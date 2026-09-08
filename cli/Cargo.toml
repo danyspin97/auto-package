@@ -1,0 +1,12 @@
+[package]
+name = "ap-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "auto-package"
+path = "src/main.rs"
+
+[dependencies]
+color-eyre = "0.6.5"
