@@ -16,7 +16,12 @@
 //! exactly which tarball to fetch and what it should hash to. Everything else
 //! is decided after unpacking.
 
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// A release, reduced to what a spec needs plus the tarball to fetch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +53,104 @@ pub struct Sdist {
     /// available, and it is free while we are already parsing the record.
     pub sha256: String,
     pub size: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    #[error("download failed for {url}: {source}")]
+    Http {
+        url: String,
+        #[source]
+        source: Box<ureq::Error>,
+    },
+
+    #[error("io error on {path}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("sha256 mismatch for {filename}: expected {expected}, got {actual}")]
+    BadDigest {
+        filename: String,
+        expected: String,
+        actual: String,
+    },
+}
+
+impl Sdist {
+    /// Download to `dest_dir/<filename>` and verify sha256.
+    ///
+    /// Idempotent: if the file already exists and its hash matches, the
+    /// download is skipped. A corrupted file (wrong hash) is overwritten.
+    pub fn fetch(&self, dest_dir: &Path) -> Result<PathBuf, FetchError> {
+        let dest = dest_dir.join(&self.filename);
+
+        if dest.exists() && sha256_of(&dest)? == self.sha256 {
+            return Ok(dest);
+        }
+
+        let resp = ureq::get(&self.url).call().map_err(|e| FetchError::Http {
+            url: self.url.clone(),
+            source: Box::new(e),
+        })?;
+
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 65536];
+        let mut file = fs::File::create(&dest).map_err(|e| FetchError::Io {
+            path: dest.clone(),
+            source: e,
+        })?;
+        let mut body = resp.into_body().into_reader();
+
+        loop {
+            let n = body.read(&mut buf).map_err(|e| FetchError::Io {
+                path: dest.clone(),
+                source: e,
+            })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            file.write_all(&buf[..n]).map_err(|e| FetchError::Io {
+                path: dest.clone(),
+                source: e,
+            })?;
+        }
+
+        let actual = hex::encode(hasher.finalize());
+        if actual != self.sha256 {
+            let _ = fs::remove_file(&dest);
+            return Err(FetchError::BadDigest {
+                filename: self.filename.clone(),
+                expected: self.sha256.clone(),
+                actual,
+            });
+        }
+
+        Ok(dest)
+    }
+}
+
+fn sha256_of(path: &Path) -> Result<String, FetchError> {
+    let mut file = fs::File::open(path).map_err(|e| FetchError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| FetchError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// What PyPI said about licensing, in descending order of trust.
