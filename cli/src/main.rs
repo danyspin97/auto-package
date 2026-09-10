@@ -60,6 +60,10 @@ fn save_attempt(
     let _ = fs::write(dir.join("spec_after.spec"), spec_after);
 }
 
+fn status(pkg: &str, step: &str) {
+    eprintln!("[{pkg}] {step}");
+}
+
 fn print_diff(before: &str, after: &str) {
     eprintln!("      --- agent changes ---");
     for d in diff::lines(before, after) {
@@ -106,6 +110,11 @@ enum Commands {
         /// Architecture.
         #[arg(long, default_value = "x86_64")]
         arch: String,
+
+        /// Send the full build log to the agent at Level::FullLog.
+        /// WARNING: can exceed 34k tokens — use only when lower rungs have failed.
+        #[arg(long, default_value_t = false)]
+        allow_full_log: bool,
     },
 }
 
@@ -134,9 +143,10 @@ fn main() -> color_eyre::Result<()> {
             distro,
             arch,
             fixes_dir,
+            allow_full_log,
         } => {
             let fixes_dir = fixes_dir.unwrap_or_else(|| work_dir.join("fixes"));
-            cmd_build(&name, &work_dir, &fixes_dir, &distro, &arch)?;
+            cmd_build(&name, &work_dir, &fixes_dir, &distro, &arch, allow_full_log)?;
         }
     }
 
@@ -149,6 +159,7 @@ fn cmd_build(
     fixes_dir: &Path,
     distro: &str,
     arch: &str,
+    allow_full_log: bool,
 ) -> color_eyre::Result<()> {
     let rpms_dir = work_dir.join("rpms");
     fs::create_dir_all(&rpms_dir)?;
@@ -188,7 +199,15 @@ fn cmd_build(
                     let total_usage = &total_usage;
 
                     s.spawn(move || {
-                        match build_one(node, &work_dir, &rpms_dir, &fixes_dir, &distro, &arch) {
+                        match build_one(
+                            node,
+                            &work_dir,
+                            &rpms_dir,
+                            &fixes_dir,
+                            &distro,
+                            &arch,
+                            allow_full_log,
+                        ) {
                             Ok(usage) => {
                                 total_usage.lock().unwrap().add(&usage);
                             }
@@ -241,6 +260,7 @@ fn build_one(
     fixes_dir: &Path,
     distro: &str,
     arch: &str,
+    allow_full_log: bool,
 ) -> color_eyre::Result<ap_build::agent::Usage> {
     let pkg = &node.name;
     let pkg_dir = work_dir.join(node.name.to_lowercase());
@@ -267,23 +287,22 @@ fn build_one(
 
     fs::create_dir_all(&pkg_dir)?;
 
-    info!("[{pkg}] downloading sdist: {}", release.sdist.filename);
+    status(pkg, &format!("downloading {}", release.sdist.filename));
     let tarball = release.sdist.fetch(&pkg_dir)?;
     debug!("[{pkg}] sdist at {}", tarball.display());
 
-    info!("[{pkg}] inspecting build system");
     let build_system = ap_ecosystem::sdist::build_system(&tarball)?;
-    info!(
+    debug!(
         "[{pkg}] build-backend: {}, requires: {:?}",
         build_system.backend.as_deref().unwrap_or("(none)"),
         build_system.requires,
     );
 
-    info!("[{pkg}] generating spec via py2pack");
+    status(pkg, "generating spec");
     let mut spec_content = ap_build::spec::generate(&release, &build_system)?;
     let spec_path = pkg_dir.join(format!("python-{}.spec", node.name.to_lowercase()));
     fs::write(&spec_path, &spec_content)?;
-    eprintln!("[{pkg}] files in {}", pkg_dir.display());
+    eprintln!("[{pkg}] spec at {}", spec_path.display());
 
     // Fix %autosetup -n if it doesn't match the actual tarball directory.
     // This is deterministic — no need for the agent.
@@ -301,26 +320,24 @@ fn build_one(
 
     // Pre-build spec review: catch obvious issues before wasting a build slot.
     info!("[{pkg}] reviewing spec before build");
+    status(pkg, "reviewing spec…");
     match ap_build::agent::review(&spec_path, &node.name) {
         Ok(Some((fixed, usage))) => {
-            info!("[{pkg}] review found an issue — applying fix");
-            eprintln!("[{pkg}] pre-build fix applied");
+            status(pkg, "pre-build fix applied");
             total_usage.add(&usage);
             print_diff(&spec_content, &fixed);
             fs::write(&spec_path, &fixed)?;
             spec_content = fixed;
         }
-        Ok(None) => info!("[{pkg}] review: no issues"),
+        Ok(None) => status(pkg, "review: spec OK"),
         Err(e) => warn!("[{pkg}] review error (continuing): {e}"),
     }
 
-    // Escalation is created fresh on the first build failure (when we know
-    // whether BUILDROOT is populated). Initialized as a placeholder.
     let mut escalation = ap_build::context::Escalation::new(false);
-    let _ = &escalation; // overwritten on first failure; linter placeholder
+    let _ = &escalation;
 
     loop {
-        info!("[{pkg}] osc build (attempt {})", attempts + 1);
+        status(pkg, &format!("osc build (attempt {})…", attempts + 1));
         match ap_build::osc::build(&pkg_dir, &spec_path, rpms_dir, distro, arch) {
             Ok(()) => {
                 info!("[{pkg}] build succeeded");
@@ -355,9 +372,12 @@ fn build_one(
                     break;
                 }
 
-                eprintln!(
-                    "[{pkg}] asking agent to fix (level {:?}, attempt {attempts})…",
-                    escalation.level()
+                status(
+                    pkg,
+                    &format!(
+                        "agent fix (level {:?}, attempt {attempts})…",
+                        escalation.level()
+                    ),
                 );
                 match ap_build::agent::fix(
                     &spec_path,
@@ -366,6 +386,7 @@ fn build_one(
                     &history,
                     &escalation,
                     &tarball,
+                    allow_full_log,
                 ) {
                     Ok((fixed, usage, new_history, confidence)) => {
                         use ap_build::agent::Confidence;
@@ -378,9 +399,16 @@ fn build_one(
                         total_usage.add(&usage);
 
                         if confidence == Confidence::Low {
-                            // Don't apply — escalate and ask again next iteration.
-                            eprintln!("[{pkg}] low confidence — escalating context");
-                            let _ = escalation.escalate(EscalationReason::RepeatedSignature);
+                            let next = escalation.escalate(EscalationReason::RepeatedSignature);
+                            status(
+                                pkg,
+                                &format!(
+                                    "low confidence — escalating to {:?}",
+                                    next.as_ref()
+                                        .map(|l| format!("{l:?}"))
+                                        .unwrap_or_else(|_| "max".into())
+                                ),
+                            );
                             history = new_history;
                         } else {
                             print_diff(&spec_content, &fixed);

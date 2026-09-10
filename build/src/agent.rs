@@ -195,6 +195,11 @@ pub fn review(spec_path: &Path, pkg_name: &str) -> Result<Option<(String, Usage)
 ///
 /// `sdist_path` is needed to read source files at `Level::BuildTree`.
 ///
+/// `allow_full_log`: when `true` and the escalation has reached
+/// `Level::FullLog`, the entire raw log is appended to the prompt. This can
+/// exceed 34k tokens for a trivial package — only enable it when lower rungs
+/// have failed repeatedly.
+///
 /// Returns the fixed spec, token usage, updated history, and whether the
 /// agent was confident enough to apply the fix immediately.
 pub fn fix(
@@ -204,6 +209,7 @@ pub fn fix(
     history: &[Turn],
     escalation: &Escalation,
     sdist_path: &Path,
+    allow_full_log: bool,
 ) -> Result<(String, Usage, Vec<Turn>, Confidence), Error> {
     let backend = detect_backend();
 
@@ -214,7 +220,13 @@ pub fn fix(
     let extracted = crate::log::extract(&log_raw, &mapper);
 
     // Gather additional context based on the current escalation level.
-    let extra_context = gather_context(escalation.level(), &extracted, &log_raw, sdist_path);
+    let extra_context = gather_context(
+        escalation.level(),
+        &extracted,
+        &log_raw,
+        sdist_path,
+        allow_full_log,
+    );
 
     let (response, usage, prompt) = call_with_context(
         &backend,
@@ -250,6 +262,7 @@ fn gather_context(
     extracted: &ExtractedLog,
     log_raw: &str,
     sdist_path: &Path,
+    allow_full_log: bool,
 ) -> String {
     match level {
         Level::ErrorContext => String::new(),
@@ -281,7 +294,11 @@ fn gather_context(
             out
         }
         Level::FullLog => {
-            format!("\nFull build log (unextracted):\n```\n{log_raw}\n```\n")
+            if allow_full_log {
+                format!("\nFull build log (unextracted):\n```\n{log_raw}\n```\n")
+            } else {
+                String::new()
+            }
         }
     }
 }
@@ -430,7 +447,7 @@ fn call_http_prompt(
                 max_tokens: 8192,
                 messages: vec![Msg {
                     role: "user",
-                    content: &prompt,
+                    content: prompt,
                 }],
             })
             .map_err(|e| Error::Parse(e.to_string()))?;
@@ -458,7 +475,7 @@ fn call_http_prompt(
                 max_tokens: 8192,
                 messages: vec![Msg {
                     role: "user",
-                    content: &prompt,
+                    content: prompt,
                 }],
             })
             .map_err(|e| Error::Parse(e.to_string()))?;
