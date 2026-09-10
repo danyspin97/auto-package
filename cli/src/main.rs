@@ -364,7 +364,11 @@ fn build_one(
                     eprintln!("[{pkg}] error: {line}");
                 }
                 if !extracted.excerpt.is_empty() {
-                    debug!("[{pkg}] excerpt:\n{}", extracted.excerpt);
+                    eprintln!("[{pkg}] --- excerpt ---");
+                    for line in extracted.excerpt.lines() {
+                        eprintln!("[{pkg}]   {line}");
+                    }
+                    eprintln!("[{pkg}] ---");
                 }
 
                 if attempts >= MAX_BUILD_ATTEMPTS {
