@@ -96,6 +96,8 @@ pub enum Confidence {
 pub struct Turn {
     /// The error excerpt that prompted this fix.
     pub error_excerpt: String,
+    /// The full prompt that was sent.
+    pub prompt: String,
     /// The reasoning the agent gave.
     pub reasoning: String,
     /// The spec the agent produced (which then failed to build).
@@ -130,7 +132,7 @@ pub fn fix(
     let mapper = PathMapper::with_sdist_root(pkg_name);
     let extracted = crate::log::extract(&log_raw, &mapper);
 
-    let (response, usage) = call(&backend, &spec, &extracted, pkg_name, history)?;
+    let (response, usage, prompt) = call(&backend, &spec, &extracted, pkg_name, history)?;
 
     eprintln!(
         "  [agent] {:?} — {}",
@@ -140,6 +142,7 @@ pub fn fix(
     let mut new_history = history.to_vec();
     new_history.push(Turn {
         error_excerpt: extracted.excerpt.clone(),
+        prompt,
         reasoning: response.reasoning.clone(),
         fixed_spec: response.fixed_spec.clone(),
     });
@@ -186,7 +189,7 @@ fn call(
     extracted: &ExtractedLog,
     pkg_name: &str,
     history: &[Turn],
-) -> Result<(FixResponse, Usage), Error> {
+) -> Result<(FixResponse, Usage, String), Error> {
     match backend {
         Backend::Cli => call_cli(spec, extracted, pkg_name, history),
         _ => call_http(backend, spec, extracted, pkg_name, history),
@@ -198,7 +201,7 @@ fn call_cli(
     extracted: &ExtractedLog,
     pkg_name: &str,
     history: &[Turn],
-) -> Result<(FixResponse, Usage), Error> {
+) -> Result<(FixResponse, Usage, String), Error> {
     let prompt = build_prompt(spec, extracted, pkg_name, history);
 
     let out = Command::new("claude")
@@ -242,7 +245,7 @@ fn call_cli(
         cache_read_tokens: envelope.usage.cache_read_input_tokens,
     };
 
-    Ok((fix_response, usage))
+    Ok((fix_response, usage, prompt))
 }
 
 fn call_http(
@@ -251,7 +254,7 @@ fn call_http(
     extracted: &ExtractedLog,
     pkg_name: &str,
     history: &[Turn],
-) -> Result<(FixResponse, Usage), Error> {
+) -> Result<(FixResponse, Usage, String), Error> {
     let prompt = build_prompt(spec, extracted, pkg_name, history);
 
     #[derive(Deserialize)]
@@ -367,7 +370,7 @@ fn call_http(
         cache_read_tokens: resp.usage.cache_read_input_tokens,
     };
 
-    Ok((fix_response, usage))
+    Ok((fix_response, usage, prompt))
 }
 
 fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &[Turn]) -> String {

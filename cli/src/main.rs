@@ -9,6 +9,57 @@ use ap_ecosystem::pip::Node;
 use clap::{Parser, Subcommand};
 use tracing::{debug, info, warn};
 
+/// Persist one fix attempt to disk for later review and prompt improvement.
+///
+/// Layout: `<fixes_dir>/<pkg>/attempt_<N>/`
+///   error.txt       — the error excerpt the agent was shown
+///   prompt.txt      — the full prompt including history
+///   reasoning.txt   — one-line agent reasoning
+///   diff.txt        — +/- lines changed
+///   spec_before.spec
+///   spec_after.spec
+fn save_attempt(
+    fixes_dir: &Path,
+    pkg: &str,
+    attempt: usize,
+    turn: &ap_build::agent::Turn,
+    spec_before: &str,
+    spec_after: &str,
+) {
+    let dir = fixes_dir
+        .join(pkg.to_lowercase())
+        .join(format!("attempt_{attempt}"));
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+
+    let mut diff = String::new();
+    for d in diff::lines(spec_before, spec_after) {
+        match d {
+            diff::Result::Left(l) => {
+                diff.push('-');
+                diff.push(' ');
+                diff.push_str(l);
+                diff.push('\n');
+            }
+            diff::Result::Right(r) => {
+                diff.push('+');
+                diff.push(' ');
+                diff.push_str(r);
+                diff.push('\n');
+            }
+            diff::Result::Both(_, _) => {}
+        }
+    }
+
+    let _ = fs::write(dir.join("error.txt"), &turn.error_excerpt);
+    let _ = fs::write(dir.join("prompt.txt"), &turn.prompt);
+    let _ = fs::write(dir.join("reasoning.txt"), &turn.reasoning);
+    let _ = fs::write(dir.join("diff.txt"), diff);
+    let _ = fs::write(dir.join("spec_before.spec"), spec_before);
+    let _ = fs::write(dir.join("spec_after.spec"), spec_after);
+}
+
 fn print_diff(before: &str, after: &str) {
     eprintln!("      --- agent changes ---");
     for d in diff::lines(before, after) {
@@ -42,6 +93,11 @@ enum Commands {
         /// Working directory for specs, sources, and built RPMs.
         #[arg(long, default_value = "ap-work")]
         work_dir: PathBuf,
+
+        /// Directory to save each agent fix attempt for later review.
+        /// Defaults to <work-dir>/fixes/.
+        #[arg(long)]
+        fixes_dir: Option<PathBuf>,
 
         /// OBS distribution target.
         #[arg(long, default_value = "openSUSE_Tumbleweed")]
@@ -77,15 +133,23 @@ fn main() -> color_eyre::Result<()> {
             work_dir,
             distro,
             arch,
+            fixes_dir,
         } => {
-            cmd_build(&name, &work_dir, &distro, &arch)?;
+            let fixes_dir = fixes_dir.unwrap_or_else(|| work_dir.join("fixes"));
+            cmd_build(&name, &work_dir, &fixes_dir, &distro, &arch)?;
         }
     }
 
     Ok(())
 }
 
-fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyre::Result<()> {
+fn cmd_build(
+    name: &str,
+    work_dir: &Path,
+    fixes_dir: &Path,
+    distro: &str,
+    arch: &str,
+) -> color_eyre::Result<()> {
     let rpms_dir = work_dir.join("rpms");
     fs::create_dir_all(&rpms_dir)?;
 
@@ -118,12 +182,13 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
                     let node = &nodes[idx];
                     let work_dir = work_dir.to_path_buf();
                     let rpms_dir = rpms_dir.clone();
+                    let fixes_dir = fixes_dir.to_path_buf();
                     let distro = distro.to_string();
                     let arch = arch.to_string();
                     let total_usage = &total_usage;
 
-                    s.spawn(
-                        move || match build_one(node, &work_dir, &rpms_dir, &distro, &arch) {
+                    s.spawn(move || {
+                        match build_one(node, &work_dir, &rpms_dir, &fixes_dir, &distro, &arch) {
                             Ok(usage) => {
                                 total_usage.lock().unwrap().add(&usage);
                             }
@@ -131,8 +196,8 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
                                 warn!("{} failed: {e:#}", node.name);
                                 eprintln!("\n[{}] FAILED: {e:#}", node.name);
                             }
-                        },
-                    )
+                        }
+                    })
                 })
                 .collect();
 
@@ -173,6 +238,7 @@ fn build_one(
     node: &Node,
     work_dir: &Path,
     rpms_dir: &Path,
+    fixes_dir: &Path,
     distro: &str,
     arch: &str,
 ) -> color_eyre::Result<ap_build::agent::Usage> {
@@ -267,6 +333,14 @@ fn build_one(
                         );
                         total_usage.add(&usage);
                         print_diff(&spec_content, &fixed);
+                        save_attempt(
+                            fixes_dir,
+                            &node.name,
+                            attempts,
+                            &new_history[new_history.len() - 1],
+                            &spec_content,
+                            &fixed,
+                        );
                         fs::write(&spec_path, &fixed)?;
                         spec_content = fixed;
                         history = new_history;
@@ -303,7 +377,7 @@ fn dep_name(req: &str) -> Option<&str> {
         return None;
     }
     let end = req
-        .find(|c: char| matches!(c, '[' | ';' | '=' | '<' | '>' | '!' | '~' | ' ' | '\t'))
+        .find(['[', ';', '=', '<', '>', '!', '~', ' ', '\t'])
         .unwrap_or(req.len());
     let name = req[..end].trim();
     if name.is_empty() { None } else { Some(name) }
@@ -334,12 +408,12 @@ fn topo_levels(nodes: &[Node]) -> Vec<Vec<usize>> {
                 if seen.contains(&key) {
                     continue;
                 }
-                if let Some(&j) = name_to_idx.get(&key) {
-                    if i != j {
-                        in_degree[i] += 1;
-                        reverse[j].push(i);
-                        seen.insert(key);
-                    }
+                if let Some(&j) = name_to_idx.get(&key)
+                    && i != j
+                {
+                    in_degree[i] += 1;
+                    reverse[j].push(i);
+                    seen.insert(key);
                 }
             }
         }
