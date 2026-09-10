@@ -52,7 +52,7 @@ impl Usage {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("ANTHROPIC_API_KEY is not set")]
+    #[error("AUTO_PACKAGE_API_KEY is not set")]
     NoApiKey,
 
     #[error("API request failed: {0}")]
@@ -90,7 +90,7 @@ struct FixResponse {
 /// The caller is responsible for writing the spec back to disk and re-running
 /// the build.
 pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String, Usage), Error> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| Error::NoApiKey)?;
+    let api_key = std::env::var("AUTO_PACKAGE_API_KEY").map_err(|_| Error::NoApiKey)?;
 
     let spec = std::fs::read_to_string(spec_path)?;
     let log_raw = std::fs::read_to_string(log_path)?;
