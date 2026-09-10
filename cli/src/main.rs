@@ -1,15 +1,18 @@
 //! Command-line surface.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use ap_ecosystem::pip::Node;
 use clap::{Parser, Subcommand};
 use tracing::{debug, info, warn};
 
 fn print_diff(before: &str, after: &str) {
     eprintln!("      --- agent changes ---");
-    for diff in diff::lines(before, after) {
-        match diff {
+    for d in diff::lines(before, after) {
+        match d {
             diff::Result::Left(l) => eprintln!("      - {l}"),
             diff::Result::Right(r) => eprintln!("      + {r}"),
             diff::Result::Both(_, _) => {}
@@ -54,7 +57,7 @@ fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
-    let level = match cli.verbose {
+    let log_level = match cli.verbose {
         0 => "warn",
         1 => "info",
         _ => "debug",
@@ -62,7 +65,7 @@ fn main() -> color_eyre::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
         )
         .with_target(false)
         .without_time()
@@ -86,8 +89,6 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
     let rpms_dir = work_dir.join("rpms");
     fs::create_dir_all(&rpms_dir)?;
 
-    let mut total_usage = ap_build::agent::Usage::default();
-
     info!("resolving dependencies for {name}");
     let nodes = ap_ecosystem::pip::resolve(name, None)?;
     info!("{} package(s) in closure", nodes.len());
@@ -95,122 +96,257 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
         debug!("  {} {}", n.name, n.version);
     }
 
-    for node in &nodes {
-        eprintln!("\n[pkg] {} {}", node.name, node.version);
+    let levels = topo_levels(&nodes);
+    info!("{} topological level(s)", levels.len());
+    for (i, level) in levels.iter().enumerate() {
+        let names: Vec<_> = level.iter().map(|&j| nodes[j].name.as_str()).collect();
+        debug!("  level {i}: {names:?}");
+    }
 
-        info!("fetching PyPI metadata");
-        let pypi_url = format!("https://pypi.org/pypi/{}/{}/json", node.name, node.version);
-        let json = ureq::get(&pypi_url).call()?.into_body().read_to_string()?;
-        let release = ap_ecosystem::pypi::parse_release(&json)?;
-        debug!("license: {:?}", release.license);
+    let total_usage = Mutex::new(ap_build::agent::Usage::default());
 
-        if release.yanked {
-            warn!("skipping {} {}: yanked", node.name, node.version);
-            eprintln!("      SKIP: yanked");
-            continue;
-        }
-
-        let pkg_dir = work_dir.join(node.name.to_lowercase());
-        fs::create_dir_all(&pkg_dir)?;
-
-        info!("downloading sdist: {}", release.sdist.filename);
-        let tarball = release.sdist.fetch(&pkg_dir)?;
-        debug!("sdist at {}", tarball.display());
-
-        info!("inspecting build system");
-        let build_system = ap_ecosystem::sdist::build_system(&tarball)?;
-        info!(
-            "build-backend: {}, requires: {:?}",
-            build_system.backend.as_deref().unwrap_or("(none)"),
-            build_system.requires,
+    for (level_idx, level) in levels.iter().enumerate() {
+        eprintln!(
+            "\n[level {level_idx}] {} package(s) in parallel",
+            level.len()
         );
 
-        info!("generating spec via py2pack");
-        let mut spec_content = ap_build::spec::generate(&release, &build_system)?;
-        let spec_path = pkg_dir.join(format!("python-{}.spec", node.name.to_lowercase()));
-        fs::write(&spec_path, &spec_content)?;
-        eprintln!("      files in {}", pkg_dir.display());
-        debug!("spec written to {}", spec_path.display());
+        std::thread::scope(|s| {
+            let handles: Vec<_> = level
+                .iter()
+                .map(|&idx| {
+                    let node = &nodes[idx];
+                    let work_dir = work_dir.to_path_buf();
+                    let rpms_dir = rpms_dir.clone();
+                    let distro = distro.to_string();
+                    let arch = arch.to_string();
+                    let total_usage = &total_usage;
 
-        let mut attempts = 0;
-        const MAX_BUILD_ATTEMPTS: usize = 6;
+                    s.spawn(
+                        move || match build_one(node, &work_dir, &rpms_dir, &distro, &arch) {
+                            Ok(usage) => {
+                                total_usage.lock().unwrap().add(&usage);
+                            }
+                            Err(e) => {
+                                warn!("{} failed: {e:#}", node.name);
+                                eprintln!("\n[{}] FAILED: {e:#}", node.name);
+                            }
+                        },
+                    )
+                })
+                .collect();
 
-        loop {
-            info!("running osc build (attempt {})", attempts + 1);
-            match ap_build::osc::build(&pkg_dir, &spec_path, &rpms_dir, distro, arch) {
-                Ok(()) => {
-                    info!("build succeeded");
-                    eprintln!("      BUILD OK");
+            for h in handles {
+                h.join().expect("thread panicked");
+            }
+        });
+    }
+
+    let usage = total_usage.into_inner().unwrap();
+    if usage.input_tokens > 0 {
+        eprintln!(
+            "\n[cost] {} in / {} out / {} cache-write / {} cache-read → ${:.4}",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_tokens,
+            usage.cache_read_tokens,
+            usage.cost_cents() / 100.0,
+        );
+    }
+
+    Ok(())
+}
+
+fn build_one(
+    node: &Node,
+    work_dir: &Path,
+    rpms_dir: &Path,
+    distro: &str,
+    arch: &str,
+) -> color_eyre::Result<ap_build::agent::Usage> {
+    let pkg = &node.name;
+    eprintln!("\n[{pkg}] {} {}", node.name, node.version);
+
+    info!("[{pkg}] fetching PyPI metadata");
+    let pypi_url = format!("https://pypi.org/pypi/{}/{}/json", node.name, node.version);
+    let json = ureq::get(&pypi_url).call()?.into_body().read_to_string()?;
+    let release = ap_ecosystem::pypi::parse_release(&json)?;
+    debug!("[{pkg}] license: {:?}", release.license);
+
+    if release.yanked {
+        warn!("[{pkg}] skipping: yanked");
+        eprintln!("[{pkg}] SKIP: yanked");
+        return Ok(ap_build::agent::Usage::default());
+    }
+
+    let pkg_dir = work_dir.join(node.name.to_lowercase());
+    fs::create_dir_all(&pkg_dir)?;
+
+    info!("[{pkg}] downloading sdist: {}", release.sdist.filename);
+    let tarball = release.sdist.fetch(&pkg_dir)?;
+    debug!("[{pkg}] sdist at {}", tarball.display());
+
+    info!("[{pkg}] inspecting build system");
+    let build_system = ap_ecosystem::sdist::build_system(&tarball)?;
+    info!(
+        "[{pkg}] build-backend: {}, requires: {:?}",
+        build_system.backend.as_deref().unwrap_or("(none)"),
+        build_system.requires,
+    );
+
+    info!("[{pkg}] generating spec via py2pack");
+    let mut spec_content = ap_build::spec::generate(&release, &build_system)?;
+    let spec_path = pkg_dir.join(format!("python-{}.spec", node.name.to_lowercase()));
+    fs::write(&spec_path, &spec_content)?;
+    eprintln!("[{pkg}] files in {}", pkg_dir.display());
+
+    let mut total_usage = ap_build::agent::Usage::default();
+    let mut attempts = 0;
+    const MAX_BUILD_ATTEMPTS: usize = 6;
+
+    loop {
+        info!("[{pkg}] osc build (attempt {})", attempts + 1);
+        match ap_build::osc::build(&pkg_dir, &spec_path, rpms_dir, distro, arch) {
+            Ok(()) => {
+                info!("[{pkg}] build succeeded");
+                eprintln!("[{pkg}] BUILD OK");
+                break;
+            }
+            Err(ap_build::osc::Error::BuildFailed { log, .. }) => {
+                attempts += 1;
+                warn!(
+                    "[{pkg}] build failed (attempt {attempts}), log at {}",
+                    log.display()
+                );
+
+                let log_raw = fs::read_to_string(&log).unwrap_or_default();
+                let mapper = ap_build::log::PathMapper::with_sdist_root(&node.name);
+                let extracted = ap_build::log::extract(&log_raw, &mapper);
+                if let Some(section) = &extracted.failed_section {
+                    eprintln!("[{pkg}] failed in: {section}");
+                }
+                for line in &extracted.error_lines {
+                    eprintln!("[{pkg}] error: {line}");
+                }
+                if !extracted.excerpt.is_empty() {
+                    debug!("[{pkg}] excerpt:\n{}", extracted.excerpt);
+                }
+
+                if attempts >= MAX_BUILD_ATTEMPTS {
+                    eprintln!("[{pkg}] FAILED after {attempts} attempts");
                     break;
                 }
-                Err(ap_build::osc::Error::BuildFailed { log, .. }) => {
-                    attempts += 1;
-                    warn!(
-                        "build failed (attempt {attempts}), log at {}",
-                        log.display()
-                    );
-
-                    // Show the extracted error lines so the user can see
-                    // what went wrong without opening the full log.
-                    let log_raw = fs::read_to_string(&log).unwrap_or_default();
-                    let mapper = ap_build::log::PathMapper::with_sdist_root(&node.name);
-                    let extracted = ap_build::log::extract(&log_raw, &mapper);
-                    if let Some(section) = &extracted.failed_section {
-                        eprintln!("      failed in: {section}");
+                eprintln!("[{pkg}] asking agent to fix (attempt {attempts})…");
+                match ap_build::agent::fix(&spec_path, &log, &node.name) {
+                    Ok((fixed, usage)) => {
+                        info!(
+                            "[{pkg}] agent: {} in / {} out",
+                            usage.input_tokens, usage.output_tokens,
+                        );
+                        total_usage.add(&usage);
+                        print_diff(&spec_content, &fixed);
+                        fs::write(&spec_path, &fixed)?;
+                        spec_content = fixed;
                     }
-                    for line in &extracted.error_lines {
-                        eprintln!("      error: {line}");
-                    }
-                    if !extracted.excerpt.is_empty() {
-                        debug!("excerpt:\n{}", extracted.excerpt);
-                    }
-
-                    if attempts >= MAX_BUILD_ATTEMPTS {
-                        eprintln!("      FAILED after {attempts} attempts");
+                    Err(e) => {
+                        warn!("[{pkg}] agent error: {e}");
+                        eprintln!("[{pkg}] agent error: {e}");
                         break;
                     }
-                    eprintln!("      asking agent to fix (attempt {attempts})…");
-                    info!("invoking agent");
-                    match ap_build::agent::fix(&spec_path, &log, &node.name) {
-                        Ok((fixed, usage)) => {
-                            info!(
-                                "agent fix: {} in / {} out",
-                                usage.input_tokens, usage.output_tokens
-                            );
-                            total_usage.add(&usage);
-
-                            // Show what the agent changed.
-                            print_diff(&spec_content, &fixed);
-
-                            fs::write(&spec_path, &fixed)?;
-                            spec_content = fixed;
-                        }
-                        Err(e) => {
-                            warn!("agent error: {e}");
-                            eprintln!("      agent error: {e}");
-                            break;
-                        }
-                    }
                 }
-                Err(e) => {
-                    warn!("osc error: {e}");
-                    eprintln!("      osc error: {e}");
-                    break;
+            }
+            Err(e) => {
+                warn!("[{pkg}] osc error: {e}");
+                eprintln!("[{pkg}] osc error: {e}");
+                break;
+            }
+        }
+    }
+
+    Ok(total_usage)
+}
+
+/// Normalize a package name for comparison: lowercase, hyphens → underscores.
+fn normalize(name: &str) -> String {
+    name.to_lowercase().replace('-', "_")
+}
+
+/// Extract the package name from a PEP 508 dependency string.
+/// Returns `None` for extra-gated deps (`; extra == '...'`) since we are not
+/// requesting extras.
+fn dep_name(req: &str) -> Option<&str> {
+    if req.contains("extra ==") || req.contains("extra==") {
+        return None;
+    }
+    let end = req
+        .find(|c: char| matches!(c, '[' | ';' | '=' | '<' | '>' | '!' | '~' | ' ' | '\t'))
+        .unwrap_or(req.len());
+    let name = req[..end].trim();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// Group node indices into topological levels via Kahn's BFS.
+///
+/// Level 0 contains packages with no dependencies inside the closure (leaves).
+/// Every package at level N depends only on packages at levels < N, so all
+/// packages within a level can be built concurrently.
+fn topo_levels(nodes: &[Node]) -> Vec<Vec<usize>> {
+    let n = nodes.len();
+    let name_to_idx: HashMap<String, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| (normalize(&node.name), i))
+        .collect();
+
+    // reverse[j] = indices of packages that directly depend on j.
+    let mut reverse: Vec<Vec<usize>> = vec![vec![]; n];
+    let mut in_degree: Vec<usize> = vec![0; n];
+
+    for (i, node) in nodes.iter().enumerate() {
+        let mut seen = std::collections::HashSet::new();
+        for req in &node.requires_dist {
+            if let Some(name) = dep_name(req) {
+                let key = normalize(name);
+                if seen.contains(&key) {
+                    continue;
+                }
+                if let Some(&j) = name_to_idx.get(&key) {
+                    if i != j {
+                        in_degree[i] += 1;
+                        reverse[j].push(i);
+                        seen.insert(key);
+                    }
                 }
             }
         }
     }
 
-    if total_usage.input_tokens > 0 {
-        eprintln!(
-            "\n[cost] {} in / {} out / {} cache-write / {} cache-read → ${:.4}",
-            total_usage.input_tokens,
-            total_usage.output_tokens,
-            total_usage.cache_creation_tokens,
-            total_usage.cache_read_tokens,
-            total_usage.cost_cents() / 100.0,
-        );
+    let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+    let mut levels = Vec::new();
+
+    while !queue.is_empty() {
+        levels.push(queue.clone());
+        let mut next = Vec::new();
+        for i in queue {
+            for &j in &reverse[i] {
+                in_degree[j] -= 1;
+                if in_degree[j] == 0 {
+                    next.push(j);
+                }
+            }
+        }
+        queue = next;
     }
 
-    Ok(())
+    // Cycles shouldn't occur in pip-resolved deps, but don't deadlock if they do.
+    let remaining: Vec<usize> = (0..n).filter(|&i| in_degree[i] > 0).collect();
+    if !remaining.is_empty() {
+        warn!(
+            "{} node(s) in a dependency cycle — building sequentially",
+            remaining.len()
+        );
+        levels.push(remaining);
+    }
+
+    levels
 }

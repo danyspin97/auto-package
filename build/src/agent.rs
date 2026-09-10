@@ -372,13 +372,35 @@ fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str) -> String 
 }
 
 fn parse_response(text: &str) -> Result<FixResponse, Error> {
-    let json = text
-        .trim()
+    // Try the whole text first (ideal: model returned only JSON).
+    let trimmed = text.trim();
+    if let Ok(r) = serde_json::from_str::<FixResponse>(trimmed) {
+        return Ok(r);
+    }
+
+    // Strip a single ```json … ``` fence if present.
+    let fenced = trimmed
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    serde_json::from_str(json).map_err(|e| Error::Parse(format!("bad JSON: {e}\n{json}")))
+    if let Ok(r) = serde_json::from_str::<FixResponse>(fenced) {
+        return Ok(r);
+    }
+
+    // Last resort: find the first `{` and last `}` and try that substring.
+    // This handles models that prepend an explanation sentence.
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && start < end
+    {
+        if let Ok(r) = serde_json::from_str::<FixResponse>(&trimmed[start..=end]) {
+            return Ok(r);
+        }
+    }
+
+    Err(Error::Parse(format!(
+        "could not find JSON in response:\n{trimmed}"
+    )))
 }
 
 fn gcloud_token() -> Result<String, Error> {
