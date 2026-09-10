@@ -5,12 +5,15 @@
 //! passes or the retry limit is reached.
 //!
 //! Two backends are supported:
+//! - Google Cloud Vertex AI: if `gcloud` is installed and `gcloud auth
+//!   application-default login` has been run, no configuration is needed —
+//!   the project comes from `gcloud config get-value project` and the token
+//!   from `gcloud auth print-access-token`. Override with
+//!   `AUTO_PACKAGE_GCP_PROJECT` / `AUTO_PACKAGE_GCP_REGION` (default
+//!   `us-east5`) if needed.
 //! - Direct Anthropic API: set `AUTO_PACKAGE_API_KEY`.
-//! - Google Cloud Vertex AI: set `AUTO_PACKAGE_GCP_PROJECT` (and optionally
-//!   `AUTO_PACKAGE_GCP_REGION`, default `us-east5`). Auth is via `gcloud auth
-//!   print-access-token`; no Anthropic key needed.
 //!
-//! If both are set, Vertex takes precedence.
+//! Vertex is tried first; direct API is the fallback.
 
 use std::path::Path;
 use std::process::Command;
@@ -61,7 +64,10 @@ enum Backend {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("set AUTO_PACKAGE_API_KEY (direct) or AUTO_PACKAGE_GCP_PROJECT (Vertex)")]
+    #[error(
+        "no credentials found — either log in with `gcloud auth application-default login` \
+         (Vertex AI) or set AUTO_PACKAGE_API_KEY (direct Anthropic API)"
+    )]
     NoCredentials,
 
     #[error("gcloud auth print-access-token failed: {0}")]
@@ -114,15 +120,39 @@ pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String,
 }
 
 fn detect_backend() -> Result<Backend, Error> {
-    if let Ok(project) = std::env::var("AUTO_PACKAGE_GCP_PROJECT") {
+    // Vertex AI: explicit project env var, or fall back to the gcloud default.
+    let gcp_project = std::env::var("AUTO_PACKAGE_GCP_PROJECT")
+        .ok()
+        .or_else(gcloud_default_project);
+
+    if let Some(project) = gcp_project {
         let region =
             std::env::var("AUTO_PACKAGE_GCP_REGION").unwrap_or_else(|_| "us-east5".to_string());
         return Ok(Backend::Vertex { project, region });
     }
+
     if let Ok(api_key) = std::env::var("AUTO_PACKAGE_API_KEY") {
         return Ok(Backend::Direct { api_key });
     }
+
     Err(Error::NoCredentials)
+}
+
+/// Ask gcloud for the active project, returning `None` if gcloud is absent or
+/// no default project is configured.
+fn gcloud_default_project() -> Option<String> {
+    let out = Command::new("gcloud")
+        .args(["config", "get-value", "project"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let project = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if project.is_empty() || project == "(unset)" {
+        return None;
+    }
+    Some(project)
 }
 
 fn fix_loop(
