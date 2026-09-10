@@ -41,10 +41,10 @@ openSUSE spec conventions to keep in mind:
 3. Architecture and C dependencies: if the package has C extensions (.so files):
    - Use %{python_sitearch} instead of %{python_sitelib}
    - Remove 'BuildArch: noarch'
+   - Always add 'BuildRequires: gcc' (a compiler is always needed for C extensions)
    - Add BuildRequires for any C libraries the extension links against,
      e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
-     for cffi, 'BuildRequires: gcc' if a compiler is needed. Check the
-     package's build errors or setup.py/pyproject.toml for hints.
+     for cffi. Check the build errors or setup.py/pyproject.toml for hints.
 
 4. Use %pyproject_wheel / %pyproject_install for PEP 517 packages.";
 
