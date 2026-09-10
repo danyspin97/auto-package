@@ -375,6 +375,18 @@ const RESPONSE_SCHEMA: &str = r#"{
 }"#;
 
 fn call_cli_prompt(prompt: &str) -> Result<(FixResponse, Usage, String), Error> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use std::time::Duration;
+
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner} {msg}")
+            .expect("static template"),
+    );
+    pb.set_message("waiting for Claude…");
+    pb.enable_steady_tick(Duration::from_millis(100));
+
     let out = Command::new("claude")
         .args([
             "--print",
@@ -387,6 +399,8 @@ fn call_cli_prompt(prompt: &str) -> Result<(FixResponse, Usage, String), Error> 
         ])
         .output()
         .map_err(Error::Launch)?;
+
+    pb.finish_and_clear();
 
     if !out.status.success() {
         return Err(Error::Failed {
