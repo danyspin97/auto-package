@@ -299,6 +299,26 @@ fn build_one(
     let mut attempts = 0;
     const MAX_BUILD_ATTEMPTS: usize = 6;
 
+    // Pre-build spec review: catch obvious issues before wasting a build slot.
+    info!("[{pkg}] reviewing spec before build");
+    match ap_build::agent::review(&spec_path, &node.name) {
+        Ok(Some((fixed, usage))) => {
+            info!("[{pkg}] review found an issue — applying fix");
+            eprintln!("[{pkg}] pre-build fix applied");
+            total_usage.add(&usage);
+            print_diff(&spec_content, &fixed);
+            fs::write(&spec_path, &fixed)?;
+            spec_content = fixed;
+        }
+        Ok(None) => info!("[{pkg}] review: no issues"),
+        Err(e) => warn!("[{pkg}] review error (continuing): {e}"),
+    }
+
+    // Escalation is created fresh on the first build failure (when we know
+    // whether BUILDROOT is populated). Initialized as a placeholder.
+    let mut escalation = ap_build::context::Escalation::new(false);
+    let _ = &escalation; // overwritten on first failure; linter placeholder
+
     loop {
         info!("[{pkg}] osc build (attempt {})", attempts + 1);
         match ap_build::osc::build(&pkg_dir, &spec_path, rpms_dir, distro, arch) {
@@ -310,6 +330,8 @@ fn build_one(
             }
             Err(ap_build::osc::Error::BuildFailed { log, .. }) => {
                 attempts += 1;
+                // A build failure means BUILDROOT is now populated.
+                escalation = ap_build::context::Escalation::new(true);
                 warn!(
                     "[{pkg}] build failed (attempt {attempts}), log at {}",
                     log.display()
@@ -333,32 +355,51 @@ fn build_one(
                     break;
                 }
 
-                eprintln!("[{pkg}] asking agent to fix (attempt {attempts})…");
-                match ap_build::agent::fix(&spec_path, &log, &node.name, &history) {
-                    Ok((fixed, usage, new_history)) => {
+                eprintln!(
+                    "[{pkg}] asking agent to fix (level {:?}, attempt {attempts})…",
+                    escalation.level()
+                );
+                match ap_build::agent::fix(
+                    &spec_path,
+                    &log,
+                    &node.name,
+                    &history,
+                    &escalation,
+                    &tarball,
+                ) {
+                    Ok((fixed, usage, new_history, confidence)) => {
+                        use ap_build::agent::Confidence;
+                        use ap_build::context::EscalationReason;
+
                         info!(
-                            "[{pkg}] agent: {} in / {} out",
-                            usage.input_tokens, usage.output_tokens,
+                            "[{pkg}] agent: {} in / {} out, confidence {:?}",
+                            usage.input_tokens, usage.output_tokens, confidence,
                         );
                         total_usage.add(&usage);
-                        print_diff(&spec_content, &fixed);
-                        save_attempt(
-                            fixes_dir,
-                            &node.name,
-                            attempts,
-                            &new_history[new_history.len() - 1],
-                            &spec_content,
-                            &fixed,
-                        );
-                        fs::write(&spec_path, &fixed)?;
-                        spec_content = fixed;
-                        history = new_history;
+
+                        if confidence == Confidence::Low {
+                            // Don't apply — escalate and ask again next iteration.
+                            eprintln!("[{pkg}] low confidence — escalating context");
+                            let _ = escalation.escalate(EscalationReason::RepeatedSignature);
+                            history = new_history;
+                        } else {
+                            print_diff(&spec_content, &fixed);
+                            save_attempt(
+                                fixes_dir,
+                                &node.name,
+                                attempts,
+                                &new_history[new_history.len() - 1],
+                                &spec_content,
+                                &fixed,
+                            );
+                            fs::write(&spec_path, &fixed)?;
+                            spec_content = fixed;
+                            history = new_history;
+                        }
                     }
                     Err(e) => {
                         warn!("[{pkg}] agent error: {e}");
                         eprintln!("[{pkg}] agent error: {e}");
-                        // Don't break — the next build attempt may still work
-                        // or give a different error we can act on.
                     }
                 }
             }

@@ -18,9 +18,31 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+use crate::context::{Escalation, Level};
 use crate::log::{ExtractedLog, PathMapper};
 
 const MODEL: &str = "claude-opus-5";
+
+const CONVENTIONS: &str = "\
+openSUSE spec conventions to keep in mind:
+
+1. BuildRequires version constraints go INSIDE the macro with spaces around the operator:
+   CORRECT:   BuildRequires:  %{python_module setuptools >= 77}
+   WRONG:     BuildRequires:  %{python_module setuptools} >= 77
+   WRONG:     BuildRequires:  %{python_module setuptools>=77}
+
+2. Package name case normalization: pip/setuptools install using the normalized
+   (lowercase, underscores) name, not the PyPI display name. For example,
+   MarkupSafe installs as 'markupsafe'. This affects:
+   - %autosetup -n: use the lowercase sdist directory name
+   - %files: all installed paths use the lowercase name
+   - dist-info: 'markupsafe-%{version}.dist-info', NOT 'MarkupSafe-%{version}.dist-info'
+
+3. Architecture: if the package installs .so files (C extensions), use
+   %{python_sitearch} and remove 'BuildArch: noarch'. Pure Python packages
+   use %{python_sitelib} and keep 'BuildArch: noarch'.
+
+4. Use %pyproject_wheel / %pyproject_install for PEP 517 packages.";
 
 /// Token counts and cost from one API call.
 #[derive(Debug, Clone, Default)]
@@ -122,19 +144,67 @@ struct FixResponse {
     fixed_spec: String,
 }
 
+/// Review a newly generated spec before the first build.
+///
+/// Returns `Some((fixed_spec, usage))` when the agent finds a medium- or
+/// high-confidence issue to fix. Returns `None` when the spec looks fine or
+/// the agent is only guessing — no fix is applied in that case.
+pub fn review(spec_path: &Path, pkg_name: &str) -> Result<Option<(String, Usage)>, Error> {
+    let backend = detect_backend();
+    let spec = std::fs::read_to_string(spec_path)?;
+
+    let prompt = format!(
+        "You are reviewing an openSUSE RPM spec file for a Python package BEFORE building it.\n\
+         Package: {pkg_name}\n\
+         \n\
+         Spec:\n\
+         ```spec\n\
+         {spec}\n\
+         ```\n\
+         \n\
+         {conventions}\n\
+         Return a JSON object with:\n\
+         - \"confidence\": \"high\", \"medium\", or \"low\"\n\
+         - \"reasoning\": one sentence describing any issue found, or 'No issues found'\n\
+         - \"fixed_spec\": the corrected spec (identical to input if no changes needed)\n\
+         \n\
+         Return only the JSON object, no other text.",
+        conventions = CONVENTIONS,
+    );
+
+    let (response, usage, _prompt) = call_prompt(&backend, &prompt)?;
+
+    eprintln!(
+        "  [review] {:?} — {}",
+        response.confidence, response.reasoning,
+    );
+
+    // Only apply the fix if the agent is reasonably confident.
+    if response.confidence == Confidence::Low || response.reasoning.contains("No issues") {
+        return Ok(None);
+    }
+
+    Ok(Some((response.fixed_spec, usage)))
+}
+
 /// Try to fix `spec_path` using the build log at `log_path`.
 ///
-/// `history` is the list of previous fix attempts for this package; the agent
-/// sees what it already tried so it doesn't repeat the same mistake.
+/// `escalation` tracks how far up the context ladder this error signature has
+/// climbed. When the agent returns low confidence, the caller should call
+/// `escalation.escalate()` and retry with more context.
 ///
-/// Returns the fixed spec, token usage, and an updated history to pass to the
-/// next call if the build fails again.
+/// `sdist_path` is needed to read source files at `Level::BuildTree`.
+///
+/// Returns the fixed spec, token usage, updated history, and whether the
+/// agent was confident enough to apply the fix immediately.
 pub fn fix(
     spec_path: &Path,
     log_path: &Path,
     pkg_name: &str,
     history: &[Turn],
-) -> Result<(String, Usage, Vec<Turn>), Error> {
+    escalation: &Escalation,
+    sdist_path: &Path,
+) -> Result<(String, Usage, Vec<Turn>, Confidence), Error> {
     let backend = detect_backend();
 
     let spec = std::fs::read_to_string(spec_path)?;
@@ -143,11 +213,23 @@ pub fn fix(
     let mapper = PathMapper::with_sdist_root(pkg_name);
     let extracted = crate::log::extract(&log_raw, &mapper);
 
-    let (response, usage, prompt) = call(&backend, &spec, &extracted, pkg_name, history)?;
+    // Gather additional context based on the current escalation level.
+    let extra_context = gather_context(escalation.level(), &extracted, &log_raw, sdist_path);
+
+    let (response, usage, prompt) = call_with_context(
+        &backend,
+        &spec,
+        &extracted,
+        pkg_name,
+        history,
+        &extra_context,
+    )?;
 
     eprintln!(
-        "  [agent] {:?} — {}",
-        response.confidence, response.reasoning,
+        "  [agent/{:?}] {:?} — {}",
+        escalation.level(),
+        response.confidence,
+        response.reasoning,
     );
 
     let mut new_history = history.to_vec();
@@ -158,7 +240,50 @@ pub fn fix(
         fixed_spec: response.fixed_spec.clone(),
     });
 
-    Ok((response.fixed_spec, usage, new_history))
+    let confidence = response.confidence.clone();
+    Ok((response.fixed_spec, usage, new_history, confidence))
+}
+
+/// Read additional context for the given escalation level.
+fn gather_context(
+    level: Level,
+    extracted: &ExtractedLog,
+    log_raw: &str,
+    sdist_path: &Path,
+) -> String {
+    match level {
+        Level::ErrorContext => String::new(),
+        Level::BuildTree => {
+            // Read the source files the extractor flagged as relevant.
+            let candidates = extracted.source_candidates(3);
+            if candidates.is_empty() {
+                return String::new();
+            }
+            let mut out = String::from("\nRelevant source files from the sdist:\n");
+            for rel in candidates {
+                let full = sdist_path.parent().unwrap_or(sdist_path).join(rel);
+                if let Ok(src) = std::fs::read_to_string(&full) {
+                    out.push_str(&format!("\n--- {rel} ---\n{src}\n"));
+                }
+            }
+            out
+        }
+        Level::BuildRoot => {
+            // List installed paths from the extracted log.
+            let paths = extracted.installed_candidates(10);
+            if paths.is_empty() {
+                return String::new();
+            }
+            let mut out = String::from("\nInstalled paths in BUILDROOT:\n");
+            for p in paths {
+                out.push_str(&format!("  {p}\n"));
+            }
+            out
+        }
+        Level::FullLog => {
+            format!("\nFull build log (unextracted):\n```\n{log_raw}\n```\n")
+        }
+    }
 }
 
 fn detect_backend() -> Backend {
@@ -194,29 +319,30 @@ fn gcloud_default_project() -> Option<String> {
     Some(project)
 }
 
-fn call(
+/// Send a ready-made prompt to whichever backend is configured.
+fn call_prompt(backend: &Backend, prompt: &str) -> Result<(FixResponse, Usage, String), Error> {
+    match backend {
+        Backend::Cli => call_cli_prompt(prompt),
+        _ => call_http_prompt(backend, prompt),
+    }
+}
+
+/// Build the prompt from spec + extracted log + history + extra context, then send it.
+fn call_with_context(
     backend: &Backend,
     spec: &str,
     extracted: &ExtractedLog,
     pkg_name: &str,
     history: &[Turn],
+    extra_context: &str,
 ) -> Result<(FixResponse, Usage, String), Error> {
-    match backend {
-        Backend::Cli => call_cli(spec, extracted, pkg_name, history),
-        _ => call_http(backend, spec, extracted, pkg_name, history),
-    }
+    let prompt = build_prompt(spec, extracted, pkg_name, history, extra_context);
+    call_prompt(backend, &prompt)
 }
 
-fn call_cli(
-    spec: &str,
-    extracted: &ExtractedLog,
-    pkg_name: &str,
-    history: &[Turn],
-) -> Result<(FixResponse, Usage, String), Error> {
-    let prompt = build_prompt(spec, extracted, pkg_name, history);
-
+fn call_cli_prompt(prompt: &str) -> Result<(FixResponse, Usage, String), Error> {
     let out = Command::new("claude")
-        .args(["--print", "--output-format", "json", "-p", &prompt])
+        .args(["--print", "--output-format", "json", "-p", prompt])
         .output()
         .map_err(Error::Launch)?;
 
@@ -256,18 +382,13 @@ fn call_cli(
         ..Usage::default()
     };
 
-    Ok((fix_response, usage, prompt))
+    Ok((fix_response, usage, prompt.to_string()))
 }
 
-fn call_http(
+fn call_http_prompt(
     backend: &Backend,
-    spec: &str,
-    extracted: &ExtractedLog,
-    pkg_name: &str,
-    history: &[Turn],
+    prompt: &str,
 ) -> Result<(FixResponse, Usage, String), Error> {
-    let prompt = build_prompt(spec, extracted, pkg_name, history);
-
     #[derive(Deserialize)]
     struct ApiResponse {
         content: Vec<ContentBlock>,
@@ -382,10 +503,16 @@ fn call_http(
         cli_cost_usd: None,
     };
 
-    Ok((fix_response, usage, prompt))
+    Ok((fix_response, usage, prompt.to_string()))
 }
 
-fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &[Turn]) -> String {
+fn build_prompt(
+    spec: &str,
+    extracted: &ExtractedLog,
+    pkg_name: &str,
+    history: &[Turn],
+    extra_context: &str,
+) -> String {
     let section = extracted.failed_section.as_deref().unwrap_or("unknown");
     let mut prior = String::new();
     if !history.is_empty() {
@@ -424,38 +551,20 @@ fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &
          Failed section: {section}\n\
          {prior}\n\
          {error_section}\n\
-         \n\
+         {extra_context}\n\
          Current spec:\n\
          ```spec\n\
          {spec}\n\
          ```\n\
          \n\
-         openSUSE spec conventions to keep in mind:\n\
-         \n\
-         1. BuildRequires version constraints go INSIDE the macro with spaces around the operator:\n\
-            CORRECT:   BuildRequires:  %{{python_module setuptools >= 77}}\n\
-            WRONG:     BuildRequires:  %{{python_module setuptools}} >= 77\n\
-            WRONG:     BuildRequires:  %{{python_module setuptools>=77}}\n\
-         \n\
-         2. Package name case normalization: pip/setuptools install using the normalized\n\
-            (lowercase, underscores) name, not the PyPI display name. For example,\n\
-            MarkupSafe installs as 'markupsafe'. This affects:\n\
-            - %autosetup -n: use the lowercase sdist directory name\n\
-            - %files: all installed paths use the lowercase name\n\
-            - dist-info: 'markupsafe-%{{version}}.dist-info', NOT 'MarkupSafe-%{{version}}.dist-info'\n\
-         \n\
-         3. Architecture: if the package installs .so files (C extensions), use\n\
-            %{{python_sitearch}} and remove 'BuildArch: noarch'. Pure Python packages\n\
-            use %{{python_sitelib}} and keep 'BuildArch: noarch'.\n\
-         \n\
-         4. Use `%pyproject_wheel` / `%pyproject_install` for PEP 517 packages.\n\
-         \n\
+         {conventions}\n\
          Return a JSON object with:\n\
          - \"confidence\": \"high\", \"medium\", or \"low\"\n\
          - \"reasoning\": one sentence explaining the fix\n\
          - \"fixed_spec\": the complete corrected spec file\n\
          \n\
          Return only the JSON object, no other text.",
+        conventions = CONVENTIONS,
     )
 }
 
