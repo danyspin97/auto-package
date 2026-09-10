@@ -126,6 +126,10 @@ enum Commands {
         #[arg(long, default_value = "x86_64")]
         arch: String,
 
+        /// OBS project to build packages under (e.g. home:you:auto-package).
+        #[arg(long)]
+        project: String,
+
         /// Send the full build log to the agent at Level::FullLog.
         /// WARNING: can exceed 34k tokens — use only when lower rungs have failed.
         #[arg(long, default_value_t = false)]
@@ -158,10 +162,19 @@ fn main() -> color_eyre::Result<()> {
             distro,
             arch,
             fixes_dir,
+            project,
             allow_full_log,
         } => {
             let fixes_dir = fixes_dir.unwrap_or_else(|| work_dir.join("fixes"));
-            cmd_build(&name, &work_dir, &fixes_dir, &distro, &arch, allow_full_log)?;
+            cmd_build(
+                &name,
+                &work_dir,
+                &fixes_dir,
+                &project,
+                &distro,
+                &arch,
+                allow_full_log,
+            )?;
         }
     }
 
@@ -172,6 +185,7 @@ fn cmd_build(
     name: &str,
     work_dir: &Path,
     fixes_dir: &Path,
+    project: &str,
     distro: &str,
     arch: &str,
     allow_full_log: bool,
@@ -199,30 +213,24 @@ fn cmd_build(
                 .iter()
                 .map(|&idx| {
                     let node = &nodes[idx];
-                    let work_dir = work_dir.to_path_buf();
-                    let rpms_dir = rpms_dir.clone();
-                    let fixes_dir = fixes_dir.to_path_buf();
-                    let distro = distro.to_string();
-                    let arch = arch.to_string();
+                    let ctx = BuildCtx {
+                        work_dir,
+                        rpms_dir: &rpms_dir,
+                        fixes_dir,
+                        project,
+                        distro,
+                        arch,
+                        allow_full_log,
+                    };
                     let total_usage = &total_usage;
 
-                    s.spawn(move || {
-                        match build_one(
-                            node,
-                            &work_dir,
-                            &rpms_dir,
-                            &fixes_dir,
-                            &distro,
-                            &arch,
-                            allow_full_log,
-                        ) {
-                            Ok(usage) => {
-                                total_usage.lock().unwrap().add(&usage);
-                            }
-                            Err(e) => {
-                                warn!("{} failed: {e:#}", node.name);
-                                eprintln!("[{}]  ✗ {e:#}", node.name);
-                            }
+                    s.spawn(move || match build_one(node, &ctx) {
+                        Ok(usage) => {
+                            total_usage.lock().unwrap().add(&usage);
+                        }
+                        Err(e) => {
+                            warn!("{} failed: {e:#}", node.name);
+                            eprintln!("[{}]  ✗ {e:#}", node.name);
                         }
                     })
                 })
@@ -255,15 +263,24 @@ fn already_built(pkg_dir: &Path, version: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn build_one(
-    node: &Node,
-    work_dir: &Path,
-    rpms_dir: &Path,
-    fixes_dir: &Path,
-    distro: &str,
-    arch: &str,
+struct BuildCtx<'a> {
+    work_dir: &'a Path,
+    rpms_dir: &'a Path,
+    fixes_dir: &'a Path,
+    project: &'a str,
+    distro: &'a str,
+    arch: &'a str,
     allow_full_log: bool,
-) -> color_eyre::Result<ap_build::agent::Usage> {
+}
+
+fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::agent::Usage> {
+    let work_dir = ctx.work_dir;
+    let rpms_dir = ctx.rpms_dir;
+    let fixes_dir = ctx.fixes_dir;
+    let project = ctx.project;
+    let distro = ctx.distro;
+    let arch = ctx.arch;
+    let allow_full_log = ctx.allow_full_log;
     let pkg = &node.name;
     let pkg_dir = work_dir.join(node.name.to_lowercase());
 
@@ -327,12 +344,25 @@ fn build_one(
         Err(e) => warn!("[{pkg}] review error: {e}"),
     }
 
+    // Set up the OBS package checkout that osc build will run from.
+    let rpm_pkg = ap_build::osc::rpm_name(&node.name);
+    step(pkg, &format!("creating {project}/{rpm_pkg}"));
+    ap_build::osc::ensure_package(project, &rpm_pkg)?;
+
+    step(pkg, "checking out package");
+    let checkout_dir = ap_build::osc::checkout(project, &rpm_pkg, work_dir)?;
+    result(pkg, checkout_dir.to_str().unwrap_or("?"));
+
     let mut escalation = ap_build::context::Escalation::new(false);
     let _ = &escalation;
 
     loop {
         step(pkg, &format!("build {}/{MAX_BUILD_ATTEMPTS}", attempts + 1));
-        match ap_build::osc::build(&pkg_dir, &spec_path, rpms_dir, distro, arch) {
+
+        // Sync the latest spec (may have been agent-fixed) into the checkout.
+        ap_build::osc::sync_sources(&checkout_dir, &spec_path, &tarball)?;
+
+        match ap_build::osc::build(&checkout_dir, rpms_dir, distro, arch) {
             Ok(()) => {
                 eprintln!("[{pkg}]  ✓ built");
                 fs::write(marker_path(&pkg_dir), &node.version)?;
