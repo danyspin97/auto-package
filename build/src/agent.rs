@@ -413,6 +413,12 @@ fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &
          {spec}\n\
          ```\n\
          \n\
+         openSUSE spec conventions to keep in mind:\n\
+         - Version constraints go inside the macro: `BuildRequires:  %{{python_module setuptools >= 77}}`\n\
+           NOT after it: `BuildRequires:  %{{python_module setuptools}} >= 77`\n\
+         - Use `%{{python_module <name>}}` for all Python build dependencies.\n\
+         - Use `%pyproject_wheel` / `%pyproject_install` for PEP 517 packages.\n\
+         \n\
          Return a JSON object with:\n\
          - \"confidence\": \"high\", \"medium\", or \"low\"\n\
          - \"reasoning\": one sentence explaining the fix\n\
