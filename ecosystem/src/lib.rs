@@ -2,3 +2,4 @@
 
 pub mod pip;
 pub mod pypi;
+pub mod sdist;
