@@ -92,7 +92,6 @@ pub fn checkout(project: &str, pkg_name: &str, into_dir: &Path) -> Result<PathBu
 
     // Re-use an existing checkout rather than re-cloning every run.
     if checkout_dir.exists() {
-        // Update the existing checkout.
         let out = Command::new("osc")
             .args(["up"])
             .current_dir(&checkout_dir)
@@ -100,10 +99,16 @@ pub fn checkout(project: &str, pkg_name: &str, into_dir: &Path) -> Result<PathBu
             .map_err(Error::Launch)?;
 
         if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // 404 means the package was just created locally by `osc mkpac`
+            // but not yet committed to the server — use the directory as-is.
+            if stderr.contains("404") || stderr.contains("Not Found") {
+                return Ok(checkout_dir);
+            }
             return Err(Error::OscFailed {
                 cmd: "up".into(),
                 code: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                stderr: stderr.into_owned(),
             });
         }
 
