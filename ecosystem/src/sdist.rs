@@ -78,6 +78,34 @@ pub fn top_level_dir(path: &Path) -> Result<Option<String>, Error> {
     Ok(None)
 }
 
+/// Whether the sdist contains C/Cython source files, indicating C extensions.
+///
+/// Checks for `.c`, `.cpp`, `.cxx`, `.pyx`, `.pxd` files anywhere in the
+/// tarball. A package that ships any of these will need a compiler and
+/// architecture-specific installation paths.
+pub fn has_c_extensions(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut archive = tar::Archive::new(GzDecoder::new(file));
+    let Ok(entries) = archive.entries() else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(entry_path) = entry.path() else {
+            continue;
+        };
+        if entry_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e, "c" | "cpp" | "cxx" | "pyx" | "pxd"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Read `[build-system]` from the sdist tarball at `path`.
 ///
 /// Returns the PEP 517 defaults when `pyproject.toml` is absent or when

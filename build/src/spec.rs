@@ -36,7 +36,11 @@ pub fn fix_autosetup_dir(spec: &str, tarball: &Path) -> Option<String> {
         return None;
     }
 
-    // Replace -n <wrong> with -n <actual> on the %autosetup line.
+    // Replace the version in the actual dir with %{version} so the spec
+    // stays correct across version bumps. e.g. markupsafe-3.0.3 → markupsafe-%{version}
+    let macro_n = actual.replace(version, "%{version}");
+
+    // Replace -n <wrong> with -n <macro_n> on the %autosetup line.
     // If there is no -n, append one.
     let fixed = spec
         .lines()
@@ -47,7 +51,6 @@ pub fn fix_autosetup_dir(spec: &str, tarball: &Path) -> Option<String> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             let has_n = parts.windows(2).any(|w| w[0] == "-n");
             if has_n {
-                // Replace the argument after -n.
                 let mut out = String::new();
                 let mut iter = parts.iter().peekable();
                 while let Some(&part) = iter.next() {
@@ -56,7 +59,7 @@ pub fn fix_autosetup_dir(spec: &str, tarball: &Path) -> Option<String> {
                     }
                     if part == "-n" {
                         out.push_str("-n ");
-                        out.push_str(&actual);
+                        out.push_str(&macro_n);
                         iter.next(); // skip old value
                     } else {
                         out.push_str(part);
@@ -64,7 +67,7 @@ pub fn fix_autosetup_dir(spec: &str, tarball: &Path) -> Option<String> {
                 }
                 out
             } else {
-                format!("{line} -n {actual}")
+                format!("{line} -n {macro_n}")
             }
         })
         .collect::<Vec<_>>()
@@ -76,6 +79,52 @@ pub fn fix_autosetup_dir(spec: &str, tarball: &Path) -> Option<String> {
     } else {
         fixed
     })
+}
+
+/// Remove `BuildRequires: %{python_module devel}` lines — py2pack sometimes
+/// generates this, but `devel` is not a valid Python module name.
+pub fn remove_invalid_python_module_devel(spec: &str) -> String {
+    spec.lines()
+        .filter(|l| {
+            !(l.contains("BuildRequires") && l.contains("%{python_module") && l.contains("devel}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// Normalize version constraints inside `%{python_module ...}`.
+///
+/// Adds spaces around `>=`, `<=`, `>`, `<`, `==`, `!=` that are missing them,
+/// e.g. `setuptools>=77` → `setuptools >= 77`.
+pub fn normalize_python_module_versions(spec: &str) -> String {
+    use std::sync::LazyLock;
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        // Match %{python_module ...} and capture the content
+        regex::Regex::new(r"%\{python_module ([^}]+)\}").expect("static pattern")
+    });
+    static OP: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\s*(>=|<=|!=|==|>|<)\s*").expect("static pattern"));
+
+    RE.replace_all(spec, |caps: &regex::Captures| {
+        let inner = &caps[1];
+        let normalized = OP.replace_all(inner, " $1 ");
+        format!("%{{python_module {}}}", normalized)
+    })
+    .into_owned()
+}
+
+/// Fix architecture-related lines when a package has C extensions.
+///
+/// - Removes `BuildArch: noarch`
+/// - Replaces `%{python_sitelib}` with `%{python_sitearch}`
+pub fn fix_c_extension_arch(spec: &str) -> String {
+    spec.lines()
+        .filter(|l| !l.trim().starts_with("BuildArch:"))
+        .map(|l| l.replace("%{python_sitelib}", "%{python_sitearch}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if spec.ends_with('\n') { "\n" } else { "" }
 }
 
 pub fn check_autosetup_dir(spec: &str, tarball: &Path) -> Option<Result<(), String>> {

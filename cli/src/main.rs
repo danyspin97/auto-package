@@ -301,17 +301,25 @@ fn build_one(
     status(pkg, "generating spec");
     let mut spec_content = ap_build::spec::generate(&release, &build_system)?;
     let spec_path = pkg_dir.join(format!("python-{}.spec", node.name.to_lowercase()));
-    fs::write(&spec_path, &spec_content)?;
-    eprintln!("[{pkg}] spec at {}", spec_path.display());
 
-    // Fix %autosetup -n if it doesn't match the actual tarball directory.
-    // This is deterministic — no need for the agent.
+    // Deterministic post-processing — these are always wrong when py2pack
+    // generates them and require no agent call.
+    spec_content = ap_build::spec::remove_invalid_python_module_devel(&spec_content);
+    spec_content = ap_build::spec::normalize_python_module_versions(&spec_content);
+
+    let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
+    if has_c {
+        info!("[{pkg}] C extensions detected — fixing arch and sitelib");
+        spec_content = ap_build::spec::fix_c_extension_arch(&spec_content);
+    }
+
     if let Some(fixed) = ap_build::spec::fix_autosetup_dir(&spec_content, &tarball) {
         info!("[{pkg}] fixed %autosetup -n to match sdist directory");
-        eprintln!("[{pkg}] fixed %autosetup -n directory");
-        fs::write(&spec_path, &fixed)?;
         spec_content = fixed;
     }
+
+    fs::write(&spec_path, &spec_content)?;
+    eprintln!("[{pkg}] spec at {}", spec_path.display());
 
     let mut total_usage = ap_build::agent::Usage::default();
     let mut history: Vec<ap_build::agent::Turn> = Vec::new();
