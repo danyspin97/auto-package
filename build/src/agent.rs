@@ -38,9 +38,13 @@ openSUSE spec conventions to keep in mind:
    - %files: all installed paths use the lowercase name
    - dist-info: 'markupsafe-%{version}.dist-info', NOT 'MarkupSafe-%{version}.dist-info'
 
-3. Architecture: if the package installs .so files (C extensions), use
-   %{python_sitearch} and remove 'BuildArch: noarch'. Pure Python packages
-   use %{python_sitelib} and keep 'BuildArch: noarch'.
+3. Architecture and C dependencies: if the package has C extensions (.so files):
+   - Use %{python_sitearch} instead of %{python_sitelib}
+   - Remove 'BuildArch: noarch'
+   - Add BuildRequires for any C libraries the extension links against,
+     e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
+     for cffi, 'BuildRequires: gcc' if a compiler is needed. Check the
+     package's build errors or setup.py/pyproject.toml for hints.
 
 4. Use %pyproject_wheel / %pyproject_install for PEP 517 packages.";
 
