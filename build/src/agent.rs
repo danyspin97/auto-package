@@ -91,6 +91,17 @@ pub enum Confidence {
     Low,
 }
 
+/// One round of the fix loop, kept so the next attempt can learn from it.
+#[derive(Debug, Clone)]
+pub struct Turn {
+    /// The error excerpt that prompted this fix.
+    pub error_excerpt: String,
+    /// The reasoning the agent gave.
+    pub reasoning: String,
+    /// The spec the agent produced (which then failed to build).
+    pub fixed_spec: String,
+}
+
 #[derive(Deserialize)]
 struct FixResponse {
     confidence: Confidence,
@@ -100,8 +111,17 @@ struct FixResponse {
 
 /// Try to fix `spec_path` using the build log at `log_path`.
 ///
-/// Returns the fixed spec content and token usage.
-pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String, Usage), Error> {
+/// `history` is the list of previous fix attempts for this package; the agent
+/// sees what it already tried so it doesn't repeat the same mistake.
+///
+/// Returns the fixed spec, token usage, and an updated history to pass to the
+/// next call if the build fails again.
+pub fn fix(
+    spec_path: &Path,
+    log_path: &Path,
+    pkg_name: &str,
+    history: &[Turn],
+) -> Result<(String, Usage, Vec<Turn>), Error> {
     let backend = detect_backend();
 
     let spec = std::fs::read_to_string(spec_path)?;
@@ -110,14 +130,21 @@ pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String,
     let mapper = PathMapper::with_sdist_root(pkg_name);
     let extracted = crate::log::extract(&log_raw, &mapper);
 
-    let (response, usage) = call(&backend, &spec, &extracted, pkg_name)?;
+    let (response, usage) = call(&backend, &spec, &extracted, pkg_name, history)?;
 
     eprintln!(
         "  [agent] {:?} — {}",
         response.confidence, response.reasoning,
     );
 
-    Ok((response.fixed_spec, usage))
+    let mut new_history = history.to_vec();
+    new_history.push(Turn {
+        error_excerpt: extracted.excerpt.clone(),
+        reasoning: response.reasoning.clone(),
+        fixed_spec: response.fixed_spec.clone(),
+    });
+
+    Ok((response.fixed_spec, usage, new_history))
 }
 
 fn detect_backend() -> Backend {
@@ -158,10 +185,11 @@ fn call(
     spec: &str,
     extracted: &ExtractedLog,
     pkg_name: &str,
+    history: &[Turn],
 ) -> Result<(FixResponse, Usage), Error> {
     match backend {
-        Backend::Cli => call_cli(spec, extracted, pkg_name),
-        _ => call_http(backend, spec, extracted, pkg_name),
+        Backend::Cli => call_cli(spec, extracted, pkg_name, history),
+        _ => call_http(backend, spec, extracted, pkg_name, history),
     }
 }
 
@@ -169,8 +197,9 @@ fn call_cli(
     spec: &str,
     extracted: &ExtractedLog,
     pkg_name: &str,
+    history: &[Turn],
 ) -> Result<(FixResponse, Usage), Error> {
-    let prompt = build_prompt(spec, extracted, pkg_name);
+    let prompt = build_prompt(spec, extracted, pkg_name, history);
 
     let out = Command::new("claude")
         .args(["--print", "--output-format", "json", "-p", &prompt])
@@ -221,8 +250,9 @@ fn call_http(
     spec: &str,
     extracted: &ExtractedLog,
     pkg_name: &str,
+    history: &[Turn],
 ) -> Result<(FixResponse, Usage), Error> {
-    let prompt = build_prompt(spec, extracted, pkg_name);
+    let prompt = build_prompt(spec, extracted, pkg_name, history);
 
     #[derive(Deserialize)]
     struct ApiResponse {
@@ -340,15 +370,34 @@ fn call_http(
     Ok((fix_response, usage))
 }
 
-fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str) -> String {
+fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &[Turn]) -> String {
     let section = extracted.failed_section.as_deref().unwrap_or("unknown");
     let errors = extracted.error_lines.join("\n");
+
+    let mut prior = String::new();
+    if !history.is_empty() {
+        prior.push_str("\nPrevious fix attempts that did not work:\n");
+        for (i, turn) in history.iter().enumerate() {
+            prior.push_str(&format!(
+                "\nAttempt {}:\n  Reasoning: {}\n  The build then failed with:\n  {}\n",
+                i + 1,
+                turn.reasoning,
+                turn.error_excerpt
+                    .lines()
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join("\n  "),
+            ));
+        }
+        prior.push_str("\nDo not repeat those fixes. Try a different approach.\n");
+    }
+
     format!(
         "You are fixing an openSUSE RPM spec file for a Python package.\n\
          Package: {pkg_name}\n\
          Failed section: {section}\n\
-         \n\
-         Error context:\n\
+         {prior}\n\
+         Current error context:\n\
          ```\n\
          {excerpt}\n\
          ```\n\
@@ -392,10 +441,9 @@ fn parse_response(text: &str) -> Result<FixResponse, Error> {
     // This handles models that prepend an explanation sentence.
     if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
         && start < end
+        && let Ok(r) = serde_json::from_str::<FixResponse>(&trimmed[start..=end])
     {
-        if let Ok(r) = serde_json::from_str::<FixResponse>(&trimmed[start..=end]) {
-            return Ok(r);
-        }
+        return Ok(r);
     }
 
     Err(Error::Parse(format!(

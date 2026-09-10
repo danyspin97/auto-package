@@ -157,6 +157,18 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
     Ok(())
 }
 
+/// Path of the success marker for a package.
+fn marker_path(pkg_dir: &Path) -> PathBuf {
+    pkg_dir.join("BUILD_OK")
+}
+
+/// True if this package version already built successfully in a previous run.
+fn already_built(pkg_dir: &Path, version: &str) -> bool {
+    fs::read_to_string(marker_path(pkg_dir))
+        .map(|v| v.trim() == version)
+        .unwrap_or(false)
+}
+
 fn build_one(
     node: &Node,
     work_dir: &Path,
@@ -165,6 +177,14 @@ fn build_one(
     arch: &str,
 ) -> color_eyre::Result<ap_build::agent::Usage> {
     let pkg = &node.name;
+    let pkg_dir = work_dir.join(node.name.to_lowercase());
+
+    if already_built(&pkg_dir, &node.version) {
+        info!("[{pkg}] already built, skipping");
+        eprintln!("[{pkg}] SKIP: already built ({})", node.version);
+        return Ok(ap_build::agent::Usage::default());
+    }
+
     eprintln!("\n[{pkg}] {} {}", node.name, node.version);
 
     info!("[{pkg}] fetching PyPI metadata");
@@ -179,7 +199,6 @@ fn build_one(
         return Ok(ap_build::agent::Usage::default());
     }
 
-    let pkg_dir = work_dir.join(node.name.to_lowercase());
     fs::create_dir_all(&pkg_dir)?;
 
     info!("[{pkg}] downloading sdist: {}", release.sdist.filename);
@@ -201,6 +220,7 @@ fn build_one(
     eprintln!("[{pkg}] files in {}", pkg_dir.display());
 
     let mut total_usage = ap_build::agent::Usage::default();
+    let mut history: Vec<ap_build::agent::Turn> = Vec::new();
     let mut attempts = 0;
     const MAX_BUILD_ATTEMPTS: usize = 6;
 
@@ -210,6 +230,7 @@ fn build_one(
             Ok(()) => {
                 info!("[{pkg}] build succeeded");
                 eprintln!("[{pkg}] BUILD OK");
+                fs::write(marker_path(&pkg_dir), &node.version)?;
                 break;
             }
             Err(ap_build::osc::Error::BuildFailed { log, .. }) => {
@@ -236,9 +257,10 @@ fn build_one(
                     eprintln!("[{pkg}] FAILED after {attempts} attempts");
                     break;
                 }
+
                 eprintln!("[{pkg}] asking agent to fix (attempt {attempts})…");
-                match ap_build::agent::fix(&spec_path, &log, &node.name) {
-                    Ok((fixed, usage)) => {
+                match ap_build::agent::fix(&spec_path, &log, &node.name, &history) {
+                    Ok((fixed, usage, new_history)) => {
                         info!(
                             "[{pkg}] agent: {} in / {} out",
                             usage.input_tokens, usage.output_tokens,
@@ -247,11 +269,13 @@ fn build_one(
                         print_diff(&spec_content, &fixed);
                         fs::write(&spec_path, &fixed)?;
                         spec_content = fixed;
+                        history = new_history;
                     }
                     Err(e) => {
                         warn!("[{pkg}] agent error: {e}");
                         eprintln!("[{pkg}] agent error: {e}");
-                        break;
+                        // Don't break — the next build attempt may still work
+                        // or give a different error we can act on.
                     }
                 }
             }
