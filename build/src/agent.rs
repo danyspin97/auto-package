@@ -18,6 +18,38 @@ const MAX_RETRIES: usize = 5;
 const MODEL: &str = "claude-opus-5";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
+/// Token counts from one API call.
+#[derive(Debug, Clone, Default)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+}
+
+impl Usage {
+    /// Cost in US cents (multiply by 0.01 for dollars).
+    ///
+    /// Rates for claude-opus-5 as of 2026:
+    /// $15/MTok input, $75/MTok output,
+    /// $18.75/MTok cache write, $1.50/MTok cache read.
+    pub fn cost_cents(&self) -> f64 {
+        (self.input_tokens as f64 * 15.0
+            + self.output_tokens as f64 * 75.0
+            + self.cache_creation_tokens as f64 * 18.75
+            + self.cache_read_tokens as f64 * 1.50)
+            / 1_000_000.0
+            * 100.0
+    }
+
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("ANTHROPIC_API_KEY is not set")]
@@ -54,9 +86,10 @@ struct FixResponse {
 
 /// Try to fix `spec_path` using the build log at `log_path`.
 ///
-/// Returns the fixed spec content. The caller is responsible for writing it
-/// back to disk and re-running the build.
-pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<String, Error> {
+/// Returns the fixed spec content and total API usage for this fix session.
+/// The caller is responsible for writing the spec back to disk and re-running
+/// the build.
+pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String, Usage), Error> {
     let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| Error::NoApiKey)?;
 
     let spec = std::fs::read_to_string(spec_path)?;
@@ -65,7 +98,9 @@ pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<String, 
     let mapper = PathMapper::with_sdist_root(pkg_name);
     let extracted = crate::log::extract(&log_raw, &mapper);
 
-    fix_loop(&api_key, &spec, &extracted, pkg_name, 0)
+    let mut total = Usage::default();
+    let fixed = fix_loop(&api_key, &spec, &extracted, pkg_name, 0, &mut total)?;
+    Ok((fixed, total))
 }
 
 fn fix_loop(
@@ -74,27 +109,24 @@ fn fix_loop(
     extracted: &ExtractedLog,
     pkg_name: &str,
     attempt: usize,
+    total: &mut Usage,
 ) -> Result<String, Error> {
     if attempt >= MAX_RETRIES {
         return Err(Error::Exhausted);
     }
 
-    let response = call_api(api_key, spec, extracted, pkg_name)?;
+    let (response, usage) = call_api(api_key, spec, extracted, pkg_name)?;
+    total.add(&usage);
 
-    if response.confidence == Confidence::Low {
-        eprintln!(
-            "  [agent] attempt {}: low confidence, reasoning: {}",
-            attempt + 1,
-            response.reasoning
-        );
-    } else {
-        eprintln!(
-            "  [agent] attempt {}: {:?} confidence — {}",
-            attempt + 1,
-            response.confidence,
-            response.reasoning
-        );
-    }
+    eprintln!(
+        "  [agent] attempt {}: {:?} — {} ({} in / {} out, ${:.4})",
+        attempt + 1,
+        response.confidence,
+        response.reasoning,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cost_cents() / 100.0,
+    );
 
     Ok(response.fixed_spec)
 }
@@ -104,7 +136,7 @@ fn call_api(
     spec: &str,
     extracted: &ExtractedLog,
     pkg_name: &str,
-) -> Result<FixResponse, Error> {
+) -> Result<(FixResponse, Usage), Error> {
     let section = extracted.failed_section.as_deref().unwrap_or("unknown");
     let errors = extracted.error_lines.join("\n");
 
@@ -155,6 +187,7 @@ fn call_api(
     #[derive(Deserialize)]
     struct ApiResponse {
         content: Vec<ContentBlock>,
+        usage: RawUsage,
     }
 
     #[derive(Deserialize)]
@@ -162,6 +195,18 @@ fn call_api(
         #[serde(rename = "type")]
         kind: String,
         text: Option<String>,
+    }
+
+    #[derive(Deserialize, Default)]
+    struct RawUsage {
+        #[serde(default)]
+        input_tokens: u64,
+        #[serde(default)]
+        output_tokens: u64,
+        #[serde(default)]
+        cache_creation_input_tokens: u64,
+        #[serde(default)]
+        cache_read_input_tokens: u64,
     }
 
     let body = Request {
@@ -204,5 +249,15 @@ fn call_api(
         .trim_end_matches("```")
         .trim();
 
-    serde_json::from_str(json).map_err(|e| Error::Parse(format!("bad JSON: {e}\n{json}")))
+    let fix_response: FixResponse =
+        serde_json::from_str(json).map_err(|e| Error::Parse(format!("bad JSON: {e}\n{json}")))?;
+
+    let usage = Usage {
+        input_tokens: resp.usage.input_tokens,
+        output_tokens: resp.usage.output_tokens,
+        cache_creation_tokens: resp.usage.cache_creation_input_tokens,
+        cache_read_tokens: resp.usage.cache_read_input_tokens,
+    };
+
+    Ok((fix_response, usage))
 }

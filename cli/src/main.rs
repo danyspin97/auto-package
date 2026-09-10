@@ -55,6 +55,8 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
     let rpms_dir = work_dir.join("rpms");
     fs::create_dir_all(&rpms_dir)?;
 
+    let mut total_usage = ap_build::agent::Usage::default();
+
     // 1. Resolve the full dependency tree.
     eprintln!("[1/4] Resolving dependencies for {name}…");
     let nodes = ap_ecosystem::pip::resolve(name, None)?;
@@ -111,7 +113,8 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
                     }
                     eprintln!("      build failed, asking agent to fix (attempt {attempts})…");
                     match ap_build::agent::fix(&spec_path, &log, &node.name) {
-                        Ok(fixed) => {
+                        Ok((fixed, usage)) => {
+                            total_usage.add(&usage);
                             fs::write(&spec_path, &fixed)?;
                         }
                         Err(e) => {
@@ -126,6 +129,17 @@ fn cmd_build(name: &str, work_dir: &Path, distro: &str, arch: &str) -> color_eyr
                 }
             }
         }
+    }
+
+    if total_usage.input_tokens > 0 {
+        eprintln!(
+            "\n[cost] {} in / {} out / {} cache-write / {} cache-read → ${:.4}",
+            total_usage.input_tokens,
+            total_usage.output_tokens,
+            total_usage.cache_creation_tokens,
+            total_usage.cache_read_tokens,
+            total_usage.cost_cents() / 100.0,
+        );
     }
 
     Ok(())
