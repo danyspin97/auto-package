@@ -283,17 +283,22 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
     let allow_full_log = ctx.allow_full_log;
     let pkg = &node.name;
     let rpm_pkg = ap_build::osc::rpm_name(&node.name);
+    let pkg_dir = work_dir.join(project).join(&rpm_pkg);
 
     eprintln!("\n[{pkg} {}]", node.version);
 
-    // Create the OBS package if needed and check it out.
-    // The checkout dir is the single working directory for everything.
-    step(pkg, &format!("creating {project}/{rpm_pkg}"));
-    ap_build::osc::ensure_package(project, &rpm_pkg, work_dir)?;
+    if pkg_dir.join(".osc").exists() {
+        // Existing checkout — use it directly.
+        result(pkg, pkg_dir.to_str().unwrap_or("?"));
+    } else {
+        // Create the OBS package and check it out.
+        step(pkg, &format!("creating {project}/{rpm_pkg}"));
+        ap_build::osc::ensure_package(project, &rpm_pkg, work_dir)?;
 
-    step(pkg, "checking out");
-    let pkg_dir = ap_build::osc::checkout(project, &rpm_pkg, work_dir)?;
-    result(pkg, pkg_dir.to_str().unwrap_or("?"));
+        step(pkg, "checking out");
+        ap_build::osc::checkout(project, &rpm_pkg, work_dir)?;
+        result(pkg, pkg_dir.to_str().unwrap_or("?"));
+    }
 
     if already_built(&pkg_dir, &node.version) {
         eprintln!("[{pkg}]  already built {}", node.version);
