@@ -148,6 +148,26 @@ pub fn fix_files_case(spec: &str, pypi_name: &str) -> String {
         return spec.to_string();
     }
 
+    // RPM section-start macros that end a %files block.
+    // File-attribute macros (%license, %doc, %dir, %config, %attr, %ghost)
+    // appear *inside* %files and must not close it.
+    const SECTIONS: &[&str] = &[
+        "%prep",
+        "%build",
+        "%install",
+        "%check",
+        "%clean",
+        "%pre",
+        "%post",
+        "%preun",
+        "%postun",
+        "%pretrans",
+        "%posttrans",
+        "%package",
+        "%description",
+        "%changelog",
+    ];
+
     let mut in_files = false;
     let mut out = String::with_capacity(spec.len());
 
@@ -155,7 +175,11 @@ pub fn fix_files_case(spec: &str, pypi_name: &str) -> String {
         let trimmed = line.trim();
         if trimmed.starts_with("%files") {
             in_files = true;
-        } else if trimmed.starts_with('%') && !trimmed.starts_with("%{") && in_files {
+        } else if in_files
+            && SECTIONS
+                .iter()
+                .any(|s| trimmed == *s || trimmed.starts_with(&format!("{s} ")))
+        {
             in_files = false;
         }
 
@@ -283,6 +307,30 @@ Version:        3.0.3
             autosetup_expected_dir(spec, "python-markupsafe", "3.0.3").as_deref(),
             Some("python-markupsafe-3.0.3")
         );
+    }
+
+    #[test]
+    fn fix_files_case_handles_license_inside_files() {
+        // %license appears INSIDE the %files block — it must not close it.
+        let spec = "\
+%files %{python_files}
+%license LICENSE.txt
+%{python_sitearch}/MarkupSafe
+%{python_sitearch}/MarkupSafe-%{version}.dist-info
+
+%changelog
+";
+        let fixed = fix_files_case(spec, "MarkupSafe");
+        assert!(
+            fixed.contains("%{python_sitearch}/markupsafe\n"),
+            "dir not fixed"
+        );
+        assert!(
+            fixed.contains("markupsafe-%{version}.dist-info"),
+            "dist-info not fixed"
+        );
+        assert!(fixed.contains("%license LICENSE.txt"), "license line lost");
+        assert!(fixed.contains("%changelog"), "changelog gone");
     }
 }
 

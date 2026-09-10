@@ -343,6 +343,7 @@ fn build_one(
         Err(e) => warn!("[{pkg}] review error (continuing): {e}"),
     }
 
+    eprintln!("[{pkg}] building spec: {}", spec_path.display());
     let mut escalation = ap_build::context::Escalation::new(false);
     let _ = &escalation;
 
