@@ -344,11 +344,18 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
         let build_system = ap_ecosystem::sdist::build_system(&tarball)?;
         debug!("[{pkg}] build-backend: {:?}", build_system.backend);
 
+        let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
+        let has_tests = ap_ecosystem::sdist::has_tests(&tarball);
+        debug!("[{pkg}] has_c={has_c} has_tests={has_tests}");
+
         step(pkg, "generating spec");
-        let mut content = ap_build::spec::generate(release, &build_system)?;
+        // Re-run post-processing with test detection since generate() can't
+        // inspect the tarball.
+        let raw = ap_build::spec::generate(release, &build_system)?;
+        let mut content =
+            ap_build::spec::post_process_with_tests(&raw, release, &build_system, has_tests);
         content = ap_build::spec::normalize_python_module_versions(&content);
 
-        let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
         if has_c {
             content = ap_build::spec::fix_c_extension_arch(&content);
         }

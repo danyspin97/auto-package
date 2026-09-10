@@ -99,6 +99,35 @@ pub fn tarball_files(path: &Path) -> Result<Vec<String>, Error> {
     Ok(files)
 }
 
+/// Whether the sdist contains tests (a `tests/` directory or `test_*.py` files).
+pub fn has_tests(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut archive = tar::Archive::new(GzDecoder::new(file));
+    let Ok(entries) = archive.entries() else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(entry_path) = entry.path() else {
+            continue;
+        };
+        let s = entry_path.to_string_lossy();
+        // Match: <root>/tests/, <root>/test/, or any test_*.py
+        if s.contains("/tests/") || s.contains("/test/") {
+            return true;
+        }
+        if entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Whether the sdist contains C/Cython source files, indicating C extensions.
 ///
 /// Checks for `.c`, `.cpp`, `.cxx`, `.pyx`, `.pxd` files anywhere in the

@@ -44,8 +44,21 @@ openSUSE spec conventions to keep in mind:
    - Add BuildRequires for any C libraries the extension links against,
      e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
      for cffi. Check the build errors or setup.py/pyproject.toml for hints.
+   - Remove installed C source files in %install:
+       %python_expand rm -f %{buildroot}%{$python_sitearch}/<pkg>/*.c
 
-4. Use %pyproject_wheel / %pyproject_install for PEP 517 packages.";
+4. Use %pyproject_wheel / %pyproject_install for PEP 517 packages.
+
+5. Always include a %check section with %pytest_arch (C extensions) or %pytest
+   (pure Python) and add 'BuildRequires: %{python_module pytest}' for it.
+
+6. Add 'Group: Development/Languages/Python' to the header tags.
+
+7. For multi-flavor builds (standard Factory pattern), the spec should use
+   '%global flavor @BUILD_FLAVOR@%{nil}' with a 'test' flavor that only runs
+   %check. The %build/%install/%files sections should be inside
+   '%if !%{with test}', and %check inside '%if %{with test}'.
+   This lets OBS build and test in separate subpackages.";
 
 /// Token counts and cost from one API call.
 #[derive(Debug, Clone, Default)]

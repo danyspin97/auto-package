@@ -365,20 +365,44 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
     }
 
     let spec = std::fs::read_to_string(&spec_path).map_err(Error::Io)?;
-    Ok(post_process(spec, release, build_system))
+    Ok(post_process(spec, release, build_system, false))
 }
 
-fn post_process(spec: String, release: &Release, build_system: &BuildSystem) -> String {
-    let mut out = String::with_capacity(spec.len() + 256);
+/// Re-generate post-processing with a known `has_tests` flag.
+/// Call this from the CLI where the tarball is available.
+pub fn post_process_with_tests(
+    spec: &str,
+    release: &Release,
+    build_system: &BuildSystem,
+    has_tests: bool,
+) -> String {
+    post_process(spec.to_string(), release, build_system, has_tests)
+}
+
+fn post_process(
+    spec: String,
+    release: &Release,
+    build_system: &BuildSystem,
+    has_tests: bool,
+) -> String {
+    let mut out = String::with_capacity(spec.len() + 512);
 
     let mut in_description = false;
     let mut description_written = false;
+    let has_check = spec.contains("%check");
 
     for line in spec.lines() {
+        // Inject %{?sle15_python_module_pythons} before the Name: tag.
+        if line.starts_with("Name:") && !spec.contains("sle15_python_module_pythons") {
+            out.push_str("%{?sle15_python_module_pythons}\n");
+        }
+
         // Fix License.
         if line.starts_with("License:") {
             let license = license_tag(&release.license);
             out.push_str(&format!("License:        {license}\n"));
+            // Add Group immediately after License.
+            out.push_str("Group:          Development/Languages/Python\n");
             continue;
         }
 
@@ -392,12 +416,15 @@ fn post_process(spec: String, release: &Release, build_system: &BuildSystem) -> 
             continue;
         }
 
-        // Inject build-backend BuildRequires after the pip line.
+        // Inject build-backend BuildRequires (and pytest if tests exist) after the pip line.
         if line.contains("%{python_module pip}") {
             out.push_str(line);
             out.push('\n');
             for req in &build_system.requires {
                 out.push_str(&format!("BuildRequires:  %{{python_module {req}}}\n"));
+            }
+            if has_tests && !spec.contains("%{python_module pytest}") {
+                out.push_str("BuildRequires:  %{python_module pytest}\n");
             }
             continue;
         }
@@ -413,7 +440,6 @@ fn post_process(spec: String, release: &Release, build_system: &BuildSystem) -> 
 
         if in_description {
             if line.starts_with('%') {
-                // Next section — emit the summary if we haven't yet, then end.
                 if !description_written {
                     if let Some(s) = &release.summary {
                         out.push_str(s);
@@ -425,8 +451,12 @@ fn post_process(spec: String, release: &Release, build_system: &BuildSystem) -> 
                 out.push_str(line);
                 out.push('\n');
             }
-            // Skip the original (possibly multi-page) description body.
             continue;
+        }
+
+        // Inject %check before %changelog when tests exist.
+        if line.starts_with("%changelog") && has_tests && !spec.contains("%check") {
+            out.push_str("\n%check\n%pytest\n\n");
         }
 
         out.push_str(line);
