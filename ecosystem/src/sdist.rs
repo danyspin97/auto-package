@@ -78,6 +78,27 @@ pub fn top_level_dir(path: &Path) -> Result<Option<String>, Error> {
     Ok(None)
 }
 
+/// List all file paths inside the sdist tarball (relative, sorted).
+///
+/// Useful for giving the review agent visibility into what the package
+/// actually contains — module directories, compiled extensions, etc.
+pub fn tarball_files(path: &Path) -> Result<Vec<String>, Error> {
+    let file = std::fs::File::open(path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let mut archive = tar::Archive::new(GzDecoder::new(file));
+    let mut files: Vec<String> = archive
+        .entries()
+        .map_err(Error::Tar)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.path().ok().map(|p| p.to_string_lossy().into_owned()))
+        .filter(|p| !p.ends_with('/'))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
 /// Whether the sdist contains C/Cython source files, indicating C extensions.
 ///
 /// Checks for `.c`, `.cpp`, `.cxx`, `.pyx`, `.pxd` files anywhere in the

@@ -152,14 +152,32 @@ struct FixResponse {
 /// Returns `Some((fixed_spec, usage))` when the agent finds a medium- or
 /// high-confidence issue to fix. Returns `None` when the spec looks fine or
 /// the agent is only guessing — no fix is applied in that case.
-pub fn review(spec_path: &Path, pkg_name: &str) -> Result<Option<(String, Usage)>, Error> {
+pub fn review(
+    spec_path: &Path,
+    pkg_name: &str,
+    tarball_files: &[String],
+) -> Result<Option<(String, Usage)>, Error> {
     let backend = detect_backend();
     let spec = std::fs::read_to_string(spec_path)?;
+
+    let files_section = if tarball_files.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nFiles in the sdist tarball (first 60):\n{}\n",
+            tarball_files
+                .iter()
+                .take(60)
+                .map(|f| format!("  {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
 
     let prompt = format!(
         "You are reviewing an openSUSE RPM spec file for a Python package BEFORE building it.\n\
          Package: {pkg_name}\n\
-         \n\
+         {files_section}\n\
          Spec:\n\
          ```spec\n\
          {spec}\n\

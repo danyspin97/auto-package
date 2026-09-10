@@ -305,39 +305,65 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
         return Ok(ap_build::agent::Usage::default());
     }
 
-    let pypi_url = format!("https://pypi.org/pypi/{}/{}/json", node.name, node.version);
-    let json = ureq::get(&pypi_url).call()?.into_body().read_to_string()?;
-    let release = ap_ecosystem::pypi::parse_release(&json)?;
-    debug!("[{pkg}] license: {:?}", release.license);
+    // The tarball filename is deterministic: <name>-<version>.tar.gz.
+    let expected_tarball = pkg_dir.join(format!(
+        "{}-{}.tar.gz",
+        node.name.to_lowercase(),
+        node.version
+    ));
+    let tarball_cached = expected_tarball.exists();
 
-    if release.yanked {
-        eprintln!("[{pkg}]  ✗ yanked — skipping");
-        return Ok(ap_build::agent::Usage::default());
-    }
-
-    step(pkg, &format!("downloading {}", release.sdist.filename));
-    let tarball = release.sdist.fetch(&pkg_dir)?;
-
-    let build_system = ap_ecosystem::sdist::build_system(&tarball)?;
-    debug!("[{pkg}] build-backend: {:?}", build_system.backend);
-
-    step(pkg, "generating spec");
-    let mut spec_content = ap_build::spec::generate(&release, &build_system)?;
+    // Only fetch PyPI JSON when we actually need it (tarball or spec missing).
     let spec_path = pkg_dir.join(format!("python-{}.spec", node.name.to_lowercase()));
+    let need_pypi = !tarball_cached || !spec_path.exists();
 
-    spec_content = ap_build::spec::normalize_python_module_versions(&spec_content);
+    let (tarball, release) = if need_pypi {
+        let pypi_url = format!("https://pypi.org/pypi/{}/{}/json", node.name, node.version);
+        let json = ureq::get(&pypi_url).call()?.into_body().read_to_string()?;
+        let release = ap_ecosystem::pypi::parse_release(&json)?;
+        debug!("[{pkg}] license: {:?}", release.license);
 
-    let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
-    if has_c {
-        spec_content = ap_build::spec::fix_c_extension_arch(&spec_content);
-    }
-    spec_content = ap_build::spec::fix_files_case(&spec_content, &release.name);
-    if let Some(fixed) = ap_build::spec::fix_autosetup_dir(&spec_content, &tarball) {
-        spec_content = fixed;
-    }
+        if release.yanked {
+            eprintln!("[{pkg}]  ✗ yanked — skipping");
+            return Ok(ap_build::agent::Usage::default());
+        }
 
-    fs::write(&spec_path, &spec_content)?;
-    result(pkg, spec_path.to_str().unwrap_or("?"));
+        let tarball = if tarball_cached {
+            expected_tarball
+        } else {
+            step(pkg, &format!("downloading {}", release.sdist.filename));
+            release.sdist.fetch(&pkg_dir)?
+        };
+
+        (tarball, Some(release))
+    } else {
+        (expected_tarball, None)
+    };
+
+    let mut spec_content = if let Some(ref release) = release {
+        let build_system = ap_ecosystem::sdist::build_system(&tarball)?;
+        debug!("[{pkg}] build-backend: {:?}", build_system.backend);
+
+        step(pkg, "generating spec");
+        let mut content = ap_build::spec::generate(release, &build_system)?;
+        content = ap_build::spec::normalize_python_module_versions(&content);
+
+        let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
+        if has_c {
+            content = ap_build::spec::fix_c_extension_arch(&content);
+        }
+        content = ap_build::spec::fix_files_case(&content, &release.name);
+        if let Some(fixed) = ap_build::spec::fix_autosetup_dir(&content, &tarball) {
+            content = fixed;
+        }
+
+        fs::write(&spec_path, &content)?;
+        result(pkg, spec_path.to_str().unwrap_or("?"));
+        content
+    } else {
+        debug!("[{pkg}] spec already present");
+        fs::read_to_string(&spec_path)?
+    };
 
     let mut total_usage = ap_build::agent::Usage::default();
     let mut history: Vec<ap_build::agent::Turn> = Vec::new();
@@ -345,7 +371,8 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
     const MAX_BUILD_ATTEMPTS: usize = 6;
 
     step(pkg, "reviewing spec");
-    match ap_build::agent::review(&spec_path, &node.name) {
+    let tarball_files = ap_ecosystem::sdist::tarball_files(&tarball).unwrap_or_default();
+    match ap_build::agent::review(&spec_path, &node.name, &tarball_files) {
         Ok(Some((fixed, usage))) => {
             total_usage.add(&usage);
             print_diff(pkg, &spec_content, &fixed);
