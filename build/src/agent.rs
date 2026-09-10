@@ -357,9 +357,30 @@ fn call_with_context(
     call_prompt(backend, &prompt)
 }
 
+/// JSON Schema passed to `claude --json-schema` to enforce structured output.
+/// This prevents the model from returning prose instead of JSON.
+const RESPONSE_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    "reasoning": {"type": "string"},
+    "fixed_spec": {"type": "string"}
+  },
+  "required": ["confidence", "reasoning", "fixed_spec"],
+  "additionalProperties": false
+}"#;
+
 fn call_cli_prompt(prompt: &str) -> Result<(FixResponse, Usage, String), Error> {
     let out = Command::new("claude")
-        .args(["--print", "--output-format", "json", "-p", prompt])
+        .args([
+            "--print",
+            "--output-format",
+            "json",
+            "--json-schema",
+            RESPONSE_SCHEMA,
+            "-p",
+            prompt,
+        ])
         .output()
         .map_err(Error::Launch)?;
 
