@@ -434,6 +434,10 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
                     }
                 }
             }
+            Err(ap_build::osc::Error::NotActionable(msg)) => {
+                eprintln!("[{pkg}]  ✗ {msg}");
+                break;
+            }
             Err(e) => {
                 eprintln!("[{pkg}]  ✗ osc error: {e}");
                 break;

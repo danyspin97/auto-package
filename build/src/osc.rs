@@ -23,6 +23,11 @@ pub enum Error {
         log: PathBuf,
     },
 
+    /// Build failed for a reason that no agent fix can address.
+    /// The caller should stop immediately and report the message.
+    #[error("not actionable: {0}")]
+    NotActionable(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -176,6 +181,20 @@ pub fn build(checkout_dir: &Path, rpms_dir: &Path, distro: &str, arch: &str) -> 
         .map_err(Error::Launch)?;
 
     if !status.success() {
+        let log_text = fs::read_to_string(&log_path).unwrap_or_default();
+
+        // Detect errors that no spec fix can address.
+        if log_text.contains("no repositories defined") {
+            return Err(Error::NotActionable(
+                "OBS project has no build repositories — configure them in OBS first".to_string(),
+            ));
+        }
+        if log_text.contains("is not a working copy") {
+            return Err(Error::NotActionable(
+                "osc checkout directory is not server-backed — run 'osc ci' in the package dir first".to_string(),
+            ));
+        }
+
         return Err(Error::BuildFailed {
             spec: spec_name,
             code: status.code().unwrap_or(-1),
