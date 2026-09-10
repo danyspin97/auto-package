@@ -308,9 +308,12 @@ fn build_one(
 
     let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
     if has_c {
-        info!("[{pkg}] C extensions detected — fixing arch and sitelib");
+        info!("[{pkg}] C extensions detected — fixing arch, sitelib, devel, gcc");
         spec_content = ap_build::spec::fix_c_extension_arch(&spec_content);
     }
+
+    // Normalize %files paths from PyPI display name to pip-installed name.
+    spec_content = ap_build::spec::fix_files_case(&spec_content, &release.name);
 
     if let Some(fixed) = ap_build::spec::fix_autosetup_dir(&spec_content, &tarball) {
         info!("[{pkg}] fixed %autosetup -n to match sdist directory");
@@ -373,6 +376,14 @@ fn build_one(
                 if !extracted.excerpt.is_empty() {
                     eprintln!("[{pkg}] --- excerpt ---");
                     for line in extracted.excerpt.lines() {
+                        eprintln!("[{pkg}]   {line}");
+                    }
+                    eprintln!("[{pkg}] ---");
+                } else {
+                    // Extractor found nothing — show the last lines of the raw log.
+                    let tail: Vec<&str> = log_raw.lines().rev().take(20).collect();
+                    eprintln!("[{pkg}] --- last 20 log lines ---");
+                    for line in tail.into_iter().rev() {
                         eprintln!("[{pkg}]   {line}");
                     }
                     eprintln!("[{pkg}] ---");
