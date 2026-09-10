@@ -289,7 +289,7 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
     // Create the OBS package if needed and check it out.
     // The checkout dir is the single working directory for everything.
     step(pkg, &format!("creating {project}/{rpm_pkg}"));
-    ap_build::osc::ensure_package(project, &rpm_pkg)?;
+    ap_build::osc::ensure_package(project, &rpm_pkg, work_dir)?;
 
     step(pkg, "checking out");
     let pkg_dir = ap_build::osc::checkout(project, &rpm_pkg, work_dir)?;

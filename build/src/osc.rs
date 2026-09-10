@@ -33,7 +33,10 @@ pub fn rpm_name(pypi_name: &str) -> String {
 }
 
 /// Ensure the package exists in `project`, creating it if not.
-pub fn ensure_package(project: &str, pkg_name: &str) -> Result<(), Error> {
+///
+/// `osc mkpac <pkg>` must be run from inside a project checkout directory,
+/// so we check out the project first if needed, then run mkpac from there.
+pub fn ensure_package(project: &str, pkg_name: &str, work_dir: &Path) -> Result<(), Error> {
     // `osc ls project/pkg` exits non-zero when the package does not exist.
     let check = Command::new("osc")
         .args(["ls", &format!("{project}/{pkg_name}")])
@@ -44,15 +47,34 @@ pub fn ensure_package(project: &str, pkg_name: &str) -> Result<(), Error> {
         return Ok(());
     }
 
-    // Package does not exist — create it.
+    // Check out the project (top-level, no package) if not already present.
+    let project_dir = work_dir.join(project);
+    if !project_dir.exists() {
+        let out = Command::new("osc")
+            .args(["co", project, "-M"])
+            .current_dir(work_dir)
+            .output()
+            .map_err(Error::Launch)?;
+
+        if !out.status.success() {
+            return Err(Error::OscFailed {
+                cmd: format!("co {project} -M"),
+                code: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+    }
+
+    // Create the package inside the project checkout.
     let out = Command::new("osc")
-        .args(["mkpac", project, pkg_name])
+        .args(["mkpac", pkg_name])
+        .current_dir(&project_dir)
         .output()
         .map_err(Error::Launch)?;
 
     if !out.status.success() {
         return Err(Error::OscFailed {
-            cmd: format!("mkpac {project} {pkg_name}"),
+            cmd: format!("mkpac {pkg_name}"),
             code: out.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
