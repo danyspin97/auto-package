@@ -81,18 +81,6 @@ pub fn fix_autosetup_dir(spec: &str, tarball: &Path) -> Option<String> {
     })
 }
 
-/// Remove `BuildRequires: %{python_module devel}` lines — py2pack sometimes
-/// generates this, but `devel` is not a valid Python module name.
-pub fn remove_invalid_python_module_devel(spec: &str) -> String {
-    spec.lines()
-        .filter(|l| {
-            !(l.contains("BuildRequires") && l.contains("%{python_module") && l.contains("devel}"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + if spec.ends_with('\n') { "\n" } else { "" }
-}
-
 /// Normalize version constraints inside `%{python_module ...}`.
 ///
 /// Adds spaces around `>=`, `<=`, `>`, `<`, `==`, `!=` that are missing them,
@@ -118,13 +106,26 @@ pub fn normalize_python_module_versions(spec: &str) -> String {
 ///
 /// - Removes `BuildArch: noarch`
 /// - Replaces `%{python_sitelib}` with `%{python_sitearch}`
+/// - Adds `BuildRequires: %{python_module devel}` (Python headers for compilation)
+///   if not already present
 pub fn fix_c_extension_arch(spec: &str) -> String {
-    spec.lines()
+    let has_devel = spec.contains("%{python_module devel}");
+
+    let mut out: Vec<String> = spec
+        .lines()
         .filter(|l| !l.trim().starts_with("BuildArch:"))
         .map(|l| l.replace("%{python_sitelib}", "%{python_sitearch}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + if spec.ends_with('\n') { "\n" } else { "" }
+        .collect();
+
+    // Inject devel after the pip BuildRequires line, which is always present.
+    if !has_devel && let Some(pos) = out.iter().position(|l| l.contains("%{python_module pip}")) {
+        out.insert(
+            pos + 1,
+            "BuildRequires:  %{python_module devel}".to_string(),
+        );
+    }
+
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
 }
 
 pub fn check_autosetup_dir(spec: &str, tarball: &Path) -> Option<Result<(), String>> {

@@ -304,7 +304,6 @@ fn build_one(
 
     // Deterministic post-processing — these are always wrong when py2pack
     // generates them and require no agent call.
-    spec_content = ap_build::spec::remove_invalid_python_module_devel(&spec_content);
     spec_content = ap_build::spec::normalize_python_module_versions(&spec_content);
 
     let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
