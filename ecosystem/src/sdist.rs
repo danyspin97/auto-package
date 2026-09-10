@@ -44,6 +44,40 @@ pub enum Error {
     Toml(#[from] toml::de::Error),
 }
 
+/// The top-level directory name inside a `.tar.gz` sdist.
+///
+/// A well-formed sdist contains exactly one top-level directory, e.g.
+/// `MarkupSafe-3.0.3/`. This is what `%autosetup -n` must match.
+pub fn top_level_dir(path: &Path) -> Result<Option<String>, Error> {
+    let file = std::fs::File::open(path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let mut archive = tar::Archive::new(GzDecoder::new(file));
+
+    for entry in archive.entries().map_err(Error::Tar)? {
+        let entry = entry.map_err(Error::Tar)?;
+        let entry_path = entry.path().map_err(Error::Tar)?;
+
+        if entry_path.is_absolute()
+            || entry_path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            continue;
+        }
+
+        if let Some(first) = entry_path.components().next() {
+            let name = first.as_os_str().to_string_lossy().into_owned();
+            if !name.is_empty() {
+                return Ok(Some(name));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 /// Read `[build-system]` from the sdist tarball at `path`.
 ///
 /// Returns the PEP 517 defaults when `pyproject.toml` is absent or when

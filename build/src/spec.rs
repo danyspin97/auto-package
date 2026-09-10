@@ -5,6 +5,7 @@
 //! build-backend requirements from the sdist, the correct SPDX license
 //! expression, and the upstream URL.
 
+use std::path::Path;
 use std::process::Command;
 
 use ap_ecosystem::pypi::{License, Release};
@@ -20,6 +21,102 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Check that the directory named in `%autosetup -n` matches what the sdist
+/// tarball actually contains.
+///
+/// `%autosetup` without `-n` defaults to `%{name}-%{version}`. Either way,
+/// the value is compared (after expanding `%{name}` and `%{version}`) against
+/// the real top-level directory in the tarball. A mismatch causes `%prep` to
+/// fail with "no such file or directory", which is one of the most common
+/// errors in generated specs.
+///
+/// Returns `None` when the spec has no `%autosetup` line or the tarball has
+/// no readable top-level directory — both mean we cannot check.
+pub fn check_autosetup_dir(spec: &str, tarball: &Path) -> Option<Result<(), String>> {
+    let actual = ap_ecosystem::sdist::top_level_dir(tarball).ok()??;
+
+    let name = tag_value(spec, "Name:")?;
+    let version = tag_value(spec, "Version:")?;
+    let expanded = autosetup_expected_dir(spec, name, version)?;
+
+    Some(if actual == expanded {
+        Ok(())
+    } else {
+        Err(format!(
+            "%autosetup -n expects '{expanded}' but sdist top-level dir is '{actual}'"
+        ))
+    })
+}
+
+fn tag_value<'a>(spec: &'a str, tag: &str) -> Option<&'a str> {
+    spec.lines()
+        .find(|l| l.starts_with(tag))
+        .map(|l| l[tag.len()..].trim())
+}
+
+/// The expanded `%autosetup -n` directory for a spec with the given name and
+/// version. Used by `check_autosetup_dir` and exposed for testing.
+pub fn autosetup_expected_dir(spec: &str, name: &str, version: &str) -> Option<String> {
+    let raw = spec
+        .lines()
+        .find(|l| l.trim().starts_with("%autosetup"))?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "-n")
+        .map(|w| w[1].to_string())
+        .unwrap_or_else(|| format!("{name}-%{{version}}"));
+
+    Some(
+        raw.replace("%{name}", name)
+            .replace("%{version}", version)
+            .replace("%{upstream_version}", version),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPEC_WITH_N: &str = "\
+Name:           python-MarkupSafe
+Version:        3.0.3
+%prep
+%autosetup -p1 -n MarkupSafe-%{version}
+";
+
+    const SPEC_WITHOUT_N: &str = "\
+Name:           python-markupsafe
+Version:        3.0.3
+%prep
+%autosetup -p1
+";
+
+    #[test]
+    fn explicit_n_is_expanded() {
+        assert_eq!(
+            autosetup_expected_dir(SPEC_WITH_N, "python-MarkupSafe", "3.0.3").as_deref(),
+            Some("MarkupSafe-3.0.3")
+        );
+    }
+
+    #[test]
+    fn missing_n_defaults_to_name_version() {
+        assert_eq!(
+            autosetup_expected_dir(SPEC_WITHOUT_N, "python-markupsafe", "3.0.3").as_deref(),
+            Some("python-markupsafe-3.0.3")
+        );
+    }
+
+    #[test]
+    fn mismatch_is_detected() {
+        // MarkupSafe-3.0.3 expected, markupsafe-3.0.3 actual — case mismatch.
+        let expected = autosetup_expected_dir(SPEC_WITH_N, "python-MarkupSafe", "3.0.3").unwrap();
+        let actual = "markupsafe-3.0.3";
+        assert_ne!(expected, actual);
+    }
 }
 
 /// Generate an openSUSE RPM spec for `release`.

@@ -285,6 +285,18 @@ fn build_one(
     fs::write(&spec_path, &spec_content)?;
     eprintln!("[{pkg}] files in {}", pkg_dir.display());
 
+    // Validate %autosetup -n against the real tarball directory before
+    // spending a full osc build on a guaranteed %prep failure.
+    if let Some(result) = ap_build::spec::check_autosetup_dir(&spec_content, &tarball) {
+        match result {
+            Ok(()) => info!("[{pkg}] %autosetup dir OK"),
+            Err(msg) => {
+                warn!("[{pkg}] %autosetup mismatch: {msg}");
+                eprintln!("[{pkg}] WARNING: {msg}");
+            }
+        }
+    }
+
     let mut total_usage = ap_build::agent::Usage::default();
     let mut history: Vec<ap_build::agent::Turn> = Vec::new();
     let mut attempts = 0;
