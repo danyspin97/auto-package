@@ -215,7 +215,7 @@ fn cmd_build(
             usage.output_tokens,
             usage.cache_creation_tokens,
             usage.cache_read_tokens,
-            usage.cost_cents() / 100.0,
+            usage.cost_usd(),
         );
     }
 

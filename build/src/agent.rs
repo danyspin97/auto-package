@@ -22,29 +22,35 @@ use crate::log::{ExtractedLog, PathMapper};
 
 const MODEL: &str = "claude-opus-5";
 
-/// Token counts from one API call.
+/// Token counts and cost from one API call.
 #[derive(Debug, Clone, Default)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Pre-computed cost in USD from the CLI's own accounting. When set,
+    /// `cost_usd()` returns this directly instead of computing from token
+    /// counts (which include CLI session overhead and are misleading).
+    pub cli_cost_usd: Option<f64>,
 }
 
 impl Usage {
-    /// Cost in US cents (multiply by 0.01 for dollars).
+    /// Cost in US dollars.
     ///
-    /// Direct API rates for claude-opus-5: $5/MTok input, $25/MTok output.
-    /// Vertex AI is billed separately by Google at different rates.
-    /// When the CLI backend is used, rates reflect the direct API — actual
-    /// Vertex AI charges may differ.
-    pub fn cost_cents(&self) -> f64 {
+    /// Uses the CLI's `total_cost_usd` when available (CLI backend). For
+    /// HTTP backends, computes from token counts at direct API rates for
+    /// claude-opus-5: $5/MTok input, $25/MTok output, $6.25/MTok cache
+    /// write, $0.50/MTok cache read.
+    pub fn cost_usd(&self) -> f64 {
+        if let Some(usd) = self.cli_cost_usd {
+            return usd;
+        }
         (self.input_tokens as f64 * 5.0
             + self.output_tokens as f64 * 25.0
             + self.cache_creation_tokens as f64 * 6.25
             + self.cache_read_tokens as f64 * 0.50)
             / 1_000_000.0
-            * 100.0
     }
 
     pub fn add(&mut self, other: &Usage) {
@@ -52,6 +58,11 @@ impl Usage {
         self.output_tokens += other.output_tokens;
         self.cache_creation_tokens += other.cache_creation_tokens;
         self.cache_read_tokens += other.cache_read_tokens;
+        match (self.cli_cost_usd.as_mut(), other.cli_cost_usd) {
+            (Some(a), Some(b)) => *a += b,
+            (None, Some(b)) => self.cli_cost_usd = Some(b),
+            _ => {}
+        }
     }
 }
 
@@ -131,6 +142,15 @@ pub fn fix(
 
     let mapper = PathMapper::with_sdist_root(pkg_name);
     let extracted = crate::log::extract(&log_raw, &mapper);
+
+    // Without a meaningful error context there is nothing actionable to send.
+    // The model will return prose rather than a fix, producing a JSON parse
+    // error. Surface a clear message instead.
+    if extracted.excerpt.is_empty() && extracted.error_lines.is_empty() {
+        return Err(Error::Parse(
+            "build log has no extractable error — check the full log manually".to_string(),
+        ));
+    }
 
     let (response, usage, prompt) = call(&backend, &spec, &extracted, pkg_name, history)?;
 
@@ -220,6 +240,8 @@ fn call_cli(
     struct CliOutput {
         result: String,
         #[serde(default)]
+        total_cost_usd: Option<f64>,
+        #[serde(default)]
         usage: CliUsage,
     }
     #[derive(Deserialize, Default)]
@@ -228,10 +250,6 @@ fn call_cli(
         input_tokens: u64,
         #[serde(default)]
         output_tokens: u64,
-        #[serde(default)]
-        cache_creation_input_tokens: u64,
-        #[serde(default)]
-        cache_read_input_tokens: u64,
     }
 
     let envelope: CliOutput = serde_json::from_slice(&out.stdout)
@@ -241,8 +259,10 @@ fn call_cli(
     let usage = Usage {
         input_tokens: envelope.usage.input_tokens,
         output_tokens: envelope.usage.output_tokens,
-        cache_creation_tokens: envelope.usage.cache_creation_input_tokens,
-        cache_read_tokens: envelope.usage.cache_read_input_tokens,
+        // CLI session tokens include project context overhead — use the
+        // pre-computed cost from the CLI instead.
+        cli_cost_usd: envelope.total_cost_usd,
+        ..Usage::default()
     };
 
     Ok((fix_response, usage, prompt))
@@ -368,6 +388,7 @@ fn call_http(
         output_tokens: resp.usage.output_tokens,
         cache_creation_tokens: resp.usage.cache_creation_input_tokens,
         cache_read_tokens: resp.usage.cache_read_input_tokens,
+        cli_cost_usd: None,
     };
 
     Ok((fix_response, usage, prompt))
