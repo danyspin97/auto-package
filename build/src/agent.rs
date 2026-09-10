@@ -1,31 +1,21 @@
-//! AI-assisted spec repair.
+//! AI-assisted spec repair via the `claude` CLI.
 //!
 //! On a build failure: extract the error context, send the spec and the
-//! excerpt to Claude, get a replacement spec back. Repeat until the build
-//! passes or the retry limit is reached.
+//! excerpt to `claude -p`, get a replacement spec back. Repeat until the
+//! build passes or the retry limit is reached.
 //!
-//! Two backends are supported:
-//! - Google Cloud Vertex AI: if `gcloud` is installed and `gcloud auth
-//!   application-default login` has been run, no configuration is needed —
-//!   the project comes from `gcloud config get-value project` and the token
-//!   from `gcloud auth print-access-token`. Override with
-//!   `AUTO_PACKAGE_GCP_PROJECT` / `AUTO_PACKAGE_GCP_REGION` (default
-//!   `us-east5`) if needed.
-//! - Direct Anthropic API: set `AUTO_PACKAGE_API_KEY`.
-//!
-//! Vertex is tried first; direct API is the fallback.
+//! Auth is whatever `claude` is already configured to use — no extra keys or
+//! environment variables needed.
 
 use std::path::Path;
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::log::{ExtractedLog, PathMapper};
 
-const MAX_RETRIES: usize = 5;
-const MODEL: &str = "claude-opus-5";
-
-/// Token counts from one API call.
+/// Token counts — not available from the CLI, kept as a zero stub so the
+/// caller's cost summary still compiles and prints nothing when unused.
 #[derive(Debug, Clone, Default)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -35,18 +25,8 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Cost in US cents (multiply by 0.01 for dollars).
-    ///
-    /// Direct API rates for claude-opus-5 as of 2026:
-    /// $5/MTok input, $25/MTok output.
-    /// Vertex AI is billed separately by Google at different rates.
     pub fn cost_cents(&self) -> f64 {
-        (self.input_tokens as f64 * 5.0
-            + self.output_tokens as f64 * 25.0
-            + self.cache_creation_tokens as f64 * 6.25
-            + self.cache_read_tokens as f64 * 0.50)
-            / 1_000_000.0
-            * 100.0
+        0.0
     }
 
     pub fn add(&mut self, other: &Usage) {
@@ -57,30 +37,16 @@ impl Usage {
     }
 }
 
-enum Backend {
-    Direct { api_key: String },
-    Vertex { project: String, region: String },
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(
-        "no credentials found — either log in with `gcloud auth application-default login` \
-         (Vertex AI) or set AUTO_PACKAGE_API_KEY (direct Anthropic API)"
-    )]
-    NoCredentials,
+    #[error("could not run claude: {0}")]
+    Launch(std::io::Error),
 
-    #[error("gcloud auth print-access-token failed: {0}")]
-    GcloudAuth(String),
+    #[error("claude exited {code}:\n{stderr}")]
+    Failed { code: i32, stderr: String },
 
-    #[error("API request failed: {0}")]
-    Http(#[from] ureq::Error),
-
-    #[error("unexpected API response: {0}")]
+    #[error("unexpected response: {0}")]
     Parse(String),
-
-    #[error("build still failing after {MAX_RETRIES} attempts")]
-    Exhausted,
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -104,91 +70,26 @@ struct FixResponse {
 
 /// Try to fix `spec_path` using the build log at `log_path`.
 ///
-/// Returns the fixed spec content and total API usage for this fix session.
+/// Returns the fixed spec content. Usage is always zero — the CLI doesn't
+/// expose token counts.
 pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String, Usage), Error> {
-    let backend = detect_backend()?;
-
     let spec = std::fs::read_to_string(spec_path)?;
     let log_raw = std::fs::read_to_string(log_path)?;
 
     let mapper = PathMapper::with_sdist_root(pkg_name);
     let extracted = crate::log::extract(&log_raw, &mapper);
 
-    let mut total = Usage::default();
-    let fixed = fix_loop(&backend, &spec, &extracted, pkg_name, 0, &mut total)?;
-    Ok((fixed, total))
-}
-
-fn detect_backend() -> Result<Backend, Error> {
-    // Vertex AI: explicit project env var, or fall back to the gcloud default.
-    let gcp_project = std::env::var("AUTO_PACKAGE_GCP_PROJECT")
-        .ok()
-        .or_else(gcloud_default_project);
-
-    if let Some(project) = gcp_project {
-        let region =
-            std::env::var("AUTO_PACKAGE_GCP_REGION").unwrap_or_else(|_| "us-east5".to_string());
-        return Ok(Backend::Vertex { project, region });
-    }
-
-    if let Ok(api_key) = std::env::var("AUTO_PACKAGE_API_KEY") {
-        return Ok(Backend::Direct { api_key });
-    }
-
-    Err(Error::NoCredentials)
-}
-
-/// Ask gcloud for the active project, returning `None` if gcloud is absent or
-/// no default project is configured.
-fn gcloud_default_project() -> Option<String> {
-    let out = Command::new("gcloud")
-        .args(["config", "get-value", "project"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let project = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if project.is_empty() || project == "(unset)" {
-        return None;
-    }
-    Some(project)
-}
-
-fn fix_loop(
-    backend: &Backend,
-    spec: &str,
-    extracted: &ExtractedLog,
-    pkg_name: &str,
-    attempt: usize,
-    total: &mut Usage,
-) -> Result<String, Error> {
-    if attempt >= MAX_RETRIES {
-        return Err(Error::Exhausted);
-    }
-
-    let (response, usage) = call_api(backend, spec, extracted, pkg_name)?;
-    total.add(&usage);
+    let response = call_claude(&spec, &extracted, pkg_name)?;
 
     eprintln!(
-        "  [agent] attempt {}: {:?} — {} ({} in / {} out, ${:.4})",
-        attempt + 1,
-        response.confidence,
-        response.reasoning,
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cost_cents() / 100.0,
+        "  [agent] {:?} — {}",
+        response.confidence, response.reasoning,
     );
 
-    Ok(response.fixed_spec)
+    Ok((response.fixed_spec, Usage::default()))
 }
 
-fn call_api(
-    backend: &Backend,
-    spec: &str,
-    extracted: &ExtractedLog,
-    pkg_name: &str,
-) -> Result<(FixResponse, Usage), Error> {
+fn call_claude(spec: &str, extracted: &ExtractedLog, pkg_name: &str) -> Result<FixResponse, Error> {
     let section = extracted.failed_section.as_deref().unwrap_or("unknown");
     let errors = extracted.error_lines.join("\n");
 
@@ -219,145 +120,25 @@ fn call_api(
         excerpt = extracted.excerpt,
     );
 
-    #[derive(Deserialize)]
-    struct ApiResponse {
-        content: Vec<ContentBlock>,
-        usage: RawUsage,
+    let out = Command::new("claude")
+        .args(["--print", "--output-format", "text", "-p", &prompt])
+        .output()
+        .map_err(Error::Launch)?;
+
+    if !out.status.success() {
+        return Err(Error::Failed {
+            code: out.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
 
-    #[derive(Deserialize)]
-    struct ContentBlock {
-        #[serde(rename = "type")]
-        kind: String,
-        text: Option<String>,
-    }
-
-    #[derive(Deserialize, Default)]
-    struct RawUsage {
-        #[serde(default)]
-        input_tokens: u64,
-        #[serde(default)]
-        output_tokens: u64,
-        #[serde(default)]
-        cache_creation_input_tokens: u64,
-        #[serde(default)]
-        cache_read_input_tokens: u64,
-    }
-
-    let json_body = match backend {
-        Backend::Direct { .. } => {
-            #[derive(Serialize)]
-            struct DirectRequest<'a> {
-                model: &'a str,
-                max_tokens: u32,
-                messages: Vec<DirectMessage<'a>>,
-            }
-            #[derive(Serialize)]
-            struct DirectMessage<'a> {
-                role: &'a str,
-                content: &'a str,
-            }
-            serde_json::to_string(&DirectRequest {
-                model: MODEL,
-                max_tokens: 8192,
-                messages: vec![DirectMessage {
-                    role: "user",
-                    content: &prompt,
-                }],
-            })
-            .map_err(|e| Error::Parse(e.to_string()))?
-        }
-        Backend::Vertex { .. } => {
-            #[derive(Serialize)]
-            struct VertexRequest<'a> {
-                anthropic_version: &'a str,
-                max_tokens: u32,
-                messages: Vec<VertexMessage<'a>>,
-            }
-            #[derive(Serialize)]
-            struct VertexMessage<'a> {
-                role: &'a str,
-                content: &'a str,
-            }
-            serde_json::to_string(&VertexRequest {
-                anthropic_version: "vertex-2023-10-16",
-                max_tokens: 8192,
-                messages: vec![VertexMessage {
-                    role: "user",
-                    content: &prompt,
-                }],
-            })
-            .map_err(|e| Error::Parse(e.to_string()))?
-        }
-    };
-
-    let response = match backend {
-        Backend::Direct { api_key } => ureq::post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .send(json_body.as_bytes())
-            .map_err(Error::Http)?,
-
-        Backend::Vertex { project, region } => {
-            let token = gcloud_token()?;
-            let url = format!(
-                "https://{region}-aiplatform.googleapis.com/v1/projects/{project}\
-                 /locations/{region}/publishers/anthropic/models/{MODEL}:rawPredict"
-            );
-            ureq::post(&url)
-                .header("Authorization", &format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .send(json_body.as_bytes())
-                .map_err(Error::Http)?
-        }
-    };
-
-    let mut body = response.into_body();
-    let text = body
-        .read_to_string()
-        .map_err(|e| Error::Parse(e.to_string()))?;
-    let resp: ApiResponse =
-        serde_json::from_str(&text).map_err(|e| Error::Parse(format!("bad API JSON: {e}")))?;
-
-    let content_text = resp
-        .content
-        .into_iter()
-        .find(|b| b.kind == "text")
-        .and_then(|b| b.text)
-        .ok_or_else(|| Error::Parse("no text block in response".to_string()))?;
-
-    let json = content_text
+    let text = String::from_utf8_lossy(&out.stdout);
+    let json = text
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
 
-    let fix_response: FixResponse =
-        serde_json::from_str(json).map_err(|e| Error::Parse(format!("bad JSON: {e}\n{json}")))?;
-
-    let usage = Usage {
-        input_tokens: resp.usage.input_tokens,
-        output_tokens: resp.usage.output_tokens,
-        cache_creation_tokens: resp.usage.cache_creation_input_tokens,
-        cache_read_tokens: resp.usage.cache_read_input_tokens,
-    };
-
-    Ok((fix_response, usage))
-}
-
-fn gcloud_token() -> Result<String, Error> {
-    let out = Command::new("gcloud")
-        .args(["auth", "print-access-token"])
-        .output()
-        .map_err(|e| Error::GcloudAuth(e.to_string()))?;
-
-    if !out.status.success() {
-        return Err(Error::GcloudAuth(
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ));
-    }
-
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    serde_json::from_str(json).map_err(|e| Error::Parse(format!("bad JSON: {e}\n{json}")))
 }
