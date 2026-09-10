@@ -73,10 +73,16 @@ pub fn ensure_package(project: &str, pkg_name: &str, work_dir: &Path) -> Result<
         .map_err(Error::Launch)?;
 
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // "already exists" means a previous mkpac ran but was never committed —
+        // the local directory is valid, just continue.
+        if stderr.contains("already exists") {
+            return Ok(());
+        }
         return Err(Error::OscFailed {
             cmd: format!("mkpac {pkg_name}"),
             code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            stderr: stderr.into_owned(),
         });
     }
 
