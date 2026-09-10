@@ -401,8 +401,6 @@ fn post_process(
         if line.starts_with("License:") {
             let license = license_tag(&release.license);
             out.push_str(&format!("License:        {license}\n"));
-            // Add Group immediately after License.
-            out.push_str("Group:          Development/Languages/Python\n");
             continue;
         }
 

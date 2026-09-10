@@ -52,9 +52,7 @@ openSUSE spec conventions to keep in mind:
 5. Always include a %check section with %pytest_arch (C extensions) or %pytest
    (pure Python) and add 'BuildRequires: %{python_module pytest}' for it.
 
-6. Add 'Group: Development/Languages/Python' to the header tags.
-
-7. For multi-flavor builds (standard Factory pattern), the spec should use
+6. For multi-flavor builds (standard Factory pattern), the spec should use
    '%global flavor @BUILD_FLAVOR@%{nil}' with a 'test' flavor that only runs
    %check. The %build/%install/%files sections should be inside
    '%if !%{with test}', and %check inside '%if %{with test}'.
