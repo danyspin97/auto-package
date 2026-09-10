@@ -178,8 +178,8 @@ pub fn review(spec_path: &Path, pkg_name: &str) -> Result<Option<(String, Usage)
     let (response, usage, _prompt) = call_prompt(&backend, &prompt)?;
 
     eprintln!(
-        "  [review] {:?} — {}",
-        response.confidence, response.reasoning,
+        "  review  {:?}: {}",
+        response.confidence, response.reasoning
     );
 
     // Only apply the fix if the agent is reasonably confident.
@@ -240,12 +240,7 @@ pub fn fix(
         &extra_context,
     )?;
 
-    eprintln!(
-        "  [agent/{:?}] {:?} — {}",
-        escalation.level(),
-        response.confidence,
-        response.reasoning,
-    );
+    eprintln!("  agent  {:?}: {}", response.confidence, response.reasoning,);
 
     let mut new_history = history.to_vec();
     new_history.push(Turn {

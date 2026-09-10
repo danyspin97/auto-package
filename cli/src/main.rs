@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use ap_ecosystem::pip::Node;
 use clap::{Parser, Subcommand};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Persist one fix attempt to disk for later review and prompt improvement.
 ///
@@ -60,20 +60,35 @@ fn save_attempt(
     let _ = fs::write(dir.join("spec_after.spec"), spec_after);
 }
 
-fn status(pkg: &str, step: &str) {
-    eprintln!("[{pkg}] {step}");
+/// Print a step line: `[pkg]  step text`
+fn step(pkg: &str, text: &str) {
+    eprintln!("[{pkg}]  {text}");
 }
 
-fn print_diff(before: &str, after: &str) {
-    eprintln!("      --- agent changes ---");
+/// Print a result appended to the previous step (used after a completed action).
+fn result(pkg: &str, text: &str) {
+    eprintln!("[{pkg}]    → {text}");
+}
+
+/// Print a diff of what the agent changed.
+fn print_diff(pkg: &str, before: &str, after: &str) {
     for d in diff::lines(before, after) {
         match d {
-            diff::Result::Left(l) => eprintln!("      - {l}"),
-            diff::Result::Right(r) => eprintln!("      + {r}"),
+            diff::Result::Left(l) => eprintln!("[{pkg}]    - {l}"),
+            diff::Result::Right(r) => eprintln!("[{pkg}]    + {r}"),
             diff::Result::Both(_, _) => {}
         }
     }
-    eprintln!("      ---");
+}
+
+/// Print the error excerpt with a simple border.
+fn print_excerpt(pkg: &str, excerpt: &str) {
+    let bar = "─".repeat(40);
+    eprintln!("[{pkg}]    {bar}");
+    for line in excerpt.lines() {
+        eprintln!("[{pkg}]    {line}");
+    }
+    eprintln!("[{pkg}]    {bar}");
 }
 
 #[derive(Parser)]
@@ -164,27 +179,20 @@ fn cmd_build(
     let rpms_dir = work_dir.join("rpms");
     fs::create_dir_all(&rpms_dir)?;
 
-    info!("resolving dependencies for {name}");
+    eprintln!("resolving {name}...");
     let nodes = ap_ecosystem::pip::resolve(name, None)?;
-    info!("{} package(s) in closure", nodes.len());
+    eprintln!("  {} package(s) in closure", nodes.len());
     for n in &nodes {
         debug!("  {} {}", n.name, n.version);
     }
 
     let levels = topo_levels(&nodes);
-    info!("{} topological level(s)", levels.len());
-    for (i, level) in levels.iter().enumerate() {
-        let names: Vec<_> = level.iter().map(|&j| nodes[j].name.as_str()).collect();
-        debug!("  level {i}: {names:?}");
-    }
 
     let total_usage = Mutex::new(ap_build::agent::Usage::default());
 
     for (level_idx, level) in levels.iter().enumerate() {
-        eprintln!(
-            "\n[level {level_idx}] {} package(s) in parallel",
-            level.len()
-        );
+        let names: Vec<&str> = level.iter().map(|&j| nodes[j].name.as_str()).collect();
+        eprintln!("\n[level {level_idx}]  {}", names.join(" · "));
 
         std::thread::scope(|s| {
             let handles: Vec<_> = level
@@ -213,7 +221,7 @@ fn cmd_build(
                             }
                             Err(e) => {
                                 warn!("{} failed: {e:#}", node.name);
-                                eprintln!("\n[{}] FAILED: {e:#}", node.name);
+                                eprintln!("[{}]  ✗ {e:#}", node.name);
                             }
                         }
                     })
@@ -227,15 +235,9 @@ fn cmd_build(
     }
 
     let usage = total_usage.into_inner().unwrap();
-    if usage.input_tokens > 0 {
-        eprintln!(
-            "\n[cost] {} in / {} out / {} cache-write / {} cache-read → ${:.4}",
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_creation_tokens,
-            usage.cache_read_tokens,
-            usage.cost_usd(),
-        );
+    let cost = usage.cost_usd();
+    if cost > 0.0 {
+        eprintln!("\ncost  ${cost:.4}");
     }
 
     Ok(())
@@ -266,143 +268,104 @@ fn build_one(
     let pkg_dir = work_dir.join(node.name.to_lowercase());
 
     if already_built(&pkg_dir, &node.version) {
-        info!("[{pkg}] already built, skipping");
-        eprintln!("[{pkg}] SKIP: already built ({})", node.version);
+        eprintln!("[{pkg}]  already built {}", node.version);
         return Ok(ap_build::agent::Usage::default());
     }
 
-    eprintln!("\n[{pkg}] {} {}", node.name, node.version);
+    eprintln!("\n[{pkg} {}]", node.version);
 
-    info!("[{pkg}] fetching PyPI metadata");
     let pypi_url = format!("https://pypi.org/pypi/{}/{}/json", node.name, node.version);
     let json = ureq::get(&pypi_url).call()?.into_body().read_to_string()?;
     let release = ap_ecosystem::pypi::parse_release(&json)?;
     debug!("[{pkg}] license: {:?}", release.license);
 
     if release.yanked {
-        warn!("[{pkg}] skipping: yanked");
-        eprintln!("[{pkg}] SKIP: yanked");
+        eprintln!("[{pkg}]  ✗ yanked — skipping");
         return Ok(ap_build::agent::Usage::default());
     }
 
     fs::create_dir_all(&pkg_dir)?;
 
-    status(pkg, &format!("downloading {}", release.sdist.filename));
+    step(pkg, &format!("downloading {}", release.sdist.filename));
     let tarball = release.sdist.fetch(&pkg_dir)?;
-    debug!("[{pkg}] sdist at {}", tarball.display());
 
     let build_system = ap_ecosystem::sdist::build_system(&tarball)?;
-    debug!(
-        "[{pkg}] build-backend: {}, requires: {:?}",
-        build_system.backend.as_deref().unwrap_or("(none)"),
-        build_system.requires,
-    );
+    debug!("[{pkg}] build-backend: {:?}", build_system.backend);
 
-    status(pkg, "generating spec");
+    step(pkg, "generating spec");
     let mut spec_content = ap_build::spec::generate(&release, &build_system)?;
     let spec_path = pkg_dir.join(format!("python-{}.spec", node.name.to_lowercase()));
 
-    // Deterministic post-processing — these are always wrong when py2pack
-    // generates them and require no agent call.
     spec_content = ap_build::spec::normalize_python_module_versions(&spec_content);
 
     let has_c = ap_ecosystem::sdist::has_c_extensions(&tarball);
     if has_c {
-        info!("[{pkg}] C extensions detected — fixing arch, sitelib, devel, gcc");
         spec_content = ap_build::spec::fix_c_extension_arch(&spec_content);
     }
-
-    // Normalize %files paths from PyPI display name to pip-installed name.
     spec_content = ap_build::spec::fix_files_case(&spec_content, &release.name);
-
     if let Some(fixed) = ap_build::spec::fix_autosetup_dir(&spec_content, &tarball) {
-        info!("[{pkg}] fixed %autosetup -n to match sdist directory");
         spec_content = fixed;
     }
 
     fs::write(&spec_path, &spec_content)?;
-    eprintln!("[{pkg}] spec at {}", spec_path.display());
+    result(pkg, spec_path.to_str().unwrap_or("?"));
 
     let mut total_usage = ap_build::agent::Usage::default();
     let mut history: Vec<ap_build::agent::Turn> = Vec::new();
     let mut attempts = 0;
     const MAX_BUILD_ATTEMPTS: usize = 6;
 
-    // Pre-build spec review: catch obvious issues before wasting a build slot.
-    info!("[{pkg}] reviewing spec before build");
-    status(pkg, "reviewing spec…");
+    step(pkg, "reviewing spec");
     match ap_build::agent::review(&spec_path, &node.name) {
         Ok(Some((fixed, usage))) => {
-            status(pkg, "pre-build fix applied");
             total_usage.add(&usage);
-            print_diff(&spec_content, &fixed);
+            print_diff(pkg, &spec_content, &fixed);
             fs::write(&spec_path, &fixed)?;
             spec_content = fixed;
         }
-        Ok(None) => status(pkg, "review: spec OK"),
-        Err(e) => warn!("[{pkg}] review error (continuing): {e}"),
+        Ok(None) => {}
+        Err(e) => warn!("[{pkg}] review error: {e}"),
     }
 
-    eprintln!("[{pkg}] building spec: {}", spec_path.display());
     let mut escalation = ap_build::context::Escalation::new(false);
     let _ = &escalation;
 
     loop {
-        status(pkg, &format!("osc build (attempt {})…", attempts + 1));
+        step(pkg, &format!("build {}/{MAX_BUILD_ATTEMPTS}", attempts + 1));
         match ap_build::osc::build(&pkg_dir, &spec_path, rpms_dir, distro, arch) {
             Ok(()) => {
-                info!("[{pkg}] build succeeded");
-                eprintln!("[{pkg}] BUILD OK");
+                eprintln!("[{pkg}]  ✓ built");
                 fs::write(marker_path(&pkg_dir), &node.version)?;
                 break;
             }
             Err(ap_build::osc::Error::BuildFailed { log, .. }) => {
                 attempts += 1;
-                // A build failure means BUILDROOT is now populated.
                 escalation = ap_build::context::Escalation::new(true);
-                warn!(
-                    "[{pkg}] build failed (attempt {attempts}), log at {}",
-                    log.display()
-                );
 
                 let log_raw = fs::read_to_string(&log).unwrap_or_default();
                 let mapper = ap_build::log::PathMapper::with_sdist_root(&node.name);
                 let extracted = ap_build::log::extract(&log_raw, &mapper);
-                if let Some(section) = &extracted.failed_section {
-                    eprintln!("[{pkg}] failed in: {section}");
-                }
+
+                let section = extracted.failed_section.as_deref().unwrap_or("unknown");
+                eprintln!("[{pkg}]  ✗ {section} failed");
                 for line in &extracted.error_lines {
-                    eprintln!("[{pkg}] error: {line}");
+                    eprintln!("[{pkg}]    {line}");
                 }
+
                 if !extracted.excerpt.is_empty() {
-                    eprintln!("[{pkg}] --- excerpt ---");
-                    for line in extracted.excerpt.lines() {
-                        eprintln!("[{pkg}]   {line}");
-                    }
-                    eprintln!("[{pkg}] ---");
+                    print_excerpt(pkg, &extracted.excerpt);
                 } else {
-                    // Extractor found no structured error — show the tail of the raw log.
-                    eprintln!("[{pkg}] (extractor found nothing — showing last 20 log lines)");
+                    eprintln!("[{pkg}]    (extractor found nothing — last 20 log lines)");
                     let tail: Vec<&str> = log_raw.lines().rev().take(20).collect();
-                    eprintln!("[{pkg}] --- last 20 log lines ---");
-                    for line in tail.into_iter().rev() {
-                        eprintln!("[{pkg}]   {line}");
-                    }
-                    eprintln!("[{pkg}] ---");
+                    print_excerpt(pkg, &tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
                 }
 
                 if attempts >= MAX_BUILD_ATTEMPTS {
-                    eprintln!("[{pkg}] FAILED after {attempts} attempts");
+                    eprintln!("[{pkg}]  ✗ gave up after {attempts} attempts");
                     break;
                 }
 
-                status(
-                    pkg,
-                    &format!(
-                        "agent fix (level {:?}, attempt {attempts})…",
-                        escalation.level()
-                    ),
-                );
+                step(pkg, &format!("agent ({:?})", escalation.level()));
                 match ap_build::agent::fix(
                     &spec_path,
                     &log,
@@ -416,26 +379,18 @@ fn build_one(
                         use ap_build::agent::Confidence;
                         use ap_build::context::EscalationReason;
 
-                        info!(
-                            "[{pkg}] agent: {} in / {} out, confidence {:?}",
-                            usage.input_tokens, usage.output_tokens, confidence,
-                        );
                         total_usage.add(&usage);
 
                         if confidence == Confidence::Low {
                             let next = escalation.escalate(EscalationReason::RepeatedSignature);
-                            status(
-                                pkg,
-                                &format!(
-                                    "low confidence — escalating to {:?}",
-                                    next.as_ref()
-                                        .map(|l| format!("{l:?}"))
-                                        .unwrap_or_else(|_| "max".into())
-                                ),
-                            );
+                            let next_name = next
+                                .as_ref()
+                                .map(|l| format!("{l:?}"))
+                                .unwrap_or_else(|_| "max".into());
+                            eprintln!("[{pkg}]    low confidence → escalating to {next_name}");
                             history = new_history;
                         } else {
-                            print_diff(&spec_content, &fixed);
+                            print_diff(pkg, &spec_content, &fixed);
                             save_attempt(
                                 fixes_dir,
                                 &node.name,
@@ -450,14 +405,12 @@ fn build_one(
                         }
                     }
                     Err(e) => {
-                        warn!("[{pkg}] agent error: {e}");
-                        eprintln!("[{pkg}] agent error: {e}");
+                        eprintln!("[{pkg}]    agent error: {e}");
                     }
                 }
             }
             Err(e) => {
-                warn!("[{pkg}] osc error: {e}");
-                eprintln!("[{pkg}] osc error: {e}");
+                eprintln!("[{pkg}]  ✗ osc error: {e}");
                 break;
             }
         }
