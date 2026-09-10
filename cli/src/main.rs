@@ -282,14 +282,23 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
     let arch = ctx.arch;
     let allow_full_log = ctx.allow_full_log;
     let pkg = &node.name;
-    let pkg_dir = work_dir.join(node.name.to_lowercase());
+    let rpm_pkg = ap_build::osc::rpm_name(&node.name);
+
+    eprintln!("\n[{pkg} {}]", node.version);
+
+    // Create the OBS package if needed and check it out.
+    // The checkout dir is the single working directory for everything.
+    step(pkg, &format!("creating {project}/{rpm_pkg}"));
+    ap_build::osc::ensure_package(project, &rpm_pkg)?;
+
+    step(pkg, "checking out");
+    let pkg_dir = ap_build::osc::checkout(project, &rpm_pkg, work_dir)?;
+    result(pkg, pkg_dir.to_str().unwrap_or("?"));
 
     if already_built(&pkg_dir, &node.version) {
         eprintln!("[{pkg}]  already built {}", node.version);
         return Ok(ap_build::agent::Usage::default());
     }
-
-    eprintln!("\n[{pkg} {}]", node.version);
 
     let pypi_url = format!("https://pypi.org/pypi/{}/{}/json", node.name, node.version);
     let json = ureq::get(&pypi_url).call()?.into_body().read_to_string()?;
@@ -300,8 +309,6 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
         eprintln!("[{pkg}]  ✗ yanked — skipping");
         return Ok(ap_build::agent::Usage::default());
     }
-
-    fs::create_dir_all(&pkg_dir)?;
 
     step(pkg, &format!("downloading {}", release.sdist.filename));
     let tarball = release.sdist.fetch(&pkg_dir)?;
@@ -344,25 +351,13 @@ fn build_one(node: &Node, ctx: &BuildCtx<'_>) -> color_eyre::Result<ap_build::ag
         Err(e) => warn!("[{pkg}] review error: {e}"),
     }
 
-    // Set up the OBS package checkout that osc build will run from.
-    let rpm_pkg = ap_build::osc::rpm_name(&node.name);
-    step(pkg, &format!("creating {project}/{rpm_pkg}"));
-    ap_build::osc::ensure_package(project, &rpm_pkg)?;
-
-    step(pkg, "checking out package");
-    let checkout_dir = ap_build::osc::checkout(project, &rpm_pkg, work_dir)?;
-    result(pkg, checkout_dir.to_str().unwrap_or("?"));
-
     let mut escalation = ap_build::context::Escalation::new(false);
     let _ = &escalation;
 
     loop {
         step(pkg, &format!("build {}/{MAX_BUILD_ATTEMPTS}", attempts + 1));
 
-        // Sync the latest spec (may have been agent-fixed) into the checkout.
-        ap_build::osc::sync_sources(&checkout_dir, &spec_path, &tarball)?;
-
-        match ap_build::osc::build(&checkout_dir, rpms_dir, distro, arch) {
+        match ap_build::osc::build(&pkg_dir, rpms_dir, distro, arch) {
             Ok(()) => {
                 eprintln!("[{pkg}]  ✓ built");
                 fs::write(marker_path(&pkg_dir), &node.version)?;

@@ -105,33 +105,6 @@ pub fn checkout(project: &str, pkg_name: &str, into_dir: &Path) -> Result<PathBu
     Ok(checkout_dir)
 }
 
-/// Copy spec and source tarball into an osc checkout directory.
-///
-/// Removes any stale sources already in the checkout so the directory only
-/// contains the files for the current build.
-pub fn sync_sources(checkout_dir: &Path, spec_path: &Path, tarball: &Path) -> Result<(), Error> {
-    // Remove old sources (skip .osc/ metadata).
-    for entry in fs::read_dir(checkout_dir).map_err(Error::Io)? {
-        let entry = entry.map_err(Error::Io)?;
-        let name = entry.file_name();
-        if name == ".osc" {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_file() {
-            fs::remove_file(&path).map_err(Error::Io)?;
-        }
-    }
-
-    let spec_dest = checkout_dir.join(spec_path.file_name().unwrap());
-    fs::copy(spec_path, &spec_dest).map_err(Error::Io)?;
-
-    let tarball_dest = checkout_dir.join(tarball.file_name().unwrap());
-    fs::copy(tarball, &tarball_dest).map_err(Error::Io)?;
-
-    Ok(())
-}
-
 /// Run `osc build` from `checkout_dir`.
 ///
 /// Built RPMs are also placed in `rpms_dir` via `--keep-pkgs` so that later
