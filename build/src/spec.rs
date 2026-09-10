@@ -106,13 +106,10 @@ pub fn normalize_python_module_versions(spec: &str) -> String {
 ///
 /// - Removes `BuildArch: noarch`
 /// - Replaces `%{python_sitelib}` with `%{python_sitearch}`
-/// - Adds `BuildRequires: %{python_module devel}` and `BuildRequires: gcc`
-///   if not already present
+/// - Adds `BuildRequires: %{python_module devel}` (Python headers) if absent
+/// - Inserts `export CFLAGS="%{optflags}"` before `%pyproject_wheel`
 pub fn fix_c_extension_arch(spec: &str) -> String {
     let has_devel = spec.contains("%{python_module devel}");
-    let has_gcc = spec
-        .lines()
-        .any(|l| l.trim().starts_with("BuildRequires:") && l.contains("gcc"));
 
     let mut out: Vec<String> = spec
         .lines()
@@ -120,18 +117,19 @@ pub fn fix_c_extension_arch(spec: &str) -> String {
         .map(|l| l.replace("%{python_sitelib}", "%{python_sitearch}"))
         .collect();
 
-    // Inject after the pip BuildRequires line, which is always present.
-    if let Some(pos) = out.iter().position(|l| l.contains("%{python_module pip}")) {
-        let mut inserts = Vec::new();
-        if !has_devel {
-            inserts.push("BuildRequires:  %{python_module devel}".to_string());
-        }
-        if !has_gcc {
-            inserts.push("BuildRequires:  gcc".to_string());
-        }
-        for (i, line) in inserts.into_iter().enumerate() {
-            out.insert(pos + 1 + i, line);
-        }
+    // Inject devel after the pip BuildRequires line.
+    if !has_devel && let Some(pos) = out.iter().position(|l| l.contains("%{python_module pip}")) {
+        out.insert(
+            pos + 1,
+            "BuildRequires:  %{python_module devel}".to_string(),
+        );
+    }
+
+    // Insert CFLAGS before %pyproject_wheel so the compiler uses RPM's flags.
+    if let Some(pos) = out.iter().position(|l| l.trim() == "%pyproject_wheel")
+        && !out[..pos].iter().any(|l| l.contains("CFLAGS"))
+    {
+        out.insert(pos, r#"export CFLAGS="%{optflags}""#.to_string());
     }
 
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }

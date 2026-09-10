@@ -380,7 +380,8 @@ fn build_one(
                     }
                     eprintln!("[{pkg}] ---");
                 } else {
-                    // Extractor found nothing — show the last lines of the raw log.
+                    // Extractor found no structured error — show the tail of the raw log.
+                    eprintln!("[{pkg}] (extractor found nothing — showing last 20 log lines)");
                     let tail: Vec<&str> = log_raw.lines().rev().take(20).collect();
                     eprintln!("[{pkg}] --- last 20 log lines ---");
                     for line in tail.into_iter().rev() {

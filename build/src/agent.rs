@@ -41,7 +41,6 @@ openSUSE spec conventions to keep in mind:
 3. Architecture and C dependencies: if the package has C extensions (.so files):
    - Use %{python_sitearch} instead of %{python_sitelib}
    - Remove 'BuildArch: noarch'
-   - Always add 'BuildRequires: gcc' (a compiler is always needed for C extensions)
    - Add BuildRequires for any C libraries the extension links against,
      e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
      for cffi. Check the build errors or setup.py/pyproject.toml for hints.
