@@ -13,4 +13,7 @@ ap-build = { version = "0.1.0", path = "../build" }
 ap-ecosystem = { version = "0.1.0", path = "../ecosystem" }
 clap = { version = "4.6.6", features = ["derive"] }
 color-eyre = "0.6.5"
+diff = "0.1.13"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ureq = "3.4.1"
