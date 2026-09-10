@@ -285,16 +285,13 @@ fn build_one(
     fs::write(&spec_path, &spec_content)?;
     eprintln!("[{pkg}] files in {}", pkg_dir.display());
 
-    // Validate %autosetup -n against the real tarball directory before
-    // spending a full osc build on a guaranteed %prep failure.
-    if let Some(result) = ap_build::spec::check_autosetup_dir(&spec_content, &tarball) {
-        match result {
-            Ok(()) => info!("[{pkg}] %autosetup dir OK"),
-            Err(msg) => {
-                warn!("[{pkg}] %autosetup mismatch: {msg}");
-                eprintln!("[{pkg}] WARNING: {msg}");
-            }
-        }
+    // Fix %autosetup -n if it doesn't match the actual tarball directory.
+    // This is deterministic — no need for the agent.
+    if let Some(fixed) = ap_build::spec::fix_autosetup_dir(&spec_content, &tarball) {
+        info!("[{pkg}] fixed %autosetup -n to match sdist directory");
+        eprintln!("[{pkg}] fixed %autosetup -n directory");
+        fs::write(&spec_path, &fixed)?;
+        spec_content = fixed;
     }
 
     let mut total_usage = ap_build::agent::Usage::default();

@@ -143,15 +143,6 @@ pub fn fix(
     let mapper = PathMapper::with_sdist_root(pkg_name);
     let extracted = crate::log::extract(&log_raw, &mapper);
 
-    // Without a meaningful error context there is nothing actionable to send.
-    // The model will return prose rather than a fix, producing a JSON parse
-    // error. Surface a clear message instead.
-    if extracted.excerpt.is_empty() && extracted.error_lines.is_empty() {
-        return Err(Error::Parse(
-            "build log has no extractable error — check the full log manually".to_string(),
-        ));
-    }
-
     let (response, usage, prompt) = call(&backend, &spec, &extracted, pkg_name, history)?;
 
     eprintln!(
@@ -396,8 +387,6 @@ fn call_http(
 
 fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &[Turn]) -> String {
     let section = extracted.failed_section.as_deref().unwrap_or("unknown");
-    let errors = extracted.error_lines.join("\n");
-
     let mut prior = String::new();
     if !history.is_empty() {
         prior.push_str("\nPrevious fix attempts that did not work:\n");
@@ -416,18 +405,25 @@ fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &
         prior.push_str("\nDo not repeat those fixes. Try a different approach.\n");
     }
 
+    let error_section = if extracted.excerpt.is_empty() && extracted.error_lines.is_empty() {
+        "No error was extracted from the build log. Review the spec carefully for \
+         common issues: incorrect %autosetup -n directory, wrong %files paths, \
+         missing BuildRequires, or architecture mismatch."
+            .to_string()
+    } else {
+        format!(
+            "Current error context:\n```\n{}\n```\n\nError lines:\n{}",
+            extracted.excerpt,
+            extracted.error_lines.join("\n"),
+        )
+    };
+
     format!(
         "You are fixing an openSUSE RPM spec file for a Python package.\n\
          Package: {pkg_name}\n\
          Failed section: {section}\n\
          {prior}\n\
-         Current error context:\n\
-         ```\n\
-         {excerpt}\n\
-         ```\n\
-         \n\
-         Error lines:\n\
-         {errors}\n\
+         {error_section}\n\
          \n\
          Current spec:\n\
          ```spec\n\
@@ -435,10 +431,24 @@ fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &
          ```\n\
          \n\
          openSUSE spec conventions to keep in mind:\n\
-         - Version constraints go inside the macro: `BuildRequires:  %{{python_module setuptools >= 77}}`\n\
-           NOT after it: `BuildRequires:  %{{python_module setuptools}} >= 77`\n\
-         - Use `%{{python_module <name>}}` for all Python build dependencies.\n\
-         - Use `%pyproject_wheel` / `%pyproject_install` for PEP 517 packages.\n\
+         \n\
+         1. BuildRequires version constraints go INSIDE the macro with spaces around the operator:\n\
+            CORRECT:   BuildRequires:  %{{python_module setuptools >= 77}}\n\
+            WRONG:     BuildRequires:  %{{python_module setuptools}} >= 77\n\
+            WRONG:     BuildRequires:  %{{python_module setuptools>=77}}\n\
+         \n\
+         2. Package name case normalization: pip/setuptools install using the normalized\n\
+            (lowercase, underscores) name, not the PyPI display name. For example,\n\
+            MarkupSafe installs as 'markupsafe'. This affects:\n\
+            - %autosetup -n: use the lowercase sdist directory name\n\
+            - %files: all installed paths use the lowercase name\n\
+            - dist-info: 'markupsafe-%{{version}}.dist-info', NOT 'MarkupSafe-%{{version}}.dist-info'\n\
+         \n\
+         3. Architecture: if the package installs .so files (C extensions), use\n\
+            %{{python_sitearch}} and remove 'BuildArch: noarch'. Pure Python packages\n\
+            use %{{python_sitelib}} and keep 'BuildArch: noarch'.\n\
+         \n\
+         4. Use `%pyproject_wheel` / `%pyproject_install` for PEP 517 packages.\n\
          \n\
          Return a JSON object with:\n\
          - \"confidence\": \"high\", \"medium\", or \"low\"\n\
@@ -446,7 +456,6 @@ fn build_prompt(spec: &str, extracted: &ExtractedLog, pkg_name: &str, history: &
          - \"fixed_spec\": the complete corrected spec file\n\
          \n\
          Return only the JSON object, no other text.",
-        excerpt = extracted.excerpt,
     )
 }
 
