@@ -4,11 +4,16 @@
 //! excerpt to Claude, get a replacement spec back. Repeat until the build
 //! passes or the retry limit is reached.
 //!
-//! No logprobs, no built-in confidence field. The model self-reports
-//! confidence as an enum; we gate retries on whether it claims to be
-//! confident and whether the diff applies cleanly — not on the number alone.
+//! Two backends are supported:
+//! - Direct Anthropic API: set `AUTO_PACKAGE_API_KEY`.
+//! - Google Cloud Vertex AI: set `AUTO_PACKAGE_GCP_PROJECT` (and optionally
+//!   `AUTO_PACKAGE_GCP_REGION`, default `us-east5`). Auth is via `gcloud auth
+//!   print-access-token`; no Anthropic key needed.
+//!
+//! If both are set, Vertex takes precedence.
 
 use std::path::Path;
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +21,6 @@ use crate::log::{ExtractedLog, PathMapper};
 
 const MAX_RETRIES: usize = 5;
 const MODEL: &str = "claude-opus-5";
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 /// Token counts from one API call.
 #[derive(Debug, Clone, Default)]
@@ -30,14 +34,14 @@ pub struct Usage {
 impl Usage {
     /// Cost in US cents (multiply by 0.01 for dollars).
     ///
-    /// Rates for claude-opus-5 as of 2026:
-    /// $15/MTok input, $75/MTok output,
-    /// $18.75/MTok cache write, $1.50/MTok cache read.
+    /// Direct API rates for claude-opus-5 as of 2026:
+    /// $5/MTok input, $25/MTok output.
+    /// Vertex AI is billed separately by Google at different rates.
     pub fn cost_cents(&self) -> f64 {
-        (self.input_tokens as f64 * 15.0
-            + self.output_tokens as f64 * 75.0
-            + self.cache_creation_tokens as f64 * 18.75
-            + self.cache_read_tokens as f64 * 1.50)
+        (self.input_tokens as f64 * 5.0
+            + self.output_tokens as f64 * 25.0
+            + self.cache_creation_tokens as f64 * 6.25
+            + self.cache_read_tokens as f64 * 0.50)
             / 1_000_000.0
             * 100.0
     }
@@ -50,10 +54,18 @@ impl Usage {
     }
 }
 
+enum Backend {
+    Direct { api_key: String },
+    Vertex { project: String, region: String },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("AUTO_PACKAGE_API_KEY is not set")]
-    NoApiKey,
+    #[error("set AUTO_PACKAGE_API_KEY (direct) or AUTO_PACKAGE_GCP_PROJECT (Vertex)")]
+    NoCredentials,
+
+    #[error("gcloud auth print-access-token failed: {0}")]
+    GcloudAuth(String),
 
     #[error("API request failed: {0}")]
     Http(#[from] ureq::Error),
@@ -87,10 +99,8 @@ struct FixResponse {
 /// Try to fix `spec_path` using the build log at `log_path`.
 ///
 /// Returns the fixed spec content and total API usage for this fix session.
-/// The caller is responsible for writing the spec back to disk and re-running
-/// the build.
 pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String, Usage), Error> {
-    let api_key = std::env::var("AUTO_PACKAGE_API_KEY").map_err(|_| Error::NoApiKey)?;
+    let backend = detect_backend()?;
 
     let spec = std::fs::read_to_string(spec_path)?;
     let log_raw = std::fs::read_to_string(log_path)?;
@@ -99,12 +109,24 @@ pub fn fix(spec_path: &Path, log_path: &Path, pkg_name: &str) -> Result<(String,
     let extracted = crate::log::extract(&log_raw, &mapper);
 
     let mut total = Usage::default();
-    let fixed = fix_loop(&api_key, &spec, &extracted, pkg_name, 0, &mut total)?;
+    let fixed = fix_loop(&backend, &spec, &extracted, pkg_name, 0, &mut total)?;
     Ok((fixed, total))
 }
 
+fn detect_backend() -> Result<Backend, Error> {
+    if let Ok(project) = std::env::var("AUTO_PACKAGE_GCP_PROJECT") {
+        let region =
+            std::env::var("AUTO_PACKAGE_GCP_REGION").unwrap_or_else(|_| "us-east5".to_string());
+        return Ok(Backend::Vertex { project, region });
+    }
+    if let Ok(api_key) = std::env::var("AUTO_PACKAGE_API_KEY") {
+        return Ok(Backend::Direct { api_key });
+    }
+    Err(Error::NoCredentials)
+}
+
 fn fix_loop(
-    api_key: &str,
+    backend: &Backend,
     spec: &str,
     extracted: &ExtractedLog,
     pkg_name: &str,
@@ -115,7 +137,7 @@ fn fix_loop(
         return Err(Error::Exhausted);
     }
 
-    let (response, usage) = call_api(api_key, spec, extracted, pkg_name)?;
+    let (response, usage) = call_api(backend, spec, extracted, pkg_name)?;
     total.add(&usage);
 
     eprintln!(
@@ -132,7 +154,7 @@ fn fix_loop(
 }
 
 fn call_api(
-    api_key: &str,
+    backend: &Backend,
     spec: &str,
     extracted: &ExtractedLog,
     pkg_name: &str,
@@ -164,25 +186,8 @@ fn call_api(
          - \"fixed_spec\": the complete corrected spec file\n\
          \n\
          Return only the JSON object, no other text.",
-        pkg_name = pkg_name,
-        section = section,
         excerpt = extracted.excerpt,
-        errors = errors,
-        spec = spec,
     );
-
-    #[derive(Serialize)]
-    struct Message<'a> {
-        role: &'a str,
-        content: &'a str,
-    }
-
-    #[derive(Serialize)]
-    struct Request<'a> {
-        model: &'a str,
-        max_tokens: u32,
-        messages: Vec<Message<'a>>,
-    }
 
     #[derive(Deserialize)]
     struct ApiResponse {
@@ -209,23 +214,74 @@ fn call_api(
         cache_read_input_tokens: u64,
     }
 
-    let body = Request {
-        model: MODEL,
-        max_tokens: 8192,
-        messages: vec![Message {
-            role: "user",
-            content: &prompt,
-        }],
+    let json_body = match backend {
+        Backend::Direct { .. } => {
+            #[derive(Serialize)]
+            struct DirectRequest<'a> {
+                model: &'a str,
+                max_tokens: u32,
+                messages: Vec<DirectMessage<'a>>,
+            }
+            #[derive(Serialize)]
+            struct DirectMessage<'a> {
+                role: &'a str,
+                content: &'a str,
+            }
+            serde_json::to_string(&DirectRequest {
+                model: MODEL,
+                max_tokens: 8192,
+                messages: vec![DirectMessage {
+                    role: "user",
+                    content: &prompt,
+                }],
+            })
+            .map_err(|e| Error::Parse(e.to_string()))?
+        }
+        Backend::Vertex { .. } => {
+            #[derive(Serialize)]
+            struct VertexRequest<'a> {
+                anthropic_version: &'a str,
+                max_tokens: u32,
+                messages: Vec<VertexMessage<'a>>,
+            }
+            #[derive(Serialize)]
+            struct VertexMessage<'a> {
+                role: &'a str,
+                content: &'a str,
+            }
+            serde_json::to_string(&VertexRequest {
+                anthropic_version: "vertex-2023-10-16",
+                max_tokens: 8192,
+                messages: vec![VertexMessage {
+                    role: "user",
+                    content: &prompt,
+                }],
+            })
+            .map_err(|e| Error::Parse(e.to_string()))?
+        }
     };
 
-    let json_body = serde_json::to_string(&body).map_err(|e| Error::Parse(e.to_string()))?;
+    let response = match backend {
+        Backend::Direct { api_key } => ureq::post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .send(json_body.as_bytes())
+            .map_err(Error::Http)?,
 
-    let response = ureq::post(API_URL)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .send(json_body.as_bytes())
-        .map_err(Error::Http)?;
+        Backend::Vertex { project, region } => {
+            let token = gcloud_token()?;
+            let url = format!(
+                "https://{region}-aiplatform.googleapis.com/v1/projects/{project}\
+                 /locations/{region}/publishers/anthropic/models/{MODEL}:rawPredict"
+            );
+            ureq::post(&url)
+                .header("Authorization", &format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .send(json_body.as_bytes())
+                .map_err(Error::Http)?
+        }
+    };
 
     let mut body = response.into_body();
     let text = body
@@ -234,15 +290,14 @@ fn call_api(
     let resp: ApiResponse =
         serde_json::from_str(&text).map_err(|e| Error::Parse(format!("bad API JSON: {e}")))?;
 
-    let text = resp
+    let content_text = resp
         .content
         .into_iter()
         .find(|b| b.kind == "text")
         .and_then(|b| b.text)
         .ok_or_else(|| Error::Parse("no text block in response".to_string()))?;
 
-    // Strip markdown code fences if the model wrapped the JSON.
-    let json = text
+    let json = content_text
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
@@ -260,4 +315,19 @@ fn call_api(
     };
 
     Ok((fix_response, usage))
+}
+
+fn gcloud_token() -> Result<String, Error> {
+    let out = Command::new("gcloud")
+        .args(["auth", "print-access-token"])
+        .output()
+        .map_err(|e| Error::GcloudAuth(e.to_string()))?;
+
+    if !out.status.success() {
+        return Err(Error::GcloudAuth(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
