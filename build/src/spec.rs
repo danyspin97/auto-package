@@ -5,8 +5,7 @@
 //! build-backend requirements from the sdist, the correct SPDX license
 //! expression, and the upstream URL.
 
-use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use ap_ecosystem::pypi::{License, Release};
 use ap_ecosystem::sdist::BuildSystem;
@@ -25,9 +24,12 @@ pub enum Error {
 
 /// Fix the `%autosetup -n` value in a spec to match the actual tarball directory.
 ///
-/// Returns the corrected spec, or `None` if no correction was needed or possible.
-pub fn fix_autosetup_dir(spec: &str, tarball: &Path) -> Option<String> {
-    let actual = ap_ecosystem::sdist::top_level_dir(tarball).ok()??;
+/// `actual_top_level` is the top-level directory name from the sdist
+/// (e.g. `MarkupSafe-3.0.3`), already extracted by the caller's single-pass
+/// [`ap_ecosystem::sdist::inspect`] call. Returns the corrected spec, or `None`
+/// if no correction was needed.
+pub fn fix_autosetup_dir(spec: &str, actual_top_level: &str) -> Option<String> {
+    let actual = actual_top_level;
     let name = tag_value(spec, "Name:")?;
     let version = tag_value(spec, "Version:")?;
     let expanded = autosetup_expected_dir(spec, name, version)?;
@@ -197,18 +199,16 @@ pub fn fix_files_case(spec: &str, pypi_name: &str) -> String {
     out
 }
 
-pub fn check_autosetup_dir(spec: &str, tarball: &Path) -> Option<Result<(), String>> {
-    let actual = ap_ecosystem::sdist::top_level_dir(tarball).ok()??;
-
+pub fn check_autosetup_dir(spec: &str, actual_top_level: &str) -> Option<Result<(), String>> {
     let name = tag_value(spec, "Name:")?;
     let version = tag_value(spec, "Version:")?;
     let expanded = autosetup_expected_dir(spec, name, version)?;
 
-    Some(if actual == expanded {
+    Some(if actual_top_level == expanded {
         Ok(())
     } else {
         Err(format!(
-            "%autosetup -n expects '{expanded}' but sdist top-level dir is '{actual}'"
+            "%autosetup -n expects '{expanded}' but sdist top-level dir is '{actual_top_level}'"
         ))
     })
 }
@@ -334,6 +334,24 @@ Version:        3.0.3
     }
 }
 
+/// Prepend `# ap: gen:` comment lines to the spec so the AI agent can read
+/// generation decisions without re-deriving them.
+///
+/// Each entry in `notes` becomes one `# ap: gen: <note>` line at the top of
+/// the file. The agent is instructed to preserve these lines and to append its
+/// own `# ap: fix N: …` lines when it makes changes.
+pub fn prepend_generation_notes(spec: &str, notes: &[String]) -> String {
+    if notes.is_empty() {
+        return spec.to_owned();
+    }
+    let block = notes
+        .iter()
+        .map(|n| format!("# ap: gen: {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{block}\n{spec}")
+}
+
 /// Generate an openSUSE RPM spec for `release`.
 ///
 /// Invokes `py2pack generate` and post-processes the result to fix the fields
@@ -355,6 +373,7 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
             &release.name,
             &release.version,
         ])
+        .stdin(Stdio::null())
         .output()
         .map_err(Error::Launch)?;
 
