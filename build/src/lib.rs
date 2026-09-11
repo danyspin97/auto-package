@@ -6,3 +6,4 @@ pub mod context;
 pub mod log;
 pub mod osc;
 pub mod spec;
+pub mod workspace;

@@ -203,9 +203,16 @@ fn post_build_failure(lines: &[&str], spans: &[Span]) -> Option<Failure> {
     ))
 }
 
-/// Last resort: any `error:` line at all.
+/// Last resort: any `error:` line, or `warning:` when there are no errors.
+///
+/// `rpmspec --parse` exits 0 but emits `warning:` lines for macro problems.
+/// Those warnings are the failure signal in that case, so we treat them the
+/// same as errors when nothing stronger was found.
 fn bare_error_line(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Option<Failure> {
-    let idx = lines.iter().rposition(|l| l.starts_with("error: "))?;
+    let idx = lines
+        .iter()
+        .rposition(|l| l.starts_with("error: "))
+        .or_else(|| lines.iter().rposition(|l| l.starts_with("warning: ")))?;
     let phase = span_at(spans, idx)
         .map(|s| s.phase.clone())
         .unwrap_or(Phase::Setup);

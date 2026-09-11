@@ -59,6 +59,10 @@ pub struct ExtractedLog {
     pub referenced: Vec<PathRef>,
     /// The excerpt to send, already capped.
     pub excerpt: String,
+    /// Last 40 timestamp-stripped lines of the raw log, used as a fallback
+    /// when the extractor found no recognisable failure signal (excerpt and
+    /// error_lines both empty). Always non-empty for non-empty logs.
+    pub log_tail: String,
     /// The located failure: its genre, its phase, and how much was elided.
     /// `None` when nothing in the log looked like a failure at all.
     pub failure: Option<Failure>,
@@ -111,6 +115,24 @@ impl ExtractedLog {
             PathClass::BuildRoot { module_path } => Some(module_path.as_str()),
             _ => None,
         })
+    }
+
+    /// The section to report to the user and use for routing decisions.
+    ///
+    /// `failed_section` is `None` when there is no `Bad exit status` line in
+    /// the log. That is the normal case for RPM's `%files` check, which is an
+    /// internal rpm operation rather than a bash scriptlet. Scanning
+    /// `error_lines` for file-check patterns covers that gap.
+    pub fn effective_section(&self) -> &str {
+        if let Some(s) = &self.failed_section {
+            return s;
+        }
+        if self.error_lines.iter().any(|l| {
+            l.contains("File not found") || l.contains("unpackaged")
+        }) {
+            return "%files";
+        }
+        "unknown"
     }
 
     fn candidates<'a>(
@@ -183,12 +205,20 @@ pub fn extract(raw: &str, mapper: &PathMapper) -> ExtractedLog {
         .map(|f| f.excerpt.clone())
         .unwrap_or_default();
 
+    // Always keep a window of the last 40 lines as a fallback, stripped of
+    // timestamps so they don't inflate token counts.
+    let log_tail = {
+        let tail: Vec<&str> = lines.iter().rev().take(40).copied().collect();
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    };
+
     ExtractedLog {
         failed_section,
         error_lines,
         python_frames,
         referenced,
         excerpt,
+        log_tail,
         failure: located,
         spans,
         format_suspect,
