@@ -15,10 +15,10 @@
 
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One package in the resolved closure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     pub name: String,
     pub version: String,
@@ -37,6 +37,9 @@ pub struct Node {
 pub enum Error {
     #[error("could not run pip: {0}")]
     Launch(std::io::Error),
+
+    #[error("package not found on PyPI: {0}")]
+    NotFound(String),
 
     #[error("pip exited {code}:\n{stderr}")]
     Failed { code: i32, stderr: String },
@@ -78,6 +81,14 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+
+        // Detect "package not found" errors
+        if stderr.contains("Could not find a version that satisfies the requirement")
+            || stderr.contains("No matching distribution found for")
+        {
+            return Err(Error::NotFound(name.to_string()));
+        }
+
         return Err(Error::Failed { code, stderr });
     }
 

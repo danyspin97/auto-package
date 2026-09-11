@@ -7,6 +7,10 @@
 //!
 //! Old packages without a `pyproject.toml` at all use setuptools implicitly.
 //! That is the PEP 517 fallback and the right default.
+//!
+//! The main entry point is [`inspect`], which does a single tarball pass and
+//! returns everything callers need. Individual helper functions have been
+//! replaced by this to avoid opening and iterating the archive multiple times.
 
 use std::io::Read;
 use std::path::Path;
@@ -28,6 +32,20 @@ pub struct BuildSystem {
     pub backend: Option<String>,
 }
 
+/// Everything the build pipeline needs from an sdist tarball, gathered in one pass.
+#[derive(Debug)]
+pub struct SdistInfo {
+    pub build_system: BuildSystem,
+    /// The single top-level directory inside the tarball, e.g. `MarkupSafe-3.0.3`.
+    /// `None` only for malformed archives; well-formed sdists always have one.
+    pub top_level_dir: Option<String>,
+    pub has_c_extensions: bool,
+    pub has_tests: bool,
+    /// All file paths in the tarball (non-directories), sorted. Used to give
+    /// the review agent visibility into what the package actually contains.
+    pub files: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io error reading {path}")]
@@ -44,20 +62,44 @@ pub enum Error {
     Toml(#[from] toml::de::Error),
 }
 
-/// The top-level directory name inside a `.tar.gz` sdist.
+/// Extract the sdist tarball into `dest`.
 ///
-/// A well-formed sdist contains exactly one top-level directory, e.g.
-/// `MarkupSafe-3.0.3/`. This is what `%autosetup -n` must match.
-pub fn top_level_dir(path: &Path) -> Result<Option<String>, Error> {
+/// Every entry in the archive is unpacked under `dest`. Well-formed sdists
+/// contain exactly one top-level directory (e.g. `markupsafe-3.0.3/`); after
+/// extraction that directory will be at `dest/<top-level>/`.
+pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
+    let file = std::fs::File::open(tarball).map_err(|e| Error::Io {
+        path: tarball.to_path_buf(),
+        source: e,
+    })?;
+    let mut archive = tar::Archive::new(GzDecoder::new(file));
+    archive.unpack(dest).map_err(Error::Tar)?;
+    Ok(())
+}
+
+/// Inspect an sdist tarball in a single pass.
+///
+/// Replaces the individual `build_system`, `top_level_dir`, `has_tests`,
+/// `has_c_extensions`, and `tarball_files` helpers — they all iterated the
+/// archive separately and caused the tarball to be decompressed 4–5 times.
+pub fn inspect(path: &Path) -> Result<SdistInfo, Error> {
     let file = std::fs::File::open(path).map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
     let mut archive = tar::Archive::new(GzDecoder::new(file));
 
+    let mut top_level_dir: Option<String> = None;
+    let mut pyproject_src: Option<String> = None;
+    let mut has_c = false;
+    let mut has_tests = false;
+    let mut files: Vec<String> = Vec::new();
+
     for entry in archive.entries().map_err(Error::Tar)? {
-        let entry = entry.map_err(Error::Tar)?;
-        let entry_path = entry.path().map_err(Error::Tar)?;
+        let mut entry = entry.map_err(Error::Tar)?;
+        // `.into_owned()` so the path doesn't borrow `entry`, allowing the
+        // subsequent `read_to_string` call on the same entry.
+        let entry_path = entry.path().map_err(Error::Tar)?.into_owned();
 
         if entry_path.is_absolute()
             || entry_path
@@ -67,115 +109,79 @@ pub fn top_level_dir(path: &Path) -> Result<Option<String>, Error> {
             continue;
         }
 
-        if let Some(first) = entry_path.components().next() {
-            let name = first.as_os_str().to_string_lossy().into_owned();
-            if !name.is_empty() {
-                return Ok(Some(name));
+        let path_str = entry_path.to_string_lossy();
+
+        if top_level_dir.is_none() {
+            if let Some(first) = entry_path.components().next() {
+                let name = first.as_os_str().to_string_lossy().into_owned();
+                if !name.is_empty() {
+                    top_level_dir = Some(name);
+                }
             }
         }
+
+        let components: Vec<_> = entry_path.components().collect();
+        if pyproject_src.is_none()
+            && components.len() == 2
+            && components[1].as_os_str() == "pyproject.toml"
+        {
+            let mut src = String::new();
+            entry.read_to_string(&mut src).map_err(|e| Error::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            pyproject_src = Some(src);
+            continue;
+        }
+
+        if !has_c {
+            if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
+                if matches!(ext, "c" | "cpp" | "cxx" | "pyx" | "pxd") {
+                    has_c = true;
+                }
+            }
+        }
+
+        if !has_tests {
+            if path_str.contains("/tests/") || path_str.contains("/test/") {
+                has_tests = true;
+            } else if entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py"))
+            {
+                has_tests = true;
+            }
+        }
+
+        if !path_str.ends_with('/') {
+            files.push(path_str.into_owned());
+        }
     }
 
-    Ok(None)
-}
-
-/// List all file paths inside the sdist tarball (relative, sorted).
-///
-/// Useful for giving the review agent visibility into what the package
-/// actually contains — module directories, compiled extensions, etc.
-pub fn tarball_files(path: &Path) -> Result<Vec<String>, Error> {
-    let file = std::fs::File::open(path).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
-    let mut files: Vec<String> = archive
-        .entries()
-        .map_err(Error::Tar)?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.path().ok().map(|p| p.to_string_lossy().into_owned()))
-        .filter(|p| !p.ends_with('/'))
-        .collect();
     files.sort();
-    Ok(files)
-}
 
-/// Whether the sdist contains tests (a `tests/` directory or `test_*.py` files).
-pub fn has_tests(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
-    let Ok(entries) = archive.entries() else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let Ok(entry_path) = entry.path() else {
-            continue;
-        };
-        let s = entry_path.to_string_lossy();
-        // Match: <root>/tests/, <root>/test/, or any test_*.py
-        if s.contains("/tests/") || s.contains("/test/") {
-            return true;
-        }
-        if entry_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py"))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Whether the sdist contains C/Cython source files, indicating C extensions.
-///
-/// Checks for `.c`, `.cpp`, `.cxx`, `.pyx`, `.pxd` files anywhere in the
-/// tarball. A package that ships any of these will need a compiler and
-/// architecture-specific installation paths.
-pub fn has_c_extensions(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
-    let Ok(entries) = archive.entries() else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let Ok(entry_path) = entry.path() else {
-            continue;
-        };
-        if entry_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| matches!(e, "c" | "cpp" | "cxx" | "pyx" | "pxd"))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Read `[build-system]` from the sdist tarball at `path`.
-///
-/// Returns the PEP 517 defaults when `pyproject.toml` is absent or when
-/// `[build-system]` is missing from it — both cases mean setuptools.
-pub fn build_system(path: &Path) -> Result<BuildSystem, Error> {
-    let raw = read_pyproject(path)?;
-    match raw {
-        None => Ok(BuildSystem::setuptools_default()),
+    let build_system = match pyproject_src {
+        None => BuildSystem::setuptools_default(),
         Some(src) => {
             let doc: PyprojectToml = toml::from_str(&src)?;
-            Ok(doc
-                .build_system
+            doc.build_system
                 .map(BuildSystem::from)
-                .unwrap_or_else(BuildSystem::setuptools_default))
+                .unwrap_or_else(BuildSystem::setuptools_default)
         }
-    }
+    };
+
+    Ok(SdistInfo {
+        build_system,
+        top_level_dir,
+        has_c_extensions: has_c,
+        has_tests,
+        files,
+    })
 }
 
 impl BuildSystem {
-    fn setuptools_default() -> Self {
+    pub(crate) fn setuptools_default() -> Self {
         Self {
             requires: vec!["setuptools".to_string()],
             backend: Some("setuptools.build_meta".to_string()),
@@ -190,53 +196,6 @@ impl From<RawBuildSystem> for BuildSystem {
             backend: raw.build_backend,
         }
     }
-}
-
-/// Read `pyproject.toml` from a `.tar.gz` sdist without full extraction.
-///
-/// The file is always at `<sdist-root>/pyproject.toml` — one directory deep.
-/// We reject any entry whose path escapes that layout (absolute paths,
-/// `..` components) before opening it.
-fn read_pyproject(path: &Path) -> Result<Option<String>, Error> {
-    let file = std::fs::File::open(path).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
-
-    for entry in archive.entries().map_err(Error::Tar)? {
-        let mut entry = entry.map_err(Error::Tar)?;
-        let entry_path = entry.path().map_err(Error::Tar)?;
-
-        // Security: reject absolute paths and any `..` component before
-        // comparing against the expected layout.
-        if entry_path.is_absolute()
-            || entry_path
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
-        {
-            continue;
-        }
-
-        // pyproject.toml is always exactly one directory deep in a well-formed
-        // sdist: `<name>-<version>/pyproject.toml`.
-        let components: Vec<_> = entry_path.components().collect();
-        if components.len() != 2 {
-            continue;
-        }
-        if components[1].as_os_str() != "pyproject.toml" {
-            continue;
-        }
-
-        let mut src = String::new();
-        entry.read_to_string(&mut src).map_err(|e| Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-        return Ok(Some(src));
-    }
-
-    Ok(None)
 }
 
 // --- TOML wire types -------------------------------------------------------
