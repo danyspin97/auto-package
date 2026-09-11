@@ -46,6 +46,11 @@ pub enum Level {
     BuildTree,
     /// Installed files from `…/BUILDROOT/`. Only after a failure.
     BuildRoot,
+    /// Full content of every file the extractor flagged as relevant — source
+    /// files, build-system configs, and anything else named in the error.
+    /// Targeted reads: much cheaper than FullLog but gives the agent the actual
+    /// text it needs to reason about.
+    FailingFiles,
     /// The entire build log, unextracted. The most expensive thing we can send.
     FullLog,
 }
@@ -56,14 +61,15 @@ impl Level {
         match self {
             Level::ErrorContext => Some(Level::BuildTree),
             Level::BuildTree => Some(Level::BuildRoot),
-            Level::BuildRoot => Some(Level::FullLog),
+            Level::BuildRoot => Some(Level::FailingFiles),
+            Level::FailingFiles => Some(Level::FullLog),
             Level::FullLog => None,
         }
     }
 
     /// Whether this rung reads the filesystem rather than the log.
     pub fn touches_filesystem(self) -> bool {
-        matches!(self, Level::BuildTree | Level::BuildRoot)
+        matches!(self, Level::BuildTree | Level::BuildRoot | Level::FailingFiles)
     }
 
     /// Whether reaching this rung requires a build to have failed already.
@@ -71,7 +77,7 @@ impl Level {
     /// `BUILDROOT` is populated by `%install`; before a failure there is
     /// nothing there worth looking at.
     pub fn requires_failure(self) -> bool {
-        matches!(self, Level::BuildRoot)
+        matches!(self, Level::BuildRoot | Level::FailingFiles)
     }
 }
 
@@ -81,6 +87,7 @@ impl fmt::Display for Level {
             Level::ErrorContext => "error-context",
             Level::BuildTree => "build-tree",
             Level::BuildRoot => "buildroot",
+            Level::FailingFiles => "failing-files",
             Level::FullLog => "full-log",
         };
         f.write_str(s)
@@ -212,6 +219,10 @@ mod tests {
         );
         assert_eq!(
             e.escalate(EscalationReason::NothingUsable),
+            Ok(Level::FailingFiles)
+        );
+        assert_eq!(
+            e.escalate(EscalationReason::NothingUsable),
             Ok(Level::FullLog)
         );
         assert_eq!(
@@ -244,7 +255,13 @@ mod tests {
             Ok(Level::FullLog),
             "must step over BuildRoot, not stop at it"
         );
-        assert_eq!(e.skipped(), &[(Level::BuildRoot, Skipped::NoFailureYet)]);
+        assert_eq!(
+            e.skipped(),
+            &[
+                (Level::BuildRoot, Skipped::NoFailureYet),
+                (Level::FailingFiles, Skipped::NoFailureYet),
+            ]
+        );
     }
 
     #[test]
@@ -284,6 +301,7 @@ mod tests {
             Level::ErrorContext,
             Level::BuildTree,
             Level::BuildRoot,
+            Level::FailingFiles,
             Level::FullLog,
         ];
         assert!(rungs.is_sorted(), "enum order must be the ladder order");
