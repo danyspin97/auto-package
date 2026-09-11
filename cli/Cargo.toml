@@ -13,7 +13,13 @@ ap-build = { version = "0.1.0", path = "../build" }
 ap-ecosystem = { version = "0.1.0", path = "../ecosystem" }
 clap = { version = "4.6.6", features = ["derive"] }
 color-eyre = "0.6.5"
+ctrlc = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 diff = "0.1.13"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ureq = "3.4.1"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tempfile = "3"
