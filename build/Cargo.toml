@@ -17,6 +17,7 @@ toml = "1.1.5"
 thiserror = "2.0.20"
 tracing = "0.1.44"
 ureq = "3.4.1"
+urlencoding = "2.1"
 
 [dev-dependencies]
 color-eyre = "0.6.5"

@@ -425,29 +425,64 @@ pub fn run_package(
                 }
                 (res.sdist_top_level, res.is_maturin, res.from_repo_archive, res.is_rust)
             }
-            Err(GenSpecError::WheelOnly { pkg_name, version }) => {
+            Err(GenSpecError::WheelOnly { pkg_name, version, candidates }) => {
                 reporter.report(&Event::StepFinished {
                     step: step.id,
                     outcome: StepOutcome::Ok,
                     elapsed: t.elapsed(),
                 });
+
+                let mut message = format!(
+                    "{pkg_name} {version} is published on PyPI as wheels only and its \
+                     metadata names no source repository."
+                );
+
+                if !candidates.is_empty() {
+                    message.push_str(&format!(
+                        "\n\nAuto-discovered {} candidate repositories:\n{}",
+                        candidates.len(),
+                        candidates.iter()
+                            .map(|url| format!("  - {}", url))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                    message.push_str(
+                        "\n\nThese are suggestions - use WebSearch to verify the correct repository.\n\
+                         Once confirmed, report the URL in your response."
+                    );
+                } else {
+                    message.push_str(
+                        "\n\nNo candidate repositories auto-discovered. Use WebSearch to find \
+                         the source repository."
+                    );
+                }
+
+                message.push_str(&format!(
+                    "\n\nAlternatively, provide it manually with:\n\
+                     \x20   --source-url {pkg_name}=https://github.com/<owner>/<repo>"
+                ));
+
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
-                    message: format!(
-                        "{pkg_name} {version} is published on PyPI as wheels only and its \
-                         metadata names no source repository. Skipping source build.\n\
-                         If you know where the source lives, provide it with:\n\
-                         \x20   --source-url {pkg_name}=https://github.com/<owner>/<repo>"
-                    ),
+                    message: message.clone(),
                 });
-                // Mark the package as wheel-only in state
+
+                // TODO: Call agent to validate candidates and find repository
+                // For now, mark as wheel-only and skip
                 let mut state = PkgState::load(&ws);
                 state.last_built_version = Some(version);
                 state.last_outcome = Some("wheel-only".to_string());
                 let _ = state.save(&ws);
                 return PipelineResult::Failed {
                     rpm_name,
-                    reason: "wheel-only package with no source repository".to_string(),
+                    reason: format!(
+                        "wheel-only package - candidates: {}",
+                        if !candidates.is_empty() {
+                            candidates.join(", ")
+                        } else {
+                            "none found, needs WebSearch".to_string()
+                        }
+                    ),
                 };
             }
             Err(GenSpecError::Other(e)) => {
@@ -1487,7 +1522,11 @@ fn find_sdist_top_level(checkout_dir: &Path, pkg_name: &str, version: &str) -> S
 }
 
 enum GenSpecError {
-    WheelOnly { pkg_name: String, version: String },
+    WheelOnly {
+        pkg_name: String,
+        version: String,
+        candidates: Vec<String>,
+    },
     Other(String),
 }
 
@@ -1545,14 +1584,20 @@ fn generate_spec(
                 .map(str::to_string)
                 .or_else(|| pypi::source_url_from_json(&json));
 
-            let Some(source_url) = source_url.or_else(|| {
-                // Try to find the source repository automatically, especially for NVIDIA packages
-                attempt_find_source_repo(&config.pkg_name)
-            }) else {
-                return Err(GenSpecError::WheelOnly {
-                    pkg_name: config.pkg_name.clone(),
-                    version: config.version.clone(),
-                });
+            let source_url = match source_url {
+                Some(url) => url,
+                None => {
+                    // Auto-discover candidate URLs for the agent to validate
+                    let candidates = find_source_repo_candidates(&config.pkg_name);
+                    if !candidates.is_empty() {
+                        eprintln!("info: found {} candidate repository URLs for agent to validate", candidates.len());
+                    }
+                    return Err(GenSpecError::WheelOnly {
+                        pkg_name: config.pkg_name.clone(),
+                        version: config.version.clone(),
+                        candidates,
+                    });
+                }
             };
 
             let tarball =
@@ -1994,84 +2039,188 @@ fn append_notes(notes_path: PathBuf, section: &str) {
     let _ = std::fs::write(notes_path, existing);
 }
 
-/// Attempt to automatically find the source repository for a package.
+/// Find candidate source repositories for a package.
 ///
-/// Tries common patterns for NVIDIA CUDA packages and other well-known packages.
-fn attempt_find_source_repo(pkg_name: &str) -> Option<String> {
+/// Returns a list of likely repository URLs for the agent to validate.
+/// Uses GitHub API search, known package mappings, and common patterns.
+fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
+    eprintln!("info: searching for source repository candidates for: {}", pkg_name);
+
     let lower = pkg_name.to_lowercase();
+    let mut candidates = Vec::new();
+    let mut verified_candidates = Vec::new();
 
-    // NVIDIA CUDA packages - try common GitHub repositories
-    if lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.contains("nvmath") || lower.contains("nvshmem") {
-        eprintln!("info: searching for source repository for NVIDIA package: {}", pkg_name);
+    // Known package mappings for special cases
+    let known_mappings: &[(&str, &str)] = &[
+        // NVIDIA CUDA packages
+        ("cuda-python", "https://github.com/NVIDIA/cuda-python"),
+        ("nvmath-python", "https://github.com/NVIDIA/nvmath-python"),
+        ("nvidia-ml-py", "https://github.com/NVIDIA/nvidia-ml-py"),
+        ("nvidia-nvshmem-cu", "https://github.com/NVIDIA/nvshmem"),
+        ("nvshmem4py", "https://github.com/NVIDIA/nvshmem"),
+        ("nvidia-cuda-cccl", "https://github.com/NVIDIA/cccl"),
+        ("nvidia-cuda-nvrtc", "https://github.com/NVIDIA/cuda-python"),
+        ("nvidia-cuda-runtime", "https://github.com/NVIDIA/cuda-python"),
+        ("nvidia-cuda-cupti", "https://github.com/NVIDIA/cuda-python"),
+        ("nvidia-cuda-nvcc", "https://github.com/NVIDIA/cuda-python"),
+        ("nvidia-nvjitlink", "https://github.com/NVIDIA/nvjitlink-python"),
+    ];
 
-        // Known NVIDIA package mappings
-        let nvidia_repos = [
-            ("cuda-python", "https://github.com/NVIDIA/cuda-python"),
-            ("nvmath-python", "https://github.com/NVIDIA/nvmath-python"),
-            ("nvidia-ml-py", "https://github.com/NVIDIA/nvidia-ml-py"),
-            ("nvidia-nvshmem-cu", "https://github.com/NVIDIA/nvshmem"),
-            ("nvshmem4py", "https://github.com/NVIDIA/nvshmem"),
-            ("nvidia-cuda-cccl", "https://github.com/NVIDIA/cccl"),
-            ("nvidia-cuda-nvrtc", "https://github.com/NVIDIA/cuda-python"),
-            ("nvidia-cuda-runtime", "https://github.com/NVIDIA/cuda-python"),
-            ("nvidia-cuda-cupti", "https://github.com/NVIDIA/cuda-python"),
-            ("nvidia-cuda-nvcc", "https://github.com/NVIDIA/cuda-python"),
-            ("nvidia-nvjitlink", "https://github.com/NVIDIA/nvjitlink-python"),
-        ];
-
-        for (pattern, repo_url) in &nvidia_repos {
-            if lower.starts_with(pattern) {
-                eprintln!("  trying known mapping: {}", repo_url);
-                if let Ok(resp) = ureq::head(*repo_url).call() {
-                    if resp.status() == 200 {
-                        eprintln!("  ✓ found source repository: {}", repo_url);
-                        return Some(repo_url.to_string());
-                    }
-                }
+    // Check known mappings first
+    for (pattern, repo_url) in known_mappings {
+        if lower.starts_with(pattern) {
+            eprintln!("  checking known mapping: {}", repo_url);
+            if verify_repo_exists(repo_url) {
+                eprintln!("  ✓ verified: {}", repo_url);
+                verified_candidates.push(repo_url.to_string());
+            } else {
+                candidates.push(repo_url.to_string());
             }
         }
+    }
 
-        // Try multiple URL variations for NVIDIA packages
-        let mut candidates = Vec::new();
+    // Try to get repository URLs from GitHub API search
+    if let Some(urls) = search_github_repos(pkg_name) {
+        for url in urls {
+            if !verified_candidates.contains(&url) && !candidates.contains(&url) {
+                eprintln!("  found via GitHub search: {}", url);
+                verified_candidates.push(url);
+            }
+        }
+    }
 
-        // Strip prefixes and CUDA version suffixes
-        let base_name = lower
+    // Generate candidate URLs based on package name patterns
+    let normalized_name = pkg_name.replace("_", "-").to_lowercase();
+
+    // Try common organization patterns for vendor-prefixed packages
+    if lower.starts_with("nvidia-") || lower.starts_with("cuda-") {
+        let base = lower
             .strip_prefix("nvidia-")
             .or_else(|| lower.strip_prefix("cuda-"))
             .unwrap_or(&lower);
 
-        let clean_name = base_name
-            .replace("-cu11", "")
-            .replace("-cu12", "")
-            .replace("-cu13", "")
+        let clean = base
+            .replace("-cu11", "").replace("-cu12", "").replace("-cu13", "")
             .replace("_", "-");
 
-        // Generate candidate URLs
-        candidates.push(format!("https://github.com/NVIDIA/{}", clean_name));
-
-        // For nvidia-cuda-* packages, also try without the cuda- prefix
-        if let Some(after_cuda) = clean_name.strip_prefix("cuda-") {
+        candidates.push(format!("https://github.com/NVIDIA/{}", clean));
+        if let Some(after_cuda) = clean.strip_prefix("cuda-") {
             candidates.push(format!("https://github.com/NVIDIA/{}", after_cuda));
-            candidates.push(format!("https://github.com/NVIDIA/cuda-{}", after_cuda));
         }
-
-        // Try the original package name too
-        candidates.push(format!("https://github.com/NVIDIA/{}", pkg_name.replace("_", "-")));
-
-        for url in &candidates {
-            eprintln!("  trying: {}", url);
-            if let Ok(resp) = ureq::head(url).call() {
-                if resp.status() == 200 {
-                    eprintln!("  ✓ found source repository: {}", url);
-                    return Some(url.clone());
-                }
-            }
+    } else if lower.starts_with("google-") {
+        if let Some(after) = lower.strip_prefix("google-") {
+            candidates.push(format!("https://github.com/googleapis/{}", after));
+            candidates.push(format!("https://github.com/google/{}", after));
         }
-
-        eprintln!("  ✗ no source repository found after trying {} URLs", candidates.len());
+    } else if lower.starts_with("aws-") {
+        if let Some(after) = lower.strip_prefix("aws-") {
+            candidates.push(format!("https://github.com/aws/{}", after));
+            candidates.push(format!("https://github.com/awslabs/{}", after));
+        }
+    } else if lower.starts_with("azure-") {
+        if let Some(after) = lower.strip_prefix("azure-") {
+            candidates.push(format!("https://github.com/Azure/{}", after));
+        }
     }
 
-    None
+    // Try the exact package name with common Python project organizations
+    for org in &["python", "pypa", "psf"] {
+        candidates.push(format!("https://github.com/{}/{}", org, normalized_name));
+    }
+
+    // Try just the package name under various popular organizations
+    candidates.push(format!("https://github.com/{}/{}", normalized_name, normalized_name));
+
+    // Also try common name variations
+    let name_parts: Vec<&str> = normalized_name.split('-').collect();
+    if name_parts.len() > 1 {
+        // Try first part as org, rest as repo (e.g. "foo-bar" -> foo/bar)
+        candidates.push(format!("https://github.com/{}/{}", name_parts[0], name_parts[1..].join("-")));
+    }
+
+    // Try the package name directly
+    candidates.push(format!("https://github.com/{}", normalized_name));
+
+    // Check all generated candidates
+    for url in &candidates {
+        if !verified_candidates.contains(url) {
+            eprintln!("  checking: {}", url);
+            if verify_repo_exists(url) {
+                eprintln!("  ✓ verified: {}", url);
+                verified_candidates.push(url.clone());
+            }
+        }
+    }
+
+    if verified_candidates.is_empty() {
+        eprintln!("  ✗ no verified repositories found after trying {} URLs", candidates.len());
+        eprintln!("  returning {} unverified candidates for agent review", candidates.len());
+        candidates
+    } else {
+        eprintln!("  ✓ found {} verified candidates", verified_candidates.len());
+        verified_candidates
+    }
+}
+
+/// Search GitHub for repositories matching the package name.
+/// Returns multiple candidates ranked by relevance.
+fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
+    let normalized = pkg_name.replace("_", "-");
+    let search_url = format!(
+        "https://api.github.com/search/repositories?q={}&sort=stars&order=desc",
+        urlencoding::encode(&normalized)
+    );
+
+    eprintln!("  searching GitHub API for: {}", normalized);
+
+    let body = ureq::get(&search_url)
+        .call()
+        .ok()?
+        .into_body()
+        .read_to_string()
+        .ok()?;
+
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let items = json.get("items")?.as_array()?;
+
+    let mut matches = Vec::new();
+
+    // Look for exact or close matches in the top results
+    for item in items.iter().take(10) {
+        let repo_name = item.get("name")?.as_str()?;
+        let html_url = item.get("html_url")?.as_str()?;
+
+        // Check if the repo name matches (case-insensitive, allowing _ vs -)
+        let repo_normalized = repo_name.replace("_", "-").to_lowercase();
+        let pkg_normalized = normalized.to_lowercase();
+
+        // Exact match gets priority
+        if repo_normalized == pkg_normalized {
+            matches.insert(0, html_url.to_string());
+        }
+        // Close matches
+        else if repo_normalized == pkg_normalized.replace("-", "")
+            || repo_normalized.ends_with(&format!("-{}", pkg_normalized))
+            || repo_normalized.starts_with(&format!("{}-", pkg_normalized))
+        {
+            matches.push(html_url.to_string());
+        }
+    }
+
+    if !matches.is_empty() {
+        eprintln!("  found {} matching repos via GitHub API", matches.len());
+        Some(matches)
+    } else {
+        None
+    }
+}
+
+/// Verify that a repository URL exists by making a HEAD request.
+fn verify_repo_exists(url: &str) -> bool {
+    ureq::head(url)
+        .call()
+        .map(|r| r.status() == 200)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
