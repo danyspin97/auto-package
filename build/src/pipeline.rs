@@ -2001,44 +2001,74 @@ fn attempt_find_source_repo(pkg_name: &str) -> Option<String> {
     let lower = pkg_name.to_lowercase();
 
     // NVIDIA CUDA packages - try common GitHub repositories
-    if lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.contains("nvmath") {
-        // Common NVIDIA GitHub patterns
+    if lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.contains("nvmath") || lower.contains("nvshmem") {
+        eprintln!("info: searching for source repository for NVIDIA package: {}", pkg_name);
+
+        // Known NVIDIA package mappings
         let nvidia_repos = [
             ("cuda-python", "https://github.com/NVIDIA/cuda-python"),
             ("nvmath-python", "https://github.com/NVIDIA/nvmath-python"),
             ("nvidia-ml-py", "https://github.com/NVIDIA/nvidia-ml-py"),
             ("nvidia-nvshmem-cu", "https://github.com/NVIDIA/nvshmem"),
             ("nvshmem4py", "https://github.com/NVIDIA/nvshmem"),
+            ("nvidia-cuda-cccl", "https://github.com/NVIDIA/cccl"),
+            ("nvidia-cuda-nvrtc", "https://github.com/NVIDIA/cuda-python"),
+            ("nvidia-cuda-runtime", "https://github.com/NVIDIA/cuda-python"),
+            ("nvidia-cuda-cupti", "https://github.com/NVIDIA/cuda-python"),
+            ("nvidia-cuda-nvcc", "https://github.com/NVIDIA/cuda-python"),
+            ("nvidia-nvjitlink", "https://github.com/NVIDIA/nvjitlink-python"),
         ];
 
         for (pattern, repo_url) in &nvidia_repos {
-            if lower.starts_with(pattern) || lower.contains(pattern) {
-                // Verify the repository exists by trying to fetch it
+            if lower.starts_with(pattern) {
+                eprintln!("  trying known mapping: {}", repo_url);
                 if let Ok(resp) = ureq::head(*repo_url).call() {
                     if resp.status() == 200 {
-                        eprintln!("info: automatically found source repository: {}", repo_url);
+                        eprintln!("  ✓ found source repository: {}", repo_url);
                         return Some(repo_url.to_string());
                     }
                 }
             }
         }
 
-        // Generic NVIDIA pattern: try https://github.com/NVIDIA/<pkg-name>
-        let clean_name = lower
+        // Try multiple URL variations for NVIDIA packages
+        let mut candidates = Vec::new();
+
+        // Strip prefixes and CUDA version suffixes
+        let base_name = lower
             .strip_prefix("nvidia-")
             .or_else(|| lower.strip_prefix("cuda-"))
-            .unwrap_or(&lower)
+            .unwrap_or(&lower);
+
+        let clean_name = base_name
             .replace("-cu11", "")
             .replace("-cu12", "")
-            .replace("-cu13", "");
+            .replace("-cu13", "")
+            .replace("_", "-");
 
-        let generic_url = format!("https://github.com/NVIDIA/{}", clean_name);
-        if let Ok(resp) = ureq::head(&generic_url).call() {
-            if resp.status() == 200 {
-                eprintln!("info: automatically found source repository: {}", generic_url);
-                return Some(generic_url);
+        // Generate candidate URLs
+        candidates.push(format!("https://github.com/NVIDIA/{}", clean_name));
+
+        // For nvidia-cuda-* packages, also try without the cuda- prefix
+        if let Some(after_cuda) = clean_name.strip_prefix("cuda-") {
+            candidates.push(format!("https://github.com/NVIDIA/{}", after_cuda));
+            candidates.push(format!("https://github.com/NVIDIA/cuda-{}", after_cuda));
+        }
+
+        // Try the original package name too
+        candidates.push(format!("https://github.com/NVIDIA/{}", pkg_name.replace("_", "-")));
+
+        for url in &candidates {
+            eprintln!("  trying: {}", url);
+            if let Ok(resp) = ureq::head(url).call() {
+                if resp.status() == 200 {
+                    eprintln!("  ✓ found source repository: {}", url);
+                    return Some(url.clone());
+                }
             }
         }
+
+        eprintln!("  ✗ no source repository found after trying {} URLs", candidates.len());
     }
 
     None
