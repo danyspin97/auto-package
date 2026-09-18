@@ -1,63 +1,17 @@
-//! AI-assisted spec repair.
+//! AI-assisted spec repair — tool-using turn loop only (REDESIGN §2.4).
 //!
-//! On a build failure: extract the error context, send the spec and the
-//! excerpt to Claude, get a replacement spec back. Repeat until the build
-//! passes or the retry limit is reached.
-//!
-//! Three backends, tried in order:
-//! 1. **Vertex AI** — set `AUTO_PACKAGE_GCP_PROJECT` (or configure a default
-//!    project with `gcloud config set project`). Token from
-//!    `gcloud auth print-access-token`. Override region with
-//!    `AUTO_PACKAGE_GCP_REGION` (default `us-east5`).
-//! 2. **Direct Anthropic API** — set `AUTO_PACKAGE_API_KEY`.
-//! 3. **`claude` CLI** — zero config; uses whatever session `claude` is
-//!    already authenticated with. Token counts come from `--output-format json`.
+//! The only backend is the `claude` CLI (`--agent-backend cli`). Vertex AI and
+//! direct-API backends are removed in M1 per REDESIGN §5.1.
 
-use std::cell::RefCell;
-use std::path::Path;
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use crate::context::{Escalation, Level};
-use crate::log::{ExtractedLog, PathMapper};
+use crate::log::ExtractedLog;
 
-const MODEL: &str = "claude-opus-5";
+// ── conventions ───────────────────────────────────────────────────────────────
 
-thread_local! {
-    /// Per-thread output sink for agent diagnostic lines.
-    ///
-    /// `None`  → write to stderr (CLI mode, spinner enabled).
-    /// `Some`  → call the closure (TUI mode, spinner suppressed).
-    ///
-    /// Each parallel build thread sets its own logger so lines from concurrent
-    /// packages don't conflict.
-    static AGENT_LOGGER: RefCell<Option<Box<dyn Fn(&str) + 'static>>> =
-        const { RefCell::new(None) };
-}
-
-/// Route agent diagnostic output through `f` for this thread.
-///
-/// Setting a logger automatically suppresses the indicatif spinner (which
-/// writes directly to stderr and corrupts any TUI or structured output).
-pub fn set_agent_logger(f: impl Fn(&str) + 'static) {
-    AGENT_LOGGER.with(|cell| *cell.borrow_mut() = Some(Box::new(f)));
-}
-
-/// Emit one agent log line — goes to the registered logger or to stderr.
-fn alog(msg: &str) {
-    AGENT_LOGGER.with(|cell| match cell.borrow().as_ref() {
-        Some(f) => f(msg),
-        None => eprintln!("{msg}"),
-    });
-}
-
-/// True when a custom logger is installed (TUI mode).
-fn has_custom_logger() -> bool {
-    AGENT_LOGGER.with(|cell| cell.borrow().is_some())
-}
-
-const CONVENTIONS: &str = "\
+const CONVENTIONS: &str = r#"
 openSUSE spec conventions to keep in mind:
 
 1. BuildRequires version constraints go INSIDE the macro with spaces around the operator:
@@ -65,82 +19,586 @@ openSUSE spec conventions to keep in mind:
    WRONG:     BuildRequires:  %{python_module setuptools} >= 77
    WRONG:     BuildRequires:  %{python_module setuptools>=77}
 
-2. Package name case normalization: pip/setuptools install using the normalized
-   (lowercase, underscores) name, not the PyPI display name. For example,
-   MarkupSafe installs as 'markupsafe'. This affects:
-   - %autosetup -n: use the lowercase sdist directory name
-   - %files: all installed paths use the lowercase name
-   - dist-info: 'markupsafe-%{version}.dist-info', NOT 'MarkupSafe-%{version}.dist-info'
+2. Normalized vs. display vs. import name — three different things:
+   - the DISPLAY name is what PyPI shows (`MarkupSafe`, `rich-toolkit`);
+   - the NORMALIZED name is lowercase with `-`/`.` turned into `_`
+     (`markupsafe`, `rich_toolkit`). The dist-info directory is always
+     `<normalized>-%{version}.dist-info/`, and the generator already writes it;
+   - the IMPORT name is whatever directory actually lands in site-packages,
+     and it is frequently neither of the above. Never derive it — look it up.
+     Convention 13 says how.
+   `%autosetup -n` takes the tarball's top-level directory, which is usually
+   but not always the normalized name; the generator sets it from the tarball.
 
-3. Architecture and C dependencies: if the package has C extensions (.so files):
+3. Architecture: a package is arch-specific only if it actually COMPILES an
+   extension, not merely because C sources are present in the tarball. The
+   generator switches to the arch macros whenever it finds a `.c`/`.cpp`/`.cc`/
+   `.pyx` file, which is right far more often than not but is still a guess.
+   Confirm it: look for `ext_modules=` / `Extension(` in setup.py, a
+   `[tool.scikit-build]` section or CMakeLists.txt, `cffi_modules`, or a `.pyx`
+   the build actually cythonizes. If there is no compiled extension, put
+   `BuildArch: noarch` back and switch `%{python_sitearch}` to
+   `%{python_sitelib}` throughout — a pure-Python package installed to sitearch
+   fails %files with 'File not found'. If there IS a compiled extension:
    - Use %{python_sitearch} instead of %{python_sitelib}
-   - Remove 'BuildArch: noarch'
+   - Do not set 'BuildArch: noarch'
+   - Use %pytest_arch rather than %pytest in %check
    - Add BuildRequires for any C libraries the extension links against,
      e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
      for cffi. Check the build errors or setup.py/pyproject.toml for hints.
+   - When the headers come from a *Python* package, the base package does not
+     carry them — the -devel flavour does. A build that fails on
+     `pybind11/pybind11.h: No such file` needs
+     `BuildRequires: %{python_module pybind11-devel}`, not
+     `%{python_module pybind11}`. The same applies to any
+     `fatal error: ...: No such file or directory` naming a header that a
+     Python dependency is supposed to provide.
+   - `Python.h: No such file` means `%{python_module devel}` is missing.
    - Remove installed C source files in %install:
        %python_expand rm -f %{buildroot}%{$python_sitearch}/<pkg>/*.c
 
-4. Use %pyproject_wheel / %pyproject_install for PEP 517 packages.
+4. Maturin packages (build-backend = "maturin" in pyproject.toml) compile Rust
+   extensions inside a Python sdist. They follow the Python conventions but need
+   a specific Rust-offline pattern. Do NOT add cargo-packaging macros or
+   %{cargo_build} — maturin drives the Rust build via %pyproject_wheel.
 
-5. Always include a %check section with %pytest_arch (C extensions) or %pytest
+   Detect: `build-backend = "maturin"` in sdist/pyproject.toml.
+
+   Required additions (all mandatory for maturin packages):
+
+   a. Sources:
+        Source1:        registry.tar.zst
+      (registry.tar.zst is generated by the build pipeline via `osc service ra`
+      before the first build; it will already be present in the OBS checkout)
+
+   b. BuildRequires (add all of these):
+        BuildRequires:  %{python_module devel}
+        BuildRequires:  %{python_module maturin}
+        BuildRequires:  %{python_module pip}
+        BuildRequires:  cargo-packaging
+        BuildRequires:  gcc-c++
+        BuildRequires:  zstd
+
+   c. Architecture restriction (Rust only builds on supported targets):
+        ExclusiveArch:  %{rust_tier1_arches} riscv64
+
+   d. %prep — extract registry offline, then remove any stale .cargo dir:
+        %autosetup -p1 -n <pkg>-%{version}
+        rm -rfv .cargo
+        tar xf %{SOURCE1} -C $PWD
+
+   e. %build — set CARGO env vars so maturin builds fully offline:
+        export CARGO_HOME=$PWD/.cargo
+        export CARGO_NET_OFFLINE=true
+        export CARGO_PROFILE_RELEASE_DEBUG=full
+        export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
+        export CARGO_PROFILE_RELEASE_STRIP=false
+        %pyproject_wheel
+
+   f. %install — repeat the CARGO vars (they do not persist across sections):
+        export CARGO_NET_OFFLINE=true
+        export CARGO_PROFILE_RELEASE_DEBUG=full
+        export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
+        export CARGO_PROFILE_RELEASE_STRIP=false
+        %pyproject_install
+        %python_expand %fdupes %{buildroot}/%{$python_sitearch}/*
+        find %{buildroot} -name _current_flavor -delete
+
+   g. %check — when the upstream test suite needs something the build worker
+      cannot have (a GPU, network access, model weights fetched at run time),
+      use an import smoke test instead, ON ONE LINE. If it only needs a
+      dependency that is not packaged yet, report that dependency instead and
+      keep the real tests — see convention 23.
+        %python_expand d=$(mktemp -d) && cd "$d" && PYTHONPATH=%{buildroot}%{$python_sitearch} $python -c "import <pkg>"
+      This must not be split across lines with backslash continuations:
+      inside %python_expand the continuation breaks the expansion and you get
+      a literal `$python` and a `PYTHONPATH=...%{}` with the sitearch missing.
+      Run the smoke test from a fresh empty directory (NOT the source tree,
+      which would shadow the installed extension with the source package).
+
+   h. %files %{python_files} — use %{python_sitearch}:
+        %{python_sitearch}/<pkg>/
+        %{python_sitearch}/<pkg>-%{version}.dist-info/
+
+5. License must be a valid SPDX expression. The generator copies whatever
+   PyPI metadata says, which is often unusable:
+   - `License: FIXME` means PyPI carried no usable license field. Read
+     source/pyproject.toml (`[project] license`), source/setup.py, or the
+     LICENSE file itself, and write the SPDX expression it states — e.g.
+     `Apache-2.0 WITH LLVM-exception`, `BSD-3-Clause`, `MIT`.
+   - Free text that is not SPDX (`BSD-derived (http://www.repoze.org/...)`,
+     `Apache Software License`) must be translated. openSUSE also defines
+     aliases for licenses with no SPDX id, e.g. `SUSE-Repoze` for the Repoze
+     BSD variant; use those rather than inventing an expression.
+   - Also add `%license <file>` to %files naming the actual license file in
+     the sdist, if the generator did not.
+
+6. Use %pyproject_wheel / %pyproject_install for PEP 517 packages.
+
+7. Always include a %check section with %pytest_arch (C extensions) or %pytest
    (pure Python) and add 'BuildRequires: %{python_module pytest}' for it.
 
-6. For multi-flavor builds (standard Factory pattern), the spec should use
+8. For multi-flavor builds (standard Factory pattern), the spec should use
    '%global flavor @BUILD_FLAVOR@%{nil}' with a 'test' flavor that only runs
    %check. The %build/%install/%files sections should be inside
    '%if !%{with test}', and %check inside '%if %{with test}'.
    This lets OBS build and test in separate subpackages.
 
-7. Build resources: there are no constraints on RAM or CPU. Always use the
+9. Build resources: there are no constraints on RAM or CPU. Always use the
    maximum available parallelism — never add '-j1' or any other job limit to
    make, cmake, or pytest invocations.
 
-8. Test failures: attempt to fix a failing test up to twice before giving up
-   (e.g. by adding a patch, adjusting the %check invocation, or adding a
-   missing test dependency). These two attempts do not count against the
-   build budget. Only skip the specific failing tests (via pytest's -k or
-   --ignore) after two unsuccessful fix attempts, and only as a last resort
-   — never skip the entire %check section.
+10. Test failures. First ask whether the tests failed because something is
+   *missing* or because they *cannot run here*:
 
-9. File reading: when you receive an \"Available source files\" manifest, you
-   may request the content of any listed file by adding its path to
-   `files_needed`. The build system will read those files and call you again
-   with their contents before you must produce the final fix. Request only
-   the files you actually need — each costs tokens.
+   **Missing dependency** — add it. Look in pyproject.toml
+   [project.optional-dependencies] / [dependency-groups] or setup.cfg
+   [options.extras_require] for the package, and add
+   `BuildRequires: %{python_module <name>}`. If OBS does not have it yet, put
+   its RPM name in `unresolvable_packages` and it will be built first — that
+   applies to large packages like torch just as much as to small ones
+   (convention 23). Only skip the tests instead when the dependency has
+   already been tried and failed (convention 12 Step B).
 
-10. Missing module in %check (e.g. `ModuleNotFoundError: No module named
+   **Cannot run here** — network, GPU, root, a real display, model downloads,
+   a fixture the sdist does not ship. Skip them, and never with '|| true' or
+   any other suppression of the exit code. Work down this ladder and stop at
+   the first rung that applies: each rung keeps more coverage than the one
+   below it, and an empty %check is the only outcome that catches nothing.
+
+   (i)   Deselect individual tests:  %pytest -k 'not test_foo and not test_bar'
+   (ii)  Ignore a file or directory: %pytest --ignore=tests/contrast
+         If the macro mangles a path argument, set the option through the
+         environment instead — this always works:
+           export PYTEST_ADDOPTS="--ignore=tests/contrast"
+           %pytest
+         Deleting the directory in %prep also works, but only do that when the
+         files must not reach the buildroot either.
+   (iii) Clear upstream options that do not apply here: %pytest -o addopts=''
+   (iv)  Replace the suite with an import smoke test. Do this when the tests
+         need something no build worker can have and no package can supply —
+         a GPU device, network access, a display, weights downloaded at run
+         time. A dependency that is merely not packaged yet is NOT this case:
+         report it instead (convention 23). The smoke test still proves the
+         extension compiled and the package imports, which is most of what
+         %check is for in a distro build:
+           %python_expand d=$(mktemp -d) && cd "$d" && PYTHONPATH=%{buildroot}%{$python_sitearch} $python -c "import <import-name>"
+         (use $python_sitelib for a pure-Python package). Run it from a fresh
+         empty directory — from the source tree, the source package shadows
+         the installed one and the test proves nothing.
+   (v)   Only if even importing is impossible (the module needs a GPU at
+         import time), remove %check and leave a comment saying why.
+
+   Prefer narrowing to deleting: if two tests out of two hundred cannot run,
+   deselect those two. A missing conftest.py or test fixture makes the tests
+   that use it unrunnable — ignore those files, do not throw away the suite.
+
+   Write any such comment WITHOUT a '%' character, because RPM expands macros
+   inside comments (see the note below the conventions). Write
+   `# TODO: tests are not run - all tests require network access`, never
+   `# no %check - ...`. Never leave %check empty, never add '|| true', and
+   never add '|| [ "$?" = "5" ]'.
+
+   Pytest exit code 5 (no tests collected): the tests exist but pytest
+   couldn't find them. Read pyproject.toml/setup.cfg to find `testpaths` or
+   `tool.pytest.ini_options`, then pass the path explicitly, e.g.
+   `%pytest_arch tests/` or `%pytest_arch src/<pkg>/tests/`.
+
+   ALWAYS read `[tool.pytest.ini_options] addopts` (pyproject.toml) or
+   `[tool:pytest] addopts` (setup.cfg) before the first build. Upstream
+   addopts are written for a git checkout and routinely break a package
+   build. The two that matter:
+   - Coverage gates. `addopts = --cov=<pkg> --cov-report=... ` together with
+     `fail_under = 100` fails the build on files the build root does not
+     exercise, even when every test passes. Do NOT add pytest-cov to make the
+     flag work, and do NOT rely on `-p no:cov` — addopts loads the plugin
+     before the disable takes effect. Clear the options outright:
+       %pytest -o addopts=''
+   - `--benchmark`, `-n auto` (xdist), `--strict-markers` against plugins you
+     have not packaged: same treatment, clear addopts and pass the test path
+     explicitly.
+   Clearing addopts is not suppressing a failure — the tests still run and
+   still have to pass.
+
+11. Tools available — USE THEM:
+   - Read: get line-numbered file content (use for build.log, pyproject.toml, setup.py)
+   - Grep: search for patterns (use to find test dependencies, entry points, etc.)
+   - Edit: modify the spec file or source files under source/
+   - Bash(rpmspec *): run `rpmspec --parse spec` to validate syntax
+   - Bash(cd source && quilt *): create and manage source patches using quilt.
+     QUILT_PATCHES is already set to the OBS checkout directory, so patches land
+     there automatically. Workflow for each logical fix:
+       cd source && quilt new 0001-short-description.patch
+       cd source && quilt add path/to/file.py   # BEFORE editing the file
+       # Edit source/path/to/file.py using the Edit tool
+       cd source && quilt refresh
+     Each patch must be small and self-contained (one logical fix per patch).
+     After creating patches, add them to the spec header using Edit:
+       Patch0: 0001-short-description.patch
+       Patch1: 0002-another-fix.patch
+     %autosetup -p1 in %prep applies them automatically — no %patch lines needed.
+
+   If you need information, READ IT. Don't say "I need to check" without calling Read/Grep.
+   NEVER state a structural fact about the package (e.g. "has no tests", "uses cmake",
+   "no C extensions") without first verifying it with Read or Grep. Assumption is not
+   evidence. If you cannot verify it with the tools available, say so in reasoning.
+
+12. Missing module in %check (e.g. `ModuleNotFoundError: No module named
    'conftest'` or any other import error): a test dependency is absent.
    Read the packaging file (pyproject.toml [project.optional-dependencies] /
    setup.cfg [options.extras_require]) to identify all test deps and add
-   them as `BuildRequires: %{python_module <dep>}`. If a required package
-   is not yet available in the OBS project and must be built first, include
-   its PyPI name in `missing_packages` so the build system can queue it
-   automatically. Only list packages that genuinely need to be built; omit
-   ones already available (e.g. in Factory).
+   them as `BuildRequires: %{python_module <dep>}`.
 
-11. Spec comments: the spec may begin with `# ap: gen:` lines that document
-   generation decisions (detected backend, test status, architecture). These
-   are ground truth — do NOT remove or contradict them. For example, if you
-   see `# ap: gen: tests: none in sdist — %%check omitted`, do not add a
-   %%check section. When you make a fix, add ONE new line immediately before
-   the first line you changed:
-       # ap: fix N: <one sentence: what changed and why>
-   where N is the current attempt number (provided in the prompt). Preserve
-   all existing `# ap:` lines unchanged.
+   **Step A — schedule the dep (first time you see it missing):**
+   If the package is not yet in OBS, add its
+   RPM name to `unresolvable_packages` so the build system can build it and
+   retry. Also add `BuildRequires: %{python_module <dep>}` so OBS installs it
+   during the test run once it is available.
 
-12. %files paths must be exact — never use shell globs (e.g. never write
+   **Step B — skip the tests (only when the dep was tried and could not be
+   built):** look for the dep under the "Dependencies that failed to build"
+   heading above, or in notes.md. That heading lists packages this run
+   actually attempted and failed on; reporting one of them again just restarts
+   a loop that has already run once. For those, skip the tests that need them
+   with `%pytest -k 'not <test>'` or `--ignore=<path>` and say so in your
+   reasoning.
+
+   A dep under "Missing BuildRequires", or one you have not seen fail at all,
+   is Step A — report it, however heavyweight it looks.
+
+   If the spec has the wrong RPM package name, fix the name instead.
+
+13. The import name is often NOT the package name — look it up, do not derive
+   it. The spec generator normalizes the dist-info directory for you
+   (`rich_toolkit-%{version}.dist-info/` is always right), but the module
+   directory is whatever the project actually installs, and for a large
+   minority of packages that is a different word entirely:
+     PyJWT → jwt/        opencv-python-headless → cv2/
+     z3-solver → z3/     pillow → PIL/         nvidia-ml-py → pynvml.py
+   Before writing any `%{python_sitelib}/…` or `%{python_sitearch}/…` module
+   line, confirm the name from one of these, in order of reliability:
+     - `source/*.egg-info/top_level.txt` (one name per line — definitive)
+     - `[tool.setuptools] packages` / `package-dir` in source/pyproject.toml
+     - `packages=[...]` in source/setup.py
+     - the top-level directories in source/ that contain an `__init__.py`
+   Note the package may install several top-level names (PyYAML installs both
+   `yaml/` and `_yaml/`); list every one.
+
+14. %files paths must be exact — never use shell globs (e.g. never write
    'outlines_core*' or 'Package-*'). The standard entries for a Python package:
    - Module directory:    %{python_sitelib}/package_name/
    - dist-info:          %{python_sitelib}/package_name-%{version}.dist-info/
    - C extension module: %{python_sitearch}/package_name/
-   A trailing '*' risks claiming unrelated files and causes 'file listed twice'
-   errors. Always use the exact normalized (lowercase) path. If you are unsure
-   of the exact path, consult the BUILDROOT listing in the context.
+   `package_name` above stands for the IMPORT name from convention 13, not the
+   PyPI name. A trailing '*' risks claiming unrelated files and causes 'file
+   listed twice' errors. If you are unsure of the exact path, grep build.log
+   for the `BUILDROOT/` paths rpm reported — an 'Installed (but unpackaged)'
+   error lists every file it found, which is exactly the set %files must
+   account for.
 
-13. RPM macros use single '%', never '%%'. For example: %check, %install,
+   Entrypoints (console scripts): if the package declares [project.scripts] or
+   entry_points['console_scripts'] in its pyproject.toml/setup.cfg, each script
+   MUST use the openSUSE python_alternative pattern. Check pyproject.toml or
+   setup.cfg with Read/Grep to find all declared scripts, then add ALL of the
+   following sections for each script named <script>:
+
+   In %install (after %pyproject_install, one line per script):
+     %python_clone -a %{buildroot}%{_bindir}/<script>
+   Also add at the end of %install:
+     %python_expand %fdupes %{buildroot}/%{$python_sitelib}
+
+   Example full %build/%install block for a package with a 'khard' script:
+
+     %build
+     %pyproject_wheel
+
+     %install
+     %pyproject_install
+     %python_clone -a %{buildroot}%{_bindir}/khard
+     %python_expand %fdupes %{buildroot}/%{$python_sitelib}
+
+   Add these package-level requires (once, not per script):
+     Requires(post):   update-alternatives
+     Requires(postun): update-alternatives
+
+   In %post/%postun (one pair per script):
+     %post
+     %python_install_alternative <script>
+
+     %postun
+     %python_uninstall_alternative <script>
+
+   In %files %{python_files}:
+     %python_alternative %{_bindir}/<script>
+
+   Missing %python_clone causes 'Installed (but unpackaged) file(s) found' for
+   the /usr/bin/ paths. Missing %python_expand %fdupes causes duplicate-file
+   errors. The dist-info directory also records entry points — if the script
+   list in the spec does not match what the dist-info declares, grep the
+   build log's BUILDROOT for the installed binaries to confirm.
+
+15. RPM macros use single '%', never '%%'. For example: %check, %install,
    %{version}, %{python_module foo}. Only use %% when you need a literal
-   percent character in the spec file output (which is rare).";
+   percent character in the spec file output (which is rare).
+
+16. Python macros: ONLY use macros documented in the openSUSE wiki page
+   "Packaging/Python" (https://en.opensuse.org/openSUSE:Packaging_Python).
+   Do NOT invent macros. If you are unsure whether a macro exists, do not
+   use it — fall back to an explicit shell command instead.
+
+IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
+   `# changed %install`, `# removed %check`). RPM expands macros inside comment
+   lines, which can make the spec fail to parse with cryptic errors like
+   `Unknown tag: set +x`. Record your reasoning in the `reasoning` response field
+   instead — it is kept in the run log and in notes.md, where the next attempt
+   will read it.
+
+17. BuildRequires takes ONE simple constraint — not PEP 508. A requirement
+   string copied out of pyproject.toml usually will not work. Reduce it to a
+   single `name >= version` (or a bare name):
+   - `!=` is not supported at all. `>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2`
+     becomes `>= 0.1.6`. Never leave a `!=` in any BuildRequires line.
+   - Multiple comma-separated constraints are not supported: keep the `>=`
+     lower bound and drop the rest. `>=0.9.8,<0.10.0` becomes `>= 0.9.8`.
+   - Environment markers are not supported and make the spec fail to parse:
+     drop everything from the `;` onwards. `numpy>=2.0; python_version>="3.9"`
+     becomes `numpy >= 2.0`. If the marker means the dep is genuinely optional
+     on this platform, leave the dep out rather than encoding the marker.
+   - Extras in brackets are not supported: `requests[socks]` becomes
+     `requests`; add the extra's own dependencies separately if the build
+     needs them.
+
+18. Dynamic version and metadata providers need their own BuildRequires, and
+   they are not listed in `[build-system] requires`. Symptoms are an import
+   error from inside the build backend, or a version that resolves to 0.0.0.
+   Read pyproject.toml before the first build and look for:
+   - `[tool.setuptools_scm]`, or `dynamic = ["version"]` with a setuptools_scm
+     provider, or a `setup.py` that calls `setuptools_scm.get_version()`. The
+     sdist has no `.git`, so add `BuildRequires: %{python_module setuptools-scm}`
+     AND export the version in %build and %install:
+       export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
+   - `metadata.version.provider` / `metadata.readme.provider` under
+     `[tool.scikit-build]`. Each provider is a separate package that must be a
+     BuildRequires of its own — e.g. `scikit_build_core.metadata.setuptools_scm`
+     needs setuptools-scm, and the `fancy_pypi_readme` provider needs
+     `%{python_module hatch-fancy-pypi-readme}`. Add every provider named in
+     the file in one edit; discovering them one failed build at a time costs
+     an attempt each.
+
+19. Stray top-level files in site-packages: a package can install files at the
+   top of site-packages that are not part of its library and must not be
+   shipped. Three sources, all handled the same way:
+   - build infrastructure listed in `[tool.setuptools] py-modules`
+     (pyproject.toml) or `py_modules` (setup.py/setup.cfg) — names like
+     `build_backend`, `build_utils`, `_build`;
+   - usage examples and scratch scripts — `example.py`, `demo.py`, `test.py`,
+     a top-level `conftest.py`;
+   - anything else that appears as a bare `.py` in an
+     `Installed (but unpackaged) file(s) found` list.
+   Owning a generic name like `example.py` at the root of site-packages would
+   collide with every other package that does the same, so remove it rather
+   than adding it to %files. Remove each one (and its `__pycache__` bytecode)
+   in `%install`:
+
+     %python_expand rm -f %{buildroot}%{$python_sitelib}/build_backend.py
+     %python_expand rm -f %{buildroot}%{$python_sitelib}/__pycache__/build_backend.cpython-*.pyc
+
+   Always remove both the `.py` file and its corresponding `__pycache__` entry;
+   removing only the `.py` leaves orphan `.pyc` files that trigger the same error.
+
+20. rpmlint devel-file-in-non-devel-package: Each bundled C/C++ header
+   (`.h`, `.hpp`) in a non-devel package generates a `devel-file-in-non-devel-package`
+   rpmlint error (Badness: 50). Packages that bundle 3rdparty C/C++ libraries
+   under `data/`, `3rdparty/`, `include/`, or similar subdirectories can easily
+   accumulate thousands of headers, pushing total rpmlint badness above the 999
+   threshold and failing the build. Check the rpmlint output in the build log
+   for `devel-file-in-non-devel-package` warnings. If present, remove the
+   offending directories in `%install`:
+
+     %python_expand rm -rf %{buildroot}%{$python_sitelib}/<pkg>/data/
+
+   These bundled C/C++ sources are build-time artifacts that have no use at
+   runtime in the RPM environment (they require CUDA, GPU, etc.) and should
+   always be stripped.
+
+21. rpmlint badness is a budget: the build fails when the TOTAL exceeds 999,
+   so the fix is whichever group of files contributes the most, not the first
+   error in the log. Find the line `Badness NNNN exceeds threshold 999` and
+   read the errors above it with their per-error badness. The usual big
+   spenders, in descending order:
+   - `wrong-script-interpreter` / `env-script-interpreter` on files that are
+     not meant to be executed at all — test fixtures, helper scripts, files
+     with a templated `#!<<PYTHON>>` shebang. Badness 490 each adds up in
+     four files. Delete the directory in %install rather than patching each
+     shebang:
+       rm -rf %{buildroot}%{$python_sitelib}/<pkg>/tests/
+       rm -rf %{buildroot}%{$python_sitelib}/<pkg>/scripts/
+   - `devel-file-in-non-devel-package` (convention 20), Badness 50 each.
+   Removing test and script directories from the installed package is normal
+   openSUSE practice — they are not part of the library's runtime surface.
+
+22. Source taken from a repository, not from a PyPI sdist: when PyPI publishes
+   only wheels, the tarball is a snapshot of the upstream repository, and it
+   does not have an sdist's shape. Check for these before the first build:
+   - **The project may be in a subdirectory.** A monorepo tarball has no
+     pyproject.toml at the top; the packaging files sit in something like
+     `cuda_python/` or `python/` or `src/<pkg>/`. The generator finds that
+     directory and has already put `cd <subdir>` at the top of %build and
+     %install, with `%autosetup -n` still pointing at the tarball's top-level
+     directory — check it picked the right one. If the archive holds several
+     projects they are listed above, and convention 24 governs the layout.
+   - **The version is not baked in.** A repository checkout has no PKG-INFO
+     and often no `.git`, so a dynamic version resolves to 0.0.0 or the build
+     backend fails outright — convention 18 covers the fix.
+   - **Extra top-level content.** CI configuration, docs, benchmarks and
+     vendored third-party trees come along with a repository archive and none
+     of it belongs in the RPM; conventions 19 and 20 cover removing it.
+
+23. A dependency missing from OBS is something to BUILD, not something to work
+   around. Reporting it in `unresolvable_packages` is how it gets packaged:
+   the build system queues it, builds it, and retries this package afterwards.
+   That is the whole job. torch, jax and the rest of the ML stack are in scope
+   exactly like any other dependency — do not treat a big or awkward package
+   as out of reach, and do not disable a feature or drop a test suite merely
+   because its dependency is not in OBS yet.
+
+   IMPORTANT: CUDA libraries (libcuda, libcudart, etc.) are provided by the
+   system. Add them as BuildRequires when a package needs them, and do not
+   skip packages that require CUDA libraries — they will be available in the
+   build environment.
+
+   CUDA Python ecosystem libraries are all open source and available on GitHub.
+   When encountering any of these as dependencies, they should be packaged:
+   cuda-python (cuda.core, cuda.bindings, cuda.pathfinder), cuda-compute,
+   numba-cuda-mlir, cuda-tile, nvmath-python (nvmath.bindings), nvshmem4py,
+   and similar NVIDIA CUDA Python libraries. Do not skip packages that depend
+   on these — report them in `unresolvable_packages` so they can be built.
+
+   Report it, and keep the spec honest in the meantime: leave the
+   `BuildRequires: %{python_module <dep>}` in place so the build uses the
+   package once it exists.
+
+   There are exactly two situations where working around a dependency is
+   right, and both need evidence, not a guess about how hard it looks:
+   - it has already been tried and failed — it is listed above under
+     "Dependencies that failed to build", or notes.md records the attempt.
+     Convention 12 Step B covers this; skip the tests that need it and say why.
+   - the tests need something no build worker has and no package can supply:
+     a GPU device, network access, a display, credentials, model weights
+     downloaded at runtime. That is a property of the build environment, not
+     a missing package. Convention 10 rung (iv) covers it.
+
+24. Monorepos: package ALL sibling projects as subpackages of this one spec.
+   When the "Other projects in this archive" section above lists more than one
+   project, the default is ONE source package that builds ALL of them, with a
+   subpackage per project — not one project built and the rest thrown away,
+   and not a separate OBS package per subdirectory. They share a tarball, a
+   version and a release cycle, which is exactly what subpackages are for, and
+   splitting them would mean checking the same source in several times.
+
+   CRITICAL — the source package name and the subpackages:
+   - The top-level `Name:` field stays as given (e.g. `python-cuda-python`).
+     Do NOT rename it to match one of the subprojects.
+   - Every relevant subproject becomes a `%package -n python-%{name}-<sub>`
+     section (or the appropriate openSUSE Python subpackage macro). None of
+     them replaces or is promoted to the top-level package.
+   - The top-level package itself may be a metapackage (empty %files, only
+     Requires on each subpackage) if there is no module at the root level.
+   - Do NOT create a separate OBS package for a subproject that belongs here.
+     If you find yourself writing a spec whose Name: is a sub-project of the
+     archive (e.g. `Name: python-cuda-bindings` inside the cuda-python zip),
+     stop — restructure so that subproject is a `%package` block instead.
+
+   The shape:
+   - %build and %install change into each project directory in turn and run
+     %pyproject_wheel / %pyproject_install there. Keep them in dependency
+     order if one subproject builds against another.
+   - each project gets its own subpackage with its own %files listing only
+     that project's module directory and dist-info, its own Summary and
+     %description, and Requires on its siblings where the code imports them.
+   - a metapackage subproject (one with a pyproject.toml, no module of its
+     own, and dependencies on the others) becomes a subpackage with an empty
+     %files and Requires on each sibling.
+   - NEVER add BuildRequires for a sibling subpackage defined in this same
+     spec. Siblings are built and installed into the buildroot before %check
+     runs; they are always present. A BuildRequires on a sibling is a circular
+     dependency OBS cannot resolve. Use PYTHONPATH=%{buildroot}%{python_sitearch}
+     (or sitelib) in %check to make sibling modules importable instead.
+   Check the exact subpackage and %files macro spelling against the openSUSE
+   Packaging/Python wiki page (convention 16) and confirm with
+   `rpmspec --parse` before you finish — do not guess at macro names.
+
+   This is the usual answer, not a rule. Leave a project out, and say in your
+   reasoning that you did, when:
+   - it is not a shipped artefact — examples/, benchmarks/, docs/, a test
+     harness, an internal build helper;
+   - it is a different product that merely shares the repository, with its own
+     version and no dependency either way;
+   - it cannot build here at all (convention 10), in which case package the
+     ones that can rather than failing the whole spec.
+   Never package a subproject you have not opened: read each pyproject.toml
+   before deciding it is in or out.
+
+── Rust / Cargo packages ─────────────────────────────────────────────────────
+
+IMPORTANT: R1–R6 apply ONLY to standalone Rust packages (binaries/libraries
+   built entirely with Cargo). They do NOT apply to Python packages whose
+   build backend happens to be maturin — those follow the Python conventions
+   above (convention 4 covers maturin specifically).
+
+R1. Rust packages use `cargo-packaging` macros. The mandatory global and
+   BuildRequires are:
+
+     %global rustflags '-Clink-arg=-Wl,-z,relro,-z,now'
+
+     BuildRequires:  cargo-packaging
+     BuildRequires:  pkgconf
+     BuildRequires:  pkgconfig
+
+   Add `BuildRequires: pkgconfig(<lib>)` for every C library the crate links
+   against (e.g. `pkgconfig(libpcre2-posix)` for pcre2).
+
+R2. Vendored dependencies are distributed as a second source tarball:
+
+     Source1:        vendor.tar.zst
+
+   Extract both in %prep with:
+
+     %autosetup -p1 -a1
+
+R3. Build with the `%{cargo_build}` macro. Pass optional Cargo features with
+   `--features '<feature1> <feature2>'`:
+
+     %build
+     %{cargo_build} --features 'pcre2'
+
+   Do NOT add `-j` flags — the macro already uses maximum parallelism.
+
+R4. Install binaries manually (no install macro exists for Rust):
+
+     %install
+     install -D -d -m 0755 %{buildroot}%{_bindir}
+     install -m 0755 %{_builddir}/%{name}-%{version}/target/release/<binary> \
+             %{buildroot}%{_bindir}/<binary>
+
+R5. Shell-completion subpackages (bash, zsh, fish): each is `BuildArch: noarch`
+   and uses `Supplements: (%{name} and <shell>)` rather than a hard `Requires`.
+   Completions are generated during `%build` and installed from the build tree.
+   Example for a package that generates completions at build time:
+
+     %package bash-completion
+     Summary:        Bash Completion for %{name}
+     Group:          System/Shells
+     Requires:       %{name} = %{version}
+     Requires:       bash-completion
+     Supplements:    (%{name} and bash)
+     BuildArch:      noarch
+
+R6. Some packages have both Cargo (Rust) and Python components. Mix the
+   relevant conventions freely — use `cargo-packaging` for the Rust parts and
+   the Python macros for the Python parts."#;
+
+// ── public types ──────────────────────────────────────────────────────────────
 
 /// Token counts and cost from one API call.
 #[derive(Debug, Clone, Default)]
@@ -149,19 +607,11 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
-    /// Pre-computed cost in USD from the CLI's own accounting. When set,
-    /// `cost_usd()` returns this directly instead of computing from token
-    /// counts (which include CLI session overhead and are misleading).
+    /// Pre-computed cost in USD from the CLI's own accounting.
     pub cli_cost_usd: Option<f64>,
 }
 
 impl Usage {
-    /// Cost in US dollars.
-    ///
-    /// Uses the CLI's `total_cost_usd` when available (CLI backend). For
-    /// HTTP backends, computes from token counts at direct API rates for
-    /// claude-opus-5: $5/MTok input, $25/MTok output, $6.25/MTok cache
-    /// write, $0.50/MTok cache read.
     pub fn cost_usd(&self) -> f64 {
         if let Some(usd) = self.cli_cost_usd {
             return usd;
@@ -186,12 +636,6 @@ impl Usage {
     }
 }
 
-enum Backend {
-    Vertex { project: String, region: String },
-    Direct { api_key: String },
-    Cli,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("could not run claude: {0}")]
@@ -199,12 +643,6 @@ pub enum Error {
 
     #[error("claude exited {code}:\n{stderr}")]
     Failed { code: i32, stderr: String },
-
-    #[error("gcloud auth print-access-token failed: {0}")]
-    GcloudAuth(String),
-
-    #[error("API request failed: {0}")]
-    Http(#[from] ureq::Error),
 
     #[error("unexpected response: {0}")]
     Parse(String),
@@ -222,25 +660,21 @@ pub enum Confidence {
     Low,
 }
 
-// ── agent-v2 public types ─────────────────────────────────────────────────────
-
 /// Which task the agent should perform this turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Task {
-    /// No build has run yet — inspect the generated spec before the first build.
+    /// Inspect the generated spec before the first build.
     Review,
-    /// `build.log` in the workspace holds a failed `osc build`.
+    /// Fix the spec after a failed `osc build`.
     FixAfterBuild,
-    /// `rpmspec.txt` in the workspace holds a failed `rpmspec --parse`.
+    /// Fix the spec after a failed `rpmspec --parse`.
     FixAfterValidation,
 }
 
 /// Per-turn tool-call and token budget.
 #[derive(Debug, Clone)]
 pub struct TurnBudget {
-    /// Maximum number of tool calls the agent may make before it must `finish`.
     pub max_tool_calls: usize,
-    /// Maximum input+output tokens for this turn.
     pub max_tokens: u64,
 }
 
@@ -252,63 +686,88 @@ impl Default for TurnBudget {
 
 /// Input to one agent turn.
 pub struct TurnRequest<'a> {
-    /// The workspace root (REDESIGN §2.2).
     pub workspace: &'a std::path::Path,
-    /// PyPI package name (e.g. `markupsafe`).
     pub pkg_name: &'a str,
     pub version: &'a str,
-    /// What kind of turn this is.
     pub task: Task,
-    /// 1-based attempt counter covering all turns for this package.
     pub attempt: usize,
     pub max_attempts: usize,
-    /// Total USD spent so far across all prior turns for this package.
     pub spent_usd: f64,
-    /// Heuristic extract from the log — a hint, not a filter. `None` for Review.
-    pub hint: Option<&'a crate::log::ExtractedLog>,
-    /// Contents of `notes.md` from the workspace.
+    /// Total USD budget for the whole package, so the turn can be capped at
+    /// whatever is left rather than being allowed to overrun it in one call.
+    pub budget_usd: f64,
+    pub hint: Option<&'a ExtractedLog>,
     pub notes: &'a str,
     pub budget: TurnBudget,
+    /// The tarball is a repository archive rather than a PyPI sdist.
+    pub from_repo_archive: bool,
+    /// Sibling projects found next to the one being built, as
+    /// `(directory, declared name)`. Non-empty only for a monorepo.
+    pub subprojects: &'a [(String, String)],
+    /// Packages OBS reported as unresolvable during the last build attempt.
+    pub unresolvable_deps: &'a [String],
+    /// Packages this run already tried to build, and failed to. These are the
+    /// only ones it is right to work around rather than report again.
+    pub failed_deps: &'a [String],
+    /// Session ID from the previous turn, used to resume the claude session.
+    pub session_id: Option<&'a str>,
+    /// OBS checkout directory — when set, QUILT_PATCHES is pointed here so the
+    /// agent can create patches that land directly in the OBS package directory.
+    pub checkout_dir: Option<&'a std::path::Path>,
+    /// Optional short note injected into the prompt just before the hint section.
+    pub context: Option<&'a str>,
+    /// Called in real-time as each tool-use block is parsed, with `(tool_name,
+    /// input_summary)`. Used by the pipeline to stream AgentToolUse events
+    /// while the turn is still running so the TUI stays alive.
+    pub on_tool_use: Option<&'a (dyn Fn(&str, &str) + Send + Sync)>,
 }
 
-/// What the agent did this turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// The agent edited `spec`.
     Edited,
-    /// The agent found nothing to change.
     NoChange,
-    /// The agent believes no spec change can fix this.
     Blocked { why: String },
 }
 
-/// Result of one agent turn.
+/// One tool invocation the agent made during a turn.
+pub struct ToolCall {
+    pub name: String,
+    /// The tool's input, JSON-encoded and truncated to a readable length.
+    pub input: String,
+}
+
 pub struct TurnOutcome {
     pub action: Action,
     pub reasoning: String,
-    pub missing_packages: Vec<String>,
+    pub evidence: Vec<String>,
+    pub unresolvable_packages: Vec<String>,
     pub confidence: Confidence,
     pub usage: Usage,
-    pub tool_calls: usize,
-    /// True when the agent read beyond the supplied hint (grepped or read
-    /// build.log directly). Recorded as a quality metric for the extractor.
-    pub went_past_hint: bool,
-    /// The full prompt sent to the agent (for TUI display).
+    pub tool_calls: Vec<ToolCall>,
     pub prompt: String,
+    pub output: String,
+    /// The raw `result` payload from the CLI, before parsing.
+    pub raw: String,
+    pub session_id: Option<String>,
 }
 
-/// JSON schema for the v2 turn final answer (returned via `--json-schema`).
+// ── turn ──────────────────────────────────────────────────────────────────────
+
 const TURN_RESPONSE_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
     "action": {"type": "string", "enum": ["edited", "no_change", "blocked"]},
     "why": {"type": "string"},
     "reasoning": {"type": "string"},
+    "evidence": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Every file you Read or pattern you Grepped before editing, e.g. ['Read source/pyproject.toml', 'Grep for console_scripts in source/']. Must be non-empty when action is edited."
+    },
     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-    "missing_packages": {"type": "array", "items": {"type": "string"}},
-    "went_past_hint": {"type": "boolean"}
+    "unresolvable_packages": {"type": "array", "items": {"type": "string"}}
   },
-  "required": ["action", "reasoning", "confidence", "went_past_hint"],
+  "required": ["action", "reasoning", "evidence", "confidence"],
   "additionalProperties": false
 }"#;
 
@@ -317,111 +776,247 @@ struct TurnResponse {
     action: String,
     #[serde(default)]
     why: String,
+    #[serde(default)]
+    evidence: Vec<String>,
     reasoning: String,
     confidence: Confidence,
     #[serde(default)]
-    missing_packages: Vec<String>,
-    #[serde(default)]
-    went_past_hint: bool,
+    unresolvable_packages: Vec<String>,
 }
 
-/// Run one agent turn against the workspace (agent-v2).
+/// Run one agent turn. The agent has tool access to the workspace and edits
+/// `spec` in place. The caller is responsible for validating and rolling back
+/// on failure.
 ///
-/// The agent has full tool access to the workspace and edits `spec` in place.
-/// The caller is responsible for:
-/// - snapshotting `spec` before the call
-/// - running `rpmspec --parse` after and rolling back on failure
-/// - appending the result to `notes.md`
+/// Uses `--output-format stream-json` so the agent's text and tool calls are
+/// printed to stderr in real time as they arrive. The structured JSON response
+/// is parsed from the final `result` event in the stream.
 pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
-    let schema_path = req.workspace.join(".turn_schema.json");
-    std::fs::write(&schema_path, TURN_RESPONSE_SCHEMA).map_err(Error::Io)?;
-
-    if has_custom_logger() {
-        alog("  ⋯  waiting for Claude… (v2)");
-    }
-
-    let pb = if has_custom_logger() {
-        None
+    let allowed_tools = if req.checkout_dir.is_some() {
+        "Read,Grep,Edit,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *)"
     } else {
-        use indicatif::{ProgressBar, ProgressStyle};
-        use std::time::Duration;
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner} {msg}")
-                .expect("static template"),
-        );
-        pb.set_message("waiting for Claude… (v2)");
-        pb.enable_steady_tick(Duration::from_millis(100));
-        Some(pb)
+        "Read,Grep,Edit,Bash(rpmspec *)"
     };
 
-    let out = Command::new("claude")
-        .args([
-            "--print",
-            "--output-format",
-            "json",
-            "--json-schema",
-            schema_path.to_str().unwrap_or_default(),
-            "--permission-mode",
-            "acceptEdits",
-            "--add-dir",
-            req.workspace.to_str().unwrap_or_default(),
-            "--allowed-tools",
-            "Read,Grep,Edit,Bash(rpmspec *)",
-            "--bare",
-            "-p",
-            &prompt,
-        ])
+    // Escalate with the attempt number: Sonnet 5 handles the routine fixes at
+    // a fifth of the price, Opus 5 takes over once the cheap fixes have failed.
+    let model = if req.attempt <= 3 {
+        "claude-sonnet-5"
+    } else {
+        "claude-opus-5"
+    };
+
+    // Cap this turn at whatever is left of the package budget, so one runaway
+    // turn cannot overshoot it — the caller only checks between turns.
+    let remaining_usd = (req.budget_usd - req.spent_usd).max(0.01);
+
+    let mut cmd = Command::new("claude");
+    cmd.args([
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--model",
+        model,
+        "--json-schema",
+        TURN_RESPONSE_SCHEMA,
+        "--add-dir",
+        &req.workspace.to_string_lossy(),
+        "--allowed-tools",
+        allowed_tools,
+        "--max-budget-usd",
+        &format!("{remaining_usd:.4}"),
+    ]);
+    // The agent edits the spec through the checkout, not through the
+    // workspace's `spec` symlink, so it needs access to both directories.
+    if let Some(checkout) = req.checkout_dir {
+        cmd.args(["--add-dir", &checkout.to_string_lossy()]);
+    }
+    if let Some(checkout) = req.checkout_dir {
+        cmd.env("QUILT_PATCHES", checkout.as_os_str());
+    }
+    if let Some(id) = req.session_id {
+        cmd.args(["--resume", id]);
+    }
+    cmd.args(["-p", &prompt]);
+
+    let mut child = cmd
         .current_dir(req.workspace)
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(Error::Launch)?;
 
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
-    }
+    // Collect stderr in a background thread so it doesn't block stdout reads.
+    let stderr_handle = {
+        let stderr = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
+            buf
+        })
+    };
 
-    // Clean up temporary schema file.
-    let _ = std::fs::remove_file(&schema_path);
-
-    if !out.status.success() {
-        return Err(Error::Failed {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-
-    #[derive(Deserialize)]
-    struct CliOutput {
+    // Stream stdout line by line: display text/tool events and collect the
+    // final `result` event which carries the structured JSON response.
+    #[derive(Deserialize, Default)]
+    struct ResultEvent {
+        #[serde(default)]
         result: String,
         #[serde(default)]
         total_cost_usd: Option<f64>,
         #[serde(default)]
-        usage: CliUsage2,
+        usage: StreamUsage,
         #[serde(default)]
         num_turns: usize,
+        #[serde(default)]
+        session_id: Option<String>,
     }
     #[derive(Deserialize, Default)]
-    struct CliUsage2 {
+    struct StreamUsage {
         #[serde(default)]
         input_tokens: u64,
         #[serde(default)]
         output_tokens: u64,
     }
 
-    let envelope: CliOutput = serde_json::from_slice(&out.stdout)
-        .map_err(|e| Error::Parse(format!("bad CLI JSON: {e}")))?;
+    let mut result_event = ResultEvent::default();
+    let mut output = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(child.stdout.take().unwrap());
+        // Track whether the last character in output was a newline.
+        let mut on_fresh_line = true;
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            match event.get("type").and_then(|t| t.as_str()) {
+                Some("assistant") => {
+                    // Text and tool_use arrive as content blocks of the
+                    // assistant message — there is no top-level `tool_use`
+                    // stream event to match on.
+                    if let Some(blocks) = event
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for block in blocks {
+                            match block.get("type").and_then(|t| t.as_str()) {
+                                Some("text") => {
+                                    if let Some(text) = block.get("text").and_then(|t| t.as_str())
+                                    {
+                                        output.push_str(text);
+                                        on_fresh_line = text.ends_with('\n');
+                                    }
+                                }
+                                Some("tool_use") => {
+                                    let name = block
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("(unnamed)");
+                                    let input = block
+                                        .get("input")
+                                        .map(|i| i.to_string())
+                                        .unwrap_or_default();
+                                    if !on_fresh_line {
+                                        output.push('\n');
+                                    }
+                                    let summary: String = input.chars().take(160).collect();
+                                    output.push_str(&format!("  → {name} {summary}\n"));
+                                    on_fresh_line = true;
+                                    if let Some(cb) = req.on_tool_use {
+                                        cb(name, &summary);
+                                    }
+                                    tool_calls.push(ToolCall {
+                                        name: name.to_string(),
+                                        input,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Some("user") => {
+                    // Tool results arrive as user-role messages with tool_result blocks.
+                    if let Some(blocks) = event
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for block in blocks {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                                let first_line = block
+                                    .get("content")
+                                    .and_then(|c| c.as_str())
+                                    .or_else(|| {
+                                        block
+                                            .get("content")
+                                            .and_then(|c| c.as_array())
+                                            .and_then(|a| a.first())
+                                            .and_then(|b| b.get("text"))
+                                            .and_then(|t| t.as_str())
+                                    })
+                                    .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+                                    .unwrap_or("(empty)");
+                                if !on_fresh_line {
+                                    output.push('\n');
+                                }
+                                let display: String = first_line.chars().take(100).collect();
+                                if first_line.len() > 100 {
+                                    output.push_str(&format!("  ↳ {display}…\n"));
+                                } else {
+                                    output.push_str(&format!("  ↳ {display}\n"));
+                                }
+                                on_fresh_line = true;
+                            }
+                        }
+                    }
+                }
+                Some("result") => {
+                    if let Ok(ev) = serde_json::from_value::<ResultEvent>(event) {
+                        result_event = ev;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
 
-    let resp: TurnResponse = serde_json::from_str(envelope.result.trim())
-        .map_err(|e| Error::Parse(format!("bad turn JSON: {e}")))?;
+    let stderr_content = stderr_handle.join().unwrap_or_default();
+    let status = child.wait().map_err(Error::Io)?;
+    if !status.success() {
+        return Err(Error::Failed {
+            code: status.code().unwrap_or(-1),
+            stderr: stderr_content,
+        });
+    }
+
+    let resp: TurnResponse = serde_json::from_str(result_event.result.trim())
+        .map_err(|e| Error::Parse(format!("bad turn JSON: {e}\nraw: {}", result_event.result)))?;
+    let _ = result_event.num_turns;
 
     let usage = Usage {
-        input_tokens: envelope.usage.input_tokens,
-        output_tokens: envelope.usage.output_tokens,
-        cli_cost_usd: envelope.total_cost_usd,
+        input_tokens: result_event.usage.input_tokens,
+        output_tokens: result_event.usage.output_tokens,
+        cli_cost_usd: result_event.total_cost_usd,
         ..Usage::default()
     };
 
@@ -431,49 +1026,110 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         _ => Action::Blocked { why: resp.why },
     };
 
-    alog(&format!("  turn-v2  {:?}: {}", resp.confidence, resp.reasoning));
-
     Ok(TurnOutcome {
         action,
         reasoning: resp.reasoning,
-        missing_packages: resp.missing_packages,
+        evidence: resp.evidence,
+        unresolvable_packages: resp.unresolvable_packages,
         confidence: resp.confidence,
         usage,
-        tool_calls: envelope.num_turns,
-        went_past_hint: resp.went_past_hint,
+        tool_calls,
         prompt,
+        output,
+        raw: result_event.result,
+        session_id: result_event.session_id,
     })
 }
 
+// ── prompt construction ───────────────────────────────────────────────────────
+
 fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     let task_desc = match req.task {
-        Task::Review => "Review the generated spec before the first build.",
-        Task::FixAfterBuild => "Fix the spec after a failed `osc build`.",
-        Task::FixAfterValidation => "Fix the spec after a failed `rpmspec --parse`.",
+        Task::Review => {
+            "Review the generated spec before the first build.\n\
+             \n\
+             Read `source/pyproject.toml` and `source/setup.cfg` (and `source/setup.py` \
+             if those are absent) FIRST — almost every check below is answered there. \
+             `source/` is a symlink to the unpacked tarball's top-level directory, so \
+             use that prefix; `sdist/pyproject.toml` does not exist.\n\
+             \n\
+             The generator has already deduplicated BuildRequires, normalised the \
+             dist-info path and the version-constraint spelling, and set \
+             `%autosetup -n` from the tarball. Do not spend the turn re-checking \
+             those. It also switched to the arch macros if it saw any C/C++/Cython \
+             source in the tarball — that one is a guess, so confirm it against \
+             convention 3 before anything else. Then spend the turn on what only \
+             reading the source can settle, in this order:\n\
+             \n\
+             1. **The import name** the package installs — convention 13. This is the \
+                single most common thing the generator gets wrong and you are the only \
+                one who can check it.\n\
+             2. **Test dependencies**: `[project.optional-dependencies]` or \
+                `[dependency-groups]` (pyproject.toml) and `[options.extras_require]` \
+                (setup.cfg), keys like `test`, `tests`, `dev`, `testing`. Add each as \
+                `BuildRequires: %{python_module <name>}`, and make sure pytest itself \
+                is there. Also grep the test files for imports that are not declared \
+                anywhere — that happens often.\n\
+             3. **Pytest configuration** — `addopts`, `testpaths`, `fail_under`: \
+                convention 10. Fix these now rather than after a failed build.\n\
+             4. **Build-backend extras**: dynamic version and metadata providers \
+                (convention 18), and the C/C++ libraries an extension links against \
+                (convention 3).\n\
+             5. **Console scripts**: `[project.scripts]` / `entry_points`, each of \
+                which needs the full python_alternative treatment (convention 14).\n\
+             6. **License** if it is FIXME or not an SPDX expression (convention 5).\n\
+             7. **Sibling projects**, if the archive holds more than one — decide the \
+                subpackage layout now, before the first build, because it changes \
+                %build, %install and every %files section (convention 24).\n\
+             \n\
+             If a check does not apply, say so in one clause; do not invent work."
+        }
+        Task::FixAfterBuild => {
+            "Fix the spec after a failed `osc build`.\n\
+             \n\
+             If the failure is in `%check`, prefer skipping the failing tests over \
+             adding more dependencies — see convention 10. The hint below is a \
+             heuristic extract of the failure; read build.log yourself whenever \
+             the extract looks like it caught the wrong thing."
+        }
+        Task::FixAfterValidation => {
+            "Fix the spec after a failed `rpmspec --parse`.\n\
+             \n\
+             The spec does not parse, so there is no build log — run \
+             `rpmspec --parse spec` yourself to see the error, and again after \
+             editing to confirm the fix. `rpmspec.txt` holds the stderr from the \
+             failure that triggered this turn."
+        }
     };
 
-    let budget_line = format!(
-        "Attempt {attempt} of {max}. ${spent:.2} spent so far. You may make up to {calls} tool calls this turn.",
-        attempt = req.attempt,
-        max = req.max_attempts,
-        spent = req.spent_usd,
-        calls = req.budget.max_tool_calls,
-    );
+    // State the budget that is actually enforced — the turn is launched with
+    // `--max-budget-usd`, and the run stops when the package budget is gone.
+    let budget_line = match req.task {
+        Task::Review => format!(
+            "Pre-build review. ${remaining:.2} of model budget left for this package.",
+            remaining = (req.budget_usd - req.spent_usd).max(0.0),
+        ),
+        _ => format!(
+            "Fix attempt {attempt} of {max}. ${spent:.2} spent on this package so far, \
+             ${remaining:.2} left. Investigate as much as you need within that.",
+            attempt = req.attempt,
+            max = req.max_attempts,
+            spent = req.spent_usd,
+            remaining = (req.budget_usd - req.spent_usd).max(0.0),
+        ),
+    };
 
-    // Workspace map: list every path that actually exists.
     let ws = req.workspace;
     let mut map_lines = Vec::new();
-    let entries = [
-        ("spec", "the spec file (writable — use Edit to change it)", true),
+    for (name, desc, always) in &[
+        ("spec", "the spec file — see \"Editing the spec\" below", true),
         ("spec.generated", "pristine generated spec for reference", false),
         ("build.log", "full osc build log from the last attempt", false),
         ("rpmspec.txt", "rpmspec --parse stderr from the last failure", false),
-        ("sdist/", "extracted source tarball (read-only)", false),
-        ("source/", "source root directory (symlink to sdist top-level, read-only)", false),
-        ("buildroot/", "BUILDROOT from the last build (read-only)", false),
-        ("notes.md", "attempt journal — read this first", false),
-    ];
-    for (name, desc, always) in &entries {
+        ("source/", "THE UNPACKED SOURCE — read pyproject.toml etc. under here", false),
+        ("sdist/", "the extraction root; `source/` is the directory inside it", false),
+        ("notes.md", "attempt journal — also inlined below", false),
+    ] {
         let path = ws.join(name);
         if *always || path.exists() {
             map_lines.push(format!("  {name:<20} {desc}"));
@@ -481,7 +1137,27 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     }
     let workspace_map = map_lines.join("\n");
 
-    // Hint section (labelled as heuristic).
+    // `spec` in the workspace is a symlink into the OBS checkout, and Edit
+    // refuses to write through symlinks — hand over the real path up front
+    // rather than letting the agent discover it by failing.
+    let spec_section = match std::fs::read_link(ws.join("spec")) {
+        Ok(target) => format!(
+            "## Editing the spec\n\
+             \n\
+             `spec` in the workspace is a symlink and Edit cannot write through a \
+             symlink. Read and Edit this path instead — it is the same file:\n\
+             \x20 {}\n\
+             \n",
+            target.display(),
+        ),
+        Err(_) => String::new(),
+    };
+
+    let context_section = match req.context {
+        Some(note) => format!("## Context\n\n{note}\n\n"),
+        None => String::new(),
+    };
+
     let hint_section = if let Some(hint) = req.hint {
         let mut s = String::from(
             "The following is a heuristic extract of the build log. \
@@ -505,42 +1181,32 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         String::new()
     };
 
-    // CONVENTIONS (v2 edits per REDESIGN §4).
-    let conventions_v2 = CONVENTIONS
-        // Rewrite item 8: replace hard two-attempt rule with agent judgement.
-        .replace(
-            "8. Test failures: attempt to fix a failing test up to twice before giving up \
-             (e.g. by adding a patch, adjusting the %check invocation, or adding a \
-             missing test dependency). These two attempts do not count against the \
-             build budget. Only skip the specific failing tests (via pytest's -k or \
-             --ignore) after two unsuccessful fix attempts, and only as a last resort \
-             — never skip the entire %check section.",
-            "8. Test failures: prefer fixing the root cause. First look for a missing \
-             test dependency in pyproject.toml [project.optional-dependencies] or \
-             setup.cfg [options.extras_require] and add it as BuildRequires. Skipping \
-             specific tests (via pytest -k or --ignore) is a last resort. Never \
-             disable %check wholesale without explaining why in your reasoning.",
+    let source_note = if req.from_repo_archive {
+        "\nNOTE: PyPI publishes this package as wheels only, so the tarball is an \
+         archive of the upstream repository, not an sdist. Read convention 22 before \
+         anything else — the project is quite likely in a subdirectory.\n"
+    } else {
+        ""
+    };
+
+    let subproject_section = if req.subprojects.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Other projects in this archive\n\n\
+             The source holds several projects side by side. `{primary}` is the one \
+             this spec was generated for; these are all of them:\n{list}\n\n\
+             Read convention 24 — the usual answer is one subpackage per project in \
+             this single spec, not one project built and the rest ignored.\n\n",
+            primary = req.pkg_name,
+            list = req
+                .subprojects
+                .iter()
+                .map(|(dir, _)| format!("  - {dir}/"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         )
-        // Rewrite item 9: replace files_needed with tool description.
-        .replace(
-            "9. File reading: when you receive an \"Available source files\" manifest, you \
-             may request the content of any listed file by adding its path to \
-             `files_needed`. The build system will read those files and call you again \
-             with their contents before you must produce the final fix. Request only \
-             the files you actually need — each costs tokens.",
-            "9. Tools available — USE THEM:\n\
-             - Read: get line-numbered file content (use for build.log, pyproject.toml, setup.py)\n\
-             - Grep: search for patterns (use to find test dependencies, entry points, etc.)\n\
-             - Edit: modify the spec file (the ONLY writable file)\n\
-             - Bash: run `rpmspec --parse spec` to validate syntax\n\
-             \n\
-             If you need information, READ IT. Don't say \"I need to check\" without calling Read/Grep.\n\
-             Examples:\n\
-             - Missing test dep? → Grep pyproject.toml for 'test'\n\
-             - Entry point error? → Read setup.py or Grep pyproject.toml for 'entry'\n\
-             - Unclear error? → Read build.log\n\
-             - Before editing? → Read spec to see current state",
-        );
+    };
 
     let notes_section = if req.notes.is_empty() {
         String::new()
@@ -548,890 +1214,199 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         format!("## Prior attempt journal (notes.md)\n\n{}\n\n", req.notes)
     };
 
+    let bullets = |deps: &[String]| {
+        deps.iter()
+            .map(|d| format!("  - {d}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let unresolvable_section = if req.unresolvable_deps.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Missing BuildRequires\n\n\
+             OBS could not find these RPM packages in any of its repositories:\n{}\n\n\
+             They are not packaged yet. Put their names in `unresolvable_packages` in \
+             your response and the build system will build them and retry this package \
+             — that is the normal path, and it applies however large the dependency is. \
+             Leave their BuildRequires lines in the spec.\n\n\
+             Exception: if a package name in the spec is clearly wrong (e.g. wrong \
+             capitalisation or an extra prefix), fix the name in the spec instead of \
+             reporting it as unresolvable.\n\n",
+            bullets(req.unresolvable_deps),
+        )
+    };
+
+    // The evidence convention 23 asks for: these were attempted and did not
+    // build, so working around them is justified and re-reporting them is not.
+    let failed_section = if req.failed_deps.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Dependencies that failed to build\n\n\
+             This run already tried to build these and could not:\n{}\n\n\
+             Do NOT put them in `unresolvable_packages` again — that is the retry \
+             cycle convention 12 Step B exists to break. Work around them instead: \
+             skip the tests that need them, or build without the feature that needs \
+             them, and say in your reasoning which one you did and why.\n\n",
+            bullets(req.failed_deps),
+        )
+    };
+
     format!(
-        "You are fixing an openSUSE RPM spec for the Python package {pkg} {version}.\n\
+        "You are fixing an openSUSE RPM spec for the package {pkg} {version}.\n\
          Task: {task}\n\
          \n\
          {budget}\n\
          \n\
+         {source_note}\
          ## Workspace\n\
          {map}\n\
          \n\
+         {spec_section}\
          {conventions}\n\
          \n\
          CRITICAL: NEVER delete the spec file completely. You can edit it, but it must \
          remain present. Deleting it will break the build system.\n\
          \n\
+         {subprojects}\
          {notes}\
+         {unresolvable}\
+         {failed}\
+         {context}\
          {hint}\
          \n\
          ## Workflow\n\
          \n\
          1. **Investigate FIRST**: Use your tools to gather information BEFORE editing.\n\
-            - If you say \"I need to check X\" — DO IT. Use Read/Grep/Bash immediately.\n\
-            - Never say \"I should verify\" or \"I need to check\" without making the tool call.\n\
-            - If the hint is unclear, Read build.log. If you need test deps, Grep pyproject.toml.\n\
-            - Set went_past_hint=true if you read/grep beyond the provided hint.\n\
-         \n\
-         2. **Edit the spec**: Use Edit to change `spec` (never return full spec as text).\n\
-         \n\
-         3. **Validate**: Run `rpmspec --parse spec` to verify syntax.\n\
-         \n\
+         2. **Edit the spec**: Use Edit on the spec path given above (never return the \
+         full spec as text). You MUST call the Edit tool BEFORE setting action to \
+         \"edited\". Never describe a change in reasoning without having called Edit \
+         first. If you identified a fix but did not apply it, set action to \
+         \"no_change\" and explain why.\n\
+         3. **Validate**: Run `rpmspec --parse <that same path>` to verify syntax. \
+         Do this after your last edit, not only after the first one.\n\
          4. **Finish**: Return a JSON object with:\n\
-         - \"action\": \"edited\" (you changed the spec), \"no_change\" (spec is already correct), \
-           or \"blocked\" (no spec change can fix this)\n\
-         - \"why\": required when action is \"blocked\" — one sentence explaining why\n\
-         - \"reasoning\": one sentence summarising what you did (not what you planned to do)\n\
-         - \"confidence\": \"high\" (verified the fix works), \"medium\" (logical fix but unverified), \
-           or \"low\" (guessing)\n\
-         - \"missing_packages\": PyPI names of packages that must be built first (if any)\n\
-         - \"went_past_hint\": true if you read build.log or grepped files beyond the hint\n\
-         \n\
-         CRITICAL: If you say you need information, USE YOUR TOOLS to get it. Don't guess.",
+         - \"action\": \"edited\", \"no_change\", or \"blocked\"\n\
+         - \"why\": required when action is \"blocked\"\n\
+         - \"reasoning\": one sentence summarising what you did\n\
+         - \"evidence\": list every Read/Grep call you made before editing, \
+         e.g. [\"Read source/pyproject.toml\", \"Read source/src.egg-info/top_level.txt\"]. \
+         Must be non-empty when action is \"edited\". This is how you prove \
+         you investigated rather than assumed.\n\
+         - \"confidence\": \"high\", \"medium\", or \"low\"\n\
+         - \"unresolvable_packages\": RPM names of packages that OBS cannot resolve and \
+         must be built first — the build system will queue them and retry this package later",
         pkg = req.pkg_name,
         version = req.version,
         task = task_desc,
         budget = budget_line,
         map = workspace_map,
-        conventions = conventions_v2,
+        source_note = source_note,
+        subprojects = subproject_section,
+        spec_section = spec_section,
+        conventions = CONVENTIONS,
         notes = notes_section,
+        unresolvable = unresolvable_section,
+        failed = failed_section,
+        context = context_section,
         hint = hint_section,
     )
 }
 
-/// One round of the fix loop, kept so the next attempt can learn from it.
-#[derive(Debug, Clone)]
-pub struct Turn {
-    /// The error excerpt that prompted this fix.
-    pub error_excerpt: String,
-    /// The full prompt that was sent.
-    pub prompt: String,
-    /// The reasoning the agent gave.
-    pub reasoning: String,
-    /// The spec the agent produced (which then failed to build).
-    pub fixed_spec: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[derive(Deserialize)]
-struct FixResponse {
-    confidence: Confidence,
-    reasoning: String,
-    #[serde(default)]
-    fixed_spec: String,
-    #[serde(default)]
-    missing_packages: Vec<String>,
-    /// Paths (relative to sdist root) whose contents the agent needs before
-    /// it can produce a confident fix. Only used at the FailingFiles escalation
-    /// level; the orchestrator will read them and make a second call.
-    #[serde(default)]
-    files_needed: Vec<String>,
-    /// True when the agent found no issues — the spec requires no changes.
-    /// Replaces prose-sniffing on `reasoning.contains("No issues")`.
-    #[serde(default)]
-    no_change: bool,
-}
-
-/// Review a newly generated spec before the first build.
-///
-/// Returns `Some((fixed_spec, usage))` when the agent finds a medium- or
-/// high-confidence issue to fix. Returns `None` when the spec looks fine or
-/// the agent is only guessing — no fix is applied in that case.
-pub fn review(
-    spec_path: &Path,
-    pkg_name: &str,
-    tarball_files: &[String],
-) -> Result<Option<(String, Usage, String, String)>, Error> {
-    let backend = detect_backend();
-    let spec = std::fs::read_to_string(spec_path)?;
-
-    let files_section = if tarball_files.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\nFiles in the sdist tarball (first 60):\n{}\n",
-            tarball_files
-                .iter()
-                .take(60)
-                .map(|f| format!("  {f}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    };
-
-    let prompt = format!(
-        "You are reviewing an openSUSE RPM spec file for a Python package BEFORE building it.\n\
-         Package: {pkg_name}\n\
-         {files_section}\n\
-         Spec:\n\
-         ```spec\n\
-         {spec}\n\
-         ```\n\
-         \n\
-         {conventions}\n\
-         Return a JSON object with:\n\
-         - \"confidence\": \"high\", \"medium\", or \"low\"\n\
-         - \"reasoning\": one sentence describing any issue found, or 'No issues found'\n\
-         - \"no_change\": true if the spec is correct and requires no edits, false otherwise\n\
-         - \"fixed_spec\": the corrected spec (ONLY include if changes are needed; omit if no_change is true)\n\
-         \n\
-         Return only the JSON object, no other text.",
-        conventions = CONVENTIONS,
-    );
-
-    let (response, usage, prompt) = call_prompt(&backend, &prompt)?;
-
-    alog(&format!("  review  {:?}: {}", response.confidence, response.reasoning));
-
-    // Only apply the fix if the agent is reasonably confident and found something.
-    if response.confidence == Confidence::Low || response.no_change {
-        return Ok(None);
-    }
-
-    // If changes are needed but no fixed_spec was provided, that's an error
-    if response.fixed_spec.is_empty() {
-        return Err(Error::Parse(
-            "agent indicated changes needed but did not provide fixed_spec".to_string()
-        ));
-    }
-
-    Ok(Some((response.fixed_spec, usage, prompt, response.reasoning)))
-}
-
-/// Try to fix `spec_path` using the build log at `log_path`.
-///
-/// `escalation` tracks how far up the context ladder this error signature has
-/// climbed. When the agent returns low confidence, the caller should call
-/// `escalation.escalate()` and retry with more context.
-///
-/// `sdist_root` is the top-level directory from the extracted sdist tarball.
-/// Used to read source files at `Level::BuildTree` and `Level::FailingFiles`.
-///
-/// `allow_full_log`: when `true` and the escalation has reached
-/// `Level::FullLog`, the entire raw log is appended to the prompt. This can
-/// exceed 34k tokens for a trivial package — only enable it when lower rungs
-/// have failed repeatedly.
-///
-/// `force_test_skip`: when `true`, the prompt instructs the agent to skip
-/// the failing tests (up to and including the entire %check section) rather
-/// than attempt another fix.
-///
-/// `section_hint`: overrides the failed-section label in the prompt when the
-/// log format doesn't produce one (e.g. rpmspec errors).
-///
-/// Returns the fixed spec, token usage, updated history, confidence, and any
-/// PyPI packages the agent identified as missing from the OBS project.
-pub fn fix(
-    spec_path: &Path,
-    log_path: &Path,
-    pkg_name: &str,
-    history: &[Turn],
-    escalation: &Escalation,
-    sdist_root: &Path,
-    allow_full_log: bool,
-    force_test_skip: bool,
-    section_hint: Option<&str>,
-) -> Result<(String, Usage, Vec<Turn>, Confidence, Vec<String>), Error> {
-    let backend = detect_backend();
-
-    let spec = std::fs::read_to_string(spec_path)?;
-    let log_raw = std::fs::read_to_string(log_path)?;
-
-    let mapper = PathMapper::with_sdist_root(pkg_name);
-    let extracted = crate::log::extract(&log_raw, &mapper);
-    let section = extracted.failed_section.as_deref().unwrap_or("unknown");
-
-    // Gather additional context based on the current escalation level.
-    let (extra_context, context_summary) = gather_context(
-        escalation.level(),
-        &extracted,
-        &log_raw,
-        sdist_root,
-        allow_full_log,
-    );
-
-    // Log what we're sending so the operator can see the context ladder in action.
-    let excerpt_lines = extracted.excerpt.lines().count();
-    let using_tail = excerpt_lines == 0 && extracted.error_lines.is_empty();
-    let excerpt_desc = if using_tail {
-        format!("excerpt=0 lines (using log tail — extractor found no signal)")
-    } else {
-        format!("excerpt={excerpt_lines} lines")
-    };
-    if context_summary.is_empty() {
-        alog(&format!("  agent  sending: {excerpt_desc}, section={section}"));
-    } else {
-        alog(&format!(
-            "  agent  sending: {excerpt_desc}, section={section}, extra={context_summary}"
-        ));
-    }
-
-    let (mut response, mut usage, mut prompt) = call_with_context(
-        &backend,
-        &spec,
-        &extracted,
-        pkg_name,
-        history,
-        &extra_context,
-        force_test_skip,
-        section_hint,
-    )?;
-
-    // Two-turn file reading at FailingFiles: if the agent listed files it needs,
-    // read them and make a second call with their contents.
-    if escalation.level() == Level::FailingFiles && !response.files_needed.is_empty() {
-        let mut file_contents = String::new();
-
-        for requested in &response.files_needed {
-            // Reject absolute paths and directory traversal.
-            let rel = std::path::Path::new(requested);
-            if rel.is_absolute()
-                || rel
-                    .components()
-                    .any(|c| c == std::path::Component::ParentDir)
-            {
-                continue;
-            }
-            let full = sdist_root.join(rel);
-            if let Ok(content) = std::fs::read_to_string(&full) {
-                let content = middle_truncate(&content, 32_768);
-                file_contents.push_str(&format!("\n--- {requested} ---\n{content}\n"));
-            }
-        }
-
-        if !file_contents.is_empty() {
-            alog(&format!(
-                "  agent  requested {} file(s) — reading and calling again",
-                response.files_needed.len()
-            ));
-            let extra_with_files =
-                format!("{extra_context}\nRequested file contents:{file_contents}");
-            let (r2, u2, p2) = call_with_context(
-                &backend,
-                &spec,
-                &extracted,
-                pkg_name,
-                history,
-                &extra_with_files,
-                force_test_skip,
-                section_hint,
-            )?;
-            usage.add(&u2);
-            response = r2;
-            prompt = p2;
-        }
-    }
-
-    alog(&format!("  agent  {:?}: {}", response.confidence, response.reasoning));
-
-    let mut new_history = history.to_vec();
-    new_history.push(Turn {
-        error_excerpt: extracted.excerpt.clone(),
-        prompt,
-        reasoning: response.reasoning.clone(),
-        fixed_spec: response.fixed_spec.clone(),
-    });
-
-    let confidence = response.confidence.clone();
-    let missing = response.missing_packages.clone();
-    Ok((response.fixed_spec, usage, new_history, confidence, missing))
-}
-
-/// Scan `log_raw` for paths that were installed to BUILDROOT.
-///
-/// Looks at every whitespace-delimited token that contains "/BUILDROOT/" and
-/// classifies it via [`PathMapper`]. Returns deduplicated module-relative paths,
-/// capped at 40 entries. Used when `%files` fails, because Python tracebacks
-/// (the normal source of BUILDROOT candidates) don't exist for that error class.
-fn extract_buildroot_paths(log_raw: &str) -> Vec<String> {
-    use crate::log::{strip_timestamp, PathClass, PathMapper};
-
-    let mapper = PathMapper::default();
-    let mut paths: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for raw_line in log_raw.lines() {
-        let line = strip_timestamp(raw_line);
-        if !line.contains("/BUILDROOT/") {
-            continue;
-        }
-        for token in line.split_whitespace() {
-            if !token.contains("/BUILDROOT/") {
-                continue;
-            }
-            // Strip common trailing punctuation that isn't part of the path.
-            let path = token.trim_end_matches([',', ':', ';', '\'', '"']);
-            if let PathClass::BuildRoot { module_path } = mapper.classify(path) {
-                if !module_path.is_empty() && seen.insert(module_path.clone()) {
-                    paths.push(module_path);
-                    if paths.len() >= 40 {
-                        return paths;
-                    }
+    /// The conventions are cross-referenced by number in the prompt itself
+    /// ("see convention 9"), so a duplicate or skipped number silently points
+    /// the model at the wrong rule.
+    #[test]
+    fn conventions_are_numbered_consecutively_from_one() {
+        let numbers: Vec<usize> = CONVENTIONS
+            .lines()
+            .filter_map(|l| {
+                let (head, rest) = l.split_once(". ")?;
+                if rest.starts_with(char::is_whitespace) {
+                    return None;
                 }
-            }
-        }
-    }
-
-    paths
-}
-
-/// Read additional context for the given escalation level.
-///
-/// `sdist_root` is the top-level directory extracted from the sdist tarball
-/// (e.g. `/tmp/work/markupsafe-3.0.3/`). All relative paths from the log
-/// are resolved against this root.
-///
-/// Returns `(context_string, summary)` where `summary` is a short human-readable
-/// description of what extra material is being sent (e.g. "2 source files").
-/// Callers print the summary so the operator knows what the agent is seeing.
-fn gather_context(
-    level: Level,
-    extracted: &ExtractedLog,
-    log_raw: &str,
-    sdist_root: &Path,
-    allow_full_log: bool,
-) -> (String, String) {
-    // %files failures don't generate Python tracebacks, so installed_candidates()
-    // is always empty for them. Detect by failed_section OR by recognising the
-    // rpm error patterns in error_lines (since %files isn't a shell scriptlet,
-    // it often doesn't produce a "Bad exit status" with a section name).
-    let is_files_failure = extracted.failed_section.as_deref() == Some("%files")
-        || extracted.error_lines.iter().any(|l| {
-            l.contains("File not found") || l.contains("unpackaged") || l.contains("file(s) found")
-        });
-    let mut files_prefix = String::new();
-    let mut files_summary = String::new();
-    if is_files_failure {
-        let paths = extract_buildroot_paths(log_raw);
-        if !paths.is_empty() {
-            files_prefix.push_str("\nInstalled paths in BUILDROOT (from build log):\n");
-            for p in &paths {
-                files_prefix.push_str(&format!("  {p}\n"));
-            }
-            files_summary = format!("{} BUILDROOT path(s)", paths.len());
-        }
-    }
-
-    let (level_ctx, level_summary) = match level {
-        Level::ErrorContext => (String::new(), String::new()),
-        Level::BuildTree => {
-            // Read the source files the extractor flagged as relevant.
-            let candidates = extracted.source_candidates(3);
-            if candidates.is_empty() {
-                ("".to_string(), "no source candidates".to_string())
-            } else {
-                let mut out = String::from("\nRelevant source files from the sdist:\n");
-                let mut read = Vec::new();
-                for rel in &candidates {
-                    let full = sdist_root.join(rel);
-                    if let Ok(src) = std::fs::read_to_string(&full) {
-                        out.push_str(&format!("\n--- {rel} ---\n{src}\n"));
-                        read.push(*rel);
-                    }
-                }
-                let summary = if read.is_empty() {
-                    "source candidates found but unreadable".to_string()
-                } else {
-                    format!("source files: {}", read.join(", "))
-                };
-                (out, summary)
-            }
-        }
-        Level::BuildRoot => {
-            // List installed paths from the extracted log.
-            let paths = extracted.installed_candidates(10);
-            if paths.is_empty() {
-                ("".to_string(), "no BUILDROOT candidates".to_string())
-            } else {
-                let mut out = String::from("\nInstalled paths in BUILDROOT:\n");
-                for p in &paths {
-                    out.push_str(&format!("  {p}\n"));
-                }
-                let summary = format!("{} BUILDROOT path(s)", paths.len());
-                (out, summary)
-            }
-        }
-        Level::FailingFiles => {
-            // Send a manifest of available files rather than their contents.
-            // The agent requests specific files via `files_needed`; the caller
-            // reads them and makes a second call with their actual text.
-            let mut available: Vec<String> =
-                extracted.source_candidates(20).into_iter().map(str::to_owned).collect();
-
-            const BUILD_CONFIGS: &[&str] = &[
-                "pyproject.toml",
-                "setup.py",
-                "setup.cfg",
-                "CMakeLists.txt",
-                "meson.build",
-                "configure.ac",
-                "Makefile.am",
-            ];
-            for name in BUILD_CONFIGS {
-                if sdist_root.join(name).exists()
-                    && !available.iter().any(|f| f == name)
-                {
-                    available.push((*name).to_owned());
-                }
-            }
-
-            if available.is_empty() {
-                ("".to_string(), "no files available to offer".to_string())
-            } else {
-                let listing = available
-                    .iter()
-                    .map(|f| format!("  {f}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let summary = format!("manifest: {} file(s) offered", available.len());
-                (
-                    format!(
-                        "\nAvailable source files — request their contents via `files_needed`:\n{listing}\n"
-                    ),
-                    summary,
-                )
-            }
-        }
-        Level::FullLog => {
-            if allow_full_log {
-                let lines = log_raw.lines().count();
-                (
-                    format!("\nFull build log (unextracted):\n```\n{log_raw}\n```\n"),
-                    format!("full log ({lines} lines)"),
-                )
-            } else {
-                ("".to_string(), "full log suppressed (use --allow-full-log)".to_string())
-            }
-        }
-    };
-
-    // Combine the %files BUILDROOT prefix (if any) with the level-specific context.
-    let combined_ctx = files_prefix + &level_ctx;
-    let combined_summary = match (files_summary.is_empty(), level_summary.is_empty()) {
-        (true, _) => level_summary,
-        (_, true) => files_summary,
-        _ => format!("{files_summary}, {level_summary}"),
-    };
-    (combined_ctx, combined_summary)
-}
-
-fn detect_backend() -> Backend {
-    let gcp_project = std::env::var("AUTO_PACKAGE_GCP_PROJECT")
-        .ok()
-        .or_else(gcloud_default_project);
-
-    if let Some(project) = gcp_project {
-        let region =
-            std::env::var("AUTO_PACKAGE_GCP_REGION").unwrap_or_else(|_| "us-east5".to_string());
-        return Backend::Vertex { project, region };
-    }
-
-    if let Ok(api_key) = std::env::var("AUTO_PACKAGE_API_KEY") {
-        return Backend::Direct { api_key };
-    }
-
-    Backend::Cli
-}
-
-fn gcloud_default_project() -> Option<String> {
-    let out = Command::new("gcloud")
-        .args(["config", "get-value", "project"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let project = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if project.is_empty() || project == "(unset)" {
-        return None;
-    }
-    Some(project)
-}
-
-/// Send a ready-made prompt to whichever backend is configured.
-///
-/// In TUI mode (custom logger installed) emits a "⋯ waiting for Claude…" line
-/// so the operator can see when the agent is blocked on the API — the spinner
-/// that would normally appear on stderr is suppressed there.
-fn call_prompt(backend: &Backend, prompt: &str) -> Result<(FixResponse, Usage, String), Error> {
-    if has_custom_logger() {
-        alog("  ⋯  waiting for Claude…");
-    }
-    match backend {
-        Backend::Cli => call_cli_prompt(prompt),
-        _ => call_http_prompt(backend, prompt),
-    }
-}
-
-/// Build the prompt from spec + extracted log + history + extra context, then send it.
-fn call_with_context(
-    backend: &Backend,
-    spec: &str,
-    extracted: &ExtractedLog,
-    pkg_name: &str,
-    history: &[Turn],
-    extra_context: &str,
-    force_test_skip: bool,
-    section_hint: Option<&str>,
-) -> Result<(FixResponse, Usage, String), Error> {
-    let prompt = build_prompt(spec, extracted, pkg_name, history, extra_context, force_test_skip, section_hint);
-    call_prompt(backend, &prompt)
-}
-
-/// JSON Schema passed to `claude --json-schema` to enforce structured output.
-/// This prevents the model from returning prose instead of JSON.
-const RESPONSE_SCHEMA: &str = r#"{
-  "type": "object",
-  "properties": {
-    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-    "reasoning": {"type": "string"},
-    "no_change": {"type": "boolean"},
-    "fixed_spec": {"type": "string"},
-    "missing_packages": {"type": "array", "items": {"type": "string"}},
-    "files_needed": {"type": "array", "items": {"type": "string"}}
-  },
-  "required": ["confidence", "reasoning", "no_change", "fixed_spec"],
-  "additionalProperties": false
-}"#;
-
-fn call_cli_prompt(prompt: &str) -> Result<(FixResponse, Usage, String), Error> {
-    use std::time::Duration;
-
-    let pb = if has_custom_logger() {
-        None
-    } else {
-        use indicatif::{ProgressBar, ProgressStyle};
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner} {msg}")
-                .expect("static template"),
-        );
-        pb.set_message("waiting for Claude…");
-        pb.enable_steady_tick(Duration::from_millis(100));
-        Some(pb)
-    };
-
-    let out = Command::new("claude")
-        .args([
-            "--print",
-            "--output-format",
-            "json",
-            "--json-schema",
-            RESPONSE_SCHEMA,
-            "-p",
-            prompt,
-        ])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(Error::Launch)?;
-
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
-    }
-
-    if !out.status.success() {
-        return Err(Error::Failed {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-
-    #[derive(Deserialize)]
-    struct CliOutput {
-        result: String,
-        #[serde(default)]
-        total_cost_usd: Option<f64>,
-        #[serde(default)]
-        usage: CliUsage,
-    }
-    #[derive(Deserialize, Default)]
-    struct CliUsage {
-        #[serde(default)]
-        input_tokens: u64,
-        #[serde(default)]
-        output_tokens: u64,
-    }
-
-    let envelope: CliOutput = serde_json::from_slice(&out.stdout)
-        .map_err(|e| Error::Parse(format!("bad CLI JSON: {e}")))?;
-
-    let fix_response = parse_response(&envelope.result)?;
-    let usage = Usage {
-        input_tokens: envelope.usage.input_tokens,
-        output_tokens: envelope.usage.output_tokens,
-        // CLI session tokens include project context overhead — use the
-        // pre-computed cost from the CLI instead.
-        cli_cost_usd: envelope.total_cost_usd,
-        ..Usage::default()
-    };
-
-    Ok((fix_response, usage, prompt.to_string()))
-}
-
-fn call_http_prompt(
-    backend: &Backend,
-    prompt: &str,
-) -> Result<(FixResponse, Usage, String), Error> {
-    #[derive(Deserialize)]
-    struct ApiResponse {
-        content: Vec<ContentBlock>,
-        usage: RawUsage,
-    }
-    #[derive(Deserialize)]
-    struct ContentBlock {
-        #[serde(rename = "type")]
-        kind: String,
-        text: Option<String>,
-    }
-    #[derive(Deserialize, Default)]
-    struct RawUsage {
-        #[serde(default)]
-        input_tokens: u64,
-        #[serde(default)]
-        output_tokens: u64,
-        #[serde(default)]
-        cache_creation_input_tokens: u64,
-        #[serde(default)]
-        cache_read_input_tokens: u64,
-    }
-
-    let (json_body, request) = match backend {
-        Backend::Direct { api_key } => {
-            #[derive(Serialize)]
-            struct Req<'a> {
-                model: &'a str,
-                max_tokens: u32,
-                messages: Vec<Msg<'a>>,
-            }
-            #[derive(Serialize)]
-            struct Msg<'a> {
-                role: &'a str,
-                content: &'a str,
-            }
-            let body = serde_json::to_string(&Req {
-                model: MODEL,
-                max_tokens: 8192,
-                messages: vec![Msg {
-                    role: "user",
-                    content: prompt,
-                }],
+                head.parse::<usize>().ok()
             })
-            .map_err(|e| Error::Parse(e.to_string()))?;
+            .collect();
+        assert!(!numbers.is_empty(), "no numbered conventions found");
+        let expected: Vec<usize> = (1..=numbers.len()).collect();
+        assert_eq!(numbers, expected, "convention numbering is not 1..n");
+    }
 
-            let req = ureq::post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json");
-            (body, req)
+    fn request<'a>(
+        ws: &'a std::path::Path,
+        subprojects: &'a [(String, String)],
+    ) -> TurnRequest<'a> {
+        TurnRequest {
+            workspace: ws,
+            pkg_name: "cuda-python",
+            version: "13.0.2",
+            task: Task::Review,
+            attempt: 0,
+            max_attempts: 10,
+            spent_usd: 0.0,
+            budget_usd: 2.0,
+            hint: None,
+            notes: "",
+            budget: TurnBudget::default(),
+            from_repo_archive: true,
+            subprojects,
+            unresolvable_deps: &[],
+            failed_deps: &[],
+            session_id: None,
+            checkout_dir: None,
+            context: None,
+            on_tool_use: None,
         }
-        Backend::Vertex { project, region } => {
-            #[derive(Serialize)]
-            struct Req<'a> {
-                anthropic_version: &'a str,
-                max_tokens: u32,
-                messages: Vec<Msg<'a>>,
+    }
+
+    #[test]
+    fn a_monorepos_sibling_projects_reach_the_prompt() {
+        let ws = std::path::Path::new("/nonexistent-workspace");
+        let subs = vec![
+            ("cuda_bindings".to_string(), "cuda-bindings".to_string()),
+            ("cuda_python".to_string(), "cuda-python".to_string()),
+        ];
+        let prompt = build_turn_prompt(&request(ws, &subs));
+
+        assert!(prompt.contains("## Other projects in this archive"), "{prompt}");
+        assert!(prompt.contains("cuda_bindings/  (declares itself `cuda-bindings`)"));
+        assert!(prompt.contains("convention 24"));
+        // And the repository-archive note, since this did not come from a sdist.
+        assert!(prompt.contains("archive of the upstream repository"));
+    }
+
+    #[test]
+    fn a_single_project_archive_says_nothing_about_subpackages() {
+        let ws = std::path::Path::new("/nonexistent-workspace");
+        let prompt = build_turn_prompt(&request(ws, &[]));
+        assert!(!prompt.contains("## Other projects in this archive"));
+    }
+
+    /// Every `convention N` reference must name a convention that exists.
+    #[test]
+    fn convention_cross_references_resolve() {
+        let count = CONVENTIONS
+            .lines()
+            .filter_map(|l| l.split_once(". ").and_then(|(h, _)| h.parse::<usize>().ok()))
+            .max()
+            .unwrap_or(0);
+        for text in [CONVENTIONS] {
+            for (i, _) in text.match_indices("convention ") {
+                let n: usize = text[i + "convention ".len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .expect("convention reference must be numeric");
+                assert!(n >= 1 && n <= count, "dangling reference to convention {n}");
             }
-            #[derive(Serialize)]
-            struct Msg<'a> {
-                role: &'a str,
-                content: &'a str,
-            }
-            let body = serde_json::to_string(&Req {
-                anthropic_version: "vertex-2023-10-16",
-                max_tokens: 8192,
-                messages: vec![Msg {
-                    role: "user",
-                    content: prompt,
-                }],
-            })
-            .map_err(|e| Error::Parse(e.to_string()))?;
-
-            let token = gcloud_token()?;
-            let url = format!(
-                "https://{region}-aiplatform.googleapis.com/v1/projects/{project}\
-                 /locations/{region}/publishers/anthropic/models/{MODEL}:rawPredict"
-            );
-            let req = ureq::post(&url)
-                .header("Authorization", &format!("Bearer {token}"))
-                .header("content-type", "application/json");
-            (body, req)
         }
-        Backend::Cli => unreachable!(),
-    };
-
-    let mut body = request
-        .send(json_body.as_bytes())
-        .map_err(Error::Http)?
-        .into_body();
-    let text = body
-        .read_to_string()
-        .map_err(|e| Error::Parse(e.to_string()))?;
-    let resp: ApiResponse =
-        serde_json::from_str(&text).map_err(|e| Error::Parse(format!("bad API JSON: {e}")))?;
-
-    let content_text = resp
-        .content
-        .into_iter()
-        .find(|b| b.kind == "text")
-        .and_then(|b| b.text)
-        .ok_or_else(|| Error::Parse("no text block in response".to_string()))?;
-
-    let fix_response = parse_response(&content_text)?;
-
-    let usage = Usage {
-        input_tokens: resp.usage.input_tokens,
-        output_tokens: resp.usage.output_tokens,
-        cache_creation_tokens: resp.usage.cache_creation_input_tokens,
-        cache_read_tokens: resp.usage.cache_read_input_tokens,
-        cli_cost_usd: None,
-    };
-
-    Ok((fix_response, usage, prompt.to_string()))
-}
-
-fn build_prompt(
-    spec: &str,
-    extracted: &ExtractedLog,
-    pkg_name: &str,
-    history: &[Turn],
-    extra_context: &str,
-    force_test_skip: bool,
-    section_hint: Option<&str>,
-) -> String {
-    let section = extracted
-        .failed_section
-        .as_deref()
-        .or(section_hint)
-        .unwrap_or("unknown");
-    let attempt_number = history.len() + 1;
-    let mut prior = String::new();
-    if !history.is_empty() {
-        prior.push_str("\nPrevious fix attempts that did not work:\n");
-        for (i, turn) in history.iter().enumerate() {
-            prior.push_str(&format!(
-                "\nAttempt {}:\n  Reasoning: {}\n  The build then failed with:\n  {}\n",
-                i + 1,
-                turn.reasoning,
-                turn.error_excerpt
-                    .lines()
-                    .take(10)
-                    .collect::<Vec<_>>()
-                    .join("\n  "),
-            ));
-        }
-        prior.push_str("\nDo not repeat those fixes. Try a different approach.\n");
     }
-
-    let error_section = if extracted.excerpt.is_empty() && extracted.error_lines.is_empty() {
-        // The extractor found no recognisable failure signal. Send the raw log
-        // tail so the agent has something concrete rather than generic advice
-        // — a blank excerpt produces low-confidence guesses and wastes a build.
-        format!(
-            "The build log extractor found no recognisable failure pattern. \
-             Here are the last lines of the log:\n```\n{}\n```",
-            extracted.log_tail,
-        )
-    } else {
-        format!(
-            "Current error context:\n```\n{}\n```\n\nError lines:\n{}",
-            extracted.excerpt,
-            extracted.error_lines.join("\n"),
-        )
-    };
-
-    let skip_directive = if force_test_skip {
-        "\nIMPORTANT: Two fix attempts on this test failure have already been made \
-         without success. You MUST now skip the failing tests. First try to skip \
-         only the specific failing tests via pytest's -k or --ignore. If that is \
-         not feasible (e.g. the failures are too broad or the test names are \
-         unclear), skip the entire %check section by removing its body. Do NOT \
-         attempt another fix to the underlying test logic.\n"
-    } else {
-        ""
-    };
-
-    format!(
-        "You are fixing an openSUSE RPM spec file for a Python package.\n\
-         Package: {pkg_name}\n\
-         Fix attempt: {attempt_number}\n\
-         Failed section: {section}\n\
-         {prior}\n\
-         {error_section}\n\
-         {extra_context}\n\
-         {skip_directive}\
-         Current spec:\n\
-         ```spec\n\
-         {spec}\n\
-         ```\n\
-         \n\
-         {conventions}\n\
-         Return a JSON object with:\n\
-         - \"confidence\": \"high\", \"medium\", or \"low\"\n\
-         - \"reasoning\": one sentence explaining the fix\n\
-         - \"fixed_spec\": the complete corrected spec file\n\
-         \n\
-         Return only the JSON object, no other text.",
-        conventions = CONVENTIONS,
-    )
-}
-
-fn parse_response(text: &str) -> Result<FixResponse, Error> {
-    // Try the whole text first (ideal: model returned only JSON).
-    let trimmed = text.trim();
-    if let Ok(r) = serde_json::from_str::<FixResponse>(trimmed) {
-        return Ok(r);
-    }
-
-    // Strip a single ```json … ``` fence if present.
-    let fenced = trimmed
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    if let Ok(r) = serde_json::from_str::<FixResponse>(fenced) {
-        return Ok(r);
-    }
-
-    // Last resort: find the first `{` and last `}` and try that substring.
-    // This handles models that prepend an explanation sentence.
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && start < end
-        && let Ok(r) = serde_json::from_str::<FixResponse>(&trimmed[start..=end])
-    {
-        return Ok(r);
-    }
-
-    Err(Error::Parse(format!(
-        "could not find JSON in response:\n{trimmed}"
-    )))
-}
-
-/// Keep the head and tail of `s` within `max_bytes`, replacing the middle with
-/// a truncation marker. Returns the original string if it fits.
-fn middle_truncate(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_owned();
-    }
-    let half = max_bytes / 2;
-    let head = &s[..half];
-    let tail = &s[s.len() - half..];
-    format!(
-        "{head}\n\n[… {} bytes omitted …]\n\n{tail}",
-        s.len() - max_bytes
-    )
-}
-
-fn gcloud_token() -> Result<String, Error> {
-    let out = Command::new("gcloud")
-        .args(["auth", "print-access-token"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| Error::GcloudAuth(e.to_string()))?;
-    if !out.status.success() {
-        return Err(Error::GcloudAuth(
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
