@@ -553,6 +553,11 @@ pub fn run_package(
             let t = Instant::now();
             reporter.report(&Event::StepStarted { step: step.id, kind: StepKind::OscService });
 
+            // Fix any broken workspace definitions in the tarball before vendoring
+            if let Some(tarball) = find_tarball(&checkout_dir) {
+                let _ = fix_cargo_workspace_in_tarball(&tarball);
+            }
+
             let normalized = config.pkg_name.replace('-', "_").to_lowercase();
             let service_xml = render_maturin_service_file(&normalized);
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
@@ -2037,6 +2042,139 @@ fn append_notes(notes_path: PathBuf, section: &str) {
     let mut existing = std::fs::read_to_string(&notes_path).unwrap_or_default();
     existing.push_str(section);
     let _ = std::fs::write(notes_path, existing);
+}
+
+/// Fix broken workspace definitions in a Cargo.toml inside a tarball.
+///
+/// Some packages reference workspace members (often git submodules) that aren't
+/// included in GitHub's archive downloads. This removes non-existent members
+/// from the workspace definition so cargo vendor doesn't fail.
+fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), String> {
+
+    // Extract to temp directory
+    let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let extract_dir = temp_dir.path();
+
+    eprintln!("  checking for broken Cargo workspace in tarball");
+
+    // Extract tarball
+    let archive_file = std::fs::File::open(tarball)
+        .map_err(|e| format!("opening tarball: {}", e))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive_file));
+    archive.unpack(extract_dir)
+        .map_err(|e| format!("extracting tarball: {}", e))?;
+
+    // Find Cargo.toml files
+    let mut fixed = false;
+    for entry in walkdir::WalkDir::new(extract_dir)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_name() != "Cargo.toml" {
+            continue;
+        }
+
+        let cargo_toml_path = entry.path();
+        let content = match std::fs::read_to_string(cargo_toml_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Parse as TOML
+        let mut doc: toml::Table = match toml::from_str(&content) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // Check if it has a workspace section
+        let workspace = match doc.get_mut("workspace") {
+            Some(toml::Value::Table(w)) => w,
+            _ => continue,
+        };
+
+        // Get members array
+        let members = match workspace.get_mut("members") {
+            Some(toml::Value::Array(m)) => m,
+            _ => continue,
+        };
+
+        // Check which members actually exist
+        let base_dir = cargo_toml_path.parent().unwrap();
+        let mut existing_members = Vec::new();
+        let mut removed_members = Vec::new();
+
+        for member in members.iter() {
+            if let Some(member_str) = member.as_str() {
+                let member_path = base_dir.join(member_str);
+                if member_path.exists() {
+                    existing_members.push(member.clone());
+                } else {
+                    eprintln!("  ⚠ removing missing workspace member: {}", member_str);
+                    removed_members.push(member_str.to_string());
+                    fixed = true;
+                }
+            }
+        }
+
+        if fixed {
+            // Update the members array
+            *members = existing_members;
+
+            // Write back the modified Cargo.toml
+            let new_content = toml::to_string_pretty(&doc)
+                .map_err(|e| format!("serializing Cargo.toml: {}", e))?;
+            std::fs::write(cargo_toml_path, new_content)
+                .map_err(|e| format!("writing Cargo.toml: {}", e))?;
+
+            eprintln!("  ✓ fixed Cargo.toml: removed {} missing workspace members",
+                     removed_members.len());
+        }
+    }
+
+    if !fixed {
+        eprintln!("  ✓ no workspace issues found");
+        return Ok(());
+    }
+
+    // Re-pack the tarball
+    eprintln!("  re-packing fixed tarball");
+    let temp_tarball = tarball.with_extension("tar.gz.tmp");
+    let tar_file = std::fs::File::create(&temp_tarball)
+        .map_err(|e| format!("creating temp tarball: {}", e))?;
+    let enc = flate2::write::GzEncoder::new(tar_file, flate2::Compression::default());
+    let mut tar_builder = tar::Builder::new(enc);
+
+    // Add all files from extract_dir
+    for entry in walkdir::WalkDir::new(extract_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path == extract_dir {
+            continue;
+        }
+
+        let relative = path.strip_prefix(extract_dir).unwrap();
+
+        if path.is_file() {
+            tar_builder.append_path_with_name(path, relative)
+                .map_err(|e| format!("adding file to tarball: {}", e))?;
+        } else if path.is_dir() {
+            tar_builder.append_dir(relative, path)
+                .map_err(|e| format!("adding dir to tarball: {}", e))?;
+        }
+    }
+
+    tar_builder.finish()
+        .map_err(|e| format!("finalizing tarball: {}", e))?;
+
+    // Replace original tarball
+    std::fs::rename(&temp_tarball, tarball)
+        .map_err(|e| format!("replacing tarball: {}", e))?;
+
+    eprintln!("  ✓ tarball updated with fixed workspace");
+    Ok(())
 }
 
 /// Find candidate source repositories for a package.
