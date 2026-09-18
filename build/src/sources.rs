@@ -415,6 +415,7 @@ fn find_matching_tag(tags: &[String], version: &str, repo: &str) -> Option<Strin
 /// Candidate archive URLs for a release tag, best first.
 ///
 /// Now queries the forge API for actual tags and tries to find an exact match.
+/// If no exact match is found, automatically uses the latest available tag.
 /// Falls back to pattern-based guessing if API query fails.
 ///
 /// Forges disagree on the path: GitHub and the Gitea/Forgejo family serve
@@ -435,32 +436,31 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
         if let Some(matching_tag) = find_matching_tag(&repo_tags, version, repo) {
             eprintln!("  ✓ found matching tag: {}", matching_tag);
             tags.push(matching_tag);
+        } else if !repo_tags.is_empty() {
+            // No exact match - automatically use the latest tag
+            let latest = &repo_tags[0]; // Tags are usually newest-first
+            let latest_version = version_from_tag(latest, repo);
+            eprintln!("  ⚠ version {} not found in repository", version);
+            eprintln!("  ✓ using latest available version: {} (tag: {})", latest_version, latest);
+            tags.push(latest.clone());
         } else {
-            // No exact match - try the latest tag if version looks like it might be wrong
-            if !repo_tags.is_empty() {
-                let latest = &repo_tags[0]; // Tags are usually newest-first
-                eprintln!("  ⚠ no exact match for version {}, latest tag is: {}", version, latest);
-                eprintln!("  suggestion: try --version {}", version_from_tag(latest, repo));
-                // Still add the version we're looking for in case it's very new
-                tags.extend([
-                    format!("v{}", version),
-                    version.to_string(),
-                ]);
-            }
+            eprintln!("  ⚠ no tags found via API, falling back to pattern guessing");
         }
     } else {
         eprintln!("  API query failed, using pattern-based tag guessing");
     }
 
-    // Add common patterns as fallback
-    tags.extend([
-        format!("v{}", version),
-        version.to_string(),
-        format!("{}-{}", repo, version),
-        format!("{}-v{}", repo, version),
-        format!("release-{}", version),
-        format!("release/{}", version),
-    ]);
+    // Add common patterns as fallback (only if we didn't get a tag from API)
+    if tags.is_empty() {
+        tags.extend([
+            format!("v{}", version),
+            version.to_string(),
+            format!("{}-{}", repo, version),
+            format!("{}-v{}", repo, version),
+            format!("release-{}", version),
+            format!("release/{}", version),
+        ]);
+    }
 
     // Remove duplicates while preserving order
     let mut seen = std::collections::HashSet::new();
