@@ -186,17 +186,36 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
         });
     }
 
-    Err(match last_err {
+    // Provide helpful error with available tags
+    let error_msg = match last_err {
         Some(e) => format!("could not read a release archive for {version}: {e}"),
-        None => format!(
-            "no release archive for version {version} at {repo_url}. Tried:\n{}",
-            candidates
-                .iter()
-                .map(|u| format!("  {u}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-    })
+        None => {
+            let mut msg = format!(
+                "no release archive for version {version} at {repo_url}. Tried:\n{}",
+                candidates
+                    .iter()
+                    .map(|u| format!("  {u}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+
+            // Add available tags to help user find the right version
+            if let Ok(tags) = get_repo_tags(repo_url) {
+                if !tags.is_empty() {
+                    msg.push_str("\n\nAvailable tags (showing first 20):");
+                    for tag in tags.iter().take(20) {
+                        let version = version_from_tag(tag, want);
+                        msg.push_str(&format!("\n  {} -> version {}", tag, version));
+                    }
+                    msg.push_str("\n\nTry one of these versions with: --version <version>");
+                }
+            }
+
+            msg
+        }
+    };
+
+    Err(error_msg)
 }
 
 /// The host, owner and repository name in a forge URL.
@@ -330,27 +349,129 @@ pub fn version_from_tag(tag: &str, repo: &str) -> String {
     v.to_string()
 }
 
+/// Get all tags from a repository via the forge API.
+fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
+    let (host, owner, repo) = owner_repo(repo_url)?;
+
+    let api_url = if host.contains("github.com") {
+        format!("https://api.github.com/repos/{owner}/{repo}/tags?per_page=100")
+    } else if host.contains("gitlab") {
+        let project = format!("{owner}%2F{repo}");
+        format!("https://{host}/api/v4/projects/{project}/repository/tags?per_page=100")
+    } else {
+        // Gitea/Forgejo
+        format!("https://{host}/api/v1/repos/{owner}/{repo}/tags?limit=100")
+    };
+
+    let json = get_json(&api_url)?;
+
+    let tags = match json.as_array() {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|item| {
+                item.get("name")
+                    .or_else(|| item.get("tag_name"))
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
+            })
+            .collect(),
+        None => vec![],
+    };
+
+    Ok(tags)
+}
+
+/// Find the best matching tag for a given version.
+///
+/// First tries exact match, then tries common patterns, then returns None.
+fn find_matching_tag(tags: &[String], version: &str, repo: &str) -> Option<String> {
+    // Try exact matches first
+    for tag in tags {
+        let normalized = version_from_tag(tag, repo);
+        if normalized == version {
+            return Some(tag.clone());
+        }
+    }
+
+    // Try pattern matching (v-prefix, repo-prefix, etc.)
+    let patterns = [
+        format!("v{}", version),
+        version.to_string(),
+        format!("{}-{}", repo, version),
+        format!("{}-v{}", repo, version),
+        format!("release-{}", version),
+        format!("release/{}", version),
+    ];
+
+    for pattern in &patterns {
+        if tags.iter().any(|tag| tag == pattern) {
+            return Some(pattern.clone());
+        }
+    }
+
+    None
+}
+
 /// Candidate archive URLs for a release tag, best first.
+///
+/// Now queries the forge API for actual tags and tries to find an exact match.
+/// Falls back to pattern-based guessing if API query fails.
 ///
 /// Forges disagree on the path: GitHub and the Gitea/Forgejo family serve
 /// `/archive/refs/tags/<tag>.tar.gz`, GitLab serves
-/// `/-/archive/<tag>/<repo>-<tag>.tar.gz`. Tag spelling is a free-for-all, so
-/// several are tried; the first that downloads wins.
+/// `/-/archive/<tag>/<repo>-<tag>.tar.gz`.
 pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
     let base = repo_url.trim_end_matches('/').trim_end_matches(".git");
     let repo = base.rsplit('/').next().unwrap_or("source");
     let is_gitlab = base.contains("gitlab");
 
-    let tags = [
-        format!("v{version}"),
-        version.to_string(),
-        format!("{repo}-{version}"),
-        format!("{repo}-v{version}"),
-        format!("release-{version}"),
-        format!("release/{version}"),
-    ];
+    let mut tags = Vec::new();
 
-    tags.iter()
+    // Try to get actual tags from the API first
+    if let Ok(repo_tags) = get_repo_tags(repo_url) {
+        eprintln!("  found {} tags via API", repo_tags.len());
+
+        // Try to find exact or close match
+        if let Some(matching_tag) = find_matching_tag(&repo_tags, version, repo) {
+            eprintln!("  ✓ found matching tag: {}", matching_tag);
+            tags.push(matching_tag);
+        } else {
+            // No exact match - try the latest tag if version looks like it might be wrong
+            if !repo_tags.is_empty() {
+                let latest = &repo_tags[0]; // Tags are usually newest-first
+                eprintln!("  ⚠ no exact match for version {}, latest tag is: {}", version, latest);
+                eprintln!("  suggestion: try --version {}", version_from_tag(latest, repo));
+                // Still add the version we're looking for in case it's very new
+                tags.extend([
+                    format!("v{}", version),
+                    version.to_string(),
+                ]);
+            }
+        }
+    } else {
+        eprintln!("  API query failed, using pattern-based tag guessing");
+    }
+
+    // Add common patterns as fallback
+    tags.extend([
+        format!("v{}", version),
+        version.to_string(),
+        format!("{}-{}", repo, version),
+        format!("{}-v{}", repo, version),
+        format!("release-{}", version),
+        format!("release/{}", version),
+    ]);
+
+    // Remove duplicates while preserving order
+    let mut seen = std::collections::HashSet::new();
+    let unique_tags: Vec<_> = tags
+        .into_iter()
+        .filter(|tag| seen.insert(tag.clone()))
+        .collect();
+
+    // Convert tags to URLs
+    unique_tags
+        .iter()
         .map(|tag| {
             if is_gitlab {
                 format!("{base}/-/archive/{tag}/{repo}-{tag}.tar.gz")
