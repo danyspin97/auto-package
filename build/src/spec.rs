@@ -137,82 +137,6 @@ pub fn fix_c_extension_arch(spec: &str) -> String {
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
 }
 
-/// Normalize `%files` paths from the PyPI display name to the pip-installed name.
-///
-/// pip installs using the normalized (lowercase) package name. py2pack uses
-/// the PyPI display name, so `%{python_sitearch}/MarkupSafe` and
-/// `MarkupSafe-%{version}.dist-info` need to become their lowercase equivalents.
-///
-/// Only the `%files` section is rewritten — other sections are left alone.
-pub fn fix_files_case(spec: &str, pypi_name: &str) -> String {
-    let normalized = pypi_name.to_lowercase();
-    if pypi_name == normalized {
-        return spec.to_string();
-    }
-
-    // RPM section-start macros that end a %files block.
-    // File-attribute macros (%license, %doc, %dir, %config, %attr, %ghost)
-    // appear *inside* %files and must not close it.
-    const SECTIONS: &[&str] = &[
-        "%prep",
-        "%build",
-        "%install",
-        "%check",
-        "%clean",
-        "%pre",
-        "%post",
-        "%preun",
-        "%postun",
-        "%pretrans",
-        "%posttrans",
-        "%package",
-        "%description",
-        "%changelog",
-    ];
-
-    let mut in_files = false;
-    let mut out = String::with_capacity(spec.len());
-
-    for line in spec.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("%files") {
-            in_files = true;
-        } else if in_files
-            && SECTIONS
-                .iter()
-                .any(|s| trimmed == *s || trimmed.starts_with(&format!("{s} ")))
-        {
-            in_files = false;
-        }
-
-        if in_files {
-            out.push_str(&line.replace(pypi_name, &normalized));
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-
-    if !spec.ends_with('\n') {
-        out.pop();
-    }
-    out
-}
-
-pub fn check_autosetup_dir(spec: &str, actual_top_level: &str) -> Option<Result<(), String>> {
-    let name = tag_value(spec, "Name:")?;
-    let version = tag_value(spec, "Version:")?;
-    let expanded = autosetup_expected_dir(spec, name, version)?;
-
-    Some(if actual_top_level == expanded {
-        Ok(())
-    } else {
-        Err(format!(
-            "%autosetup -n expects '{expanded}' but sdist top-level dir is '{actual_top_level}'"
-        ))
-    })
-}
-
 fn tag_value<'a>(spec: &'a str, tag: &str) -> Option<&'a str> {
     spec.lines()
         .find(|l| l.starts_with(tag))
@@ -310,46 +234,81 @@ Version:        3.0.3
     }
 
     #[test]
-    fn fix_files_case_handles_license_inside_files() {
-        // %license appears INSIDE the %files block — it must not close it.
-        let spec = "\
-%files %{python_files}
-%license LICENSE.txt
-%{python_sitearch}/MarkupSafe
-%{python_sitearch}/MarkupSafe-%{version}.dist-info
+    fn python_module_constraints_get_spaces_around_the_operator() {
+        // The unspaced form is what pyproject.toml and py2pack produce, and
+        // exactly what convention 1 in the agent prompt calls wrong.
+        let spec = "BuildRequires:  %{python_module setuptools>=42}\n\
+                    BuildRequires:  %{python_module wheel}\n";
+        let fixed = normalize_python_module_versions(spec);
+        assert!(fixed.contains("%{python_module setuptools >= 42}"), "{fixed}");
+        assert!(fixed.contains("%{python_module wheel}"), "bare name mangled");
+    }
 
-%changelog
-";
-        let fixed = fix_files_case(spec, "MarkupSafe");
-        assert!(
-            fixed.contains("%{python_sitearch}/markupsafe\n"),
-            "dir not fixed"
-        );
-        assert!(
-            fixed.contains("markupsafe-%{version}.dist-info"),
-            "dist-info not fixed"
-        );
-        assert!(fixed.contains("%license LICENSE.txt"), "license line lost");
-        assert!(fixed.contains("%changelog"), "changelog gone");
+}
+
+/// Strip all `# ap: fix` comment lines from a spec.
+///
+/// Model-authored fix comments must not accumulate across attempts: they
+/// reference RPM macros (e.g. `# ap: fix 1: Changed %pytest to %pytest_arch`)
+/// and RPM expands macros inside comments, causing parse failures. Call this
+/// before handing the spec back to the model.
+pub fn strip_ap_fix_comments(spec: &str) -> String {
+    let filtered: Vec<&str> = spec
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("# ap: fix"))
+        .collect();
+    let body = filtered.join("\n");
+    if spec.ends_with('\n') {
+        body + "\n"
+    } else {
+        body
     }
 }
 
-/// Prepend `# ap: gen:` comment lines to the spec so the AI agent can read
-/// generation decisions without re-deriving them.
+/// Return the 1-based line number and text of the first comment line that
+/// contains a `%` macro reference, or `None` if the spec is clean.
 ///
-/// Each entry in `notes` becomes one `# ap: gen: <note>` line at the top of
-/// the file. The agent is instructed to preserve these lines and to append its
-/// own `# ap: fix N: …` lines when it makes changes.
-pub fn prepend_generation_notes(spec: &str, notes: &[String]) -> String {
-    if notes.is_empty() {
-        return spec.to_owned();
+/// RPM expands macros inside comment lines, so any `# foo: %something` line
+/// will be expanded before the spec is parsed — causing the mysterious
+/// `Unknown tag: set +x` class of failure that item 8 exists to prevent.
+pub fn first_macro_in_comment(spec: &str) -> Option<(usize, String)> {
+    for (i, line) in spec.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(pos) = trimmed.find('%') {
+            let after = &trimmed[pos + 1..];
+            // `%%` is a literal percent — not a macro.
+            if after.starts_with('%') {
+                continue;
+            }
+            if after.starts_with(|c: char| c.is_alphabetic() || c == '{') {
+                return Some((i + 1, line.to_string()));
+            }
+        }
     }
-    let block = notes
-        .iter()
-        .map(|n| format!("# ap: gen: {n}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{block}\n{spec}")
+    None
+}
+
+/// Insert `cd <dir>` at the top of `%build` and `%install`.
+///
+/// A repository snapshot of a monorepo has the packaging in a subdirectory
+/// (`cuda_python/`, `python/`), so `%autosetup` lands one level above the
+/// project and every build macro would run in the wrong place.
+pub fn build_in_subdir(spec: &str, dir: &str) -> String {
+    let mut out = String::with_capacity(spec.len() + 64);
+    for line in spec.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if matches!(line.trim(), "%build" | "%install") {
+            out.push_str(&format!("cd {dir}\n"));
+        }
+    }
+    if !spec.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 /// Generate an openSUSE RPM spec for `release`.
@@ -369,7 +328,7 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
             "-t",
             "opensuse.spec",
             "-f",
-            spec_path.to_str().unwrap(),
+            &spec_path.to_string_lossy().into_owned(),
             &release.name,
             &release.version,
         ])
@@ -384,26 +343,33 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
     }
 
     let spec = std::fs::read_to_string(&spec_path).map_err(Error::Io)?;
-    Ok(post_process(spec, release, build_system, false))
+    Ok(post_process(spec, release, build_system, SdistFacts::default()))
 }
 
-/// Re-generate post-processing with a known `has_tests` flag.
-/// Call this from the CLI where the tarball is available.
-pub fn post_process_with_tests(
+/// What the sdist tells us that PyPI metadata cannot.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SdistFacts {
+    pub has_tests: bool,
+    pub has_c_extensions: bool,
+}
+
+/// Re-run post-processing once the tarball has been inspected.
+pub fn post_process_with_sdist(
     spec: &str,
     release: &Release,
     build_system: &BuildSystem,
-    has_tests: bool,
+    facts: SdistFacts,
 ) -> String {
-    post_process(spec.to_string(), release, build_system, has_tests)
+    post_process(spec.to_string(), release, build_system, facts)
 }
 
 fn post_process(
     spec: String,
     release: &Release,
     build_system: &BuildSystem,
-    has_tests: bool,
+    facts: SdistFacts,
 ) -> String {
+    let has_tests = facts.has_tests;
     let mut out = String::with_capacity(spec.len() + 512);
 
     let mut in_description = false;
@@ -438,6 +404,9 @@ fn post_process(
             out.push_str(line);
             out.push('\n');
             for req in &build_system.requires {
+                // `setuptools>=42` as it appears in pyproject.toml is exactly
+                // the form the conventions document as wrong; OBS needs
+                // `setuptools >= 42` inside the macro.
                 out.push_str(&format!("BuildRequires:  %{{python_module {req}}}\n"));
             }
             if has_tests && !spec.contains("%{python_module pytest}") {
@@ -465,6 +434,9 @@ fn post_process(
                     description_written = true;
                 }
                 in_description = false;
+                // rpm wants a blank line between the description body and the
+                // next section; without it the agent adds one on every package.
+                out.push('\n');
                 out.push_str(line);
                 out.push('\n');
             }
@@ -472,7 +444,7 @@ fn post_process(
         }
 
         // Inject %check before %changelog when tests exist.
-        if line.starts_with("%changelog") && has_tests && !spec.contains("%check") {
+        if line.starts_with("%changelog") && has_tests && !has_check {
             out.push_str("\n%check\n%pytest\n\n");
         }
 
@@ -480,7 +452,223 @@ fn post_process(
         out.push('\n');
     }
 
+    // Everything below is a whole-file pass, applied in a fixed order.
+    //
+    // Each one exists because the review agent was making the identical edit
+    // on nearly every package (see the notes.md journals): a deterministic
+    // rule here is a turn the model does not have to spend.
+    let out = normalize_python_module_versions(&out);
+    let out = dedupe_build_requires(&out);
+    let out = normalize_files_paths(&out, &release.name);
+    if facts.has_c_extensions {
+        fix_c_extension_arch(&out)
+    } else {
+        out
+    }
+}
+
+/// The pip-installed form of a PyPI name: lowercase, `-`/`.` → `_`.
+///
+/// This is what ends up on disk: `MarkupSafe` installs as `markupsafe`,
+/// `rich-toolkit` as `rich_toolkit`, and the dist-info directory always uses
+/// this spelling.
+pub fn normalized_module_name(pypi_name: &str) -> String {
+    pypi_name
+        .to_lowercase()
+        .replace(['-', '.'], "_")
+}
+
+/// Drop `BuildRequires` lines that name a package an earlier line already did.
+///
+/// py2pack emits the PyPI build requirements and [`post_process`] then adds
+/// `[build-system] requires` from the sdist, so anything declared in both
+/// appears twice — the single most common edit in the attempt journals, and
+/// once even a triplicate. The line carrying a version constraint wins,
+/// whichever order the two appear in.
+pub fn dedupe_build_requires(spec: &str) -> String {
+    use std::collections::HashMap;
+
+    /// The bare package name a BuildRequires line is about, lowercased.
+    fn subject(line: &str) -> Option<String> {
+        let rest = line.strip_prefix("BuildRequires:")?.trim();
+        let inner = match rest.strip_prefix("%{python_module ") {
+            Some(i) => i.strip_suffix('}').unwrap_or(i),
+            None => rest,
+        };
+        let name = inner
+            .split([' ', '>', '<', '=', '!'])
+            .next()?
+            .trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "{}{}",
+                if rest.starts_with("%{python_module ") { "py:" } else { "" },
+                name.to_lowercase()
+            ))
+        }
+    }
+
+    // First pass: for each subject, remember the index of the line to keep.
+    let lines: Vec<&str> = spec.lines().collect();
+    let mut keep: HashMap<String, usize> = HashMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(key) = subject(line) else { continue };
+        match keep.get(&key) {
+            // Prefer the constrained form — it carries strictly more information.
+            Some(&prev) if lines[prev].contains(">=") || lines[prev].contains("<=") => {}
+            _ => {
+                keep.insert(key, i);
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(spec.len());
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(key) = subject(line)
+            && keep.get(&key) != Some(&i)
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !spec.ends_with('\n') {
+        out.pop();
+    }
     out
+}
+
+/// Rewrite `%files` entries that spell the package the way PyPI does.
+///
+/// The dist-info directory is always `<normalized>-%{version}.dist-info/` —
+/// that one is not a guess. The module directory is only rewritten when it
+/// currently spells out the PyPI name verbatim; packages whose import name
+/// differs entirely (`PyJWT` → `jwt`, `opencv-python-headless` → `cv2`) are
+/// left for the agent, which can read `top_level.txt`.
+pub fn normalize_files_paths(spec: &str, pypi_name: &str) -> String {
+    let normalized = normalized_module_name(pypi_name);
+    let mut out = String::with_capacity(spec.len());
+
+    for line in spec.lines() {
+        let trimmed = line.trim();
+        let rewritten = if trimmed.contains(".dist-info") {
+            let prefix = trimmed.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+            format!("{prefix}/{normalized}-%{{version}}.dist-info/")
+        } else if let Some((prefix, last)) = trimmed.rsplit_once('/')
+            && trimmed.starts_with('%')
+            && last.trim_end_matches('/').eq_ignore_ascii_case(pypi_name)
+        {
+            format!("{prefix}/{normalized}/")
+        } else {
+            line.to_string()
+        };
+        out.push_str(&rewritten);
+        out.push('\n');
+    }
+
+    if !spec.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Generate a minimal skeleton spec for a monorepo package.
+///
+/// py2pack only understands single-project PyPI packages; for a monorepo with
+/// multiple subprojects it would produce a spec for one subproject only,
+/// leaving all siblings out. This skeleton carries the correct header fields
+/// from the PyPI release and leaves %build/%install/%check empty so the review
+/// agent can fill in the full multi-subpackage layout per convention 24.
+pub fn monorepo_skeleton(
+    pkg_name: &str,
+    version: &str,
+    subprojects: &[ap_ecosystem::sdist::Subproject],
+    release: Option<&ap_ecosystem::pypi::Release>,
+) -> String {
+    let name = pkg_name.to_lowercase();
+    let summary = release
+        .and_then(|r| r.summary.as_deref())
+        .unwrap_or("FIXME: add package summary");
+    let license = release
+        .map(|r| license_tag(&r.license))
+        .unwrap_or_else(|| "FIXME".to_string());
+    let url = release
+        .and_then(|r| r.homepage.as_deref())
+        .unwrap_or("FIXME");
+
+    let sub_list: String = subprojects
+        .iter()
+        .map(|s| {
+            format!(
+                "# TODO: add %package -n python-%{{name}}-{sub} for {dir}/\n",
+                sub = s.name.as_deref().unwrap_or(&s.dir),
+                dir = s.dir,
+            )
+        })
+        .collect();
+
+    format!(
+        "#\n\
+         # spec file for package python-{name}\n\
+         #\n\
+         # Copyright (c) 2026 SUSE LLC\n\
+         #\n\
+         # All modifications and additions to the file contributed by third parties\n\
+         # remain the property of their copyright owners, unless otherwise agreed\n\
+         # upon. The license for this file, and modifications and additions to the\n\
+         # file, is the same license as for the pristine package itself (unless the\n\
+         # license for the pristine package is not an Open Source License, in which\n\
+         # case the license is the MIT License). An \"Open Source License\" is a\n\
+         # license that conforms to the Open Source Definition (Version 1.9)\n\
+         # published by the Open Source Initiative.\n\
+         \n\
+         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
+         \n\
+         \n\
+         %{{?sle15_python_module_pythons}}\n\
+         Name:           python-{name}\n\
+         Version:        {version}\n\
+         Release:        0\n\
+         Summary:        {summary}\n\
+         License:        {license}\n\
+         URL:            {url}\n\
+         Source:         {name}-{version}.tar.gz\n\
+         BuildRequires:  python-rpm-macros\n\
+         BuildRequires:  %{{python_module pip}}\n\
+         BuildRequires:  fdupes\n\
+         %python_subpackages\n\
+         \n\
+         # This is a monorepo: all subprojects below must become %%package sections.\n\
+         # Convention 24 governs the layout — do not build only one subproject.\n\
+         {sub_list}\
+         %description\n\
+         {summary}\n\
+         \n\
+         %prep\n\
+         %autosetup -p1 -n {name}-{version}\n\
+         \n\
+         %build\n\
+         # TODO: build each subproject in dependency order\n\
+         \n\
+         %install\n\
+         # TODO: install each subproject\n\
+         \n\
+         %check\n\
+         # TODO: check each subproject\n\
+         \n\
+         %files %{{python_files}}\n\
+         %license LICENSE\n\
+         \n\
+         %changelog\n",
+        name = name,
+        version = version,
+        summary = summary,
+        license = license,
+        url = url,
+        sub_list = sub_list,
+    )
 }
 
 fn license_tag(license: &License) -> String {
@@ -496,5 +684,82 @@ fn license_tag(license: &License) -> String {
                 .join(" AND ")
         }
         License::Unknown => "FIXME".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod generator_tests {
+    use super::*;
+
+    /// "removed duplicate BuildRequires" appears in 20 of the 25 attempt
+    /// journals — py2pack emits the PyPI build requirements and we then add
+    /// `[build-system] requires` from the sdist on top.
+    #[test]
+    fn duplicate_build_requires_collapse_to_the_constrained_line() {
+        let spec = "\
+BuildRequires:  %{python_module pip}
+BuildRequires:  %{python_module hatchling}
+BuildRequires:  %{python_module setuptools >= 42}
+BuildRequires:  %{python_module hatchling >= 1.0}
+BuildRequires:  %{python_module setuptools}
+BuildRequires:  fdupes
+";
+        let out = dedupe_build_requires(spec);
+        assert_eq!(out.matches("hatchling").count(), 1, "{out}");
+        assert!(out.contains("%{python_module hatchling >= 1.0}"), "{out}");
+        assert_eq!(out.matches("setuptools").count(), 1, "{out}");
+        assert!(out.contains("%{python_module setuptools >= 42}"), "{out}");
+        assert!(out.contains("fdupes"), "non-python BR dropped");
+        assert!(out.contains("pip"), "pip dropped");
+    }
+
+    #[test]
+    fn a_non_python_buildrequires_is_not_confused_with_the_macro_form() {
+        // `cmake` the RPM and `%{python_module cmake}` are different packages.
+        let spec = "\
+BuildRequires:  cmake
+BuildRequires:  %{python_module cmake}
+";
+        assert_eq!(dedupe_build_requires(spec), spec);
+    }
+
+    #[test]
+    fn a_monorepo_project_is_built_from_its_subdirectory() {
+        let spec = "%build\n%pyproject_wheel\n\n%install\n%pyproject_install\n";
+        let out = build_in_subdir(spec, "cuda_python");
+        assert_eq!(
+            out,
+            "%build\ncd cuda_python\n%pyproject_wheel\n\n%install\ncd cuda_python\n%pyproject_install\n"
+        );
+    }
+
+    #[test]
+    fn dist_info_always_uses_the_normalized_name() {
+        let spec = "\
+%files %{python_files}
+%{python_sitelib}/rich-toolkit
+%{python_sitelib}/rich-toolkit-%{version}.dist-info
+";
+        let out = normalize_files_paths(spec, "rich-toolkit");
+        assert!(out.contains("%{python_sitelib}/rich_toolkit/"), "{out}");
+        assert!(
+            out.contains("%{python_sitelib}/rich_toolkit-%{version}.dist-info/"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_module_name_that_is_not_the_package_name_is_left_alone() {
+        // PyJWT installs as `jwt`; only the agent can know that from
+        // top_level.txt, so the module line must survive untouched.
+        let spec = "%files %{python_files}\n%{python_sitelib}/jwt/\n";
+        assert_eq!(normalize_files_paths(spec, "PyJWT"), spec);
+    }
+
+    #[test]
+    fn display_name_in_files_is_normalized() {
+        let spec = "%files %{python_files}\n%{python_sitearch}/MarkupSafe\n";
+        let out = normalize_files_paths(spec, "MarkupSafe");
+        assert!(out.contains("%{python_sitearch}/markupsafe/"), "{out}");
     }
 }
