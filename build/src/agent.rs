@@ -45,7 +45,9 @@ openSUSE spec conventions to keep in mind:
    - Use %pytest_arch rather than %pytest in %check
    - Add BuildRequires for any C libraries the extension links against,
      e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
-     for cffi. Check the build errors or setup.py/pyproject.toml for hints.
+     for cffi. When headers or libraries are missing, use `zypper search --provides`
+     or `zypper what-provides` to find the package that provides them (see the
+     "Missing C Headers and Libraries" section below for the search pattern).
    - When the headers come from a *Python* package, the base package does not
      carry them — the -devel flavour does. A build that fails on
      `pybind11/pybind11.h: No such file` needs
@@ -144,6 +146,11 @@ openSUSE spec conventions to keep in mind:
    '%if !%{with test}', and %check inside '%if %{with test}'.
    This lets OBS build and test in separate subpackages.
 
+   CRITICAL: ALL Python packages MUST be built for multiple Python flavors
+   (python311, python312, etc.), not just one. Never write code or comments
+   that assume a single Python interpreter. The %python_expand and
+   %{python_files} macros handle multi-flavor builds automatically.
+
 9. Build resources: there are no constraints on RAM or CPU. Always use the
    maximum available parallelism — never add '-j1' or any other job limit to
    make, cmake, or pytest invocations.
@@ -225,6 +232,7 @@ openSUSE spec conventions to keep in mind:
    - Grep: search for patterns (use to find test dependencies, entry points, etc.)
    - Edit: modify the spec file or source files under source/
    - Bash(rpmspec *): run `rpmspec --parse spec` to validate syntax
+   - WebSearch: search the web for missing source repositories or package information
    - Bash(cd source && quilt *): create and manage source patches using quilt.
      QUILT_PATCHES is already set to the OBS checkout directory, so patches land
      there automatically. Workflow for each logical fix:
@@ -446,7 +454,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      directory and has already put `cd <subdir>` at the top of %build and
      %install, with `%autosetup -n` still pointing at the tarball's top-level
      directory — check it picked the right one. If the archive holds several
-     projects they are listed above, and convention 24 governs the layout.
+     projects they are listed above, and convention 25 governs the layout.
    - **The version is not baked in.** A repository checkout has no PKG-INFO
      and often no `.git`, so a dynamic version resolves to 0.0.0 or the build
      backend fails outright — convention 18 covers the fix.
@@ -462,10 +470,18 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    as out of reach, and do not disable a feature or drop a test suite merely
    because its dependency is not in OBS yet.
 
-   IMPORTANT: CUDA libraries (libcuda, libcudart, etc.) are provided by the
-   system. Add them as BuildRequires when a package needs them, and do not
-   skip packages that require CUDA libraries — they will be available in the
-   build environment.
+   IMPORTANT: Packages that link against or provide bindings to CUDA libraries
+   (like cuda-python, nvmath-python, etc.) MUST declare CUDA as a BuildRequires.
+   When packaging any CUDA-related package:
+   1. Check the source for references to CUDA headers or libraries (look for
+      #include <cuda.h>, libcuda.so, libcudart.so, etc. in the source code or
+      build configuration)
+   2. If found, add these BuildRequires:
+      BuildRequires:  cuda-devel
+      BuildRequires:  cuda-runtime
+   3. Also add CUDA to `unresolvable_packages` if it is not available in OBS
+      yet — it will be built and made available
+   4. Do not skip packages that require CUDA libraries
 
    CUDA Python ecosystem libraries are all open source and available on GitHub.
    When encountering any of these as dependencies, they should be packaged:
@@ -488,7 +504,22 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      downloaded at runtime. That is a property of the build environment, not
      a missing package. Convention 10 rung (iv) covers it.
 
-24. Monorepos: package ALL sibling projects as subpackages of this one spec.
+24. Missing source code: when the build fails because a package has no source
+   tarball on PyPI and no repository URL in its metadata, search for it
+   directly. Use WebSearch with queries like:
+   - "site:github.com <package-name> NVIDIA" for NVIDIA CUDA packages
+   - "site:github.com <package-name> python" for other packages
+   - "<package-name> github repository"
+   Look for:
+   - Official repositories (nvidia/*, NVIDIA/*, or the project's organization)
+   - Releases or tags matching the package version
+   - Monorepo structures where the package is a subdirectory
+   Once found, report the GitHub repository URL and the specific tag/release
+   in your reasoning, and set action to "blocked" with why: "source not on
+   PyPI, available at https://github.com/..." so the build system can fetch
+   it from there.
+
+25. Monorepos: package ALL sibling projects as subpackages of this one spec.
    When the "Other projects in this archive" section above lists more than one
    project, the default is ONE source package that builds ALL of them, with a
    subpackage per project — not one project built and the rest thrown away,
@@ -795,9 +826,9 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
     let allowed_tools = if req.checkout_dir.is_some() {
-        "Read,Grep,Edit,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *)"
+        "Read,Grep,Edit,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),WebSearch"
     } else {
-        "Read,Grep,Edit,Bash(rpmspec *)"
+        "Read,Grep,Edit,Bash(rpmspec *),WebSearch"
     };
 
     // Escalate with the attempt number: Sonnet 5 handles the routine fixes at
@@ -1080,7 +1111,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              6. **License** if it is FIXME or not an SPDX expression (convention 5).\n\
              7. **Sibling projects**, if the archive holds more than one — decide the \
                 subpackage layout now, before the first build, because it changes \
-                %build, %install and every %files section (convention 24).\n\
+                %build, %install and every %files section (convention 25).\n\
              \n\
              If a check does not apply, say so in one clause; do not invent work."
         }
@@ -1196,13 +1227,13 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "## Other projects in this archive\n\n\
              The source holds several projects side by side. `{primary}` is the one \
              this spec was generated for; these are all of them:\n{list}\n\n\
-             Read convention 24 — the usual answer is one subpackage per project in \
+             Read convention 25 — the usual answer is one subpackage per project in \
              this single spec, not one project built and the rest ignored.\n\n",
             primary = req.pkg_name,
             list = req
                 .subprojects
                 .iter()
-                .map(|(dir, _)| format!("  - {dir}/"))
+                .map(|(dir, name)| format!("  - {dir}/  (declares itself `{name}`)"))
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
@@ -1227,10 +1258,32 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         format!(
             "## Missing BuildRequires\n\n\
              OBS could not find these RPM packages in any of its repositories:\n{}\n\n\
-             They are not packaged yet. Put their names in `unresolvable_packages` in \
-             your response and the build system will build them and retry this package \
-             — that is the normal path, and it applies however large the dependency is. \
-             Leave their BuildRequires lines in the spec.\n\n\
+             They are not packaged yet. **Your goal is to get this package built by \
+             packaging ALL missing dependencies.** Put their names in \
+             `unresolvable_packages` in your response and the build system will build \
+             them and retry this package — that is the normal path, and it applies \
+             however large the dependency is. Leave their BuildRequires lines in the spec.\n\n\
+             Do not stop at the first missing dependency — report ALL unresolvable \
+             packages so they can be built in parallel. This iterative process continues \
+             until all dependencies are satisfied and the final package successfully builds.\n\n\
+             **CRITICAL - Verify before reporting python-* packages**:\n\
+             1. **Check PyPI first**: Before reporting a python-* package as unresolvable, \
+             verify it exists on PyPI: `curl -s https://pypi.org/pypi/<name>/json`. If you \
+             get a 404, the package doesn't exist on PyPI.\n\
+             2. **Check name variations**: PyPI package names use `-` while imports use `_`. \
+             Try variations (e.g., `rich-toolkit` vs `rich_toolkit`).\n\
+             3. **System tools are NOT Python packages**: Tools like cmake, ninja, pkg-config, \
+             gcc, etc. are ALWAYS system packages, never python-*. If you see missing \
+             `python314-cmake`, `python313-ninja`, etc., this is WRONG:\n\
+             - WRONG: `BuildRequires: %{{python_module cmake}}`\n\
+             - CORRECT: `BuildRequires: cmake`\n\
+             - WRONG: `BuildRequires: %{{python_module ninja}}`\n\
+             - CORRECT: `BuildRequires: ninja`\n\
+             Common system tools: cmake, ninja, pkg-config, gcc, g++, make, automake, \
+             autoconf, libtool, gettext, flex, bison.\n\
+             4. **Fix the spec**: If the spec incorrectly uses `%{{python_module <system-tool>}}`, \
+             remove the macro and use the plain package name instead. Do NOT report these \
+             as unresolvable.\n\n\
              Exception: if a package name in the spec is clearly wrong (e.g. wrong \
              capitalisation or an extra prefix), fix the name in the spec instead of \
              reporting it as unresolvable.\n\n",
@@ -1260,6 +1313,13 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          \n\
          {budget}\n\
          \n\
+         **GOAL**: Your ultimate objective is to get this package successfully built. \
+         When you encounter missing dependencies, report ALL of them in \
+         `unresolvable_packages` so they can be packaged. This process continues \
+         recursively — each missing dependency will be packaged, which may reveal more \
+         missing dependencies, until the entire dependency tree is satisfied and this \
+         package builds successfully.\n\
+         \n\
          {source_note}\
          ## Workspace\n\
          {map}\n\
@@ -1277,6 +1337,70 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          {context}\
          {hint}\
          \n\
+         ## Missing C Headers and Libraries\n\
+         \n\
+         When a build fails with \"fatal error: <header.h>: No such file or directory\" or \
+         linker errors about missing libraries, you need to find which package provides them:\n\
+         \n\
+         1. **Search for the providing package**: Use `zypper search --provides --match-exact \"/usr/include/<header.h>\"` \
+         or `zypper what-provides '<library>.so*'` to find which package provides the missing file.\n\
+         2. **Add the -devel package**: C headers are typically in -devel packages. \
+         For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.\n\
+         3. **Common patterns**:\n\
+         - `Python.h: No such file` → add `BuildRequires: %{{python_module devel}}`\n\
+         - `pkg-config` errors → add `BuildRequires: pkg-config` or `pkgconfig(<name>)`\n\
+         - Library linking errors → search for the library and add its -devel package\n\
+         4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check \
+         the build log for hints about which library the build system is trying to find.\n\
+         \n\
+         **If the package is found**: Add it directly to BuildRequires in the spec \
+         (e.g., common system libraries like openssl-devel, libffi-devel are already available).\n\
+         \n\
+         **If the package is NOT found** (zypper returns no results or OBS reports it as \
+         unresolvable): Report it in `unresolvable_packages` so it can be built, just like \
+         missing Python dependencies. C libraries can also be missing and need to be packaged.\n\
+         \n\
+         ## Source Files and Cleanup\n\
+         \n\
+         Before finishing, check for untracked files and source availability:\n\
+         \n\
+         1. **Check untracked files**: Run `osc status` in the package directory to see \
+         untracked files (marked with `?`).\n\
+         2. **Handle each untracked file**:\n\
+         - If it's a legitimate source file needed for the build, add it to the spec with \
+         `Source<N>:` (where N is the next available number).\n\
+         - If it's a generated file, build artifact, or not needed, delete it with `rm`.\n\
+         - **IMPORTANT**: Avoid tarballs of different versions of the current package \
+         (these are leftovers from previous attempts). Delete them unless they're \
+         explicitly referenced in the spec.\n\
+         3. **Verify all sources exist**: Read the spec and check that every `Source:` and \
+         `Source<N>:` line points to a file that actually exists in the package directory. \
+         Use `ls` to verify files exist. Missing sources will cause the build to fail.\n\
+         4. **Examples of files to DELETE**:\n\
+         - Old version tarballs: `{pkg}-1.2.3.tar.gz` when the current version is 1.2.4\n\
+         - Build artifacts: `.pyc`, `__pycache__/`, `*.egg-info/`, `.pytest_cache/`\n\
+         - Editor temporaries: `.swp`, `*~`, `.#*`\n\
+         \n\
+         ## Common Test Failures\n\
+         \n\
+         **ModuleNotFoundError during tests**: If you see errors like:\n\
+         ```\n\
+         [  180s] ModuleNotFoundError: No module named 'pybind11_tests'\n\
+         [  180s] ModuleNotFoundError: No module named 'some_package'\n\
+         ```\n\
+         This means the test suite imports a module that isn't in BuildRequires. Add it:\n\
+         - For Python packages: `BuildRequires: %{{python_module <package-name>}}`\n\
+         - Example: `ModuleNotFoundError: No module named 'pytest_cov'` → add \
+         `BuildRequires: %{{python_module pytest-cov}}`\n\
+         \n\
+         Check the test files or `[project.optional-dependencies]` / `[dependency-groups]` \
+         sections in pyproject.toml for test dependencies that might be missing.\n\
+         \n\
+         **Verifying package names**: You can search PyPI directly to verify package names \
+         or check if a package exists: `curl -s https://pypi.org/pypi/<package>/json | jq .info.name` \
+         or browse to `https://pypi.org/project/<package>/`. This is useful when the import \
+         name differs from the package name (e.g., `import PIL` but package is `Pillow`).\n\
+         \n\
          ## Workflow\n\
          \n\
          1. **Investigate FIRST**: Use your tools to gather information BEFORE editing.\n\
@@ -1285,9 +1409,12 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          \"edited\". Never describe a change in reasoning without having called Edit \
          first. If you identified a fix but did not apply it, set action to \
          \"no_change\" and explain why.\n\
-         3. **Validate**: Run `rpmspec --parse <that same path>` to verify syntax. \
+         3. **Check sources and cleanup**: Verify all Source: and Source<N>: lines point \
+         to files that exist. Run `osc status` and handle untracked files (see \"Source \
+         Files and Cleanup\" above). Delete old version tarballs and build artifacts.\n\
+         4. **Validate**: Run `rpmspec --parse <that same path>` to verify syntax. \
          Do this after your last edit, not only after the first one.\n\
-         4. **Finish**: Return a JSON object with:\n\
+         5. **Finish**: Return a JSON object with:\n\
          - \"action\": \"edited\", \"no_change\", or \"blocked\"\n\
          - \"why\": required when action is \"blocked\"\n\
          - \"reasoning\": one sentence summarising what you did\n\
@@ -1297,7 +1424,10 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          you investigated rather than assumed.\n\
          - \"confidence\": \"high\", \"medium\", or \"low\"\n\
          - \"unresolvable_packages\": RPM names of packages that OBS cannot resolve and \
-         must be built first — the build system will queue them and retry this package later",
+         must be built first. **IMPORTANT**: Before listing any python-* package here, \
+         verify it exists on PyPI with `curl -s https://pypi.org/pypi/<name>/json`. Never \
+         report system tools (cmake, ninja, pkg-config, gcc) as python-* packages — fix \
+         the spec to use the plain package name instead.",
         pkg = req.pkg_name,
         version = req.version,
         task = task_desc,
@@ -1377,7 +1507,7 @@ mod tests {
 
         assert!(prompt.contains("## Other projects in this archive"), "{prompt}");
         assert!(prompt.contains("cuda_bindings/  (declares itself `cuda-bindings`)"));
-        assert!(prompt.contains("convention 24"));
+        assert!(prompt.contains("convention 25"));
         // And the repository-archive note, since this did not come from a sdist.
         assert!(prompt.contains("archive of the upstream repository"));
     }

@@ -102,7 +102,7 @@ impl PkgState {
 
     pub fn is_built(&self, version: &str) -> bool {
         self.last_built_version.as_deref() == Some(version)
-            && matches!(self.last_outcome.as_deref(), Some("success"))
+            && matches!(self.last_outcome.as_deref(), Some("success") | Some("wheel-only"))
     }
 }
 
@@ -424,6 +424,31 @@ pub fn run_package(
                     let _ = std::os::unix::fs::symlink(&src, &link);
                 }
                 (res.sdist_top_level, res.is_maturin, res.from_repo_archive, res.is_rust)
+            }
+            Err(GenSpecError::WheelOnly { pkg_name, version }) => {
+                reporter.report(&Event::StepFinished {
+                    step: step.id,
+                    outcome: StepOutcome::Ok,
+                    elapsed: t.elapsed(),
+                });
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message: format!(
+                        "{pkg_name} {version} is published on PyPI as wheels only and its \
+                         metadata names no source repository. Skipping source build.\n\
+                         If you know where the source lives, provide it with:\n\
+                         \x20   --source-url {pkg_name}=https://github.com/<owner>/<repo>"
+                    ),
+                });
+                // Mark the package as wheel-only in state
+                let mut state = PkgState::load(&ws);
+                state.last_built_version = Some(version);
+                state.last_outcome = Some("wheel-only".to_string());
+                let _ = state.save(&ws);
+                return PipelineResult::Failed {
+                    rpm_name,
+                    reason: "wheel-only package with no source repository".to_string(),
+                };
             }
             Err(GenSpecError::Other(e)) => {
                 reporter.report(&Event::StepFinished {
@@ -1462,6 +1487,7 @@ fn find_sdist_top_level(checkout_dir: &Path, pkg_name: &str, version: &str) -> S
 }
 
 enum GenSpecError {
+    WheelOnly { pkg_name: String, version: String },
     Other(String),
 }
 
@@ -1519,17 +1545,14 @@ fn generate_spec(
                 .map(str::to_string)
                 .or_else(|| pypi::source_url_from_json(&json));
 
-            let Some(source_url) = source_url else {
-                return Err(GenSpecError::Other(format!(
-                    "{pkg} {version} is published on PyPI as wheels only and its metadata \
-                     names no source repository, so there is nothing to put in Source0.\n\
-                     If you know where the source lives, point auto-package at it:\n\
-                     \x20   --source-url {pkg}=https://github.com/<owner>/<repo>\n\
-                     It is remembered in {sources} and applies to later runs too.",
-                    pkg = config.pkg_name,
-                    version = config.version,
-                    sources = crate::sources::SourceMap::path(&config.work_dir).display(),
-                )));
+            let Some(source_url) = source_url.or_else(|| {
+                // Try to find the source repository automatically, especially for NVIDIA packages
+                attempt_find_source_repo(&config.pkg_name)
+            }) else {
+                return Err(GenSpecError::WheelOnly {
+                    pkg_name: config.pkg_name.clone(),
+                    version: config.version.clone(),
+                });
             };
 
             let tarball =
@@ -1969,6 +1992,56 @@ fn append_notes(notes_path: PathBuf, section: &str) {
     let mut existing = std::fs::read_to_string(&notes_path).unwrap_or_default();
     existing.push_str(section);
     let _ = std::fs::write(notes_path, existing);
+}
+
+/// Attempt to automatically find the source repository for a package.
+///
+/// Tries common patterns for NVIDIA CUDA packages and other well-known packages.
+fn attempt_find_source_repo(pkg_name: &str) -> Option<String> {
+    let lower = pkg_name.to_lowercase();
+
+    // NVIDIA CUDA packages - try common GitHub repositories
+    if lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.contains("nvmath") {
+        // Common NVIDIA GitHub patterns
+        let nvidia_repos = [
+            ("cuda-python", "https://github.com/NVIDIA/cuda-python"),
+            ("nvmath-python", "https://github.com/NVIDIA/nvmath-python"),
+            ("nvidia-ml-py", "https://github.com/NVIDIA/nvidia-ml-py"),
+            ("nvidia-nvshmem-cu", "https://github.com/NVIDIA/nvshmem"),
+            ("nvshmem4py", "https://github.com/NVIDIA/nvshmem"),
+        ];
+
+        for (pattern, repo_url) in &nvidia_repos {
+            if lower.starts_with(pattern) || lower.contains(pattern) {
+                // Verify the repository exists by trying to fetch it
+                if let Ok(resp) = ureq::head(*repo_url).call() {
+                    if resp.status() == 200 {
+                        eprintln!("info: automatically found source repository: {}", repo_url);
+                        return Some(repo_url.to_string());
+                    }
+                }
+            }
+        }
+
+        // Generic NVIDIA pattern: try https://github.com/NVIDIA/<pkg-name>
+        let clean_name = lower
+            .strip_prefix("nvidia-")
+            .or_else(|| lower.strip_prefix("cuda-"))
+            .unwrap_or(&lower)
+            .replace("-cu11", "")
+            .replace("-cu12", "")
+            .replace("-cu13", "");
+
+        let generic_url = format!("https://github.com/NVIDIA/{}", clean_name);
+        if let Ok(resp) = ureq::head(&generic_url).call() {
+            if resp.status() == 200 {
+                eprintln!("info: automatically found source repository: {}", generic_url);
+                return Some(generic_url);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
