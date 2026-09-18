@@ -473,6 +473,14 @@ fn cmd_build(
             let batch = std::mem::take(&mut pending_deps);
             let handles: Vec<_> = batch
                 .into_iter()
+                // Convert RPM names to PyPI names: "python-foo" → "foo"
+                // The agent returns RPM names, but we need PyPI names for querying.
+                .map(|rpm_name| {
+                    rpm_name
+                        .strip_prefix("python-")
+                        .unwrap_or(&rpm_name)
+                        .to_string()
+                })
                 .filter(|dep| attempted_deps.insert(dep.clone()))
                 .filter(|dep| {
                     // Skip deps already present in the project or any of its
@@ -485,6 +493,8 @@ fn cmd_build(
                     .contains(&rpm)
                 })
                 .map(|dep| {
+                    eprintln!("  queuing missing dependency: {} (PyPI: {})",
+                              ap_build::osc::rpm_name(&dep), dep);
                     let url = format!("https://pypi.org/pypi/{dep}/json");
                     let dep_version = ureq::get(&url)
                         .call()
