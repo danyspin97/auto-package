@@ -10,6 +10,7 @@
 //!   try to read out of the sdist — its *presence* is diagnostic, the file is
 //!   not.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -70,9 +71,31 @@ static ANY_SITE: LazyLock<Regex> =
 /// tarball listing, which the pre-build phase has already computed. When it
 /// is unavailable we fall back to a structural guess, but the explicit name is
 /// strictly better and should be supplied whenever it is known.
-#[derive(Debug, Clone, Default)]
 pub struct PathMapper {
     sdist_root: Option<String>,
+    /// Set to true the first time a path is successfully matched against sdist_root.
+    /// Callers can call `did_match_root()` after extraction to detect when the
+    /// supplied root name never matched anything (e.g. the bare package name was
+    /// passed instead of the versioned directory name).
+    matched: AtomicBool,
+}
+
+impl Default for PathMapper {
+    fn default() -> Self {
+        Self {
+            sdist_root: None,
+            matched: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Clone for PathMapper {
+    fn clone(&self) -> Self {
+        Self {
+            sdist_root: self.sdist_root.clone(),
+            matched: AtomicBool::new(self.matched.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl PathMapper {
@@ -80,7 +103,21 @@ impl PathMapper {
     pub fn with_sdist_root(root: impl Into<String>) -> Self {
         Self {
             sdist_root: Some(root.into()),
+            matched: AtomicBool::new(false),
         }
+    }
+
+    /// True when at least one path was classified as `BuildTree` using the
+    /// explicit sdist root. If this returns false after processing a log, the
+    /// caller should emit a warning — the most likely cause is that the root
+    /// was the bare package name rather than the versioned directory name.
+    pub fn did_match_root(&self) -> bool {
+        self.matched.load(Ordering::Relaxed)
+    }
+
+    /// The sdist root name this mapper was configured with, if any.
+    pub fn sdist_root(&self) -> Option<&str> {
+        self.sdist_root.as_deref()
     }
 
     pub fn classify(&self, path: &str) -> PathClass {
@@ -115,12 +152,13 @@ impl PathMapper {
 
     /// The sdist-relative form of a BUILD-tree path, if it is one.
     fn sdist_relative(&self, path: &str) -> Option<String> {
-        let after_build = after_marker(path, "/BUILD/")?;
+        let _after_build = after_marker(path, "/BUILD/")?;
 
         // Preferred: we know what the tarball unpacks to.
         if let Some(root) = &self.sdist_root {
             let marker = format!("/{root}/");
             if let Some(rest) = after_marker(path, &marker) {
+                self.matched.store(true, Ordering::Relaxed);
                 return Some(rest.to_string());
             }
             // Path is under /BUILD/ but not under the sdist root — a generated
@@ -131,6 +169,7 @@ impl PathMapper {
         // Fallback: `<pkg>-<ver>-build/<sdist-root>/<relative>`. rpm creates
         // the `-build` wrapper; upstream's tarball creates the directory
         // inside it.
+        let after_build = after_marker(path, "/BUILD/")?;
         let mut parts = after_build.splitn(3, '/');
         let wrapper = parts.next()?;
         let _sdist_root = parts.next()?;
@@ -245,5 +284,21 @@ mod tests {
             mapper().classify("/var/tmp/rpm-tmp.Asoqjo"),
             PathClass::Other
         );
+    }
+
+    #[test]
+    fn did_match_root_tracks_successful_matches() {
+        let m = mapper();
+        assert!(!m.did_match_root());
+        m.classify(SDIST_FRAME);
+        assert!(m.did_match_root());
+    }
+
+    #[test]
+    fn did_match_root_stays_false_for_system_frames() {
+        let m = mapper();
+        m.classify(SYSTEM_FRAME);
+        m.classify(BUILDROOT_NOISE);
+        assert!(!m.did_match_root());
     }
 }

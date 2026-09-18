@@ -74,6 +74,33 @@ pub struct ExtractedLog {
 }
 
 impl ExtractedLog {
+    /// True when the extractor found a recognisable failure signal.
+    pub fn has_signal(&self) -> bool {
+        self.failure.is_some() && !self.excerpt.is_empty()
+    }
+
+    /// Convert to the ap-core event type for event emission.
+    pub fn to_event_extract(&self) -> ap_core::event::Extract {
+        ap_core::event::Extract {
+            genre: self.failure.as_ref().map(|f| f.genre.as_str().to_string()),
+            phase: self.failure.as_ref().map(|f| f.phase.name().to_string()),
+            located_by: self.failure.as_ref().map(|f| f.located_by.clone()),
+            excerpt: if self.has_signal() {
+                self.excerpt.clone()
+            } else {
+                self.log_tail.clone()
+            },
+            error_lines: self.error_lines.clone(),
+            elided_count: self.failure.as_ref().map(|f| f.elided).unwrap_or(0),
+            source_candidates: self
+                .source_candidates(5)
+                .iter()
+                .map(|s| std::path::PathBuf::from(s))
+                .collect(),
+            has_signal: self.has_signal(),
+        }
+    }
+
     /// The best candidate for "which source file should the model see".
     ///
     /// Run 1 in one call: the innermost frame is in `setuptools`, a dependency
@@ -91,13 +118,10 @@ impl ExtractedLog {
 
     /// Sdist-relative source paths the log pointed at, best first.
     ///
-    /// These are **candidates, not an inline set**. Reading them is
-    /// [`Level::BuildTree`], two rungs above where an attempt starts: the
-    /// excerpt alone answered run 1, and inlining files on every attempt would
-    /// spend most of the 81× saving extraction buys on attempts that never
-    /// needed them.
-    ///
-    /// [`Level::BuildTree`]: crate::context::Level::BuildTree
+    /// These are **candidates, not an inline set**: the agent reads them with
+    /// its own tools when the excerpt is not enough. Inlining them on every
+    /// attempt would spend most of the 81× saving extraction buys on attempts
+    /// that never needed them.
     pub fn source_candidates(&self, limit: usize) -> Vec<&str> {
         self.candidates(limit, |c| match c {
             PathClass::BuildTree { relative } => Some(relative.as_str()),
@@ -366,6 +390,38 @@ mod tests {
         assert!(e.excerpt.contains("as_requirement"));
         // Timestamps are stripped on the way out — they are pure token cost.
         assert!(!e.excerpt.contains("[    7s]"));
+    }
+
+    /// The failure that comes *after* a successful `%check`.
+    ///
+    /// The pipeline used to pre-scope the log to the `%check` section before
+    /// calling `extract`, which would have cut this failure out entirely. The
+    /// whole log goes in; `phase::segment` decides what matters.
+    #[test]
+    fn a_post_build_failure_after_check_is_still_found() {
+        let log = "\
+[   22s] Executing(%build): /usr/bin/bash -e /var/tmp/rpm-tmp.aaa
+[   24s] Executing(%install): /usr/bin/bash -e /var/tmp/rpm-tmp.bbb
+[   27s] Executing(%check): /usr/bin/bash -e /var/tmp/rpm-tmp.ccc
+[   30s] 12 passed in 2.1s
+[   50s] ... running 50-check-filelist
+[   50s] python313-foo.rpm: directories not owned by a package:
+[   50s]  - /etc/alternatives
+";
+        let e = extract(log, &PathMapper::with_sdist_root("foo-1.0"));
+        let failure = e.failure.expect("the post-build complaint must be found");
+        assert_eq!(failure.genre, Genre::PostBuildCheck);
+        assert_eq!(failure.located_by, "post-build-check");
+        assert!(failure.excerpt.contains("/etc/alternatives"));
+    }
+
+    #[test]
+    fn the_extract_records_which_strategy_found_it() {
+        let e = extracted();
+        assert_eq!(
+            e.to_event_extract().located_by.as_deref(),
+            Some("rpm-reported-failure")
+        );
     }
 
     #[test]

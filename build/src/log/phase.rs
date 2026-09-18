@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 /// Which part of the build a line belongs to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Phase {
     /// Buildroot resolution and installation. Discardable in its entirety.
     Setup,
@@ -47,7 +47,7 @@ impl Phase {
 }
 
 /// A contiguous run of lines belonging to one phase.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub phase: Phase,
     /// Inclusive start index into the normalised line slice.

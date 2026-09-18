@@ -32,7 +32,7 @@ const XTRACE_CONTEXT: usize = 8;
 
 /// What kind of failure this is. Determines how it gets quoted, and is a useful
 /// clustering key for the cross-package fix cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Genre {
     /// A Python traceback ending in an exception.
     PythonTraceback,
@@ -59,7 +59,7 @@ impl Genre {
 }
 
 /// A located, quoted failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Failure {
     pub genre: Genre,
     /// Which phase it happened in — the single most useful routing fact.
@@ -68,6 +68,9 @@ pub struct Failure {
     pub excerpt: String,
     /// How many lines were dropped as noise or as elided frames.
     pub elided: usize,
+    /// Which strategy in [`locate`] found this failure. Reported to the user at
+    /// `--log debug` so a wrong extract can be traced to the rule that produced it.
+    pub located_by: String,
 }
 
 static BAD_EXIT: LazyLock<Regex> = LazyLock::new(|| {
@@ -146,6 +149,11 @@ pub fn locate(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Option<Fai
         .or_else(|| bare_error_line(lines, spans, mapper))
 }
 
+/// Names of the strategies in [`locate`], in the order they are tried.
+const BY_RPM_REPORT: &str = "rpm-reported-failure";
+const BY_POST_BUILD: &str = "post-build-check";
+const BY_BARE_ERROR: &str = "bare-error-line";
+
 /// The common case: rpm names the script that failed, which names the section.
 fn rpm_reported_failure(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Option<Failure> {
     let (idx, caps) = lines
@@ -165,7 +173,7 @@ fn rpm_reported_failure(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> 
         .map(|s| (s.start, s.end.min(idx + 1)))
         .unwrap_or((idx.saturating_sub(40), idx + 1));
 
-    Some(quote(lines, body, phase, mapper))
+    Some(quote(lines, body, phase, mapper, BY_RPM_REPORT))
 }
 
 /// Iteration 3's case: rpmbuild succeeded and the post-build checks objected.
@@ -200,6 +208,7 @@ fn post_build_failure(lines: &[&str], spans: &[Span]) -> Option<Failure> {
         elided,
         Genre::PostBuildCheck,
         Phase::PostBuild,
+        BY_POST_BUILD,
     ))
 }
 
@@ -221,6 +230,7 @@ fn bare_error_line(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Optio
         (idx.saturating_sub(30), idx + 1),
         phase,
         mapper,
+        BY_BARE_ERROR,
     ))
 }
 
@@ -230,18 +240,19 @@ fn quote(
     (start, end): (usize, usize),
     phase: Phase,
     mapper: &PathMapper,
+    located_by: &str,
 ) -> Failure {
     let region = &lines[start..end.min(lines.len())];
 
     if let Some(tb_start) = region.iter().rposition(|l| TRACEBACK_START.is_match(l)) {
         let (kept, elided) = collapse_traceback(&region[tb_start..], mapper);
-        return finish(kept, elided, Genre::PythonTraceback, phase);
+        return finish(kept, elided, Genre::PythonTraceback, phase, located_by);
     }
 
     if let Some(err) = region.iter().rposition(|l| SHELL_ERROR.is_match(l)) {
         let from = err.saturating_sub(XTRACE_CONTEXT);
         let kept: Vec<&str> = region[from..=err].to_vec();
-        return finish(kept, from, Genre::ShellError, phase);
+        return finish(kept, from, Genre::ShellError, phase, located_by);
     }
 
     // Nothing recognised: drop the chatter and keep the tail.
@@ -254,7 +265,7 @@ fn quote(
             kept.push(line);
         }
     }
-    finish(kept, elided, Genre::Unknown, phase)
+    finish(kept, elided, Genre::Unknown, phase, located_by)
 }
 
 /// Keep the frames that say something; elide runs of interpreter plumbing.
@@ -313,7 +324,13 @@ fn collapse_traceback<'a>(block: &[&'a str], mapper: &PathMapper) -> (Vec<&'a st
     (kept, elided)
 }
 
-fn finish(kept: Vec<&str>, elided: usize, genre: Genre, phase: Phase) -> Failure {
+fn finish(
+    kept: Vec<&str>,
+    elided: usize,
+    genre: Genre,
+    phase: Phase,
+    located_by: &str,
+) -> Failure {
     let overflow = kept.len().saturating_sub(MAX_EXCERPT_LINES);
     let capped = if overflow > 0 {
         // Keep the end: the exception and rpm's verdict live there.
@@ -327,6 +344,7 @@ fn finish(kept: Vec<&str>, elided: usize, genre: Genre, phase: Phase) -> Failure
         phase,
         excerpt: capped.join("\n"),
         elided: elided + overflow,
+        located_by: located_by.to_string(),
     }
 }
 
