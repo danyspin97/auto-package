@@ -1381,14 +1381,9 @@ fn extract_build_log(
             ),
         });
     }
-    if extracted.format_suspect {
-        reporter.report(&Event::Warning {
-            step,
-            message: "build log has no osc timestamp prefixes — the extractor's \
-                      anchors may under-match"
-                .to_string(),
-        });
-    }
+    // Note: We used to warn about missing osc timestamp prefixes, but this is
+    // harmless and not actionable — the extractor still works, just with
+    // slightly less accurate anchoring. Removed to reduce noise.
 
     extracted
 }
