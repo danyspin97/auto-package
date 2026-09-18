@@ -40,24 +40,37 @@ openSUSE spec conventions to keep in mind:
    `BuildArch: noarch` back and switch `%{python_sitearch}` to
    `%{python_sitelib}` throughout — a pure-Python package installed to sitearch
    fails %files with 'File not found'. If there IS a compiled extension:
-   - Use %{python_sitearch} instead of %{python_sitelib}
+
+   CRITICAL requirements for arch packages:
+   - Use %{python_sitearch} instead of %{python_sitelib} (in %install, %check, %files)
    - Do not set 'BuildArch: noarch'
-   - Use %pytest_arch rather than %pytest in %check
-   - Add BuildRequires for any C libraries the extension links against,
-     e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
-     for cffi. When headers or libraries are missing, use `zypper search --provides`
-     or `zypper what-provides` to find the package that provides them (see the
-     "Missing C Headers and Libraries" section below for the search pattern).
-   - When the headers come from a *Python* package, the base package does not
-     carry them — the -devel flavour does. A build that fails on
-     `pybind11/pybind11.h: No such file` needs
-     `BuildRequires: %{python_module pybind11-devel}`, not
-     `%{python_module pybind11}`. The same applies to any
-     `fatal error: ...: No such file or directory` naming a header that a
-     Python dependency is supposed to provide.
-   - `Python.h: No such file` means `%{python_module devel}` is missing.
-   - Remove installed C source files in %install:
-       %python_expand rm -f %{buildroot}%{$python_sitearch}/<pkg>/*.c
+   - Use %pytest_arch rather than %pytest in %check (using %pytest breaks tests)
+   - %fdupes MUST target sitearch: %python_expand %fdupes %{buildroot}/%{$python_sitearch}
+     (NOT sitelib — this is a common generator error)
+
+   Common -devel package requirements for compiled extensions:
+   - pybind11-devel (for pybind11/pybind11.h — NOT plain pybind11)
+   - %{python_module numpy-devel} (for numpy/arrayobject.h)
+   - %{python_module devel} (for Python.h)
+   - cmake, gcc-c++ (always needed when CMakeLists.txt is present)
+   - cuda-devel, cuda-runtime (for CUDA extensions — see convention 23)
+
+   Add BuildRequires for any C libraries the extension links against,
+   e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
+   for cffi. When headers or libraries are missing, use `zypper search --provides`
+   or `zypper what-provides` to find the package that provides them (see the
+   "Missing C Headers and Libraries" section below for the search pattern).
+
+   When the headers come from a *Python* package, the base package does not
+   carry them — the -devel flavour does. A build that fails on
+   `pybind11/pybind11.h: No such file` needs
+   `BuildRequires: %{python_module pybind11-devel}`, not
+   `%{python_module pybind11}`. The same applies to any
+   `fatal error: ...: No such file or directory` naming a header that a
+   Python dependency is supposed to provide.
+
+   Remove installed C source files in %install:
+     %python_expand rm -f %{buildroot}%{$python_sitearch}/<pkg>/*.c
 
 4. Maturin packages (build-backend = "maturin" in pyproject.toml) compile Rust
    extensions inside a Python sdist. They follow the Python conventions but need
@@ -307,15 +320,34 @@ openSUSE spec conventions to keep in mind:
    Entrypoints (console scripts): if the package declares [project.scripts] or
    entry_points['console_scripts'] in its pyproject.toml/setup.cfg, each script
    MUST use the openSUSE python_alternative pattern. Check pyproject.toml or
-   setup.cfg with Read/Grep to find all declared scripts, then add ALL of the
-   following sections for each script named <script>:
+   setup.cfg with Read/Grep to find all declared scripts, then add ALL SEVEN
+   components below for each script named <script>.
 
-   In %install (after %pyproject_install, one line per script):
+   CRITICAL: ALL components are MANDATORY. Missing ANY ONE will cause build failure:
+
+   Component 1 — In %install (after %pyproject_install, one line per script):
      %python_clone -a %{buildroot}%{_bindir}/<script>
-   Also add at the end of %install:
-     %python_expand %fdupes %{buildroot}/%{$python_sitelib}
 
-   Example full %build/%install block for a package with a 'khard' script:
+   Component 2 — Also at the end of %install (once, not per script):
+     %python_expand %fdupes %{buildroot}/%{$python_sitelib}
+     (or %{$python_sitearch} for arch packages)
+
+   Component 3 & 4 — Add these package-level requires (once, not per script):
+     Requires(post):   update-alternatives
+     Requires(postun): update-alternatives
+
+   Component 5 — In %post section (one %python_install_alternative per script):
+     %post
+     %python_install_alternative <script>
+
+   Component 6 — In %postun section (one %python_uninstall_alternative per script):
+     %postun
+     %python_uninstall_alternative <script>
+
+   Component 7 — In %files %{python_files} (one line per script):
+     %python_alternative %{_bindir}/<script>
+
+   Example full %build/%install/%post/%postun/%files for a package with 'khard' script:
 
      %build
      %pyproject_wheel
@@ -325,25 +357,23 @@ openSUSE spec conventions to keep in mind:
      %python_clone -a %{buildroot}%{_bindir}/khard
      %python_expand %fdupes %{buildroot}/%{$python_sitelib}
 
-   Add these package-level requires (once, not per script):
-     Requires(post):   update-alternatives
-     Requires(postun): update-alternatives
-
-   In %post/%postun (one pair per script):
      %post
-     %python_install_alternative <script>
+     %python_install_alternative khard
 
      %postun
-     %python_uninstall_alternative <script>
+     %python_uninstall_alternative khard
 
-   In %files %{python_files}:
-     %python_alternative %{_bindir}/<script>
+     %files %{python_files}
+     %{python_sitelib}/khard/
+     %{python_sitelib}/khard-%{version}.dist-info/
+     %python_alternative %{_bindir}/khard
 
    Missing %python_clone causes 'Installed (but unpackaged) file(s) found' for
    the /usr/bin/ paths. Missing %python_expand %fdupes causes duplicate-file
-   errors. The dist-info directory also records entry points — if the script
-   list in the spec does not match what the dist-info declares, grep the
-   build log's BUILDROOT for the installed binaries to confirm.
+   errors. Missing Requires(post/postun) causes post-install failures. Missing
+   %post/%postun causes update-alternatives errors. Missing %python_alternative
+   in %files causes file conflicts. The generator often omits some or all of these —
+   you must verify and add all seven components.
 
 15. RPM macros use single '%', never '%%'. For example: %check, %install,
    %{version}, %{python_module foo}. Only use %% when you need a literal
@@ -363,18 +393,41 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
 
 17. BuildRequires takes ONE simple constraint — not PEP 508. A requirement
    string copied out of pyproject.toml usually will not work. Reduce it to a
-   single `name >= version` (or a bare name):
+   single `name >= version` (or a bare name).
+
+   Common WRONG patterns and their fixes:
+
+   WRONG: BuildRequires: %{python_module maturin >= 1.14.1, < 2.0}
+   RIGHT: BuildRequires: %{python_module maturin >= 1.14.1}
+
+   WRONG: BuildRequires: %{python_module numpy ~= 2.0}
+   RIGHT: BuildRequires: %{python_module numpy >= 2.0}
+
+   WRONG: BuildRequires: %{python_module setuptools>=77}
+   RIGHT: BuildRequires: %{python_module setuptools >= 77}
+   (spaces required around operator per convention 1)
+
+   WRONG: BuildRequires: %{python_module numpy >= 2.0; python_version>="3.9"}
+   RIGHT: BuildRequires: %{python_module numpy >= 2.0}
+
+   Rules:
    - `!=` is not supported at all. `>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2`
      becomes `>= 0.1.6`. Never leave a `!=` in any BuildRequires line.
    - Multiple comma-separated constraints are not supported: keep the `>=`
      lower bound and drop the rest. `>=0.9.8,<0.10.0` becomes `>= 0.9.8`.
-   - Environment markers are not supported and make the spec fail to parse:
-     drop everything from the `;` onwards. `numpy>=2.0; python_version>="3.9"`
-     becomes `numpy >= 2.0`. If the marker means the dep is genuinely optional
-     on this platform, leave the dep out rather than encoding the marker.
+   - `~=` (compatible release) is not supported: `~= 2.0` becomes `>= 2.0`.
+   - Environment markers (`;`) are not supported and make the spec fail to parse:
+     drop everything from the `;` onwards. If the marker means the dep is
+     genuinely optional on this platform, leave the dep out entirely.
    - Extras in brackets are not supported: `requests[socks]` becomes
      `requests`; add the extra's own dependencies separately if the build
      needs them.
+   - Spaces around operators are REQUIRED (convention 1): `>=77` must be `>= 77`.
+
+   Package name capitalization MATTERS. Some packages use mixed case:
+   - Pillow (not pillow)
+   - PyYAML (not pyyaml)
+   Check pyproject.toml [project.name] or PyPI for the canonical spelling.
 
 18. Dynamic version and metadata providers need their own BuildRequires, and
    they are not listed in `[build-system] requires`. Symptoms are an import
@@ -462,47 +515,62 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      vendored third-party trees come along with a repository archive and none
      of it belongs in the RPM; conventions 19 and 20 cover removing it.
 
-23. A dependency missing from OBS is something to BUILD, not something to work
-   around. Reporting it in `unresolvable_packages` is how it gets packaged:
-   the build system queues it, builds it, and retries this package afterwards.
-   That is the whole job. torch, jax and the rest of the ML stack are in scope
-   exactly like any other dependency — do not treat a big or awkward package
-   as out of reach, and do not disable a feature or drop a test suite merely
-   because its dependency is not in OBS yet.
+23. **ANY dependency missing from OBS is something to BUILD, not something to
+   work around.** This is the CORE PRINCIPLE of the entire packaging system.
 
-   IMPORTANT: Packages that link against or provide bindings to CUDA libraries
-   (like cuda-python, nvmath-python, etc.) MUST declare CUDA as a BuildRequires.
-   When packaging any CUDA-related package:
-   1. Check the source for references to CUDA headers or libraries (look for
-      #include <cuda.h>, libcuda.so, libcudart.so, etc. in the source code or
-      build configuration)
+   Reporting it in `unresolvable_packages` is how it gets packaged: the build
+   system queues it, builds it, and retries this package afterwards. That is
+   the whole job.
+
+   This applies to ALL dependency types without exception:
+   - **Python packages**: torch, jax, transformers, pydantic — report them ALL
+   - **C/C++ libraries**: libfoo, libbar-devel — if zypper can't find them, report them
+   - **System tools**: cmake, ninja, specialized build tools — report if missing
+   - **CUDA libraries**: cuda-devel, cuda-runtime, CUDA Python packages
+   - **ANY other dependency**: regardless of type, size, or complexity
+
+   **Size and complexity DO NOT MATTER.** torch, jax and the rest of the ML stack
+   are in scope exactly like any other dependency. Do not treat a big or awkward
+   package as out of reach. Do not disable a feature or drop a test suite merely
+   because its dependency is not in OBS yet. The build system WILL package it.
+
+   **Special case — CUDA libraries and packages:**
+
+   Packages that link against or provide bindings to CUDA libraries (like
+   cuda-python, nvmath-python, etc.) MUST declare CUDA as a BuildRequires:
+
+   1. Check the source for CUDA references: #include <cuda.h>, libcuda.so,
+      libcudart.so, find_package(CUDAToolkit), etc.
    2. If found, add these BuildRequires:
       BuildRequires:  cuda-devel
       BuildRequires:  cuda-runtime
-   3. Also add CUDA to `unresolvable_packages` if it is not available in OBS
-      yet — it will be built and made available
-   4. Do not skip packages that require CUDA libraries
+   3. Also add CUDA to `unresolvable_packages` if OBS reports it as unresolvable
+      — it will be built and made available
+   4. NEVER skip packages that require CUDA libraries
 
    CUDA Python ecosystem libraries are all open source and available on GitHub.
-   When encountering any of these as dependencies, they should be packaged:
+   When encountering any of these as dependencies, report them for packaging:
    cuda-python (cuda.core, cuda.bindings, cuda.pathfinder), cuda-compute,
    numba-cuda-mlir, cuda-tile, nvmath-python (nvmath.bindings), nvshmem4py,
-   and similar NVIDIA CUDA Python libraries. Do not skip packages that depend
-   on these — report them in `unresolvable_packages` so they can be built.
+   and similar NVIDIA CUDA Python libraries.
 
-   Report it, and keep the spec honest in the meantime: leave the
-   `BuildRequires: %{python_module <dep>}` in place so the build uses the
-   package once it exists.
+   **Keep the spec honest:** Leave all `BuildRequires` in place (Python packages,
+   C libraries, system tools, everything) so the build uses them once they exist.
+   Never remove a BuildRequires line just because the package is not available yet.
 
-   There are exactly two situations where working around a dependency is
-   right, and both need evidence, not a guess about how hard it looks:
-   - it has already been tried and failed — it is listed above under
-     "Dependencies that failed to build", or notes.md records the attempt.
-     Convention 12 Step B covers this; skip the tests that need it and say why.
-   - the tests need something no build worker has and no package can supply:
-     a GPU device, network access, a display, credentials, model weights
-     downloaded at runtime. That is a property of the build environment, not
-     a missing package. Convention 10 rung (iv) covers it.
+   **Only two exceptions where working around a dependency is justified:**
+
+   Exception 1: The dependency has already been tried and FAILED — it is listed
+   above under "Dependencies that failed to build", or notes.md records the attempt.
+   Convention 12 Step B covers this; skip the tests that need it and say why.
+
+   Exception 2: The tests need something no build worker has and no package can
+   supply: a GPU device, network access, a display, credentials, model weights
+   downloaded at runtime. That is a property of the build environment, not a
+   missing package. Convention 10 rung (iv) covers it.
+
+   Both exceptions need EVIDENCE from the current run, not a guess about how hard
+   something looks. If you have not seen it fail in THIS run, report it.
 
 24. Missing source code: when the build fails because a package has no source
    tarball on PyPI and no repository URL in its metadata, search for it
@@ -826,9 +894,9 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
     let allowed_tools = if req.checkout_dir.is_some() {
-        "Read,Grep,Edit,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),WebSearch"
+        "Read,Grep,Edit,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),Bash(osc status),Bash(ls *),Bash(rm *),WebSearch"
     } else {
-        "Read,Grep,Edit,Bash(rpmspec *),WebSearch"
+        "Read,Grep,Edit,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(rm *),WebSearch"
     };
 
     // Escalate with the attempt number: Sonnet 5 handles the routine fixes at
@@ -1085,31 +1153,77 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              use that prefix; `sdist/pyproject.toml` does not exist.\n\
              \n\
              The generator has already deduplicated BuildRequires, normalised the \
-             dist-info path and the version-constraint spelling, and set \
-             `%autosetup -n` from the tarball. Do not spend the turn re-checking \
-             those. It also switched to the arch macros if it saw any C/C++/Cython \
-             source in the tarball — that one is a guess, so confirm it against \
-             convention 3 before anything else. Then spend the turn on what only \
-             reading the source can settle, in this order:\n\
+             version-constraint spelling, and set `%autosetup -n` from the tarball. \
+             Do not spend the turn re-checking those.\n\
+             \n\
+             ## CRITICAL BUGS FIRST (fix immediately if found)\n\
+             \n\
+             0a. **Duplicated dist-info path**: The generator has a known bug where it \
+                 sometimes creates `package-%{version}.dist-info/package-%{version}.dist-info/` \
+                 (doubled path). Read the spec's %files section FIRST and check the dist-info \
+                 entry. If it's duplicated, fix it immediately to the single path: \
+                 `package-%{version}.dist-info/`\n\
+             \n\
+             0b. **Maturin package detection**: Grep `source/pyproject.toml` for \
+                 `build-backend.*maturin`. If found, this is a Rust extension package and the \
+                 generator's arch guess is WRONG. The spec needs the full convention 4 maturin \
+                 treatment (Source1 registry.tar.zst, cargo-packaging, ExclusiveArch, CARGO_* \
+                 env vars, etc.). Apply ALL maturin requirements from convention 4 before \
+                 checking anything else — these changes affect the entire spec structure.\n\
+             \n\
+             ## Main Review Checklist\n\
+             \n\
+             The generator switched to arch macros if it saw C/C++/Cython source — that's \
+             a guess, so confirm it against convention 3 first. Then work through these in order:\n\
              \n\
              1. **The import name** the package installs — convention 13. This is the \
-                single most common thing the generator gets wrong and you are the only \
-                one who can check it.\n\
-             2. **Test dependencies**: `[project.optional-dependencies]` or \
-                `[dependency-groups]` (pyproject.toml) and `[options.extras_require]` \
-                (setup.cfg), keys like `test`, `tests`, `dev`, `testing`. Add each as \
-                `BuildRequires: %{python_module <name>}`, and make sure pytest itself \
-                is there. Also grep the test files for imports that are not declared \
-                anywhere — that happens often.\n\
-             3. **Pytest configuration** — `addopts`, `testpaths`, `fail_under`: \
+                single most common thing the generator gets wrong. Always verify from \
+                `source/*.egg-info/top_level.txt` (definitive) or the source code. Never \
+                derive it from the PyPI package name.\n\
+             \n\
+             2. **Console scripts**: Read `[project.scripts]` or `entry_points` in \
+                source/pyproject.toml or source/setup.cfg. If ANY scripts are declared, \
+                verify ALL python_alternative components are present (convention 14):\n\
+                - %python_clone -a %{buildroot}%{_bindir}/<script> in %install (one per script)\n\
+                - %python_expand %fdupes at end of %install\n\
+                - Requires(post): update-alternatives\n\
+                - Requires(postun): update-alternatives\n\
+                - %post section with %python_install_alternative <script> (one per script)\n\
+                - %postun section with %python_uninstall_alternative <script> (one per script)\n\
+                - %python_alternative %{_bindir}/<script> in %files (one per script)\n\
+                Missing ANY component will cause build failure.\n\
+             \n\
+             3. **Test dependencies** from TWO sources:\n\
+                a. DECLARED: `[project.optional-dependencies]` or `[dependency-groups]` \
+                   (pyproject.toml) and `[options.extras_require]` (setup.cfg), keys like \
+                   `test`, `tests`, `dev`, `testing`.\n\
+                b. UNDECLARED: Grep the test files for imports and cross-reference against \
+                   declared deps — many packages import test dependencies without declaring them.\n\
+                Add BOTH declared and undeclared as `BuildRequires: %{python_module <name>}`, \
+                and make sure pytest itself is there.\n\
+             \n\
+             4. **Pytest configuration** — `addopts`, `testpaths`, `fail_under`: \
                 convention 10. Fix these now rather than after a failed build.\n\
-             4. **Build-backend extras**: dynamic version and metadata providers \
+             \n\
+             5. **Build-backend extras**: dynamic version and metadata providers \
                 (convention 18), and the C/C++ libraries an extension links against \
-                (convention 3).\n\
-             5. **Console scripts**: `[project.scripts]` / `entry_points`, each of \
-                which needs the full python_alternative treatment (convention 14).\n\
-             6. **License** if it is FIXME or not an SPDX expression (convention 5).\n\
-             7. **Sibling projects**, if the archive holds more than one — decide the \
+                (convention 3). For C extensions, confirm the -devel package name:\n\
+                - pybind11 → pybind11-devel (for headers)\n\
+                - numpy → %{python_module numpy-devel} (for numpy/arrayobject.h)\n\
+                - cmake, gcc-c++ always needed for CMakeLists.txt\n\
+             \n\
+             6. **%fdupes target must match package type** (common generator error):\n\
+                - Arch packages: %python_expand %fdupes %{buildroot}/%{$python_sitearch}\n\
+                - Noarch packages: %python_expand %fdupes %{buildroot}/%{$python_sitelib}\n\
+             \n\
+             7. **%pytest vs %pytest_arch** (critical for C extensions):\n\
+                - Arch packages MUST use %pytest_arch in %check\n\
+                - Noarch packages use %pytest\n\
+                Using %pytest on an arch package will cause test failures.\n\
+             \n\
+             8. **License** if it is FIXME or not an SPDX expression (convention 5).\n\
+             \n\
+             9. **Sibling projects**, if the archive holds more than one — decide the \
                 subpackage layout now, before the first build, because it changes \
                 %build, %install and every %files section (convention 25).\n\
              \n\
@@ -1337,28 +1451,57 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          {context}\
          {hint}\
          \n\
-         ## Missing C Headers and Libraries\n\
+         ## Missing Dependencies — ALL Types Must Be Packaged\n\
+         \n\
+         **CRITICAL PRINCIPLE**: When ANY dependency is missing — Python packages, C libraries, \
+         system tools, headers, or any other build requirement — it must be packaged. This \
+         applies universally:\n\
+         - Python packages (python-foo)\n\
+         - C/C++ libraries and their -devel packages (libfoo, libfoo-devel)\n\
+         - System build tools (cmake, ninja, pkg-config)\n\
+         - CUDA libraries (cuda-devel, cuda-runtime)\n\
+         - Any other dependency the build needs\n\
+         \n\
+         **Do NOT work around missing dependencies by disabling features or skipping tests** \
+         unless they have ALREADY been tried and failed (see \"Dependencies that failed to build\" \
+         section above). The goal is to build a COMPLETE package with all features working.\n\
+         \n\
+         ### Finding Missing C Headers and Libraries\n\
          \n\
          When a build fails with \"fatal error: <header.h>: No such file or directory\" or \
-         linker errors about missing libraries, you need to find which package provides them:\n\
+         linker errors about missing libraries:\n\
          \n\
          1. **Search for the providing package**: Use `zypper search --provides --match-exact \"/usr/include/<header.h>\"` \
          or `zypper what-provides '<library>.so*'` to find which package provides the missing file.\n\
+         \n\
          2. **Add the -devel package**: C headers are typically in -devel packages. \
          For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.\n\
+         \n\
          3. **Common patterns**:\n\
          - `Python.h: No such file` → add `BuildRequires: %{{python_module devel}}`\n\
          - `pkg-config` errors → add `BuildRequires: pkg-config` or `pkgconfig(<name>)`\n\
          - Library linking errors → search for the library and add its -devel package\n\
+         - CUDA headers/libraries → add `BuildRequires: cuda-devel` and `cuda-runtime`\n\
+         \n\
          4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check \
          the build log for hints about which library the build system is trying to find.\n\
          \n\
-         **If the package is found**: Add it directly to BuildRequires in the spec \
-         (e.g., common system libraries like openssl-devel, libffi-devel are already available).\n\
+         ### If Package Found vs Not Found\n\
          \n\
-         **If the package is NOT found** (zypper returns no results or OBS reports it as \
-         unresolvable): Report it in `unresolvable_packages` so it can be built, just like \
-         missing Python dependencies. C libraries can also be missing and need to be packaged.\n\
+         **If zypper FINDS the package**: Add it directly to BuildRequires in the spec.\n\
+         Common available packages: openssl-devel, libffi-devel, zlib-devel, cmake, gcc-c++.\n\
+         \n\
+         **If zypper returns NO RESULTS or OBS reports it as unresolvable**: Report it in \
+         `unresolvable_packages` so it can be built. This applies to ALL dependency types:\n\
+         - C libraries that don't exist in OBS yet → report them, they will be packaged\n\
+         - System tools not in repos → report them, they will be packaged\n\
+         - CUDA libraries → report them, they will be packaged\n\
+         - ANY missing dependency → report it\n\
+         \n\
+         The build system will recursively package all reported dependencies until the full \
+         dependency tree is satisfied. Never skip a feature or disable tests merely because \
+         a dependency (of any type) is not packaged yet — that is what `unresolvable_packages` \
+         is for.\n\
          \n\
          ## Source Files and Cleanup\n\
          \n\
@@ -1418,10 +1561,16 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          - \"action\": \"edited\", \"no_change\", or \"blocked\"\n\
          - \"why\": required when action is \"blocked\"\n\
          - \"reasoning\": one sentence summarising what you did\n\
-         - \"evidence\": list every Read/Grep call you made before editing, \
-         e.g. [\"Read source/pyproject.toml\", \"Read source/src.egg-info/top_level.txt\"]. \
-         Must be non-empty when action is \"edited\". This is how you prove \
-         you investigated rather than assumed.\n\
+         - \"evidence\": MUST list SPECIFIC files/patterns you Read or Grepped before editing.\n\
+           REQUIRED format (each entry must name a specific file or pattern):\n\
+           [\"Read source/pyproject.toml lines 1-50\",\n\
+            \"Read source/my_package.egg-info/top_level.txt\",\n\
+            \"Grep 'import' in source/tests/*.py\",\n\
+            \"Grep 'console_scripts' in source/setup.cfg\"]\n\
+           Generic entries like \"checked the source\" or \"verified files\" are NOT evidence.\n\
+           Must be non-empty when action is \"edited\". This proves you investigated rather \n\
+           than assumed. If you edited based on a specific file's content, that file MUST \n\
+           appear in evidence.\n\
          - \"confidence\": \"high\", \"medium\", or \"low\"\n\
          - \"unresolvable_packages\": RPM names of packages that OBS cannot resolve and \
          must be built first. **IMPORTANT**: Before listing any python-* package here, \

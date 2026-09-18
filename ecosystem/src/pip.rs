@@ -53,12 +53,100 @@ pub enum Error {
     NoDigest(String),
 }
 
+/// Get the cache directory for pip resolution results.
+///
+/// Caches are stored in `~/.cache/auto-package/pip-resolve/` by default,
+/// or `$XDG_CACHE_HOME/auto-package/pip-resolve/` if XDG_CACHE_HOME is set.
+fn cache_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home).join(".cache")
+        });
+    base.join("auto-package").join("pip-resolve")
+}
+
+/// Get the cache file path for a specific package resolution.
+///
+/// Uses package name and version (or "latest") as the cache key.
+fn cache_path(name: &str, version: Option<&str>) -> std::path::PathBuf {
+    let key = match version {
+        Some(v) => format!("{}-{}.json", name.to_lowercase(), v),
+        None => format!("{}-latest.json", name.to_lowercase()),
+    };
+    cache_dir().join(key)
+}
+
+/// Load cached resolution result if available and fresh.
+///
+/// Cache is considered stale if older than 7 days (for pinned versions) or
+/// 1 day (for "latest").
+fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
+    let path = cache_path(name, version);
+
+    // Check if cache file exists
+    let metadata = std::fs::metadata(&path).ok()?;
+
+    // Determine freshness threshold
+    let max_age_secs = match version {
+        Some(_) => 7 * 24 * 60 * 60, // 7 days for pinned versions
+        None => 24 * 60 * 60,         // 1 day for "latest"
+    };
+
+    // Check if cache is fresh
+    let age = metadata.modified()
+        .ok()?
+        .elapsed()
+        .ok()?
+        .as_secs();
+
+    if age > max_age_secs {
+        eprintln!("  cache entry stale (age: {} days), re-resolving", age / 86400);
+        return None;
+    }
+
+    // Load and parse cache
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let nodes: Vec<Node> = serde_json::from_str(&contents).ok()?;
+
+    eprintln!("  ✓ loaded resolution from cache ({} packages)", nodes.len());
+    Some(nodes)
+}
+
+/// Save resolution result to cache.
+fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
+    let path = cache_path(name, version);
+
+    // Create cache directory if it doesn't exist
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Serialize and save
+    if let Ok(json) = serde_json::to_string_pretty(nodes) {
+        if std::fs::write(&path, json).is_ok() {
+            eprintln!("  cached resolution for future use");
+        }
+    }
+}
+
 /// Resolve the runtime closure of `name` at `version`.
 ///
 /// `version` may be `None` for "latest". Returns all nodes including the root
 /// package itself; callers can filter by `Node::is_requested` if they only
 /// want transitive deps.
+///
+/// Results are cached in `~/.cache/auto-package/pip-resolve/`. Cached results
+/// for pinned versions are valid for 7 days, "latest" queries for 1 day.
 pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
+    // Try to load from cache first
+    if let Some(cached) = load_cached_resolve(name, version) {
+        return Ok(cached);
+    }
+
+    eprintln!("  resolving dependencies with pip (not in cache)...");
+
     let spec = match version {
         Some(v) => format!("{name}=={v}"),
         None => name.to_string(),
@@ -93,7 +181,7 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
     }
 
     let report: Report = serde_json::from_slice(&out.stdout)?;
-    report
+    let nodes: Vec<Node> = report
         .install
         .into_iter()
         .map(|e| {
@@ -103,7 +191,7 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
                 .hashes
                 .sha256
                 .ok_or_else(|| Error::NoDigest(e.metadata.name.clone()))?;
-            Ok(Node {
+            Ok::<Node, Error>(Node {
                 name: e.metadata.name,
                 version: e.metadata.version,
                 sha256,
@@ -113,7 +201,12 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
                 is_yanked: e.is_yanked,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    // Save to cache for future use
+    save_cached_resolve(name, version, &nodes);
+
+    Ok(nodes)
 }
 
 // --- wire format -----------------------------------------------------------

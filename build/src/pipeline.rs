@@ -2217,21 +2217,16 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
         }
     }
 
-    // Try to get repository URLs from GitHub API search
-    if let Some(urls) = search_github_repos(pkg_name) {
-        for url in urls {
-            if !verified_candidates.contains(&url) && !candidates.contains(&url) {
-                eprintln!("  found via GitHub search: {}", url);
-                verified_candidates.push(url);
-            }
-        }
-    }
-
     // Generate candidate URLs based on package name patterns
     let normalized_name = pkg_name.replace("_", "-").to_lowercase();
 
-    // Try common organization patterns for vendor-prefixed packages
-    if lower.starts_with("nvidia-") || lower.starts_with("cuda-") {
+    // For NVIDIA packages, try NVIDIA org URLs FIRST and with high priority
+    // This ensures we prefer official NVIDIA repos over any random GitHub repos
+    let is_nvidia_package = lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.starts_with("nv");
+
+    if is_nvidia_package {
+        eprintln!("  detected NVIDIA package, preferring github.com/NVIDIA organization");
+
         let base = lower
             .strip_prefix("nvidia-")
             .or_else(|| lower.strip_prefix("cuda-"))
@@ -2241,10 +2236,57 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
             .replace("-cu11", "").replace("-cu12", "").replace("-cu13", "")
             .replace("_", "-");
 
-        candidates.push(format!("https://github.com/NVIDIA/{}", clean));
-        if let Some(after_cuda) = clean.strip_prefix("cuda-") {
-            candidates.push(format!("https://github.com/NVIDIA/{}", after_cuda));
+        // Try NVIDIA org with the cleaned package name
+        let nvidia_url = format!("https://github.com/NVIDIA/{}", clean);
+        eprintln!("  checking NVIDIA org: {}", nvidia_url);
+        if verify_repo_exists(&nvidia_url) {
+            eprintln!("  ✓ verified NVIDIA repo: {}", nvidia_url);
+            verified_candidates.insert(0, nvidia_url.clone());
+        } else {
+            candidates.insert(0, nvidia_url);
         }
+
+        // Also try without cuda- prefix for packages like cuda-python
+        if let Some(after_cuda) = clean.strip_prefix("cuda-") {
+            let nvidia_url2 = format!("https://github.com/NVIDIA/{}", after_cuda);
+            eprintln!("  checking NVIDIA org (without cuda- prefix): {}", nvidia_url2);
+            if verify_repo_exists(&nvidia_url2) {
+                eprintln!("  ✓ verified NVIDIA repo: {}", nvidia_url2);
+                verified_candidates.insert(0, nvidia_url2.clone());
+            } else {
+                candidates.insert(0, nvidia_url2);
+            }
+        }
+
+        // Try the exact package name under NVIDIA org
+        let nvidia_exact = format!("https://github.com/NVIDIA/{}", pkg_name);
+        if nvidia_exact != format!("https://github.com/NVIDIA/{}", clean) {
+            eprintln!("  checking NVIDIA org (exact name): {}", nvidia_exact);
+            if verify_repo_exists(&nvidia_exact) {
+                eprintln!("  ✓ verified NVIDIA repo: {}", nvidia_exact);
+                verified_candidates.insert(0, nvidia_exact.clone());
+            } else {
+                candidates.insert(0, nvidia_exact);
+            }
+        }
+
+        // For NVIDIA packages, skip GitHub API search to avoid non-official repos
+        eprintln!("  skipping GitHub API search for NVIDIA package (prefer official repos)");
+    } else {
+        // For non-NVIDIA packages, use GitHub API search
+        if let Some(urls) = search_github_repos(pkg_name) {
+            for url in urls {
+                if !verified_candidates.contains(&url) && !candidates.contains(&url) {
+                    eprintln!("  found via GitHub search: {}", url);
+                    verified_candidates.push(url);
+                }
+            }
+        }
+    }
+
+    // Try common organization patterns for other vendor-prefixed packages
+    if lower.starts_with("nvidia-") || lower.starts_with("cuda-") {
+        // Already handled above with higher priority
     } else if lower.starts_with("google-") {
         if let Some(after) = lower.strip_prefix("google-") {
             candidates.push(format!("https://github.com/googleapis/{}", after));
