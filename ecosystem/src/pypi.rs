@@ -184,6 +184,7 @@ pub enum Error {
     /// the response is not what we think it is.
     #[error("no sha256 digest for {0}")]
     NoDigest(String),
+
 }
 
 /// Parse a `/pypi/…/json` response body.
@@ -288,10 +289,24 @@ fn non_empty(s: Option<String>) -> Option<String> {
 // absent somewhere in PyPI's back catalogue, and unknown fields are ignored so
 // that a new key upstream cannot break parsing.
 
+/// Treat an explicit JSON `null` the same as an absent field: produce `T::default()`.
+///
+/// serde's `#[serde(default)]` only activates when a key is missing entirely.
+/// PyPI frequently sends `"project_urls": null` or `"classifiers": null`, which
+/// a bare `default` attribute cannot handle — the deserialiser still tries to
+/// deserialise the `null` token as the concrete type and fails.
+fn deserialize_null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 struct Envelope {
     info: RawInfo,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     urls: Vec<RawFile>,
 }
 
@@ -305,7 +320,7 @@ struct RawInfo {
     license: Option<String>,
     #[serde(default)]
     license_expression: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     classifiers: Vec<String>,
     #[serde(default)]
     requires_python: Option<String>,
@@ -313,9 +328,9 @@ struct RawInfo {
     home_page: Option<String>,
     #[serde(default)]
     project_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     project_urls: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     yanked: bool,
 }
 
@@ -324,11 +339,11 @@ struct RawFile {
     filename: String,
     url: String,
     packagetype: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     size: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     digests: RawDigests,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     yanked: bool,
 }
 
@@ -336,6 +351,148 @@ struct RawFile {
 struct RawDigests {
     #[serde(default)]
     sha256: Option<String>,
+}
+
+/// Known Git hosting platforms and the URL prefix used to normalise them.
+static GIT_HOSTS: &[&str] = &[
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "codeberg.org",
+    "sr.ht",
+    "salsa.debian.org",
+];
+
+/// Parse a `/pypi/…/json` response into a `Release` using a synthetic sdist
+/// entry for the given `tarball_filename`.
+///
+/// Used for wheel-only packages where we source the tarball from GitHub
+/// (or another forge) rather than PyPI. The `sdist` field is populated with
+/// placeholder values — callers must have already downloaded the tarball.
+pub fn parse_release_with_tarball(json: &str, tarball_filename: &str) -> Result<Release, Error> {
+    let raw: Envelope = serde_json::from_str(json)?;
+    let info = raw.info;
+
+    Ok(Release {
+        homepage: homepage(&info),
+        license: license(&info),
+        yanked: info.yanked,
+        sdist: Sdist {
+            filename: tarball_filename.to_string(),
+            url: String::new(),
+            sha256: String::new(),
+            size: 0,
+        },
+        name: info.name,
+        version: info.version,
+        summary: info.summary,
+        requires_python: info.requires_python,
+    })
+}
+
+/// Extract a source repository URL from a `/pypi/…/json` response body.
+///
+/// Searches `project_urls` and `home_page` for any URL on a known Git hosting
+/// platform, then strips trailing slashes, `.git` suffixes, and sub-paths
+/// so the result is a clean `owner/repo`-level URL.
+///
+/// Returns `None` when no recognisable source URL is found in the metadata.
+pub fn source_url_from_json(json: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Outer {
+        info: SrcInfo,
+    }
+    #[derive(Deserialize)]
+    struct SrcInfo {
+        #[serde(default, deserialize_with = "deserialize_null_default")]
+        project_urls: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        home_page: Option<String>,
+    }
+
+    let outer: Outer = serde_json::from_str(json).ok()?;
+    let info = outer.info;
+
+    // Prefer URLs whose key hints at source over generic homepage links.
+    let source_keys = ["Source", "Source Code", "Repository", "Code", "GitHub", "GitLab"];
+    let mut candidates: Vec<String> = source_keys
+        .iter()
+        .filter_map(|k| info.project_urls.get(*k).cloned())
+        .collect();
+    // Then add all other project_urls values and home_page as fallbacks.
+    for (key, val) in &info.project_urls {
+        let k = key.as_str();
+        if !source_keys.contains(&k) {
+            candidates.push(val.clone());
+        }
+    }
+    if let Some(hp) = info.home_page {
+        candidates.push(hp);
+    }
+
+    for url in candidates {
+        let trimmed = url.trim();
+        for host in GIT_HOSTS {
+            if trimmed.contains(host) {
+                let base = trimmed.trim_end_matches('/').trim_end_matches(".git");
+                // Keep only up to the second path segment after the host
+                // (owner/repo), dropping /tree/main, /issues, etc.
+                let after_host = base
+                    .find(host)
+                    .map(|i| &base[i + host.len()..])
+                    .and_then(|s| s.strip_prefix('/'))?;
+                let parts: Vec<&str> = after_host.splitn(3, '/').collect();
+                if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                    return Some(format!("https://{host}/{}/{}", parts[0], parts[1]));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Convenience alias kept for call sites that specifically want a GitHub URL.
+#[inline]
+pub fn github_url_from_json(json: &str) -> Option<String> {
+    source_url_from_json(json)
+}
+
+/// Extract package names from a `requires_dist` list, filtering out deps
+/// that are not relevant for an openSUSE Linux build.
+pub fn parse_dep_names(requires_dist: &[String]) -> Vec<String> {
+    requires_dist
+        .iter()
+        .filter_map(|req| {
+            let (spec, marker) = req
+                .split_once(';')
+                .map(|(s, m)| (s.trim(), Some(m.trim())))
+                .unwrap_or((req.as_str(), None));
+
+            if let Some(m) = marker {
+                // Skip extras-gated deps (optional).
+                if m.contains("extra ==") || m.contains("extra==") {
+                    return None;
+                }
+                // Skip Windows-only deps.
+                if (m.contains("sys_platform") && m.contains("win32"))
+                    || (m.contains("platform_system") && m.contains("Windows"))
+                {
+                    return None;
+                }
+            }
+
+            // Strip version constraints, extras brackets, and parentheses to
+            // get the bare package name.
+            let name = spec
+                .split(|c: char| matches!(c, '>' | '<' | '=' | '!' | '~' | '[' | '(' | ','))
+                .next()
+                .unwrap_or(spec)
+                .trim()
+                .to_lowercase();
+
+            if name.is_empty() { None } else { Some(name) }
+        })
+        .collect()
 }
 
 #[cfg(test)]
