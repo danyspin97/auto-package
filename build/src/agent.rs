@@ -180,6 +180,12 @@ openSUSE spec conventions to keep in mind:
    (convention 23). Only skip the tests instead when the dependency has
    already been tried and failed (convention 12 Step B).
 
+   **Common missing tools** — tests often shell out to system commands:
+   - `FileNotFoundError: 'git'` → add `BuildRequires: git-core`
+   - `FileNotFoundError: 'hg'` → add `BuildRequires: mercurial`
+   - `FileNotFoundError: 'svn'` → add `BuildRequires: subversion`
+   These are system packages, NOT Python packages — never use %{python_module}.
+
    **Cannot run here** — network, GPU, root, a real display, model downloads,
    a fixture the sdist does not ship. Skip them, and never with '|| true' or
    any other suppression of the exit code. Work down this ladder and stop at
@@ -194,6 +200,12 @@ openSUSE spec conventions to keep in mind:
            %pytest
          Deleting the directory in %prep also works, but only do that when the
          files must not reach the buildroot either.
+
+         **Common directories to ignore**:
+         - Bundled third-party test suites: --ignore=csrc/third_party/pybind11/tests
+           (these test the vendored library, not this package)
+         - Examples/benchmarks that aren't tests: --ignore=examples --ignore=benchmarks
+
    (iii) Clear upstream options that do not apply here: %pytest -o addopts=''
    (iv)  Replace the suite with an import smoke test. Do this when the tests
          need something no build worker can have and no package can supply —
@@ -206,6 +218,12 @@ openSUSE spec conventions to keep in mind:
          (use $python_sitelib for a pure-Python package). Run it from a fresh
          empty directory — from the source tree, the source package shadows
          the installed one and the test proves nothing.
+
+         **When to use smoke test instead of pytest**:
+         - pytest INTERNALERROR (pytest itself crashes)
+         - All tests require GPU/network/display
+         - Test suite needs resources not available in build environment
+
    (v)   Only if even importing is impossible (the module needs a GPU at
          import time), remove %check and leave a comment saying why.
 
@@ -240,7 +258,39 @@ openSUSE spec conventions to keep in mind:
    Clearing addopts is not suppressing a failure — the tests still run and
    still have to pass.
 
-11. Tools available — USE THEM:
+11. **Common Build Failure Patterns** — recognize and fix these automatically:
+
+   **Source file format mismatch** (error in %prep):
+   - `File /home/abuild/rpmbuild/SOURCES/package-1.0.zip: No such file`
+   - **Cause**: Source0 line references .zip but actual file is .tar.gz (or vice versa)
+   - **Fix**: Read build.log to find actual filename, update Source0 to match
+
+   **Bundled test suites importing their own test modules**:
+   - `ModuleNotFoundError: No module named 'pybind11_tests'`
+   - `ModuleNotFoundError: No module named 'test_utils'` from third_party/
+   - **Cause**: Package vendors a library's full test suite, not just the library
+   - **Fix**: Ignore the bundled test directory: `%pytest --ignore=csrc/third_party/pybind11/tests`
+
+   **pytest crashes before running tests**:
+   - `INTERNALERROR> Traceback` from pytest itself
+   - **Cause**: pytest version incompatibility, broken test setup, plugin conflict
+   - **Fix**: Replace entire test suite with smoke test (convention 10 rung iv)
+
+   **Tests shell out to version control commands**:
+   - `FileNotFoundError: [Errno 2] No such file or directory: 'git'`
+   - Same for hg, svn, bzr
+   - **Cause**: Tests interact with VCS but tool not in BuildRequires
+   - **Fix**: Add `BuildRequires: git-core` (or mercurial, subversion, etc.)
+   - **Never** use %{python_module git} — git is a system tool, not a Python package
+
+   **Module imports successfully in isolation but not from test suite**:
+   - Module builds and installs correctly
+   - `import module` works in smoke test
+   - Full test suite fails with ModuleNotFoundError
+   - **Cause**: Test suite expects specific runtime environment (GPU, torch context, etc.)
+   - **Fix**: Use smoke test instead of full suite
+
+12. Tools available — USE THEM:
    - Read: get line-numbered file content (use for build.log, pyproject.toml, setup.py)
    - Grep: search for patterns (use to find test dependencies, entry points, etc.)
    - Edit: modify the spec file or source files under source/
