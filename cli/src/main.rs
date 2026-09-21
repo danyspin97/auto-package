@@ -1,6 +1,5 @@
 //! Command-line surface — REDESIGN M1.
 
-#[allow(dead_code)]
 mod tui;
 
 use std::path::PathBuf;
@@ -47,6 +46,10 @@ enum Commands {
         /// Log level: error, warn, info, debug, trace.
         #[arg(long, default_value = "info")]
         log: String,
+
+        /// Enable interactive TUI mode.
+        #[arg(long, default_value_t = false)]
+        tui: bool,
 
         /// Maximum agent fix attempts per package.
         #[arg(long, default_value_t = 10)]
@@ -132,6 +135,7 @@ fn main() -> color_eyre::Result<()> {
             distro,
             arch,
             log,
+            tui: enable_tui,
             max_attempts,
             budget_usd,
             target,
@@ -217,15 +221,23 @@ fn main() -> color_eyre::Result<()> {
 
             let run_dir = RunDir::allocate(&work_dir)?;
 
-            let human: Box<dyn ap_core::sink::Reporter> = Box::new(HumanSink::new(level));
-            let jsonl: Box<dyn ap_core::sink::Reporter> =
-                Box::new(JsonlSink::open(&run_dir.jsonl())?);
+            let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
+
+            // Add TUI sink if enabled, otherwise use HumanSink
+            if enable_tui {
+                let tui_sink = tui::TuiSink::new()?;
+                sinks.push(Box::new(tui_sink));
+            } else {
+                sinks.push(Box::new(HumanSink::new(level)));
+            }
+
+            // Always add JSONL logging
+            sinks.push(Box::new(JsonlSink::open(&run_dir.jsonl())?));
+
             let memory = std::sync::Arc::new(MemorySink::new());
-            let reporter: Arc<dyn Reporter + Send + Sync> = Arc::new(FanoutReporter::new(vec![
-                human,
-                jsonl,
-                Box::new(memory.clone()),
-            ]));
+            sinks.push(Box::new(memory.clone()));
+
+            let reporter: Arc<dyn Reporter + Send + Sync> = Arc::new(FanoutReporter::new(sinks));
 
             {
                 let memory = memory.clone();
