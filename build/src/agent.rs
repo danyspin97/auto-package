@@ -1717,10 +1717,10 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              \n\
              0b. **Maturin package detection**: Grep `source/pyproject.toml` for \
                  `build-backend.*maturin`. If found, this is a Rust extension package and the \
-                 generator's arch guess is WRONG. The spec needs the full convention 4 maturin \
-                 treatment (Source1 registry.tar.zst, cargo-packaging, ExclusiveArch, CARGO_* \
-                 env vars, etc.). Apply ALL maturin requirements from convention 4 before \
-                 checking anything else — these changes affect the entire spec structure.\n\
+                 generator's arch guess is WRONG. Load the `maturin-packaging` skill (see \
+                 convention 4) for the full treatment — Source1 registry.tar.zst, \
+                 cargo-packaging, ExclusiveArch, CARGO_* env vars, etc. — and apply ALL of it \
+                 before checking anything else; these changes affect the entire spec structure.\n\
              \n\
              0c. **Source0 extension mismatch**: `ls sdist/` and compare the actual tarball's \
                  extension against the spec's `Source0:` line — the generator sometimes writes \
@@ -2047,21 +2047,6 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          {context}\
          {hint}\
          \n\
-         ## Missing Dependencies — ALL Types Must Be Packaged\n\
-         \n\
-         **CRITICAL PRINCIPLE**: When ANY dependency is missing — Python packages, C libraries, \
-         system tools, headers, or any other build requirement — it must be packaged. This \
-         applies universally:\n\
-         - Python packages (python-foo)\n\
-         - C/C++ libraries and their -devel packages (libfoo, libfoo-devel)\n\
-         - System build tools (cmake, ninja, pkg-config)\n\
-         - CUDA libraries (cuda-devel, cuda-runtime)\n\
-         - Any other dependency the build needs\n\
-         \n\
-         **Do NOT work around missing dependencies by disabling features or skipping tests** \
-         unless they have ALREADY been tried and failed (see \"Dependencies that failed to build\" \
-         section above). The goal is to build a COMPLETE package with all features working.\n\
-         \n\
          ### Finding Missing C Headers and Libraries\n\
          \n\
          When a build fails with \"fatal error: <header.h>: No such file or directory\" or \
@@ -2082,22 +2067,8 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check \
          the build log for hints about which library the build system is trying to find.\n\
          \n\
-         ### If Package Found vs Not Found\n\
-         \n\
-         **If zypper FINDS the package**: Add it directly to BuildRequires in the spec.\n\
-         Common available packages: openssl-devel, libffi-devel, zlib-devel, cmake, gcc-c++.\n\
-         \n\
-         **If zypper returns NO RESULTS or OBS reports it as unresolvable**: Report it in \
-         `unresolvable_packages` so it can be built. This applies to ALL dependency types:\n\
-         - C libraries that don't exist in OBS yet → report them, they will be packaged\n\
-         - System tools not in repos → report them, they will be packaged\n\
-         - CUDA libraries → report them, they will be packaged\n\
-         - ANY missing dependency → report it\n\
-         \n\
-         The build system will recursively package all reported dependencies until the full \
-         dependency tree is satisfied. Never skip a feature or disable tests merely because \
-         a dependency (of any type) is not packaged yet — that is what `unresolvable_packages` \
-         is for.\n\
+         If zypper finds nothing, this is convention 27's territory: report the package in \
+         `unresolvable_packages` rather than working around it.\n\
          \n\
          ## Source Files and Cleanup\n\
          \n\
@@ -2119,26 +2090,6 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          - Old version tarballs: `{pkg}-1.2.3.tar.gz` when the current version is 1.2.4\n\
          - Build artifacts: `.pyc`, `__pycache__/`, `*.egg-info/`, `.pytest_cache/`\n\
          - Editor temporaries: `.swp`, `*~`, `.#*`\n\
-         \n\
-         ## Common Test Failures\n\
-         \n\
-         **ModuleNotFoundError during tests**: If you see errors like:\n\
-         ```\n\
-         [  180s] ModuleNotFoundError: No module named 'pybind11_tests'\n\
-         [  180s] ModuleNotFoundError: No module named 'some_package'\n\
-         ```\n\
-         This means the test suite imports a module that isn't in BuildRequires. Add it:\n\
-         - For Python packages: `BuildRequires: %{{python_module <package-name>}}`\n\
-         - Example: `ModuleNotFoundError: No module named 'pytest_cov'` → add \
-         `BuildRequires: %{{python_module pytest-cov}}`\n\
-         \n\
-         Check the test files or `[project.optional-dependencies]` / `[dependency-groups]` \
-         sections in pyproject.toml for test dependencies that might be missing.\n\
-         \n\
-         **Verifying package names**: You can search PyPI directly to verify package names \
-         or check if a package exists: `curl -s https://pypi.org/pypi/<package>/json | jq .info.name` \
-         or browse to `https://pypi.org/project/<package>/`. This is useful when the import \
-         name differs from the package name (e.g., `import PIL` but package is `Pillow`).\n\
          \n\
          ## Workflow\n\
          \n\
