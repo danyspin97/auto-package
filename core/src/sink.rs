@@ -2,10 +2,38 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use owo_colors::{OwoColorize, Stream::Stderr, Style};
 
-use crate::event::{Event, RunOutcome, StepOutcome};
+use crate::event::{Event, PackageOutcome, RunOutcome, StepOutcome};
+
+/// Set while a full-screen UI (the TUI) owns the terminal. Any diagnostic
+/// output that isn't routed through a `Reporter` — ad hoc `eprintln!`s
+/// scattered through resolution/search code — must check this before
+/// writing, or it lands on top of the alternate screen and corrupts it.
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Relaxed);
+}
+
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
+
+/// `eprintln!`, suppressed while [`set_quiet`] is in effect. Use for ad hoc
+/// diagnostic lines that aren't structured `Event`s and so can't reach the
+/// TUI as anything else — the alternative is losing them entirely while the
+/// TUI is active.
+#[macro_export]
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        if !$crate::sink::is_quiet() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
@@ -94,6 +122,7 @@ impl HumanSink {
             | Event::StepStarted { .. }
             | Event::StepFinished { .. }
             | Event::SpecChanged { .. }
+            | Event::PackageFinished { .. }
             | Event::Progress { .. } => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }
@@ -158,6 +187,33 @@ impl HumanSink {
                     ));
                 }
                 Some(s)
+            }
+            Event::PackageFinished { pkg, version, outcome } => {
+                let outcome_colored = match outcome {
+                    PackageOutcome::Built => {
+                        format!("{}", "built".if_supports_color(Stderr, |t| t.green()))
+                    }
+                    PackageOutcome::AlreadyBuilt => format!(
+                        "{}",
+                        "already built".if_supports_color(Stderr, |t| t.green())
+                    ),
+                    PackageOutcome::MissingDeps { deps } => format!(
+                        "{}",
+                        format!("needs: {}", deps.join(", "))
+                            .if_supports_color(Stderr, |t| t.yellow()),
+                    ),
+                    PackageOutcome::Failed { reason } => format!(
+                        "{}",
+                        format!("failed: {reason}")
+                            .if_supports_color(Stderr, |t| t.red()),
+                    ),
+                };
+                Some(format!(
+                    "{} {} {}: {outcome_colored}",
+                    "finished".if_supports_color(Stderr, |t| t.bold()),
+                    pkg.if_supports_color(Stderr, |t| t.bold()),
+                    version.if_supports_color(Stderr, |t| t.dimmed()),
+                ))
             }
             Event::StepStarted { step, kind } => Some(format!(
                 "  {} {}",

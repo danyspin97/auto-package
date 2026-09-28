@@ -123,6 +123,17 @@ pub enum MissingSource {
     Agent,
 }
 
+/// Final result of building one package, as seen by the CLI's build loop.
+/// Unlike per-step events, this is not tied to a `StepId` — it is reported
+/// once a package's thread has been joined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PackageOutcome {
+    Built,
+    AlreadyBuilt,
+    MissingDeps { deps: Vec<String> },
+    Failed { reason: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Task {
     Review,
@@ -292,5 +303,10 @@ pub enum Event {
         step: StepId,
         name: String,
         path: PathBuf,
+    },
+    PackageFinished {
+        pkg: String,
+        version: String,
+        outcome: PackageOutcome,
     },
 }
