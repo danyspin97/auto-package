@@ -31,11 +31,11 @@ generalize perfectly to this package.
   section. Do not hand-write the ldconfig calls — the macro is the current
   idiom (do not invent macros; this one is real, confirmed on the build
   host's `/usr/lib/rpm/macros.d/macros.ldconfig`).
-- **CMake `%build`/%install`**: `%cmake` (configure) then `%cmake_build`,
+- **CMake `%build`/`%install`**: `%cmake` (configure) then `%cmake_build`,
   then `%cmake_install`. Never hand-write `mkdir build && cd build && cmake
   ..` — the macros already do the out-of-tree build and set the standard
   flags (`CMAKE_INSTALL_PREFIX`, `CMAKE_BUILD_TYPE`, etc.).
-- **Meson `%build`/%install`/%check`**: the same idea, different macro set —
+- **Meson `%build`/`%install`/`%check`**: the same idea, different macro set —
   `%meson` (configure) then `%meson_build`, `%meson_install`, and
   `%meson_test` for `%check`. Detect via `meson.build` at the source root.
   Never hand-write `meson setup`/`ninja` invocations.

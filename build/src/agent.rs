@@ -525,8 +525,9 @@ openSUSE spec conventions to keep in mind:
    Note the package may install several top-level names (PyYAML installs both
    `yaml/` and `_yaml/`); list every one.
 
-17. %files paths must be exact — never use shell globs (e.g. never write
-   'outlines_core*' or 'Package-*'). The standard entries for a Python package:
+17. For a Python package, %files paths must be exact — never use a shell glob
+   on the package's own name (e.g. never write 'outlines_core*' or
+   'Package-*'). The standard entries:
    - Module directory:    %{python_sitelib}/package_name/
    - dist-info:          %{python_sitelib}/package_name-%{version}.dist-info/
    - C extension module: %{python_sitearch}/package_name/
@@ -536,6 +537,14 @@ openSUSE spec conventions to keep in mind:
    for the `BUILDROOT/` paths rpm reported — an 'Installed (but unpackaged)'
    error lists every file it found, which is exactly the set %files must
    account for.
+
+   This is specific to a package's own name and does not forbid every glob
+   ever: a versioned shared library's SONAME entry
+   (`%{_libdir}/lib<name>.so.*`) is a real, standard openSUSE idiom for a
+   plain C/C++ package — see the `plain-c-cpp-packaging` skill — because the
+   exact patch version is not something to hardcode. The rule above is about
+   not guessing at the package's own directory name, not about globs in
+   general.
 
    A `py_modules=[...]` project (setup.py/setup.cfg) installs bare `.py`
    files at the top of site-packages instead of a package directory — e.g.

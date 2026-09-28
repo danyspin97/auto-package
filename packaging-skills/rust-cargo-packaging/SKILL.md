@@ -46,9 +46,12 @@ R4. Install binaries manually (no install macro exists for Rust):
              %{buildroot}%{_bindir}/<binary>
 
 R5. Shell-completion subpackages (bash, zsh, fish): each is `BuildArch: noarch`
-   and uses `Supplements: (%{name} and <shell>)` rather than a hard `Requires`.
-   Completions are generated during `%build` and installed from the build tree.
-   Example for a package that generates completions at build time:
+   and adds `Supplements: (%{name} and <shell>)` alongside its normal
+   `Requires: %{name} = %{version}` — the `Supplements` line makes it
+   auto-install whenever both the base package and the shell are already
+   present, it does not replace the hard `Requires`. Completions are
+   generated during `%build` and installed from the build tree. Example for
+   a package that generates completions at build time:
 
      %package bash-completion
      Summary:        Bash Completion for %{name}
