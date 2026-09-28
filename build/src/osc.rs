@@ -417,8 +417,9 @@ pub fn checkout(
         let out = proc::capture("osc", &["up"], &checkout_dir, emit)?;
 
         if !out.success() {
-            // 404 means the package was just created locally by `osc mkpac`
-            // but not yet committed to the server — use the directory as-is.
+            // 404 means `ensure_package`'s meta push hasn't propagated to
+            // this checkout's view of the server yet — use the directory
+            // as-is rather than failing on a lag that resolves itself.
             if out.stderr.contains("404") || out.stderr.contains("Not Found") {
                 return Ok(checkout_dir);
             }
@@ -457,8 +458,9 @@ pub fn checkout(
 pub fn pull(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
     let out = proc::capture("osc", &["up"], checkout_dir, emit)?;
     if !out.success() {
-        // 404 means the package was created locally via `osc mkpac` but not
-        // yet committed — the directory is valid, nothing to pull.
+        // 404 means `ensure_package`'s meta push hasn't propagated to this
+        // checkout's view of the server yet — the directory is valid,
+        // nothing to pull.
         let benign = ["nothing to update", "At revision", "Skipping", "404", "Not Found"];
         if !benign.iter().any(|b| out.stdout.contains(b) || out.stderr.contains(b)) {
             return Err(Error::OscFailed {
@@ -597,18 +599,24 @@ pub fn get_project_build_statuses(
         return HashMap::new();
     }
 
+    parse_project_build_statuses(&out.stdout, repo, arch)
+}
+
+/// Parsing half of [`get_project_build_statuses`], split out so it is
+/// testable without shelling out to `osc`.
+fn parse_project_build_statuses(stdout: &str, repo: &str, arch: &str) -> HashMap<String, BuildStatus> {
     let marker = format!(" {repo} {arch} (");
     let mut statuses = HashMap::new();
     let mut pending_pkgs: Vec<String> = Vec::new();
 
-    for line in out.stdout.lines() {
+    for line in stdout.lines() {
         if line.trim() == "Legend:" {
             break;
         }
         if line.contains(&marker) {
             let chars: Vec<char> = line.chars().collect();
             for (i, pkg) in pending_pkgs.iter().enumerate() {
-                if let Some(&c) = chars.get(1 + 2 * i)
+                if let Some(&c) = chars.get(2 * i)
                     && c != ' '
                 {
                     statuses.insert(pkg.clone(), BuildStatus::from_code(c));
@@ -852,4 +860,60 @@ pub fn obs_build(
             },
         },
     })
+}
+
+#[cfg(test)]
+mod project_build_statuses_tests {
+    use super::*;
+
+    /// Regression test for the off-by-one that used to read the separator
+    /// space between status codes instead of the code itself, silently
+    /// returning no statuses at all and making every OBS-known package look
+    /// "resolvable" regardless of its actual build state.
+    #[test]
+    fn reads_status_codes_at_even_columns_not_the_separators() {
+        let stdout = "\
+python-foo
+python-bar
+python-baz
+. B U openSUSE_Tumbleweed x86_64 (published)
+Legend:
+ . succeeded
+";
+        let statuses = parse_project_build_statuses(stdout, "openSUSE_Tumbleweed", "x86_64");
+
+        assert_eq!(statuses.get("python-foo"), Some(&BuildStatus::Succeeded));
+        assert_eq!(statuses.get("python-bar"), Some(&BuildStatus::Broken));
+        assert_eq!(statuses.get("python-baz"), Some(&BuildStatus::Unresolvable));
+    }
+
+    #[test]
+    fn a_space_code_is_treated_as_no_status_rather_than_disabled() {
+        // The blank/disabled code is indistinguishable from the column
+        // separator, so it must be skipped rather than recorded — a caller
+        // treating "no entry" as "not resolvable" is the safe default.
+        let stdout = "\
+python-foo
+python-bar
+.   openSUSE_Tumbleweed x86_64 (published)
+Legend:
+";
+        let statuses = parse_project_build_statuses(stdout, "openSUSE_Tumbleweed", "x86_64");
+
+        assert_eq!(statuses.get("python-foo"), Some(&BuildStatus::Succeeded));
+        assert_eq!(statuses.get("python-bar"), None);
+    }
+
+    #[test]
+    fn stops_parsing_at_the_legend_footer() {
+        let stdout = "\
+python-foo
+F openSUSE_Tumbleweed x86_64 (published)
+Legend:
+F failed
+";
+        let statuses = parse_project_build_statuses(stdout, "openSUSE_Tumbleweed", "x86_64");
+        assert_eq!(statuses.get("python-foo"), Some(&BuildStatus::Failed));
+        assert_eq!(statuses.len(), 1);
+    }
 }
