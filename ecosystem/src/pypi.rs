@@ -55,6 +55,34 @@ pub struct Sdist {
     pub size: u64,
 }
 
+/// A prebuilt wheel, picked as a last resort when a release has no sdist and
+/// no buildable source repository — a closed-source binary redistribution
+/// (e.g. NVIDIA's individual CUDA toolkit component wheels). Not something to
+/// build from; something to unpack directly into an RPM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WheelFile {
+    pub filename: String,
+    pub url: String,
+    /// Lowercase hex.
+    pub sha256: String,
+    pub size: u64,
+}
+
+impl WheelFile {
+    /// Download to `dest_dir/<filename>` and verify sha256. Same contract as
+    /// [`Sdist::fetch`] — the two share nothing but a filename/url/digest, so
+    /// this borrows that implementation via a throwaway `Sdist` value.
+    pub fn fetch(&self, dest_dir: &Path) -> Result<PathBuf, FetchError> {
+        Sdist {
+            filename: self.filename.clone(),
+            url: self.url.clone(),
+            sha256: self.sha256.clone(),
+            size: self.size,
+        }
+        .fetch(dest_dir)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
     #[error("download failed for {url}: {source}")]
@@ -180,6 +208,11 @@ pub enum Error {
     #[error("{name} {version} has no sdist on PyPI, only wheels")]
     NoSdist { name: String, version: String },
 
+    /// No sdist AND no usable wheel either — the release has nothing to
+    /// package at all (an sdist-less, wheel-less upload is legacy/malformed).
+    #[error("{name} {version} has no sdist and no usable wheel on PyPI")]
+    NoWheel { name: String, version: String },
+
     /// PyPI has always published sha256; a record without one is a signal that
     /// the response is not what we think it is.
     #[error("no sha256 digest for {0}")]
@@ -231,6 +264,37 @@ fn pick_sdist(urls: &[RawFile]) -> Option<&RawFile> {
     sdists()
         .find(|f| f.filename.ends_with(".tar.gz"))
         .or_else(|| sdists().next())
+}
+
+/// Pick a wheel to repackage as a prebuilt binary, for a release that has
+/// neither an sdist nor a discoverable source repository. Prefers a
+/// universal `py3-none-any` wheel (installable regardless of platform), then
+/// a wheel whose platform tag names `arch`, then whatever wheel exists.
+pub fn pick_wheel_from_json(json: &str, arch: &str) -> Result<WheelFile, Error> {
+    let raw: Envelope = serde_json::from_str(json)?;
+    let info = &raw.info;
+    let wheel = pick_wheel(&raw.urls, arch).ok_or_else(|| Error::NoWheel {
+        name: info.name.clone(),
+        version: info.version.clone(),
+    })?;
+    let sha256 = wheel.digests.sha256.clone().ok_or_else(|| Error::NoDigest(wheel.filename.clone()))?;
+    Ok(WheelFile {
+        filename: wheel.filename.clone(),
+        url: wheel.url.clone(),
+        sha256,
+        size: wheel.size,
+    })
+}
+
+fn pick_wheel<'a>(urls: &'a [RawFile], arch: &str) -> Option<&'a RawFile> {
+    let wheels = || {
+        urls.iter()
+            .filter(|f| f.packagetype == "bdist_wheel" && !f.yanked && f.filename.ends_with(".whl"))
+    };
+    wheels()
+        .find(|f| f.filename.ends_with("-none-any.whl"))
+        .or_else(|| wheels().find(|f| f.filename.contains(arch)))
+        .or_else(|| wheels().next())
 }
 
 /// The best upstream URL, preferring the project's own page over its host.
@@ -594,6 +658,28 @@ mod tests {
         );
         let err = parse_release(&json).expect_err("wheel-only must not parse");
         assert!(matches!(err, Error::NoSdist { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn picks_the_wheel_matching_the_requested_arch() {
+        let wheel = pick_wheel_from_json(MARKUPSAFE, "x86_64").expect("a wheel exists");
+        assert_eq!(wheel.filename, "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl");
+        assert_eq!(wheel.sha256, "0123456789abcdef");
+    }
+
+    #[test]
+    fn falls_back_to_any_wheel_when_none_match_the_arch() {
+        // No aarch64 build in the fixture — still returns the one wheel there is
+        // rather than failing outright.
+        let wheel = pick_wheel_from_json(MARKUPSAFE, "aarch64").expect("falls back to the only wheel");
+        assert_eq!(wheel.filename, "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl");
+    }
+
+    #[test]
+    fn no_wheel_at_all_is_an_error() {
+        let json = MARKUPSAFE.replace(r#""packagetype": "bdist_wheel""#, r#""packagetype": "sdist""#);
+        let err = pick_wheel_from_json(&json, "x86_64").expect_err("no wheel in this fixture");
+        assert!(matches!(err, Error::NoWheel { .. }), "got {err:?}");
     }
 
     #[test]

@@ -8,6 +8,7 @@ license.workspace = true
 tempfile = "3"
 
 [dependencies]
+ap-core = { version = "0.1.0", path = "../core" }
 flate2 = "1.1.10"
 hex = "0.4.3"
 serde = { version = "1.0.229", features = ["derive"] }

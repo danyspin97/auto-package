@@ -54,6 +54,15 @@ pub struct SdistInfo {
     pub python_packaging: bool,
     /// The archive carries a Cargo manifest.
     pub cargo_manifest: bool,
+    /// A top-level `CMakeLists.txt`, with no Python or Cargo packaging
+    /// alongside it — a plain C/C++ library or tool built with CMake.
+    pub cmake_manifest: bool,
+    /// A top-level `configure.ac`/`configure.in` or `Makefile.am`, with no
+    /// Python, Cargo or CMake packaging alongside it — a plain C/C++ project
+    /// built with autotools. A release snapshot from a repository tag
+    /// (rather than a `make dist` tarball) ships these instead of a
+    /// generated `configure` script, so the build needs `autoreconf` first.
+    pub autotools_manifest: bool,
     /// Every project found alongside the chosen one, when the archive holds
     /// more than one. Empty for an ordinary single-project sdist.
     ///
@@ -95,13 +104,46 @@ pub enum Error {
 /// Every entry in the archive is unpacked under `dest`. Well-formed sdists
 /// contain exactly one top-level directory (e.g. `markupsafe-3.0.3/`); after
 /// extraction that directory will be at `dest/<top-level>/`.
+///
+/// A `.whl` is a zip archive with no wrapping top-level directory — it
+/// unpacks flat into `dest` itself. Wheels only reach this function when a
+/// release has no sdist and no source repository (see
+/// `ap_build::pipeline::generate_wheel_binary_spec`), so there is no
+/// pyproject.toml/build-system to inspect either.
 pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
+    if tarball.extension().and_then(|e| e.to_str()) == Some("whl") {
+        return extract_zip(tarball, dest);
+    }
+
     let file = std::fs::File::open(tarball).map_err(|e| Error::Io {
         path: tarball.to_path_buf(),
         source: e,
     })?;
     let mut archive = tar::Archive::new(GzDecoder::new(file));
     archive.unpack(dest).map_err(Error::Tar)?;
+    Ok(())
+}
+
+fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
+    let out = std::process::Command::new("unzip")
+        .arg("-q")
+        .arg("-o")
+        .arg(archive)
+        .arg("-d")
+        .arg(dest)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| Error::Io { path: archive.to_path_buf(), source: e })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(Error::Io {
+            path: archive.to_path_buf(),
+            source: std::io::Error::other(format!(
+                "unzip exited with {}: {stderr}",
+                out.status
+            )),
+        });
+    }
     Ok(())
 }
 
@@ -152,6 +194,8 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
     let mut py_manifests: Vec<(usize, String, String)> = Vec::new();
     let mut cargo: Option<((usize, u8), String)> = None;
     let mut setup_py_depth: Option<usize> = None;
+    let mut cmake_manifest = false;
+    let mut autotools_manifest = false;
     let mut has_c = false;
     let mut has_tests = false;
     let mut files: Vec<String> = Vec::new();
@@ -226,6 +270,15 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
             && setup_py_depth.is_none_or(|d| depth < d)
         {
             setup_py_depth = Some(depth);
+        }
+
+        if depth == 0 && file_name == Some("CMakeLists.txt".as_ref()) {
+            cmake_manifest = true;
+        }
+        if depth == 0
+            && matches!(file_name, Some(n) if n == "configure.ac" || n == "configure.in" || n == "Makefile.am")
+        {
+            autotools_manifest = true;
         }
 
         if !has_c {
@@ -353,6 +406,12 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
         project_dir,
         python_packaging: python_depth.is_some(),
         cargo_manifest: cargo.is_some(),
+        // A plain C/C++ project only when nothing else already claims the
+        // archive — a maturin/PyO3 crate has both Cargo.toml and
+        // pyproject.toml, and a CMake-based Python extension (scikit-build)
+        // has both CMakeLists.txt and pyproject.toml. Python and Cargo win.
+        cmake_manifest: cmake_manifest && python_depth.is_none() && cargo.is_none(),
+        autotools_manifest: autotools_manifest && python_depth.is_none() && cargo.is_none(),
         subprojects,
         files,
     })
@@ -437,6 +496,73 @@ mod tests {
         assert!(info.files.iter().any(|f| f == "thing-1.0/pyproject.toml"), "{:?}", info.files);
         // Both manifests present: the Python name wins (maturin projects).
         assert_eq!(info.project_name.as_deref(), Some("thing-py"));
+    }
+
+    #[test]
+    fn a_top_level_cmakelists_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                ("libthing-1.0/CMakeLists.txt", b"project(thing)\n".as_slice()),
+                ("libthing-1.0/src/thing.c", b"int main(){}".as_slice()),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert!(info.cmake_manifest);
+        assert!(!info.autotools_manifest);
+    }
+
+    #[test]
+    fn a_nested_cmakelists_is_not_the_project() {
+        // A vendored dependency's CMakeLists.txt two levels down must not
+        // make an otherwise plain sdist look like a CMake project.
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                ("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n".as_slice()),
+                ("thing-1.0/vendor/lib/CMakeLists.txt", b"project(vendored)\n".as_slice()),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert!(!info.cmake_manifest);
+    }
+
+    #[test]
+    fn a_top_level_configure_ac_is_detected_as_autotools() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                ("libthing-1.0/configure.ac", b"AC_INIT([thing], [1.0])\n".as_slice()),
+                ("libthing-1.0/Makefile.am", b"bin_PROGRAMS = thing\n".as_slice()),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert!(info.autotools_manifest);
+        assert!(!info.cmake_manifest);
+    }
+
+    #[test]
+    fn cmake_alongside_python_packaging_is_not_a_plain_c_project() {
+        // scikit-build-core Python extensions carry both — Python wins, per
+        // convention 3, not the new plain-C/C++ path.
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                ("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n".as_slice()),
+                ("thing-1.0/CMakeLists.txt", b"project(thing)\n".as_slice()),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert!(!info.cmake_manifest);
+        assert!(info.python_packaging);
     }
 
     #[test]

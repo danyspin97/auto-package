@@ -102,7 +102,7 @@ fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
         .as_secs();
 
     if age > max_age_secs {
-        eprintln!("  cache entry stale (age: {} days), re-resolving", age / 86400);
+        ap_core::diag!("  cache entry stale (age: {} days), re-resolving", age / 86400);
         return None;
     }
 
@@ -110,7 +110,7 @@ fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
     let contents = std::fs::read_to_string(&path).ok()?;
     let nodes: Vec<Node> = serde_json::from_str(&contents).ok()?;
 
-    eprintln!("  ✓ loaded resolution from cache ({} packages)", nodes.len());
+    ap_core::diag!("  ✓ loaded resolution from cache ({} packages)", nodes.len());
     Some(nodes)
 }
 
@@ -126,7 +126,7 @@ fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
     // Serialize and save
     if let Ok(json) = serde_json::to_string_pretty(nodes) {
         if std::fs::write(&path, json).is_ok() {
-            eprintln!("  cached resolution for future use");
+            ap_core::diag!("  cached resolution for future use");
         }
     }
 }
@@ -145,7 +145,7 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         return Ok(cached);
     }
 
-    eprintln!("  resolving dependencies with pip (not in cache)...");
+    ap_core::diag!("  resolving dependencies with pip (not in cache)...");
 
     let spec = match version {
         Some(v) => format!("{name}=={v}"),

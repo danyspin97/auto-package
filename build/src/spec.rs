@@ -671,6 +671,220 @@ pub fn monorepo_skeleton(
     )
 }
 
+/// Build a skeleton spec for a release that ships no sdist AND has no
+/// discoverable source repository — a closed-source binary redistribution.
+/// This is the normal shape of NVIDIA's individual CUDA toolkit component
+/// wheels (`nvidia-cuda-nvcc`, `nvidia-cuda-cupti`, `nvidia-cuda-nvrtc`,
+/// `nvidia-cuda-runtime`, ...): PyPI is simply how NVIDIA redistributes the
+/// proprietary toolkit binaries, and there is nothing to compile.
+///
+/// `wheel_filename` becomes `Source0`; `%install` unpacks it directly with
+/// `%pyproject_install`, which accepts a pre-built wheel path instead of a
+/// dist it just built. See convention 24 Exception 3 for when this is the
+/// right call versus a workaround to avoid.
+pub fn wheel_binary_skeleton(pkg_name: &str, version: &str, wheel_filename: &str, release: &Release) -> String {
+    let name = pkg_name.to_lowercase();
+    let summary = release.summary.as_deref().unwrap_or("FIXME: add package summary");
+    let license = license_tag(&release.license);
+    let url = release.homepage.as_deref().unwrap_or("FIXME");
+    // A platform wheel (`...-manylinux_2_17_x86_64.whl`) carries compiled
+    // binaries and belongs in sitearch; a universal wheel (`...-none-any.whl`)
+    // is the noarch/sitelib case. Best-effort guess from the filename tag —
+    // confirm against the actual unpacked contents before the first build.
+    let is_pure = wheel_filename.ends_with("-none-any.whl");
+    let arch_line = if is_pure { "BuildArch:      noarch\n" } else { "" };
+    let sitedir = if is_pure { "python_sitelib" } else { "python_sitearch" };
+
+    format!(
+        "#\n\
+         # spec file for package python-{name}\n\
+         #\n\
+         # Copyright (c) 2026 SUSE LLC\n\
+         #\n\
+         # All modifications and additions to the file contributed by third parties\n\
+         # remain the property of their copyright owners, unless otherwise agreed\n\
+         # upon. The license for this file, and modifications and additions to the\n\
+         # file, is the same license as for the pristine package itself (unless the\n\
+         # license for the pristine package is not an Open Source License, in which\n\
+         # case the license is the MIT License). An \"Open Source License\" is a\n\
+         # license that conforms to the Open Source Definition (Version 1.9)\n\
+         # published by the Open Source Initiative.\n\
+         \n\
+         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
+         \n\
+         \n\
+         %{{?sle15_python_module_pythons}}\n\
+         Name:           python-{name}\n\
+         Version:        {version}\n\
+         Release:        0\n\
+         Summary:        {summary}\n\
+         License:        {license}\n\
+         URL:            {url}\n\
+         Source0:        {wheel_filename}\n\
+         {arch_line}\
+         BuildRequires:  python-rpm-macros\n\
+         BuildRequires:  %{{python_module pip}}\n\
+         BuildRequires:  fdupes\n\
+         %python_subpackages\n\
+         \n\
+         %description\n\
+         {summary}\n\
+         \n\
+         # This release has no sdist and no discoverable source repository — see\n\
+         # convention 28 (and convention 24 Exception 3). %%{{SOURCE0}} is the\n\
+         # upstream wheel itself,\n\
+         # unpacked as-is below; there is no source to compile. Confirm the arch\n\
+         # guess above and the %%files list against source/ (the unpacked wheel)\n\
+         # before the first build.\n\
+         \n\
+         %prep\n\
+         # nothing to unpack here: %%{{SOURCE0}} is a prebuilt wheel\n\
+         \n\
+         %build\n\
+         # prebuilt binary wheel - nothing to compile\n\
+         \n\
+         %install\n\
+         %pyproject_install %{{SOURCE0}}\n\
+         %python_expand %fdupes %{{buildroot}}/%{{${sitedir}}}\n\
+         \n\
+         %check\n\
+         # TODO: confirm the import name from source/*.dist-info/METADATA and\n\
+         # smoke-test it: %%python_expand $python -c \"import <name>\"\n\
+         \n\
+         %files %{{python_files}}\n\
+         # TODO: list the exact paths %%pyproject_install put in the buildroot\n\
+         # (see source/ for the unpacked wheel's real layout) — convention 15\n\
+         # forbids globs here.\n\
+         \n\
+         %changelog\n",
+        name = name,
+        version = version,
+        summary = summary,
+        license = license,
+        url = url,
+        wheel_filename = wheel_filename,
+        arch_line = arch_line,
+        sitedir = sitedir,
+    )
+}
+
+/// Which native build system a plain C/C++ project uses. Decided by
+/// `ap_ecosystem::sdist::SdistInfo::cmake_manifest`/`autotools_manifest`.
+pub enum CBuildSystem {
+    Cmake,
+    Autotools,
+}
+
+/// Build a skeleton spec for a plain C/C++ project: no Python or Cargo
+/// packaging anywhere in the archive, just a native build system. This is a
+/// third ecosystem for the generator (Python and Rust are the other two), and
+/// a much less uniform one — whether the project ships a shared library
+/// needing a `lib<name><soversion>`/`-devel` split, and which `-devel`/
+/// `pkgconfig()` BuildRequires its `find_package()`/`pkg_check_modules()`
+/// calls need, both require reading `CMakeLists.txt`/`configure.ac` and
+/// `source/` directly. The skeleton stays deliberately bare; see convention 29.
+pub fn c_project_skeleton(
+    pkg_name: &str,
+    version: &str,
+    url: &str,
+    top_level_dir: &str,
+    build: CBuildSystem,
+) -> String {
+    let name = pkg_name.to_lowercase();
+    let (build_kind, build_requires, build_section, install_section): (&str, &str, &str, &str) = match build {
+        CBuildSystem::Cmake => (
+            "CMake",
+            "BuildRequires:  cmake\n\
+             BuildRequires:  gcc-c++\n\
+             BuildRequires:  pkg-config\n",
+            "%cmake\n\
+             %cmake_build\n",
+            "%cmake_install\n",
+        ),
+        CBuildSystem::Autotools => (
+            "autotools",
+            "BuildRequires:  autoconf\n\
+             BuildRequires:  automake\n\
+             BuildRequires:  libtool\n\
+             BuildRequires:  gcc-c++\n\
+             BuildRequires:  pkg-config\n",
+            // A release archive is a repository snapshot, not a `make dist`
+            // tarball — it has configure.ac/Makefile.am but no generated
+            // `configure` script yet (see libuv.spec's `./autogen.sh`, the
+            // real-world precedent this mirrors).
+            "autoreconf -fiv\n\
+             %configure\n\
+             %make_build\n",
+            "%make_install\n\
+             find %{buildroot} -type f -name \"*.la\" -delete -print\n",
+        ),
+    };
+
+    format!(
+        "#\n\
+         # spec file for package {name}\n\
+         #\n\
+         # Copyright (c) 2026 SUSE LLC\n\
+         #\n\
+         # All modifications and additions to the file contributed by third parties\n\
+         # remain the property of their copyright owners, unless otherwise agreed\n\
+         # upon. The license for this file, and modifications and additions to the\n\
+         # file, is the same license as for the pristine package itself (unless the\n\
+         # license for the pristine package is not an Open Source License, in which\n\
+         # case the license is the MIT License). An \"Open Source License\" is a\n\
+         # license that conforms to the Open Source Definition (Version 1.9)\n\
+         # published by the Open Source Initiative.\n\
+         \n\
+         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
+         \n\
+         \n\
+         Name:           {name}\n\
+         Version:        {version}\n\
+         Release:        0\n\
+         Summary:        TODO: fill in summary\n\
+         License:        TODO: fill in SPDX license - read LICENSE/COPYING in source/\n\
+         URL:            {url}\n\
+         Source0:        %{{name}}-%{{version}}.tar.gz\n\
+         {build_requires}\
+         \n\
+         %description\n\
+         TODO: fill in description\n\
+         \n\
+         # No Python or Cargo packaging found anywhere in this archive - a plain\n\
+         # C/C++ project built with {build_kind}. See convention 29: decide whether\n\
+         # this ships a shared library needing a lib%%{{name}}<soversion>/%%{{name}}-devel\n\
+         # split, find the -devel/pkgconfig() BuildRequires the build actually needs,\n\
+         # and add %%ldconfig_scriptlets to any shared-library subpackage.\n\
+         \n\
+         %prep\n\
+         %autosetup -n {top_level_dir}\n\
+         \n\
+         %build\n\
+         {build_section}\
+         \n\
+         %install\n\
+         {install_section}\
+         \n\
+         %check\n\
+         # TODO: run the test suite if there is one\n\
+         \n\
+         %files\n\
+         # TODO: list the files %%install put in the buildroot - convention 15's\n\
+         # \"no globs\" rule applies here too.\n\
+         %license TODO\n\
+         \n\
+         %changelog\n",
+        name = name,
+        version = version,
+        url = url,
+        build_requires = build_requires,
+        build_kind = build_kind,
+        top_level_dir = top_level_dir,
+        build_section = build_section,
+        install_section = install_section,
+    )
+}
+
 fn license_tag(license: &License) -> String {
     match license {
         License::Spdx(expr) => expr.clone(),
@@ -721,6 +935,74 @@ BuildRequires:  cmake
 BuildRequires:  %{python_module cmake}
 ";
         assert_eq!(dedupe_build_requires(spec), spec);
+    }
+
+    fn dummy_release(homepage: &str, license: License) -> Release {
+        Release {
+            name: "pkg".to_string(),
+            version: "1.0".to_string(),
+            summary: Some("A package".to_string()),
+            homepage: Some(homepage.to_string()),
+            license,
+            requires_python: None,
+            yanked: false,
+            sdist: ap_ecosystem::pypi::Sdist {
+                filename: String::new(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
+            },
+        }
+    }
+
+    /// The running example: NVIDIA's CUDA toolkit component wheels ship
+    /// compiled binaries under a manylinux platform tag — sitearch, not noarch.
+    #[test]
+    fn wheel_binary_skeleton_marks_platform_wheels_as_arch() {
+        let release = dummy_release(
+            "https://developer.nvidia.com/cuda-toolkit",
+            License::FreeText("NVIDIA Proprietary".to_string()),
+        );
+        let wheel = "nvidia_cuda_nvcc_cu13-13.0.88-py3-none-manylinux_2_17_x86_64.whl";
+        let spec = wheel_binary_skeleton("nvidia-cuda-nvcc-cu13", "13.0.88", wheel, &release);
+
+        assert!(spec.contains(&format!("Source0:        {wheel}")), "{spec}");
+        assert!(!spec.contains("BuildArch:      noarch"), "platform wheel must not be noarch:\n{spec}");
+        assert!(spec.contains("%{buildroot}/%{$python_sitearch}"), "{spec}");
+        assert!(spec.contains("%pyproject_install %{SOURCE0}"), "{spec}");
+    }
+
+    #[test]
+    fn wheel_binary_skeleton_marks_pure_wheels_as_noarch() {
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let wheel = "somepkg-1.0-py3-none-any.whl";
+        let spec = wheel_binary_skeleton("somepkg", "1.0", wheel, &release);
+
+        assert!(spec.contains("BuildArch:      noarch"), "{spec}");
+        assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");
+    }
+
+    #[test]
+    fn c_project_skeleton_uses_cmake_macros() {
+        let spec = c_project_skeleton("libthing", "1.0", "https://example.org", "libthing-1.0", CBuildSystem::Cmake);
+        assert!(spec.contains("Name:           libthing"), "{spec}");
+        assert!(spec.contains("%autosetup -n libthing-1.0"), "{spec}");
+        assert!(spec.contains("BuildRequires:  cmake"), "{spec}");
+        assert!(spec.contains("%cmake\n"), "{spec}");
+        assert!(spec.contains("%cmake_build"), "{spec}");
+        assert!(spec.contains("%cmake_install"), "{spec}");
+        assert!(!spec.contains("autoreconf"), "cmake skeleton must not run autoreconf:\n{spec}");
+    }
+
+    #[test]
+    fn c_project_skeleton_uses_autotools_macros() {
+        let spec = c_project_skeleton("libthing", "1.0", "https://example.org", "libthing-1.0", CBuildSystem::Autotools);
+        assert!(spec.contains("autoreconf -fiv"), "{spec}");
+        assert!(spec.contains("%configure"), "{spec}");
+        assert!(spec.contains("%make_build"), "{spec}");
+        assert!(spec.contains("%make_install"), "{spec}");
+        assert!(spec.contains("BuildRequires:  autoconf"), "{spec}");
+        assert!(!spec.contains("%cmake"), "autotools skeleton must not reference cmake:\n{spec}");
     }
 
     #[test]
