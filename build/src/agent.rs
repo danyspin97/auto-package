@@ -625,9 +625,14 @@ openSUSE spec conventions to keep in mind:
    percent character in the spec file output (which is rare).
 
 20. Python macros: ONLY use macros documented in the openSUSE wiki page
-   "Packaging/Python" (https://en.opensuse.org/openSUSE:Packaging_Python).
-   Do NOT invent macros. If you are unsure whether a macro exists, do not
-   use it — fall back to an explicit shell command instead.
+   "Packaging/Python" (https://en.opensuse.org/openSUSE:Packaging_Python),
+   OR one this prompt's conventions/skills name explicitly (e.g.
+   `%python_find_lang` in the `gettext-i18n-packaging` skill) — that wiki
+   page is not a complete list of every real python-rpm-macros macro. Do NOT
+   invent a macro beyond those two sources. If a macro you want is in
+   neither, confirm it actually exists with `rpm -E %<macro>` (a real macro
+   expands to something other than its own literal name) or
+   `rpmspec --parse` before using it — do not guess from the name alone.
 
 IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `# changed %install`, `# removed %check`). RPM expands macros inside comment

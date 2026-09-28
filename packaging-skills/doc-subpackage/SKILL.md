@@ -28,7 +28,12 @@ reference shape:
     %fdupes %{buildroot}%{_docdir}/<name>-doc
 - Declare the subpackage and its own noarch-ness explicitly — HTML docs
   have no compiled content, so `-doc` is `BuildArch: noarch` even when the
-  base package is architecture-specific (a compiled extension):
+  base package is architecture-specific (a compiled extension). `cookiecutter`
+  itself is already `BuildArch: noarch` at the top level, so its `-doc`
+  subpackage inherits that for free and doesn't need the line spelled out;
+  for a compiled, arch-specific base package, `python-lxml`'s
+  `%package -n python-lxml-doc` shows the line written explicitly, which is
+  the case that actually needs it:
     %package -n <name>-doc
     Summary:        Documentation for <name>
     BuildArch:      noarch
