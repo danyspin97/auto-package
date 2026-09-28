@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "auto-package-conventions",
+  "version": "0.1.0",
+  "description": "Conditional openSUSE RPM packaging conventions for auto-package's spec-repair agent — loaded on demand instead of every turn, for ecosystems/situations that only apply to a minority of packages.",
+  "author": {
+    "name": "auto-package"
+  },
+  "skills": [
+    "./maturin-packaging",
+    "./rust-cargo-packaging",
+    "./plain-c-cpp-packaging",
+    "./monorepo-packaging",
+    "./prebuilt-wheel-packaging",
+    "./systemd-service-files",
+    "./gettext-i18n-packaging",
+    "./doc-subpackage",
+    "./django-test-settings"
+  ]
+}

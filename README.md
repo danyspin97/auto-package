@@ -75,6 +75,14 @@ The project is organized as a Rust workspace:
 - **ecosystem**: PyPI and package metadata handling  
 - **build**: OBS integration, spec generation, and AI agent
 - **cli**: Command-line interface and TUI
+- **packaging-skills**: a Claude Code plugin (loaded via `--plugin-dir`) holding
+  the AI agent's conditional packaging conventions — maturin, standalone
+  Rust/Cargo, plain C/C++, monorepos, prebuilt wheels, systemd services,
+  i18n, `-doc` subpackages, Django test settings. These only apply to a
+  minority of packages, so they're loaded on demand via the `Skill` tool
+  instead of being sent in every turn's prompt; `build/src/agent.rs`'s
+  `CONVENTIONS` constant holds the always-applicable rules and briefly
+  points at the relevant skill by name where one exists.
 
 ### Event System
 
