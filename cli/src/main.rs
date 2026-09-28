@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ap_build::pipeline::{AgentBackend, PipelineConfig, PipelineResult, run_package, select_target};
-use ap_core::event::{Event, RunOutcome};
+use ap_core::event::{Event, PackageOutcome, RunOutcome, SelectionReason};
 use ap_core::run::RunDir;
 use ap_core::sink::{FanoutReporter, HumanSink, JsonlSink, LogLevel, MemorySink, Reporter};
 use clap::{Parser, Subcommand};
@@ -221,13 +221,17 @@ fn main() -> color_eyre::Result<()> {
 
             let run_dir = RunDir::allocate(&work_dir)?;
 
-            let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
+            // The TUI takes over the terminal, so text output is dropped in
+            // favor of it; jsonl/memory logging are unaffected either way.
+            // `set_quiet` also silences the ad hoc `diag!` lines scattered
+            // through resolution/search code that don't go through a
+            // `Reporter` at all — left unguarded they'd print straight over
+            // the TUI's alternate screen.
+            let tui_ctrl = if enable_tui { Some(tui::TuiController::new()?) } else { None };
+            ap_core::sink::set_quiet(tui_ctrl.is_some());
 
-            // Add TUI sink if enabled, otherwise use HumanSink
-            if enable_tui {
-                let tui_sink = tui::TuiSink::new()?;
-                sinks.push(Box::new(tui_sink));
-            } else {
+            let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
+            if tui_ctrl.is_none() {
                 sinks.push(Box::new(HumanSink::new(level)));
             }
 
@@ -237,11 +241,29 @@ fn main() -> color_eyre::Result<()> {
             let memory = std::sync::Arc::new(MemorySink::new());
             sinks.push(Box::new(memory.clone()));
 
-            let reporter: Arc<dyn Reporter + Send + Sync> = Arc::new(FanoutReporter::new(sinks));
+            let base_reporter: Arc<dyn Reporter + Send + Sync> =
+                Arc::new(FanoutReporter::new(sinks));
+            let reporter: Arc<dyn Reporter + Send + Sync> = match &tui_ctrl {
+                Some(t) => t.tap(base_reporter.clone(), None),
+                None => base_reporter.clone(),
+            };
 
             {
                 let memory = memory.clone();
+                let tui_active = tui_ctrl.is_some();
                 ctrlc::set_handler(move || {
+                    // The TUI leaves the terminal in raw mode + the alternate
+                    // screen; without restoring it first, this message and
+                    // the shell prompt after exit both land inside that
+                    // broken state instead of the user's normal screen.
+                    if tui_active {
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        let _ = crossterm::execute!(
+                            std::io::stdout(),
+                            crossterm::terminal::LeaveAlternateScreen,
+                            crossterm::event::DisableMouseCapture
+                        );
+                    }
                     let usage = memory.events().iter().fold(
                         ap_core::event::Usage::default(),
                         |mut acc, ev| {
@@ -290,6 +312,8 @@ fn main() -> color_eyre::Result<()> {
                 source_urls,
                 &run_dir,
                 reporter.clone(),
+                base_reporter.clone(),
+                tui_ctrl.clone(),
             );
 
             let outcome = if result.is_ok() {
@@ -376,7 +400,18 @@ fn cmd_build(
     source_urls: Arc<ap_build::sources::SourceMap>,
     run_dir: &RunDir,
     reporter: Arc<dyn Reporter + Send + Sync>,
+    base_reporter: Arc<dyn Reporter + Send + Sync>,
+    tui_ctrl: Option<tui::TuiController>,
 ) -> color_eyre::Result<()> {
+    // Reporter for events belonging to a single package: still delivered to
+    // jsonl/memory like `reporter`, but tagged so the TUI can attribute
+    // per-step events to the right row (see `tui::TuiController::tap`).
+    let pkg_reporter = |pkg: &str| -> Arc<dyn Reporter + Send + Sync> {
+        match &tui_ctrl {
+            Some(t) => t.tap(base_reporter.clone(), Some(pkg.to_string())),
+            None => reporter.clone(),
+        }
+    };
     // Resolve the version if it was not pinned. A repository has no package
     // index behind it, so "latest" comes from the forge's own release list.
     let pinned_version = version.map(str::to_string);
@@ -476,6 +511,18 @@ fn cmd_build(
     // Tracks deps we have already attempted to avoid infinite retry loops.
     let mut attempted_deps: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // A failed top-level target is retried automatically: it stays in the
+    // dependency closure, so the next iteration's `select_target` re-selects
+    // it as long as nothing else in the closure needs it built first. Only
+    // give up — and stop blocking whatever depends on it — after it has
+    // failed this many times in a row. Reuses `--max-attempts` (the same cap
+    // on agent fix turns *within* one `run_package` call) so there's a
+    // single knob for "how hard to keep trying a broken package", instead of
+    // a second, smaller one that gives up before the per-attempt budget does.
+    let max_target_retries = max_attempts;
+    let mut fail_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut permanently_failed: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
     loop {
@@ -505,7 +552,7 @@ fn cmd_build(
                     .contains(&rpm)
                 })
                 .map(|dep| {
-                    eprintln!("  queuing missing dependency: {} (PyPI: {})",
+                    ap_core::diag!("  queuing missing dependency: {} (PyPI: {})",
                               ap_build::osc::rpm_name(&dep), dep);
                     let url = format!("https://pypi.org/pypi/{dep}/json");
                     let dep_version = ureq::get(&url)
@@ -533,32 +580,54 @@ fn cmd_build(
                     if dep_pkg_run.ensure().is_err() {
                         return None;
                     }
-                    let r = reporter.clone();
+                    reporter.report(&Event::TargetSelected {
+                        pkg: dep_rpm.clone(),
+                        version: dep_config.version.clone(),
+                        reason: SelectionReason::FirstUnbuiltDependency,
+                        blocked_by: vec![],
+                    });
+                    let dep_version = dep_config.version.clone();
+                    let r = pkg_reporter(&dep_rpm);
                     let sem2 = sem.clone();
                     Some(std::thread::spawn(move || {
                         sem_acquire(&sem2, jobs);
                         let result = run_package(&dep_config, &dep_pkg_run, r.as_ref());
                         sem_release(&sem2);
-                        (dep_rpm, result)
+                        (dep_rpm, dep_version, result)
                     }))
                 })
                 .flatten()
                 .collect();
 
             for handle in handles {
-                let (dep_rpm, result) = handle.join().expect("dep thread panicked");
+                let (dep_rpm, version, result) = handle.join().expect("dep thread panicked");
+                let outcome = match &result {
+                    PipelineResult::Built { .. } => PackageOutcome::Built,
+                    PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
+                    PipelineResult::MissingDeps { deps, .. } => {
+                        PackageOutcome::MissingDeps { deps: deps.clone() }
+                    }
+                    PipelineResult::Failed { reason, .. } => {
+                        PackageOutcome::Failed { reason: reason.clone() }
+                    }
+                };
+                pkg_reporter(&dep_rpm).report(&Event::PackageFinished {
+                    pkg: dep_rpm.clone(),
+                    version,
+                    outcome,
+                });
                 match result {
                     PipelineResult::Built { .. } => {
-                        eprintln!("built dep {dep_rpm}");
+                        ap_core::diag!("built dep {dep_rpm}");
                     }
                     PipelineResult::AlreadyBuilt { .. } => {
-                        eprintln!("dep {dep_rpm} already built");
+                        ap_core::diag!("dep {dep_rpm} already built");
                     }
                     PipelineResult::MissingDeps { deps: more, .. } => {
                         pending_deps.extend(more);
                     }
                     PipelineResult::Failed { reason, .. } => {
-                        reporter.report(&Event::Warning {
+                        pkg_reporter(&dep_rpm).report(&Event::Warning {
                             step: None,
                             message: format!(
                                 "dependency {dep_rpm} failed to build ({reason}); \
@@ -584,12 +653,29 @@ fn cmd_build(
             let pkg_run = run_dir.pkg(&rpm_name);
             pkg_run.ensure()?;
             reporter.report(&Event::TargetSelected {
-                pkg: name.to_string(),
+                pkg: rpm_name.clone(),
                 version: version.clone(),
-                reason: ap_core::event::SelectionReason::ExplicitOverride,
+                reason: SelectionReason::ExplicitOverride,
                 blocked_by: vec![],
             });
-            match run_package(&config, &pkg_run, reporter.as_ref()) {
+            let r = pkg_reporter(&rpm_name);
+            let result = run_package(&config, &pkg_run, r.as_ref());
+            let outcome = match &result {
+                PipelineResult::Built { .. } => PackageOutcome::Built,
+                PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
+                PipelineResult::MissingDeps { deps, .. } => {
+                    PackageOutcome::MissingDeps { deps: deps.clone() }
+                }
+                PipelineResult::Failed { reason, .. } => {
+                    PackageOutcome::Failed { reason: reason.clone() }
+                }
+            };
+            r.report(&Event::PackageFinished {
+                pkg: rpm_name.clone(),
+                version: version.clone(),
+                outcome,
+            });
+            match result {
                 PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => {
                     return Ok(())
                 }
@@ -602,7 +688,7 @@ fn cmd_build(
                         .cloned()
                         .collect();
                     if new_deps.is_empty() {
-                        eprintln!("{rpm_name} needs: {}", deps.join(", "));
+                        ap_core::diag!("{rpm_name} needs: {}", deps.join(", "));
                         return Ok(());
                     }
                     pending_deps.extend(new_deps);
@@ -620,18 +706,29 @@ fn cmd_build(
             explicit_target,
             pinned_version.as_deref(),
             &config,
+            &permanently_failed,
             reporter.as_ref(),
         )
             .map_err(|e| color_eyre::eyre::eyre!(e))?;
 
         if targets.is_empty() {
-            eprintln!("{name} and all dependencies are already built");
-            return Ok(());
+            if permanently_failed.is_empty() {
+                ap_core::diag!("{name} and all dependencies are already built");
+                return Ok(());
+            }
+            let mut names: Vec<&String> = permanently_failed.iter().collect();
+            names.sort();
+            let names = names.into_iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(color_eyre::eyre::eyre!(
+                "build incomplete — gave up on {} after {max_target_retries} failed attempt(s) \
+                 each, blocking everything left in the closure that needs them: {names}",
+                permanently_failed.len()
+            ));
         }
 
         for t in &targets {
             reporter.report(&Event::TargetSelected {
-                pkg: t.name.clone(),
+                pkg: ap_build::osc::rpm_name(&t.name),
                 version: t.version.clone(),
                 reason: t.reason.clone(),
                 blocked_by: t.blocked_by.clone(),
@@ -651,7 +748,7 @@ fn cmd_build(
                 };
                 let pkg_run = run_dir.pkg(&rpm_name);
                 pkg_run.ensure().expect("failed to create pkg run dir");
-                let r = reporter.clone();
+                let r = pkg_reporter(&rpm_name);
                 let sem2 = sem.clone();
                 std::thread::spawn(move || {
                     sem_acquire(&sem2, jobs);
@@ -663,36 +760,76 @@ fn cmd_build(
             .collect();
 
         let mut batch_pending: Vec<String> = Vec::new();
-        let mut any_failed = false;
+        let mut batch_failures: Vec<(String, String)> = Vec::new();
 
         for handle in handles {
             let (rpm_name, version, result) = handle.join().expect("build thread panicked");
+            let outcome = match &result {
+                PipelineResult::Built { .. } => PackageOutcome::Built,
+                PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
+                PipelineResult::MissingDeps { deps, .. } => {
+                    PackageOutcome::MissingDeps { deps: deps.clone() }
+                }
+                PipelineResult::Failed { reason, .. } => {
+                    PackageOutcome::Failed { reason: reason.clone() }
+                }
+            };
+            pkg_reporter(&rpm_name).report(&Event::PackageFinished {
+                pkg: rpm_name.clone(),
+                version: version.clone(),
+                outcome,
+            });
             match result {
                 PipelineResult::Built { .. } => {
-                    eprintln!("built {rpm_name} {version}");
+                    ap_core::diag!("built {rpm_name} {version}");
+                    fail_counts.remove(&rpm_name);
                 }
                 PipelineResult::AlreadyBuilt { .. } => {
-                    eprintln!("{rpm_name} {version} already built");
+                    ap_core::diag!("{rpm_name} {version} already built");
+                    fail_counts.remove(&rpm_name);
                 }
                 PipelineResult::MissingDeps { deps, .. } => {
                     batch_pending.extend(deps);
                 }
                 PipelineResult::Failed { reason, .. } => {
-                    eprintln!("ERROR: {rpm_name} failed: {reason}");
-                    any_failed = true;
+                    batch_failures.push((rpm_name.clone(), reason.clone()));
+                    let count = fail_counts.entry(rpm_name.clone()).or_insert(0);
+                    *count += 1;
+                    if *count >= max_target_retries {
+                        permanently_failed.insert(rpm_name.clone());
+                        pkg_reporter(&rpm_name).report(&Event::Warning {
+                            step: None,
+                            message: format!(
+                                "giving up on {rpm_name} after {count} failed attempts \
+                                 ({reason}); anything depending on it stays blocked, but the \
+                                 rest of the closure keeps going"
+                            ),
+                        });
+                    } else {
+                        pkg_reporter(&rpm_name).report(&Event::Warning {
+                            step: None,
+                            message: format!(
+                                "{rpm_name} failed (attempt {count}/{max_target_retries}): \
+                                 {reason}; retrying next round"
+                            ),
+                        });
+                    }
                 }
             }
         }
 
-        if any_failed {
-            return Err(color_eyre::eyre::eyre!("one or more packages failed to build"));
-        }
-
         pending_deps.extend(batch_pending);
 
-        // If an explicit target was requested, stop after one batch.
+        // If an explicit target was requested, stop after one batch — there is
+        // no "next round" to retry it in, so a failure here must surface as
+        // an error rather than a silent `Ok`.
         if explicit_target.is_some() {
-            return Ok(());
+            return match batch_failures.first() {
+                Some((rpm_name, reason)) => {
+                    Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"))
+                }
+                None => Ok(()),
+            };
         }
     }
 }
