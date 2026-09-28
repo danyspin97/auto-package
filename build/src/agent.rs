@@ -30,6 +30,22 @@ openSUSE spec conventions to keep in mind:
    `%autosetup -n` takes the tarball's top-level directory, which is usually
    but not always the normalized name; the generator sets it from the tarball.
 
+   The RPM package name (what goes inside `%{python_module ...}`) follows the
+   DISPLAY name's capitalization, not the normalized one — `%{python_module
+   Pillow}`, not `%{python_module pillow}`. This trips people up because pip
+   and PyPI treat names case-INsensitively, so a project's own
+   pyproject.toml/setup.cfg dependency list frequently spells a dependency in
+   lowercase (`dependencies = ["pillow>=10.3.0"]`) even when the canonical,
+   OBS-packaged spelling is mixed-case. Copying a name verbatim out of
+   `[project.dependencies]` or `install_requires` (convention 3's "main
+   runtime dependencies" diff, or any test-dependency addition) is NOT safe —
+   re-check every name you add against its canonical PyPI spelling
+   (`https://pypi.org/project/<name>/` or `curl -s
+   https://pypi.org/pypi/<name>/json | jq .info.name`) before writing it into
+   BuildRequires/Requires. Known mixed-case names include Pillow, PyYAML,
+   MarkupSafe, PyJWT, PySide6, PyQt5, PyMySQL, PyNaCl — but don't rely on a
+   memorized list, verify each one.
+
 3. Architecture: a package is arch-specific only if it actually COMPILES an
    extension, not merely because C sources are present in the tarball. The
    generator switches to the arch macros whenever it finds a `.c`/`.cpp`/`.cc`/
@@ -39,7 +55,18 @@ openSUSE spec conventions to keep in mind:
    the build actually cythonizes. If there is no compiled extension, put
    `BuildArch: noarch` back and switch `%{python_sitearch}` to
    `%{python_sitelib}` throughout — a pure-Python package installed to sitearch
-   fails %files with 'File not found'. If there IS a compiled extension:
+   fails %files with 'File not found'.
+
+   **CUDA kernel packages are a common false positive**: a package can ship
+   `.cu`/`.cpp` source files (or embed CUDA C++ as Python string literals)
+   that are compiled at IMPORT or RUN time by NVRTC / `torch.utils.cpp_extension`
+   / Triton's own JIT, never during the RPM build itself. No `setup.py`
+   `ext_modules=`, no CMakeLists.txt, no cythonized `.pyx` — this is
+   `BuildArch: noarch` even though `.cu`/`.cpp` files are present in the
+   sdist. Check for an actual build-time compile step before trusting the
+   file extensions alone.
+
+   If there IS a compiled extension:
 
    CRITICAL requirements for arch packages:
    - Use %{python_sitearch} instead of %{python_sitelib} (in %install, %check, %files)
@@ -49,11 +76,15 @@ openSUSE spec conventions to keep in mind:
      (NOT sitelib — this is a common generator error)
 
    Common -devel package requirements for compiled extensions:
-   - pybind11-devel (for pybind11/pybind11.h — NOT plain pybind11)
+   - pybind11-devel, USUALLY (see the pybind11 exception just below)
    - %{python_module numpy-devel} (for numpy/arrayobject.h)
    - %{python_module devel} (for Python.h)
-   - cmake, gcc-c++ (always needed when CMakeLists.txt is present)
-   - cuda-devel, cuda-runtime (for CUDA extensions — see convention 23)
+   - gcc-c++ for ANY C++ extension, whether built via CMakeLists.txt, a plain
+     setup.py `Extension()`/`ext_modules=`, or cffi — the generator only
+     reliably adds it for the CMake case, so check for it whenever the
+     language is C++ (not C) regardless of build system. Add cmake itself
+     only when CMakeLists.txt is actually present.
+   - cuda-devel, cuda-runtime (for CUDA extensions — see convention 24)
 
    Add BuildRequires for any C libraries the extension links against,
    e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
@@ -61,13 +92,24 @@ openSUSE spec conventions to keep in mind:
    or `zypper what-provides` to find the package that provides them (see the
    "Missing C Headers and Libraries" section below for the search pattern).
 
-   When the headers come from a *Python* package, the base package does not
-   carry them — the -devel flavour does. A build that fails on
-   `pybind11/pybind11.h: No such file` needs
+   When the headers come from a *Python* package, the base package usually
+   does not carry them — the -devel flavour does. A build that fails on
+   `pybind11/pybind11.h: No such file` usually needs
    `BuildRequires: %{python_module pybind11-devel}`, not
    `%{python_module pybind11}`. The same applies to any
    `fatal error: ...: No such file or directory` naming a header that a
    Python dependency is supposed to provide.
+
+   **pybind11 exception — check how the build actually finds the headers
+   before choosing**: pybind11 ships its own headers inside the pip package
+   too (`pybind11/include/` in site-packages), and a setup.py that gets its
+   include path from `pybind11.get_include()` or `pybind11.__file__` (rather
+   than a system include path or CMake's `find_package(pybind11)`) only
+   needs the plain `%{python_module pybind11}` — adding `-devel` on top of
+   that is harmless but adding it INSTEAD is wrong; only `-devel`, with no
+   plain package, leaves `pybind11.get_include()` unable to `import pybind11`
+   at all. Read setup.py/CMakeLists.txt to see which lookup it uses before
+   picking.
 
    Remove installed C source files in %install:
      %python_expand rm -f %{buildroot}%{$python_sitearch}/<pkg>/*.c
@@ -123,7 +165,7 @@ openSUSE spec conventions to keep in mind:
       cannot have (a GPU, network access, model weights fetched at run time),
       use an import smoke test instead, ON ONE LINE. If it only needs a
       dependency that is not packaged yet, report that dependency instead and
-      keep the real tests — see convention 23.
+      keep the real tests — see convention 24.
         %python_expand d=$(mktemp -d) && cd "$d" && PYTHONPATH=%{buildroot}%{$python_sitearch} $python -c "import <pkg>"
       This must not be split across lines with backslash continuations:
       inside %python_expand the continuation breaks the expansion and you get
@@ -145,6 +187,11 @@ openSUSE spec conventions to keep in mind:
      `Apache Software License`) must be translated. openSUSE also defines
      aliases for licenses with no SPDX id, e.g. `SUSE-Repoze` for the Repoze
      BSD variant; use those rather than inventing an expression.
+   - A `License:` field spanning many lines, or containing phrases like
+     "Permission is hereby granted" / "Apache License" boilerplate, means the
+     generator dumped the entire license text into the tag instead of an
+     SPDX id. Replace the whole thing with the short SPDX expression (e.g.
+     `Apache-2.0`), never leave the full text in the tag.
    - Also add `%license <file>` to %files naming the actual license file in
      the sdist, if the generator did not.
 
@@ -177,8 +224,17 @@ openSUSE spec conventions to keep in mind:
    `BuildRequires: %{python_module <name>}`. If OBS does not have it yet, put
    its RPM name in `unresolvable_packages` and it will be built first — that
    applies to large packages like torch just as much as to small ones
-   (convention 23). Only skip the tests instead when the dependency has
-   already been tried and failed (convention 12 Step B).
+   (convention 24). Only skip the tests instead when the dependency has
+   already been tried and failed (convention 13 Step B).
+
+   The same applies when tests are not failing but merely *skipping*: a test
+   file that does `try: import aiohttp \n except ImportError: aiohttp = None`
+   plus `@unittest.skipUnless(aiohttp, ...)` for an optional integration
+   (Django, aiohttp, twisted, and similar framework-integration extras are
+   the common case) will silently skip that whole test class if the extra
+   is not installed. Installing the extra's own dependencies as BuildRequires
+   turns those tests from skipped into actually run — strictly more coverage
+   for the same %check section, and worth doing whenever the extra is small.
 
    **Common missing tools** — tests often shell out to system commands:
    - `FileNotFoundError: 'git'` → add `BuildRequires: git-core`
@@ -211,7 +267,7 @@ openSUSE spec conventions to keep in mind:
          need something no build worker can have and no package can supply —
          a GPU device, network access, a display, weights downloaded at run
          time. A dependency that is merely not packaged yet is NOT this case:
-         report it instead (convention 23). The smoke test still proves the
+         report it instead (convention 24). The smoke test still proves the
          extension compiled and the package imports, which is most of what
          %check is for in a distro build:
            %python_expand d=$(mktemp -d) && cd "$d" && PYTHONPATH=%{buildroot}%{$python_sitearch} $python -c "import <import-name>"
@@ -258,6 +314,18 @@ openSUSE spec conventions to keep in mind:
    Clearing addopts is not suppressing a failure — the tests still run and
    still have to pass.
 
+   `filterwarnings = ['error']` turns EVERY warning into a hard failure,
+   including pytest's own "unknown mark" / "unknown ini option" warnings. If
+   `[tool.pytest.ini_options]` sets both `filterwarnings = ['error']` and an
+   addopts flag or a custom `markers` entry that belongs to a plugin (e.g.
+   `--benchmark-*` needs pytest-benchmark, a `@pytest.mark.thread_unsafe`
+   marker needs pytest-run-parallel), that plugin is not optional the way it
+   would be without `filterwarnings = error` — omitting it fails the whole
+   run on an unrelated-looking warning-turned-error, not a missing-module
+   traceback. Add every plugin implied by addopts/markers as a BuildRequires
+   whenever `filterwarnings = ['error']` is set, rather than only the ones
+   that produce an obvious ModuleNotFoundError.
+
 11. **Common Build Failure Patterns** — recognize and fix these automatically:
 
    **Source file format mismatch** (error in %prep):
@@ -290,6 +358,26 @@ openSUSE spec conventions to keep in mind:
    - **Cause**: Test suite expects specific runtime environment (GPU, torch context, etc.)
    - **Fix**: Use smoke test instead of full suite
 
+   **%build (not %check) fails with a network error**:
+   - `Temporary failure in name resolution`, `Could not resolve host`,
+     `Connection timed out` while `%build` is running (not `%check`)
+   - **Cause**: OBS build workers have NO network access at all, at any point
+     in the build. The build system tried to download something at build
+     time — a prebuilt binary (a pinned compiler/toolchain fetched from a
+     vendor URL), a CMake `FetchContent`/`ExternalProject_Add` target, or a
+     pip resolver trying to hit PyPI because `--no-build-isolation` was
+     missing. This is NOT a missing-BuildRequires situation — packaging the
+     thing it tried to download does not help if the build script only knows
+     how to fetch it itself.
+   - **Fix**: Look for the project's own offline switch first — an
+     `OFFLINE_BUILD`/`*_OFFLINE=1`-style env var, a CMake option to disable
+     the fetching target, or a `SYSPATH`-style override pointing at a
+     system-installed copy instead (see Triton's `TRITON_OFFLINE_BUILD` and
+     `LLVM_SYSPATH`/`JSON_SYSPATH` for a real example). Never report the
+     downloaded thing as `unresolvable_packages` merely because a URL fetch
+     failed — confirm first whether it is even packageable as an independent
+     RPM (a header-only library the build vendors as source usually isn't).
+
 12. Tools available — USE THEM:
    - Read: get line-numbered file content (use for build.log, pyproject.toml, setup.py)
    - Grep: search for patterns (use to find test dependencies, entry points, etc.)
@@ -314,7 +402,7 @@ openSUSE spec conventions to keep in mind:
    "no C extensions") without first verifying it with Read or Grep. Assumption is not
    evidence. If you cannot verify it with the tools available, say so in reasoning.
 
-12. Missing module in %check (e.g. `ModuleNotFoundError: No module named
+13. Missing module in %check (e.g. `ModuleNotFoundError: No module named
    'conftest'` or any other import error): a test dependency is absent.
    Read the packaging file (pyproject.toml [project.optional-dependencies] /
    setup.cfg [options.extras_require]) to identify all test deps and add
@@ -339,7 +427,7 @@ openSUSE spec conventions to keep in mind:
 
    If the spec has the wrong RPM package name, fix the name instead.
 
-13. The import name is often NOT the package name — look it up, do not derive
+14. The import name is often NOT the package name — look it up, do not derive
    it. The spec generator normalizes the dist-info directory for you
    (`rich_toolkit-%{version}.dist-info/` is always right), but the module
    directory is whatever the project actually installs, and for a large
@@ -355,17 +443,32 @@ openSUSE spec conventions to keep in mind:
    Note the package may install several top-level names (PyYAML installs both
    `yaml/` and `_yaml/`); list every one.
 
-14. %files paths must be exact — never use shell globs (e.g. never write
+15. %files paths must be exact — never use shell globs (e.g. never write
    'outlines_core*' or 'Package-*'). The standard entries for a Python package:
    - Module directory:    %{python_sitelib}/package_name/
    - dist-info:          %{python_sitelib}/package_name-%{version}.dist-info/
    - C extension module: %{python_sitearch}/package_name/
-   `package_name` above stands for the IMPORT name from convention 13, not the
+   `package_name` above stands for the IMPORT name from convention 14, not the
    PyPI name. A trailing '*' risks claiming unrelated files and causes 'file
    listed twice' errors. If you are unsure of the exact path, grep build.log
    for the `BUILDROOT/` paths rpm reported — an 'Installed (but unpackaged)'
    error lists every file it found, which is exactly the set %files must
    account for.
+
+   A `py_modules=[...]` project (setup.py/setup.cfg) installs bare `.py`
+   files at the top of site-packages instead of a package directory — e.g.
+   `nvidia-ml-py`'s only module is `%{python_sitelib}/pynvml.py`, not a
+   `pynvml/` directory. Check `source/*.egg-info/top_level.txt` either way:
+   it lists the installed name whether it is a directory or a single file,
+   but only the source (`py_modules=` vs `packages=`) tells you which form
+   to write in %files.
+
+   A namespace package (`google/`, `cuda/`) split with `%dir` plus an
+   explicit `__init__.py` line (rather than owning the whole directory)
+   needs the matching `__pycache__/__init__.*.pyc` listed too — the
+   directory's `%dir` entry does not imply ownership of files another
+   subpackage generates inside it, and rpm reports the compiled bytecode as
+   a separate 'Installed (but unpackaged)' file if it is left out.
 
    Entrypoints (console scripts): if the package declares [project.scripts] or
    entry_points['console_scripts'] in its pyproject.toml/setup.cfg, each script
@@ -425,11 +528,11 @@ openSUSE spec conventions to keep in mind:
    in %files causes file conflicts. The generator often omits some or all of these —
    you must verify and add all seven components.
 
-15. RPM macros use single '%', never '%%'. For example: %check, %install,
+16. RPM macros use single '%', never '%%'. For example: %check, %install,
    %{version}, %{python_module foo}. Only use %% when you need a literal
    percent character in the spec file output (which is rare).
 
-16. Python macros: ONLY use macros documented in the openSUSE wiki page
+17. Python macros: ONLY use macros documented in the openSUSE wiki page
    "Packaging/Python" (https://en.opensuse.org/openSUSE:Packaging_Python).
    Do NOT invent macros. If you are unsure whether a macro exists, do not
    use it — fall back to an explicit shell command instead.
@@ -441,7 +544,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    instead — it is kept in the run log and in notes.md, where the next attempt
    will read it.
 
-17. BuildRequires takes ONE simple constraint — not PEP 508. A requirement
+18. BuildRequires takes ONE simple constraint — not PEP 508. A requirement
    string copied out of pyproject.toml usually will not work. Reduce it to a
    single `name >= version` (or a bare name).
 
@@ -474,29 +577,42 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      needs them.
    - Spaces around operators are REQUIRED (convention 1): `>=77` must be `>= 77`.
 
-   Package name capitalization MATTERS. Some packages use mixed case:
-   - Pillow (not pillow)
-   - PyYAML (not pyyaml)
-   Check pyproject.toml [project.name] or PyPI for the canonical spelling.
+   Package name capitalization MATTERS — see convention 2. Do not trust the
+   casing used in a `requirements`/`dependencies` list; verify the canonical
+   PyPI spelling for every name you write.
 
-18. Dynamic version and metadata providers need their own BuildRequires, and
+19. Dynamic version and metadata providers need their own BuildRequires, and
    they are not listed in `[build-system] requires`. Symptoms are an import
    error from inside the build backend, or a version that resolves to 0.0.0.
    Read pyproject.toml before the first build and look for:
    - `[tool.setuptools_scm]`, or `dynamic = ["version"]` with a setuptools_scm
      provider, or a `setup.py` that calls `setuptools_scm.get_version()`. The
-     sdist has no `.git`, so add `BuildRequires: %{python_module setuptools-scm}`
+     sdist has no `.git`, so add `BuildRequires: %{python_module setuptools_scm}`
+     (underscore — the OBS package is `python3XX-setuptools_scm`; the
+     hyphenated `setuptools-scm` spelling resolves to nothing and fails
+     dependency resolution with an empty build log)
      AND export the version in %build and %install:
        export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
    - `metadata.version.provider` / `metadata.readme.provider` under
      `[tool.scikit-build]`. Each provider is a separate package that must be a
      BuildRequires of its own — e.g. `scikit_build_core.metadata.setuptools_scm`
-     needs setuptools-scm, and the `fancy_pypi_readme` provider needs
+     needs setuptools_scm, and the `fancy_pypi_readme` provider needs
      `%{python_module hatch-fancy-pypi-readme}`. Add every provider named in
      the file in one edit; discovering them one failed build at a time costs
      an attempt each.
+   - A custom build backend's own `get_requires_for_build_wheel()` can return
+     dependencies that appear NOWHERE in `[build-system] requires` — that
+     list is only what pip needs to invoke the backend at all, not what the
+     backend decides it needs once running (which can depend on the
+     environment: available CUDA_HOME, an installed torch version, etc.).
+     `%pyproject_wheel` builds without network/build-isolation, so anything
+     the backend's own code imports must already be a BuildRequires. When
+     `[build-system] requires` looks complete but the build still fails on an
+     import from inside a `build_backend.py`/backend module, read that
+     module's own source (not just pyproject.toml) to find what it actually
+     imports — do not assume the static requires list is the full picture.
 
-19. Stray top-level files in site-packages: a package can install files at the
+20. Stray top-level files in site-packages: a package can install files at the
    top of site-packages that are not part of its library and must not be
    shipped. Three sources, all handled the same way:
    - build infrastructure listed in `[tool.setuptools] py-modules`
@@ -517,7 +633,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    Always remove both the `.py` file and its corresponding `__pycache__` entry;
    removing only the `.py` leaves orphan `.pyc` files that trigger the same error.
 
-20. rpmlint devel-file-in-non-devel-package: Each bundled C/C++ header
+21. rpmlint devel-file-in-non-devel-package: Each bundled C/C++ header
    (`.h`, `.hpp`) in a non-devel package generates a `devel-file-in-non-devel-package`
    rpmlint error (Badness: 50). Packages that bundle 3rdparty C/C++ libraries
    under `data/`, `3rdparty/`, `include/`, or similar subdirectories can easily
@@ -532,7 +648,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    runtime in the RPM environment (they require CUDA, GPU, etc.) and should
    always be stripped.
 
-21. rpmlint badness is a budget: the build fails when the TOTAL exceeds 999,
+22. rpmlint badness is a budget: the build fails when the TOTAL exceeds 999,
    so the fix is whichever group of files contributes the most, not the first
    error in the log. Find the line `Badness NNNN exceeds threshold 999` and
    read the errors above it with their per-error badness. The usual big
@@ -544,11 +660,11 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      shebang:
        rm -rf %{buildroot}%{$python_sitelib}/<pkg>/tests/
        rm -rf %{buildroot}%{$python_sitelib}/<pkg>/scripts/
-   - `devel-file-in-non-devel-package` (convention 20), Badness 50 each.
+   - `devel-file-in-non-devel-package` (convention 21), Badness 50 each.
    Removing test and script directories from the installed package is normal
    openSUSE practice — they are not part of the library's runtime surface.
 
-22. Source taken from a repository, not from a PyPI sdist: when PyPI publishes
+23. Source taken from a repository, not from a PyPI sdist: when PyPI publishes
    only wheels, the tarball is a snapshot of the upstream repository, and it
    does not have an sdist's shape. Check for these before the first build:
    - **The project may be in a subdirectory.** A monorepo tarball has no
@@ -557,15 +673,15 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      directory and has already put `cd <subdir>` at the top of %build and
      %install, with `%autosetup -n` still pointing at the tarball's top-level
      directory — check it picked the right one. If the archive holds several
-     projects they are listed above, and convention 25 governs the layout.
+     projects they are listed above, and convention 26 governs the layout.
    - **The version is not baked in.** A repository checkout has no PKG-INFO
      and often no `.git`, so a dynamic version resolves to 0.0.0 or the build
-     backend fails outright — convention 18 covers the fix.
+     backend fails outright — convention 19 covers the fix.
    - **Extra top-level content.** CI configuration, docs, benchmarks and
      vendored third-party trees come along with a repository archive and none
      of it belongs in the RPM; conventions 19 and 20 cover removing it.
 
-23. **ANY dependency missing from OBS is something to BUILD, not something to
+24. **ANY dependency missing from OBS is something to BUILD, not something to
    work around.** This is the CORE PRINCIPLE of the entire packaging system.
 
    Reporting it in `unresolvable_packages` is how it gets packaged: the build
@@ -598,6 +714,18 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       — it will be built and made available
    4. NEVER skip packages that require CUDA libraries
 
+   **Exception — dlopen/dlsym at runtime, not linked at build time**: some
+   packages talk to CUDA/cuFile/NCCL through their own minimal, ABI-compatible
+   struct/typedef stubs and load the real symbols with `dlopen`/`dlsym` at
+   runtime, rather than `#include`ing the real headers or linking
+   `libcudart`/`libcufile`/`libnccl` at build time. Grep for the actual
+   `#include` targets and the link libraries (`target_link_libraries` /
+   `-lcudart` / CMake `find_package(CUDAToolkit)`) before assuming CUDA
+   references anywhere in the source mean a build-time dependency — a
+   `dlopen("libcudart.so", ...)` call needs neither `cuda-devel` nor
+   `cuda-runtime` to build. Reporting them anyway when they are not linked
+   costs a large, unnecessary build of the entire CUDA toolkit for nothing.
+
    CUDA Python ecosystem libraries are all open source and available on GitHub.
    When encountering any of these as dependencies, report them for packaging:
    cuda-python (cuda.core, cuda.bindings, cuda.pathfinder), cuda-compute,
@@ -608,7 +736,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    C libraries, system tools, everything) so the build uses them once they exist.
    Never remove a BuildRequires line just because the package is not available yet.
 
-   **Only two exceptions where working around a dependency is justified:**
+   **Only three exceptions where working around a dependency is justified:**
 
    Exception 1: The dependency has already been tried and FAILED — it is listed
    above under "Dependencies that failed to build", or notes.md records the attempt.
@@ -619,10 +747,23 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    downloaded at runtime. That is a property of the build environment, not a
    missing package. Convention 10 rung (iv) covers it.
 
-   Both exceptions need EVIDENCE from the current run, not a guess about how hard
-   something looks. If you have not seen it fail in THIS run, report it.
+   Exception 3: The dependency is binary-only upstream — no source exists to
+   build it from, and the maintainers have said so explicitly (e.g. NVIDIA's
+   CUTLASS maintainers confirming CuTeDSL's compiled artifacts, like
+   libCutlassIRPythonCAPI.so and the _cute*.so extension modules, ship only in
+   the PyPI wheel and will not be open-sourced: see
+   https://github.com/NVIDIA/cutlass/issues/2297). When that is true — not
+   merely suspected — taking the prebuilt binary from the upstream PyPI wheel
+   is the correct approach, not a workaround to avoid. Cite the evidence (an
+   upstream maintainer statement, issue, or release note) in your reasoning
+   before relying on this exception; do not invoke it just because building
+   from source looks hard.
 
-24. Missing source code: when the build fails because a package has no source
+   All three exceptions need EVIDENCE from the current run or from upstream, not
+   a guess about how hard something looks. If you have not seen it fail in THIS
+   run (Exceptions 1-2) or confirmed it upstream (Exception 3), report it.
+
+25. Missing source code: when the build fails because a package has no source
    tarball on PyPI and no repository URL in its metadata, search for it
    directly. Use WebSearch with queries like:
    - "site:github.com <package-name> NVIDIA" for NVIDIA CUDA packages
@@ -637,7 +778,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    PyPI, available at https://github.com/..." so the build system can fetch
    it from there.
 
-25. Monorepos: package ALL sibling projects as subpackages of this one spec.
+26. Monorepos: package ALL sibling projects as subpackages of this one spec.
    When the "Other projects in this archive" section above lists more than one
    project, the default is ONE source package that builds ALL of them, with a
    subpackage per project — not one project built and the rest thrown away,
@@ -674,7 +815,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      dependency OBS cannot resolve. Use PYTHONPATH=%{buildroot}%{python_sitearch}
      (or sitelib) in %check to make sibling modules importable instead.
    Check the exact subpackage and %files macro spelling against the openSUSE
-   Packaging/Python wiki page (convention 16) and confirm with
+   Packaging/Python wiki page (convention 17) and confirm with
    `rpmspec --parse` before you finish — do not guess at macro names.
 
    This is the usual answer, not a rule. Leave a project out, and say in your
@@ -687,6 +828,134 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      ones that can rather than failing the whole spec.
    Never package a subproject you have not opened: read each pyproject.toml
    before deciding it is in or out.
+
+   **Known macro limitation — do not fight it:** `%python_subpackages` (the
+   macro that auto-generates the `<flavor>-<name>` subpackages) is bound to
+   this spec's single top-level `Name:` and can only be invoked once. A
+   `%package -n python-<other-name>` block does NOT get flavor-multiplied by
+   it — see `/usr/share/doc/packages/python-rpm-macros/README.md` on the
+   build host. So when a sibling project is independently versioned and
+   released on PyPI under its own name (the exception above), and it is
+   ALSO being packaged as its own separate OBS package (check "Other
+   projects in this archive" — if a sibling directory declares a name that
+   sounds like an existing or sibling OBS package, e.g. this spec is
+   `python-cuda-python` and a sibling declares itself `cuda-bindings`),
+   do NOT re-vendor that sibling's build inside this spec's subpackages.
+   Instead make this an umbrella/metapackage: empty (or near-empty) %files,
+   and `Requires: python-<sibling-name>` for each such sibling instead of
+   building it a second time. Trying to cram multiple independently-named,
+   independently-flavored subpackages into one `%python_subpackages`
+   invocation produces "already exists" errors that no macro argument
+   fixes — this has already been tried and confirmed a dead end.
+
+27. **rpmlint compliance**: Follow rpmlint rules when writing spec files to
+   avoid build failures and extra review cycles. Common issues:
+
+   - **summary-too-long** (Badness: 200): Summary line must be SHORT and
+     concise, not a complete sentence or detailed explanation.
+     - Bad:  `ml_dtypes is a stand-alone implementation of several NumPy dtype extensions used in machine learning`
+     - Good: `NumPy dtype extensions for machine learning`
+     Keep summaries under ~60 characters when possible. A summary is a
+     phrase, not a sentence — no trailing period.
+
+   - **description-line-too-long**: Wrap description lines at 80 characters.
+
+   - **no-manual-page-for-binary**: If the package installs binaries but has
+     no man pages, this warning is expected and acceptable.
+
+   - **devel-file-in-non-devel-package**: Already covered in convention 21.
+
+   Before finalizing a spec, mentally check these rules. The goal is to
+   produce a spec that passes rpmlint on the first build, not one that needs
+   a second round just to fix linting errors.
+
+28. **Prebuilt binary wheel packages** (no %build step at all): when the
+   generator's comment says "This release has no sdist and no discoverable
+   source repository", `%{SOURCE0}` is the upstream wheel file itself, not a
+   tarball — there is nothing to compile, and `%prep`/`%autosetup` do not
+   apply. This is the normal shape of a closed-source binary redistribution:
+   NVIDIA ships each CUDA toolkit component this way (nvcc, cupti, nvrtc,
+   cudart, ...) because the actual compiler/runtime binaries have no public
+   source at all, only a PyPI wheel. Convention 24 Exception 3 is why taking
+   the wheel as-is is correct here rather than a workaround to avoid.
+
+   `source/` in the workspace is the wheel already unpacked flat (no wrapping
+   directory) — read `source/*.dist-info/METADATA` for the real summary and
+   license, and `source/*.dist-info/RECORD` for the exact file list %files
+   must account for. Do this before touching %files; never guess the layout.
+
+   - `%install` is just `%pyproject_install %{SOURCE0}` — it accepts a
+     pre-built wheel path directly, no `%pyproject_wheel` step first.
+   - The generator guessed arch vs. noarch from the wheel's platform tag
+     (`-none-any` → noarch/sitelib, anything else → sitearch). Confirm it
+     against the actual contents of `source/` — a wheel bundling `.so` files
+     is arch-specific regardless of what its tag says.
+   - `%check` gets an import smoke test (there is no source to run a real
+     test suite against), using the import name from `source/*.dist-info/METADATA`'s
+     `Name:` field or the top-level directories actually present in `source/`.
+   - License: read `source/*.dist-info/METADATA`'s `License-Expression` or
+     `Classifier: License ::` lines, or the packaged `LICENSE`/`NOTICE` file
+     if `source/` ships one — the PyPI JSON alone is frequently `FIXME` for
+     these releases even when the wheel itself carries a real license file.
+   - `%files` paths must match convention 15 exactly — read RECORD, don't glob.
+
+29. **Plain C/C++ packages** (no Python, no Cargo — just CMakeLists.txt or
+   configure.ac): a third ecosystem, much less uniform than the other two.
+   The generator only picked the build system and the `%autosetup -n`
+   directory; everything else is a TODO for you to fill in from `source/`.
+   The shapes below are taken from real openSUSE specs (`fmt`, `zlib-ng`,
+   `libuv` in Factory) — verify the exact macro spelling with
+   `rpmspec --parse` rather than assuming these examples generalize
+   perfectly to this package.
+
+   - **Shared library or not?** Grep `CMakeLists.txt` for
+     `add_library(... SHARED ...)` (CMake defaults to `STATIC` unless
+     `BUILD_SHARED_LIBS` is set) or `configure.ac` for `LT_INIT`/
+     `AC_PROG_LIBTOOL` (libtool-managed shared libraries). If it only builds
+     a binary or a static library, one package with no split is enough —
+     skip the rest of this list.
+   - **Shared library split**: a versioned shared library needs its own
+     `%package -n lib<name><soversion>` (the soname's major version, e.g.
+     `libfmt12`, `libz1-ng`, `libuv1` — find it from `set(SOVERSION ...)`/
+     `VERSION`+`SOVERSION` in CMakeLists.txt, or `-version-info` in
+     configure.ac/Makefile.am) plus a `%package devel` with
+     `Requires: lib<name><soversion> = %{version}`. The base `Name:` package
+     can stay empty (metapackage) or hold a CLI binary if there is one.
+   - **`%ldconfig_scriptlets`**: every shared-library subpackage needs
+     `%ldconfig_scriptlets -n lib<name><soversion>` (expands to the
+     `%post`/`%postun -p /sbin/ldconfig` pair) directly before its `%files`
+     section. Do not hand-write the ldconfig calls — the macro is the current
+     idiom (see convention 17 on not inventing macros; this one is real,
+     confirmed on the build host's `/usr/lib/rpm/macros.d/macros.ldconfig`).
+   - **CMake `%build`/%install`**: `%cmake` (configure) then `%cmake_build`,
+     then `%cmake_install`. Never hand-write `mkdir build && cd build && cmake
+     ..` — the macros already do the out-of-tree build and set the standard
+     flags (`CMAKE_INSTALL_PREFIX`, `CMAKE_BUILD_TYPE`, etc.).
+   - **autotools `%build`/`%install`**: if the archive is a repository
+     snapshot (no generated `configure` script — the normal case for a GitHub
+     tag archive, as opposed to a `make dist` release tarball), run
+     `autoreconf -fiv` first, then `%configure`, then `%make_build`. Install
+     with `%make_install`; delete `*.la` files from the buildroot afterwards
+     (libtool archives are never packaged).
+   - **`%check`**: `%ctest` for CMake projects that call `enable_testing()`/
+     `add_test()`; `%make_build check` (sometimes gated behind
+     `%if !0%{?qemu_user_space_build}` when the suite needs the build arch's
+     native execution) for autotools projects with a `check` target. If
+     neither exists, say so and leave `%check` out with a `# TODO:` comment
+     — never `|| true`.
+   - **BuildRequires for library dependencies**: `find_package(Foo)` in
+     CMakeLists.txt or `PKG_CHECK_MODULES(FOO, foo)` in configure.ac each need
+     the matching `-devel` package or `pkgconfig(foo)` virtual provide — same
+     lookup approach as convention 3's C-extension case (`zypper search
+     --provides`/`zypper what-provides`). Do not guess the -devel package
+     name; verify it.
+   - **`%files`**: `%license` for the actual license file in `source/`
+     (`LICENSE`, `COPYING`, `COPYING.LESSER`), `%doc` for `README`/`AUTHORS`/
+     `ChangeLog` if present, `%{_includedir}/...` and
+     `%{_libdir}/pkgconfig/*.pc` in `%files devel`, and `%{_libdir}/lib<name>.so.*`
+     (the versioned SONAME symlink, not the unversioned `.so` — that one goes
+     in `%files devel` since it's only needed at link time) in the shared
+     library subpackage.
 
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
@@ -944,14 +1213,18 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
     let allowed_tools = if req.checkout_dir.is_some() {
-        "Read,Grep,Edit,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),Bash(osc status),Bash(ls *),Bash(rm *),WebSearch"
+        "Read,Grep,Edit,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),Bash(osc status),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch"
     } else {
-        "Read,Grep,Edit,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(rm *),WebSearch"
+        "Read,Grep,Edit,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch"
     };
 
-    // Escalate with the attempt number: Sonnet 5 handles the routine fixes at
-    // a fifth of the price, Opus 5 takes over once the cheap fixes have failed.
-    let model = if req.attempt <= 3 {
+    // Escalate with the attempt number: the first 3 attempts go to the
+    // previous-generation Sonnet (cheapest), the next 3 to Sonnet 5, and
+    // everything from attempt 6 on — the packages the cheaper tiers already
+    // failed on — to Opus 5.
+    let model = if req.attempt <= 2 {
+        "claude-sonnet-4-5"
+    } else if req.attempt <= 5 {
         "claude-sonnet-5"
     } else {
         "claude-opus-5"
@@ -1034,13 +1307,10 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     }
 
     let mut result_event = ResultEvent::default();
-    let mut output = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     {
         use std::io::BufRead;
         let reader = std::io::BufReader::new(child.stdout.take().unwrap());
-        // Track whether the last character in output was a newline.
-        let mut on_fresh_line = true;
         for line in reader.lines() {
             let line = match line {
                 Ok(l) => l,
@@ -1064,74 +1334,23 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                         .and_then(|c| c.as_array())
                     {
                         for block in blocks {
-                            match block.get("type").and_then(|t| t.as_str()) {
-                                Some("text") => {
-                                    if let Some(text) = block.get("text").and_then(|t| t.as_str())
-                                    {
-                                        output.push_str(text);
-                                        on_fresh_line = text.ends_with('\n');
-                                    }
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                let name = block
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("(unnamed)");
+                                let input = block
+                                    .get("input")
+                                    .map(|i| i.to_string())
+                                    .unwrap_or_default();
+                                let summary: String = input.chars().take(160).collect();
+                                if let Some(cb) = req.on_tool_use {
+                                    cb(name, &summary);
                                 }
-                                Some("tool_use") => {
-                                    let name = block
-                                        .get("name")
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("(unnamed)");
-                                    let input = block
-                                        .get("input")
-                                        .map(|i| i.to_string())
-                                        .unwrap_or_default();
-                                    if !on_fresh_line {
-                                        output.push('\n');
-                                    }
-                                    let summary: String = input.chars().take(160).collect();
-                                    output.push_str(&format!("  → {name} {summary}\n"));
-                                    on_fresh_line = true;
-                                    if let Some(cb) = req.on_tool_use {
-                                        cb(name, &summary);
-                                    }
-                                    tool_calls.push(ToolCall {
-                                        name: name.to_string(),
-                                        input,
-                                    });
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Some("user") => {
-                    // Tool results arrive as user-role messages with tool_result blocks.
-                    if let Some(blocks) = event
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                    {
-                        for block in blocks {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                                let first_line = block
-                                    .get("content")
-                                    .and_then(|c| c.as_str())
-                                    .or_else(|| {
-                                        block
-                                            .get("content")
-                                            .and_then(|c| c.as_array())
-                                            .and_then(|a| a.first())
-                                            .and_then(|b| b.get("text"))
-                                            .and_then(|t| t.as_str())
-                                    })
-                                    .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
-                                    .unwrap_or("(empty)");
-                                if !on_fresh_line {
-                                    output.push('\n');
-                                }
-                                let display: String = first_line.chars().take(100).collect();
-                                if first_line.len() > 100 {
-                                    output.push_str(&format!("  ↳ {display}…\n"));
-                                } else {
-                                    output.push_str(&format!("  ↳ {display}\n"));
-                                }
-                                on_fresh_line = true;
+                                tool_calls.push(ToolCall {
+                                    name: name.to_string(),
+                                    input,
+                                });
                             }
                         }
                     }
@@ -1144,9 +1363,6 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                 _ => {}
             }
         }
-    }
-    if !output.ends_with('\n') {
-        output.push('\n');
     }
 
     let stderr_content = stderr_handle.join().unwrap_or_default();
@@ -1173,6 +1389,23 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         "edited" => Action::Edited,
         "no_change" => Action::NoChange,
         _ => Action::Blocked { why: resp.why },
+    };
+
+    // Build minimal output summary for output.md
+    let output = if tool_calls.is_empty() {
+        format!("No tool calls made.\nAction: {:?}\n", action)
+    } else {
+        let tool_summary = tool_calls
+            .iter()
+            .map(|tc| format!("  • {}", tc.name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "Made {} tool call(s):\n{}\n\nAction: {:?}\n",
+            tool_calls.len(),
+            tool_summary,
+            action
+        )
     };
 
     Ok(TurnOutcome {
@@ -1221,19 +1454,34 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  env vars, etc.). Apply ALL maturin requirements from convention 4 before \
                  checking anything else — these changes affect the entire spec structure.\n\
              \n\
+             0c. **Source0 extension mismatch**: `ls sdist/` and compare the actual tarball's \
+                 extension against the spec's `Source0:` line — the generator sometimes writes \
+                 `.zip` when the real file is `.tar.gz` (or vice versa). This fails `%prep` with \
+                 'No such file or directory' on the very first build. Fix `Source0:` to match \
+                 the real filename now, before anything else depends on it.\n\
+             \n\
+             0d. **System tools wrapped in `%{python_module ...}`**: Grep the spec's \
+                 BuildRequires for `%{python_module cmake}`, `%{python_module ninja}`, or the \
+                 same for meson, patchelf, swig, make, gcc, g++, pkg-config, pkgconfig, rustc, \
+                 cargo, autoconf, automake, libtool, bison, flex, gettext. These are system \
+                 binaries invoked via subprocess, never `import`ed, so OBS has no \
+                 `python<NNN>-<tool>` package to resolve and the build fails dependency \
+                 resolution with an empty build log. Unwrap them to plain package names: \
+                 `BuildRequires: cmake` / `BuildRequires: ninja`, etc.\n\
+             \n\
              ## Main Review Checklist\n\
              \n\
              The generator switched to arch macros if it saw C/C++/Cython source — that's \
              a guess, so confirm it against convention 3 first. Then work through these in order:\n\
              \n\
-             1. **The import name** the package installs — convention 13. This is the \
+             1. **The import name** the package installs — convention 14. This is the \
                 single most common thing the generator gets wrong. Always verify from \
                 `source/*.egg-info/top_level.txt` (definitive) or the source code. Never \
                 derive it from the PyPI package name.\n\
              \n\
              2. **Console scripts**: Read `[project.scripts]` or `entry_points` in \
                 source/pyproject.toml or source/setup.cfg. If ANY scripts are declared, \
-                verify ALL python_alternative components are present (convention 14):\n\
+                verify ALL python_alternative components are present (convention 15):\n\
                 - %python_clone -a %{buildroot}%{_bindir}/<script> in %install (one per script)\n\
                 - %python_expand %fdupes at end of %install\n\
                 - Requires(post): update-alternatives\n\
@@ -1243,7 +1491,19 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 - %python_alternative %{_bindir}/<script> in %files (one per script)\n\
                 Missing ANY component will cause build failure.\n\
              \n\
-             3. **Test dependencies** from TWO sources:\n\
+             3. **Main runtime dependencies**: diff `[project.dependencies]` (pyproject.toml) \
+                or `install_requires` (setup.cfg/setup.py) against the spec's Requires/ \
+                BuildRequires. The generator sometimes copies test/optional dependencies \
+                faithfully but drops the package's own main dependencies entirely — %check \
+                then fails to even `import` the package. Add any missing ones as \
+                `BuildRequires: %{python_module <name>}` (needed so %check can import them) \
+                AND `Requires: %{python_module <name>}` (needed at install time). Do NOT copy \
+                the name's casing verbatim from the dependency list — convention 2 explains \
+                why that is frequently wrong (e.g. a lowercase `pillow` entry in \
+                pyproject.toml still needs `%{python_module Pillow}`) and how to verify the \
+                canonical spelling.\n\
+             \n\
+             4. **Test dependencies** from TWO sources:\n\
                 a. DECLARED: `[project.optional-dependencies]` or `[dependency-groups]` \
                    (pyproject.toml) and `[options.extras_require]` (setup.cfg), keys like \
                    `test`, `tests`, `dev`, `testing`.\n\
@@ -1252,30 +1512,32 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 Add BOTH declared and undeclared as `BuildRequires: %{python_module <name>}`, \
                 and make sure pytest itself is there.\n\
              \n\
-             4. **Pytest configuration** — `addopts`, `testpaths`, `fail_under`: \
+             5. **Pytest configuration** — `addopts`, `testpaths`, `fail_under`: \
                 convention 10. Fix these now rather than after a failed build.\n\
              \n\
-             5. **Build-backend extras**: dynamic version and metadata providers \
-                (convention 18), and the C/C++ libraries an extension links against \
+             6. **Build-backend extras**: dynamic version and metadata providers \
+                (convention 19), and the C/C++ libraries an extension links against \
                 (convention 3). For C extensions, confirm the -devel package name:\n\
-                - pybind11 → pybind11-devel (for headers)\n\
+                - pybind11 → usually pybind11-devel, but plain %{python_module pybind11} \
+                  if setup.py gets the include path from pybind11.get_include() — see \
+                  convention 3's pybind11 exception\n\
                 - numpy → %{python_module numpy-devel} (for numpy/arrayobject.h)\n\
                 - cmake, gcc-c++ always needed for CMakeLists.txt\n\
              \n\
-             6. **%fdupes target must match package type** (common generator error):\n\
+             7. **%fdupes target must match package type** (common generator error):\n\
                 - Arch packages: %python_expand %fdupes %{buildroot}/%{$python_sitearch}\n\
                 - Noarch packages: %python_expand %fdupes %{buildroot}/%{$python_sitelib}\n\
              \n\
-             7. **%pytest vs %pytest_arch** (critical for C extensions):\n\
+             8. **%pytest vs %pytest_arch** (critical for C extensions):\n\
                 - Arch packages MUST use %pytest_arch in %check\n\
                 - Noarch packages use %pytest\n\
                 Using %pytest on an arch package will cause test failures.\n\
              \n\
-             8. **License** if it is FIXME or not an SPDX expression (convention 5).\n\
+             9. **License** if it is FIXME or not an SPDX expression (convention 5).\n\
              \n\
-             9. **Sibling projects**, if the archive holds more than one — decide the \
+             10. **Sibling projects**, if the archive holds more than one — decide the \
                 subpackage layout now, before the first build, because it changes \
-                %build, %install and every %files section (convention 25).\n\
+                %build, %install and every %files section (convention 26).\n\
              \n\
              If a check does not apply, say so in one clause; do not invent work."
         }
@@ -1378,8 +1640,15 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
 
     let source_note = if req.from_repo_archive {
         "\nNOTE: PyPI publishes this package as wheels only, so the tarball is an \
-         archive of the upstream repository, not an sdist. Read convention 22 before \
-         anything else — the project is quite likely in a subdirectory.\n"
+         archive of the upstream repository, not an sdist. Read convention 23 before \
+         anything else — the project is quite likely in a subdirectory.\n\
+         \n\
+         Run `ls sdist/` FIRST and compare it against the spec's `%autosetup -n` \
+         argument. Repository archives routinely extract to a directory named after \
+         the whole repo (e.g. `cuda-python-13.4.2`), not after this specific package \
+         (e.g. `cuda-bindings-13.4.2`), and the generator's guess is wrong almost every \
+         time for this source type. A wrong `-n` fails %prep immediately with 'No such \
+         file or directory' — fix it before anything else.\n"
     } else {
         ""
     };
@@ -1391,7 +1660,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "## Other projects in this archive\n\n\
              The source holds several projects side by side. `{primary}` is the one \
              this spec was generated for; these are all of them:\n{list}\n\n\
-             Read convention 25 — the usual answer is one subpackage per project in \
+             Read convention 26 — the usual answer is one subpackage per project in \
              this single spec, not one project built and the rest ignored.\n\n",
             primary = req.pkg_name,
             list = req
@@ -1437,15 +1706,24 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              2. **Check name variations**: PyPI package names use `-` while imports use `_`. \
              Try variations (e.g., `rich-toolkit` vs `rich_toolkit`).\n\
              3. **System tools are NOT Python packages**: Tools like cmake, ninja, pkg-config, \
-             gcc, etc. are ALWAYS system packages, never python-*. If you see missing \
-             `python314-cmake`, `python313-ninja`, etc., this is WRONG:\n\
+             gcc, patchelf, etc. are ALWAYS system packages, never python-*. If you see missing \
+             `python314-cmake`, `python314-patchelf`, etc., this is WRONG:\n\
              - WRONG: `BuildRequires: %{{python_module cmake}}`\n\
              - CORRECT: `BuildRequires: cmake`\n\
-             - WRONG: `BuildRequires: %{{python_module ninja}}`\n\
-             - CORRECT: `BuildRequires: ninja`\n\
+             - WRONG: `BuildRequires: %{{python_module patchelf}}`\n\
+             - CORRECT: `BuildRequires: patchelf`\n\
              Common system tools: cmake, ninja, pkg-config, gcc, g++, make, automake, \
-             autoconf, libtool, gettext, flex, bison.\n\
-             4. **Fix the spec**: If the spec incorrectly uses `%{{python_module <system-tool>}}`, \
+             autoconf, libtool, gettext, flex, bison, patchelf.\n\
+             4. **A missing `python<NNN>-<dep>` is a flavor gap, not a new package**: \
+             `%{{python_module <dep>}}` expands to one BuildRequires per active Python flavor \
+             on this build target, and a newer flavor sometimes lacks a subpackage that older \
+             flavors already have (e.g. `python314-cython` missing while `python312-cython` \
+             builds fine). Do NOT put the flavor-prefixed name in `unresolvable_packages` — the \
+             pipeline strips the `python<NNN>-` prefix before treating a name as buildable, so \
+             reporting `python314-cython` just queues a redundant duplicate build of `cython`, \
+             which already exists. Leave the BuildRequires as `%{{python_module <dep>}}` in the \
+             spec; the gap closes on its own once that flavor catches up.\n\
+             5. **Fix the spec**: If the spec incorrectly uses `%{{python_module <system-tool>}}`, \
              remove the macro and use the plain package name instead. Do NOT report these \
              as unresolvable.\n\n\
              Exception: if a package name in the spec is clearly wrong (e.g. wrong \
@@ -1455,7 +1733,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         )
     };
 
-    // The evidence convention 23 asks for: these were attempted and did not
+    // The evidence convention 24 asks for: these were attempted and did not
     // build, so working around them is justified and re-reporting them is not.
     let failed_section = if req.failed_deps.is_empty() {
         String::new()
@@ -1464,7 +1742,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "## Dependencies that failed to build\n\n\
              This run already tried to build these and could not:\n{}\n\n\
              Do NOT put them in `unresolvable_packages` again — that is the retry \
-             cycle convention 12 Step B exists to break. Work around them instead: \
+             cycle convention 13 Step B exists to break. Work around them instead: \
              skip the tests that need them, or build without the feature that needs \
              them, and say in your reasoning which one you did and why.\n\n",
             bullets(req.failed_deps),
@@ -1706,7 +1984,7 @@ mod tests {
 
         assert!(prompt.contains("## Other projects in this archive"), "{prompt}");
         assert!(prompt.contains("cuda_bindings/  (declares itself `cuda-bindings`)"));
-        assert!(prompt.contains("convention 25"));
+        assert!(prompt.contains("convention 26"));
         // And the repository-archive note, since this did not come from a sdist.
         assert!(prompt.contains("archive of the upstream repository"));
     }
