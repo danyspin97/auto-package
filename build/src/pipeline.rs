@@ -85,6 +85,31 @@ pub enum PipelineResult {
 pub struct PkgState {
     pub last_built_version: Option<String>,
     pub last_outcome: Option<String>,
+    /// Version for which the pre-build Review turn was already run and
+    /// accepted (not `Blocked`). Lets a resumed run — e.g. after a crash that
+    /// left the package reviewed but never committed — skip straight to
+    /// validate/commit instead of paying for another agent review turn on a
+    /// spec that didn't change.
+    #[serde(default)]
+    pub reviewed_version: Option<String>,
+    /// Hash of the spec file's contents at the moment `reviewed_version` was
+    /// recorded. `reviewed_version` alone is not enough: the version can
+    /// stay the same while the spec on disk changes underneath it (a manual
+    /// edit, or a partially-applied fix from an interrupted run), and
+    /// resuming must not treat that changed-but-unreviewed spec as already
+    /// reviewed just because the version tag matches.
+    #[serde(default)]
+    pub reviewed_spec_hash: Option<u64>,
+}
+
+/// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
+/// only used to detect "did the spec change since it was reviewed", not for
+/// anything security-sensitive.
+fn hash_spec(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl PkgState {
@@ -103,6 +128,11 @@ impl PkgState {
     pub fn is_built(&self, version: &str) -> bool {
         self.last_built_version.as_deref() == Some(version)
             && matches!(self.last_outcome.as_deref(), Some("success") | Some("wheel-only"))
+    }
+
+    pub fn is_reviewed(&self, version: &str, spec_content: &str) -> bool {
+        self.reviewed_version.as_deref() == Some(version)
+            && self.reviewed_spec_hash == Some(hash_spec(spec_content))
     }
 }
 
@@ -128,13 +158,21 @@ pub struct TargetInfo {
 /// `pinned_version` is the user's `--version`; it constrains the resolve so a
 /// pin actually pins rather than being overwritten by whatever pip picks.
 ///
-/// Returns `Ok(vec![])` when every package in the closure is already resolvable.
+/// `permanently_failed` holds RPM names the caller has given up retrying
+/// (see [`crate::pipeline`] retry-count tracking in the CLI build loop) —
+/// they and anything depending on them are excluded from the frontier so a
+/// package that can never succeed doesn't get re-selected forever.
+///
+/// Returns `Ok(vec![])` when every package in the closure is already
+/// resolvable, or when nothing further can be built because everything left
+/// is blocked by a `permanently_failed` package.
 pub fn select_target(
     name: &str,
     explicit_target: Option<&str>,
     // Pin the root package to this version, if the user asked for one.
     pinned_version: Option<&str>,
     config: &PipelineConfig,
+    permanently_failed: &std::collections::HashSet<String>,
     reporter: &dyn Reporter,
 ) -> Result<Vec<TargetInfo>, String> {
     reporter.report(&Event::ResolveStarted { root: name.to_string() });
@@ -143,28 +181,49 @@ pub fn select_target(
     // Checks both the user's own project and all configured build/path projects
     // (from osc meta prj) — the union is the complete set of resolvable packages.
     let obs_project = config.project.clone();
-    let (nodes, available_packages) = std::thread::scope(|scope| {
+    let (nodes, available_packages, build_statuses) = std::thread::scope(|scope| {
         let handle = scope.spawn(|| {
             osc::get_available_packages(&obs_project, Emit::run(reporter))
         });
+        let statuses_handle = scope.spawn(|| {
+            osc::get_project_build_statuses(
+                &obs_project,
+                &config.distro,
+                &config.arch,
+                Emit::run(reporter),
+            )
+        });
         let nodes = ap_ecosystem::pip::resolve(name, pinned_version);
-        // Join the fetch (likely already done while pip was resolving).
-        (nodes, handle.join().unwrap_or_default())
+        // Join the fetches (likely already done while pip was resolving).
+        (
+            nodes,
+            handle.join().unwrap_or_default(),
+            statuses_handle.join().unwrap_or_default(),
+        )
     });
     let nodes = nodes.map_err(|e| format!("resolve failed: {e}"))?;
 
     let total = nodes.len();
 
     // A node is resolvable if present in the user's project or any build
-    // project, OR if its local state.json records a prior "wheel-only" or
-    // "success" outcome — wheel-only packages can't be built from source and
-    // should not be re-selected on every run.
+    // project — unless OBS reports its own build as actually failing there,
+    // in which case it stays unresolved so the frontier picks it back up and
+    // `run_package`'s existing build-log-driven fix path can retry it,
+    // instead of a broken OBS package silently blocking everything above it
+    // forever. It's also resolvable if its local state.json records a prior
+    // "wheel-only" or "success" outcome — wheel-only packages can't be built
+    // from source and should not be re-selected on every run.
     let resolvable: Vec<bool> = nodes
         .iter()
         .map(|n| {
             let rpm = osc::rpm_name(&n.name);
             if available_packages.contains(&rpm) {
-                return true;
+                return !matches!(
+                    build_statuses.get(&rpm),
+                    Some(osc::BuildStatus::Failed)
+                        | Some(osc::BuildStatus::Unresolvable)
+                        | Some(osc::BuildStatus::Broken)
+                );
             }
             // Check local workspace state.
             let ws_name = ap_core::run::sanitize_name(&rpm);
@@ -222,6 +281,11 @@ pub fn select_target(
         if resolvable[i] {
             continue;
         }
+        // Given up on this one already — leave it (and anything that needs
+        // it) out of the frontier instead of re-selecting it forever.
+        if permanently_failed.contains(&osc::rpm_name(&node.name)) {
+            continue;
+        }
 
         let deps_satisfied = dep_names_from_requires_dist(&node.requires_dist)
             .into_iter()
@@ -251,13 +315,62 @@ pub fn select_target(
     }
 
     if frontier.is_empty() {
-        // Nothing buildable but packages remain — dependency cycle or unresolvable.
+        // Nothing buildable but packages remain. If EVERY still-unresolved
+        // package is explained by a `permanently_failed` package — it failed
+        // itself, or it depends (transitively, within the closure) on one
+        // that did — that's an expected terminal state: the caller reports
+        // it and stops rather than treating it as a resolver bug. A
+        // `permanently_failed` set that doesn't cover everything left
+        // unresolved means something else is also stuck (e.g. an unrelated
+        // dependency cycle), which must still surface as an error instead of
+        // being silently swallowed just because *some* package gave up.
+        let mut explained = vec![false; nodes.len()];
+        for (i, node) in nodes.iter().enumerate() {
+            if !resolvable[i] && permanently_failed.contains(&osc::rpm_name(&node.name)) {
+                explained[i] = true;
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (i, node) in nodes.iter().enumerate() {
+                if resolvable[i] || explained[i] {
+                    continue;
+                }
+                let deps = dep_names_from_requires_dist(&node.requires_dist);
+                let any_explained_dep = deps.iter().any(|dep| {
+                    name_to_idx.get(dep).map(|&j| explained[j]).unwrap_or(false)
+                });
+                let all_deps_settled = deps.iter().all(|dep| {
+                    name_to_idx
+                        .get(dep)
+                        .map(|&j| resolvable[j] || explained[j])
+                        .unwrap_or(true)
+                });
+                if any_explained_dep && all_deps_settled {
+                    explained[i] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
         let blocked: Vec<String> = nodes
             .iter()
             .enumerate()
             .filter(|(i, _)| !resolvable[*i])
             .map(|(_, n)| n.name.clone())
             .collect();
+
+        let all_explained = nodes
+            .iter()
+            .enumerate()
+            .all(|(i, _)| resolvable[i] || explained[i]);
+        if all_explained && !permanently_failed.is_empty() {
+            return Ok(vec![]);
+        }
+
         return Err(format!(
             "cannot build {name}: stuck — unresolvable packages: {}",
             blocked.join(", ")
@@ -633,8 +746,19 @@ pub fn run_package(
         .map(|m| m.len() > 0)
         .unwrap_or(false);
 
+    // A prior run may have reviewed-and-accepted this exact spec version and
+    // then died (crash, kill) before ever attempting a build — e.g. mid
+    // `osc ci` on an unrelated package in the same batch. Resuming that case
+    // should go straight to validate/commit, not pay for a second review
+    // turn on a spec that hasn't changed since the first one accepted it.
+    let already_reviewed = !need_spec
+        && PkgState::load(&ws).is_reviewed(
+            &config.version,
+            &std::fs::read_to_string(&spec_path).unwrap_or_default(),
+        );
+
     // ── Step: Review (freshly generated specs, or existing spec with no prior build) ──
-    if !config.no_agent && (need_spec || !build_log_nonempty) {
+    if !config.no_agent && (need_spec || !build_log_nonempty) && !already_reviewed {
         let spec_before = std::fs::read_to_string(&spec_path).unwrap_or_default();
 
         let turn = agent_turn(
@@ -687,6 +811,12 @@ pub fn run_package(
                     reason: format!("review blocked: {why}"),
                 };
             }
+            let mut state = PkgState::load(&ws);
+            state.reviewed_version = Some(config.version.clone());
+            state.reviewed_spec_hash = Some(hash_spec(
+                &std::fs::read_to_string(&spec_path).unwrap_or_default(),
+            ));
+            let _ = state.save(&ws);
         }
     }
 
@@ -1501,6 +1631,7 @@ fn find_tarball(dir: &Path) -> Option<PathBuf> {
             || n.ends_with(".tar.bz2")
             || n.ends_with(".tar.zst")
             || n.ends_with(".zip")
+            || n.ends_with(".whl")
         {
             Some(e.path())
         } else {
@@ -1512,6 +1643,11 @@ fn find_tarball(dir: &Path) -> Option<PathBuf> {
 fn find_sdist_top_level(checkout_dir: &Path, pkg_name: &str, version: &str) -> String {
     if let Some(tb) = find_tarball(checkout_dir) {
         let fname = tb.file_name().unwrap_or_default().to_string_lossy();
+        // A wheel unpacks flat (no wrapping directory) — see
+        // `ap_ecosystem::sdist::extract`'s `.whl` branch.
+        if fname.ends_with(".whl") {
+            return String::new();
+        }
         for ext in &[".tar.gz", ".tar.bz2", ".tar.zst", ".zip"] {
             if let Some(stem) = fname.strip_suffix(ext) {
                 return stem.to_string();
@@ -1587,16 +1723,47 @@ fn generate_spec(
             let source_url = match source_url {
                 Some(url) => url,
                 None => {
-                    // Auto-discover candidate URLs for the agent to validate
-                    let candidates = find_source_repo_candidates(&config.pkg_name);
-                    if !candidates.is_empty() {
-                        eprintln!("info: found {} candidate repository URLs for agent to validate", candidates.len());
+                    // Auto-discover a source repository. Only a *verified*
+                    // (confirmed to exist) candidate is safe to build from
+                    // automatically — an unverified guess just burns an
+                    // attempt on a 404. See `RepoCandidates`.
+                    let repos = find_source_repo_candidates(&config.pkg_name);
+                    match repos.verified.first() {
+                        Some(url) => {
+                            ap_core::diag!(
+                                "info: auto-discovered and verified source repository for {}: {url}",
+                                config.pkg_name,
+                            );
+                            url.clone()
+                        }
+                        None => {
+                            // No source anywhere. This is the normal shape of a
+                            // closed-source binary redistribution (NVIDIA's
+                            // individual CUDA toolkit component wheels are the
+                            // running example) — repackage the wheel itself
+                            // rather than getting permanently stuck. See
+                            // convention 24 Exception 3.
+                            match pypi::pick_wheel_from_json(&json, &config.arch) {
+                                Ok(wheel) => {
+                                    return generate_wheel_binary_spec(
+                                        config,
+                                        &wheel,
+                                        &json,
+                                        checkout_dir,
+                                        spec_path,
+                                        step,
+                                    );
+                                }
+                                Err(_) => {
+                                    return Err(GenSpecError::WheelOnly {
+                                        pkg_name: config.pkg_name.clone(),
+                                        version: config.version.clone(),
+                                        candidates: repos.guessed,
+                                    });
+                                }
+                            }
+                        }
                     }
-                    return Err(GenSpecError::WheelOnly {
-                        pkg_name: config.pkg_name.clone(),
-                        version: config.version.clone(),
-                        candidates,
-                    });
                 }
             };
 
@@ -1719,6 +1886,39 @@ fn generate_from_repo(
     let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
         .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
 
+    // A monorepo may hold several projects, and `inspect_preferring` falls
+    // back to the shallowest manifest when none of them declares the wanted
+    // name. That fallback is fine for browsing, but generating a spec from it
+    // silently ships the wrong project (e.g. building a compiled-artifact-only
+    // wheel's monorepo checkout, which builds its unrelated top-level
+    // package). Refuse instead of guessing, so a mismatch surfaces here
+    // rather than several minutes later in review.
+    let normalize = |n: &str| n.to_lowercase().replace(['-', '.'], "_");
+    let wanted = normalize(&config.pkg_name);
+    let declared_names: Vec<&str> = info
+        .project_name
+        .iter()
+        .map(String::as_str)
+        .chain(info.subprojects.iter().filter_map(|s| s.name.as_deref()))
+        .collect();
+    if (info.python_packaging || info.cargo_manifest)
+        && !declared_names.iter().any(|n| normalize(n) == wanted)
+    {
+        let found = if declared_names.is_empty() {
+            "no named projects at all".to_string()
+        } else {
+            declared_names.join(", ")
+        };
+        return Err(GenSpecError::Other(format!(
+            "{url} does not declare a project named {wanted:?} (found: {found}). \
+             This usually means {} is binary-only upstream and this repository \
+             is not its real source — check whether the PyPI release is a \
+             wheel with no matching sdist (convention 24 Exception 3) before \
+             retrying with a different --source-url.",
+            config.pkg_name
+        )));
+    }
+
     if info.python_packaging {
         // py2pack needs PyPI metadata for the summary, license and deps. When
         // the project is not on PyPI at all there is nothing to fetch, and the
@@ -1734,9 +1934,30 @@ fn generate_from_repo(
         return generate_rust_spec(config, repo_url, spec_path, step);
     }
 
+    if info.cmake_manifest || info.autotools_manifest {
+        // Unlike Rust, a plain C/C++ project vendors nothing through OBS
+        // services — the archive already downloaded is the real Source0.
+        let build = if info.cmake_manifest { crate::spec::CBuildSystem::Cmake } else { crate::spec::CBuildSystem::Autotools };
+        let top_level = info.top_level_dir.clone().unwrap_or_else(|| format!("{name}-{}", config.version));
+        let spec_text = crate::spec::c_project_skeleton(&config.pkg_name, &config.version, repo_url, &top_level, build);
+        let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
+        std::fs::write(spec_path, &spec_text)
+            .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
+        let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+        return Ok(GenSpecResult {
+            sdist_top_level: top_level,
+            is_maturin: false,
+            is_rust: false,
+            // Not the PyPI-specific repo-archive case (convention 23) — a
+            // plain C/C++ project has no PyPI angle at all. Its own guidance
+            // is baked into the skeleton's convention 29 comment instead.
+            from_repo_archive: false,
+        });
+    }
+
     Err(GenSpecError::Other(format!(
-        "{url} contains no pyproject.toml, setup.py or Cargo.toml, so \
-         auto-package cannot tell how to build it"
+        "{url} contains no pyproject.toml, setup.py, Cargo.toml, CMakeLists.txt \
+         or configure.ac, so auto-package cannot tell how to build it"
     )))
 }
 
@@ -1925,6 +2146,47 @@ fn generate_repo_python_spec(
     })
 }
 
+/// Repackage a prebuilt wheel as-is, for a release with no sdist and no
+/// discoverable source repository — a closed-source binary redistribution
+/// (NVIDIA's individual CUDA toolkit component wheels are the running
+/// example: nvcc, cupti, nvrtc, cudart have no public source at all). See
+/// convention 24 Exception 3 in the agent prompt.
+fn generate_wheel_binary_spec(
+    config: &PipelineConfig,
+    wheel: &ap_ecosystem::pypi::WheelFile,
+    pypi_json: &str,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+) -> Result<GenSpecResult, GenSpecError> {
+    ap_core::diag!(
+        "info: {} {} has no sdist and no source repository — repackaging the upstream wheel {}",
+        config.pkg_name, config.version, wheel.filename,
+    );
+
+    wheel
+        .fetch(checkout_dir)
+        .map_err(|e| GenSpecError::Other(format!("wheel download failed: {e}")))?;
+
+    let release = ap_ecosystem::pypi::parse_release_with_tarball(pypi_json, &wheel.filename)
+        .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
+
+    let spec_text =
+        crate::spec::wheel_binary_skeleton(&config.pkg_name, &config.version, &wheel.filename, &release);
+    let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
+    std::fs::write(spec_path, &spec_text)
+        .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
+    let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+
+    Ok(GenSpecResult {
+        // A wheel unpacks flat — no wrapping top-level directory.
+        sdist_top_level: String::new(),
+        is_maturin: false,
+        is_rust: false,
+        from_repo_archive: false,
+    })
+}
+
 /// Render the OBS `_service` XML for a Rust package.
 ///
 /// `github_url` is the project URL (without `.git`), `version` is the crate
@@ -2050,7 +2312,7 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
     let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let extract_dir = temp_dir.path();
 
-    eprintln!("  checking for broken Cargo workspace in tarball");
+    ap_core::diag!("  checking for broken Cargo workspace in tarball");
 
     // Extract tarball
     let archive_file = std::fs::File::open(tarball)
@@ -2105,7 +2367,7 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
                 if member_path.exists() {
                     existing_members.push(member.clone());
                 } else {
-                    eprintln!("  ⚠ removing missing workspace member: {}", member_str);
+                    ap_core::diag!("  ⚠ removing missing workspace member: {}", member_str);
                     removed_members.push(member_str.to_string());
                     fixed = true;
                 }
@@ -2122,18 +2384,18 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
             std::fs::write(cargo_toml_path, new_content)
                 .map_err(|e| format!("writing Cargo.toml: {}", e))?;
 
-            eprintln!("  ✓ fixed Cargo.toml: removed {} missing workspace members",
+            ap_core::diag!("  ✓ fixed Cargo.toml: removed {} missing workspace members",
                      removed_members.len());
         }
     }
 
     if !fixed {
-        eprintln!("  ✓ no workspace issues found");
+        ap_core::diag!("  ✓ no workspace issues found");
         return Ok(());
     }
 
     // Re-pack the tarball
-    eprintln!("  re-packing fixed tarball");
+    ap_core::diag!("  re-packing fixed tarball");
     let temp_tarball = tarball.with_extension("tar.gz.tmp");
     let tar_file = std::fs::File::create(&temp_tarball)
         .map_err(|e| format!("creating temp tarball: {}", e))?;
@@ -2168,22 +2430,37 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
     std::fs::rename(&temp_tarball, tarball)
         .map_err(|e| format!("replacing tarball: {}", e))?;
 
-    eprintln!("  ✓ tarball updated with fixed workspace");
+    ap_core::diag!("  ✓ tarball updated with fixed workspace");
     Ok(())
+}
+
+/// Source repository candidates for a wheel-only package.
+struct RepoCandidates {
+    /// Confirmed to exist via `verify_repo_exists` — safe to build from
+    /// automatically without a human/agent confirming it first.
+    verified: Vec<String>,
+    /// Unverified guesses, surfaced only for a human/agent to check manually.
+    guessed: Vec<String>,
 }
 
 /// Find candidate source repositories for a package.
 ///
-/// Returns a list of likely repository URLs for the agent to validate.
 /// Uses GitHub API search, known package mappings, and common patterns.
-fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
-    eprintln!("info: searching for source repository candidates for: {}", pkg_name);
+fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
+    ap_core::diag!("info: searching for source repository candidates for: {}", pkg_name);
 
     let lower = pkg_name.to_lowercase();
     let mut candidates = Vec::new();
     let mut verified_candidates = Vec::new();
 
     // Known package mappings for special cases
+    // NOTE: nvidia-cuda-nvrtc, nvidia-cuda-runtime, nvidia-cuda-cupti and
+    // nvidia-cuda-nvcc used to map here too. They don't: NVIDIA/cuda-python
+    // is the *bindings* monorepo (cuda.bindings/cuda.core/cuda.pathfinder) —
+    // it does not contain the closed-source nvcc compiler, cupti profiler,
+    // nvrtc or cudart binaries those wheels actually redistribute. There is
+    // no public source for them at all; they fall through to the
+    // wheel-binary-repackaging path in `generate_spec` instead.
     let known_mappings: &[(&str, &str)] = &[
         // NVIDIA CUDA packages
         ("cuda-python", "https://github.com/NVIDIA/cuda-python"),
@@ -2192,19 +2469,15 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
         ("nvidia-nvshmem-cu", "https://github.com/NVIDIA/nvshmem"),
         ("nvshmem4py", "https://github.com/NVIDIA/nvshmem"),
         ("nvidia-cuda-cccl", "https://github.com/NVIDIA/cccl"),
-        ("nvidia-cuda-nvrtc", "https://github.com/NVIDIA/cuda-python"),
-        ("nvidia-cuda-runtime", "https://github.com/NVIDIA/cuda-python"),
-        ("nvidia-cuda-cupti", "https://github.com/NVIDIA/cuda-python"),
-        ("nvidia-cuda-nvcc", "https://github.com/NVIDIA/cuda-python"),
         ("nvidia-nvjitlink", "https://github.com/NVIDIA/nvjitlink-python"),
     ];
 
     // Check known mappings first
     for (pattern, repo_url) in known_mappings {
         if lower.starts_with(pattern) {
-            eprintln!("  checking known mapping: {}", repo_url);
+            ap_core::diag!("  checking known mapping: {}", repo_url);
             if verify_repo_exists(repo_url) {
-                eprintln!("  ✓ verified: {}", repo_url);
+                ap_core::diag!("  ✓ verified: {}", repo_url);
                 verified_candidates.push(repo_url.to_string());
             } else {
                 candidates.push(repo_url.to_string());
@@ -2220,7 +2493,7 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
     let is_nvidia_package = lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.starts_with("nv");
 
     if is_nvidia_package {
-        eprintln!("  detected NVIDIA package, preferring github.com/NVIDIA organization");
+        ap_core::diag!("  detected NVIDIA package, preferring github.com/NVIDIA organization");
 
         let base = lower
             .strip_prefix("nvidia-")
@@ -2233,9 +2506,9 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
 
         // Try NVIDIA org with the cleaned package name
         let nvidia_url = format!("https://github.com/NVIDIA/{}", clean);
-        eprintln!("  checking NVIDIA org: {}", nvidia_url);
+        ap_core::diag!("  checking NVIDIA org: {}", nvidia_url);
         if verify_repo_exists(&nvidia_url) {
-            eprintln!("  ✓ verified NVIDIA repo: {}", nvidia_url);
+            ap_core::diag!("  ✓ verified NVIDIA repo: {}", nvidia_url);
             verified_candidates.insert(0, nvidia_url.clone());
         } else {
             candidates.insert(0, nvidia_url);
@@ -2244,9 +2517,9 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
         // Also try without cuda- prefix for packages like cuda-python
         if let Some(after_cuda) = clean.strip_prefix("cuda-") {
             let nvidia_url2 = format!("https://github.com/NVIDIA/{}", after_cuda);
-            eprintln!("  checking NVIDIA org (without cuda- prefix): {}", nvidia_url2);
+            ap_core::diag!("  checking NVIDIA org (without cuda- prefix): {}", nvidia_url2);
             if verify_repo_exists(&nvidia_url2) {
-                eprintln!("  ✓ verified NVIDIA repo: {}", nvidia_url2);
+                ap_core::diag!("  ✓ verified NVIDIA repo: {}", nvidia_url2);
                 verified_candidates.insert(0, nvidia_url2.clone());
             } else {
                 candidates.insert(0, nvidia_url2);
@@ -2256,9 +2529,9 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
         // Try the exact package name under NVIDIA org
         let nvidia_exact = format!("https://github.com/NVIDIA/{}", pkg_name);
         if nvidia_exact != format!("https://github.com/NVIDIA/{}", clean) {
-            eprintln!("  checking NVIDIA org (exact name): {}", nvidia_exact);
+            ap_core::diag!("  checking NVIDIA org (exact name): {}", nvidia_exact);
             if verify_repo_exists(&nvidia_exact) {
-                eprintln!("  ✓ verified NVIDIA repo: {}", nvidia_exact);
+                ap_core::diag!("  ✓ verified NVIDIA repo: {}", nvidia_exact);
                 verified_candidates.insert(0, nvidia_exact.clone());
             } else {
                 candidates.insert(0, nvidia_exact);
@@ -2266,13 +2539,13 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
         }
 
         // For NVIDIA packages, skip GitHub API search to avoid non-official repos
-        eprintln!("  skipping GitHub API search for NVIDIA package (prefer official repos)");
+        ap_core::diag!("  skipping GitHub API search for NVIDIA package (prefer official repos)");
     } else {
         // For non-NVIDIA packages, use GitHub API search
         if let Some(urls) = search_github_repos(pkg_name) {
             for url in urls {
                 if !verified_candidates.contains(&url) && !candidates.contains(&url) {
-                    eprintln!("  found via GitHub search: {}", url);
+                    ap_core::diag!("  found via GitHub search: {}", url);
                     verified_candidates.push(url);
                 }
             }
@@ -2319,22 +2592,20 @@ fn find_source_repo_candidates(pkg_name: &str) -> Vec<String> {
     // Check all generated candidates
     for url in &candidates {
         if !verified_candidates.contains(url) {
-            eprintln!("  checking: {}", url);
+            ap_core::diag!("  checking: {}", url);
             if verify_repo_exists(url) {
-                eprintln!("  ✓ verified: {}", url);
+                ap_core::diag!("  ✓ verified: {}", url);
                 verified_candidates.push(url.clone());
             }
         }
     }
 
     if verified_candidates.is_empty() {
-        eprintln!("  ✗ no verified repositories found after trying {} URLs", candidates.len());
-        eprintln!("  returning {} unverified candidates for agent review", candidates.len());
-        candidates
+        ap_core::diag!("  ✗ no verified repositories found after trying {} URLs", candidates.len());
     } else {
-        eprintln!("  ✓ found {} verified candidates", verified_candidates.len());
-        verified_candidates
+        ap_core::diag!("  ✓ found {} verified candidates", verified_candidates.len());
     }
+    RepoCandidates { verified: verified_candidates, guessed: candidates }
 }
 
 /// Search GitHub for repositories matching the package name.
@@ -2346,7 +2617,7 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
         urlencoding::encode(&normalized)
     );
 
-    eprintln!("  searching GitHub API for: {}", normalized);
+    ap_core::diag!("  searching GitHub API for: {}", normalized);
 
     let body = ureq::get(&search_url)
         .call()
@@ -2383,7 +2654,7 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
     }
 
     if !matches.is_empty() {
-        eprintln!("  found {} matching repos via GitHub API", matches.len());
+        ap_core::diag!("  found {} matching repos via GitHub API", matches.len());
         Some(matches)
     } else {
         None

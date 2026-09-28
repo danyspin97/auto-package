@@ -430,24 +430,24 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
 
     // Try to get actual tags from the API first
     if let Ok(repo_tags) = get_repo_tags(repo_url) {
-        eprintln!("  found {} tags via API", repo_tags.len());
+        ap_core::diag!("  found {} tags via API", repo_tags.len());
 
         // Try to find exact or close match
         if let Some(matching_tag) = find_matching_tag(&repo_tags, version, repo) {
-            eprintln!("  ✓ found matching tag: {}", matching_tag);
+            ap_core::diag!("  ✓ found matching tag: {}", matching_tag);
             tags.push(matching_tag);
         } else if !repo_tags.is_empty() {
             // No exact match - automatically use the latest tag
             let latest = &repo_tags[0]; // Tags are usually newest-first
             let latest_version = version_from_tag(latest, repo);
-            eprintln!("  ⚠ version {} not found in repository", version);
-            eprintln!("  ✓ using latest available version: {} (tag: {})", latest_version, latest);
+            ap_core::diag!("  ⚠ version {} not found in repository", version);
+            ap_core::diag!("  ✓ using latest available version: {} (tag: {})", latest_version, latest);
             tags.push(latest.clone());
         } else {
-            eprintln!("  ⚠ no tags found via API, falling back to pattern guessing");
+            ap_core::diag!("  ⚠ no tags found via API, falling back to pattern guessing");
         }
     } else {
-        eprintln!("  API query failed, using pattern-based tag guessing");
+        ap_core::diag!("  API query failed, using pattern-based tag guessing");
     }
 
     // Add common patterns as fallback (only if we didn't get a tag from API)

@@ -87,6 +87,23 @@ impl BuildStatus {
         )
     }
 
+    /// Decode one of `osc results <project>`'s single-letter per-package
+    /// status codes (see its own "Legend:" footer).
+    fn from_code(c: char) -> Self {
+        match c {
+            '.' => BuildStatus::Succeeded,
+            ' ' => BuildStatus::Disabled,
+            'U' => BuildStatus::Unresolvable,
+            'F' => BuildStatus::Failed,
+            'B' => BuildStatus::Broken,
+            'b' => BuildStatus::Blocked,
+            '%' | 'd' | 'S' => BuildStatus::Building,
+            's' => BuildStatus::Scheduled,
+            'x' => BuildStatus::Excluded,
+            other => BuildStatus::Unknown(other.to_string()),
+        }
+    }
+
     pub fn is_success(&self) -> bool {
         matches!(self, BuildStatus::Succeeded)
     }
@@ -318,8 +335,15 @@ pub fn create_initial_changes(
 
 /// Ensure the package exists in `project`, creating it if not.
 ///
-/// `osc mkpac <pkg>` must be run from inside a project checkout directory,
-/// so we check out the project first if needed, then run mkpac from there.
+/// Creates it by pushing package meta directly (`osc meta pkg ... -F -`,
+/// which the server creates implicitly if it doesn't exist yet) rather than
+/// `osc mkpac`. `mkpac` infers "already registered" from local working-copy
+/// state — a stray directory left over from a previous, incomplete attempt,
+/// or a project checkout that still remembers the package from one — and
+/// happily reports success without the package ever having been created on
+/// the server. That false success surfaces much later as a 404 on `osc ci`.
+/// Pushing meta directly has no such local state to get confused by: the
+/// server is the only thing that decides whether the package exists.
 pub fn ensure_package(
     project: &str,
     pkg_name: &str,
@@ -338,36 +362,36 @@ pub fn ensure_package(
         return Ok(());
     }
 
-    // Ensure the project directory is a valid osc working copy (.osc/ present).
-    // A plain directory is not enough — osc mkpac requires osc metadata.
-    // Check for .osc/ specifically so we don't re-run co when already set up.
-    let project_dir = work_dir.join(project);
-    if !project_dir.join(".osc").exists() {
-        let out = proc::capture("osc", &["co", project, "-M"], work_dir, emit)?;
+    let meta = format!(
+        "<package name=\"{pkg_name}\" project=\"{project}\">\n  \
+         <title/>\n  <description/>\n</package>\n"
+    );
+    let meta_file = work_dir.join(format!(".{pkg_name}.meta.xml"));
+    fs::write(&meta_file, &meta).map_err(|e| Error::OscFailed {
+        cmd: format!("meta pkg {project} {pkg_name} (writing temp meta file)"),
+        code: -1,
+        stderr: e.to_string(),
+    })?;
 
-        // A concurrent thread may have created it between our check and
-        // the co call. If .osc/ now exists we're good; otherwise fail.
-        if !out.success() && !project_dir.join(".osc").exists() {
-            return Err(Error::OscFailed {
-                cmd: format!("co {project} -M"),
-                code: out.code,
-                stderr: out.stderr,
-            });
-        }
-    }
-
-    // Create the package inside the project checkout.
-    let out = proc::capture("osc", &["mkpac", pkg_name], &project_dir, emit)?;
+    let out = proc::capture(
+        "osc",
+        &[
+            "meta",
+            "pkg",
+            project,
+            pkg_name,
+            "-F",
+            &meta_file.to_string_lossy(),
+        ],
+        work_dir,
+        emit,
+    );
+    let _ = fs::remove_file(&meta_file);
+    let out = out?;
 
     if !out.success() {
-        // Either case means the local directory is already valid — continue.
-        if out.stderr.contains("already exists")
-            || out.stderr.contains("is already under version control")
-        {
-            return Ok(());
-        }
         return Err(Error::OscFailed {
-            cmd: format!("mkpac {pkg_name}"),
+            cmd: format!("meta pkg {project} {pkg_name} -F -"),
             code: out.code,
             stderr: out.stderr,
         });
@@ -540,6 +564,66 @@ pub fn get_build_status(
         }
     }
     Ok(BuildStatus::Unknown("no results".to_string()))
+}
+
+/// Query the OBS build status of every package in `project` for one
+/// repo/arch in a single call.
+///
+/// Runs `osc results -r <repo> -a <arch> <project>` (no package name lists
+/// every package). Unlike the single-package form, this layout is NOT
+/// `<pkg> ... <status-word>` per line: `osc` prints the package names as an
+/// indented tree, one per line, wrapping into as many same-order blocks as
+/// fit the terminal width, and after each block a single status line packs
+/// one letter code per package into fixed two-column slots (`<code><sep>`),
+/// e.g. `. B U U . U ...  openSUSE_Tumbleweed x86_64 (published)`. A blank
+/// (space) code means "disabled" — indistinguishable from the column
+/// separator under naive whitespace splitting — hence the positional
+/// indexing here instead of `split_whitespace`.
+pub fn get_project_build_statuses(
+    project: &str,
+    repo: &str,
+    arch: &str,
+    emit: Emit<'_>,
+) -> HashMap<String, BuildStatus> {
+    let Ok(out) = proc::capture(
+        "osc",
+        &["results", "-r", repo, "-a", arch, project],
+        &anywhere(),
+        emit,
+    ) else {
+        return HashMap::new();
+    };
+    if !out.success() {
+        return HashMap::new();
+    }
+
+    let marker = format!(" {repo} {arch} (");
+    let mut statuses = HashMap::new();
+    let mut pending_pkgs: Vec<String> = Vec::new();
+
+    for line in out.stdout.lines() {
+        if line.trim() == "Legend:" {
+            break;
+        }
+        if line.contains(&marker) {
+            let chars: Vec<char> = line.chars().collect();
+            for (i, pkg) in pending_pkgs.iter().enumerate() {
+                if let Some(&c) = chars.get(1 + 2 * i)
+                    && c != ' '
+                {
+                    statuses.insert(pkg.clone(), BuildStatus::from_code(c));
+                }
+            }
+            pending_pkgs.clear();
+            continue;
+        }
+        let name = line.trim_start_matches(|c: char| c == ' ' || c == '|').trim();
+        if !name.is_empty() {
+            pending_pkgs.push(name.to_lowercase());
+        }
+    }
+
+    statuses
 }
 
 /// Fetch the OBS build log into `log_path`.
