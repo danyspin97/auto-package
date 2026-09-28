@@ -20,12 +20,12 @@ auto-package build <package-name> --project <obs-project>
 
 ### With Interactive TUI
 
-Launch the build with a real-time terminal UI that shows:
-- Current package and build step
-- Live event stream
-- Agent activity and reasoning
-- Token usage and costs
-- Build progress
+Launch the build with a real-time terminal UI that shows every package in the
+current build (the root package and any dependencies queued alongside it) as
+a table, with a detail pane for whichever package is selected:
+- Per-package status, current step, elapsed time, and cost
+- Live event stream and agent activity for the selected package
+- Aggregate progress and cost across the whole run
 
 ```bash
 auto-package build <package-name> --project <obs-project> --tui
@@ -33,6 +33,7 @@ auto-package build <package-name> --project <obs-project> --tui
 
 ### TUI Controls
 
+- `↑`/`↓` or `j`/`k`: Select a package to view its detail pane
 - `q` or `Esc`: Exit the TUI
 - `Ctrl+C`: Force quit
 
@@ -87,19 +88,22 @@ trait Reporter {
 
 Events are distributed to multiple sinks:
 - `HumanSink`: Formatted text output (when TUI is disabled)
-- `TuiSink`: Interactive terminal UI (when `--tui` is enabled)
 - `JsonlSink`: Structured JSONL logging for analysis
 - `MemorySink`: In-memory storage for runtime queries
 
+When `--tui` is enabled, `TuiController` additionally taps the reporter used
+by each package's build thread — per-step events (`StepStarted`, `Command`,
+`AgentToolUse`, ...) carry a `StepId` that only disambiguates steps *within*
+one package, so the tap is what attributes them to the right row in the UI.
+
 ## TUI Layout
 
-The TUI displays four main sections:
+The TUI displays:
 
-1. **Header**: Current package and version being built
-2. **Current Step**: Active build step with progress
-3. **Event Log**: Scrolling log of build events with color coding
-4. **Agent Activity**: AI model tool calls and reasoning
-5. **Stats Footer**: Token usage, cost, and elapsed time
+1. **Summary header**: Packages done/total, elapsed time, total cost
+2. **Package table**: One row per package — status, version, current step, time, cost
+3. **Detail pane**: Event log and agent activity for the selected package
+4. **Footer**: Latest run-level message and keybindings
 
 ## Development
 
