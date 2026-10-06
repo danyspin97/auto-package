@@ -2,7 +2,7 @@
 
 mod tui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -862,9 +862,9 @@ fn cmd_build(
     name: &str,
     version: Option<&str>,
     project: &str,
-    work_dir: &PathBuf,
-    state_root: &PathBuf,
-    rpms_dir: &PathBuf,
+    work_dir: &Path,
+    state_root: &Path,
+    rpms_dir: &Path,
     distro: &str,
     arch: &str,
     max_attempts: usize,
@@ -1019,9 +1019,9 @@ fn cmd_build(
         rpm_name: rpm_name.clone(),
         version: version.clone(),
         project: project.to_string(),
-        work_dir: work_dir.clone(),
-        state_root: state_root.clone(),
-        rpms_dir: rpms_dir.clone(),
+        work_dir: work_dir.to_path_buf(),
+        state_root: state_root.to_path_buf(),
+        rpms_dir: rpms_dir.to_path_buf(),
         distro: distro.to_string(),
         arch: arch.to_string(),
         max_attempts,
@@ -1662,9 +1662,9 @@ fn cmd_build(
 fn cmd_update(
     project: &str,
     only: Option<&str>,
-    work_dir: &PathBuf,
-    state_root: &PathBuf,
-    rpms_dir: &PathBuf,
+    work_dir: &Path,
+    state_root: &Path,
+    rpms_dir: &Path,
     distro: &str,
     arch: &str,
     max_attempts: usize,

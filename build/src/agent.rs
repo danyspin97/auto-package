@@ -101,7 +101,7 @@ pub(crate) fn scrub_env_for_agent(
         // (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_API_KEY`)
         // obviously look credential-shaped and would otherwise be stripped.
         // Those names are vetted by hand in AGENT_ENV_ALLOWLIST.
-        if AGENT_ENV_ALLOWLIST.iter().any(|a| *a == name.as_str()) {
+        if AGENT_ENV_ALLOWLIST.contains(&name.as_str()) {
             kept.insert(name, value);
             continue;
         }
@@ -2406,8 +2406,12 @@ pub struct TurnRequest<'a> {
     /// Called in real-time as each tool-use block is parsed, with `(tool_name,
     /// input_summary)`. Used by the pipeline to stream AgentToolUse events
     /// while the turn is still running so the TUI stays alive.
-    pub on_tool_use: Option<&'a (dyn Fn(&str, &str) + Send + Sync)>,
+    pub on_tool_use: Option<&'a ToolUseCallback<'a>>,
 }
+
+/// Streaming per-tool-use callback — clippy's `type_complexity` floor
+/// hits the inline `dyn Fn(&str, &str) + Send + Sync` on `on_tool_use`.
+pub type ToolUseCallback<'a> = dyn Fn(&str, &str) + Send + Sync + 'a;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -2550,7 +2554,7 @@ fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
     }
     fn split_list(s: &str) -> Vec<String> {
         s.split(',')
-            .map(|v| strip_wrapping(v))
+            .map(strip_wrapping)
             .filter(|v| !v.is_empty())
             .collect()
     }
@@ -3758,7 +3762,7 @@ mod tests {
         // agent's turn.
         let scrubbed = scrub_env_for_agent(vec![pair("OSC_PASSWORD", "hunter2")], &[]);
         assert!(
-            scrubbed.get("OSC_PASSWORD").is_none(),
+            !scrubbed.contains_key("OSC_PASSWORD"),
             "OSC_PASSWORD must not pass through"
         );
     }
@@ -3768,7 +3772,7 @@ mod tests {
         // Cloud credentials — not in the allow-list and matches *_SECRET too.
         let scrubbed = scrub_env_for_agent(vec![pair("AWS_SECRET_ACCESS_KEY", "AKIA...")], &[]);
         assert!(
-            scrubbed.get("AWS_SECRET_ACCESS_KEY").is_none(),
+            !scrubbed.contains_key("AWS_SECRET_ACCESS_KEY"),
             "AWS_SECRET_ACCESS_KEY must not pass through"
         );
     }
@@ -3779,7 +3783,7 @@ mod tests {
         // one thought to list explicitly — e.g. some new forge's auth token.
         let scrubbed = scrub_env_for_agent(vec![pair("FOO_TOKEN", "ghp_abc")], &[]);
         assert!(
-            scrubbed.get("FOO_TOKEN").is_none(),
+            !scrubbed.contains_key("FOO_TOKEN"),
             "FOO_TOKEN must be dropped by the suffix guard"
         );
     }
@@ -3806,7 +3810,7 @@ mod tests {
         // should run in a maximally minimal environment.
         let scrubbed = scrub_env_for_agent(vec![pair("SOMETHING_IRRELEVANT", "value")], &[]);
         assert!(
-            scrubbed.get("SOMETHING_IRRELEVANT").is_none(),
+            !scrubbed.contains_key("SOMETHING_IRRELEVANT"),
             "unknown non-allowlisted names are dropped under the strict allow-list"
         );
     }
@@ -3840,7 +3844,7 @@ mod tests {
         let extra = vec!["MYSERVICE_TOKEN".to_string()];
         let scrubbed = scrub_env_for_agent(vec![pair("MYSERVICE_TOKEN", "secret")], &extra);
         assert!(
-            scrubbed.get("MYSERVICE_TOKEN").is_none(),
+            !scrubbed.contains_key("MYSERVICE_TOKEN"),
             "credential-suffix guard must override extra_allow"
         );
     }

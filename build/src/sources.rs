@@ -215,15 +215,15 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
             );
 
             // Add available tags to help user find the right version
-            if let Ok(tags) = get_repo_tags(repo_url) {
-                if !tags.is_empty() {
-                    msg.push_str("\n\nAvailable tags (showing first 20):");
-                    for tag in tags.iter().take(20) {
-                        let version = version_from_tag(tag, want);
-                        msg.push_str(&format!("\n  {} -> version {}", tag, version));
-                    }
-                    msg.push_str("\n\nTry one of these versions with: --version <version>");
+            if let Ok(tags) = get_repo_tags(repo_url)
+                && !tags.is_empty()
+            {
+                msg.push_str("\n\nAvailable tags (showing first 20):");
+                for tag in tags.iter().take(20) {
+                    let version = version_from_tag(tag, want);
+                    msg.push_str(&format!("\n  {} -> version {}", tag, version));
                 }
+                msg.push_str("\n\nTry one of these versions with: --version <version>");
             }
 
             msg

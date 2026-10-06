@@ -565,11 +565,11 @@ impl Reporter for JsonlSink {
             pkg: current_pkg(),
             event,
         };
-        if let Ok(line) = serde_json::to_string(&envelope) {
-            if let Ok(mut w) = self.writer.lock() {
-                let _ = writeln!(w, "{line}");
-                let _ = w.flush();
-            }
+        if let Ok(line) = serde_json::to_string(&envelope)
+            && let Ok(mut w) = self.writer.lock()
+        {
+            let _ = writeln!(w, "{line}");
+            let _ = w.flush();
         }
     }
 }
@@ -605,7 +605,7 @@ impl Reporter for MemorySink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{RunId, StepId, StepKind};
+    use crate::event::{StepId, StepKind};
     use std::io::{BufRead, BufReader};
     use std::sync::Arc;
 

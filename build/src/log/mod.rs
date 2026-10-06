@@ -95,7 +95,7 @@ impl ExtractedLog {
             source_candidates: self
                 .source_candidates(5)
                 .iter()
-                .map(|s| std::path::PathBuf::from(s))
+                .map(std::path::PathBuf::from)
                 .collect(),
             has_signal: self.has_signal(),
         }

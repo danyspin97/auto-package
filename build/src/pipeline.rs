@@ -91,15 +91,10 @@ impl PipelineConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AgentBackend {
+    #[default]
     Cli,
-}
-
-impl Default for AgentBackend {
-    fn default() -> Self {
-        Self::Cli
-    }
 }
 
 #[derive(Debug)]
@@ -665,14 +660,14 @@ pub fn run_package(
     // `last_outcome` to "success"/"wheel-only" inline — this covers every
     // failure path, which otherwise left state.json untouched and made a
     // mid-run crash indistinguishable from "never attempted".
-    if let PipelineResult::Failed { reason, .. } = &result {
-        if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
-            let mut state = PkgState::load(&ws);
-            state.last_built_version = Some(config.version.clone());
-            state.last_outcome = Some("failed".to_string());
-            state.last_failure_reason = Some(reason.clone());
-            let _ = state.save(&ws);
-        }
+    if let PipelineResult::Failed { reason, .. } = &result
+        && let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name)
+    {
+        let mut state = PkgState::load(&ws);
+        state.last_built_version = Some(config.version.clone());
+        state.last_outcome = Some("failed".to_string());
+        state.last_failure_reason = Some(reason.clone());
+        let _ = state.save(&ws);
     }
     result
 }
@@ -2586,13 +2581,12 @@ fn apply_turn_outcome(
     if matches!(
         &effect,
         Ok(TurnEffect::Edited | TurnEffect::SwitchedToWheel)
-    ) {
-        if let Err(e) = osc::run_service(checkout_dir, Emit::new(reporter, step.id)) {
-            reporter.report(&Event::Warning {
-                step: Some(step.id),
-                message: format!("osc service ra after {label} failed: {e}; proceeding anyway"),
-            });
-        }
+    ) && let Err(e) = osc::run_service(checkout_dir, Emit::new(reporter, step.id))
+    {
+        reporter.report(&Event::Warning {
+            step: Some(step.id),
+            message: format!("osc service ra after {label} failed: {e}; proceeding anyway"),
+        });
     }
 
     effect
@@ -2731,8 +2725,8 @@ fn extract_rpm_filename_version<'a>(name: &str, filename: &'a str) -> Option<&'a
 /// crate wrappers, not here.
 fn rpm_version_satisfies(candidate: &str, op: &str, required: &str) -> bool {
     use std::cmp::Ordering;
-    let a: Vec<&str> = candidate.split(|c: char| c == '.' || c == '-').collect();
-    let b: Vec<&str> = required.split(|c: char| c == '.' || c == '-').collect();
+    let a: Vec<&str> = candidate.split(['.', '-']).collect();
+    let b: Vec<&str> = required.split(['.', '-']).collect();
     let n = a.len().max(b.len());
     let mut ord = Ordering::Equal;
     for i in 0..n {
@@ -3445,6 +3439,7 @@ fn validate_wheel_switch_why(why: &str) -> Result<(), String> {
 /// built the package correctly is still better than the source spec that
 /// couldn't, with or without the audit file. The warning tells the
 /// operator to add the file manually.
+#[allow(clippy::too_many_arguments)]
 fn write_wheel_switch_provenance(
     checkout_dir: &Path,
     rpm_name: &str,
@@ -4149,10 +4144,10 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             candidates.push(format!("https://github.com/aws/{}", after));
             candidates.push(format!("https://github.com/awslabs/{}", after));
         }
-    } else if lower.starts_with("azure-") {
-        if let Some(after) = lower.strip_prefix("azure-") {
-            candidates.push(format!("https://github.com/Azure/{}", after));
-        }
+    } else if lower.starts_with("azure-")
+        && let Some(after) = lower.strip_prefix("azure-")
+    {
+        candidates.push(format!("https://github.com/Azure/{}", after));
     }
 
     // Try the exact package name with common Python project organizations

@@ -184,10 +184,10 @@ fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
     }
 
     // Serialize and save
-    if let Ok(json) = serde_json::to_string_pretty(nodes) {
-        if std::fs::write(&path, json).is_ok() {
-            ap_core::diag!("  cached resolution for future use");
-        }
+    if let Ok(json) = serde_json::to_string_pretty(nodes)
+        && std::fs::write(&path, json).is_ok()
+    {
+        ap_core::diag!("  cached resolution for future use");
     }
 }
 

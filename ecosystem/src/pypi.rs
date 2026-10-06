@@ -769,7 +769,7 @@ pub fn parse_dep_names(requires_dist: &[String]) -> Vec<String> {
             // Strip version constraints, extras brackets, and parentheses to
             // get the bare package name.
             let name = spec
-                .split(|c: char| matches!(c, '>' | '<' | '=' | '!' | '~' | '[' | '(' | ','))
+                .split(['>', '<', '=', '!', '~', '[', '(', ','])
                 .next()
                 .unwrap_or(spec)
                 .trim()

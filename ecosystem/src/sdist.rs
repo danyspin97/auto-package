@@ -495,16 +495,15 @@ fn inspect_from_entries(
             has_c = true;
         }
 
-        if !has_tests {
-            if path_str.contains("/tests/") || path_str.contains("/test/") {
-                has_tests = true;
-            } else if entry_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py"))
-            {
-                has_tests = true;
-            }
+        if !has_tests
+            && (path_str.contains("/tests/")
+                || path_str.contains("/test/")
+                || entry_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py")))
+        {
+            has_tests = true;
         }
     }
 

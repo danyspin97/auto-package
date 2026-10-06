@@ -535,7 +535,7 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
             "-t",
             "opensuse.spec",
             "-f",
-            &spec_path.to_string_lossy().into_owned(),
+            &spec_path.to_string_lossy(),
             &release.name,
             &release.version,
         ])

@@ -1185,9 +1185,7 @@ fn parse_project_build_statuses(
             pending_pkgs.clear();
             continue;
         }
-        let name = line
-            .trim_start_matches(|c: char| c == ' ' || c == '|')
-            .trim();
+        let name = line.trim_start_matches([' ', '|']).trim();
         if !name.is_empty() {
             pending_pkgs.push(name.to_lowercase());
         }

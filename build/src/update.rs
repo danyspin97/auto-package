@@ -367,9 +367,9 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 ";
 
     fn only_pypi(latest: &'static str) -> Lookups<'static> {
-        let p: &'static (dyn Fn(&str) -> Result<String, String>) =
+        let p: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(move |_name: &str| Ok(latest.to_string())));
-        let r: &'static (dyn Fn(&str) -> Result<String, String>) =
+        let r: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(move |_url: &str| -> Result<String, String> {
                 unreachable!("repo path not used")
             }));
@@ -380,11 +380,11 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
     }
 
     fn only_repo(latest: &'static str) -> Lookups<'static> {
-        let p: &'static (dyn Fn(&str) -> Result<String, String>) =
+        let p: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(move |_name: &str| -> Result<String, String> {
                 unreachable!("pypi path not used")
             }));
-        let r: &'static (dyn Fn(&str) -> Result<String, String>) =
+        let r: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(move |_url: &str| Ok(latest.to_string())));
         Lookups {
             fetch_pypi_latest: p,
@@ -488,9 +488,9 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
     #[test]
     fn skips_when_pypi_lookup_errors() {
         let spec = |_: &str| Some(ATTRS_SPEC.to_string());
-        let p: &'static (dyn Fn(&str) -> Result<String, String>) =
+        let p: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(|_: &str| Err("404 Not Found".to_string())));
-        let r: &'static (dyn Fn(&str) -> Result<String, String>) =
+        let r: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(|_: &str| -> Result<String, String> {
                 unreachable!()
             }));
