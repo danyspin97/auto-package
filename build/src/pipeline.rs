@@ -3405,9 +3405,28 @@ fn append_notes(notes_path: PathBuf, section: &str) {
 
 /// Fix broken workspace definitions in a Cargo.toml inside a tarball.
 ///
-/// Some packages reference workspace members (often git submodules) that aren't
-/// included in GitHub's archive downloads. This removes non-existent members
-/// from the workspace definition so cargo vendor doesn't fail.
+/// Some packages reference workspace members (often git submodules) that
+/// aren't included in GitHub's archive downloads. This removes
+/// genuinely-missing members from the workspace definition so cargo vendor
+/// doesn't fail.
+///
+/// Correctness notes from the earlier review:
+///
+/// * **Glob-aware membership**. Cargo's `members = ["crates/*"]` syntax is
+///   a glob; literal filesystem existence of a path named `crates/*`
+///   previously said "not there, remove it", collapsing a perfectly valid
+///   workspace to `members = []`. `member_resolves` now expands single-
+///   segment wildcards and keeps the member when any filesystem entry
+///   matches the pattern.
+///
+/// * **Original tarball preserved**. The repack previously overwrote the
+///   downloaded archive in place, destroying the pristine SHA256 identity
+///   the caller had just verified. The original is now kept as
+///   `<name>.orig.tar.gz` next to the modified one so provenance survives.
+///
+/// * **Audit trail**. When any member is removed, a `cargo-workspace-fix.
+///   txt` is written alongside the tarball naming each removed member;
+///   that file lands in the OBS commit so the reviewer sees what changed.
 fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), String> {
 
     // Extract to temp directory
@@ -3425,6 +3444,7 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
 
     // Find Cargo.toml files
     let mut fixed = false;
+    let mut audit_log: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for entry in walkdir::WalkDir::new(extract_dir)
         .max_depth(3)
         .into_iter()
@@ -3458,15 +3478,18 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
             _ => continue,
         };
 
-        // Check which members actually exist
+        // Check which members actually resolve. A member can be a literal
+        // path (`crates/foo`) OR a single-segment glob (`crates/*`,
+        // `vendor/foo-*`); `member_resolves` understands both so a glob
+        // whose parent dir has at least one match stays in instead of
+        // being stripped as if the literal path `crates/*` were missing.
         let base_dir = cargo_toml_path.parent().unwrap();
         let mut existing_members = Vec::new();
         let mut removed_members = Vec::new();
 
         for member in members.iter() {
             if let Some(member_str) = member.as_str() {
-                let member_path = base_dir.join(member_str);
-                if member_path.exists() {
+                if member_resolves(base_dir, member_str) {
                     existing_members.push(member.clone());
                 } else {
                     ap_core::diag!("  ⚠ removing missing workspace member: {}", member_str);
@@ -3476,7 +3499,7 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
             }
         }
 
-        if fixed {
+        if !removed_members.is_empty() {
             // Update the members array
             *members = existing_members;
 
@@ -3488,6 +3511,14 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
 
             ap_core::diag!("  ✓ fixed Cargo.toml: removed {} missing workspace members",
                      removed_members.len());
+
+            audit_log.push((
+                cargo_toml_path
+                    .strip_prefix(extract_dir)
+                    .unwrap_or(cargo_toml_path)
+                    .to_path_buf(),
+                removed_members,
+            ));
         }
     }
 
@@ -3495,6 +3526,49 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
         ap_core::diag!("  ✓ no workspace issues found");
         return Ok(());
     }
+
+    // Preserve the pristine downloaded archive before replacing it, so the
+    // original SHA256-verified bytes are still auditable after the fact.
+    // Non-fatal — a save failure logs a warning rather than aborting a
+    // successful workspace fix.
+    let orig_backup = tarball.with_file_name(format!(
+        "{}.orig",
+        tarball
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    if let Err(e) = std::fs::copy(tarball, &orig_backup) {
+        ap_core::diag!(
+            "  warning: could not back up original tarball to {}: {e}",
+            orig_backup.display()
+        );
+    }
+
+    // Audit record of what members were stripped and from which
+    // Cargo.toml. Written next to the tarball so it travels with the OBS
+    // commit; without this the modification is invisible to the recipe
+    // reviewer.
+    let audit = {
+        let mut s = String::from(
+            "cargo workspace fix applied by auto-package: the following \
+             workspace members were removed from in-tarball Cargo.toml \
+             files because nothing in the archive resolved them (likely \
+             omitted git submodules).\n\
+             \n\
+             Original tarball preserved next to this one as the `.orig`\n\
+             file; compare for the exact byte-level diff.\n\n",
+        );
+        for (path, members) in &audit_log {
+            s.push_str(&format!("{}:\n", path.display()));
+            for m in members {
+                s.push_str(&format!("  - {m}\n"));
+            }
+        }
+        s
+    };
+    let audit_path = tarball.with_file_name("cargo-workspace-fix.txt");
+    let _ = std::fs::write(&audit_path, audit);
 
     // Re-pack the tarball
     ap_core::diag!("  re-packing fixed tarball");
@@ -3534,6 +3608,69 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
 
     ap_core::diag!("  ✓ tarball updated with fixed workspace");
     Ok(())
+}
+
+/// Does `member` under `base_dir` resolve to anything on disk?
+///
+/// Cargo workspace members are either literal paths (`crates/foo`) or
+/// single-segment globs (`crates/*`, `vendor/foo-*`). The literal case is
+/// a direct filesystem check; the glob case reads the parent directory
+/// and matches each entry name against the pattern. Returns `true` as
+/// soon as any match is found.
+///
+/// Not a complete Cargo workspace resolver — doesn't handle `**` recursive
+/// globs or Cargo's `exclude = [...]` filter — but every workspace shape
+/// the running packaging corpus hits uses single-segment `*` patterns.
+fn member_resolves(base_dir: &Path, member: &str) -> bool {
+    let (parent_rel, pattern) = match member.rsplit_once('/') {
+        Some((p, n)) => (p, n),
+        None => ("", member),
+    };
+    let parent = if parent_rel.is_empty() {
+        base_dir.to_path_buf()
+    } else {
+        base_dir.join(parent_rel)
+    };
+    if !parent.is_dir() {
+        return false;
+    }
+    if !pattern.contains('*') {
+        return parent.join(pattern).exists();
+    }
+    let Ok(iter) = std::fs::read_dir(&parent) else {
+        return false;
+    };
+    iter.filter_map(|e| e.ok())
+        .any(|e| glob_matches_single_segment(pattern, &e.file_name().to_string_lossy()))
+}
+
+/// Match a single-segment glob (one with `*` wildcards, no `/`) against a
+/// candidate filename.
+///
+/// A single `*` matches any run of characters (including empty); multiple
+/// `*`s split the pattern into literal pieces that must appear in order.
+/// Does not implement `?`, `[...]` character classes, or `**`.
+fn glob_matches_single_segment(pattern: &str, candidate: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == candidate;
+    }
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or("");
+    if !candidate.starts_with(first) {
+        return false;
+    }
+    let mut rest = &candidate[first.len()..];
+    let mut peekable = parts.peekable();
+    while let Some(part) = peekable.next() {
+        if part.is_empty() && peekable.peek().is_none() {
+            return true; // trailing *
+        }
+        match rest.find(part) {
+            Some(idx) => rest = &rest[idx + part.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 /// Source repository candidates for a package with no (or no usable) PyPI
@@ -4146,6 +4283,46 @@ Patch0:         0001-fix.patch
     /// Earlier review probe: a spec declaring `Version: 1.20` matched a
     /// request for version `1.2` because the pre-fix check was a bare
     /// substring search. Must now compare the actual parsed tag value.
+    /// Earlier review probe: a valid `members = ["crates/*"]` with a real
+    /// member in `crates/foo` became `members = []` because the pre-fix
+    /// check did literal `.exists()` on the path "crates/*".
+    #[test]
+    fn cargo_workspace_glob_matches_existing_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        std::fs::create_dir_all(base.join("crates/foo")).unwrap();
+        std::fs::create_dir_all(base.join("crates/bar")).unwrap();
+
+        assert!(member_resolves(base, "crates/*"), "crates/* matches crates/foo");
+        assert!(member_resolves(base, "crates/foo"), "literal path still works");
+        assert!(member_resolves(base, "crates/f*"), "prefix glob works");
+    }
+
+    #[test]
+    fn cargo_workspace_glob_with_no_match_is_still_considered_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("crates")).unwrap();
+        assert!(
+            !member_resolves(tmp.path(), "crates/*"),
+            "empty crates/ dir means the glob genuinely resolves nothing"
+        );
+        assert!(!member_resolves(tmp.path(), "nonexistent/*"));
+        assert!(!member_resolves(tmp.path(), "nope"));
+    }
+
+    #[test]
+    fn glob_single_segment_matcher_handles_the_common_shapes() {
+        assert!(glob_matches_single_segment("*", "anything"));
+        assert!(glob_matches_single_segment("foo-*", "foo-bar"));
+        assert!(glob_matches_single_segment("foo-*", "foo-"));
+        assert!(!glob_matches_single_segment("foo-*", "bar"));
+        assert!(glob_matches_single_segment("*-core", "ripgrep-core"));
+        assert!(glob_matches_single_segment("a*b*c", "aXXbYYc"));
+        assert!(!glob_matches_single_segment("a*b*c", "aXXbYY"));
+        assert!(glob_matches_single_segment("literal", "literal"));
+        assert!(!glob_matches_single_segment("literal", "other"));
+    }
+
     #[test]
     fn spec_version_differs_rejects_substring_matches() {
         let tmp = tempfile::tempdir().unwrap();
