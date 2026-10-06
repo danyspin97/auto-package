@@ -66,6 +66,13 @@ pub enum SkipReason {
     /// No ecosystem matched the `Source:` line.
     NotRecognized { source: String },
     LookupFailed { ecosystem_tag: String, name: String, error: String },
+    /// Both versions were fetched but at least one is not valid PEP 440, so
+    /// the comparator cannot decide which is newer. Previously this fell
+    /// into `UpToDate`, which labelled a package `[current]` when the tool
+    /// had actually failed to make the comparison at all — the Oct 6
+    /// review's probe with a packaged `Version: %{package_version}` that
+    /// never got expanded reproduced exactly this false-current label.
+    VersionCompareFailed { packaged: String, latest: String },
 }
 
 impl std::fmt::Display for SkipReason {
@@ -79,6 +86,13 @@ impl std::fmt::Display for SkipReason {
             }
             SkipReason::LookupFailed { ecosystem_tag, name, error } => {
                 write!(f, "{ecosystem_tag} lookup for {name} failed: {error}")
+            }
+            SkipReason::VersionCompareFailed { packaged, latest } => {
+                write!(
+                    f,
+                    "cannot compare versions (packaged {packaged:?} vs latest {latest:?} — \
+                     one or both are not PEP 440); report as unknown rather than UpToDate"
+                )
             }
         }
     }
@@ -181,17 +195,20 @@ where
         Err(reason) => return skipped(rpm_name, reason),
     };
 
-    let decision = if pypi::is_newer_pep440(&latest, &header.version) {
-        Decision::Update {
+    let decision = match pypi::compare_pep440(&latest, &header.version) {
+        pypi::VersionCompare::Newer => Decision::Update {
             ecosystem,
             old_version: header.version,
             new_version: latest,
-        }
-    } else {
-        Decision::UpToDate {
+        },
+        pypi::VersionCompare::NotNewer => Decision::UpToDate {
             ecosystem,
             version: header.version,
-        }
+        },
+        pypi::VersionCompare::Unparseable => Decision::Skipped(SkipReason::VersionCompareFailed {
+            packaged: header.version,
+            latest,
+        }),
     };
     Candidate { rpm_name: rpm_name.to_string(), decision }
 }
@@ -202,10 +219,10 @@ fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
 
 /// Classify every package in `project` (optionally filtered to just `only`).
 ///
-/// Hits OBS twice per package (`osc ls`, then `osc cat <pkg> <pkg>.spec`),
-/// plus one PyPI call per PyPI-sourced package and one git-forge API call
-/// per repo-sourced one. Returned in sorted RPM-name order so `--check`
-/// output is stable across runs.
+/// Hits OBS twice per package (`osc ls` to find the real spec filename, then
+/// `osc cat <pkg> <picked>.spec`), plus one PyPI call per PyPI-sourced
+/// package and one git-forge API call per repo-sourced one. Returned in
+/// sorted RPM-name order so `--check` output is stable across runs.
 pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate> {
     let packages = osc::list_project_packages(project, emit);
     let mut names: Vec<String> = packages
@@ -214,8 +231,14 @@ pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate>
         .collect();
     names.sort();
 
-    let fetch_spec =
-        |rpm_name: &str| osc::cat_file(project, rpm_name, &format!("{rpm_name}.spec"), emit);
+    // Enumerate the package's files instead of guessing `<pkg>.spec`.
+    // AppCo's versioned-library convention gives one OBS package per
+    // upstream major version (`pytorch+2.4`, `pytorch+2.5`), each holding a
+    // plain `<base-name>.spec` (`pytorch.spec`) that has no relation to the
+    // OBS package name. The old guess silently missed every one of these
+    // (Oct 6 review finding #3): `demo+1.0` looked for `demo+1.0.spec`,
+    // not the actual `demo.spec`.
+    let fetch_spec = |rpm_name: &str| spec_for_package(project, rpm_name, emit);
     let fetch_pypi_latest = |pypi_name: &str| {
         pypi::fetch_latest_version(pypi_name).map_err(|e| e.to_string())
     };
@@ -229,6 +252,46 @@ pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate>
         .iter()
         .map(|n| classify(n, &fetch_spec, &lookups))
         .collect()
+}
+
+/// Fetch the primary spec from an OBS package, picking the right filename
+/// out of whatever `osc ls` returns.
+fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+    let files = osc::list_package_files(project, pkg, emit)?;
+    let picked = pick_spec_filename(pkg, &files)?;
+    osc::cat_file(project, pkg, &picked, emit)
+}
+
+/// Pure, testable half of [`spec_for_package`]'s filename picker.
+///
+/// Preference order:
+/// 1. `<base>.spec`, where `<base>` is the OBS package name with any
+///    `+<version>` suffix stripped (AppCo convention: `pytorch+2.4` →
+///    `pytorch.spec`).
+/// 2. `<pkg>.spec` verbatim (the pre-Oct 6 default, for the common
+///    non-AppCo case).
+/// 3. Alphabetical first, so multibuild flavors or alternative spec names
+///    still produce a stable choice across runs.
+///
+/// Returns `None` only when no `.spec` file is present at all.
+fn pick_spec_filename(pkg: &str, files: &[String]) -> Option<String> {
+    let mut specs: Vec<&String> = files.iter().filter(|f| f.ends_with(".spec")).collect();
+    if specs.is_empty() {
+        return None;
+    }
+    specs.sort();
+    let bare_spec = format!(
+        "{}.spec",
+        pkg.split_once('+').map(|(n, _)| n).unwrap_or(pkg),
+    );
+    let pkg_spec = format!("{pkg}.spec");
+    if let Some(s) = specs.iter().find(|s| ***s == bare_spec) {
+        return Some((*s).clone());
+    }
+    if let Some(s) = specs.iter().find(|s| ***s == pkg_spec) {
+        return Some((*s).clone());
+    }
+    specs.first().map(|s| (*s).clone())
 }
 
 #[cfg(test)]
@@ -416,6 +479,113 @@ Source:         file:///opt/thing.tar.gz
         assert_eq!(
             git_repo_url("https://files.pythonhosted.org/packages/source/a/attrs/attrs.tar.gz"),
             None,
+        );
+    }
+
+    /// AppCo versioned-library packages are named `<base>+<version>` on OBS
+    /// but hold a plain `<base>.spec`. The pre-Oct-6 picker guessed
+    /// `<pkg>.spec` and silently missed the real one on every such package.
+    #[test]
+    fn picks_the_bare_name_spec_for_an_appco_versioned_package() {
+        let files = vec![
+            "_service".to_string(),
+            "pytorch.spec".to_string(),
+            "pytorch.changes".to_string(),
+        ];
+        assert_eq!(
+            pick_spec_filename("pytorch+2.4", &files).as_deref(),
+            Some("pytorch.spec"),
+        );
+    }
+
+    /// For the common `python-foo` case the file matching `<pkg>.spec` must
+    /// still win over anything alphabetically earlier (e.g. a `_service.spec`
+    /// placeholder or a related subpackage's spec).
+    #[test]
+    fn picks_the_pkg_name_spec_when_present_for_the_ordinary_case() {
+        let files = vec![
+            "_other.spec".to_string(),
+            "python-attrs.spec".to_string(),
+            "python-attrs.changes".to_string(),
+        ];
+        assert_eq!(
+            pick_spec_filename("python-attrs", &files).as_deref(),
+            Some("python-attrs.spec"),
+        );
+    }
+
+    #[test]
+    fn picks_alphabetically_first_spec_when_neither_canonical_name_is_present() {
+        let files = vec![
+            "zzz.spec".to_string(),
+            "aaa.spec".to_string(),
+            "mmm.spec".to_string(),
+        ];
+        assert_eq!(
+            pick_spec_filename("something-weird+1", &files).as_deref(),
+            Some("aaa.spec"),
+        );
+    }
+
+    #[test]
+    fn no_spec_file_at_all_returns_none() {
+        let files = vec!["_service".to_string(), "README.md".to_string()];
+        assert_eq!(pick_spec_filename("whatever", &files), None);
+    }
+
+    /// A version that is neither obviously newer nor obviously the same —
+    /// because one side cannot be parsed as PEP 440 at all — must NOT be
+    /// labelled `UpToDate`. The Oct 6 review reproduced the false-current
+    /// label with a spec whose `Version: %{package_version}` never
+    /// expanded; the comparison was between the literal macro and a real
+    /// PyPI version, so parsing failed, so the pre-Oct-6 code concluded
+    /// "not newer, therefore current".
+    #[test]
+    fn an_unparseable_version_is_not_reported_as_up_to_date() {
+        let spec = "\
+Name:           python-weird
+Version:        not-a-valid-pep-440
+Source:         https://files.pythonhosted.org/packages/source/w/weird/weird-%{version}.tar.gz
+";
+        let spec_fn = |_: &str| Some(spec.to_string());
+        let c = classify("python-weird", &spec_fn, &only_pypi("2.0.0"));
+        match c.decision {
+            Decision::Skipped(SkipReason::VersionCompareFailed { packaged, latest }) => {
+                assert_eq!(packaged, "not-a-valid-pep-440");
+                assert_eq!(latest, "2.0.0");
+            }
+            other => panic!(
+                "expected Skipped(VersionCompareFailed), got {other:?} — this is the \
+                 Oct 6 false-UpToDate regression"
+            ),
+        }
+    }
+
+    /// A spec using an AppCo `Version: %{package_version}` pattern should
+    /// resolve against the matching `%define`/`%global` earlier in the
+    /// file, so the comparison sees the real version. Without this the
+    /// version string reaching the comparator is literally
+    /// `%{package_version}`, which triggers the VersionCompareFailed path
+    /// above (which is at least not-silent, but still blocks genuine
+    /// updates).
+    #[test]
+    fn version_macro_is_expanded_from_a_preceding_define() {
+        let spec = "\
+%define package_version 2.4.0
+Name:           pytorch
+Version:        %{package_version}
+Source:         https://files.pythonhosted.org/packages/source/p/pytorch/pytorch-%{version}.tar.gz
+";
+        let spec_fn = |_: &str| Some(spec.to_string());
+        let c = classify("pytorch+2.4", &spec_fn, &only_pypi("2.5.0"));
+        assert_eq!(
+            c.decision,
+            Decision::Update {
+                ecosystem: Ecosystem::Pypi { pypi_name: "pytorch".into() },
+                old_version: "2.4.0".into(),
+                new_version: "2.5.0".into(),
+            },
+            "expected the define-resolved 2.4.0 to compare against 2.5.0"
         );
     }
 }

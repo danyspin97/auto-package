@@ -850,16 +850,38 @@ pub fn pypi_name_from_versioned_tarball(filename: &str, spec_version: &str) -> O
     None
 }
 
-/// True iff `latest` is a strictly newer PEP 440 version than `packaged`.
+/// Three-way result of a PEP 440 comparison between two version strings.
 ///
-/// Both strings are parsed as PEP 440. Unparseable versions return `false` —
-/// an update sweep must not act on a comparison it couldn't actually make.
-pub fn is_newer_pep440(latest: &str, packaged: &str) -> bool {
+/// Collapsing `Unparseable` into `false`/`NotNewer` (as `is_newer_pep440`
+/// used to) made the update sweep classify a package it *couldn't actually
+/// compare* as `UpToDate` — the Oct 6 review's probe with a non-PEP 440
+/// packaged version and a real-newer upstream reproduced the false-current
+/// label. Callers that want "yes/no newer" still have `is_newer_pep440`;
+/// callers that need to distinguish "I checked, it's current" from "I
+/// couldn't check" (every update-plan classifier) use this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionCompare {
+    Newer,
+    NotNewer,
+    Unparseable,
+}
+
+/// Compare two PEP 440 version strings three-way.
+pub fn compare_pep440(latest: &str, packaged: &str) -> VersionCompare {
     use pep440_rs::Version;
     use std::str::FromStr;
-    let Ok(l) = Version::from_str(latest) else { return false };
-    let Ok(p) = Version::from_str(packaged) else { return false };
-    l > p
+    let Ok(l) = Version::from_str(latest) else { return VersionCompare::Unparseable };
+    let Ok(p) = Version::from_str(packaged) else { return VersionCompare::Unparseable };
+    if l > p { VersionCompare::Newer } else { VersionCompare::NotNewer }
+}
+
+/// True iff `latest` is a strictly newer PEP 440 version than `packaged`.
+///
+/// Returns `false` for an unparseable input too; callers that must
+/// distinguish "cannot compare" from "not newer" need [`compare_pep440`]'s
+/// three-way result instead — see its doc comment for why.
+pub fn is_newer_pep440(latest: &str, packaged: &str) -> bool {
+    matches!(compare_pep440(latest, packaged), VersionCompare::Newer)
 }
 
 #[cfg(test)]

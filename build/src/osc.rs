@@ -535,6 +535,33 @@ mod project_packages_cache_tests {
     }
 }
 
+/// Enumerate the files committed to an OBS package.
+///
+/// Returns `None` when `osc ls` fails (project/package doesn't exist, auth
+/// broken) rather than panicking, same as [`cat_file`]: the update sweep
+/// uses that `None` to skip the package and record a SpecFetchFailed instead
+/// of killing the whole scan.
+///
+/// Used so the update sweep can discover the real `.spec` filename rather
+/// than guess `<pkg>.spec` — AppCo's versioned-library convention gives one
+/// OBS package per upstream version (`pytorch+2.4`, `pytorch+2.5`), each
+/// holding a plain `<base-name>.spec` (`pytorch.spec`) that has no relation
+/// to the OBS package name. The guess silently missed every one of these
+/// before (Oct 6 review finding #3).
+pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Vec<String>> {
+    let out = proc::capture("osc", &["ls", project, pkg], &anywhere(), emit).ok()?;
+    if !out.success() {
+        return None;
+    }
+    Some(
+        out.stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+
 /// Fetch a single file's contents from an OBS package without checking out.
 ///
 /// Returns `None` when the package doesn't exist, the file isn't in it, or

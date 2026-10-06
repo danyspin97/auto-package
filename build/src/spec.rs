@@ -158,13 +158,76 @@ pub struct Header {
 /// Parse `Name:`, `Version:`, and the first `Source:` / `Source0:` line out of
 /// a spec file's text. Returns `None` when `Name:` or `Version:` is missing —
 /// a spec without either is not something this tool should try to update.
+///
+/// `Version:` is run through [`expand_simple_defines`] so that AppCo-style
+/// `Version: %{package_version}` resolves to the actual version string
+/// rather than being passed to the update sweep's PEP 440 comparator as a
+/// literal `%{package_version}` — which previously parsed as unparseable,
+/// returned "not newer", and silently labelled the package `UpToDate` even
+/// when upstream had moved on (Oct 6 review finding #3).
 pub fn parse_header(spec: &str) -> Option<Header> {
-    let name = tag_value(spec, "Name:")?.to_string();
-    let version = tag_value(spec, "Version:")?.to_string();
+    let name_raw = tag_value(spec, "Name:")?;
+    let version_raw = tag_value(spec, "Version:")?;
+    let defines = collect_simple_defines(spec);
+    let name = expand_simple_defines(name_raw, &defines);
+    let version = expand_simple_defines(version_raw, &defines);
     let source = tag_value(spec, "Source:")
         .or_else(|| tag_value(spec, "Source0:"))
         .map(str::to_string);
     Some(Header { name, version, source })
+}
+
+/// Collect `%define <name> <value>` and `%global <name> <value>` entries
+/// from a spec, in file order so later definitions override earlier ones (as
+/// rpmbuild itself does). Only the simple single-token-value shape is
+/// understood — parametric macros, conditionals, nested `%()` evaluation,
+/// and the lua `%{lua:...}` form are intentionally left untouched; this is
+/// a header reader, not an rpm interpreter.
+fn collect_simple_defines(spec: &str) -> std::collections::HashMap<String, String> {
+    let mut macros = std::collections::HashMap::new();
+    for line in spec.lines() {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("%define ")
+            .or_else(|| trimmed.strip_prefix("%global "));
+        let Some(rest) = rest else { continue };
+        let rest = rest.trim();
+        let Some((name, value)) = rest.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        // Skip parametric macros (name(args)) and empty definitions.
+        if name.is_empty() || value.is_empty() || name.contains('(') {
+            continue;
+        }
+        // One-pass substitution of already-known defines so chained
+        // `%define release_prefix 1.0` / `%define pkgver %{release_prefix}.3`
+        // resolves. Deliberately not recursive beyond that — complex nested
+        // forms belong to real rpm expansion, not this reader.
+        macros.insert(name.to_string(), expand_once(value, &macros));
+    }
+    macros
+}
+
+/// Replace every `%{name}` or `%name` reference by its collected `%define`/
+/// `%global` value. Unknown macros are left alone so the caller still sees
+/// which ones didn't resolve.
+pub(crate) fn expand_simple_defines(
+    s: &str,
+    macros: &std::collections::HashMap<String, String>,
+) -> String {
+    expand_once(s, macros)
+}
+
+fn expand_once(s: &str, macros: &std::collections::HashMap<String, String>) -> String {
+    let mut out = s.to_string();
+    for (name, value) in macros {
+        out = out
+            .replace(&format!("%{{{name}}}"), value)
+            .replace(&format!("%{name}"), value);
+    }
+    out
 }
 
 /// The expanded `%autosetup -n` directory for a spec with the given name and
@@ -243,6 +306,77 @@ Source0:        https://example.com/foo-%{version}.tar.gz
     fn parse_header_requires_name_and_version() {
         assert!(parse_header("Version: 1.0\n").is_none());
         assert!(parse_header("Name: foo\n").is_none());
+    }
+
+    /// AppCo's versioned-library specs declare the real version as a
+    /// `%define` and reference it from `Version:`. Reading the raw tag
+    /// value made the comparator see the literal `%{package_version}`
+    /// string, which parses as not-PEP-440 and used to be labelled
+    /// `UpToDate` (Oct 6 review finding #3). The reader has to resolve the
+    /// define up front so the comparator sees `2.4.0` here.
+    #[test]
+    fn parse_header_expands_a_define_referenced_from_version() {
+        let spec = "\
+%define package_version 2.4.0
+Name:           pytorch
+Version:        %{package_version}
+Source:         pytorch-%{version}.tar.gz
+";
+        let h = parse_header(spec).expect("header");
+        assert_eq!(h.version, "2.4.0");
+    }
+
+    #[test]
+    fn parse_header_expands_global_the_same_way_as_define() {
+        let spec = "\
+%global pkgver 1.5.2
+Name:           something
+Version:        %{pkgver}
+";
+        let h = parse_header(spec).expect("header");
+        assert_eq!(h.version, "1.5.2");
+    }
+
+    #[test]
+    fn parse_header_leaves_unknown_macros_alone_rather_than_losing_the_reference() {
+        // No matching define — the raw value survives verbatim so callers
+        // can tell the macro wasn't resolvable, instead of being handed an
+        // empty string or a silent fallback.
+        let spec = "\
+Name:           foo
+Version:        %{something_undefined}
+";
+        let h = parse_header(spec).expect("header");
+        assert_eq!(h.version, "%{something_undefined}");
+    }
+
+    #[test]
+    fn parse_header_chains_defines_in_file_order() {
+        // Real-world case: a release-prefix macro referenced inside a
+        // later package-version macro. One pass over defines is enough
+        // because each one substitutes against the ones already seen.
+        let spec = "\
+%define release_prefix 1.0
+%define pkgver %{release_prefix}.3
+Name:           bar
+Version:        %{pkgver}
+";
+        let h = parse_header(spec).expect("header");
+        assert_eq!(h.version, "1.0.3");
+    }
+
+    #[test]
+    fn parse_header_skips_parametric_macros_without_breaking() {
+        // Parametric defines (`%define foo() ...`) are not simple
+        // substitutions — don't try to apply one; the Version: here is a
+        // literal and should pass through untouched.
+        let spec = "\
+%define py_sitearch() /usr/lib/python/arch
+Name:           ok
+Version:        3.2.1
+";
+        let h = parse_header(spec).expect("header");
+        assert_eq!(h.version, "3.2.1");
     }
 
     #[test]
