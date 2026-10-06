@@ -208,6 +208,50 @@ fn repo_package_name(url: &str) -> String {
         .to_string()
 }
 
+/// Produce candidate upstream-project names for a dep the agent (or OBS)
+/// reported in RPM BuildRequires shape, from most-specific to most-stripped.
+///
+/// The agent is instructed to translate shapes like `libtrantor-devel` or
+/// `yaml-cpp-devel` into the upstream project name (`trantor`, `yaml-cpp`)
+/// before reporting them. In practice some turns don't do that — the dep
+/// then arrives at the source-repo discovery step with the RPM cruft
+/// still attached, which doesn't match any real upstream project name
+/// and `find_source_repo_candidates` returns no verified candidates.
+///
+/// We try the original name first (unchanged behavior for correctly-
+/// translated deps), then progressively strip the common RPM-library
+/// decorations:
+///   - `-devel` / `-dev` / `-headers` suffix → the development
+///     subpackage of a shared library;
+///   - `lib` prefix → the sonamed library package itself.
+///
+/// Returns the list in try-order, deduped, with the original always
+/// first so a one-shot `is_verified` check on `candidates[0]` keeps the
+/// pre-fix behavior for already-canonical deps.
+fn upstream_name_candidates(dep: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![dep.to_string()];
+    let suffixes = ["-devel", "-dev", "-headers"];
+    let mut stripped = dep.to_string();
+    for s in &suffixes {
+        if let Some(rest) = stripped.strip_suffix(s) {
+            stripped = rest.to_string();
+            break;
+        }
+    }
+    if stripped != dep && !out.contains(&stripped) {
+        out.push(stripped.clone());
+    }
+    if let Some(rest) = stripped.strip_prefix("lib")
+        && !rest.is_empty()
+    {
+        let rest = rest.to_string();
+        if !out.contains(&rest) {
+            out.push(rest);
+        }
+    }
+    out
+}
+
 /// Resolve a bare dependency name (already stripped of any `python-` RPM
 /// prefix) discovered at runtime into a buildable [`PipelineConfig`].
 ///
@@ -268,23 +312,52 @@ fn resolve_dependency_config(
     // whether it builds under Python/Rust/PlainC — one more layer of
     // insurance that the queued dep carries the right RPM name regardless of
     // what the parent's ecosystem was.
-    let repos = ap_build::pipeline::find_source_repo_candidates(dep);
-    let Some(repo_url) = repos.verified.first() else {
-        reporter.report(&Event::Warning {
-            step: None,
-            message: format!(
-                "{dep} has no PyPI package and no discoverable public source \
-                 repository — cannot be automatically packaged. If this is a \
-                 system library or a closed-source redistribution (like \
-                 NVIDIA's cuda-devel/cuda-runtime), it must already be \
-                 provided by the target project's own repository \
-                 configuration; this tool has no way to manufacture one."
-            ),
-        });
-        return None;
+    //
+    // Try candidate upstream-project spellings in sequence: the agent is
+    // supposed to translate OBS's BuildRequires-shape name
+    // (`libtrantor-devel`) into the upstream project name (`trantor`)
+    // before reporting, but doesn't always — the drogon case landed
+    // `trantor-devel` here, which `find_source_repo_candidates` couldn't
+    // match. Canonicalize mechanically so a partially-translated dep
+    // still has a chance.
+    let (repo_url, dep) = {
+        let candidates = upstream_name_candidates(dep);
+        let mut hit: Option<(String, String)> = None;
+        for cand in &candidates {
+            let repos = ap_build::pipeline::find_source_repo_candidates(cand);
+            if let Some(url) = repos.verified.first() {
+                if cand != dep {
+                    ap_core::diag!(
+                        "  canonicalized {dep} → {cand} to find a source \
+                         repository ({url}); agent should have translated \
+                         this name itself (strip lib/-devel/-dev cruft)"
+                    );
+                }
+                hit = Some((url.clone(), cand.clone()));
+                break;
+            }
+        }
+        let Some((url, resolved)) = hit else {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!(
+                    "{dep} has no PyPI package and no discoverable public source \
+                     repository (tried: {}). If this is a system library or a \
+                     closed-source redistribution (like NVIDIA's \
+                     cuda-devel/cuda-runtime), it must already be provided by \
+                     the target project's own repository configuration; this \
+                     tool has no way to manufacture one. Otherwise, pass \
+                     --source-url {dep}=<url> to point it at the upstream repo.",
+                    candidates.join(", ")
+                ),
+            });
+            return None;
+        };
+        (url, resolved)
     };
+    let dep = dep.as_str();
 
-    let version = match ap_build::sources::latest_release(repo_url) {
+    let version = match ap_build::sources::latest_release(&repo_url) {
         Ok(v) => v,
         Err(e) => {
             reporter.report(&Event::Warning {
@@ -298,7 +371,7 @@ fn resolve_dependency_config(
         }
     };
 
-    let probe = match ap_build::sources::probe(repo_url, &version, dep) {
+    let probe = match ap_build::sources::probe(&repo_url, &version, dep) {
         Ok(p) => p,
         Err(e) => {
             reporter.report(&Event::Warning {
@@ -1923,6 +1996,73 @@ fn report_update_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// drogon-shaped case the user reported: the agent passed
+    /// `trantor-devel` through as the dep name instead of translating
+    /// to upstream `trantor`. The candidate list must strip the
+    /// `-devel` suffix so `find_source_repo_candidates` has a chance.
+    #[test]
+    fn upstream_name_candidates_strips_devel_suffix() {
+        assert_eq!(
+            upstream_name_candidates("trantor-devel"),
+            vec!["trantor-devel".to_string(), "trantor".to_string()]
+        );
+    }
+
+    #[test]
+    fn upstream_name_candidates_strips_lib_prefix_and_devel_suffix_together() {
+        // The full RPM BuildRequires shape. Three candidates: original,
+        // -devel stripped, both stripped.
+        assert_eq!(
+            upstream_name_candidates("libtrantor-devel"),
+            vec![
+                "libtrantor-devel".to_string(),
+                "libtrantor".to_string(),
+                "trantor".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upstream_name_candidates_handles_hyphenated_project_names() {
+        // yaml-cpp is drogon's other recurring BuildRequires. The
+        // hyphen inside the name must survive — only the trailing
+        // -devel is cruft.
+        assert_eq!(
+            upstream_name_candidates("yaml-cpp-devel"),
+            vec!["yaml-cpp-devel".to_string(), "yaml-cpp".to_string()]
+        );
+    }
+
+    #[test]
+    fn upstream_name_candidates_also_recognises_dev_and_headers() {
+        for (dep, stripped) in [
+            ("something-dev", "something"),
+            ("whatever-headers", "whatever"),
+        ] {
+            let out = upstream_name_candidates(dep);
+            assert!(out.contains(&stripped.to_string()), "{dep:?} → {out:?}");
+        }
+    }
+
+    #[test]
+    fn upstream_name_candidates_leaves_a_canonical_name_alone() {
+        // Nothing to strip — only one candidate, same as pre-fix
+        // behavior for correctly-translated deps.
+        assert_eq!(
+            upstream_name_candidates("trantor"),
+            vec!["trantor".to_string()]
+        );
+        assert_eq!(upstream_name_candidates("httpx"), vec!["httpx".to_string()]);
+    }
+
+    #[test]
+    fn upstream_name_candidates_does_not_strip_lib_from_a_project_whose_name_is_lib() {
+        // Pathological: a project called just `lib` would strip to
+        // empty. Guard against the empty-string candidate — we skip it,
+        // keeping just the original.
+        assert_eq!(upstream_name_candidates("lib"), vec!["lib".to_string()]);
+    }
 
     #[test]
     fn a_repo_url_is_recognised_in_the_name_position() {
