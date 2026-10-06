@@ -2961,10 +2961,20 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         Task::FixAfterBuild => {
             "Fix the spec after a failed `osc build`.\n\
              \n\
-             If the failure is in `%check`, prefer skipping the failing tests over \
-             adding more dependencies — see convention 11. The hint below is a \
-             heuristic extract of the failure; read build.log yourself whenever \
-             the extract looks like it caught the wrong thing.\n\
+             For a %check failure, follow conventions 10 and 11 IN ORDER: diagnose and \
+             add missing test dependencies first (convention 10 — a BuildRequires or \
+             fixing an uninstalled test helper is almost always the right fix for an \
+             `ImportError`/`ModuleNotFoundError`/`fixture not found`), and only then \
+             consider convention 11's test-skip ladder for tests that genuinely \
+             cannot run in this environment (no network, no GPU, no display beyond \
+             what xvfb-run supplies, no shipped fixture). Skipping before you have \
+             checked what the test actually needs throws away coverage for a problem \
+             a BuildRequires would have fixed — the Oct 6 review flagged the earlier \
+             blanket \"prefer skipping over adding deps\" phrasing as a contradiction \
+             with convention 10, which it was.\n\
+             \n\
+             The hint below is a heuristic extract of the failure; read build.log \
+             yourself whenever the extract looks like it caught the wrong thing.\n\
              \n\
              Before concluding a prior fix did not work, rule out a stale build.log: \
              compare this attempt's build.log against the previous one (md5sum, or the \

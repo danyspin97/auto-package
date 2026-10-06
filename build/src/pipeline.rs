@@ -2206,6 +2206,12 @@ fn apply_turn_outcome(
             Ok(if changed { TurnEffect::Edited } else { TurnEffect::NoChange })
         }
         crate::agent::Action::UseUpstreamWheel { why } => {
+            // Minimum-shape gate on the reason: too short to be real
+            // evidence rejects the switch outright instead of silently
+            // swapping the recipe based on an empty `why`.
+            if let Err(e) = validate_wheel_switch_why(why) {
+                return Err(format!("{label}: {e}"));
+            }
             reporter.report(&Event::Warning {
                 step: Some(step.id),
                 message: format!(
@@ -2214,13 +2220,45 @@ fn apply_turn_outcome(
                 ),
             });
             match try_wheel_fallback(config, checkout_dir, spec_path, step) {
-                Ok(()) => {
+                Ok(wheel) => {
+                    // Durable, reviewable audit record of what got swapped
+                    // and why. See `write_wheel_switch_provenance` for the
+                    // rationale — the OBS commit's reviewers do not see
+                    // the run's JSONL, so the switch has to leave a trail
+                    // inside the checkout itself.
+                    if let Err(e) = write_wheel_switch_provenance(
+                        checkout_dir,
+                        rpm_name,
+                        config,
+                        &wheel,
+                        attempt,
+                        label,
+                        why,
+                        before,
+                    ) {
+                        reporter.report(&Event::Warning {
+                            step: Some(step.id),
+                            message: format!(
+                                "{rpm_name}: wheel switch succeeded but writing \
+                                 wheel-origin.txt / spec.pre-wheel-switch failed \
+                                 ({e}); add them by hand before submitting the \
+                                 OBS request — the switch is otherwise invisible \
+                                 to the recipe reviewer"
+                            ),
+                        });
+                    }
                     let changed = accept_or_restore(
                         spec_path,
                         before,
                         step,
                         reporter,
-                        &format!("\n## {label} — switched to upstream wheel\nReasoning: {why}\n"),
+                        &format!(
+                            "\n## {label} — switched to upstream wheel\n\
+                             Wheel: {}\n\
+                             SHA256: {}\n\
+                             Reasoning: {why}\n",
+                            wheel.filename, wheel.sha256,
+                        ),
                         notes_path,
                     );
                     Ok(if changed { TurnEffect::SwitchedToWheel } else { TurnEffect::NoChange })
@@ -2646,8 +2684,15 @@ fn generate_from_repo(
         // error message's own advice ("check whether ... a wheel"). The
         // wrongly-fetched archive is no longer needed either way.
         let _ = std::fs::remove_file(&tarball);
+        // Discard the picked wheel info here: the provenance file only
+        // makes sense when the switch is the result of a deliberate agent
+        // `UseUpstreamWheel`, where the audit trail has a specific `why`
+        // to record. This call site is the generation path's automatic
+        // retry on a wrongly-guessed repo (no agent decision was made),
+        // so there is nothing to attest beyond "guess was wrong, we fell
+        // back" and the warning above the caller already covers it.
         return match try_wheel_fallback(config, checkout_dir, spec_path, step) {
-            Ok(()) => Ok(GenSpecResult {
+            Ok(_wheel) => Ok(GenSpecResult {
                 sdist_top_level: String::new(),
                 is_maturin: false,
                 is_rust: false,
@@ -2895,12 +2940,22 @@ fn generate_repo_python_spec(
 /// `spec_path` with the same wheel-binary skeleton the no-sdist path uses —
 /// this is an independent check, not trust in the agent's claim: if PyPI has
 /// no wheel either, the caller still fails the package.
+///
+/// Returns the picked [`ap_ecosystem::pypi::WheelFile`] so the caller can
+/// write a provenance record alongside the spec. The Oct 6 review called
+/// out that previously the only check was "a wheel exists" — the agent's
+/// claim that the source genuinely cannot be built was never independently
+/// verifiable after the fact. We cannot verify "source builds are
+/// impossible" from here (that is a factual claim about an environment OBS
+/// controls), but we can at least pin the exact artifact that got
+/// substituted and the reasoning that justified it, so a human reviewer
+/// has something to audit before the recipe is submitted.
 fn try_wheel_fallback(
     config: &PipelineConfig,
     checkout_dir: &Path,
     spec_path: &Path,
     step: &StepDir,
-) -> Result<(), String> {
+) -> Result<ap_ecosystem::pypi::WheelFile, String> {
     let pypi_url = format!(
         "https://pypi.org/pypi/{}/{}/json",
         config.pkg_name, config.version
@@ -2925,6 +2980,95 @@ fn try_wheel_fallback(
             }
         }
     })?;
+    Ok(wheel)
+}
+
+/// Enforce the minimum shape of a `UseUpstreamWheel`'s `why`: non-empty, long
+/// enough to carry an actual quoted build-log line or missing-toolchain
+/// name, not a bare "idk" or whitespace.
+///
+/// Not evidence verification — the agent could still fabricate a plausible
+/// string — but a cheap gate against the obvious trivial-reason case, and
+/// paired with the mandatory provenance file ([`write_wheel_switch_provenance`])
+/// it makes the switch auditable rather than a silent recipe swap. Returns
+/// `Err` for the caller to fold into its own failure path.
+///
+/// The 20-char floor is the length of the shortest realistic
+/// evidence line the Exception 4 wording asks for (`"nvcc: not found"` is 15,
+/// `"find_package(CUDAToolkit"` is 23); it rejects "" / "no reason" / the
+/// placeholder shapes without rejecting any genuine single-line citation.
+fn validate_wheel_switch_why(why: &str) -> Result<(), String> {
+    let trimmed = why.trim();
+    if trimmed.len() < 20 {
+        return Err(format!(
+            "use_upstream_wheel's `why` ({trimmed:?}) is too short to be \
+             audit evidence — convention 28 Exception 4 asks for the exact \
+             missing compiler/SDK and a quoted build.log line that proves it"
+        ));
+    }
+    Ok(())
+}
+
+/// Record WHAT got swapped and WHY, so a human reviewing the OBS commit
+/// after the pipeline has moved on can see the switch happened at all.
+///
+/// Writes `wheel-origin.txt` into the checkout and preserves the original
+/// spec as `<spec>.pre-wheel-switch` before the fallback overwrites it.
+/// Both files travel with the OBS commit and show up in the review diff,
+/// instead of the switch being discoverable only from the run's JSONL
+/// stream (which the OBS submit request's reviewers never see).
+///
+/// Non-fatal — a provenance-write failure surfaces as a warning rather
+/// than reverting an otherwise-successful wheel switch; a wheel spec that
+/// built the package correctly is still better than the source spec that
+/// couldn't, with or without the audit file. The warning tells the
+/// operator to add the file manually.
+fn write_wheel_switch_provenance(
+    checkout_dir: &Path,
+    rpm_name: &str,
+    config: &PipelineConfig,
+    wheel: &ap_ecosystem::pypi::WheelFile,
+    attempt: usize,
+    label: &str,
+    why: &str,
+    original_spec: &str,
+) -> std::io::Result<()> {
+    let provenance = format!(
+        "Switched from source build to upstream wheel.\n\
+         \n\
+         Package:      {rpm_name}\n\
+         PyPI name:    {pkg_name}\n\
+         Version:      {version}\n\
+         Arch:         {arch}\n\
+         Switch at:    {label}, attempt {attempt}\n\
+         Pipeline:     auto-package convention 28 Exception 4\n\
+         \n\
+         Upstream wheel:\n\
+         \x20 filename: {wheel_filename}\n\
+         \x20 url:      {wheel_url}\n\
+         \x20 sha256:   {wheel_sha256}\n\
+         \x20 size:     {wheel_size} bytes\n\
+         \n\
+         Agent-reported reason (why the source cannot be compiled here):\n\
+         {why}\n\
+         \n\
+         The pre-switch source-build spec is preserved as\n\
+         `{rpm_name}.spec.pre-wheel-switch` in this checkout. Review both\n\
+         before accepting the recipe; this file is the only record that\n\
+         the recipe was swapped from source to binary.\n",
+        pkg_name = config.pkg_name,
+        version = config.version,
+        arch = config.arch,
+        wheel_filename = wheel.filename,
+        wheel_url = wheel.url,
+        wheel_sha256 = wheel.sha256,
+        wheel_size = wheel.size,
+    );
+    std::fs::write(checkout_dir.join("wheel-origin.txt"), provenance)?;
+    std::fs::write(
+        checkout_dir.join(format!("{rpm_name}.spec.pre-wheel-switch")),
+        original_spec,
+    )?;
     Ok(())
 }
 
@@ -3617,6 +3761,35 @@ mod tests {
     #[test]
     fn a_package_with_no_build_status_entry_is_not_resolvable() {
         assert!(!status_is_resolvable(None));
+    }
+
+    /// Oct 6 review finding #4: a `UseUpstreamWheel` with a bare / empty
+    /// `why` previously swapped the recipe silently. Enforce a minimum
+    /// shape so the audit record has at least a usable sentence in it.
+    #[test]
+    fn use_upstream_wheel_rejects_a_trivially_short_why() {
+        for empty in ["", " ", "idk", "no reason", "needs nvcc"] {
+            assert!(
+                validate_wheel_switch_why(empty).is_err(),
+                "{empty:?} must be rejected as audit evidence"
+            );
+        }
+    }
+
+    /// A real-shape `why` matching the convention 28 Exception 4 example
+    /// (quoted build.log line + named toolchain) must pass.
+    #[test]
+    fn use_upstream_wheel_accepts_a_real_shape_why() {
+        for ok in [
+            "nvcc: command not found at build.log:847, needed by find_package(CUDAToolkit REQUIRED)",
+            "The source needs NVIDIA's proprietary nvcc toolchain; find_package(CUDAToolkit REQUIRED) failed",
+        ] {
+            assert!(
+                validate_wheel_switch_why(ok).is_ok(),
+                "{ok:?} should be accepted — this is the exact evidence shape \
+                 convention 28 Exception 4 asks for"
+            );
+        }
     }
 
     #[test]
