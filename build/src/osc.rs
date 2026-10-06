@@ -1157,6 +1157,30 @@ pub fn fetch_buildlog(
 
 /// Download built binaries from OBS into `dest_dir`.
 ///
+/// Count `.rpm` files under `rpms_dir` whose filename starts with
+/// `<pkg_name>-`.
+///
+/// Used by `wait_for_build` to confirm that `osc getbinaries` actually
+/// produced artifacts for the package it was asked about, rather than
+/// silently exiting 0 with an empty binary set (which happens when the
+/// OBS project's publishing config for the requested repo/arch pair is
+/// misconfigured). Returns 0 when the directory doesn't exist or can't
+/// be read — the caller treats that the same as "no RPMs produced",
+/// which is the strictly safe interpretation.
+fn count_rpms(rpms_dir: &std::path::Path, pkg_name: &str) -> usize {
+    let prefix = format!("{pkg_name}-");
+    let Ok(iter) = std::fs::read_dir(rpms_dir) else {
+        return 0;
+    };
+    iter.filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            n.starts_with(prefix.as_str()) && n.ends_with(".rpm")
+        })
+        .count()
+}
+
 /// Runs `osc getbinaries --destdir=<dest> <project> <package> <repo> <arch>`.
 /// Errors are non-fatal: the caller logs a warning and continues.
 pub fn get_binaries(
@@ -1316,12 +1340,56 @@ pub fn obs_build(
     let elapsed = start.elapsed();
 
     if status.is_success() {
-        // Download built RPMs so prefer-pkgs works for dependent packages.
-        if let Err(e) = get_binaries(project, pkg_name, repo, arch, rpms_dir, emit) {
-            reporter.report(&Event::Warning {
+        // Download the built RPMs. The Oct 6 review's reproduction of
+        // 'succeeded status followed by a failing getbinaries still
+        // returns success, leaving the RPM directory empty' turned on
+        // this call being non-fatal: a succeeded OBS build without any
+        // locally-downloaded artifacts is NOT a success a dependent
+        // build can rely on — `rpm_satisfies_dep` can't find anything,
+        // the dep is reported unresolvable even though OBS says the
+        // source is green, and the dependent spends attempts chasing a
+        // nonexistent problem. Promote this to fatal: if OBS says
+        // succeeded but we cannot pull the binaries, surface that as a
+        // build failure.
+        //
+        // We also verify that at least one `.rpm` landed under
+        // `rpms_dir` after the fetch — `osc getbinaries` can exit 0
+        // with no files written when the project is misconfigured
+        // (empty binary set for this repo/arch pair), which the warning
+        // version silently papered over.
+        let fetch_result = get_binaries(project, pkg_name, repo, arch, rpms_dir, emit);
+        let downloaded_count = count_rpms(rpms_dir, pkg_name);
+        if let Err(e) = fetch_result {
+            reporter.report(&Event::CommandDone {
                 step,
-                message: format!("getbinaries failed (non-fatal): {e}"),
+                code: 1,
+                elapsed,
+                stdout_bytes: log_bytes,
+                stderr_bytes: 0,
             });
+            return Err(Error::NotActionable(format!(
+                "OBS reported {pkg_name} succeeded but downloading the built RPMs \
+                 failed: {e}. A green source without downloadable artifacts is not \
+                 a usable build — a dependent package would see every \
+                 BuildRequires as unresolvable. Re-check the OBS project's binary \
+                 publishing config for repo={repo}/arch={arch}."
+            )));
+        }
+        if downloaded_count == 0 {
+            reporter.report(&Event::CommandDone {
+                step,
+                code: 1,
+                elapsed,
+                stdout_bytes: log_bytes,
+                stderr_bytes: 0,
+            });
+            return Err(Error::NotActionable(format!(
+                "OBS reported {pkg_name} succeeded and `osc getbinaries` exited 0, \
+                 but no .rpm files appeared under {}. The project's binary \
+                 publishing for repo={repo}/arch={arch} is probably misconfigured \
+                 (empty binary set) — check the OBS <publish>/<binaries> settings.",
+                rpms_dir.display()
+            )));
         }
         reporter.report(&Event::CommandDone {
             step,
@@ -1374,6 +1442,32 @@ pub fn obs_build(
             },
         },
     })
+}
+
+#[cfg(test)]
+mod count_rpms_tests {
+    use super::*;
+
+    #[test]
+    fn count_rpms_sees_only_matching_rpm_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("python-foo-1.0-1.1.x86_64.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("python-foo-doc-1.0-1.1.noarch.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("python-bar-1.0-1.1.x86_64.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("python-foo-1.0-1.1.x86_64.src.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("not-an-rpm.txt"), b"").unwrap();
+
+        // Both the main binary and the `-doc` subpackage count — anything
+        // starting with "python-foo-" and ending with .rpm.
+        assert!(count_rpms(tmp.path(), "python-foo") >= 2);
+        assert!(count_rpms(tmp.path(), "python-bar") >= 1);
+        assert_eq!(count_rpms(tmp.path(), "python-nonexistent"), 0);
+    }
+
+    #[test]
+    fn count_rpms_tolerates_missing_dir() {
+        assert_eq!(count_rpms(std::path::Path::new("/does/not/exist"), "x"), 0);
+    }
 }
 
 #[cfg(test)]
