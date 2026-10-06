@@ -9,9 +9,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::event::{RunId, StepId};
 
 /// Sanitize a name for use as a directory component.
+///
 /// Keeps alphanumeric, `-`, `_`, `.`; replaces everything else with `_`.
+///
+/// Then rejects path-traversal shapes: a bare `.` (current directory) and
+/// `..` (parent directory) are both path components the filesystem will
+/// resolve relative to the caller's cwd, so an attacker-controlled or
+/// mis-typed name along those lines could land artifacts outside the
+/// intended run directory. Any purely-dot result is replaced with `_` so
+/// the sanitized name is always a plain, in-place directory component.
+/// Empty inputs are mapped the same way.
+///
+/// Earlier review probe: `..` survived sanitization because `.` is in the
+/// permitted character class and no post-filter check rejected the fully-
+/// dot result.
 pub fn sanitize_name(name: &str) -> String {
-    name.chars()
+    let sanitized: String = name
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c
@@ -19,7 +33,11 @@ pub fn sanitize_name(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if sanitized.is_empty() || sanitized.chars().all(|c| c == '.') {
+        return "_".to_string();
+    }
+    sanitized
 }
 
 /// Generate a run ID: `YYYYMMDD-HHMMSS-<6hexchars>`.
@@ -184,6 +202,32 @@ impl StepDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Earlier review probe: `..` survived sanitization because the pre-fix
+    /// character filter allowed `.` and had no post-filter check against
+    /// purely-dot results. A `..` directory component passed to any join
+    /// would resolve to the parent dir and escape the intended scope.
+    #[test]
+    fn sanitize_name_rejects_dot_and_dotdot_path_components() {
+        assert_eq!(sanitize_name(".."), "_");
+        assert_eq!(sanitize_name("."), "_");
+        assert_eq!(sanitize_name("..."), "_"); // multi-dot too
+        assert_eq!(sanitize_name(""), "_");
+    }
+
+    #[test]
+    fn sanitize_name_keeps_an_ordinary_name_untouched() {
+        assert_eq!(sanitize_name("python-foo"), "python-foo");
+        assert_eq!(sanitize_name("ruamel.yaml"), "ruamel.yaml");
+        assert_eq!(sanitize_name("home:you:python"), "home_you_python");
+    }
+
+    #[test]
+    fn sanitize_name_keeps_a_dot_inside_a_name() {
+        // A name like `backports.zstd` still passes — the rejection is
+        // only for a name that is NOTHING BUT dots.
+        assert_eq!(sanitize_name("backports.zstd"), "backports.zstd");
+    }
 
     /// Earlier review probe: two attempts of the same package allocated
     /// the same `01-build/build.log` because each `RunDir::pkg()` call

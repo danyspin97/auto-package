@@ -428,12 +428,38 @@ fn main() -> color_eyre::Result<()> {
             // root can hold state for several projects side by side without
             // the one-project-per-work-dir mismatch guard the previous layout
             // had to carry. `--cleanup` scopes to just this project's subdir.
+            //
+            // Guarded by an ownership marker (`.auto-package`) written at
+            // the project_dir root on first creation. `--cleanup` refuses
+            // to recursively remove a project_dir that does not carry the
+            // marker — this stops a mistyped `--work-dir` pointing at an
+            // unrelated directory (or a stray symlink into one) from being
+            // wiped out just because `--cleanup` was passed. For existing
+            // project_dirs with no marker, the user has to add it manually
+            // if they want the clean-up to proceed.
             let project_dir_name = ap_core::run::sanitize_name(&project);
             let project_dir = work_dir.join(&project_dir_name);
+            const OWNERSHIP_MARKER: &str = ".auto-package";
             if cleanup && project_dir.exists() {
+                let marker = project_dir.join(OWNERSHIP_MARKER);
+                if !marker.exists() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "--cleanup refuses to remove {} because it has no \
+                         `.auto-package` ownership marker — this directory \
+                         may not have been created by auto-package. Delete \
+                         it manually if that is wrong, or `touch {}/.auto-package` \
+                         first to accept that --cleanup can recursively \
+                         remove it on this and later runs.",
+                        project_dir.display(),
+                        project_dir.display(),
+                    ));
+                }
                 std::fs::remove_dir_all(&project_dir)?;
             }
             std::fs::create_dir_all(&project_dir)?;
+            // Write (idempotent, non-fatal) the ownership marker so later
+            // --cleanup runs can tell this directory was created by us.
+            let _ = std::fs::write(project_dir.join(OWNERSHIP_MARKER), b"");
 
             // Canonicalize so no relative path can reach a subprocess whose
             // cwd is the osc checkout.
