@@ -16,6 +16,7 @@
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// One package in the resolved closure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,13 +70,77 @@ fn cache_dir() -> std::path::PathBuf {
 
 /// Get the cache file path for a specific package resolution.
 ///
-/// Uses package name and version (or "latest") as the cache key.
+/// Delegates to [`cache_key`], which also folds in the host interpreter and
+/// platform so a cache populated under one Python/arch is not reused under
+/// another. The old narrow key (`<name>-<version>.json`) is simply never
+/// matched; the existing TTL prunes those stale files.
 fn cache_path(name: &str, version: Option<&str>) -> std::path::PathBuf {
-    let key = match version {
-        Some(v) => format!("{}-{}.json", name.to_lowercase(), v),
-        None => format!("{}-latest.json", name.to_lowercase()),
+    cache_dir().join(cache_key(name, version, &host_python(), &host_platform()))
+}
+
+/// Build the cache filename for a resolve result.
+///
+/// `pip install --dry-run` resolves against the host interpreter and host
+/// platform regardless of our `--arch`/`--distro`: `--python-version` is
+/// cosmetic once a real interpreter is running, and `pip` has no `--platform`
+/// knob that works in the default (non-wheel-download) mode. Two concurrent
+/// runs on different Python majors or different arches must not share a
+/// cached result, so interpreter + platform go into the key as a short hash.
+pub(crate) fn cache_key(
+    name: &str,
+    version: Option<&str>,
+    python: &str,
+    platform: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(python.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(platform.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    let short = &digest[..12];
+    let base = match version {
+        Some(v) => format!("{}-{}", name.to_lowercase(), v),
+        None => format!("{}-latest", name.to_lowercase()),
     };
-    cache_dir().join(key)
+    format!("{base}-{short}.json")
+}
+
+/// Host Python interpreter identifier, from `python3 --version` (e.g.
+/// `Python 3.13.1`). Falls back to the empty string if the probe fails — a
+/// missing interpreter is a bigger problem than a slightly less specific cache
+/// key, and `resolve` itself will fail loudly on the subsequent `pip` call.
+fn host_python() -> String {
+    Command::new("python3")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            // Older `python3 --version` prints to stderr; newer to stdout.
+            let mut out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if out.is_empty() {
+                out = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            }
+            out
+        })
+        .unwrap_or_default()
+}
+
+/// Host platform tag, from `sysconfig.get_platform()` (e.g.
+/// `linux-x86_64`). Falls back to `std::env::consts::OS-ARCH` when the Python
+/// probe can't run — enough to keep an x86_64 cache from being reused on
+/// aarch64 even if `python3` is missing entirely.
+fn host_platform() -> String {
+    let probed = Command::new("python3")
+        .args(["-c", "import sysconfig; print(sysconfig.get_platform())"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    probed.unwrap_or_else(|| {
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+    })
 }
 
 /// Load cached resolution result if available and fresh.
@@ -395,5 +460,65 @@ mod tests {
             r#""version": "1", "future_field": {"a": 1}"#,
         );
         assert_eq!(parse(&json).len(), 3);
+    }
+
+    #[test]
+    fn cache_key_folds_interpreter_and_platform_into_a_short_hash() {
+        let key = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        assert!(key.starts_with("httpx-0.28.1-"), "{key}");
+        assert!(key.ends_with(".json"), "{key}");
+        // 12-char hex hash segment between the version and `.json`.
+        let stem = key.strip_suffix(".json").unwrap();
+        let hash = stem.rsplit('-').next().unwrap();
+        assert_eq!(hash.len(), 12, "{key}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{key}");
+    }
+
+    #[test]
+    fn cache_key_changes_when_interpreter_changes() {
+        let a = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        let b = cache_key("httpx", Some("0.28.1"), "Python 3.14.0", "linux-x86_64");
+        assert_ne!(a, b, "interpreter must change the cache key");
+    }
+
+    #[test]
+    fn cache_key_changes_when_platform_changes() {
+        let a = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        let b = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-aarch64");
+        assert_ne!(a, b, "platform must change the cache key");
+    }
+
+    #[test]
+    fn cache_key_is_deterministic_for_the_same_inputs() {
+        let a = cache_key("Httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        let b = cache_key("Httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cache_key_lowercases_the_package_name() {
+        // Avoids `MarkupSafe` vs `markupsafe` producing two different cache
+        // entries for the same release.
+        let a = cache_key("MarkupSafe", Some("3.0.3"), "p", "l");
+        let b = cache_key("markupsafe", Some("3.0.3"), "p", "l");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cache_key_distinguishes_latest_from_pinned() {
+        let latest = cache_key("httpx", None, "p", "l");
+        let pinned = cache_key("httpx", Some("0.28.1"), "p", "l");
+        assert_ne!(latest, pinned);
+        assert!(latest.contains("httpx-latest-"), "{latest}");
+    }
+
+    #[test]
+    fn cache_key_differs_from_the_old_narrow_scheme() {
+        // Old key was `<name>-<version>.json`. The new key must never match it,
+        // so stale entries from before this change are simply ignored (the TTL
+        // in load_cached_resolve prunes them).
+        let old = "httpx-0.28.1.json";
+        let new = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        assert_ne!(old, new);
     }
 }
