@@ -4258,29 +4258,38 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
 
     let items = json.get("items")?.as_array()?;
 
-    let mut matches = Vec::new();
+    // GitHub returns the items sorted by stars DESC thanks to the
+    // `sort=stars&order=desc` query. Preserve that order by appending to
+    // two separate buckets — exact matches first, close matches after —
+    // and concatenating at the end. The pre-fix code did `matches.insert
+    // (0, ...)` for exact matches, which REVERSED their order: three
+    // repos exactly named "trantor" (an-tao/trantor, trantor-library
+    // /trantor, mrc-pop/trantor) came in from gh in star order (an-tao
+    // first), and the insert-at-zero flipped them so mrc-pop ended up
+    // first in the returned list. Downstream picked that first one, it
+    // had zero tags/releases, and the whole dep got marked unbuildable.
+    let mut exact_matches = Vec::new();
+    let mut close_matches = Vec::new();
 
-    // Look for exact or close matches in the top results
     for item in items.iter().take(10) {
         let repo_name = item.get("name")?.as_str()?;
         let html_url = item.get("html_url")?.as_str()?;
 
-        // Check if the repo name matches (case-insensitive, allowing _ vs -)
         let repo_normalized = repo_name.replace("_", "-").to_lowercase();
         let pkg_normalized = normalized.to_lowercase();
 
-        // Exact match gets priority
         if repo_normalized == pkg_normalized {
-            matches.insert(0, html_url.to_string());
-        }
-        // Close matches
-        else if repo_normalized == pkg_normalized.replace("-", "")
+            exact_matches.push(html_url.to_string());
+        } else if repo_normalized == pkg_normalized.replace("-", "")
             || repo_normalized.ends_with(&format!("-{}", pkg_normalized))
             || repo_normalized.starts_with(&format!("{}-", pkg_normalized))
         {
-            matches.push(html_url.to_string());
+            close_matches.push(html_url.to_string());
         }
     }
+
+    let mut matches = exact_matches;
+    matches.extend(close_matches);
 
     if !matches.is_empty() {
         ap_core::diag!("  found {} matching repos via GitHub API", matches.len());

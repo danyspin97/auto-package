@@ -320,94 +320,99 @@ fn resolve_dependency_config(
     // `trantor-devel` here, which `find_source_repo_candidates` couldn't
     // match. Canonicalize mechanically so a partially-translated dep
     // still has a chance.
-    let (repo_url, dep) = {
-        let candidates = upstream_name_candidates(dep);
-        let mut hit: Option<(String, String)> = None;
-        for cand in &candidates {
-            let repos = ap_build::pipeline::find_source_repo_candidates(cand);
-            if let Some(url) = repos.verified.first() {
-                if cand != dep {
-                    ap_core::diag!(
-                        "  canonicalized {dep} → {cand} to find a source \
-                         repository ({url}); agent should have translated \
-                         this name itself (strip lib/-devel/-dev cruft)"
-                    );
+    //
+    // For EACH candidate name, try EACH verified repo URL — the search
+    // can return several same-named repos (three different `trantor`
+    // projects on GitHub, for example) and the first one may be a
+    // dead fork with no tags. Only give up once no verified URL for any
+    // candidate name yields a usable release.
+    let mut all_attempts: Vec<String> = Vec::new();
+    let mut probe_failure_warnings: Vec<String> = Vec::new();
+    let name_candidates = upstream_name_candidates(dep);
+    for cand in &name_candidates {
+        let repos = ap_build::pipeline::find_source_repo_candidates(cand);
+        for repo_url in &repos.verified {
+            all_attempts.push(repo_url.clone());
+            let version = match ap_build::sources::latest_release(repo_url) {
+                Ok(v) => v,
+                Err(e) => {
+                    probe_failure_warnings
+                        .push(format!("{repo_url}: latest-release lookup failed: {e}"));
+                    continue;
                 }
-                hit = Some((url.clone(), cand.clone()));
-                break;
+            };
+            let probe = match ap_build::sources::probe(repo_url, &version, cand) {
+                Ok(p) => p,
+                Err(e) => {
+                    probe_failure_warnings.push(format!("{repo_url}: probe failed: {e}"));
+                    continue;
+                }
+            };
+            // Found a verified repo whose latest release probes cleanly.
+            if cand != dep {
+                ap_core::diag!(
+                    "  canonicalized {dep} → {cand} to find a source \
+                     repository ({repo_url}); agent should have \
+                     translated this name itself (strip lib/-devel/-dev \
+                     cruft)"
+                );
             }
-        }
-        let Some((url, resolved)) = hit else {
-            reporter.report(&Event::Warning {
-                step: None,
-                message: format!(
-                    "{dep} has no PyPI package and no discoverable public source \
-                     repository (tried: {}). If this is a system library or a \
-                     closed-source redistribution (like NVIDIA's \
-                     cuda-devel/cuda-runtime), it must already be provided by \
-                     the target project's own repository configuration; this \
-                     tool has no way to manufacture one. Otherwise, pass \
-                     --source-url {dep}=<url> to point it at the upstream repo.",
-                    candidates.join(", ")
-                ),
+            // Mirrors `cmd_build`'s explicit --source-url handling: the
+            // user-given name wins for a monorepo (it names one specific
+            // subproject), otherwise the repository's own declared name
+            // wins over our guess.
+            let effective_name = if probe.subprojects.len() > 1 {
+                cand.clone()
+            } else {
+                probe.project_name.clone().unwrap_or_else(|| cand.clone())
+            };
+            let dep_rpm = probe.ecosystem.rpm_name(&effective_name);
+            ap_core::diag!(
+                "  queuing missing dependency: {dep_rpm} \
+                 (source repository: {repo_url}, not on PyPI)"
+            );
+            return Some(PipelineConfig {
+                pkg_name: effective_name,
+                rpm_name: dep_rpm,
+                version,
+                source_repo: Some(repo_url.clone()),
+                subprojects: probe.subprojects,
+                ..config.clone()
             });
-            return None;
-        };
-        (url, resolved)
-    };
-    let dep = dep.as_str();
-
-    let version = match ap_build::sources::latest_release(&repo_url) {
-        Ok(v) => v,
-        Err(e) => {
-            reporter.report(&Event::Warning {
-                step: None,
-                message: format!(
-                    "found a likely source repository for {dep} ({repo_url}) \
-                     but could not resolve its latest release: {e}"
-                ),
-            });
-            return None;
         }
-    };
+    }
 
-    let probe = match ap_build::sources::probe(&repo_url, &version, dep) {
-        Ok(p) => p,
-        Err(e) => {
-            reporter.report(&Event::Warning {
-                step: None,
-                message: format!(
-                    "found a likely source repository for {dep} ({repo_url}) \
-                     but could not tell how to build it: {e}"
-                ),
-            });
-            return None;
-        }
-    };
-
-    // Mirrors `cmd_build`'s explicit --source-url handling: the user-given
-    // name wins for a monorepo (it names one specific subproject), otherwise
-    // the repository's own declared name wins over our guess.
-    let effective_name = if probe.subprojects.len() > 1 {
-        dep.to_string()
+    // No candidate × repo combination yielded a usable release. Build
+    // one warning that names every URL we actually tried and why each
+    // failed, so the user can see 'yes we tried an-tao/trantor but it
+    // returned Y' instead of a bare 'no source repo found'.
+    let detail = if probe_failure_warnings.is_empty() {
+        format!(
+            "no verified source repository found at all (tried names: {})",
+            name_candidates.join(", "),
+        )
     } else {
-        probe
-            .project_name
-            .clone()
-            .unwrap_or_else(|| dep.to_string())
+        format!(
+            "every verified repository failed to resolve a usable release \
+             (tried {} URL(s) across {} name candidate(s)):\n  - {}",
+            all_attempts.len(),
+            name_candidates.len(),
+            probe_failure_warnings.join("\n  - ")
+        )
     };
-    let dep_rpm = probe.ecosystem.rpm_name(&effective_name);
-    ap_core::diag!(
-        "  queuing missing dependency: {dep_rpm} (source repository: {repo_url}, not on PyPI)"
-    );
-    Some(PipelineConfig {
-        pkg_name: effective_name,
-        rpm_name: dep_rpm,
-        version,
-        source_repo: Some(repo_url.clone()),
-        subprojects: probe.subprojects,
-        ..config.clone()
-    })
+    reporter.report(&Event::Warning {
+        step: None,
+        message: format!(
+            "{dep} has no PyPI package and no usable public source \
+             repository. {detail}. If this is a system library or a \
+             closed-source redistribution (like NVIDIA's \
+             cuda-devel/cuda-runtime), it must already be provided by \
+             the target project's own repository configuration; this \
+             tool has no way to manufacture one. Otherwise, pass \
+             --source-url {dep}=<url> to point it at the upstream repo."
+        ),
+    });
+    None
 }
 
 /// Clean process-wide shutdown for Ctrl-C — restore the terminal if the TUI
