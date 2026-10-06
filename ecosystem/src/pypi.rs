@@ -1462,4 +1462,50 @@ mod tests {
         ];
         assert!(parse_dep_names(&reqs).is_empty());
     }
+
+    /// A wheel-only release — NVIDIA's CUDA toolkit packages are the real
+    /// case — has `info.version` but no sdist. `parse_release` refuses it,
+    /// which is correct for the full sdist consumers; `parse_version_only`
+    /// must still succeed, because the version is the only thing an update
+    /// sweep is asking for.
+    const WHEEL_ONLY: &str = r#"{
+      "info": {
+        "name": "nvidia-nccl-cu13",
+        "version": "2.29.7",
+        "classifiers": [],
+        "project_urls": {}
+      },
+      "urls": [
+        {
+          "digests": {"sha256": "deadbeef"},
+          "filename": "nvidia_nccl_cu13-2.29.7-py3-none-manylinux2014_x86_64.whl",
+          "packagetype": "bdist_wheel",
+          "size": 123,
+          "url": "https://files.pythonhosted.org/packages/x/nvidia_nccl_cu13-2.29.7-py3-none-manylinux2014_x86_64.whl",
+          "yanked": false
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn parse_version_only_works_on_wheel_only_release() {
+        // The whole point of this function: wheel-only releases have no sdist,
+        // but still have a valid info.version. The full parser would error
+        // here (NoSdist) and the update sweep would lose the ability to flag
+        // a bump for every NVIDIA CUDA package.
+        assert_eq!(parse_version_only(WHEEL_ONLY).unwrap(), "2.29.7");
+        assert!(matches!(
+            parse_release(WHEEL_ONLY),
+            Err(Error::NoSdist { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_version_only_ignores_the_urls_array_entirely() {
+        // Even if the urls array is completely absent (malformed response),
+        // info.version is still extractable. Belt-and-braces: the whole point
+        // is that this path never touches urls.
+        let json = r#"{"info":{"name":"foo","version":"1.2.3"}}"#;
+        assert_eq!(parse_version_only(json).unwrap(), "1.2.3");
+    }
 }

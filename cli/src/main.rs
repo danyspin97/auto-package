@@ -236,9 +236,12 @@ fn resolve_dependency_config(
     let parent_is_python = config.rpm_name.starts_with("python-");
 
     if parent_is_python {
-        let pypi_version = ap_ecosystem::pypi::fetch_latest_release(dep)
-            .ok()
-            .map(|r| r.version);
+        // Use the version-only path, not fetch_latest_release: a wheel-only
+        // release (NVIDIA CUDA toolkit packages, Triton, etc.) has a real
+        // info.version but no sdist, and fetch_latest_release would reject
+        // it on the sdist check — leaving the dependency unqueued even
+        // though PyPI could tell us its version perfectly well.
+        let pypi_version = ap_ecosystem::pypi::fetch_latest_version(dep).ok();
 
         if let Some(version) = pypi_version {
             ap_core::diag!(
@@ -916,9 +919,11 @@ fn cmd_build(
                 // goes through the same resolution a runtime-discovered
                 // dependency does, instead of hard-failing the moment PyPI
                 // comes back empty.
-                let pypi_version = ap_ecosystem::pypi::fetch_latest_release(name)
-                    .ok()
-                    .map(|r| r.version);
+                // Version-only probe, not fetch_latest_release: a wheel-only
+                // release (common for vendor SDKs) has a legitimate
+                // info.version but no sdist, and the full parser would reject
+                // it before the repo-fallback path even got a chance to run.
+                let pypi_version = ap_ecosystem::pypi::fetch_latest_version(name).ok();
                 if let Some(v) = pypi_version {
                     v
                 } else {
