@@ -229,7 +229,7 @@ fn find_explicit_target<'a>(
 /// reported it Disabled, `select_target` saw "not Failed/Unresolvable/Broken",
 /// called the package resolvable, found nothing left to build, and the whole
 /// run exited successful.
-pub(crate) fn status_is_resolvable(status: Option<&osc::BuildStatus>) -> bool {
+pub fn status_is_resolvable(status: Option<&osc::BuildStatus>) -> bool {
     matches!(
         status,
         Some(

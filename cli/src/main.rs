@@ -1124,35 +1124,79 @@ fn cmd_build(
                 })
                 .filter(|dep| attempted_deps.insert(ap_build::osc::fuzzy_key(dep)))
                 .filter(|dep| {
-                    // Skip deps already present in the project or any of its
-                    // configured build/path projects — unless it's already
-                    // present precisely because OBS reports it
-                    // Unresolvable/Failed/Broken, which is exactly the case
-                    // this queue exists to retry. The ecosystem (and so the
-                    // real RPM name) is not known yet at this point — a
-                    // system package like `cmake` or `cuda-devel` never gets
-                    // the `python-` prefix a Python dependency would, so
-                    // check both spellings rather than assuming Python.
-                    // Everything here compares by `fuzzy_key`, not the raw
-                    // string — see its doc comment for why an exact match on
-                    // a guessed or agent-reported spelling is not reliable.
+                    // Skip deps already resolvable in the project or any of
+                    // its configured build/path projects — unless the
+                    // package is in OUR project but in a non-resolvable
+                    // state (Failed/Unresolvable/Broken/Disabled/Excluded/
+                    // Unknown/missing-status), which is exactly the case
+                    // this queue exists to retry.
+                    //
+                    // This used to be a pure "name present in the union of
+                    // listed packages" check, which the Oct 6 review's
+                    // finding #1 called out for `select_target` and the
+                    // user re-reported for this mini-loop: a source entry
+                    // in the own project with status Disabled or no entry
+                    // at all for the requested distro/arch counted as
+                    // "present → resolved", silently dropping the dep from
+                    // the queue even though no built binary existed. The
+                    // UnresolvableDeps path from `pipeline.rs` reaches
+                    // here, so dropping a dep here means the whole
+                    // UnresolvableDeps queue appears to do nothing.
+                    //
+                    // Linked (upstream) project packages are still trusted
+                    // on mere presence — we don't own or rebuild those and
+                    // their per-arch build status is unreliable to query
+                    // from a project we don't control (see
+                    // `select_target`'s `linked_packages` comment).
+                    //
+                    // The ecosystem (and so the real RPM name) is not
+                    // known yet at this point — a system package like
+                    // `cmake` or `cuda-devel` never gets the `python-`
+                    // prefix a Python dependency would, so check both
+                    // spellings rather than assuming Python. Everything
+                    // here compares by `fuzzy_key`, not the raw string.
                     let bare_key = ap_build::osc::fuzzy_key(dep);
                     if stuck_seeds.contains(&bare_key) {
                         return true;
                     }
-                    let available = ap_build::osc::get_available_packages(
-                        project,
-                        ap_build::proc::Emit::run(reporter.as_ref()),
-                    );
                     let rpm_key = ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(dep));
-                    if available
-                        .iter()
-                        .any(|a| {
-                            let k = ap_build::osc::fuzzy_key(a);
-                            k == rpm_key || k == bare_key
-                        })
+                    let emit = ap_build::proc::Emit::run(reporter.as_ref());
+
+                    // Own-project packages: index by fuzzy key so a
+                    // separator mismatch can't false-miss.
+                    let own = ap_build::osc::list_project_packages(project, emit);
+                    let own_match = own.iter().find(|p| {
+                        let k = ap_build::osc::fuzzy_key(p);
+                        k == rpm_key || k == bare_key
+                    });
+                    if let Some(real_pkg) = own_match {
+                        // Package exists in our project. Only skip queuing
+                        // it when its OBS build status is actually
+                        // resolvable — i.e. there's a built binary (or one
+                        // genuinely in flight). An Unresolvable/Failed/
+                        // Broken/Disabled/Excluded/Unknown or missing-
+                        // status entry stays queued so the agent can look
+                        // at it.
+                        let statuses = ap_build::osc::get_project_build_statuses(
+                            project, distro, arch, emit,
+                        );
+                        return !ap_build::pipeline::status_is_resolvable(
+                            statuses.get(real_pkg),
+                        );
+                    }
+
+                    // Linked / build-path projects: trust presence (see
+                    // comment above).
+                    for (path_project, _repo) in
+                        ap_build::osc::get_project_repo_paths(project, emit)
                     {
-                        return false;
+                        let linked = ap_build::osc::list_project_packages(&path_project, emit);
+                        if linked.iter().any(|p| {
+                            let k = ap_build::osc::fuzzy_key(p);
+                            k == rpm_key || k == bare_key
+                        }) {
+                            return false;
+                        }
                     }
                     // A local workspace already existing for this name means
                     // some earlier round already checked it out — most
