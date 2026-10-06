@@ -752,10 +752,14 @@ pub fn parse_dep_names(requires_dist: &[String]) -> Vec<String> {
                 if m.contains("extra ==") || m.contains("extra==") {
                     return None;
                 }
-                // Skip Windows-only deps.
-                if (m.contains("sys_platform") && m.contains("win32"))
-                    || (m.contains("platform_system") && m.contains("Windows"))
-                {
+                // Skip Windows-only deps — but only when the marker is
+                // actually gated TO Windows, not when it is gated AWAY
+                // from Windows (`sys_platform != 'win32'` means
+                // "everywhere except Windows", which on Linux is a
+                // keep, not a drop). The pre-fix substring check
+                // `.contains("sys_platform") && .contains("win32")`
+                // ignored the operator and dropped both.
+                if marker_is_windows_only(m) {
                     return None;
                 }
             }
@@ -772,6 +776,44 @@ pub fn parse_dep_names(requires_dist: &[String]) -> Vec<String> {
             if name.is_empty() { None } else { Some(name) }
         })
         .collect()
+}
+
+/// True iff a PEP 508 environment marker gates the dependency *to* Windows
+/// specifically — a strict equality to `sys_platform == 'win32'` or
+/// `platform_system == 'Windows'`.
+///
+/// Deliberately does NOT drop on inequality (`sys_platform != 'win32'`,
+/// which means "install everywhere except Windows", a keep for a Linux
+/// build) or on an equality to another platform (`sys_platform == 'linux'`,
+/// also a keep). The pre-fix check was a bare substring match on
+/// "sys_platform" + "win32" and dropped both; the earlier review reproduced
+/// a `sys_platform != 'win32'` dep being silently removed from a Linux dep
+/// list that way.
+///
+/// Known limitation: a boolean `or` combining windows and another
+/// platform-specific equality — e.g. `sys_platform == 'win32' or
+/// sys_platform == 'linux'` — would still be wrongly dropped by this
+/// substring-only check. Such markers do not appear in the current
+/// dependency corpus; a full PEP 508 evaluator belongs in `pep508_rs`,
+/// not this filter.
+pub(crate) fn marker_is_windows_only(m: &str) -> bool {
+    let n = normalize_marker(m);
+    n.contains("sys_platform=='win32'") || n.contains("platform_system=='Windows'")
+}
+
+/// Strip whitespace and unify quoting on a PEP 508 marker so a substring
+/// check can match `sys_platform == 'win32'` and `sys_platform=="win32"`
+/// identically.
+fn normalize_marker(m: &str) -> String {
+    let mut out = String::with_capacity(m.len());
+    for c in m.chars() {
+        match c {
+            '"' => out.push('\''),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Extract the PyPI project name from a spec's `Source:` URL.
@@ -1359,5 +1401,65 @@ mod tests {
     #[test]
     fn tarball_filename_rejects_pure_name() {
         assert!(pypi_name_from_versioned_tarball("something.tar.gz", "9.9.9").is_none());
+    }
+
+    /// Earlier review probe: `sys_platform != 'win32'` was dropped by the
+    /// substring-only check. That marker means "install everywhere except
+    /// Windows", which on a Linux build is a KEEP, not a drop.
+    #[test]
+    fn marker_filter_keeps_a_sys_platform_not_equal_win32_dep() {
+        // The real shape of the bug — one top-level dep kept, one skipped.
+        let reqs = vec![
+            "requests; sys_platform != 'win32'".to_string(),
+            "pywin32; sys_platform == 'win32'".to_string(),
+        ];
+        assert_eq!(
+            parse_dep_names(&reqs),
+            vec!["requests"],
+            "the != 'win32' dep must survive; only the == 'win32' one is Windows-only"
+        );
+    }
+
+    #[test]
+    fn marker_filter_drops_both_equality_quote_styles() {
+        for src in [
+            "winreg; sys_platform == 'win32'",
+            "winreg; sys_platform==\"win32\"",
+            "pywintypes; platform_system == 'Windows'",
+        ] {
+            let reqs = vec![src.to_string()];
+            assert!(
+                parse_dep_names(&reqs).is_empty(),
+                "{src:?} is Windows-only; must be dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn marker_filter_keeps_a_linux_only_dep_rather_than_dropping_it_as_if_windows_only() {
+        let reqs = vec!["evdev; sys_platform == 'linux'".to_string()];
+        assert_eq!(
+            parse_dep_names(&reqs),
+            vec!["evdev"],
+            "'linux' equality has nothing to do with Windows; must not be dropped"
+        );
+    }
+
+    #[test]
+    fn marker_filter_keeps_a_platform_system_not_equal_windows_dep() {
+        let reqs = vec!["posix_only; platform_system != 'Windows'".to_string()];
+        assert_eq!(parse_dep_names(&reqs), vec!["posix_only"]);
+    }
+
+    #[test]
+    fn marker_filter_drops_a_windows_only_marker_with_a_trailing_and_clause() {
+        // AND-connected: for the whole marker to be true on Linux, every
+        // conjunct must hold on Linux. `sys_platform == 'win32'` is false
+        // on Linux, so the whole marker is false, so the dep is Windows-
+        // only in effect. The substring check correctly catches this.
+        let reqs = vec![
+            "colorama; sys_platform == 'win32' and python_version >= '3.10'".to_string(),
+        ];
+        assert!(parse_dep_names(&reqs).is_empty());
     }
 }
