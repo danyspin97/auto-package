@@ -18,6 +18,80 @@ use std::path::Path;
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 
+/// How an archive is wrapped on disk.
+///
+/// PyPI's historical default is `.tar.gz`, but every other shape in this list
+/// still turns up: `.zip` is an older sdist form the index still accepts,
+/// `.tar.bz2` lives on in pre-2015 uploads, and `.tar.zst` is what the Rust
+/// `ap_service` emits when it hands tarballs back for inspection. Previously
+/// the whole module hard-coded gzip and only wheels took the unzip path, so
+/// any of these other formats crashed inspection before the pipeline could
+/// even report what it had received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    TarGz,
+    TarBz2,
+    TarZstd,
+    /// A `.zip` sdist. Container-wise indistinguishable from `.whl`; kept
+    /// separate for diagnostics.
+    Zip,
+    /// A Python wheel — zip container, no top-level directory wrapper.
+    Wheel,
+}
+
+fn classify(path: &Path) -> Option<ArchiveKind> {
+    let s = path.to_string_lossy().to_lowercase();
+    if s.ends_with(".tar.gz") || s.ends_with(".tgz") {
+        Some(ArchiveKind::TarGz)
+    } else if s.ends_with(".tar.bz2") || s.ends_with(".tbz2") {
+        Some(ArchiveKind::TarBz2)
+    } else if s.ends_with(".tar.zst") || s.ends_with(".tzst") {
+        Some(ArchiveKind::TarZstd)
+    } else if s.ends_with(".whl") {
+        Some(ArchiveKind::Wheel)
+    } else if s.ends_with(".zip") {
+        Some(ArchiveKind::Zip)
+    } else {
+        None
+    }
+}
+
+/// Open a compressed-tar archive as a boxed streaming reader.
+///
+/// Returned `Read` is a reader over the uncompressed tar bytes, ready for
+/// `tar::Archive::new`. The kind is passed in rather than re-sniffed so one
+/// callsite can decide what the archive is and both `extract` and
+/// `inspect_preferring` reuse the same answer.
+fn open_tar(
+    path: &Path,
+    kind: ArchiveKind,
+) -> Result<tar::Archive<Box<dyn Read>>, Error> {
+    let file = std::fs::File::open(path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let reader: Box<dyn Read> = match kind {
+        ArchiveKind::TarGz => Box::new(GzDecoder::new(file)),
+        ArchiveKind::TarBz2 => Box::new(bzip2::read::BzDecoder::new(file)),
+        ArchiveKind::TarZstd => {
+            let dec = zstd::Decoder::new(file).map_err(|e| Error::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            Box::new(dec)
+        }
+        ArchiveKind::Zip | ArchiveKind::Wheel => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::other(
+                    "zip-shaped archive is not a tar; call the zip path",
+                ),
+            });
+        }
+    };
+    Ok(tar::Archive::new(reader))
+}
+
 /// What the sdist says about its own build system.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildSystem {
@@ -105,44 +179,81 @@ pub enum Error {
 /// contain exactly one top-level directory (e.g. `markupsafe-3.0.3/`); after
 /// extraction that directory will be at `dest/<top-level>/`.
 ///
-/// A `.whl` is a zip archive with no wrapping top-level directory — it
-/// unpacks flat into `dest` itself. Wheels only reach this function when a
-/// release has no sdist and no source repository (see
-/// `ap_build::pipeline::generate_wheel_binary_spec`), so there is no
-/// pyproject.toml/build-system to inspect either.
+/// Dispatches on the file extension — `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`,
+/// `.tar.zst`/`.tzst`, `.zip`, and `.whl` are all accepted. A `.whl` (and a
+/// bare `.zip`) is a zip archive with no wrapping top-level directory — it
+/// unpacks flat into `dest` itself. The gzip, bzip2 and zstd paths all share
+/// the tar iterator; only the outer decoder differs.
 pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
-    if tarball.extension().and_then(|e| e.to_str()) == Some("whl") {
-        return extract_zip(tarball, dest);
-    }
-
-    let file = std::fs::File::open(tarball).map_err(|e| Error::Io {
+    let kind = classify(tarball).ok_or_else(|| Error::Io {
         path: tarball.to_path_buf(),
-        source: e,
+        source: std::io::Error::other(format!(
+            "unrecognised archive extension on {}: expected one of \
+             .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.zst/.tzst, .zip, .whl",
+            tarball.display(),
+        )),
     })?;
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
-    archive.unpack(dest).map_err(Error::Tar)?;
-    Ok(())
+    match kind {
+        ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd => {
+            let mut archive = open_tar(tarball, kind)?;
+            archive.unpack(dest).map_err(Error::Tar)?;
+            Ok(())
+        }
+        ArchiveKind::Zip | ArchiveKind::Wheel => extract_zip(tarball, dest),
+    }
 }
 
+/// Extract a zip-shaped archive (`.whl` or `.zip`) using the `zip` crate.
+///
+/// Pure-Rust, no reliance on the system `unzip` binary — the previous
+/// implementation shelled out, which quietly failed on build hosts without
+/// InfoZip installed and left no artifact behind to diagnose from.
 fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
-    let out = std::process::Command::new("unzip")
-        .arg("-q")
-        .arg("-o")
-        .arg(archive)
-        .arg("-d")
-        .arg(dest)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| Error::Io { path: archive.to_path_buf(), source: e })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(Error::Io {
+    let file = std::fs::File::open(archive).map_err(|e| Error::Io {
+        path: archive.to_path_buf(),
+        source: e,
+    })?;
+    let mut zip_archive = zip::ZipArchive::new(file).map_err(|e| Error::Io {
+        path: archive.to_path_buf(),
+        source: std::io::Error::other(e.to_string()),
+    })?;
+    std::fs::create_dir_all(dest).map_err(|e| Error::Io {
+        path: dest.to_path_buf(),
+        source: e,
+    })?;
+    for i in 0..zip_archive.len() {
+        let mut entry = zip_archive.by_index(i).map_err(|e| Error::Io {
             path: archive.to_path_buf(),
-            source: std::io::Error::other(format!(
-                "unzip exited with {}: {stderr}",
-                out.status
-            )),
-        });
+            source: std::io::Error::other(e.to_string()),
+        })?;
+        // `enclosed_name` filters out absolute paths and `..` traversal — same
+        // guard the tar reader applies — so a hostile wheel can't escape
+        // `dest`.
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
+        let out_path = dest.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path).map_err(|e| Error::Io {
+                path: out_path.clone(),
+                source: e,
+            })?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+        let mut out_file = std::fs::File::create(&out_path).map_err(|e| Error::Io {
+            path: out_path.clone(),
+            source: e,
+        })?;
+        std::io::copy(&mut entry, &mut out_file).map_err(|e| Error::Io {
+            path: out_path.clone(),
+            source: e,
+        })?;
     }
     Ok(())
 }
@@ -167,8 +278,126 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
     // Compare directory names the way pip does, so `cuda-python` finds
     // `cuda_python/`.
     let normalized = want.map(|w| w.to_lowercase().replace(['-', '.'], "_"));
+    // Pick the right decoder up front: a `.tar.zst` fed through GzDecoder
+    // produces nothing and inspection reports no manifests, so dispatch on
+    // the extension before touching the stream.
+    let kind = classify(path).ok_or_else(|| Error::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(format!(
+            "unrecognised archive extension on {}: expected one of \
+             .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.zst/.tzst, .zip, .whl",
+            path.display(),
+        )),
+    })?;
+    let entries = match kind {
+        ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd => {
+            collect_tar_entries(path, kind)?
+        }
+        ArchiveKind::Zip | ArchiveKind::Wheel => collect_zip_entries(path)?,
+    };
+    inspect_from_entries(entries, normalized.as_deref())
+}
+
+/// One archive entry, flattened into the shape the inspection body needs.
+///
+/// `contents` is pre-read for the manifest files that the body actually
+/// opens (pyproject.toml, Cargo.toml) and `None` for everything else — the
+/// body never pulls bytes out of entries it doesn't need, so skipping the
+/// read for ordinary source files keeps the memory profile the same as the
+/// previous streaming implementation.
+struct InspectEntry {
+    path_str: String,
+    is_dir: bool,
+    contents: Option<String>,
+}
+
+fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntry>, Error> {
+    let mut archive = open_tar(path, kind)?;
+    let mut out = Vec::new();
+    for entry in archive.entries().map_err(Error::Tar)? {
+        let mut entry = entry.map_err(Error::Tar)?;
+        let entry_path = entry.path().map_err(Error::Tar)?.into_owned();
+        if entry_path.is_absolute()
+            || entry_path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            continue;
+        }
+        let path_str = entry_path.to_string_lossy().into_owned();
+        let is_dir = path_str.ends_with('/');
+        let file_name = entry_path.file_name().and_then(|n| n.to_str());
+        let contents = if matches!(file_name, Some("pyproject.toml" | "Cargo.toml")) {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf).map_err(|e| Error::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            Some(buf)
+        } else {
+            None
+        };
+        out.push(InspectEntry { path_str, is_dir, contents });
+    }
+    Ok(out)
+}
+
+/// Walk a zip-shaped archive (`.zip` or `.whl`) producing the same
+/// `InspectEntry` list that `collect_tar_entries` builds for tar-shaped
+/// archives. A `.whl` has no wrapping top-level directory — the depth
+/// bookkeeping in `inspect_from_entries` handles that automatically.
+fn collect_zip_entries(path: &Path) -> Result<Vec<InspectEntry>, Error> {
+    let file = std::fs::File::open(path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let mut zip_archive = zip::ZipArchive::new(file).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(e.to_string()),
+    })?;
+    let mut out = Vec::new();
+    for i in 0..zip_archive.len() {
+        let mut entry = zip_archive.by_index(i).map_err(|e| Error::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(e.to_string()),
+        })?;
+        let name = entry.name().to_string();
+        // Mirror the tar guard: skip absolute paths and `..` traversal.
+        if std::path::Path::new(&name).is_absolute()
+            || std::path::Path::new(&name)
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            continue;
+        }
+        let is_dir = entry.is_dir();
+        let file_name = std::path::Path::new(&name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        let contents = if !is_dir
+            && matches!(file_name.as_deref(), Some("pyproject.toml" | "Cargo.toml"))
+        {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf).map_err(|e| Error::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            Some(buf)
+        } else {
+            None
+        };
+        out.push(InspectEntry { path_str: name, is_dir, contents });
+    }
+    Ok(out)
+}
+
+fn inspect_from_entries(
+    entries: Vec<InspectEntry>,
+    normalized: Option<&str>,
+) -> Result<SdistInfo, Error> {
     let wanted = |components: &[std::path::Component<'_>]| -> bool {
-        let (Some(want), true) = (normalized.as_deref(), components.len() >= 3) else {
+        let (Some(want), true) = (normalized, components.len() >= 3) else {
             return false;
         };
         components[components.len() - 2]
@@ -178,12 +407,6 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
             .replace(['-', '.'], "_")
             == want
     };
-
-    let file = std::fs::File::open(path).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let mut archive = tar::Archive::new(GzDecoder::new(file));
 
     let mut top_level_dir: Option<String> = None;
     // Shallowest manifest of each kind, with its depth below the top level.
@@ -200,24 +423,12 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
     let mut has_tests = false;
     let mut files: Vec<String> = Vec::new();
 
-    for entry in archive.entries().map_err(Error::Tar)? {
-        let mut entry = entry.map_err(Error::Tar)?;
-        // `.into_owned()` so the path doesn't borrow `entry`, allowing the
-        // subsequent `read_to_string` call on the same entry.
-        let entry_path = entry.path().map_err(Error::Tar)?.into_owned();
+    for entry in entries {
+        let entry_path = std::path::PathBuf::from(&entry.path_str);
+        let path_str = &entry.path_str;
 
-        if entry_path.is_absolute()
-            || entry_path
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
-        {
-            continue;
-        }
-
-        let path_str = entry_path.to_string_lossy();
-
-        if !path_str.ends_with('/') {
-            files.push(path_str.to_string());
+        if !entry.is_dir {
+            files.push(path_str.clone());
         }
 
         let components: Vec<_> = entry_path.components().collect();
@@ -238,31 +449,25 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
         let depth = components.len().saturating_sub(2);
         let file_name = components.last().map(|c| c.as_os_str());
 
-        let read_src = |entry: &mut tar::Entry<'_, _>| -> Result<String, Error> {
-            let mut src = String::new();
-            entry.read_to_string(&mut src).map_err(|e| Error::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
-            Ok(src)
-        };
-
         let rank = (depth, if wanted(&components) { 0 } else { 1 });
 
-        if file_name == Some("pyproject.toml".as_ref()) {
+        if file_name == Some("pyproject.toml".as_ref())
+            && let Some(src) = &entry.contents
+        {
             let dir = components[1..components.len() - 1]
                 .iter()
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            py_manifests.push((depth, dir, read_src(&mut entry)?));
+            py_manifests.push((depth, dir, src.clone()));
             continue;
         }
 
         if file_name == Some("Cargo.toml".as_ref())
             && cargo.as_ref().is_none_or(|(r, _)| rank < *r)
+            && let Some(src) = &entry.contents
         {
-            cargo = Some((rank, read_src(&mut entry)?));
+            cargo = Some((rank, src.clone()));
             continue;
         }
 
@@ -281,12 +486,11 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
             autotools_manifest = true;
         }
 
-        if !has_c {
-            if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "c" | "cpp" | "cxx" | "pyx" | "pxd") {
-                    has_c = true;
-                }
-            }
+        if !has_c
+            && let Some(ext) = entry_path.extension().and_then(|e| e.to_str())
+            && matches!(ext, "c" | "cpp" | "cxx" | "pyx" | "pxd")
+        {
+            has_c = true;
         }
 
         if !has_tests {
@@ -300,7 +504,6 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
                 has_tests = true;
             }
         }
-
     }
 
     files.sort();
@@ -314,7 +517,7 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
     };
     let rank_of = |depth: usize, dir: &str| {
         let norm = dir.to_lowercase().replace(['-', '.'], "_");
-        (depth, normalized.as_deref() != Some(norm.as_str()))
+        (depth, normalized != Some(norm.as_str()))
     };
     py_manifests.sort_by(|a, b| {
         rank_of(a.0, &a.1)
@@ -391,7 +594,7 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
             // Same tie-break as the manifest choice above.
             dirs.sort_by_key(|d| {
                 let norm = d.to_lowercase().replace(['-', '.'], "_");
-                (normalized.as_deref() != Some(norm.as_str()), d.clone())
+                (normalized != Some(norm.as_str()), d.clone())
             });
             dirs.into_iter().next()
         }
@@ -735,5 +938,180 @@ build-backend = "flit_core.buildapi"
         let bs = build_system_from_toml(src);
         assert_eq!(bs.requires, ["flit_core>=3.2.0,<4"]);
         assert_eq!(bs.backend.as_deref(), Some("flit_core.buildapi"));
+    }
+
+    // --- Archive-format dispatch ------------------------------------------
+    //
+    // Each format gets a tiny single-file fixture, extracted into a tempdir,
+    // and the extracted file's contents are checked byte-for-byte. The
+    // fixtures intentionally use the same file name across formats so a
+    // single `expect_extracted` helper verifies everything after extraction.
+
+    fn write_tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut buf);
+            for (name, body) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                ar.append_data(&mut header, name, *body).unwrap();
+            }
+            ar.finish().unwrap();
+        }
+        buf
+    }
+
+    fn write_tar_bz2(path: &Path, entries: &[(&str, &[u8])]) {
+        let tar_bytes = write_tar_bytes(entries);
+        let file = std::fs::File::create(path).unwrap();
+        let mut enc = bzip2::write::BzEncoder::new(file, bzip2::Compression::fast());
+        std::io::Write::write_all(&mut enc, &tar_bytes).unwrap();
+        enc.finish().unwrap();
+    }
+
+    fn write_tar_zst(path: &Path, entries: &[(&str, &[u8])]) {
+        let tar_bytes = write_tar_bytes(entries);
+        let file = std::fs::File::create(path).unwrap();
+        let mut enc = zstd::Encoder::new(file, 3).unwrap();
+        std::io::Write::write_all(&mut enc, &tar_bytes).unwrap();
+        enc.finish().unwrap();
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(body).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    /// Every extraction test shares the same fixture: a one-file archive
+    /// whose extracted path and body are known in advance.
+    fn make_fixture_entries() -> &'static [(&'static str, &'static [u8])] {
+        &[("thing-1.0/README", b"hello\n")]
+    }
+
+    fn assert_extracted(dest: &Path) {
+        let p = dest.join("thing-1.0").join("README");
+        let body = std::fs::read(&p).expect("extracted file exists");
+        assert_eq!(body, b"hello\n");
+    }
+
+    #[test]
+    fn extract_tar_gz() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.gz");
+        write_tar(&src, make_fixture_entries());
+        let out = dir.path().join("out");
+        extract(&src, &out).unwrap();
+        assert_extracted(&out);
+    }
+
+    #[test]
+    fn extract_tar_bz2() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.bz2");
+        write_tar_bz2(&src, make_fixture_entries());
+        let out = dir.path().join("out");
+        extract(&src, &out).unwrap();
+        assert_extracted(&out);
+    }
+
+    #[test]
+    fn extract_tar_zst() {
+        // The Rust ap_service emits .tar.zst — this is the format the review
+        // specifically flagged as needing extraction support.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.zst");
+        write_tar_zst(&src, make_fixture_entries());
+        let out = dir.path().join("out");
+        extract(&src, &out).unwrap();
+        assert_extracted(&out);
+    }
+
+    #[test]
+    fn extract_zip_sdist() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.zip");
+        write_zip(&src, make_fixture_entries());
+        let out = dir.path().join("out");
+        extract(&src, &out).unwrap();
+        assert_extracted(&out);
+    }
+
+    #[test]
+    fn extract_wheel_still_works() {
+        // Same container as .zip, but with the `.whl` role — must take the
+        // same code path and continue to extract without the system `unzip`
+        // binary (which the old implementation shelled out to).
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("foo-1.0-py3-none-any.whl");
+        write_zip(&src, &[("foo-1.0.dist-info/METADATA", b"Name: foo\n")]);
+        let out = dir.path().join("out");
+        extract(&src, &out).unwrap();
+        let body = std::fs::read(out.join("foo-1.0.dist-info/METADATA")).unwrap();
+        assert_eq!(body, b"Name: foo\n");
+    }
+
+    #[test]
+    fn extract_refuses_unrecognised_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("thing.rar");
+        std::fs::write(&src, b"not an archive").unwrap();
+        let out = dir.path().join("out");
+        let err = extract(&src, &out).expect_err("rar is not supported");
+        assert!(matches!(err, Error::Io { .. }), "{err:?}");
+    }
+
+    // --- Inspection across formats ----------------------------------------
+
+    #[test]
+    fn inspect_tar_zst() {
+        // The real motivation: a .tar.zst used to be fed to GzDecoder and
+        // inspection reported no manifests, so an ap_service tarball looked
+        // like an empty archive.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.zst");
+        write_tar_zst(
+            &src,
+            &[("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n")],
+        );
+        let info = inspect(&src).unwrap();
+        assert_eq!(info.project_name.as_deref(), Some("thing"));
+        assert!(info.python_packaging);
+    }
+
+    #[test]
+    fn inspect_tar_bz2() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.bz2");
+        write_tar_bz2(
+            &src,
+            &[("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n")],
+        );
+        let info = inspect(&src).unwrap();
+        assert_eq!(info.project_name.as_deref(), Some("thing"));
+    }
+
+    #[test]
+    fn inspect_zip_sdist() {
+        // A .zip sdist is a legacy shape that PyPI still accepts — inspection
+        // has to look inside it the same way it does for tarballs.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.zip");
+        write_zip(
+            &src,
+            &[("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n")],
+        );
+        let info = inspect(&src).unwrap();
+        assert_eq!(info.project_name.as_deref(), Some("thing"));
+        assert!(info.python_packaging);
     }
 }
