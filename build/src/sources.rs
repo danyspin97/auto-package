@@ -421,9 +421,22 @@ fn find_matching_tag(tags: &[String], version: &str, repo: &str) -> Option<Strin
 
 /// Candidate archive URLs for a release tag, best first.
 ///
-/// Now queries the forge API for actual tags and tries to find an exact match.
-/// If no exact match is found, automatically uses the latest available tag.
-/// Falls back to pattern-based guessing if API query fails.
+/// Queries the forge API for actual tags and tries to find an exact match
+/// for `version`. If no exact match is found in the first 100 tags the API
+/// returns, this used to silently pick the latest available tag and let
+/// the caller name the resulting tarball with the REQUESTED version — the
+/// recipe then packaged completely different source bytes under the
+/// requested version. The Sep review reproduced this and the Oct follow-up
+/// confirmed it was still live: fetching e.g. `demo==1.5.0` against a repo
+/// whose first 100 tags only cover `1.6.x+` happily built `1.6.3` and
+/// labelled the result `1.5.0`.
+///
+/// The identity-breaking fallback is removed. If the exact version is not
+/// present among the API tags, we return pattern-based guesses only
+/// (`v<ver>`, `<ver>`, `<repo>-<ver>`, …) — the HTTP fetch then 404s on
+/// every guess and the caller fails loudly, surfacing "this release is
+/// not where you think it is" instead of silently substituting a
+/// different one.
 ///
 /// Forges disagree on the path: GitHub and the Gitea/Forgejo family serve
 /// `/archive/refs/tags/<tag>.tar.gz`, GitLab serves
@@ -435,39 +448,40 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
 
     let mut tags = Vec::new();
 
-    // Try to get actual tags from the API first
-    if let Ok(repo_tags) = get_repo_tags(repo_url) {
-        ap_core::diag!("  found {} tags via API", repo_tags.len());
-
-        // Try to find exact or close match
-        if let Some(matching_tag) = find_matching_tag(&repo_tags, version, repo) {
-            ap_core::diag!("  ✓ found matching tag: {}", matching_tag);
-            tags.push(matching_tag);
-        } else if !repo_tags.is_empty() {
-            // No exact match - automatically use the latest tag
-            let latest = &repo_tags[0]; // Tags are usually newest-first
-            let latest_version = version_from_tag(latest, repo);
-            ap_core::diag!("  ⚠ version {} not found in repository", version);
-            ap_core::diag!("  ✓ using latest available version: {} (tag: {})", latest_version, latest);
-            tags.push(latest.clone());
-        } else {
-            ap_core::diag!("  ⚠ no tags found via API, falling back to pattern guessing");
+    // Query API first for an exact match.
+    match get_repo_tags(repo_url) {
+        Ok(repo_tags) => {
+            ap_core::diag!("  found {} tags via API", repo_tags.len());
+            if let Some(matching_tag) = find_matching_tag(&repo_tags, version, repo) {
+                ap_core::diag!("  ✓ found matching tag: {}", matching_tag);
+                tags.push(matching_tag);
+            } else {
+                ap_core::diag!(
+                    "  ⚠ version {version} not found in the first {} API tags; \
+                     tag-pattern guesses only (the download will 404 if none hit, \
+                     rather than silently substituting a different release)",
+                    repo_tags.len()
+                );
+            }
         }
-    } else {
-        ap_core::diag!("  API query failed, using pattern-based tag guessing");
+        Err(e) => {
+            ap_core::diag!("  API query failed ({e}); using pattern-based tag guessing");
+        }
     }
 
-    // Add common patterns as fallback (only if we didn't get a tag from API)
-    if tags.is_empty() {
-        tags.extend([
-            format!("v{}", version),
-            version.to_string(),
-            format!("{}-{}", repo, version),
-            format!("{}-v{}", repo, version),
-            format!("release-{}", version),
-            format!("release/{}", version),
-        ]);
-    }
+    // Pattern-based guesses: added unconditionally. When the API resolved
+    // an exact tag they are redundant (will 404 or match the already-
+    // picked one and get deduped); when the API didn't resolve, they are
+    // the only chance of a fetch succeeding, and the caller treats a
+    // 404-on-every-URL as the hard failure it should be.
+    tags.extend([
+        format!("v{}", version),
+        version.to_string(),
+        format!("{}-{}", repo, version),
+        format!("{}-v{}", repo, version),
+        format!("release-{}", version),
+        format!("release/{}", version),
+    ]);
 
     // Remove duplicates while preserving order
     let mut seen = std::collections::HashSet::new();
