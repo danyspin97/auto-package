@@ -135,6 +135,15 @@ pub struct PkgState {
     /// reviewed just because the version tag matches.
     #[serde(default)]
     pub reviewed_spec_hash: Option<u64>,
+    /// Total model-call USD spent across every `run_package` invocation
+    /// for this package. Persisted so an outer-loop retry can enforce
+    /// \`budget_usd\` as a durable per-package cap rather than resetting
+    /// to zero on every call — the Sep review called out the per-call
+    /// reset as "neither a whole-closure nor a durable per-package cap".
+    /// A fresh `run_package` sums `budget_usd - prior_spend` and refuses
+    /// agent turns once that reaches zero.
+    #[serde(default)]
+    pub cumulative_spent_usd: f64,
 }
 
 /// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
@@ -1029,7 +1038,21 @@ fn run_package_inner(
 
     // ── Build + fix loop ──────────────────────────────────────────────────────
     let mut attempts = 0usize;
-    let mut spent_usd = 0.0f64;
+    // Resume cumulative spend from state.json so an outer-loop retry
+    // enforces `budget_usd` as a durable per-package cap, not a per-call
+    // reset (Sep review). An agent-turn tick on a retry still has
+    // `budget_usd - prior_cumulative` left, not a fresh `budget_usd`.
+    let mut spent_usd = PkgState::load(&ws).cumulative_spent_usd;
+    if spent_usd > 0.0 {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: format!(
+                "{rpm_name}: resuming with ${spent_usd:.4} already spent on this \
+                 package in prior runs (budget cap ${:.4})",
+                config.budget_usd
+            ),
+        });
+    }
     let mut session_id: Option<String> = None;
 
     let build_log_nonempty = ws
@@ -1968,6 +1991,14 @@ fn agent_turn(
 
     *session_id = outcome.session_id.clone();
     *spent_usd += outcome.usage.cost_usd();
+    // Persist the running total so an outer-loop retry (or a crash
+    // mid-pipeline) resumes with the correct cumulative spend instead
+    // of a reset-to-zero cap. See `PkgState::cumulative_spent_usd`.
+    if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
+        let mut st = PkgState::load(&ws);
+        st.cumulative_spent_usd = *spent_usd;
+        let _ = st.save(&ws);
+    }
 
     let prompt_path = step.file("prompt.md");
     let _ = std::fs::write(&prompt_path, &outcome.prompt);
@@ -4125,6 +4156,7 @@ mod tests {
             last_failure_reason: None,
             reviewed_version: None,
             reviewed_spec_hash: None,
+            cumulative_spent_usd: 0.0,
         };
         assert!(
             !state.is_built("1.2.3"),
@@ -4140,6 +4172,7 @@ mod tests {
             last_failure_reason: None,
             reviewed_version: None,
             reviewed_spec_hash: None,
+            cumulative_spent_usd: 0.0,
         };
         assert!(make("success").is_built("1.0"));
         assert!(!make("failed").is_built("1.0"));
@@ -4162,6 +4195,7 @@ mod tests {
             last_failure_reason: Some("agent error: claude exited 1".into()),
             reviewed_version: None,
             reviewed_spec_hash: None,
+            cumulative_spent_usd: 0.0,
         };
         let json = serde_json::to_string(&fresh).unwrap();
         let back: PkgState = serde_json::from_str(&json).unwrap();
