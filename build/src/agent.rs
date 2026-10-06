@@ -92,6 +92,24 @@ openSUSE spec conventions to keep in mind:
    or `zypper what-provides` to find the package that provides them (see the
    "Missing C Headers and Libraries" section below for the search pattern).
 
+   **Cython packages: force regeneration by removing PKG-INFO.** When the
+   package `BuildRequires: %{python_module Cython ...}` and ships `.pyx`
+   files, Cython treats the presence of `PKG-INFO` in the source root as a
+   signal that the sdist already contains pre-generated `.c` files and
+   skips cythonization — meaning the pinned Cython version never actually
+   runs. Add this to `%prep` after `%autosetup` to force regeneration:
+     rm -f PKG-INFO
+   Real example: `python-numpy`.
+
+   For packages that ignore PKG-INFO and check for the generated files
+   themselves (lxml's setup.py probes `src/lxml/lxml.etree.c` directly),
+   the stronger form is to delete every generated artifact outright:
+     find -name '*.c' -delete -print
+     rm -f src/<pkg>/<pkg>.etree.h src/<pkg>/<pkg>.etree_api.h
+   Only reach for the aggressive form when `rm -f PKG-INFO` alone doesn't
+   trigger regeneration (build.log still reports the pinned Cython was
+   not invoked). Real example: `python-lxml`.
+
    When the headers come from a *Python* package, the base package usually
    does not carry them — the -devel flavour does. A build that fails on
    `pybind11/pybind11.h: No such file` usually needs
@@ -109,7 +127,11 @@ openSUSE spec conventions to keep in mind:
    that is harmless but adding it INSTEAD is wrong; only `-devel`, with no
    plain package, leaves `pybind11.get_include()` unable to `import pybind11`
    at all. Read setup.py/CMakeLists.txt to see which lookup it uses before
-   picking.
+   picking. `pybind11.get_cmake_dir()` counts as the CMake case too — it
+   just returns the path to pybind11's own CMake config files for a
+   manual `cmake -Dpybind11_DIR=...` invocation, so it still needs
+   `%{python_module pybind11-devel}` for `find_package(pybind11 CONFIG)`
+   to succeed (real example: `python-tokenspeed-triton`).
 
    Remove installed C source files in %install:
      %python_expand rm -f %{buildroot}%{$python_sitearch}/<pkg>/*.c
@@ -270,6 +292,19 @@ openSUSE spec conventions to keep in mind:
    server).
 
    (i)   Deselect individual tests:  %pytest -k 'not test_foo and not test_bar'
+
+         **Recognize this shape immediately rather than spending an attempt
+         on an environment fix first**: a test that re-invokes `python -I`
+         (isolated mode — common for a `python -m <pkg>.cli ...`-style
+         subprocess test) structurally cannot see `PYTHONPATH`, no matter how
+         it is exported in the build environment — `-I` ignores it by
+         design, not as a bug to work around. Go straight to deselecting
+         these tests; do not try a `PYTHONPATH`/`sitecustomize` fix, since it
+         cannot work (real example: `python-backports-zstd`'s
+         `CommandLineTest` tests — the first attempt tried setting
+         `PYTHONPATH` for exactly this failure and cost a whole extra
+         attempt before deselecting them instead).
+
    (ii)  Ignore a file or directory: %pytest --ignore=tests/contrast
          If the macro mangles a path argument, set the option through the
          environment instead — this always works:
@@ -390,6 +425,26 @@ openSUSE spec conventions to keep in mind:
      traceback. Add every plugin implied by addopts/markers as a
      BuildRequires whenever `filterwarnings = ['error']` is set, rather than
      only the ones that produce an obvious ModuleNotFoundError.
+   - **The test *code* itself is incompatible with a newer pytest — this
+     needs a patch, not a config change or a skip.** Not every pytest-version
+     failure is fixable by an `addopts`/ini-level change: pytest 9.1 removed
+     the ability for a `@pytest.fixture(scope='class')` method to take
+     `self` — it must become a `@classmethod` taking `cls` instead — and a
+     test file written for an older pytest fails with a confusing
+     fixture-resolution error that looks like a code bug in the package, not
+     a version mismatch. Before reaching for convention 11's skip ladder,
+     check whether this is a known, already-fixed-elsewhere issue: search the
+     upstream repo's issues/PRs, or another distro's packaging of the same
+     project (Debian/Fedora), for a pytest-9.1-compatibility patch — this is
+     common enough that one often already exists and just needs adapting,
+     rather than hand-converting every affected fixture yourself. Apply it
+     as a quilt patch (convention 14) tagged `PATCH-FIX-UPSTREAM` with the
+     original commit/PR cited, the same as any other upstream fix — patching
+     the test suite to pass is strictly better than skipping it, since it
+     keeps real coverage instead of discarding it. (Real example:
+     `python-pydantic-core` in openSUSE's own `devel:languages:python`
+     carries exactly this shape of patch, sourced from Debian's packaging,
+     for this exact pytest 9.1 fixture change.)
 
 13. **Non-test build failures: Source0 mismatches and offline %build errors.**
    Two build-time (not %check-time) failure patterns worth recognizing on
@@ -538,6 +593,25 @@ openSUSE spec conventions to keep in mind:
    error lists every file it found, which is exactly the set %files must
    account for.
 
+   **A bare `<name>.py` file is a different shape from a package directory —
+   check which one you actually have before writing %files.** A project
+   using `py_modules = ["<name>"]` (setup.py/setup.cfg) or an equivalent
+   pyproject.toml `[tool.setuptools] py-modules` entry, rather than
+   `packages = [...]`, installs a single top-level `.py` file with no
+   `__init__.py` and no directory at all — the generator's default
+   `package_name/` (with a trailing slash) then claims a directory that
+   does not exist and fails with 'File not found'. Confirm by checking
+   whether `source/`'s top-level entry for the import name (convention 16)
+   is a file or a directory, and write the file-shaped entries instead:
+     %{python_sitelib}/<name>.py
+     %{python_sitelib}/__pycache__/<name>.cpython-*.pyc
+   Do not forget the `__pycache__` entry — it is easy to remember the `.py`
+   file and miss its compiled bytecode, which then shows up as a separate
+   'Installed but unpackaged' error. Real examples: `python-six` (`six.py`),
+   `python-nvidia-ml-py` (`pynvml.py`), `python-typing_extensions`
+   (`typing_extensions.py`) — all three shipped as a bare file, not a
+   directory, and the generator guessed directory for all three.
+
    This is specific to a package's own name and does not forbid every glob
    ever: a versioned shared library's SONAME entry
    (`%{_libdir}/lib<name>.so.*`) is a real, standard openSUSE idiom for a
@@ -560,6 +634,24 @@ openSUSE spec conventions to keep in mind:
    directory's `%dir` entry does not imply ownership of files another
    subpackage generates inside it, and rpm reports the compiled bytecode as
    a separate 'Installed (but unpackaged)' file if it is left out.
+
+   A PEP 561 stub-only subdirectory (`<pkg>-stubs/`, containing only `.pyi`
+   files and no `__init__.py`) needs its own `%dir` entry for the directory
+   itself — globbing the files inside it (`<pkg>-stubs/*.pyi`) claims the
+   files but not the directory, and rpm reports the directory itself as "not
+   owned by a package" even though every file in it is claimed. Declare both:
+     %dir %{python_sitearch}/<pkg>-stubs/
+     %{python_sitearch}/<pkg>-stubs/*.pyi
+   (real example: `python-duckdb`'s `_duckdb-stubs/`).
+
+   A compiled extension's `.so` filename is easy to glob wrong by splitting
+   the CPython tag and platform tag across two separate wildcard segments
+   (`_mod.cpython-*-*.so`) — this can fail to match the real filename
+   (`_mod.cpython-313-x86_64-linux-gnu.so`) even though it looks like it
+   should. Prefer one wildcard spanning the whole variable suffix instead:
+     %{python_sitearch}/_mod.cpython-*.so
+   (real example: `python-duckdb`'s `_duckdb.cpython-*-*.so` → fixed to
+   `_duckdb.cpython-*.so`).
 
 18. **Console-script entrypoints must use the openSUSE `python_alternative`
    pattern.** If the package declares [project.scripts] or
@@ -620,6 +712,71 @@ openSUSE spec conventions to keep in mind:
    in %files causes file conflicts. The generator often omits some or all of these —
    you must verify and add all seven components.
 
+   **`libalternatives` variant (Tumbleweed / `suse_version > 1500`).** On
+   newer openSUSE, the `alts`/`libalternatives` mechanism is preferred over
+   `update-alternatives`; gate the two with a `%bcond`. The `%python_clone`/
+   `%python_alternative` macros are unchanged in both modes:
+     %if 0%{?suse_version} > 1500
+     %bcond_without libalternatives
+     %else
+     %bcond_with libalternatives
+     %endif
+     ...
+     %if %{with libalternatives}
+     BuildRequires:  alts
+     Requires:       alts
+     %else
+     Requires(post):   update-alternatives
+     Requires(postun): update-alternatives
+     %endif
+     ...
+     %pre
+     %python_libalternatives_reset_alternative <script>
+   And in `%check`, when per-flavor tests shell out to the binary itself,
+   stage symlinks under `build/flavorbin/` so the tests find each flavor's
+   copy:
+     %python_flavored_alternatives
+     %if %{with libalternatives}
+     %{python_expand #
+     for b in <script1> <script2>; do
+       [ -e build/flavorbin/$b ] || ln -s %{buildroot}%{_bindir}/$b-%{$python_bin_suffix} build/flavorbin/$b
+     done
+     }
+     %endif
+   Real example: `python-numpy` for `f2py` and `numpy-config`.
+
+   Two script-grouping forms also exist and are easy to miss:
+   - **Multiple scripts under one libalternatives group** —
+     `%python_group_libalternatives <script1> <script2> ...` in `%install`
+     bundles separate binaries into one alternatives group (so admin
+     switches them atomically). Real example: `python-Sphinx` groups
+     `sphinx-apidoc sphinx-autogen sphinx-build sphinx-quickstart`.
+   - **Aliased scripts in one install/uninstall call** — when upstream
+     ships two names for the SAME binary (not two different scripts),
+     list both in one `%python_install_alternative` call and uninstall
+     only the master:
+       %post
+       %python_install_alternative pytest py.test
+       %postun
+       %python_uninstall_alternative pytest
+     Real example: `python-pytest` for the `pytest`/`py.test` pair.
+   - **Man pages via alternatives too.** When each script has a
+     corresponding man page the install should pair them. Clone the man
+     page per flavor alongside the binary, then list the man pages in
+     the same `%python_install_alternative` call AFTER the binary names
+     and declare each `%python_alternative %{_mandir}/man1/<name>.1`
+     entry in `%files`:
+       %python_clone -a %{buildroot}%{_bindir}/<script>
+       %python_clone -a %{buildroot}%{_mandir}/man1/<script>.1
+       ...
+       %post
+       %python_install_alternative <script1> <script2> <script1>.1 <script2>.1
+       %files
+       %python_alternative %{_bindir}/<script1>
+       %python_alternative %{_mandir}/man1/<script1>.1%{?ext_man}
+     Real example: `python-Twisted` ships 8 binaries + 7 man pages this
+     way under one alternatives group.
+
 19. RPM macros use single '%', never '%%'. For example: %check, %install,
    %{version}, %{python_module foo}. Only use %% when you need a literal
    percent character in the spec file output (which is rare).
@@ -663,8 +820,45 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    Rules:
    - `!=` is not supported at all. `>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2`
      becomes `>= 0.1.6`. Never leave a `!=` in any BuildRequires line.
-   - Multiple comma-separated constraints are not supported: keep the `>=`
-     lower bound and drop the rest. `>=0.9.8,<0.10.0` becomes `>= 0.9.8`.
+   - Multiple comma-separated constraints are not supported in one line
+     — but two escape hatches exist for an actually-necessary bounded
+     range (upstream documents an incompatibility, or you've seen the
+     newer version break this specific build). Pick either:
+     a. **Two separate BuildRequires lines** on the same package name —
+        RPM resolves both as the intersection:
+          BuildRequires: %{python_module pytest >= 7.0.0}
+          BuildRequires: %{python_module pytest < 10}
+        Real example: `python-SQLAlchemy`.
+     b. **RPM4 boolean `with` inside one `%{python_module …}` argument**,
+        referencing the flavor-aware `%python-<name>` form on the right
+        side so each flavor's own package is bound:
+          BuildRequires: %{python_module charset-normalizer >= 2.0 with %python-charset-normalizer < 4}
+        Real example: `python-aiohttp`.
+     Form (b) is more compact when the upper bound is a hard upstream
+     cap for every flavor; form (a) is clearer when the two bounds have
+     different reasons for existing. If the upper bound is NOT actually
+     necessary, drop it per the next bullet instead.
+
+     The RPM4 boolean syntax inside `%{python_module …}` also supports
+     the `if` keyword for environment-markers-style conditional deps:
+       BuildRequires: %{python_module importlib_resources >= 5 if %python-base < 3.10}
+     Reads as "require importlib_resources on flavors whose base Python
+     is < 3.10" — a direct equivalent of pyproject.toml's
+     `importlib_resources; python_version < '3.10'`. Real example:
+     `python-notebook`.
+   - A constraint that is ONLY an upper bound (`< X`, no `>=` to keep) usually
+     cannot be translated at all — drop it and use the bare name instead.
+     `[build-system] requires` sometimes pins `setuptools<70.0.0` for an old
+     build backend, but a rolling-release distro ships exactly one current
+     version of `setuptools`; once that version passes 70, `%{python_module
+     setuptools < 70.0.0}` can never resolve — OBS will report it unresolvable
+     forever, not because the package is missing but because no installable
+     version satisfies the constraint (if this surfaces later as an
+     unresolvable BuildRequires instead of being caught here at
+     spec-authoring time, the "Missing BuildRequires" section's item 6 below
+     covers the same diagnosis).
+       WRONG: BuildRequires: %{python_module setuptools < 70.0.0}
+       RIGHT: BuildRequires: %{python_module setuptools}
    - `~=` (compatible release) is not supported: `~= 2.0` becomes `>= 2.0`.
    - Environment markers (`;`) are not supported and make the spec fail to parse:
      drop everything from the `;` onwards. If the marker means the dep is
@@ -739,6 +933,17 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    Always remove both the `.py` file and its corresponding `__pycache__` entry;
    removing only the `.py` leaves orphan `.pyc` files that trigger the same error.
 
+   **If the installed package carries a `dist-info/RECORD` file, delete
+   the corresponding RECORD lines too.** `RECORD` is pip's manifest of
+   every file the wheel installed; downstream tooling (`pip check`,
+   introspection via `importlib.metadata.files()`) compares it against
+   the filesystem and reports deleted entries as broken. The one-liner:
+     sed -i -e '/<name>-<ext>,/d' %{buildroot}%{$python_sitearch}/<pkg>-%{version}.dist-info/RECORD
+   For a batch delete (e.g. the C sources after a Cython compile — real
+   example `python-pandas`), match on the shared extension:
+     find %{buildroot}%{$python_sitearch}/<pkg>/_libs -name '*.[ch]' -delete
+     sed -i -e '/\.[ch],/d' %{buildroot}%{$python_sitearch}/<pkg>-%{version}.dist-info/RECORD
+
 24. rpmlint devel-file-in-non-devel-package: Each bundled C/C++ header
    (`.h`, `.hpp`) in a non-devel package generates a `devel-file-in-non-devel-package`
    rpmlint error (Badness: 50). Packages that bundle 3rdparty C/C++ libraries
@@ -793,19 +998,29 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
 
    Reporting it in `unresolvable_packages` is how it gets packaged: the build
    system queues it, builds it, and retries this package afterwards. That is
-   the whole job.
+   the whole job — size and complexity do not matter.
 
    This applies to ALL dependency types without exception:
    - **Python packages**: torch, jax, transformers, pydantic — report them ALL
-   - **C/C++ libraries**: libfoo, libbar-devel — if zypper can't find them, report them
+   - **C/C++ libraries**: report the upstream project name, NOT the
+     `BuildRequires` string. Strip a leading `lib` and a trailing `-devel`/
+     `-dev` before adding to `unresolvable_packages` — `BuildRequires:
+     libtrantor-devel` is reported as `trantor`, `BuildRequires: libfoo-dev`
+     as `foo`. The pipeline uses that name to search PyPI and then GitHub for
+     the source repo; the openSUSE devel-package wrapping is a distro
+     naming scheme upstream repos do not use, so reporting the wrapped
+     spelling makes the lookup miss its own project and permanently mark the
+     dep unbuildable (see "Dependencies that can never be built here" below
+     — a dep landing there under a `lib…-devel` spelling is almost always
+     this bug, not a real unbuildable dep; re-report it under the stripped
+     name).
    - **System tools**: cmake, ninja, specialized build tools — report if missing
    - **CUDA libraries**: cuda-devel, cuda-runtime, CUDA Python packages
    - **ANY other dependency**: regardless of type, size, or complexity
 
-   **Size and complexity DO NOT MATTER.** torch, jax and the rest of the ML stack
-   are in scope exactly like any other dependency. Do not treat a big or awkward
-   package as out of reach. Do not disable a feature or drop a test suite merely
-   because its dependency is not in OBS yet. The build system WILL package it.
+   Do not treat a big or awkward package as out of reach, and do not disable
+   a feature or drop a test suite merely because its dependency is not in
+   OBS yet.
 
    **Keep the spec honest:** Leave all `BuildRequires` in place (Python packages,
    C libraries, system tools, everything) so the build uses them once they exist.
@@ -821,15 +1036,34 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    2. If found, add these BuildRequires:
       BuildRequires:  cuda-devel
       BuildRequires:  cuda-runtime
-   3. Also add CUDA to `unresolvable_packages` if OBS reports it as unresolvable
-      — it will be built and made available
-   4. NEVER skip packages that require CUDA libraries
+   3. Also add CUDA to `unresolvable_packages` if OBS reports it as
+      unresolvable — report it regardless, there is no downside to reporting
+      a dependency that turns out to already be satisfied. But know what to
+      expect: the build system resolves a missing name from PyPI first, then
+      falls back to a discoverable public source repository (the same
+      fallback a wheel-only PyPI release uses) — `cuda-devel`/`cuda-runtime`
+      specifically are the closed-source CUDA Toolkit compiler/runtime
+      itself, with neither a PyPI package nor any public source anywhere, so
+      this specific pair can only ever resolve if the target OBS project's
+      own repository configuration already provides it (e.g. a path to
+      NVIDIA's official repo, or a project maintainer's own import) — no
+      amount of re-reporting manufactures a package that has no buildable
+      source. This is unlike every CUDA *Python* ecosystem library below,
+      which the build system CAN and does build automatically once reported.
+   4. NEVER skip packages that require CUDA libraries — report the need even
+      when you expect `cuda-devel`/`cuda-runtime` to stay unresolved; that is
+      still correct information for whoever is watching the project, and
+      costs nothing.
 
    CUDA Python ecosystem libraries are all open source and available on GitHub.
    When encountering any of these as dependencies, report them for packaging:
    cuda-python (cuda.core, cuda.bindings, cuda.pathfinder), cuda-compute,
    numba-cuda-mlir, cuda-tile, nvmath-python (nvmath.bindings), nvshmem4py,
-   and similar NVIDIA CUDA Python libraries.
+   and similar NVIDIA CUDA Python libraries. Unlike `cuda-devel`/
+   `cuda-runtime` above, these publish real source (PyPI sdist or a public
+   GitHub repository) and the build system resolves and builds them the same
+   way it does any other missing dependency — report them with full
+   confidence, not just for completeness.
 
    **Clarification, not an exception — dlopen/dlsym at runtime is not a
    build-time dependency at all**: some packages talk to CUDA/cuFile/NCCL
@@ -860,6 +1094,17 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    dependency survives a SONAME bump without a spec edit (real example:
    `python-python-mpv`).
 
+   A sibling shape pins the exact *version* of a named dependency (rather
+   than resolving a file to a package name): when a Python package embeds
+   code generated against another package's internals (classic case is
+   anything using `cffi`'s out-of-line API — the generated bindings depend
+   on the exact cffi version they were compiled with), bind runtime cffi to
+   the exact build-time cffi:
+     Requires:       python-cffi = %(rpm -q --whatprovides python-cffi --qf "%%{version}")
+   Note the doubled `%%` — the `%(...)` shell escape is expanded by rpm
+   first, so the format string's own `%` must be escaped. Real example:
+   `python-cryptography`.
+
    **A `noarch` package can still need `ExclusiveArch` if a hard runtime
    dependency is itself arch-limited.** A pure-Python package with no
    compiled code of its own is not automatically buildable everywhere: if
@@ -873,6 +1118,26 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `ExclusiveArch`/architecture support of every hard runtime dependency
    you add, and propagate the same restriction to this spec if it has one —
    do not assume `noarch` means architecture is irrelevant.
+
+   **Special case — a PyPI package that just redistributes a system tool:**
+   `ninja` exists on PyPI purely as a portable, pip-installable copy of the
+   `ninja` build tool openSUSE already ships as its own system package of
+   the same name — build backends like scikit-build-core/meson-python
+   depend on it only to shell out to the `ninja` executable, not to
+   `import ninja`. If you see `ninja` as a dependency — this project's own
+   `requires_dist`, another project's missing-BuildRequires list, or
+   anywhere else — do not put it in `unresolvable_packages` and do not
+   write `%{python_module ninja}`; write plain `Requires: ninja` /
+   `BuildRequires: ninja` instead. Building a `python-ninja` RPM from the
+   wheel would only duplicate the system package that already provides the
+   same binary. (This is the opposite of the dlopen clarification above,
+   which is about dropping a dependency that was never real — here the
+   dependency is real, it just already has a home under its plain system
+   name.) Before applying this, confirm the actual consumer shells out to
+   `ninja` rather than doing a literal `import ninja` in its own code —
+   spot-checking one such case is what established this rule; if a future
+   dependency genuinely imports the PyPI package's Python module, it needs
+   the real `python-ninja`, and this substitution does not apply to it.
 
 28. **The only three exceptions where working around a dependency (rather
    than reporting it per convention 27) is justified.** All three need
@@ -903,6 +1168,39 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    upstream maintainer statement, issue, or release note) in your reasoning
    before relying on this exception; do not invoke it just because building
    from source looks hard.
+
+   Exception 4 — THIS package (not a dependency) cannot be compiled in this
+   environment at all: the source is real and public, but `%build` needs a
+   proprietary vendor compiler/SDK that has no distro package and no
+   open-source substitute — e.g. NVIDIA's `nvcc` to compile `.cu` device
+   code (`nvidia-nccl-cu13`, `nvidia-nvshmem-cu13`, CUDA-CCCL and similar all
+   hit this: real GitHub source, but the actual GPU kernels cannot be
+   compiled without NVIDIA's own toolchain). This is a property of the build
+   environment, the same category as Exception 2, not a bug in the spec —
+   do not spend attempts rewriting CMake flags or BuildRequires for it.
+   Set action to `"use_upstream_wheel"` with `why` naming the exact missing
+   compiler/SDK and quoting the build.log line that proves `%build` needs it
+   (e.g. `find_package(CUDAToolkit REQUIRED)` failing, or a literal `nvcc:
+   command not found`). The pipeline independently checks that PyPI actually
+   publishes a wheel for this version before switching — it does nothing
+   silently wrong if you are mistaken, but don't invoke this reflexively:
+   if the failure is a missing BuildRequires, a wrong CMake path, or
+   anything convention 13's offline-build guidance already covers, fix that
+   instead. Once the pipeline swaps in the wheel skeleton, the next turn
+   sees a fresh spec shaped like Exception 3's — load the
+   `prebuilt-wheel-packaging` skill to finish it.
+
+   This exception also covers Review discovering that the checked-out
+   source is simply the wrong artifact for this specific PyPI release — a
+   `find_source_repo_candidates` guess can be a real, existing repository
+   (so it passed verification) while still being the wrong slice of it for
+   this exact package (a monorepo's unrelated sibling, or the full project
+   when this release is only a data/binary shim from one small part of it).
+   If the checked-out tree's actual structure doesn't match what this
+   release's own PyPI metadata (`Summary`, `Description`, what little
+   `RECORD`/wheel filename tells you if one exists) says it should contain,
+   that mismatch is itself the evidence — cite what you checked and what
+   didn't line up, and use `use_upstream_wheel` the same way.
 
 29. Missing source code: when the build fails because a package has no source
    tarball on PyPI and no repository URL in its metadata, search for it
@@ -1240,9 +1538,20 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    convention 11's skip ladder on a numeric-mismatch failure in a C
    extension's tests.
 
-48. **Test-environment setup that isn't a missing BuildRequires**: two
+48. **Test-environment setup that isn't a missing BuildRequires**: four
    recurring cases where `%check` fails for a reason that has nothing to do
    with a missing package — fix the environment, not the dependency list.
+   - **`%ctest` can silently drop a custom environment variable the test
+     binary needs.** Unlike `%pytest`, `%ctest` does not reliably propagate
+     an `export`ed variable through to the actual test invocation — a CTest
+     suite that calls back into the just-built Python extension and needs
+     `PYTHONPATH` pointing at the buildroot's installed module can fail with
+     no trace in the build log of the export ever reaching the process, even
+     though the `export` line itself ran. Run `ctest` directly with the
+     variable set inline instead of relying on the macro to carry it:
+       PYTHONPATH=%{buildroot}%{$python_sitearch} ctest --output-on-failure
+     (real example: `triton`, where `%ctest` lost `PYTHONPATH` entirely —
+     setting it inline on a direct `ctest` invocation fixed it).
    - **Locale-sensitive tests under OBS's default C/POSIX locale.** A test
      doing Unicode normalization, locale-aware sorting/formatting, or
      comparing output containing non-ASCII characters can fail purely
@@ -1273,6 +1582,392 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      this same symptom — a test comparing against a literal date/timestamp
      failing under OBS specifically — before assuming a real Y2038-style
      bug.)
+   - **Process-introspection tests fail under OBS's build-worker sandbox.**
+     A test that shells out to `ps` (or reads `/proc/<pid>/...` for another
+     process) to confirm something about a process it just spawned — a
+     changed process title, an argv/cmdline check — can fail even though the
+     feature under test works correctly, because the build runs inside a PID
+     namespace where child processes are not visible the way `ps`/`/proc`
+     expect from outside it. This is an OBS sandboxing limitation, not a
+     missing package (`procps`/`ps` itself is present and works) and not a
+     bug in the package being tested. Deselect the specific tests rather
+     than chasing a BuildRequires or patch (convention 11 rung i/ii), noting
+     in your reasoning that the failure is sandbox visibility, not
+     functionality (real example: `python-setproctitle`, 8 of 25 tests
+     deselected this way while the other 17 — which check the in-process
+     state directly rather than shelling out to `ps` — pass normally).
+   - **Accumulate arch-specific deselects into a `test_failok` variable
+     and run them as a best-effort second pass**, instead of `rm`-ing the
+     files outright (which forfeits the chance to see them pass on another
+     arch). Collect the deselect expressions arch-by-arch, then run them
+     with `||:` after the main pass so a failure in the "known flaky"
+     bucket does not fail the build:
+       test_failok=""
+       %ifarch s390x
+       test_failok+=" or test_truncate_f32"
+       %endif
+       %ifarch %ix86 %arm
+       test_failok+=" or test_mem_policy"
+       %endif
+       %pytest_arch -k "not (test_broken ${test_failok})"
+       [ -n "$test_failok" ] && %pytest_arch -k "${test_failok:4}" ||:
+     The `${test_failok:4}` strips the leading ` or ` so the second
+     `-k` expression is well-formed. Real example: `python-numpy`.
+   - **Source-tree shadowing when `%pytest_arch --pyargs <pkg>` is run
+     from the extracted source root.** With `--pyargs`, pytest resolves
+     the import name against `sys.path` — but the current directory is on
+     `sys.path`, so the uncompiled `source/<pkg>/` directory is found
+     before the installed buildroot copy. The symptom is a confusing
+     "cannot import compiled extension" / circular-import error that
+     looks like a missing BuildRequires. Rename the source directory
+     before invoking pytest so only the installed copy is importable:
+       mv <pkg> <pkg>.dont-import-me
+       %pytest_arch --pyargs <pkg> -k "not ($donttest)"
+     Only reach for this when the test command is `--pyargs <pkg>` or
+     equivalent and the failure signature is import-time, not test-time.
+     Real example: `python-scipy` renames its `scipy/` tree to
+     `scipy.dont-import-me` right before `%pytest_arch --pyargs scipy`.
+
+49. **Per-CPython-version-locked upstream wheels that exactly cover this
+   project's flavors** (extends convention 28 Exception 4): sometimes a
+   package's source is real and public but genuinely cannot be built here —
+   Exception 4's proprietary-toolchain case, or a package-specific blocker
+   like a custom pinned compiler fork the distro toolchain can't provide
+   (e.g. Triton's `CMakeLists.txt` requires an exact untagged
+   `triton-lang/llvm-project` commit distro LLVM does not build) — AND
+   PyPI's only wheels for that release are each locked to one specific
+   CPython ABI (`cp313-cp313-...`, `cp314-cp314-...`), with no `-none-any`
+   and no `abi3` tag covering every flavor this project builds.
+
+   The automatic `"use_upstream_wheel"` action (Exception 4) cannot handle
+   this shape: it calls `pick_wheel_from_json`, which deliberately REFUSES
+   every cp-locked wheel rather than guess one — `wheel_is_flavor_agnostic`
+   in `ecosystem/src/pypi.rs` names Triton as the exact reason for that
+   refusal — so the turn would fail with "no usable upstream wheel either"
+   instead of switching. Do it by hand instead, as an ordinary `"edited"`
+   action:
+   a. Find which Python flavors this project actually builds:
+      `rpm --eval '%{pythons}'` (e.g. `python313 python314`).
+   b. Check the release's PyPI JSON
+      (`https://pypi.org/pypi/<name>/<version>/json`) for a `bdist_wheel`
+      matching EACH flavor's ABI tag (`cp313-cp313-manylinux..._<arch>.whl`
+      for `python313`, and so on) for the target `%{arch}`. If any enabled
+      flavor has no matching wheel, this technique doesn't fully apply —
+      report the gap rather than guessing one.
+   c. Delete `%build` entirely (there is nothing to compile) and add one
+      `SourceN:` per flavor, each pointing at that flavor's own wheel URL.
+   d. In `%install`, call each flavor's OWN install macro by its real,
+      hardcoded name — not the shared multi-flavor `%pyproject_install`,
+      which runs the identical argument for every flavor and so cannot pick
+      a different wheel per flavor:
+        %install
+        %python313_pyproject_install %{SOURCE0}
+        %python314_pyproject_install %{SOURCE1}
+        %python_clone -a %{buildroot}%{_bindir}/<console-script>
+        %python_expand %fdupes %{buildroot}%{$python_sitearch}
+      (`%python<NNN>_pyproject_install` already runs `%python<NNN>_compile`
+      and `%python<NNN>_fix_shebang` — the same macro the shared
+      multi-flavor loop calls internally, just invoked once per flavor with
+      a different argument instead of the same one N times.)
+   e. Everything else — License from `source/*.dist-info/`,
+      `Root-Is-Purelib` deciding arch vs. noarch, `%check` needing a real
+      import/file check rather than a blind `%pytest_arch` if the actual
+      test suite needs a GPU (Exception 2) — follows the
+      `prebuilt-wheel-packaging` skill exactly as for a single wheel; load
+      it for the multi-flavor worked example and finish the spec from
+      there.
+
+50. **OOM / disk-full build failures are a worker-sizing problem, not a
+   spec bug.** A `%build` or `%check` killed by the OOM reaper, a linker
+   that aborts partway through, or a "No space left on device" error on a
+   package known to need gigabytes of RAM/disk to compile (numpy, scipy,
+   pandas, torch, cutlass, llvm, chromium-class) is NOT fixed by trimming
+   dependencies or passing `-j1`. Add a sibling `_constraints` file next to
+   the spec so OBS routes the job to a bigger worker:
+
+     <constraints>
+       <hardware>
+         <physicalmemory><size unit="G">8</size></physicalmemory>
+         <disk><size unit="G">9</size></disk>
+       </hardware>
+     </constraints>
+
+   Pick numbers from the actual failure (how much RAM/disk it was using
+   when it died, rounded up a bit). The file is checked in alongside
+   `_multibuild`/`_service`; no spec edit needed. Real example: `python-
+   numpy` ships `_constraints` with 8G RAM / 9G disk for its C/Fortran
+   compile step. If the failure signature is clear OOM or ENOSPC on a
+   package that just needs more room, add this before chasing phantom
+   dependency changes.
+
+   **Complementary pattern — cap `%jobs` dynamically to fit current
+   worker memory** instead of (or in addition to) demanding a bigger
+   worker. When the OOM happens inside `pytest-xdist` or `make -j`
+   whose per-worker footprint is known, `BuildRequires: memory-
+   constraints` and call `%limit_build -m <MB-per-job>` once in `%check`
+   or `%build`:
+     BuildRequires: memory-constraints
+     ...
+     %check
+     %limit_build -m 3972
+     %pytest_arch -n %{jobs} ...
+   The macro divides available RAM by the per-job number and sets
+   `%jobs` accordingly, so the build still parallelizes but never
+   overcommits. Use when a single job comfortably fits the default
+   worker but N parallel jobs OOM. Real example: `python-pandas` sets
+   `-m 3972` for its test collection. For a build that OOMs even at
+   `-j1`, the `_constraints` file above is still the right fix.
+
+51. **`meson-python` / `scikit-build-core` backend arguments go through
+   `PIP_CONFIG_SETTINGS`, not direct meson/cmake invocations.** When
+   `build-backend = "mesonpy"` or `build-backend = "scikit_build_core.build"`
+   is in pyproject.toml and the package needs a non-default build flag (an
+   arch-specific CPU baseline, a feature toggle, a disable for an
+   unavailable optional dep), `%pyproject_wheel` cannot be told directly —
+   it runs pip, which only forwards config settings to the PEP 517 backend
+   through this env var. Set it in `%build` before `%pyproject_wheel`:
+
+     %ifarch x86_64 %{ix86}
+     export PIP_CONFIG_SETTINGS="setup-args=-Dcpu-baseline=none"
+     %endif
+     %pyproject_wheel
+
+   The key is the backend's own name (`setup-args` for meson-python,
+   `cmake.define.<VAR>` / `cmake.args` for scikit-build-core — check the
+   backend's docs for the exact spelling). Multiple settings can be
+   space-separated inside the quotes. Trying to add a bare `-Dfoo=bar` to
+   `%meson_build` is wrong — that macro is not invoked for a PEP-517
+   build. Real example: `python-numpy` passes `-Dcpu-baseline=none` on x86
+   this way.
+
+52. **PyPI package renames / forks need `Obsoletes` + `Provides` so the old
+   name still resolves.** When this package is a fork or renamed
+   continuation of an older PyPI project — the fork took over the
+   namespace and `pip install <old-name>` now redirects to it, or the
+   project literally renamed itself — downstream specs that still say
+   `BuildRequires: python-<old-name>` must keep resolving. Pair every
+   stale name under the one new package:
+     Obsoletes:  python-<old-name> < %{version}
+     Provides:   python-<old-name> = %{version}
+   Give one `Obsoletes`/`Provides` pair per old name. Confirm the old
+   name with PyPI's `/pypi/<old-name>/json` returning either 404 or a
+   redirect/notice pointing at the new project before adding it — do not
+   invent historical names from the package's own description text.
+
+   Three shapes count as "old name" worth pairing:
+   - **Case-only rename**: PyPI accepted a capitalization change (`django`
+     → `Django`) and the old distro spec was in the other form. Pair
+     `python-django` under the new `python-Django`.
+   - **Fork or project rename**: `PIL` → `Pillow`, `imaging` → `Pillow`.
+     One pair per prior name — `python-Pillow` has two.
+   - **Separate project folded in**: a once-independent package now lives
+     inside this one (e.g. `python-South`'s migrations tool was absorbed
+     into Django's built-in `django.db.migrations`). Pair the absorbed
+     project's distro name too so installing the new umbrella uninstalls
+     the dead one — `python-Django` carries `Provides: python-South =
+     %{version}` + `Obsoletes: python-South < %{version}` for exactly
+     this reason.
+
+   **Non-python-prefixed name → gate the pair to one flavor so it
+   doesn't duplicate.** When the old name has no `python-` prefix at all
+   (bare `mypy`, `pytest`, `jupyter-notebook`), one of the Python
+   flavors needs to carry the `Provides`/`Obsoletes`, not every flavor
+   (otherwise RPM reports duplicate Provides across the subpackages).
+   Pin them to the primary flavor:
+     %if "%{python_flavor}" == "python3" || "%{?python_provides}" == "python3"
+     Provides:  <bare-name> = %{version}
+     Obsoletes: <bare-name> < %{version}
+     %endif
+   Real example: `python-mypy` gates `Provides: mypy = %{version}` to
+   the primary `python3` flavor.
+
+53. **Optional heavy component → its own subpackage via `%exclude` from
+   the main `%files` plus a `%files` block for the split.** When
+   installing a Python package drops both the lightweight core and a
+   heavy optional component into the same site-packages tree (a GUI
+   binding like `PIL/ImageTk`, a plugin folder a casual consumer never
+   loads), carve the optional piece into its own subpackage so the main
+   package stays small. Keep `%install` unchanged (upstream drops both
+   sets of files in one pass), split only at `%package`/`%files` time:
+
+     %package tk
+     Summary:  <main> - Tcl/Tk Module
+     Requires: %{name} = %{version}
+     Requires: python-tk
+     %description tk
+     ...
+
+     %files %{python_files}
+     %{python_sitearch}/<pkg>
+     %exclude %{python_sitearch}/<pkg>/<ImageTk>*
+     %exclude %{python_sitearch}/<pkg>/<_imagingtk>*
+     %pycache_only %exclude %{python_sitearch}/<pkg>/__pycache__/<ImageTk>.*
+
+     %files %{python_files tk}
+     %{python_sitearch}/<pkg>/<ImageTk>*
+     %{python_sitearch}/<pkg>/<_imagingtk>*
+     %pycache_only %{python_sitearch}/<pkg>/__pycache__/<ImageTk>.*
+
+   Three rules this makes concrete:
+   - `%exclude` the split-off files from the main package AND list them
+     in the subpackage. Omitting the `%exclude` leaves them owned twice;
+     omitting the subpackage listing drops them from the build.
+   - The compiled bytecode (`__pycache__/<Name>.*.pyc`) is a separate
+     file from the `.py` and needs its own `%pycache_only %exclude` /
+     `%pycache_only` entry alongside each code file — easy to forget and
+     surfaces as a separate 'Installed (but unpackaged)' error.
+   - The subpackage's `%files` line uses `%{python_files <name>}`, not
+     a hand-rolled `-n python%{python_version_nodots}-<name>`.
+   Real example: `python-Pillow` splits `ImageTk`/`_imagingtk` into
+   `python-Pillow-tk`.
+
+   **Python C-extension headers follow the same shape as a C library's
+   `-devel`.** A compiled Python extension that exposes a C API ships
+   `.h` headers inside its sitearch tree (`%{python_sitearch}/<pkg>/*.h`,
+   sometimes also `includes/*.h`); other Python C extensions that extend
+   this API `#include` them at build time. Split them into a `-devel`
+   subpackage with the same `%exclude` from main + list in subpackage
+   pattern:
+     %exclude %{python_sitearch}/<pkg>/*.h
+     %exclude %{python_sitearch}/<pkg>/includes/*.h
+     ...
+     %files %{python_files devel}
+     %{python_sitearch}/<pkg>/*.h
+     %{python_sitearch}/<pkg>/includes/*.h
+   Real example: `python-lxml` ships `lxml.etree.h` /
+   `lxml.etree_api.h` for extensions building against lxml's C API.
+
+54. **Metapackage subpackage: pulls in a cluster of runtime deps, ships no
+   files of its own.** For a feature that lives entirely in *other*
+   packages — a LaTeX rendering mode that needs 15 `texlive-*` runtime
+   packages, a GUI backend that only needs a toolkit's own binding, a
+   plugin set that just has to be present — define a subpackage whose
+   whole `%files` block is just the `%license` line, with all the real
+   work done in `Requires:` lines and (if the base package is arch)
+   `BuildArch: noarch`:
+
+     %package latex
+     Summary:        Allow rendering latex in %{name}
+     Requires:       %{name} = %{version}
+     Requires:       texlive-dvipng
+     Requires:       texlive-latex
+     Requires:       tex(helvet.sty)
+     ...
+     BuildArch:      noarch
+
+     %files %{python_files latex}
+     %license LICENSE/
+
+   Installing `python-matplotlib-latex` then pulls the whole LaTeX chain
+   as a side effect, without the base package growing a heavy hard
+   `Requires` chain for a feature most users don't need. Keep the
+   `%license` line even though the subpackage ships no code — an empty
+   `%files` is a rpmlint warning. Real example: `python-matplotlib-latex`
+   has 20+ `texlive-*` and `tex(…)` runtime `Requires` with a
+   license-only `%files`.
+
+55. **Two-pass pytest: xdist-safe tests in parallel, xdist-hostile tests
+   serially.** When some tests fail only under `pytest-xdist`'s parallel
+   worker scheduling — a GUI backend test that assumes it owns the
+   display, a cwd-sensitive test, a test that depends on a specific
+   process ordering — do NOT drop `-n auto` for the whole suite (losing
+   8x+ wall-clock for a handful of flaky tests). Split them with a
+   `no_xdist` accumulator and run two passes:
+
+     no_xdist="test_backend or test_span_selector_animated_artists_callback"
+     %{python_expand
+     $python -m pytest --pyargs <pkg>.tests \
+       -n auto \
+       -k "not (${no_xdist} ${skip_tests})"
+     $python -m pytest --pyargs <pkg>.tests \
+       -k "(${no_xdist}) and not (${skip_tests:4})"
+     }
+
+   The first pass runs the bulk in parallel skipping both the no-xdist
+   bucket and the usual deselect list. The second pass runs ONLY the
+   no-xdist bucket without `-n auto`, still minus the deselect list. The
+   `${skip_tests:4}` strips the leading ` or ` so the second `-k`'s
+   expression is syntactically valid (same trim as convention 48's
+   `test_failok` pattern). Real example: `python-matplotlib`.
+
+56. **Publisher-signed checksums file (no direct tarball signature) → GPG
+   the file, then verify each listed hash.** Some upstreams don't sign
+   the release tarball directly — they publish and sign a single
+   `<name>-<version>.checksum.txt` listing MD5/SHA1/SHA256 for every
+   release artifact. Verifying the source then has two steps: GPG the
+   checksums file against the maintainer keyring, then verify the
+   tarball's hash from the file. Wire this up as three Sources plus a
+   `%prep` prelude:
+
+     Source:   <tarball-url>
+     Source1:  <project>/<name>-%{version}.checksum.txt
+     Source2:  %{name}.keyring
+     BuildRequires: gpg2
+     ...
+     %prep
+     gpg --import %{SOURCE2}
+     gpg --verify %{SOURCE1}
+     echo "`grep -e '^[0-9a-f]\{32\}  <name>-%{version}.tar.gz' %{SOURCE1} | cut -c1-32`  %{SOURCE0}" | md5sum  -c
+     echo "`grep -e '^[0-9a-f]\{40\}  <name>-%{version}.tar.gz' %{SOURCE1} | cut -c1-40`  %{SOURCE0}" | sha1sum -c
+     echo "`grep -e '^[0-9a-f]\{64\}  <name>-%{version}.tar.gz' %{SOURCE1} | cut -c1-64`  %{SOURCE0}" | sha256sum -c
+     %autosetup -p1 -n <name>-%{version}
+
+   One `grep | cut | <hash>sum -c` line per hash the file lists. The
+   `.keyring` file is the same per-package `<Name>.keyring` as the
+   plain-c-cpp "source signature verification" entry — reuse it. A single
+   failing hash aborts `%prep`, which is the point. Do NOT substitute a
+   plain `sha256sum -c` against the whole file — the file has multiple
+   non-SHA256 lines that would be rejected. Real example:
+   `python-Django`, which pairs `Source: django-%{version}.tar.gz` with
+   `Source1: Django-%{version}.checksum.txt` and runs all three hash
+   checks in `%prep`.
+
+57. **Test suite needs the compiled extension in-tree, not just in the
+   buildroot → run `make inplace` after `%pyproject_wheel`.** Some C-
+   extension packages' test suites import the extension from a path
+   relative to the source tree (not from `%{buildroot}%{python_sitearch}`)
+   and skip or fail if the `.so` is only in the installed location. The
+   pattern is a one-liner in `%build` right after the wheel builds:
+     %build
+     export CFLAGS="%{optflags}"
+     %pyproject_wheel
+     # Test suite imports the compiled extension in-place.
+     %python_expand PYTHON=$python make inplace
+   Then `%check` works against the source tree directly (`%python_exec
+   test.py`, or `%pytest` with `cd src/<pkg>` first) without PYTHONPATH
+   gymnastics. Reach for this only when the test suite documents an
+   `inplace` build target or a first attempt without it fails with
+   "cannot import compiled extension" from a path inside the source
+   tree. Real example: `python-lxml`.
+
+58. **Vendored third-party libraries → their LICENSE files must ride
+   along in `%license`.** Build backends that need their own
+   dependencies at bootstrap time (poetry-core, hatchling, pip itself)
+   ship them vendored under `_vendor/`, `_vendored/`, `vendor/`, or
+   `bundled/`. Each vendored library's own LICENSE/COPYING is a legal
+   requirement to redistribute — missing them is an rpmlint error and a
+   compliance issue. Collect them in `%prep` into a sibling directory,
+   then list the whole set with `%license`:
+
+     %prep
+     %autosetup -p1 -n <pkg>-%{version}
+     mkdir vendoredlicenses
+     cp -p src/<pkg>/_vendor/lark/LICENSE          vendoredlicenses/lark.LICENSE
+     cp -p src/<pkg>/_vendor/packaging/LICENSE     vendoredlicenses/packaging.LICENSE
+     cp -p src/<pkg>/_vendor/packaging/LICENSE.APACHE vendoredlicenses/packaging.LICENSE.APACHE
+     cp -p src/<pkg>/_vendor/tomli/LICENSE         vendoredlicenses/tomli.LICENSE
+     ...
+     %files
+     %license LICENSE vendoredlicenses/*
+
+   Enumerate every subdirectory under `_vendor/` — `ls
+   source/src/<pkg>/_vendor/` and copy one line per LICENSE file it
+   finds, including multi-license sets like
+   `packaging/LICENSE{,.APACHE,.BSD}`. Do NOT substitute `%doc
+   _vendor/*/LICENSE` — rpm needs the files out from under the Python
+   source tree for the `%license` tagging to apply. Real example:
+   `python-poetry-core` collects LICENSE files from 4 vendored libs
+   (lark, fastjsonschema, packaging, tomli).
 
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 

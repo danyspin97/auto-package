@@ -61,7 +61,12 @@ generalize perfectly to this package.
   the matching `-devel` package or `pkgconfig(foo)` virtual provide — the
   same lookup approach as for a Python C-extension (`zypper search
   --provides`/`zypper what-provides`). Do not guess the -devel package
-  name; verify it.
+  name; verify it. If the dep isn't in OBS yet and has to be reported in
+  `unresolvable_packages`, strip the `lib`-prefix and `-devel`/`-dev` suffix
+  first — `libtrantor-devel` is reported as `trantor` — because the
+  resolver searches PyPI and GitHub for the upstream project name, which
+  nobody writes with the distro's devel-package wrapping (see convention
+  27's C/C++ bullet for the full reasoning).
 - **`%files`**: `%license` for the actual license file in `source/`
   (`LICENSE`, `COPYING`, `COPYING.LESSER`), `%doc` for `README`/`AUTHORS`/
   `ChangeLog` if present, `%{_includedir}/...` and
@@ -69,6 +74,33 @@ generalize perfectly to this package.
   (the versioned SONAME symlink, not the unversioned `.so` — that one goes
   in `%files devel` since it's only needed at link time) in the shared
   library subpackage.
+- **GObject-Introspection typelibs**: a C/C++ library that ships `.gir`/
+  `.typelib` files (common for anything in the GNOME ecosystem — grep for
+  `gobject-introspection` in `meson.build`/`configure.ac`, or
+  `-Dintrospection=enabled` in reference specs) needs
+  `BuildRequires: gobject-introspection-devel`, a `-Dintrospection=enabled`
+  (or equivalent) build flag, and a standalone subpackage named
+  `typelib-<ApiMajor>_<ApiMinor>-<Namespace>-<ApiVersion>` holding only
+  `%{_libdir}/girepository-1.0/<Namespace>-<ApiVersion>.typelib` (openSUSE
+  naming convention). The `.gir` XML goes in `-devel`
+  (`%{_datadir}/gir-1.0/*.gir`), the compiled `.typelib` in the standalone
+  package; `-devel` adds `Requires: typelib-...` so pulling the devel
+  package drags in the typelib automatically. Real example: `gstreamer`.
+- **File capabilities (POSIX caps) on a helper binary**: when a helper
+  needs `cap_net_bind_service`, `cap_sys_time`, etc. (upstream build
+  options like `-Dptp-helper-permissions=capabilities` are the giveaway),
+  openSUSE's `permissions` package applies them from
+  `/etc/permissions.d/<name>` at install time:
+    Requires(pre):  permissions
+    %verifyscript
+    %verify_permissions -e %{_libexecdir}/<path>/<helper>
+    %post
+    %set_permissions %{_libexecdir}/<path>/<helper>
+    %files
+    %verify(not mode caps) %{_libexecdir}/<path>/<helper>
+  The `%verify(not mode caps)` on the `%files` line suppresses rpm's
+  verify-time complaints about the setcap'd file. Real example:
+  `gstreamer`'s `gst-ptp-helper`.
 - **Source signature verification**: for a security-relevant system library
   fetched directly from its own release page (rather than a registry like
   PyPI with its own trust model), fetching the upstream GPG signature and
