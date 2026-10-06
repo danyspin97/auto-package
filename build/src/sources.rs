@@ -225,34 +225,22 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
     Err(error_msg)
 }
 
-/// The host, owner and repository name in a forge URL.
+/// The host, project path and repository name in a forge URL.
 ///
-/// Both spellings a user is likely to paste are accepted:
-/// `https://github.com/NVIDIA/cuda-python(.git)` and
-/// `git@github.com:NVIDIA/cuda-python.git`.
+/// Delegates to [`ap_ecosystem::forge::parse`], which handles every forge
+/// spelling the pipeline sees — HTTPS, `git@host:owner/repo.git` SSH,
+/// `ssh://` URLs, nested GitLab groups (`group/subgroup/project`), and
+/// forge sub-paths like `/tree/main` or `/-/blob/...`.
+///
+/// Returns `(host, project_path, repo_name)`:
+/// - `host` — e.g. `github.com`, `gitlab.gnome.org`
+/// - `project_path` — the full path below the host (`owner/repo` for
+///   GitHub, `group/subgroup/project` for a nested GitLab group)
+/// - `repo_name` — the trailing segment of the project path
 fn owner_repo(repo_url: &str) -> Result<(String, String, String), String> {
-    let trimmed = repo_url.trim().trim_end_matches('/');
-    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
-
-    let rest = match trimmed.split_once("://") {
-        Some((_, rest)) => rest.to_string(),
-        // scp-style: git@host:owner/repo
-        None => trimmed
-            .split_once('@')
-            .map(|(_, hostpath)| hostpath.replacen(':', "/", 1))
-            .ok_or_else(|| format!("{repo_url} is not a repository URL"))?,
-    };
-
-    let mut parts = rest.split('/');
-    let host = parts.next().unwrap_or_default().to_string();
-    let owner = parts.next().unwrap_or_default().to_string();
-    let repo = parts.next().unwrap_or_default().to_string();
-    if host.is_empty() || owner.is_empty() || repo.is_empty() {
-        return Err(format!(
-            "cannot tell the owner and repository apart in {repo_url}"
-        ));
-    }
-    Ok((host, owner, repo))
+    let forge = ap_ecosystem::forge::parse(repo_url)
+        .ok_or_else(|| format!("{repo_url} is not a repository URL"))?;
+    Ok((forge.host, forge.project_path, forge.repo_name))
 }
 
 fn get_json(url: &str) -> Result<serde_json::Value, String> {
@@ -288,25 +276,30 @@ fn first_tag(v: &serde_json::Value) -> Option<String> {
 /// project that tags but never cuts releases (common outside GitHub) still has
 /// a newest version, and a project that does both means the release.
 pub fn latest_release(repo_url: &str) -> Result<String, String> {
-    let (host, owner, repo) = owner_repo(repo_url)?;
+    let (host, project_path, repo_name) = owner_repo(repo_url)?;
 
     // Each forge family gets its release endpoint and its tag-list fallback.
+    // `project_path` carries the full path below the host, so a nested GitLab
+    // group (`group/subgroup/project`) is formatted correctly for the API.
     let endpoints: [String; 2] = if host.contains("github.com") {
+        // GitHub has no subgroups, so project_path is always `owner/repo`.
         [
-            format!("https://api.github.com/repos/{owner}/{repo}/releases/latest"),
-            format!("https://api.github.com/repos/{owner}/{repo}/tags?per_page=1"),
+            format!("https://api.github.com/repos/{project_path}/releases/latest"),
+            format!("https://api.github.com/repos/{project_path}/tags?per_page=1"),
         ]
     } else if host.contains("gitlab") {
-        let project = format!("{owner}%2F{repo}");
+        // GitLab identifies projects by the URL-encoded full path.
+        let encoded = project_path.replace('/', "%2F");
         [
-            format!("https://{host}/api/v4/projects/{project}/releases?per_page=1"),
-            format!("https://{host}/api/v4/projects/{project}/repository/tags?per_page=1"),
+            format!("https://{host}/api/v4/projects/{encoded}/releases?per_page=1"),
+            format!("https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=1"),
         ]
     } else {
         // Gitea and Forgejo, which is what most self-hosted forges are.
+        // Neither supports subgroups, so project_path is `owner/repo`.
         [
-            format!("https://{host}/api/v1/repos/{owner}/{repo}/releases/latest"),
-            format!("https://{host}/api/v1/repos/{owner}/{repo}/tags?limit=1"),
+            format!("https://{host}/api/v1/repos/{project_path}/releases/latest"),
+            format!("https://{host}/api/v1/repos/{project_path}/tags?limit=1"),
         ]
     };
 
@@ -314,7 +307,7 @@ pub fn latest_release(repo_url: &str) -> Result<String, String> {
     for url in &endpoints {
         match get_json(url) {
             Ok(v) => match first_tag(&v) {
-                Some(tag) => return Ok(version_from_tag(&tag, &repo)),
+                Some(tag) => return Ok(version_from_tag(&tag, &repo_name)),
                 None => last_err = Some(format!("{url}: no release or tag in the answer")),
             },
             Err(e) => last_err = Some(e),
@@ -358,16 +351,16 @@ pub fn version_from_tag(tag: &str, repo: &str) -> String {
 
 /// Get all tags from a repository via the forge API.
 fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
-    let (host, owner, repo) = owner_repo(repo_url)?;
+    let (host, project_path, _repo_name) = owner_repo(repo_url)?;
 
     let api_url = if host.contains("github.com") {
-        format!("https://api.github.com/repos/{owner}/{repo}/tags?per_page=100")
+        format!("https://api.github.com/repos/{project_path}/tags?per_page=100")
     } else if host.contains("gitlab") {
-        let project = format!("{owner}%2F{repo}");
-        format!("https://{host}/api/v4/projects/{project}/repository/tags?per_page=100")
+        let encoded = project_path.replace('/', "%2F");
+        format!("https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=100")
     } else {
         // Gitea/Forgejo
-        format!("https://{host}/api/v1/repos/{owner}/{repo}/tags?limit=100")
+        format!("https://{host}/api/v1/repos/{project_path}/tags?limit=100")
     };
 
     let json = get_json(&api_url)?;
@@ -554,11 +547,36 @@ mod tests {
             "https://github.com/NVIDIA/cuda-python/",
             "git@github.com:NVIDIA/cuda-python.git",
         ] {
-            let (host, owner, repo) = owner_repo(url).unwrap();
-            assert_eq!((host.as_str(), owner.as_str(), repo.as_str()),
-                       ("github.com", "NVIDIA", "cuda-python"), "{url}");
+            let (host, project_path, repo) = owner_repo(url).unwrap();
+            assert_eq!(
+                (host.as_str(), project_path.as_str(), repo.as_str()),
+                ("github.com", "NVIDIA/cuda-python", "cuda-python"),
+                "{url}",
+            );
         }
         assert!(owner_repo("https://github.com/NVIDIA").is_err());
+    }
+
+    #[test]
+    fn gitlab_nested_group_is_preserved_through_owner_repo() {
+        // The whole project path survives — `group/subgroup/project`, not
+        // just the first two segments. latest_release's GitLab branch then
+        // URL-encodes it correctly for the API.
+        let (host, project_path, repo) =
+            owner_repo("https://gitlab.com/group/subgroup/project").unwrap();
+        assert_eq!(host, "gitlab.com");
+        assert_eq!(project_path, "group/subgroup/project");
+        assert_eq!(repo, "project");
+    }
+
+    #[test]
+    fn ssh_scp_style_normalises_before_api_calls() {
+        // Even the SSH spelling resolves to the same (host, project_path,
+        // repo) — downstream HTTPS API calls work transparently.
+        let (host, project_path, _) =
+            owner_repo("git@gitlab.com:group/subgroup/project.git").unwrap();
+        assert_eq!(host, "gitlab.com");
+        assert_eq!(project_path, "group/subgroup/project");
     }
 
     #[test]

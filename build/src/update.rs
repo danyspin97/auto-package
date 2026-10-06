@@ -127,27 +127,53 @@ fn detect_ecosystem(source: &str, spec_version: &str) -> Option<Ecosystem> {
     None
 }
 
-/// Return a canonical `https://<host>/<owner>/<repo>` for a git-forge URL
+/// Return a canonical `https://<host>/<project_path>` for a git-forge URL
 /// found inside a `Source:` line, or `None` if the line doesn't point at a
 /// recognised git host.
 ///
 /// A spec's `Source:` for a GitHub release often points at an archive
 /// (`.../archive/<tag>.tar.gz`); the release-lookup API wants the plain repo
-/// URL, so this trims whatever comes after `<owner>/<repo>`.
+/// URL. SSH URLs (`git@github.com:owner/repo.git`) are also normalised to
+/// their HTTPS form. Nested GitLab groups (`group/subgroup/project`) are
+/// preserved as-is rather than truncated to two segments.
+///
+/// The actual parsing lives in [`ap_ecosystem::forge::parse`] so the three
+/// forge-URL readers in this codebase stay in sync.
 fn git_repo_url(source: &str) -> Option<String> {
-    const HOSTS: &[&str] = &["github.com", "gitlab.com", "codeberg.org"];
-    for host in HOSTS {
-        if let Some(idx) = source.find(host) {
-            let after = &source[idx + host.len()..];
-            let after = after.strip_prefix('/')?;
-            let parts: Vec<&str> = after.splitn(3, '/').collect();
-            if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-                let repo = parts[1].trim_end_matches(".git");
-                return Some(format!("https://{host}/{}/{repo}", parts[0]));
-            }
+    // A `Source:` line may embed the forge URL inside something else (e.g.
+    // `Source0: %{url}/archive/v%{version}.tar.gz`), so scan for a known host
+    // marker and parse the slice starting at `https://`/`http://`/`git@`.
+    let candidates = extract_url_like(source);
+    for candidate in candidates {
+        if let Some(forge) = ap_ecosystem::forge::parse(&candidate)
+            && ap_ecosystem::forge::is_known_host(&forge.host)
+        {
+            return Some(forge.canonical_https());
         }
     }
     None
+}
+
+/// Pull URL-ish substrings out of a `Source:` line.
+///
+/// A Source line in a spec typically starts with the URL, but macros like
+/// `%{url}` and arbitrary file names can appear around it, so this collects
+/// every candidate that begins with a scheme we recognise.
+fn extract_url_like(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for prefix in ["https://", "http://", "ssh://", "git@"] {
+        let mut rest = source;
+        while let Some(idx) = rest.find(prefix) {
+            let tail = &rest[idx..];
+            // A URL ends at whitespace or a quote.
+            let end = tail
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .unwrap_or(tail.len());
+            out.push(tail[..end].to_string());
+            rest = &tail[end..];
+        }
+    }
+    out
 }
 
 /// Fetch and classify one package. Pure given the injected lookups —
@@ -481,7 +507,6 @@ Source:         file:///opt/thing.tar.gz
             None,
         );
     }
-
     /// AppCo versioned-library packages are named `<base>+<version>` on OBS
     /// but hold a plain `<base>.spec`. The pre-Oct-6 picker guessed
     /// `<pkg>.spec` and silently missed the real one on every such package.
@@ -586,6 +611,32 @@ Source:         https://files.pythonhosted.org/packages/source/p/pytorch/pytorch
                 new_version: "2.5.0".into(),
             },
             "expected the define-resolved 2.4.0 to compare against 2.5.0"
+        );
+    }
+
+    #[test]
+    fn git_repo_url_preserves_nested_gitlab_groups() {
+        // A nested GitLab group has to survive intact: GitLab's REST API
+        // returns 404 for a truncated path, and the archive URL built from
+        // it just doesn't exist. Three-segment path, three-segment URL.
+        assert_eq!(
+            git_repo_url(
+                "https://gitlab.com/group/subgroup/project/-/archive/v1.0/project-v1.0.tar.gz",
+            )
+            .as_deref(),
+            Some("https://gitlab.com/group/subgroup/project"),
+        );
+    }
+
+    #[test]
+    fn git_repo_url_normalises_ssh_to_https() {
+        // A `Source:` line pointing at an SSH clone URL was passed through
+        // unchanged — the subsequent HTTPS release-API call then couldn't
+        // reach it. Now the SSH spelling is reduced to its canonical HTTPS
+        // form before anything else runs.
+        assert_eq!(
+            git_repo_url("git@github.com:NVIDIA/cuda-python.git").as_deref(),
+            Some("https://github.com/NVIDIA/cuda-python"),
         );
     }
 }

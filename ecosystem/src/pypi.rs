@@ -632,15 +632,9 @@ struct RawDigests {
     sha256: Option<String>,
 }
 
-/// Known Git hosting platforms and the URL prefix used to normalise them.
-static GIT_HOSTS: &[&str] = &[
-    "github.com",
-    "gitlab.com",
-    "bitbucket.org",
-    "codeberg.org",
-    "sr.ht",
-    "salsa.debian.org",
-];
+// Forge hosts and URL parsing live in `crate::forge` — the same code backs
+// `source_url_from_json` below, `build::sources::owner_repo`, and
+// `build::update::git_repo_url`.
 
 /// Parse a `/pypi/…/json` response into a `Release` using a synthetic sdist
 /// entry for the given `tarball_filename`.
@@ -672,8 +666,10 @@ pub fn parse_release_with_tarball(json: &str, tarball_filename: &str) -> Result<
 /// Extract a source repository URL from a `/pypi/…/json` response body.
 ///
 /// Searches `project_urls` and `home_page` for any URL on a known Git hosting
-/// platform, then strips trailing slashes, `.git` suffixes, and sub-paths
-/// so the result is a clean `owner/repo`-level URL.
+/// platform, then normalises it via [`crate::forge::parse`]: SSH URLs become
+/// HTTPS, nested GitLab groups are preserved in full, and sub-paths like
+/// `/tree/main`, `/issues`, or `/-/blob/...` are trimmed off so the result is
+/// a clean project URL.
 ///
 /// Returns `None` when no recognisable source URL is found in the metadata.
 pub fn source_url_from_json(json: &str) -> Option<String> {
@@ -710,21 +706,10 @@ pub fn source_url_from_json(json: &str) -> Option<String> {
     }
 
     for url in candidates {
-        let trimmed = url.trim();
-        for host in GIT_HOSTS {
-            if trimmed.contains(host) {
-                let base = trimmed.trim_end_matches('/').trim_end_matches(".git");
-                // Keep only up to the second path segment after the host
-                // (owner/repo), dropping /tree/main, /issues, etc.
-                let after_host = base
-                    .find(host)
-                    .map(|i| &base[i + host.len()..])
-                    .and_then(|s| s.strip_prefix('/'))?;
-                let parts: Vec<&str> = after_host.splitn(3, '/').collect();
-                if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-                    return Some(format!("https://{host}/{}/{}", parts[0], parts[1]));
-                }
-            }
+        if let Some(forge) = crate::forge::parse(url.trim())
+            && crate::forge::is_known_host(&forge.host)
+        {
+            return Some(forge.canonical_https());
         }
     }
     None
@@ -1498,6 +1483,49 @@ mod tests {
             parse_release(WHEEL_ONLY),
             Err(Error::NoSdist { .. })
         ));
+    }
+
+    #[test]
+    fn source_url_from_json_follows_the_source_project_url_key() {
+        let r = source_url_from_json(MARKUPSAFE);
+        assert_eq!(r.as_deref(), Some("https://github.com/pallets/markupsafe"));
+    }
+
+    #[test]
+    fn source_url_from_json_preserves_nested_gitlab_group() {
+        // The real bug: a project_urls entry like
+        // `https://gitlab.com/group/subgroup/project` used to be truncated
+        // to `group/subgroup`, which is a group URL, not a project URL.
+        let json = r#"{
+          "info": {
+            "name": "x", "version": "1",
+            "project_urls": {
+              "Source": "https://gitlab.com/group/subgroup/project"
+            }
+          },
+          "urls": []
+        }"#;
+        assert_eq!(
+            source_url_from_json(json).as_deref(),
+            Some("https://gitlab.com/group/subgroup/project"),
+        );
+    }
+
+    #[test]
+    fn source_url_from_json_strips_github_subpaths() {
+        let json = r#"{
+          "info": {
+            "name": "x", "version": "1",
+            "project_urls": {
+              "Source": "https://github.com/pallets/markupsafe/tree/main"
+            }
+          },
+          "urls": []
+        }"#;
+        assert_eq!(
+            source_url_from_json(json).as_deref(),
+            Some("https://github.com/pallets/markupsafe"),
+        );
     }
 
     #[test]
