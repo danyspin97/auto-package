@@ -64,15 +64,24 @@ pub enum SkipReason {
     SpecHeaderMissing,
     NoSourceLine,
     /// No ecosystem matched the `Source:` line.
-    NotRecognized { source: String },
-    LookupFailed { ecosystem_tag: String, name: String, error: String },
+    NotRecognized {
+        source: String,
+    },
+    LookupFailed {
+        ecosystem_tag: String,
+        name: String,
+        error: String,
+    },
     /// Both versions were fetched but at least one is not valid PEP 440, so
     /// the comparator cannot decide which is newer. Previously this fell
     /// into `UpToDate`, which labelled a package `[current]` when the tool
     /// had actually failed to make the comparison at all — the Oct 6
     /// review's probe with a packaged `Version: %{package_version}` that
     /// never got expanded reproduced exactly this false-current label.
-    VersionCompareFailed { packaged: String, latest: String },
+    VersionCompareFailed {
+        packaged: String,
+        latest: String,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
@@ -84,7 +93,11 @@ impl std::fmt::Display for SkipReason {
             SkipReason::NotRecognized { source } => {
                 write!(f, "no recognised ecosystem for source ({source})")
             }
-            SkipReason::LookupFailed { ecosystem_tag, name, error } => {
+            SkipReason::LookupFailed {
+                ecosystem_tag,
+                name,
+                error,
+            } => {
                 write!(f, "{ecosystem_tag} lookup for {name} failed: {error}")
             }
             SkipReason::VersionCompareFailed { packaged, latest } => {
@@ -201,20 +214,20 @@ where
     };
 
     let latest = match &ecosystem {
-        Ecosystem::Pypi { pypi_name } => (lookups.fetch_pypi_latest)(pypi_name).map_err(|e| {
-            SkipReason::LookupFailed {
+        Ecosystem::Pypi { pypi_name } => {
+            (lookups.fetch_pypi_latest)(pypi_name).map_err(|e| SkipReason::LookupFailed {
                 ecosystem_tag: "PyPI".into(),
                 name: pypi_name.clone(),
                 error: e,
-            }
-        }),
-        Ecosystem::GitRepo { url } => (lookups.fetch_repo_latest)(url).map_err(|e| {
-            SkipReason::LookupFailed {
+            })
+        }
+        Ecosystem::GitRepo { url } => {
+            (lookups.fetch_repo_latest)(url).map_err(|e| SkipReason::LookupFailed {
                 ecosystem_tag: "git".into(),
                 name: url.clone(),
                 error: e,
-            }
-        }),
+            })
+        }
     };
     let latest = match latest {
         Ok(v) => v,
@@ -236,11 +249,17 @@ where
             latest,
         }),
     };
-    Candidate { rpm_name: rpm_name.to_string(), decision }
+    Candidate {
+        rpm_name: rpm_name.to_string(),
+        decision,
+    }
 }
 
 fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
-    Candidate { rpm_name: rpm_name.to_string(), decision: Decision::Skipped(reason) }
+    Candidate {
+        rpm_name: rpm_name.to_string(),
+        decision: Decision::Skipped(reason),
+    }
 }
 
 /// Classify every package in `project` (optionally filtered to just `only`).
@@ -265,9 +284,8 @@ pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate>
     // (Oct 6 review finding #3): `demo+1.0` looked for `demo+1.0.spec`,
     // not the actual `demo.spec`.
     let fetch_spec = |rpm_name: &str| spec_for_package(project, rpm_name, emit);
-    let fetch_pypi_latest = |pypi_name: &str| {
-        pypi::fetch_latest_version(pypi_name).map_err(|e| e.to_string())
-    };
+    let fetch_pypi_latest =
+        |pypi_name: &str| pypi::fetch_latest_version(pypi_name).map_err(|e| e.to_string());
     let fetch_repo_latest = |url: &str| crate::sources::latest_release(url);
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
@@ -349,23 +367,29 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 ";
 
     fn only_pypi(latest: &'static str) -> Lookups<'static> {
-        let p: &'static (dyn Fn(&str) -> Result<String, String>) = Box::leak(Box::new(
-            move |_name: &str| Ok(latest.to_string()),
-        ));
-        let r: &'static (dyn Fn(&str) -> Result<String, String>) = Box::leak(Box::new(
-            move |_url: &str| -> Result<String, String> { unreachable!("repo path not used") },
-        ));
-        Lookups { fetch_pypi_latest: p, fetch_repo_latest: r }
+        let p: &'static (dyn Fn(&str) -> Result<String, String>) =
+            Box::leak(Box::new(move |_name: &str| Ok(latest.to_string())));
+        let r: &'static (dyn Fn(&str) -> Result<String, String>) =
+            Box::leak(Box::new(move |_url: &str| -> Result<String, String> {
+                unreachable!("repo path not used")
+            }));
+        Lookups {
+            fetch_pypi_latest: p,
+            fetch_repo_latest: r,
+        }
     }
 
     fn only_repo(latest: &'static str) -> Lookups<'static> {
-        let p: &'static (dyn Fn(&str) -> Result<String, String>) = Box::leak(Box::new(
-            move |_name: &str| -> Result<String, String> { unreachable!("pypi path not used") },
-        ));
-        let r: &'static (dyn Fn(&str) -> Result<String, String>) = Box::leak(Box::new(
-            move |_url: &str| Ok(latest.to_string()),
-        ));
-        Lookups { fetch_pypi_latest: p, fetch_repo_latest: r }
+        let p: &'static (dyn Fn(&str) -> Result<String, String>) =
+            Box::leak(Box::new(move |_name: &str| -> Result<String, String> {
+                unreachable!("pypi path not used")
+            }));
+        let r: &'static (dyn Fn(&str) -> Result<String, String>) =
+            Box::leak(Box::new(move |_url: &str| Ok(latest.to_string())));
+        Lookups {
+            fetch_pypi_latest: p,
+            fetch_repo_latest: r,
+        }
     }
 
     #[test]
@@ -375,7 +399,9 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         assert_eq!(
             c.decision,
             Decision::Update {
-                ecosystem: Ecosystem::Pypi { pypi_name: "attrs".into() },
+                ecosystem: Ecosystem::Pypi {
+                    pypi_name: "attrs".into()
+                },
                 old_version: "26.1.0".into(),
                 new_version: "27.0.0".into(),
             }
@@ -389,7 +415,9 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         assert_eq!(
             c.decision,
             Decision::UpToDate {
-                ecosystem: Ecosystem::Pypi { pypi_name: "attrs".into() },
+                ecosystem: Ecosystem::Pypi {
+                    pypi_name: "attrs".into()
+                },
                 version: "26.1.0".into(),
             }
         );
@@ -409,7 +437,9 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         assert_eq!(
             c.decision,
             Decision::Update {
-                ecosystem: Ecosystem::Pypi { pypi_name: "nvidia_cublas".into() },
+                ecosystem: Ecosystem::Pypi {
+                    pypi_name: "nvidia_cublas".into()
+                },
                 old_version: "13.1.1.3".into(),
                 new_version: "13.2.0.0".into(),
             }
@@ -423,7 +453,9 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         assert_eq!(
             c.decision,
             Decision::Update {
-                ecosystem: Ecosystem::Pypi { pypi_name: "torchaudio".into() },
+                ecosystem: Ecosystem::Pypi {
+                    pypi_name: "torchaudio".into()
+                },
                 old_version: "2.4.0".into(),
                 new_version: "2.5.0".into(),
             }
@@ -458,10 +490,14 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         let spec = |_: &str| Some(ATTRS_SPEC.to_string());
         let p: &'static (dyn Fn(&str) -> Result<String, String>) =
             Box::leak(Box::new(|_: &str| Err("404 Not Found".to_string())));
-        let r: &'static (dyn Fn(&str) -> Result<String, String>) = Box::leak(Box::new(
-            |_: &str| -> Result<String, String> { unreachable!() },
-        ));
-        let lookups = Lookups { fetch_pypi_latest: p, fetch_repo_latest: r };
+        let r: &'static (dyn Fn(&str) -> Result<String, String>) =
+            Box::leak(Box::new(|_: &str| -> Result<String, String> {
+                unreachable!()
+            }));
+        let lookups = Lookups {
+            fetch_pypi_latest: p,
+            fetch_repo_latest: r,
+        };
         let c = classify("python-attrs", &spec, &lookups);
         assert_eq!(
             c.decision,
@@ -606,7 +642,9 @@ Source:         https://files.pythonhosted.org/packages/source/p/pytorch/pytorch
         assert_eq!(
             c.decision,
             Decision::Update {
-                ecosystem: Ecosystem::Pypi { pypi_name: "pytorch".into() },
+                ecosystem: Ecosystem::Pypi {
+                    pypi_name: "pytorch".into()
+                },
                 old_version: "2.4.0".into(),
                 new_version: "2.5.0".into(),
             },

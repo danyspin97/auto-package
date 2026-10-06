@@ -113,7 +113,10 @@ pub enum FetchError {
 /// Fetch and parse the latest release for `name` from PyPI's JSON API.
 pub fn fetch_latest_release(name: &str) -> Result<Release, FetchError> {
     let url = format!("https://pypi.org/pypi/{name}/json");
-    let to_http_err = |e| FetchError::Http { url: url.clone(), source: Box::new(e) };
+    let to_http_err = |e| FetchError::Http {
+        url: url.clone(),
+        source: Box::new(e),
+    };
     let json = ureq::get(&url)
         .call()
         .map_err(to_http_err)?
@@ -134,7 +137,10 @@ pub fn fetch_latest_release(name: &str) -> Result<Release, FetchError> {
 /// envelope and nothing else.
 pub fn fetch_latest_version(name: &str) -> Result<String, FetchError> {
     let url = format!("https://pypi.org/pypi/{name}/json");
-    let to_http_err = |e| FetchError::Http { url: url.clone(), source: Box::new(e) };
+    let to_http_err = |e| FetchError::Http {
+        url: url.clone(),
+        source: Box::new(e),
+    };
     let json = ureq::get(&url)
         .call()
         .map_err(to_http_err)?
@@ -269,7 +275,6 @@ pub enum Error {
     /// the response is not what we think it is.
     #[error("no sha256 digest for {0}")]
     NoDigest(String),
-
 }
 
 /// Parse a `/pypi/…/json` response body.
@@ -343,7 +348,11 @@ pub fn pick_wheel_from_json(
             name: info.name.clone(),
             version: info.version.clone(),
         })?;
-    let sha256 = wheel.digests.sha256.clone().ok_or_else(|| Error::NoDigest(wheel.filename.clone()))?;
+    let sha256 = wheel
+        .digests
+        .sha256
+        .clone()
+        .ok_or_else(|| Error::NoDigest(wheel.filename.clone()))?;
     Ok(WheelFile {
         filename: wheel.filename.clone(),
         url: wheel.url.clone(),
@@ -427,9 +436,8 @@ pub(crate) fn wheel_platform_matches_linux_arch(tag: &str, arch: &str) -> bool {
     }
     let suffix = format!("_{arch}");
     tag.split('.').any(|p| {
-        let is_linux = p.starts_with("linux_")
-            || p.starts_with("manylinux")
-            || p.starts_with("musllinux_");
+        let is_linux =
+            p.starts_with("linux_") || p.starts_with("manylinux") || p.starts_with("musllinux_");
         is_linux && p.ends_with(&suffix)
     })
 }
@@ -460,7 +468,9 @@ pub(crate) fn wheel_python_is_installable(
         if let Some(ver) = p.strip_prefix("py") {
             // `py<N>` or `py<N><M>` — language-level tag. First digit must
             // be '3' or newer (never Python 2).
-            ver.chars().next().is_some_and(|c| c.is_ascii_digit() && c >= '3')
+            ver.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() && c >= '3')
         } else if let Some(ver) = p.strip_prefix("cp") {
             // CPython-locked. Accept iff the project is pinned to exactly
             // this flavor OR the wheel uses the stable ABI (`abi3`) and we
@@ -689,7 +699,14 @@ pub fn source_url_from_json(json: &str) -> Option<String> {
     let info = outer.info;
 
     // Prefer URLs whose key hints at source over generic homepage links.
-    let source_keys = ["Source", "Source Code", "Repository", "Code", "GitHub", "GitLab"];
+    let source_keys = [
+        "Source",
+        "Source Code",
+        "Repository",
+        "Code",
+        "GitHub",
+        "GitLab",
+    ];
     let mut candidates: Vec<String> = source_keys
         .iter()
         .filter_map(|k| info.project_urls.get(*k).cloned())
@@ -819,7 +836,11 @@ pub fn pypi_name_from_source_url(url: &str) -> Option<String> {
     let mut parts = tail.splitn(3, '/');
     let _letter = parts.next()?;
     let name = parts.next()?;
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// Extract the PyPI project name and version from a PEP 427 wheel filename.
@@ -897,9 +918,17 @@ pub enum VersionCompare {
 pub fn compare_pep440(latest: &str, packaged: &str) -> VersionCompare {
     use pep440_rs::Version;
     use std::str::FromStr;
-    let Ok(l) = Version::from_str(latest) else { return VersionCompare::Unparseable };
-    let Ok(p) = Version::from_str(packaged) else { return VersionCompare::Unparseable };
-    if l > p { VersionCompare::Newer } else { VersionCompare::NotNewer }
+    let Ok(l) = Version::from_str(latest) else {
+        return VersionCompare::Unparseable;
+    };
+    let Ok(p) = Version::from_str(packaged) else {
+        return VersionCompare::Unparseable;
+    };
+    if l > p {
+        VersionCompare::Newer
+    } else {
+        VersionCompare::NotNewer
+    }
 }
 
 /// True iff `latest` is a strictly newer PEP 440 version than `packaged`.
@@ -1015,7 +1044,10 @@ mod tests {
     #[test]
     fn picks_the_wheel_matching_the_requested_arch() {
         let wheel = pick_wheel_from_json(MARKUPSAFE, "x86_64", None).expect("a wheel exists");
-        assert_eq!(wheel.filename, "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl");
+        assert_eq!(
+            wheel.filename,
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl"
+        );
         assert_eq!(wheel.sha256, "0123456789abcdef");
     }
 
@@ -1107,7 +1139,10 @@ mod tests {
             "nvidia_nccl_cu13-2.29.7-py3-none-manylinux2014_x86_64.whl",
             None
         ));
-        assert!(wheel_is_flavor_agnostic("somepkg-1.0-py3-none-any.whl", None));
+        assert!(wheel_is_flavor_agnostic(
+            "somepkg-1.0-py3-none-any.whl",
+            None
+        ));
         assert!(!wheel_is_flavor_agnostic(
             "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl",
             None
@@ -1131,8 +1166,8 @@ mod tests {
             "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
             "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl",
         );
-        let err =
-            pick_wheel_from_json(&json, "x86_64", None).expect_err("cp-locked wheel must be refused");
+        let err = pick_wheel_from_json(&json, "x86_64", None)
+            .expect_err("cp-locked wheel must be refused");
         assert!(matches!(err, Error::NoWheel { .. }), "got {err:?}");
     }
 
@@ -1148,7 +1183,10 @@ mod tests {
         );
         let wheel = pick_wheel_from_json(&json, "x86_64", Some("cp314"))
             .expect("the single configured flavor's own wheel must be accepted");
-        assert_eq!(wheel.filename, "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl");
+        assert_eq!(
+            wheel.filename,
+            "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl"
+        );
     }
 
     #[test]
@@ -1166,8 +1204,12 @@ mod tests {
 
     #[test]
     fn no_wheel_at_all_is_an_error() {
-        let json = MARKUPSAFE.replace(r#""packagetype": "bdist_wheel""#, r#""packagetype": "sdist""#);
-        let err = pick_wheel_from_json(&json, "x86_64", None).expect_err("no wheel in this fixture");
+        let json = MARKUPSAFE.replace(
+            r#""packagetype": "bdist_wheel""#,
+            r#""packagetype": "sdist""#,
+        );
+        let err =
+            pick_wheel_from_json(&json, "x86_64", None).expect_err("no wheel in this fixture");
         assert!(matches!(err, Error::NoWheel { .. }), "got {err:?}");
     }
 
@@ -1347,7 +1389,10 @@ mod tests {
     #[test]
     fn wheel_filename_rejects_truncated_filename() {
         // Fewer than 5 hyphen-separated segments means not a real wheel name.
-        assert_eq!(pypi_name_and_version_from_wheel_filename("foo-1.0.whl"), None);
+        assert_eq!(
+            pypi_name_and_version_from_wheel_filename("foo-1.0.whl"),
+            None
+        );
     }
 
     #[test]
@@ -1442,9 +1487,8 @@ mod tests {
         // conjunct must hold on Linux. `sys_platform == 'win32'` is false
         // on Linux, so the whole marker is false, so the dep is Windows-
         // only in effect. The substring check correctly catches this.
-        let reqs = vec![
-            "colorama; sys_platform == 'win32' and python_version >= '3.10'".to_string(),
-        ];
+        let reqs =
+            vec!["colorama; sys_platform == 'win32' and python_version >= '3.10'".to_string()];
         assert!(parse_dep_names(&reqs).is_empty());
     }
 

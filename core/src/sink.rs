@@ -139,10 +139,7 @@ pub struct PkgContextReporter {
 }
 
 impl PkgContextReporter {
-    pub fn new(
-        inner: std::sync::Arc<dyn Reporter + Send + Sync>,
-        pkg: Option<String>,
-    ) -> Self {
+    pub fn new(inner: std::sync::Arc<dyn Reporter + Send + Sync>, pkg: Option<String>) -> Self {
         Self { inner, pkg }
     }
 }
@@ -212,13 +209,19 @@ impl HumanSink {
 
     fn format(&self, event: &Event) -> Option<String> {
         match event {
-            Event::RunStarted { run_id, work_dir, .. } => Some(format!(
+            Event::RunStarted {
+                run_id, work_dir, ..
+            } => Some(format!(
                 "{} · run {} · {}",
                 "auto-package".if_supports_color(Stderr, |t| t.bold()),
                 run_id.if_supports_color(Stderr, |t| t.dimmed()),
                 work_dir.display().if_supports_color(Stderr, |t| t.dimmed()),
             )),
-            Event::RunFinished { outcome, elapsed, usage } => {
+            Event::RunFinished {
+                outcome,
+                elapsed,
+                usage,
+            } => {
                 let ms = elapsed.as_millis();
                 let (secs, frac) = (ms / 1000, ms % 1000);
                 let outcome_colored = match outcome {
@@ -229,27 +232,34 @@ impl HumanSink {
                     ),
                     _ => format!(
                         "{}",
-                        "Failed"
-                            .if_supports_color(Stderr, |t| t.style(Style::new().red().bold()))
+                        "Failed".if_supports_color(Stderr, |t| t.style(Style::new().red().bold()))
                     ),
                 };
                 Some(format!(
                     "run finished: {outcome_colored} in {secs}.{frac:03}s · {}",
-                    format!("${:.4}", usage.cost_usd)
-                        .if_supports_color(Stderr, |t| t.dimmed()),
+                    format!("${:.4}", usage.cost_usd).if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
             Event::ResolveStarted { root } => Some(format!(
                 "resolve {}",
                 root.if_supports_color(Stderr, |t| t.bold()),
             )),
-            Event::ResolveFinished { total, built, remaining } => Some(format!(
+            Event::ResolveFinished {
+                total,
+                built,
+                remaining,
+            } => Some(format!(
                 "  {} packages in closure · {} already built · {} remaining",
                 total,
                 built.if_supports_color(Stderr, |t| t.green()),
                 remaining,
             )),
-            Event::TargetSelected { pkg, version, blocked_by, .. } => {
+            Event::TargetSelected {
+                pkg,
+                version,
+                blocked_by,
+                ..
+            } => {
                 let mut s = format!(
                     "building {} {}",
                     pkg.if_supports_color(Stderr, |t| t.bold()),
@@ -264,7 +274,11 @@ impl HumanSink {
                 }
                 Some(s)
             }
-            Event::PackageFinished { pkg, version, outcome } => {
+            Event::PackageFinished {
+                pkg,
+                version,
+                outcome,
+            } => {
                 let outcome_colored = match outcome {
                     PackageOutcome::Built => {
                         format!("{}", "built".if_supports_color(Stderr, |t| t.green()))
@@ -280,8 +294,7 @@ impl HumanSink {
                     ),
                     PackageOutcome::Failed { reason } => format!(
                         "{}",
-                        format!("failed: {reason}")
-                            .if_supports_color(Stderr, |t| t.red()),
+                        format!("failed: {reason}").if_supports_color(Stderr, |t| t.red()),
                     ),
                 };
                 Some(format!(
@@ -296,7 +309,11 @@ impl HumanSink {
                 format!("{:02}", step.0 + 1).if_supports_color(Stderr, |t| t.dimmed()),
                 kind.if_supports_color(Stderr, |t| t.bold()),
             )),
-            Event::StepFinished { step, outcome, elapsed } => {
+            Event::StepFinished {
+                step,
+                outcome,
+                elapsed,
+            } => {
                 let ms = elapsed.as_millis();
                 let (secs, frac) = (ms / 1000, ms % 1000);
                 let outcome_colored = match outcome {
@@ -316,7 +333,11 @@ impl HumanSink {
                     format!("{secs}.{frac:03}s").if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
-            Event::BuildFailed { classification, log, .. } => {
+            Event::BuildFailed {
+                classification,
+                log,
+                ..
+            } => {
                 let label = match classification {
                     crate::event::BuildFailure::RpmParseError { message, .. } => {
                         format!("rpm parse error: {message}")
@@ -334,8 +355,7 @@ impl HumanSink {
                 };
                 Some(format!(
                     "  {}: {label}\n  log: {}",
-                    "FAILED"
-                        .if_supports_color(Stderr, |t| t.style(Style::new().red().bold())),
+                    "FAILED".if_supports_color(Stderr, |t| t.style(Style::new().red().bold())),
                     log.display().if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
@@ -352,7 +372,13 @@ impl HumanSink {
                 "missing packages".if_supports_color(Stderr, |t| t.yellow()),
                 names.join(", "),
             )),
-            Event::SpecChanged { lines_added, lines_removed, diff, artifact, .. } => {
+            Event::SpecChanged {
+                lines_added,
+                lines_removed,
+                diff,
+                artifact,
+                ..
+            } => {
                 if *lines_added == 0 && *lines_removed == 0 {
                     return None;
                 }
@@ -367,7 +393,13 @@ impl HumanSink {
                 }
                 Some(s)
             }
-            Event::Command { program, argv, cwd, log, .. } => {
+            Event::Command {
+                program,
+                argv,
+                cwd,
+                log,
+                ..
+            } => {
                 let mut s = format!(
                     "  {} {} {} {}",
                     "+".if_supports_color(Stderr, |t| t.dimmed()),
@@ -388,7 +420,9 @@ impl HumanSink {
                 "agent".if_supports_color(Stderr, |t| t.style(Style::new().cyan().bold())),
                 artifact.display().if_supports_color(Stderr, |t| t.dimmed()),
             )),
-            Event::ExtractResult { extract, artifact, .. } => {
+            Event::ExtractResult {
+                extract, artifact, ..
+            } => {
                 let mut body = format!(
                     "genre: {}\nphase: {}\nlocated by: {}\nelided: {} line(s)\n",
                     extract.genre.as_deref().unwrap_or("—"),
@@ -427,7 +461,13 @@ impl HumanSink {
                 "    {name}: {}",
                 path.display().if_supports_color(Stderr, |t| t.dimmed()),
             )),
-            Event::AgentReply { response, usage, raw, artifact, .. } => {
+            Event::AgentReply {
+                response,
+                usage,
+                raw,
+                artifact,
+                ..
+            } => {
                 let confidence = response.confidence.as_deref().unwrap_or("?");
                 let confidence_colored = match confidence {
                     "High" => format!("{}", confidence.if_supports_color(Stderr, |t| t.green())),
@@ -443,10 +483,7 @@ impl HumanSink {
                         "{}",
                         response.action.if_supports_color(Stderr, |t| t.yellow())
                     ),
-                    _ => format!(
-                        "{}",
-                        response.action.if_supports_color(Stderr, |t| t.red())
-                    ),
+                    _ => format!("{}", response.action.if_supports_color(Stderr, |t| t.red())),
                 };
                 let reasoning = if response.reasoning.chars().count() > 120 {
                     format!(
@@ -459,8 +496,7 @@ impl HumanSink {
                 let mut s = format!(
                     "  {} ({action_colored} · {confidence_colored} · {}): {reasoning}",
                     "reply".if_supports_color(Stderr, |t| t.cyan()),
-                    format!("${:.4}", usage.cost_usd)
-                        .if_supports_color(Stderr, |t| t.dimmed()),
+                    format!("${:.4}", usage.cost_usd).if_supports_color(Stderr, |t| t.dimmed()),
                 );
                 if self.level >= LogLevel::Trace && !raw.is_empty() {
                     s.push('\n');
@@ -525,7 +561,10 @@ struct JsonlEnvelope<'a> {
 
 impl Reporter for JsonlSink {
     fn report(&self, event: &Event) {
-        let envelope = JsonlEnvelope { pkg: current_pkg(), event };
+        let envelope = JsonlEnvelope {
+            pkg: current_pkg(),
+            event,
+        };
         if let Ok(line) = serde_json::to_string(&envelope) {
             if let Ok(mut w) = self.writer.lock() {
                 let _ = writeln!(w, "{line}");
@@ -626,8 +665,7 @@ mod tests {
         // in the file must still carry its correct pkg, and ordering within
         // either thread's own slice doesn't matter.
         let path = tmp_path("parallel");
-        let sink: Arc<dyn Reporter + Send + Sync> =
-            Arc::new(JsonlSink::open(&path).unwrap());
+        let sink: Arc<dyn Reporter + Send + Sync> = Arc::new(JsonlSink::open(&path).unwrap());
 
         let per_thread = 50usize;
         let handles: Vec<_> = ["pkg-a", "pkg-b"]

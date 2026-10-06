@@ -48,8 +48,8 @@ impl SourceMap {
 
     pub fn save(&self, work_dir: &Path) -> Result<(), String> {
         let path = Self::path(work_dir);
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| format!("serializing source map: {e}"))?;
+        let text =
+            toml::to_string_pretty(self).map_err(|e| format!("serializing source map: {e}"))?;
         std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
     }
 
@@ -143,10 +143,18 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
     let mut last_err = None;
 
     for url in &candidates {
-        let Ok(resp) = ureq::get(url).call() else { continue };
+        let Ok(resp) = ureq::get(url).call() else {
+            continue;
+        };
         let mut buf = Vec::new();
         use std::io::Read;
-        if resp.into_body().into_reader().read_to_end(&mut buf).is_err() || buf.is_empty() {
+        if resp
+            .into_body()
+            .into_reader()
+            .read_to_end(&mut buf)
+            .is_err()
+            || buf.is_empty()
+        {
             continue;
         }
 
@@ -519,7 +527,8 @@ mod tests {
 
     #[test]
     fn an_explicit_package_wins_over_the_default() {
-        let (pkg, url) = SourceMap::parse_arg("cuda-python=https://github.com/x/y", "root").unwrap();
+        let (pkg, url) =
+            SourceMap::parse_arg("cuda-python=https://github.com/x/y", "root").unwrap();
         assert_eq!(pkg, "cuda-python");
         assert_eq!(url, "https://github.com/x/y");
     }
@@ -533,10 +542,16 @@ mod tests {
     #[test]
     fn gitlab_uses_its_own_archive_layout() {
         let urls = archive_urls("https://gitlab.com/owner/thing", "1.2.3");
-        assert!(urls[0].contains("/-/archive/v1.2.3/thing-v1.2.3.tar.gz"), "{urls:?}");
+        assert!(
+            urls[0].contains("/-/archive/v1.2.3/thing-v1.2.3.tar.gz"),
+            "{urls:?}"
+        );
 
         let urls = archive_urls("https://github.com/owner/thing.git", "1.2.3");
-        assert_eq!(urls[0], "https://github.com/owner/thing/archive/refs/tags/v1.2.3.tar.gz");
+        assert_eq!(
+            urls[0],
+            "https://github.com/owner/thing/archive/refs/tags/v1.2.3.tar.gz"
+        );
     }
 
     #[test]
@@ -583,7 +598,10 @@ mod tests {
     fn a_tag_is_reduced_to_the_version_it_carries() {
         assert_eq!(version_from_tag("v12.9.0", "cuda-python"), "12.9.0");
         assert_eq!(version_from_tag("12.9.0", "cuda-python"), "12.9.0");
-        assert_eq!(version_from_tag("cuda-python-v12.9.0", "cuda-python"), "12.9.0");
+        assert_eq!(
+            version_from_tag("cuda-python-v12.9.0", "cuda-python"),
+            "12.9.0"
+        );
         assert_eq!(version_from_tag("release-1.2", "thing"), "1.2");
         // Not a version prefix: a tag that merely starts with a letter v.
         assert_eq!(version_from_tag("voyager", "thing"), "voyager");
@@ -609,7 +627,10 @@ mod tests {
     #[test]
     fn rust_crates_are_not_given_the_python_prefix() {
         assert_eq!(Ecosystem::Rust.rpm_name("ripgrep"), "ripgrep");
-        assert_eq!(Ecosystem::Python.rpm_name("MarkupSafe"), "python-markupsafe");
+        assert_eq!(
+            Ecosystem::Python.rpm_name("MarkupSafe"),
+            "python-markupsafe"
+        );
         assert_eq!(Ecosystem::PlainC.rpm_name("nlohmann-json"), "nlohmann-json");
     }
 
@@ -620,7 +641,10 @@ mod tests {
         m.insert("cuda-python", "https://github.com/NVIDIA/cuda-python");
         m.save(dir.path()).unwrap();
         let back = SourceMap::load(dir.path()).unwrap();
-        assert_eq!(back.get("cuda_python"), Some("https://github.com/NVIDIA/cuda-python"));
+        assert_eq!(
+            back.get("cuda_python"),
+            Some("https://github.com/NVIDIA/cuda-python")
+        );
     }
 
     #[test]

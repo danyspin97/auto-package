@@ -103,11 +103,7 @@ mod tests {
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::create_dir_all(&fallback).unwrap();
 
-        let got = resolve_skills_dir(
-            Some(skills.to_str().unwrap()),
-            Some(&exe),
-            &fallback,
-        );
+        let got = resolve_skills_dir(Some(skills.to_str().unwrap()), Some(&exe), &fallback);
         assert_eq!(got.as_deref(), Some(skills.as_path()));
     }
 
@@ -117,11 +113,7 @@ mod tests {
         let fallback = tmp.path().join("fallback");
         fs::create_dir_all(&fallback).unwrap();
 
-        let got = resolve_skills_dir(
-            Some("/this/path/does/not/exist/xyz"),
-            None,
-            &fallback,
-        );
+        let got = resolve_skills_dir(Some("/this/path/does/not/exist/xyz"), None, &fallback);
         assert_eq!(got.as_deref(), Some(fallback.as_path()));
     }
 

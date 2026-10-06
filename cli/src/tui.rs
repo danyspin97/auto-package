@@ -105,7 +105,11 @@ impl TuiController {
         base: std::sync::Arc<dyn Reporter + Send + Sync>,
         pkg: Option<String>,
     ) -> std::sync::Arc<dyn Reporter + Send + Sync> {
-        std::sync::Arc::new(Tapped { base, pkg, tx: self.tx.clone() })
+        std::sync::Arc::new(Tapped {
+            base,
+            pkg,
+            tx: self.tx.clone(),
+        })
     }
 }
 
@@ -118,7 +122,10 @@ struct Tapped {
 impl Reporter for Tapped {
     fn report(&self, event: &Event) {
         self.base.report(event);
-        let _ = self.tx.send(Msg { pkg: self.pkg.clone(), event: event.clone() });
+        let _ = self.tx.send(Msg {
+            pkg: self.pkg.clone(),
+            event: event.clone(),
+        });
     }
 }
 
@@ -324,7 +331,8 @@ impl TuiState {
     fn pkg_mut(&mut self, name: &str) -> &mut PkgState {
         if !self.packages.contains_key(name) {
             self.order.push(name.to_string());
-            self.packages.insert(name.to_string(), PkgState::new(String::new()));
+            self.packages
+                .insert(name.to_string(), PkgState::new(String::new()));
         }
         self.packages.get_mut(name).unwrap()
     }
@@ -339,7 +347,11 @@ impl TuiState {
                 self.run_start = Some(Instant::now());
                 self.add_global_log(LogLevel::Info, "Run started".to_string());
             }
-            Event::RunFinished { outcome, elapsed, usage } => {
+            Event::RunFinished {
+                outcome,
+                elapsed,
+                usage,
+            } => {
                 self.run_outcome = Some(outcome.clone());
                 let level = match outcome {
                     RunOutcome::Success => LogLevel::Success,
@@ -357,7 +369,11 @@ impl TuiState {
             Event::ResolveStarted { root } => {
                 self.add_global_log(LogLevel::Info, format!("Resolving {root}"));
             }
-            Event::ResolveFinished { total, built, remaining } => {
+            Event::ResolveFinished {
+                total,
+                built,
+                remaining,
+            } => {
                 self.add_global_log(
                     LogLevel::Info,
                     format!("Resolved: {total} total, {built} built, {remaining} remaining"),
@@ -369,7 +385,11 @@ impl TuiState {
                 state.status = PkgStatus::Queued;
                 state.started = Instant::now();
             }
-            Event::PackageFinished { pkg, version, outcome } => {
+            Event::PackageFinished {
+                pkg,
+                version,
+                outcome,
+            } => {
                 let state = self.pkg_mut(pkg);
                 if state.version.is_empty() {
                     state.version = version.clone();
@@ -415,7 +435,11 @@ impl TuiState {
                 state.current_step = Some((step.0, kind.clone()));
                 state.add_log(LogLevel::Info, format!("Step {}: {kind}", step.0 + 1));
             }
-            Event::StepFinished { step, outcome, elapsed } => {
+            Event::StepFinished {
+                step,
+                outcome,
+                elapsed,
+            } => {
                 let kind = state
                     .current_step
                     .as_ref()
@@ -444,7 +468,10 @@ impl TuiState {
             Event::AgentPrompt { task, .. } => {
                 let task_str = match task {
                     Task::Review => "Reviewing spec".to_string(),
-                    Task::FixAfterBuild { attempt, max_attempts } => {
+                    Task::FixAfterBuild {
+                        attempt,
+                        max_attempts,
+                    } => {
                         state.tries = *attempt;
                         state.max_tries = *max_attempts;
                         format!("Fixing spec (attempt {attempt}/{max_attempts})")
@@ -453,7 +480,9 @@ impl TuiState {
                 state.add_agent_activity(ActivityKind::Task, task_str.clone());
                 state.add_log(LogLevel::Info, format!("Agent: {task_str}"));
             }
-            Event::AgentReply { response, usage, .. } => {
+            Event::AgentReply {
+                response, usage, ..
+            } => {
                 state.input_tokens += usage.input_tokens;
                 state.output_tokens += usage.output_tokens;
                 state.cost_usd += usage.cost_usd;
@@ -467,11 +496,17 @@ impl TuiState {
                     ),
                 );
                 let reasoning = if response.reasoning.chars().count() > 80 {
-                    format!("{}...", response.reasoning.chars().take(77).collect::<String>())
+                    format!(
+                        "{}...",
+                        response.reasoning.chars().take(77).collect::<String>()
+                    )
                 } else {
                     response.reasoning.clone()
                 };
-                state.add_log(LogLevel::Info, format!("Agent {}: {reasoning}", response.action));
+                state.add_log(
+                    LogLevel::Info,
+                    format!("Agent {}: {reasoning}", response.action),
+                );
             }
             Event::AgentToolUse { tool, input, .. } => {
                 let input_short: String = input.chars().take(60).collect();
@@ -484,9 +519,16 @@ impl TuiState {
                 state.add_log(LogLevel::Warn, message.clone());
             }
             Event::MissingPackages { names, .. } => {
-                state.add_log(LogLevel::Warn, format!("Missing packages: {}", names.join(", ")));
+                state.add_log(
+                    LogLevel::Warn,
+                    format!("Missing packages: {}", names.join(", ")),
+                );
             }
-            Event::SpecChanged { lines_added, lines_removed, .. } => {
+            Event::SpecChanged {
+                lines_added,
+                lines_removed,
+                ..
+            } => {
                 if *lines_added > 0 || *lines_removed > 0 {
                     state.add_log(
                         LogLevel::Success,
@@ -667,10 +709,10 @@ fn render(f: &mut Frame, state: &TuiState, table_state: &mut TableState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),                     // Summary header
+            Constraint::Length(3),                                       // Summary header
             Constraint::Length((visible.len() as u16 + 3).clamp(5, 12)), // Package table
-            Constraint::Min(8),                         // Detail pane
-            Constraint::Length(3),                      // Global log / footer
+            Constraint::Min(8),                                          // Detail pane
+            Constraint::Length(3),                                       // Global log / footer
         ])
         .split(f.area());
 
@@ -689,7 +731,11 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
         state.total_cost_usd()
     );
     let header = Paragraph::new(title)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, area);
 }
@@ -740,8 +786,10 @@ fn render_table(
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(vec!["Status", "Package", "Version", "Step", "Tries", "Time", "Cost"])
-                .style(Style::default().add_modifier(Modifier::BOLD)),
+            Row::new(vec![
+                "Status", "Package", "Version", "Step", "Tries", "Time", "Cost",
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
         )
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(Block::default().borders(Borders::ALL).title("Packages"));
@@ -766,13 +814,14 @@ fn render_detail(
         .and_then(|n| state.packages.get(n.as_str()))
     else {
         f.render_widget(
-            Paragraph::new("No package selected yet").block(
-                Block::default().borders(Borders::ALL).title("Event Log"),
-            ),
+            Paragraph::new("No package selected yet")
+                .block(Block::default().borders(Borders::ALL).title("Event Log")),
             chunks[0],
         );
         f.render_widget(
-            Block::default().borders(Borders::ALL).title("Agent Activity"),
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Agent Activity"),
             chunks[1],
         );
         return;
@@ -786,8 +835,7 @@ fn render_detail(
         .rev()
         .map(|l| ListItem::new(l.message.clone()).style(Style::default().fg(l.level.color())))
         .collect();
-    let log = List::new(log_items)
-        .block(Block::default().borders(Borders::ALL).title("Event Log"));
+    let log = List::new(log_items).block(Block::default().borders(Borders::ALL).title("Event Log"));
     f.render_widget(log, chunks[0]);
 
     let activity_items: Vec<ListItem> = pkg
@@ -798,8 +846,8 @@ fn render_detail(
         .rev()
         .map(|a| ListItem::new(a.text.clone()).style(Style::default().fg(a.kind.color())))
         .collect();
-    let activity = List::new(activity_items)
-        .block(Block::default().borders(Borders::ALL).title(format!(
+    let activity =
+        List::new(activity_items).block(Block::default().borders(Borders::ALL).title(format!(
             "Agent Activity — {} in / {} out",
             pkg.input_tokens, pkg.output_tokens
         )));

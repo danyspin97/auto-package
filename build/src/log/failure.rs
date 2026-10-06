@@ -356,13 +356,7 @@ fn collapse_traceback<'a>(block: &[&'a str], mapper: &PathMapper) -> (Vec<&'a st
     (kept, elided)
 }
 
-fn finish(
-    kept: Vec<&str>,
-    elided: usize,
-    genre: Genre,
-    phase: Phase,
-    located_by: &str,
-) -> Failure {
+fn finish(kept: Vec<&str>, elided: usize, genre: Genre, phase: Phase, located_by: &str) -> Failure {
     let overflow = kept.len().saturating_sub(MAX_EXCERPT_LINES);
     let capped = if overflow > 0 {
         // Keep the end: the exception and rpm's verdict live there.

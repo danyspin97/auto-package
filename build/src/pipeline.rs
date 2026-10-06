@@ -85,7 +85,9 @@ impl PipelineConfig {
     /// that flavor's name translates to an ABI tag at all (see
     /// `flavors::abi_tag_for_flavor`).
     pub fn single_locked_flavor_abi(&self) -> Option<String> {
-        self.python_flavors.single_flavor().and_then(crate::flavors::abi_tag_for_flavor)
+        self.python_flavors
+            .single_flavor()
+            .and_then(crate::flavors::abi_tag_for_flavor)
     }
 }
 
@@ -300,7 +302,9 @@ pub fn select_target(
     force: bool,
     reporter: &dyn Reporter,
 ) -> Result<Vec<TargetInfo>, String> {
-    reporter.report(&Event::ResolveStarted { root: name.to_string() });
+    reporter.report(&Event::ResolveStarted {
+        root: name.to_string(),
+    });
 
     // Kick off the package availability fetch concurrently with pip resolve.
     // Checked separately, not merged: whether a build-status check applies
@@ -308,11 +312,17 @@ pub fn select_target(
     // below).
     let obs_project = config.project.clone();
     let (nodes, own_packages, linked_packages, build_statuses) = std::thread::scope(|scope| {
-        let own_handle = scope.spawn(|| osc::list_project_packages(&obs_project, Emit::run(reporter)));
+        let own_handle =
+            scope.spawn(|| osc::list_project_packages(&obs_project, Emit::run(reporter)));
         let linked_handle = scope.spawn(|| {
             let mut linked = std::collections::HashSet::new();
-            for (path_project, _repo) in osc::get_project_repo_paths(&obs_project, Emit::run(reporter)) {
-                linked.extend(osc::list_project_packages(&path_project, Emit::run(reporter)));
+            for (path_project, _repo) in
+                osc::get_project_repo_paths(&obs_project, Emit::run(reporter))
+            {
+                linked.extend(osc::list_project_packages(
+                    &path_project,
+                    Emit::run(reporter),
+                ));
             }
             linked
         });
@@ -368,8 +378,10 @@ pub fn select_target(
     // unresolvable and get queued as duplicates. Index both listings by a
     // separator-blind `fuzzy_key` instead, and use the *real* listed name
     // (not the guess) for the build-status lookup once a match is found.
-    let own_fuzzy: std::collections::HashMap<String, &String> =
-        own_packages.iter().map(|p| (osc::fuzzy_key(p), p)).collect();
+    let own_fuzzy: std::collections::HashMap<String, &String> = own_packages
+        .iter()
+        .map(|p| (osc::fuzzy_key(p), p))
+        .collect();
     let linked_fuzzy: std::collections::HashSet<String> =
         linked_packages.iter().map(|p| osc::fuzzy_key(p)).collect();
 
@@ -517,9 +529,9 @@ pub fn select_target(
                     continue;
                 }
                 let deps = dep_names_from_requires_dist(&node.requires_dist);
-                let any_explained_dep = deps.iter().any(|dep| {
-                    name_to_idx.get(dep).map(|&j| explained[j]).unwrap_or(false)
-                });
+                let any_explained_dep = deps
+                    .iter()
+                    .any(|dep| name_to_idx.get(dep).map(|&j| explained[j]).unwrap_or(false));
                 let all_deps_settled = deps.iter().all(|dep| {
                     name_to_idx
                         .get(dep)
@@ -618,12 +630,22 @@ fn dep_names_from_requires_dist(requires_dist: &[String]) -> Vec<String> {
             }
             let name = r
                 .split(|c: char| {
-                    c == '(' || c == '[' || c == ';' || c == '>' || c == '<' || c == '='
-                        || c == '!' || c == ' '
+                    c == '('
+                        || c == '['
+                        || c == ';'
+                        || c == '>'
+                        || c == '<'
+                        || c == '='
+                        || c == '!'
+                        || c == ' '
                 })
                 .next()?
                 .trim();
-            if name.is_empty() { None } else { Some(normalize_pkg_name(name)) }
+            if name.is_empty() {
+                None
+            } else {
+                Some(normalize_pkg_name(name))
+            }
         })
         .collect()
 }
@@ -685,7 +707,10 @@ fn run_package_inner(
     {
         let step = step_or_fail!(pkg_run, "checkout", rpm_name);
         let t = Instant::now();
-        reporter.report(&Event::StepStarted { step: step.id, kind: StepKind::Checkout });
+        reporter.report(&Event::StepStarted {
+            step: step.id,
+            kind: StepKind::Checkout,
+        });
 
         let emit = Emit::new(reporter, step.id);
         let result = osc::ensure_package(&config.project, &rpm_name, &config.work_dir, emit)
@@ -804,7 +829,10 @@ fn run_package_inner(
     let (mut sdist_top_level, is_maturin, mut from_repo_archive, is_rust) = if need_spec {
         let step = step_or_fail!(pkg_run, "spec", rpm_name);
         let t = Instant::now();
-        reporter.report(&Event::StepStarted { step: step.id, kind: StepKind::GenerateSpec });
+        reporter.report(&Event::StepStarted {
+            step: step.id,
+            kind: StepKind::GenerateSpec,
+        });
 
         match generate_spec(config, &checkout_dir, &spec_path, &step) {
             Ok(res) => {
@@ -836,9 +864,18 @@ fn run_package_inner(
                     }
                     let _ = std::os::unix::fs::symlink(&src, &link);
                 }
-                (res.sdist_top_level, res.is_maturin, res.from_repo_archive, res.is_rust)
+                (
+                    res.sdist_top_level,
+                    res.is_maturin,
+                    res.from_repo_archive,
+                    res.is_rust,
+                )
             }
-            Err(GenSpecError::WheelOnly { pkg_name, version, candidates }) => {
+            Err(GenSpecError::WheelOnly {
+                pkg_name,
+                version,
+                candidates,
+            }) => {
                 reporter.report(&Event::StepFinished {
                     step: step.id,
                     outcome: StepOutcome::Ok,
@@ -854,7 +891,8 @@ fn run_package_inner(
                     message.push_str(&format!(
                         "\n\nAuto-discovered {} candidate repositories:\n{}",
                         candidates.len(),
-                        candidates.iter()
+                        candidates
+                            .iter()
                             .map(|url| format!("  - {}", url))
                             .collect::<Vec<_>>()
                             .join("\n")
@@ -866,7 +904,7 @@ fn run_package_inner(
                 } else {
                     message.push_str(
                         "\n\nNo candidate repositories auto-discovered. Use WebSearch to find \
-                         the source repository."
+                         the source repository.",
                     );
                 }
 
@@ -909,7 +947,10 @@ fn run_package_inner(
                     step: Some(step.id),
                     message: e.clone(),
                 });
-                return PipelineResult::Failed { rpm_name, reason: e };
+                return PipelineResult::Failed {
+                    rpm_name,
+                    reason: e,
+                };
             }
         }
     } else {
@@ -931,7 +972,10 @@ fn run_package_inner(
         if need_service {
             let step = step_or_fail!(pkg_run, "service", rpm_name);
             let t = Instant::now();
-            reporter.report(&Event::StepStarted { step: step.id, kind: StepKind::OscService });
+            reporter.report(&Event::StepStarted {
+                step: step.id,
+                kind: StepKind::OscService,
+            });
 
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
@@ -953,7 +997,10 @@ fn run_package_inner(
                         outcome: StepOutcome::Failed,
                         elapsed: t.elapsed(),
                     });
-                    return PipelineResult::Failed { rpm_name, reason: e };
+                    return PipelineResult::Failed {
+                        rpm_name,
+                        reason: e,
+                    };
                 }
             }
         }
@@ -965,7 +1012,10 @@ fn run_package_inner(
         if need_service {
             let step = step_or_fail!(pkg_run, "service", rpm_name);
             let t = Instant::now();
-            reporter.report(&Event::StepStarted { step: step.id, kind: StepKind::OscService });
+            reporter.report(&Event::StepStarted {
+                step: step.id,
+                kind: StepKind::OscService,
+            });
 
             // Fix any broken workspace definitions in the tarball before vendoring
             if let Some(tarball) = find_tarball(&checkout_dir) {
@@ -995,7 +1045,10 @@ fn run_package_inner(
                         outcome: StepOutcome::Failed,
                         elapsed: t.elapsed(),
                     });
-                    return PipelineResult::Failed { rpm_name, reason: e };
+                    return PipelineResult::Failed {
+                        rpm_name,
+                        reason: e,
+                    };
                 }
             }
         }
@@ -1005,7 +1058,10 @@ fn run_package_inner(
     if !ws.sdist_extracted() {
         let sdist_step = step_or_fail!(pkg_run, "sdist", rpm_name);
         let t = Instant::now();
-        reporter.report(&Event::StepStarted { step: sdist_step.id, kind: StepKind::FetchSdist });
+        reporter.report(&Event::StepStarted {
+            step: sdist_step.id,
+            kind: StepKind::FetchSdist,
+        });
 
         // Find tarball in checkout and extract to ws.sdist_dir()
         if let Some(tarball) = find_tarball(&checkout_dir) {
@@ -1154,8 +1210,7 @@ fn run_package_inner(
     // still inspect the spec and report what's missing via `unresolvable_packages`.
     if !need_spec
         && !config.no_agent
-        && (build_log_nonempty
-            || matches!(obs_status, Some(osc::BuildStatus::Unresolvable)))
+        && (build_log_nonempty || matches!(obs_status, Some(osc::BuildStatus::Unresolvable)))
     {
         let clean = strip_and_rewrite(&spec_path);
         let extract = extract_build_log(&ws.build_log(), &sdist_top_level, reporter, None);
@@ -1200,7 +1255,10 @@ fn run_package_inner(
                     .collect();
                 to_build.sort_unstable();
                 to_build.dedup();
-                return PipelineResult::MissingDeps { rpm_name, deps: to_build };
+                return PipelineResult::MissingDeps {
+                    rpm_name,
+                    deps: to_build,
+                };
             }
 
             let effect = match apply_turn_and_reset(
@@ -1488,7 +1546,10 @@ fn run_package_inner(
         let build_step = step_or_fail!(pkg_run, "build", rpm_name);
         let build_log = build_step.file("build.log");
         let t = Instant::now();
-        reporter.report(&Event::StepStarted { step: build_step.id, kind: StepKind::Build });
+        reporter.report(&Event::StepStarted {
+            step: build_step.id,
+            kind: StepKind::Build,
+        });
 
         let build_result = osc::obs_build(
             &config.project,
@@ -1521,7 +1582,10 @@ fn run_package_inner(
                 osc::invalidate_project_packages_cache(&config.project);
                 return PipelineResult::Built { rpm_name };
             }
-            Err(osc::Error::UnresolvableDeps { names: deps, detail: _ }) => {
+            Err(osc::Error::UnresolvableDeps {
+                names: deps,
+                detail: _,
+            }) => {
                 reporter.report(&Event::StepFinished {
                     step: build_step.id,
                     outcome: StepOutcome::Failed,
@@ -1718,7 +1782,10 @@ fn run_package_inner(
                     outcome: StepOutcome::Failed,
                     elapsed: t.elapsed(),
                 });
-                return PipelineResult::Failed { rpm_name, reason: msg };
+                return PipelineResult::Failed {
+                    rpm_name,
+                    reason: msg,
+                };
             }
             Err(_) => {
                 reporter.report(&Event::StepFinished {
@@ -1748,12 +1815,8 @@ fn run_package_inner(
 
                 link_build_log(&ws, &build_log);
 
-                let extract = extract_build_log(
-                    &build_log,
-                    &sdist_top_level,
-                    reporter,
-                    Some(build_step.id),
-                );
+                let extract =
+                    extract_build_log(&build_log, &sdist_top_level, reporter, Some(build_step.id));
                 reporter.report(&Event::BuildFailed {
                     step: build_step.id,
                     classification: classify_failure(&extract),
@@ -1937,7 +2000,11 @@ fn agent_turn(
         unresolvable_detail: ctx.unresolvable_detail,
         failed_deps: &config.failed_deps,
         unbuildable_deps: &config.unbuildable_deps,
-        session_id: if ctx.resume { session_id.as_deref() } else { None },
+        session_id: if ctx.resume {
+            session_id.as_deref()
+        } else {
+            None
+        },
         checkout_dir: ctx.checkout_dir,
         context: ctx.context,
         on_tool_use: Some(&|tool, input| {
@@ -2189,7 +2256,10 @@ impl CheckoutSnapshot {
                 }
             }
         }
-        Self { checkout_dir: checkout_dir.to_path_buf(), files }
+        Self {
+            checkout_dir: checkout_dir.to_path_buf(),
+            files,
+        }
     }
 
     /// Restore every top-level file to its snapshot state: restore
@@ -2244,7 +2314,15 @@ fn accept_or_restore(
     notes_entry: &str,
     notes_path: PathBuf,
 ) -> bool {
-    accept_or_restore_with_snapshot(spec_path, before, None, step, reporter, notes_entry, notes_path)
+    accept_or_restore_with_snapshot(
+        spec_path,
+        before,
+        None,
+        step,
+        reporter,
+        notes_entry,
+        notes_path,
+    )
 }
 
 /// `accept_or_restore` extended with a full-checkout snapshot taken BEFORE
@@ -2374,7 +2452,15 @@ fn apply_turn_outcome(
     reporter: &dyn Reporter,
 ) -> Result<TurnEffect, String> {
     let ApplyTurnCtx {
-        config, checkout_dir, spec_path, step, before, rpm_name, label, attempt, notes_path,
+        config,
+        checkout_dir,
+        spec_path,
+        step,
+        before,
+        rpm_name,
+        label,
+        attempt,
+        notes_path,
         snapshot,
     } = ctx;
     let effect = match &outcome.action {
@@ -2410,7 +2496,11 @@ fn apply_turn_outcome(
                 ),
                 notes_path,
             );
-            Ok(if changed { TurnEffect::Edited } else { TurnEffect::NoChange })
+            Ok(if changed {
+                TurnEffect::Edited
+            } else {
+                TurnEffect::NoChange
+            })
         }
         crate::agent::Action::UseUpstreamWheel { why } => {
             // Minimum-shape gate on the reason: too short to be real
@@ -2468,7 +2558,11 @@ fn apply_turn_outcome(
                         ),
                         notes_path,
                     );
-                    Ok(if changed { TurnEffect::SwitchedToWheel } else { TurnEffect::NoChange })
+                    Ok(if changed {
+                        TurnEffect::SwitchedToWheel
+                    } else {
+                        TurnEffect::NoChange
+                    })
                 }
                 Err(e) => Err(format!("{label}: unbuildable from source ({why}), and {e}")),
             }
@@ -2489,13 +2583,14 @@ fn apply_turn_outcome(
     // and lets the existing validation gate catch any actual breakage,
     // instead of masking whatever the agent was trying to fix behind an
     // unrelated service error.
-    if matches!(&effect, Ok(TurnEffect::Edited | TurnEffect::SwitchedToWheel)) {
+    if matches!(
+        &effect,
+        Ok(TurnEffect::Edited | TurnEffect::SwitchedToWheel)
+    ) {
         if let Err(e) = osc::run_service(checkout_dir, Emit::new(reporter, step.id)) {
             reporter.report(&Event::Warning {
                 step: Some(step.id),
-                message: format!(
-                    "osc service ra after {label} failed: {e}; proceeding anyway"
-                ),
+                message: format!("osc service ra after {label} failed: {e}; proceeding anyway"),
             });
         }
     }
@@ -2837,14 +2932,16 @@ fn generate_spec(
                 }
             };
 
-            let tarball =
-                checkout_dir.join(format!("{}-{}.tar.gz", config.pkg_name.to_lowercase(), config.version));
+            let tarball = checkout_dir.join(format!(
+                "{}-{}.tar.gz",
+                config.pkg_name.to_lowercase(),
+                config.version
+            ));
             let (bytes, url) = fetch_release_archive(&source_url, &config.version)?;
             std::fs::write(&tarball, &bytes)
                 .map_err(|e| GenSpecError::Other(format!("writing {}: {e}", tarball.display())))?;
-            let info =
-                ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
-                    .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
+            let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
+                .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
 
             return generate_repo_python_spec(config, &tarball, &info, &json, spec_path, step);
         }
@@ -3033,9 +3130,22 @@ fn generate_from_repo(
     if info.cmake_manifest || info.autotools_manifest {
         // Unlike Rust, a plain C/C++ project vendors nothing through OBS
         // services — the archive already downloaded is the real Source0.
-        let build = if info.cmake_manifest { crate::spec::CBuildSystem::Cmake } else { crate::spec::CBuildSystem::Autotools };
-        let top_level = info.top_level_dir.clone().unwrap_or_else(|| format!("{name}-{}", config.version));
-        let spec_text = crate::spec::c_project_skeleton(&config.pkg_name, &config.version, repo_url, &top_level, build);
+        let build = if info.cmake_manifest {
+            crate::spec::CBuildSystem::Cmake
+        } else {
+            crate::spec::CBuildSystem::Autotools
+        };
+        let top_level = info
+            .top_level_dir
+            .clone()
+            .unwrap_or_else(|| format!("{name}-{}", config.version));
+        let spec_text = crate::spec::c_project_skeleton(
+            &config.pkg_name,
+            &config.version,
+            repo_url,
+            &top_level,
+            build,
+        );
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
         std::fs::write(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
@@ -3061,7 +3171,9 @@ fn generate_from_repo(
 fn fetch_release_archive(repo_url: &str, version: &str) -> Result<(Vec<u8>, String), GenSpecError> {
     let candidates = crate::sources::archive_urls(repo_url, version);
     for url in &candidates {
-        let Ok(resp) = ureq::get(url).call() else { continue };
+        let Ok(resp) = ureq::get(url).call() else {
+            continue;
+        };
         use std::io::Read;
         let mut buf = Vec::new();
         if resp.into_body().into_reader().read_to_end(&mut buf).is_ok() && !buf.is_empty() {
@@ -3218,8 +3330,8 @@ fn generate_repo_python_spec(
         },
     );
 
-    let spec_text = crate::spec::fix_autosetup_dir(&spec_text, &sdist_top_level)
-        .unwrap_or(spec_text);
+    let spec_text =
+        crate::spec::fix_autosetup_dir(&spec_text, &sdist_top_level).unwrap_or(spec_text);
 
     // A repository snapshot of a monorepo keeps the project one or more levels
     // down; %build and %install have to change into it.
@@ -3282,14 +3394,14 @@ fn try_wheel_fallback(
         config.single_locked_flavor_abi().as_deref(),
     )
     .map_err(|e| format!("no usable upstream wheel either: {e}"))?;
-    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step).map_err(|e| {
-        match e {
+    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step).map_err(
+        |e| match e {
             GenSpecError::Other(msg) => format!("wheel spec generation failed: {msg}"),
             GenSpecError::WheelOnly { .. } => {
                 "wheel spec generation failed unexpectedly".to_string()
             }
-        }
-    })?;
+        },
+    )?;
     Ok(wheel)
 }
 
@@ -3397,7 +3509,9 @@ fn generate_wheel_binary_spec(
 ) -> Result<GenSpecResult, GenSpecError> {
     ap_core::diag!(
         "info: {} {} has no sdist and no source repository — repackaging the upstream wheel {}",
-        config.pkg_name, config.version, wheel.filename,
+        config.pkg_name,
+        config.version,
+        wheel.filename,
     );
 
     wheel
@@ -3407,8 +3521,12 @@ fn generate_wheel_binary_spec(
     let release = ap_ecosystem::pypi::parse_release_with_tarball(pypi_json, &wheel.filename)
         .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
 
-    let spec_text =
-        crate::spec::wheel_binary_skeleton(&config.pkg_name, &config.version, &wheel.filename, &release);
+    let spec_text = crate::spec::wheel_binary_skeleton(
+        &config.pkg_name,
+        &config.version,
+        &wheel.filename,
+        &release,
+    );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
     std::fs::write(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
@@ -3483,9 +3601,7 @@ fn render_service_file(github_url: &str, version: &str, pkg_name: &str) -> Strin
 /// directly and only fall back to genre for phases that aren't one of the
 /// four rpm sections at all (rpm's own post-install file-list check often
 /// gets attributed to whichever section ran last, e.g. `%license`).
-fn classify_failure(
-    extracted: &crate::log::ExtractedLog,
-) -> ap_core::event::BuildFailure {
+fn classify_failure(extracted: &crate::log::ExtractedLog) -> ap_core::event::BuildFailure {
     use crate::log::{Genre, Phase};
     let Some(failure) = &extracted.failure else {
         return ap_core::event::BuildFailure::Unclassified {
@@ -3635,7 +3751,6 @@ fn append_notes(notes_path: PathBuf, section: &str) {
 ///   txt` is written alongside the tarball naming each removed member;
 ///   that file lands in the OBS commit so the reviewer sees what changed.
 fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), String> {
-
     // Extract to temp directory
     let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let extract_dir = temp_dir.path();
@@ -3643,10 +3758,11 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
     ap_core::diag!("  checking for broken Cargo workspace in tarball");
 
     // Extract tarball
-    let archive_file = std::fs::File::open(tarball)
-        .map_err(|e| format!("opening tarball: {}", e))?;
+    let archive_file =
+        std::fs::File::open(tarball).map_err(|e| format!("opening tarball: {}", e))?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive_file));
-    archive.unpack(extract_dir)
+    archive
+        .unpack(extract_dir)
         .map_err(|e| format!("extracting tarball: {}", e))?;
 
     // Find Cargo.toml files
@@ -3716,8 +3832,10 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
             std::fs::write(cargo_toml_path, new_content)
                 .map_err(|e| format!("writing Cargo.toml: {}", e))?;
 
-            ap_core::diag!("  ✓ fixed Cargo.toml: removed {} missing workspace members",
-                     removed_members.len());
+            ap_core::diag!(
+                "  ✓ fixed Cargo.toml: removed {} missing workspace members",
+                removed_members.len()
+            );
 
             audit_log.push((
                 cargo_toml_path
@@ -3798,20 +3916,22 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
         let relative = path.strip_prefix(extract_dir).unwrap();
 
         if path.is_file() {
-            tar_builder.append_path_with_name(path, relative)
+            tar_builder
+                .append_path_with_name(path, relative)
                 .map_err(|e| format!("adding file to tarball: {}", e))?;
         } else if path.is_dir() {
-            tar_builder.append_dir(relative, path)
+            tar_builder
+                .append_dir(relative, path)
                 .map_err(|e| format!("adding dir to tarball: {}", e))?;
         }
     }
 
-    tar_builder.finish()
+    tar_builder
+        .finish()
         .map_err(|e| format!("finalizing tarball: {}", e))?;
 
     // Replace original tarball
-    std::fs::rename(&temp_tarball, tarball)
-        .map_err(|e| format!("replacing tarball: {}", e))?;
+    std::fs::rename(&temp_tarball, tarball).map_err(|e| format!("replacing tarball: {}", e))?;
 
     ap_core::diag!("  ✓ tarball updated with fixed workspace");
     Ok(())
@@ -3899,7 +4019,10 @@ pub struct RepoCandidates {
 /// package, or a Python package not published to PyPI) — see convention 27's
 /// "handle any package, not just PyPI" note.
 pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
-    ap_core::diag!("info: searching for source repository candidates for: {}", pkg_name);
+    ap_core::diag!(
+        "info: searching for source repository candidates for: {}",
+        pkg_name
+    );
 
     let lower = pkg_name.to_lowercase();
     let mut candidates = Vec::new();
@@ -3921,7 +4044,10 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
         ("nvidia-nvshmem-cu", "https://github.com/NVIDIA/nvshmem"),
         ("nvshmem4py", "https://github.com/NVIDIA/nvshmem"),
         ("nvidia-cuda-cccl", "https://github.com/NVIDIA/cccl"),
-        ("nvidia-nvjitlink", "https://github.com/NVIDIA/nvjitlink-python"),
+        (
+            "nvidia-nvjitlink",
+            "https://github.com/NVIDIA/nvjitlink-python",
+        ),
     ];
 
     // Check known mappings first
@@ -3942,7 +4068,8 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
 
     // For NVIDIA packages, try NVIDIA org URLs FIRST and with high priority
     // This ensures we prefer official NVIDIA repos over any random GitHub repos
-    let is_nvidia_package = lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.starts_with("nv");
+    let is_nvidia_package =
+        lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.starts_with("nv");
 
     if is_nvidia_package {
         ap_core::diag!("  detected NVIDIA package, preferring github.com/NVIDIA organization");
@@ -3953,7 +4080,9 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             .unwrap_or(&lower);
 
         let clean = base
-            .replace("-cu11", "").replace("-cu12", "").replace("-cu13", "")
+            .replace("-cu11", "")
+            .replace("-cu12", "")
+            .replace("-cu13", "")
             .replace("_", "-");
 
         // Try NVIDIA org with the cleaned package name
@@ -3969,7 +4098,10 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
         // Also try without cuda- prefix for packages like cuda-python
         if let Some(after_cuda) = clean.strip_prefix("cuda-") {
             let nvidia_url2 = format!("https://github.com/NVIDIA/{}", after_cuda);
-            ap_core::diag!("  checking NVIDIA org (without cuda- prefix): {}", nvidia_url2);
+            ap_core::diag!(
+                "  checking NVIDIA org (without cuda- prefix): {}",
+                nvidia_url2
+            );
             if verify_repo_exists(&nvidia_url2) {
                 ap_core::diag!("  ✓ verified NVIDIA repo: {}", nvidia_url2);
                 verified_candidates.insert(0, nvidia_url2.clone());
@@ -4029,13 +4161,20 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     }
 
     // Try just the package name under various popular organizations
-    candidates.push(format!("https://github.com/{}/{}", normalized_name, normalized_name));
+    candidates.push(format!(
+        "https://github.com/{}/{}",
+        normalized_name, normalized_name
+    ));
 
     // Also try common name variations
     let name_parts: Vec<&str> = normalized_name.split('-').collect();
     if name_parts.len() > 1 {
         // Try first part as org, rest as repo (e.g. "foo-bar" -> foo/bar)
-        candidates.push(format!("https://github.com/{}/{}", name_parts[0], name_parts[1..].join("-")));
+        candidates.push(format!(
+            "https://github.com/{}/{}",
+            name_parts[0],
+            name_parts[1..].join("-")
+        ));
     }
 
     // Try the package name directly
@@ -4053,11 +4192,20 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     }
 
     if verified_candidates.is_empty() {
-        ap_core::diag!("  ✗ no verified repositories found after trying {} URLs", candidates.len());
+        ap_core::diag!(
+            "  ✗ no verified repositories found after trying {} URLs",
+            candidates.len()
+        );
     } else {
-        ap_core::diag!("  ✓ found {} verified candidates", verified_candidates.len());
+        ap_core::diag!(
+            "  ✓ found {} verified candidates",
+            verified_candidates.len()
+        );
     }
-    RepoCandidates { verified: verified_candidates, guessed: candidates }
+    RepoCandidates {
+        verified: verified_candidates,
+        guessed: candidates,
+    }
 }
 
 /// Search GitHub for repositories matching the package name.
@@ -4199,8 +4347,14 @@ mod tests {
         };
         let json = serde_json::to_string(&fresh).unwrap();
         let back: PkgState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.last_failure_reason.as_deref(), Some("agent error: claude exited 1"));
-        assert!(!back.is_built("1.2.3"), "`failed` must never satisfy is_built");
+        assert_eq!(
+            back.last_failure_reason.as_deref(),
+            Some("agent error: claude exited 1")
+        );
+        assert!(
+            !back.is_built("1.2.3"),
+            "`failed` must never satisfy is_built"
+        );
     }
 
     /// `Succeeded` is the only hard "available right now" status; the three
@@ -4289,7 +4443,12 @@ mod tests {
         // to check out a brand-new, wrongly-named package.
         let nodes = vec![fake_node("backports.zstd"), fake_node("other-pkg")];
 
-        for spelling in ["backports.zstd", "backports-zstd", "python-backports-zstd", "BACKPORTS_ZSTD"] {
+        for spelling in [
+            "backports.zstd",
+            "backports-zstd",
+            "python-backports-zstd",
+            "BACKPORTS_ZSTD",
+        ] {
             let found = find_explicit_target(&nodes, spelling)
                 .unwrap_or_else(|e| panic!("expected a match for {spelling:?}: {e}"));
             assert_eq!(found.name, "backports.zstd");
@@ -4300,8 +4459,14 @@ mod tests {
     fn explicit_target_error_lists_available_names() {
         let nodes = vec![fake_node("torchcodec"), fake_node("backports.zstd")];
         let err = find_explicit_target(&nodes, "nonexistent").unwrap_err();
-        assert!(err.contains("torchcodec"), "error should list available names: {err}");
-        assert!(err.contains("backports.zstd"), "error should list available names: {err}");
+        assert!(
+            err.contains("torchcodec"),
+            "error should list available names: {err}"
+        );
+        assert!(
+            err.contains("backports.zstd"),
+            "error should list available names: {err}"
+        );
     }
 
     /// Real shape from `triton`/`python-hf-xet`/`python-torchcodec`: a plain
@@ -4438,7 +4603,10 @@ mod tests {
         // must normalize to the same key, or the dependency-graph edge
         // between them silently fails to resolve.
         let reqs = vec!["ruamel-yaml".to_string(), "ruamel_yaml".to_string()];
-        assert_eq!(normalize_pkg_name("ruamel.yaml"), normalize_pkg_name("ruamel-yaml"));
+        assert_eq!(
+            normalize_pkg_name("ruamel.yaml"),
+            normalize_pkg_name("ruamel-yaml")
+        );
         for name in dep_names_from_requires_dist(&reqs) {
             assert_eq!(name, normalize_pkg_name("ruamel.yaml"));
         }
@@ -4518,10 +4686,7 @@ Patch0:         0001-fix.patch
             Some("3.2.9")
         );
         assert_eq!(
-            extract_rpm_filename_version(
-                "python-foo",
-                "python-foo-0.1-1.1.x86_64.rpm"
-            ),
+            extract_rpm_filename_version("python-foo", "python-foo-0.1-1.1.x86_64.rpm"),
             Some("0.1")
         );
     }
@@ -4539,8 +4704,14 @@ Patch0:         0001-fix.patch
         std::fs::create_dir_all(base.join("crates/foo")).unwrap();
         std::fs::create_dir_all(base.join("crates/bar")).unwrap();
 
-        assert!(member_resolves(base, "crates/*"), "crates/* matches crates/foo");
-        assert!(member_resolves(base, "crates/foo"), "literal path still works");
+        assert!(
+            member_resolves(base, "crates/*"),
+            "crates/* matches crates/foo"
+        );
+        assert!(
+            member_resolves(base, "crates/foo"),
+            "literal path still works"
+        );
         assert!(member_resolves(base, "crates/f*"), "prefix glob works");
     }
 
@@ -4611,7 +4782,10 @@ Patch0:         0001-fix.patch
         impl Reporter for Null {
             fn report(&self, _: &Event) {}
         }
-        let step = StepDir { path: dir.to_path_buf(), id: ap_core::event::StepId(0) };
+        let step = StepDir {
+            path: dir.to_path_buf(),
+            id: ap_core::event::StepId(0),
+        };
         snap.restore(&Null, &step);
 
         // Edited file restored.
@@ -4621,7 +4795,10 @@ Patch0:         0001-fix.patch
             "spec must be rolled back"
         );
         // Deleted file re-created.
-        assert!(dir.join("fix.patch").exists(), "deleted patch must be restored");
+        assert!(
+            dir.join("fix.patch").exists(),
+            "deleted patch must be restored"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("fix.patch")).unwrap(),
             "--- orig\n+++ new\n",

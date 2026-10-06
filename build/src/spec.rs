@@ -174,7 +174,11 @@ pub fn parse_header(spec: &str) -> Option<Header> {
     let source = tag_value(spec, "Source:")
         .or_else(|| tag_value(spec, "Source0:"))
         .map(str::to_string);
-    Some(Header { name, version, source })
+    Some(Header {
+        name,
+        version,
+        source,
+    })
 }
 
 /// Collect `%define <name> <value>` and `%global <name> <value>` entries
@@ -438,10 +442,15 @@ Version:        3.0.3
         let spec = "BuildRequires:  %{python_module setuptools>=42}\n\
                     BuildRequires:  %{python_module wheel}\n";
         let fixed = normalize_python_module_versions(spec);
-        assert!(fixed.contains("%{python_module setuptools >= 42}"), "{fixed}");
-        assert!(fixed.contains("%{python_module wheel}"), "bare name mangled");
+        assert!(
+            fixed.contains("%{python_module setuptools >= 42}"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("%{python_module wheel}"),
+            "bare name mangled"
+        );
     }
-
 }
 
 /// Strip all `# ap: fix` comment lines from a spec.
@@ -541,7 +550,12 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
     }
 
     let spec = std::fs::read_to_string(&spec_path).map_err(Error::Io)?;
-    Ok(post_process(spec, release, build_system, SdistFacts::default()))
+    Ok(post_process(
+        spec,
+        release,
+        build_system,
+        SdistFacts::default(),
+    ))
 }
 
 /// What the sdist tells us that PyPI metadata cannot.
@@ -671,9 +685,7 @@ fn post_process(
 /// `rich-toolkit` as `rich_toolkit`, and the dist-info directory always uses
 /// this spelling.
 pub fn normalized_module_name(pypi_name: &str) -> String {
-    pypi_name
-        .to_lowercase()
-        .replace(['-', '.'], "_")
+    pypi_name.to_lowercase().replace(['-', '.'], "_")
 }
 
 /// Drop `BuildRequires` lines that name a package an earlier line already did.
@@ -693,16 +705,17 @@ pub fn dedupe_build_requires(spec: &str) -> String {
             Some(i) => i.strip_suffix('}').unwrap_or(i),
             None => rest,
         };
-        let name = inner
-            .split([' ', '>', '<', '=', '!'])
-            .next()?
-            .trim();
+        let name = inner.split([' ', '>', '<', '=', '!']).next()?.trim();
         if name.is_empty() {
             None
         } else {
             Some(format!(
                 "{}{}",
-                if rest.starts_with("%{python_module ") { "py:" } else { "" },
+                if rest.starts_with("%{python_module ") {
+                    "py:"
+                } else {
+                    ""
+                },
                 name.to_lowercase()
             ))
         }
@@ -880,9 +893,17 @@ pub fn monorepo_skeleton(
 /// `%pyproject_install`, which accepts a pre-built wheel path instead of a
 /// dist it just built. See convention 24 Exception 3 for when this is the
 /// right call versus a workaround to avoid.
-pub fn wheel_binary_skeleton(pkg_name: &str, version: &str, wheel_filename: &str, release: &Release) -> String {
+pub fn wheel_binary_skeleton(
+    pkg_name: &str,
+    version: &str,
+    wheel_filename: &str,
+    release: &Release,
+) -> String {
     let name = pkg_name.to_lowercase();
-    let summary = release.summary.as_deref().unwrap_or("FIXME: add package summary");
+    let summary = release
+        .summary
+        .as_deref()
+        .unwrap_or("FIXME: add package summary");
     let license = license_tag(&release.license);
     let url = release.homepage.as_deref().unwrap_or("FIXME");
     // A platform wheel (`...-manylinux_2_17_x86_64.whl`) carries compiled
@@ -890,8 +911,16 @@ pub fn wheel_binary_skeleton(pkg_name: &str, version: &str, wheel_filename: &str
     // is the noarch/sitelib case. Best-effort guess from the filename tag —
     // confirm against the actual unpacked contents before the first build.
     let is_pure = wheel_filename.ends_with("-none-any.whl");
-    let arch_line = if is_pure { "BuildArch:      noarch\n" } else { "" };
-    let sitedir = if is_pure { "python_sitelib" } else { "python_sitearch" };
+    let arch_line = if is_pure {
+        "BuildArch:      noarch\n"
+    } else {
+        ""
+    };
+    let sitedir = if is_pure {
+        "python_sitelib"
+    } else {
+        "python_sitearch"
+    };
 
     format!(
         "#\n\
@@ -989,34 +1018,35 @@ pub fn c_project_skeleton(
     build: CBuildSystem,
 ) -> String {
     let name = pkg_name.to_lowercase();
-    let (build_kind, build_requires, build_section, install_section): (&str, &str, &str, &str) = match build {
-        CBuildSystem::Cmake => (
-            "CMake",
-            "BuildRequires:  cmake\n\
+    let (build_kind, build_requires, build_section, install_section): (&str, &str, &str, &str) =
+        match build {
+            CBuildSystem::Cmake => (
+                "CMake",
+                "BuildRequires:  cmake\n\
              BuildRequires:  gcc-c++\n\
              BuildRequires:  pkg-config\n",
-            "%cmake\n\
+                "%cmake\n\
              %cmake_build\n",
-            "%cmake_install\n",
-        ),
-        CBuildSystem::Autotools => (
-            "autotools",
-            "BuildRequires:  autoconf\n\
+                "%cmake_install\n",
+            ),
+            CBuildSystem::Autotools => (
+                "autotools",
+                "BuildRequires:  autoconf\n\
              BuildRequires:  automake\n\
              BuildRequires:  libtool\n\
              BuildRequires:  gcc-c++\n\
              BuildRequires:  pkg-config\n",
-            // A release archive is a repository snapshot, not a `make dist`
-            // tarball — it has configure.ac/Makefile.am but no generated
-            // `configure` script yet (see libuv.spec's `./autogen.sh`, the
-            // real-world precedent this mirrors).
-            "autoreconf -fiv\n\
+                // A release archive is a repository snapshot, not a `make dist`
+                // tarball — it has configure.ac/Makefile.am but no generated
+                // `configure` script yet (see libuv.spec's `./autogen.sh`, the
+                // real-world precedent this mirrors).
+                "autoreconf -fiv\n\
              %configure\n\
              %make_build\n",
-            "%make_install\n\
+                "%make_install\n\
              find %{buildroot} -type f -name \"*.la\" -delete -print\n",
-        ),
-    };
+            ),
+        };
 
     format!(
         "#\n\
@@ -1165,7 +1195,10 @@ BuildRequires:  %{python_module cmake}
         let spec = wheel_binary_skeleton("nvidia-cuda-nvcc-cu13", "13.0.88", wheel, &release);
 
         assert!(spec.contains(&format!("Source0:        {wheel}")), "{spec}");
-        assert!(!spec.contains("BuildArch:      noarch"), "platform wheel must not be noarch:\n{spec}");
+        assert!(
+            !spec.contains("BuildArch:      noarch"),
+            "platform wheel must not be noarch:\n{spec}"
+        );
         assert!(spec.contains("%{buildroot}/%{$python_sitearch}"), "{spec}");
         assert!(spec.contains("%pyproject_install %{SOURCE0}"), "{spec}");
     }
@@ -1182,25 +1215,43 @@ BuildRequires:  %{python_module cmake}
 
     #[test]
     fn c_project_skeleton_uses_cmake_macros() {
-        let spec = c_project_skeleton("libthing", "1.0", "https://example.org", "libthing-1.0", CBuildSystem::Cmake);
+        let spec = c_project_skeleton(
+            "libthing",
+            "1.0",
+            "https://example.org",
+            "libthing-1.0",
+            CBuildSystem::Cmake,
+        );
         assert!(spec.contains("Name:           libthing"), "{spec}");
         assert!(spec.contains("%autosetup -n libthing-1.0"), "{spec}");
         assert!(spec.contains("BuildRequires:  cmake"), "{spec}");
         assert!(spec.contains("%cmake\n"), "{spec}");
         assert!(spec.contains("%cmake_build"), "{spec}");
         assert!(spec.contains("%cmake_install"), "{spec}");
-        assert!(!spec.contains("autoreconf"), "cmake skeleton must not run autoreconf:\n{spec}");
+        assert!(
+            !spec.contains("autoreconf"),
+            "cmake skeleton must not run autoreconf:\n{spec}"
+        );
     }
 
     #[test]
     fn c_project_skeleton_uses_autotools_macros() {
-        let spec = c_project_skeleton("libthing", "1.0", "https://example.org", "libthing-1.0", CBuildSystem::Autotools);
+        let spec = c_project_skeleton(
+            "libthing",
+            "1.0",
+            "https://example.org",
+            "libthing-1.0",
+            CBuildSystem::Autotools,
+        );
         assert!(spec.contains("autoreconf -fiv"), "{spec}");
         assert!(spec.contains("%configure"), "{spec}");
         assert!(spec.contains("%make_build"), "{spec}");
         assert!(spec.contains("%make_install"), "{spec}");
         assert!(spec.contains("BuildRequires:  autoconf"), "{spec}");
-        assert!(!spec.contains("%cmake"), "autotools skeleton must not reference cmake:\n{spec}");
+        assert!(
+            !spec.contains("%cmake"),
+            "autotools skeleton must not reference cmake:\n{spec}"
+        );
     }
 
     #[test]

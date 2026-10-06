@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ap_build::pipeline::{AgentBackend, PipelineConfig, PipelineResult, run_package, select_target};
+use ap_build::pipeline::{
+    AgentBackend, PipelineConfig, PipelineResult, run_package, select_target,
+};
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SelectionReason};
 use ap_core::run::RunDir;
 use ap_core::sink::{FanoutReporter, HumanSink, JsonlSink, LogLevel, MemorySink, Reporter};
@@ -316,7 +318,10 @@ fn resolve_dependency_config(
     let effective_name = if probe.subprojects.len() > 1 {
         dep.to_string()
     } else {
-        probe.project_name.clone().unwrap_or_else(|| dep.to_string())
+        probe
+            .project_name
+            .clone()
+            .unwrap_or_else(|| dep.to_string())
     };
     let dep_rpm = probe.ecosystem.rpm_name(&effective_name);
     ap_core::diag!(
@@ -419,7 +424,9 @@ fn main() -> color_eyre::Result<()> {
             // Both of these are silent-wrong-behaviour traps otherwise: a
             // mistyped level would quietly log at info, and an unsupported
             // backend would quietly run the CLI one.
-            let level: LogLevel = log.parse().map_err(|e: String| color_eyre::eyre::eyre!(e))?;
+            let level: LogLevel = log
+                .parse()
+                .map_err(|e: String| color_eyre::eyre::eyre!(e))?;
             if agent_backend != "cli" {
                 return Err(color_eyre::eyre::eyre!(
                     "unsupported --agent-backend '{agent_backend}'; only 'cli' is available"
@@ -629,17 +636,18 @@ fn main() -> color_eyre::Result<()> {
                 RunOutcome::Failed
             };
             // Sum usage from all AgentReply events recorded during the run.
-            let total_usage = memory.events().iter().fold(
-                ap_core::event::Usage::default(),
-                |mut acc, ev| {
-                    if let Event::AgentReply { usage, .. } = ev {
-                        acc.input_tokens += usage.input_tokens;
-                        acc.output_tokens += usage.output_tokens;
-                        acc.cost_usd += usage.cost_usd;
-                    }
-                    acc
-                },
-            );
+            let total_usage =
+                memory
+                    .events()
+                    .iter()
+                    .fold(ap_core::event::Usage::default(), |mut acc, ev| {
+                        if let Event::AgentReply { usage, .. } = ev {
+                            acc.input_tokens += usage.input_tokens;
+                            acc.output_tokens += usage.output_tokens;
+                            acc.cost_usd += usage.cost_usd;
+                        }
+                        acc
+                    });
             reporter.report(&Event::RunFinished {
                 outcome,
                 elapsed: start.elapsed(),
@@ -663,7 +671,9 @@ fn main() -> color_eyre::Result<()> {
             jobs,
             regen,
         } => {
-            let level: LogLevel = log.parse().map_err(|e: String| color_eyre::eyre::eyre!(e))?;
+            let level: LogLevel = log
+                .parse()
+                .map_err(|e: String| color_eyre::eyre::eyre!(e))?;
 
             // Same per-project-arch subdir layout as Build (see that arm for
             // the rationale, including the Oct 6 cross-arch-bleed review) — a
@@ -786,17 +796,18 @@ fn main() -> color_eyre::Result<()> {
             } else {
                 RunOutcome::Failed
             };
-            let total_usage = memory.events().iter().fold(
-                ap_core::event::Usage::default(),
-                |mut acc, ev| {
-                    if let Event::AgentReply { usage, .. } = ev {
-                        acc.input_tokens += usage.input_tokens;
-                        acc.output_tokens += usage.output_tokens;
-                        acc.cost_usd += usage.cost_usd;
-                    }
-                    acc
-                },
-            );
+            let total_usage =
+                memory
+                    .events()
+                    .iter()
+                    .fold(ap_core::event::Usage::default(), |mut acc, ev| {
+                        if let Event::AgentReply { usage, .. } = ev {
+                            acc.input_tokens += usage.input_tokens;
+                            acc.output_tokens += usage.output_tokens;
+                            acc.cost_usd += usage.cost_usd;
+                        }
+                        acc
+                    });
             reporter.report(&Event::RunFinished {
                 outcome,
                 elapsed: start.elapsed(),
@@ -820,7 +831,10 @@ fn make_semaphore(jobs: usize) -> Option<Semaphore> {
     if jobs == 0 {
         None
     } else {
-        Some(Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new())))
+        Some(Arc::new((
+            std::sync::Mutex::new(0usize),
+            std::sync::Condvar::new(),
+        )))
     }
 }
 
@@ -886,11 +900,9 @@ fn cmd_build(
     // this gap: the TUI already had attribution via `tap`, but the base
     // JSONL stream had none.
     let pkg_reporter = |pkg: &str| -> Arc<dyn Reporter + Send + Sync> {
-        let tagged: Arc<dyn Reporter + Send + Sync> =
-            Arc::new(ap_core::sink::PkgContextReporter::new(
-                base_reporter.clone(),
-                Some(pkg.to_string()),
-            ));
+        let tagged: Arc<dyn Reporter + Send + Sync> = Arc::new(
+            ap_core::sink::PkgContextReporter::new(base_reporter.clone(), Some(pkg.to_string())),
+        );
         match &tui_ctrl {
             Some(t) => t.tap(tagged, Some(pkg.to_string())),
             None => tagged,
@@ -967,7 +979,10 @@ fn cmd_build(
             let effective_name = if probe.subprojects.len() > 1 {
                 name.to_string()
             } else {
-                let declared = probe.project_name.clone().unwrap_or_else(|| name.to_string());
+                let declared = probe
+                    .project_name
+                    .clone()
+                    .unwrap_or_else(|| name.to_string());
                 if !declared.eq_ignore_ascii_case(name) {
                     reporter.report(&Event::Progress {
                         step: None,
@@ -1110,9 +1125,11 @@ fn cmd_build(
         // guaranteed to agree on separators — see `osc::fuzzy_key`'s doc
         // comment. An exact-string seed set would silently fail to recognize
         // its own entries.
-        stuck_seeds.extend(already_stuck.iter().map(|pkg| {
-            ap_build::osc::fuzzy_key(pkg.strip_prefix("python-").unwrap_or(pkg))
-        }));
+        stuck_seeds.extend(
+            already_stuck
+                .iter()
+                .map(|pkg| ap_build::osc::fuzzy_key(pkg.strip_prefix("python-").unwrap_or(pkg))),
+        );
         pending_deps.extend(already_stuck);
     }
 
@@ -1125,8 +1142,10 @@ fn cmd_build(
     // single knob for "how hard to keep trying a broken package", instead of
     // a second, smaller one that gives up before the per-attempt budget does.
     let max_target_retries = max_attempts;
-    let mut fail_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut permanently_failed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut fail_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut permanently_failed: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
@@ -1210,12 +1229,9 @@ fn cmd_build(
                         // Broken/Disabled/Excluded/Unknown or missing-
                         // status entry stays queued so the agent can look
                         // at it.
-                        let statuses = ap_build::osc::get_project_build_statuses(
-                            project, distro, arch, emit,
-                        );
-                        return !ap_build::pipeline::status_is_resolvable(
-                            statuses.get(real_pkg),
-                        );
+                        let statuses =
+                            ap_build::osc::get_project_build_statuses(project, distro, arch, emit);
+                        return !ap_build::pipeline::status_is_resolvable(statuses.get(real_pkg));
                     }
 
                     // Linked / build-path projects: trust presence (see
@@ -1255,19 +1271,20 @@ fn cmd_build(
                     !state_path.exists()
                 })
                 .filter_map(|dep| {
-                    let dep_config = match resolve_dependency_config(&dep, &config, reporter.as_ref()) {
-                        Some(c) => c,
-                        None => {
-                            // No PyPI project and no discoverable source repo —
-                            // this is never going to become buildable no matter
-                            // how many times it's reported. Record it so every
-                            // package needing it learns that from its next
-                            // prompt (convention 28 Exception 4) instead of
-                            // reporting it again forever.
-                            newly_unbuildable.push(dep);
-                            return None;
-                        }
-                    };
+                    let dep_config =
+                        match resolve_dependency_config(&dep, &config, reporter.as_ref()) {
+                            Some(c) => c,
+                            None => {
+                                // No PyPI project and no discoverable source repo —
+                                // this is never going to become buildable no matter
+                                // how many times it's reported. Record it so every
+                                // package needing it learns that from its next
+                                // prompt (convention 28 Exception 4) instead of
+                                // reporting it again forever.
+                                newly_unbuildable.push(dep);
+                                return None;
+                            }
+                        };
                     let dep_rpm = dep_config.rpm_name.clone();
                     let dep_pkg_run = run_dir.pkg(&dep_rpm);
                     if dep_pkg_run.ensure().is_err() {
@@ -1305,9 +1322,9 @@ fn cmd_build(
                     PipelineResult::MissingDeps { deps, .. } => {
                         PackageOutcome::MissingDeps { deps: deps.clone() }
                     }
-                    PipelineResult::Failed { reason, .. } => {
-                        PackageOutcome::Failed { reason: reason.clone() }
-                    }
+                    PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
+                        reason: reason.clone(),
+                    },
                 };
                 pkg_reporter(&dep_rpm).report(&Event::PackageFinished {
                     pkg: dep_rpm.clone(),
@@ -1364,9 +1381,9 @@ fn cmd_build(
                 PipelineResult::MissingDeps { deps, .. } => {
                     PackageOutcome::MissingDeps { deps: deps.clone() }
                 }
-                PipelineResult::Failed { reason, .. } => {
-                    PackageOutcome::Failed { reason: reason.clone() }
-                }
+                PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
+                    reason: reason.clone(),
+                },
             };
             r.report(&Event::PackageFinished {
                 pkg: rpm_name.clone(),
@@ -1374,9 +1391,7 @@ fn cmd_build(
                 outcome,
             });
             match result {
-                PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => {
-                    return Ok(())
-                }
+                PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => return Ok(()),
                 PipelineResult::MissingDeps { deps, .. } => {
                     // Only queue deps we haven't tried yet; if every dep was
                     // already attempted we cannot make progress. Compared by
@@ -1394,7 +1409,7 @@ fn cmd_build(
                     continue;
                 }
                 PipelineResult::Failed { reason, .. } => {
-                    return Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"))
+                    return Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"));
                 }
             }
         }
@@ -1415,7 +1430,7 @@ fn cmd_build(
             config.force,
             reporter.as_ref(),
         )
-            .map_err(|e| color_eyre::eyre::eyre!(e))?;
+        .map_err(|e| color_eyre::eyre::eyre!(e))?;
 
         if targets.is_empty() {
             if permanently_failed.is_empty() {
@@ -1476,9 +1491,9 @@ fn cmd_build(
                 PipelineResult::MissingDeps { deps, .. } => {
                     PackageOutcome::MissingDeps { deps: deps.clone() }
                 }
-                PipelineResult::Failed { reason, .. } => {
-                    PackageOutcome::Failed { reason: reason.clone() }
-                }
+                PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
+                    reason: reason.clone(),
+                },
             };
             pkg_reporter(&rpm_name).report(&Event::PackageFinished {
                 pkg: rpm_name.clone(),
@@ -1603,7 +1618,11 @@ fn cmd_build(
             // forever, error out instead.
             if !pending_deps.is_empty() && new_pending.is_empty() {
                 let missing: Vec<&String> = pending_deps.iter().collect();
-                let names = missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                let names = missing
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return Err(color_eyre::eyre::eyre!(
                     "{name} needs {} but every one has already been attempted \
                      without success; cannot build",
@@ -1739,11 +1758,11 @@ fn cmd_update(
             max_attempts,
             budget_usd,
             None,
-            true,   // force
-            regen,  // passthrough from Update's own --regen
+            true,  // force
+            regen, // passthrough from Update's own --regen
             no_agent,
             jobs,
-            false,  // sweep: never from inside an update
+            false, // sweep: never from inside an update
             source_repo,
             source_urls.clone(),
             python_flavors.clone(),
@@ -1799,14 +1818,22 @@ fn report_update_plan(
             }
             Decision::UpToDate { ecosystem, version } => {
                 n_uptodate += 1;
-                format!("[current] {}  {}  ({})", c.rpm_name, version, eco_tag(ecosystem))
+                format!(
+                    "[current] {}  {}  ({})",
+                    c.rpm_name,
+                    version,
+                    eco_tag(ecosystem)
+                )
             }
             Decision::Skipped(reason) => {
                 n_skipped += 1;
                 format!("[skip]    {}  ({reason})", c.rpm_name)
             }
         };
-        reporter.report(&Event::Progress { step: None, message: line });
+        reporter.report(&Event::Progress {
+            step: None,
+            message: line,
+        });
     }
     reporter.report(&Event::Progress {
         step: None,

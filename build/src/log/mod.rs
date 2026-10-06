@@ -151,9 +151,11 @@ impl ExtractedLog {
         if let Some(s) = &self.failed_section {
             return s;
         }
-        if self.error_lines.iter().any(|l| {
-            l.contains("File not found") || l.contains("unpackaged")
-        }) {
+        if self
+            .error_lines
+            .iter()
+            .any(|l| l.contains("File not found") || l.contains("unpackaged"))
+        {
             return "%files";
         }
         "unknown"

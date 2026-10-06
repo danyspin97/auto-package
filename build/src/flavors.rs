@@ -84,7 +84,10 @@ mod tests {
     #[test]
     fn a_missing_file_has_no_single_flavor() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(PythonFlavors::load(dir.path()).unwrap().single_flavor(), None);
+        assert_eq!(
+            PythonFlavors::load(dir.path()).unwrap().single_flavor(),
+            None
+        );
     }
 
     #[test]
@@ -97,7 +100,11 @@ mod tests {
     #[test]
     fn exactly_one_configured_flavor_is_the_single_flavor() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(PythonFlavors::path(dir.path()), "flavors = [\"python313\"]\n").unwrap();
+        std::fs::write(
+            PythonFlavors::path(dir.path()),
+            "flavors = [\"python313\"]\n",
+        )
+        .unwrap();
         assert_eq!(
             PythonFlavors::load(dir.path()).unwrap().single_flavor(),
             Some("python313")
@@ -115,7 +122,10 @@ mod tests {
             "flavors = [\"python313\", \"python314\"]\n",
         )
         .unwrap();
-        assert_eq!(PythonFlavors::load(dir.path()).unwrap().single_flavor(), None);
+        assert_eq!(
+            PythonFlavors::load(dir.path()).unwrap().single_flavor(),
+            None
+        );
     }
 
     #[test]

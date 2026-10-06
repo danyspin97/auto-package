@@ -183,7 +183,10 @@ impl PkgRunDir {
             }
             Err(e) => return Err(e),
         }
-        Ok(StepDir { path, id: StepId(n) })
+        Ok(StepDir {
+            path,
+            id: StepId(n),
+        })
     }
 }
 
@@ -251,7 +254,10 @@ mod tests {
         let p2 = run.pkg("python-foo");
         let s2 = p2.step("build").unwrap();
         assert!(s2.path.ends_with("02-build"), "got {:?}", s2.path);
-        assert_ne!(s1.path, s2.path, "retry must not reuse the first attempt's dir");
+        assert_ne!(
+            s1.path, s2.path,
+            "retry must not reuse the first attempt's dir"
+        );
     }
 
     /// Two different packages must have independent counters — a build of

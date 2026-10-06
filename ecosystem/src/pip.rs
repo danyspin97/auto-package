@@ -86,12 +86,7 @@ fn cache_path(name: &str, version: Option<&str>) -> std::path::PathBuf {
 /// knob that works in the default (non-wheel-download) mode. Two concurrent
 /// runs on different Python majors or different arches must not share a
 /// cached result, so interpreter + platform go into the key as a short hash.
-pub(crate) fn cache_key(
-    name: &str,
-    version: Option<&str>,
-    python: &str,
-    platform: &str,
-) -> String {
+pub(crate) fn cache_key(name: &str, version: Option<&str>, python: &str, platform: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(python.as_bytes());
     hasher.update([0u8]);
@@ -138,9 +133,7 @@ fn host_platform() -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
-    probed.unwrap_or_else(|| {
-        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
-    })
+    probed.unwrap_or_else(|| format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH))
 }
 
 /// Load cached resolution result if available and fresh.
@@ -156,18 +149,17 @@ fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
     // Determine freshness threshold
     let max_age_secs = match version {
         Some(_) => 7 * 24 * 60 * 60, // 7 days for pinned versions
-        None => 24 * 60 * 60,         // 1 day for "latest"
+        None => 24 * 60 * 60,        // 1 day for "latest"
     };
 
     // Check if cache is fresh
-    let age = metadata.modified()
-        .ok()?
-        .elapsed()
-        .ok()?
-        .as_secs();
+    let age = metadata.modified().ok()?.elapsed().ok()?.as_secs();
 
     if age > max_age_secs {
-        ap_core::diag!("  cache entry stale (age: {} days), re-resolving", age / 86400);
+        ap_core::diag!(
+            "  cache entry stale (age: {} days), re-resolving",
+            age / 86400
+        );
         return None;
     }
 
@@ -175,7 +167,10 @@ fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
     let contents = std::fs::read_to_string(&path).ok()?;
     let nodes: Vec<Node> = serde_json::from_str(&contents).ok()?;
 
-    ap_core::diag!("  ✓ loaded resolution from cache ({} packages)", nodes.len());
+    ap_core::diag!(
+        "  ✓ loaded resolution from cache ({} packages)",
+        nodes.len()
+    );
     Some(nodes)
 }
 

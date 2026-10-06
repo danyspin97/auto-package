@@ -62,10 +62,7 @@ fn classify(path: &Path) -> Option<ArchiveKind> {
 /// `tar::Archive::new`. The kind is passed in rather than re-sniffed so one
 /// callsite can decide what the archive is and both `extract` and
 /// `inspect_preferring` reuse the same answer.
-fn open_tar(
-    path: &Path,
-    kind: ArchiveKind,
-) -> Result<tar::Archive<Box<dyn Read>>, Error> {
+fn open_tar(path: &Path, kind: ArchiveKind) -> Result<tar::Archive<Box<dyn Read>>, Error> {
     let file = std::fs::File::open(path).map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
@@ -83,9 +80,7 @@ fn open_tar(
         ArchiveKind::Zip | ArchiveKind::Wheel => {
             return Err(Error::Io {
                 path: path.to_path_buf(),
-                source: std::io::Error::other(
-                    "zip-shaped archive is not a tar; call the zip path",
-                ),
+                source: std::io::Error::other("zip-shaped archive is not a tar; call the zip path"),
             });
         }
     };
@@ -337,7 +332,11 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
         } else {
             None
         };
-        out.push(InspectEntry { path_str, is_dir, contents });
+        out.push(InspectEntry {
+            path_str,
+            is_dir,
+            contents,
+        });
     }
     Ok(out)
 }
@@ -375,19 +374,22 @@ fn collect_zip_entries(path: &Path) -> Result<Vec<InspectEntry>, Error> {
             .file_name()
             .and_then(|n| n.to_str())
             .map(str::to_string);
-        let contents = if !is_dir
-            && matches!(file_name.as_deref(), Some("pyproject.toml" | "Cargo.toml"))
-        {
-            let mut buf = String::new();
-            entry.read_to_string(&mut buf).map_err(|e| Error::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
-            Some(buf)
-        } else {
-            None
-        };
-        out.push(InspectEntry { path_str: name, is_dir, contents });
+        let contents =
+            if !is_dir && matches!(file_name.as_deref(), Some("pyproject.toml" | "Cargo.toml")) {
+                let mut buf = String::new();
+                entry.read_to_string(&mut buf).map_err(|e| Error::Io {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?;
+                Some(buf)
+            } else {
+                None
+            };
+        out.push(InspectEntry {
+            path_str: name,
+            is_dir,
+            contents,
+        });
     }
     Ok(out)
 }
@@ -688,15 +690,29 @@ mod tests {
         write_tar(
             &tarball,
             &[
-                ("thing-1.0/Cargo.toml", b"[package]\nname = \"thing\"\n".as_slice()),
-                ("thing-1.0/pyproject.toml", b"[project]\nname = \"thing-py\"\n".as_slice()),
+                (
+                    "thing-1.0/Cargo.toml",
+                    b"[package]\nname = \"thing\"\n".as_slice(),
+                ),
+                (
+                    "thing-1.0/pyproject.toml",
+                    b"[project]\nname = \"thing-py\"\n".as_slice(),
+                ),
                 ("thing-1.0/src/main.rs", b"fn main() {}".as_slice()),
             ],
         );
 
         let info = inspect(&tarball).unwrap();
-        assert!(info.files.iter().any(|f| f == "thing-1.0/Cargo.toml"), "{:?}", info.files);
-        assert!(info.files.iter().any(|f| f == "thing-1.0/pyproject.toml"), "{:?}", info.files);
+        assert!(
+            info.files.iter().any(|f| f == "thing-1.0/Cargo.toml"),
+            "{:?}",
+            info.files
+        );
+        assert!(
+            info.files.iter().any(|f| f == "thing-1.0/pyproject.toml"),
+            "{:?}",
+            info.files
+        );
         // Both manifests present: the Python name wins (maturin projects).
         assert_eq!(info.project_name.as_deref(), Some("thing-py"));
     }
@@ -708,7 +724,10 @@ mod tests {
         write_tar(
             &tarball,
             &[
-                ("libthing-1.0/CMakeLists.txt", b"project(thing)\n".as_slice()),
+                (
+                    "libthing-1.0/CMakeLists.txt",
+                    b"project(thing)\n".as_slice(),
+                ),
                 ("libthing-1.0/src/thing.c", b"int main(){}".as_slice()),
             ],
         );
@@ -726,8 +745,14 @@ mod tests {
         write_tar(
             &tarball,
             &[
-                ("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n".as_slice()),
-                ("thing-1.0/vendor/lib/CMakeLists.txt", b"project(vendored)\n".as_slice()),
+                (
+                    "thing-1.0/pyproject.toml",
+                    b"[project]\nname = \"thing\"\n".as_slice(),
+                ),
+                (
+                    "thing-1.0/vendor/lib/CMakeLists.txt",
+                    b"project(vendored)\n".as_slice(),
+                ),
             ],
         );
         let info = inspect(&tarball).unwrap();
@@ -741,8 +766,14 @@ mod tests {
         write_tar(
             &tarball,
             &[
-                ("libthing-1.0/configure.ac", b"AC_INIT([thing], [1.0])\n".as_slice()),
-                ("libthing-1.0/Makefile.am", b"bin_PROGRAMS = thing\n".as_slice()),
+                (
+                    "libthing-1.0/configure.ac",
+                    b"AC_INIT([thing], [1.0])\n".as_slice(),
+                ),
+                (
+                    "libthing-1.0/Makefile.am",
+                    b"bin_PROGRAMS = thing\n".as_slice(),
+                ),
             ],
         );
         let info = inspect(&tarball).unwrap();
@@ -759,7 +790,10 @@ mod tests {
         write_tar(
             &tarball,
             &[
-                ("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n".as_slice()),
+                (
+                    "thing-1.0/pyproject.toml",
+                    b"[project]\nname = \"thing\"\n".as_slice(),
+                ),
                 ("thing-1.0/CMakeLists.txt", b"project(thing)\n".as_slice()),
             ],
         );
@@ -774,7 +808,10 @@ mod tests {
         let tarball = dir.path().join("src.tar.gz");
         write_tar(
             &tarball,
-            &[("ripgrep-14.1.1/Cargo.toml", b"[package]\nname = \"ripgrep\"\n".as_slice())],
+            &[(
+                "ripgrep-14.1.1/Cargo.toml",
+                b"[package]\nname = \"ripgrep\"\n".as_slice(),
+            )],
         );
         assert_eq!(
             inspect(&tarball).unwrap().project_name.as_deref(),
@@ -805,12 +842,18 @@ mod tests {
         write_tar(
             &tarball,
             &[
-                ("cuda-python-13.0.2/cuda_bindings/pyproject.toml",
-                 b"[project]\nname = \"cuda-bindings\"\n".as_slice()),
-                ("cuda-python-13.0.2/cuda_core/pyproject.toml",
-                 b"[project]\nname = \"cuda-core\"\n".as_slice()),
-                ("cuda-python-13.0.2/cuda_python/pyproject.toml",
-                 b"[project]\nname = \"cuda-python\"\n".as_slice()),
+                (
+                    "cuda-python-13.0.2/cuda_bindings/pyproject.toml",
+                    b"[project]\nname = \"cuda-bindings\"\n".as_slice(),
+                ),
+                (
+                    "cuda-python-13.0.2/cuda_core/pyproject.toml",
+                    b"[project]\nname = \"cuda-core\"\n".as_slice(),
+                ),
+                (
+                    "cuda-python-13.0.2/cuda_python/pyproject.toml",
+                    b"[project]\nname = \"cuda-python\"\n".as_slice(),
+                ),
             ],
         );
 
@@ -823,9 +866,18 @@ mod tests {
         assert_eq!(
             info.subprojects,
             vec![
-                Subproject { dir: "cuda_bindings".into(), name: Some("cuda-bindings".into()) },
-                Subproject { dir: "cuda_core".into(), name: Some("cuda-core".into()) },
-                Subproject { dir: "cuda_python".into(), name: Some("cuda-python".into()) },
+                Subproject {
+                    dir: "cuda_bindings".into(),
+                    name: Some("cuda-bindings".into())
+                },
+                Subproject {
+                    dir: "cuda_core".into(),
+                    name: Some("cuda-core".into())
+                },
+                Subproject {
+                    dir: "cuda_python".into(),
+                    name: Some("cuda-python".into())
+                },
             ]
         );
 
@@ -842,9 +894,14 @@ mod tests {
         write_tar(
             &tarball,
             &[
-                ("thing-1.0/pyproject.toml", b"[project]\nname = \"thing\"\n".as_slice()),
-                ("thing-1.0/examples/demo/pyproject.toml",
-                 b"[project]\nname = \"demo\"\n".as_slice()),
+                (
+                    "thing-1.0/pyproject.toml",
+                    b"[project]\nname = \"thing\"\n".as_slice(),
+                ),
+                (
+                    "thing-1.0/examples/demo/pyproject.toml",
+                    b"[project]\nname = \"demo\"\n".as_slice(),
+                ),
             ],
         );
         let info = inspect_preferring(&tarball, Some("demo")).unwrap();

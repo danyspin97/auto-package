@@ -2262,10 +2262,19 @@ pub enum Error {
     Launch(std::io::Error),
 
     #[error("claude exited {code}:\n{stderr}")]
-    Failed { code: i32, stderr: String, stdout: String, prompt: String },
+    Failed {
+        code: i32,
+        stderr: String,
+        stdout: String,
+        prompt: String,
+    },
 
     #[error("unexpected response: {message}")]
-    Parse { message: String, stdout: String, prompt: String },
+    Parse {
+        message: String,
+        stdout: String,
+        prompt: String,
+    },
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -2332,7 +2341,10 @@ pub struct TurnBudget {
 
 impl Default for TurnBudget {
     fn default() -> Self {
-        Self { max_tool_calls: 15, max_tokens: 200_000 }
+        Self {
+            max_tool_calls: 15,
+            max_tokens: 200_000,
+        }
     }
 }
 
@@ -2401,14 +2413,18 @@ pub struct TurnRequest<'a> {
 pub enum Action {
     Edited,
     NoChange,
-    Blocked { why: String },
+    Blocked {
+        why: String,
+    },
     /// The package's own source cannot be built in this environment (e.g. it
     /// requires a proprietary compiler/toolchain OBS cannot provide, per
     /// convention 28 Exception 3's "environment" case) and a prebuilt wheel
     /// exists on PyPI for this exact version. `why` is the agent's cited
     /// evidence — the pipeline still independently verifies a wheel exists
     /// before acting on this.
-    UseUpstreamWheel { why: String },
+    UseUpstreamWheel {
+        why: String,
+    },
 }
 
 /// One tool invocation the agent made during a turn.
@@ -2542,8 +2558,8 @@ fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
     // Require at least `action` — without it there is no shape at all, and
     // treating a random text reply as a `no_change` would mask real bugs.
     let action = strip_wrapping(&find_field(text, "action")?);
-    let reasoning = find_field(text, "reasoning")
-        .unwrap_or_else(|| text.trim().chars().take(500).collect());
+    let reasoning =
+        find_field(text, "reasoning").unwrap_or_else(|| text.trim().chars().take(500).collect());
     let evidence = find_field(text, "evidence")
         .map(|s| split_list(&s))
         .unwrap_or_default();
@@ -3158,12 +3174,32 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     };
     let mut map_lines = Vec::new();
     for (name, desc, always) in &[
-        ("spec", "the spec file — see \"Editing the spec\" below", true),
-        ("spec.generated", "pristine generated spec for reference", false),
-        ("build.log", "full osc build log from the last attempt", false),
-        ("rpmspec.txt", "rpmspec --parse stderr from the last failure", false),
+        (
+            "spec",
+            "the spec file — see \"Editing the spec\" below",
+            true,
+        ),
+        (
+            "spec.generated",
+            "pristine generated spec for reference",
+            false,
+        ),
+        (
+            "build.log",
+            "full osc build log from the last attempt",
+            false,
+        ),
+        (
+            "rpmspec.txt",
+            "rpmspec --parse stderr from the last failure",
+            false,
+        ),
         ("source/", source_desc, false),
-        ("sdist/", "the extraction root; `source/` is the directory inside it", false),
+        (
+            "sdist/",
+            "the extraction root; `source/` is the directory inside it",
+            false,
+        ),
         ("notes.md", "attempt journal — also inlined below", false),
     ] {
         let path = ws.join(name);
@@ -3503,7 +3539,10 @@ mod tests {
         ];
         let prompt = build_turn_prompt(&request(ws, &subs));
 
-        assert!(prompt.contains("## Other projects in this archive"), "{prompt}");
+        assert!(
+            prompt.contains("## Other projects in this archive"),
+            "{prompt}"
+        );
         assert!(prompt.contains("cuda_bindings/  (declares itself `cuda-bindings`)"));
         assert!(prompt.contains("convention 30"));
         // And the repository-archive note, since this did not come from a sdist.
@@ -3555,7 +3594,10 @@ mod tests {
     #[test]
     fn pick_turn_response_falls_back_to_structured_output_tool_call() {
         let tool_calls = vec![
-            ToolCall { name: "Read".into(), input: "{}".into() },
+            ToolCall {
+                name: "Read".into(),
+                input: "{}".into(),
+            },
             ToolCall {
                 name: "StructuredOutput".into(),
                 input: r#"{
@@ -3596,7 +3638,10 @@ mod tests {
         assert!(
             pick_turn_response(
                 "",
-                &[ToolCall { name: "Read".into(), input: "{}".into() }]
+                &[ToolCall {
+                    name: "Read".into(),
+                    input: "{}".into()
+                }]
             )
             .is_none()
         );
@@ -3625,7 +3670,10 @@ mod tests {
             resp.unresolvable_packages,
             vec!["trantor", "jsoncpp", "libbrotli", "yaml-cpp"]
         );
-        assert_eq!(resp.evidence, vec!["Read drogon.spec", "Read CMakeLists.txt"]);
+        assert_eq!(
+            resp.evidence,
+            vec!["Read drogon.spec", "Read CMakeLists.txt"]
+        );
     }
 
     /// A non-Python package (drogon-shape: no `python-` RPM prefix) must get
@@ -3697,7 +3745,10 @@ mod tests {
     #[test]
     fn scrub_env_keeps_anthropic_api_key() {
         let scrubbed = scrub_env_for_agent(vec![pair("ANTHROPIC_API_KEY", "sk-ant-x")], &[]);
-        assert_eq!(scrubbed.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-ant-x"));
+        assert_eq!(
+            scrubbed.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-ant-x")
+        );
     }
 
     #[test]
@@ -3706,14 +3757,16 @@ mod tests {
         // it. OSC pushes happen in the pipeline's own subprocesses, not the
         // agent's turn.
         let scrubbed = scrub_env_for_agent(vec![pair("OSC_PASSWORD", "hunter2")], &[]);
-        assert!(scrubbed.get("OSC_PASSWORD").is_none(), "OSC_PASSWORD must not pass through");
+        assert!(
+            scrubbed.get("OSC_PASSWORD").is_none(),
+            "OSC_PASSWORD must not pass through"
+        );
     }
 
     #[test]
     fn scrub_env_drops_aws_secret_access_key() {
         // Cloud credentials — not in the allow-list and matches *_SECRET too.
-        let scrubbed =
-            scrub_env_for_agent(vec![pair("AWS_SECRET_ACCESS_KEY", "AKIA...")], &[]);
+        let scrubbed = scrub_env_for_agent(vec![pair("AWS_SECRET_ACCESS_KEY", "AKIA...")], &[]);
         assert!(
             scrubbed.get("AWS_SECRET_ACCESS_KEY").is_none(),
             "AWS_SECRET_ACCESS_KEY must not pass through"
@@ -3725,13 +3778,19 @@ mod tests {
         // The suffix matcher catches unknown credential-shaped names that no
         // one thought to list explicitly — e.g. some new forge's auth token.
         let scrubbed = scrub_env_for_agent(vec![pair("FOO_TOKEN", "ghp_abc")], &[]);
-        assert!(scrubbed.get("FOO_TOKEN").is_none(), "FOO_TOKEN must be dropped by the suffix guard");
+        assert!(
+            scrubbed.get("FOO_TOKEN").is_none(),
+            "FOO_TOKEN must be dropped by the suffix guard"
+        );
     }
 
     #[test]
     fn scrub_env_keeps_path() {
         let scrubbed = scrub_env_for_agent(vec![pair("PATH", "/usr/bin:/bin")], &[]);
-        assert_eq!(scrubbed.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
+        assert_eq!(
+            scrubbed.get("PATH").map(String::as_str),
+            Some("/usr/bin:/bin")
+        );
     }
 
     #[test]
@@ -3745,8 +3804,7 @@ mod tests {
         // Strict allow-list: SOMETHING_IRRELEVANT doesn't look like a secret
         // and doesn't appear in the allow-list, so it is dropped. The agent
         // should run in a maximally minimal environment.
-        let scrubbed =
-            scrub_env_for_agent(vec![pair("SOMETHING_IRRELEVANT", "value")], &[]);
+        let scrubbed = scrub_env_for_agent(vec![pair("SOMETHING_IRRELEVANT", "value")], &[]);
         assert!(
             scrubbed.get("SOMETHING_IRRELEVANT").is_none(),
             "unknown non-allowlisted names are dropped under the strict allow-list"
@@ -3780,8 +3838,7 @@ mod tests {
         // through the credential-suffix guard: a secret-shaped name does NOT
         // get forwarded just because someone put it on the CLI.
         let extra = vec!["MYSERVICE_TOKEN".to_string()];
-        let scrubbed =
-            scrub_env_for_agent(vec![pair("MYSERVICE_TOKEN", "secret")], &extra);
+        let scrubbed = scrub_env_for_agent(vec![pair("MYSERVICE_TOKEN", "secret")], &extra);
         assert!(
             scrubbed.get("MYSERVICE_TOKEN").is_none(),
             "credential-suffix guard must override extra_allow"
@@ -3793,8 +3850,7 @@ mod tests {
         // A benign extra-allow name DOES pass through — proof the extension
         // point is wired up for real, not just dead code.
         let extra = vec!["MYSERVICE_HOST".to_string()];
-        let scrubbed =
-            scrub_env_for_agent(vec![pair("MYSERVICE_HOST", "example.com")], &extra);
+        let scrubbed = scrub_env_for_agent(vec![pair("MYSERVICE_HOST", "example.com")], &extra);
         assert_eq!(
             scrubbed.get("MYSERVICE_HOST").map(String::as_str),
             Some("example.com")
@@ -3806,7 +3862,10 @@ mod tests {
     fn convention_cross_references_resolve() {
         let count = CONVENTIONS
             .lines()
-            .filter_map(|l| l.split_once(". ").and_then(|(h, _)| h.parse::<usize>().ok()))
+            .filter_map(|l| {
+                l.split_once(". ")
+                    .and_then(|(h, _)| h.parse::<usize>().ok())
+            })
             .max()
             .unwrap_or(0);
         for text in [CONVENTIONS] {

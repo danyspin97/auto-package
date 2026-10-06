@@ -26,13 +26,12 @@ fn emit_host_macro_warning(emit: Emit<'_>) {
     WARNED.call_once(|| {
         emit.reporter.report(&Event::Warning {
             step: emit.step,
-            message:
-                "`rpmspec --parse` validates specs using host RPM macros, not \
+            message: "`rpmspec --parse` validates specs using host RPM macros, not \
                  the target OBS build repo's macros — a clean parse here does \
                  not guarantee the OBS worker will see the same expansions \
                  (e.g. `%python3_sitelib`, `%python_module`, `%suse_version`). \
                  Treat it as a syntax check, not a reproduction."
-                    .to_string(),
+                .to_string(),
         });
     });
 }
@@ -179,7 +178,10 @@ impl From<&str> for BuildStatus {
 pub enum FailureKind {
     NoRepositories,
     NotWorkingCopy,
-    UnresolvableDeps { names: Vec<String>, detail: Vec<String> },
+    UnresolvableDeps {
+        names: Vec<String>,
+        detail: Vec<String>,
+    },
     BuildFailed,
 }
 
@@ -216,10 +218,7 @@ fn extract_unresolvable(log: &str) -> Vec<String> {
             continue;
         };
         // Take just the package name; drop " needed by ..." suffix.
-        let pkg = pkg_str
-            .split_whitespace()
-            .next()
-            .unwrap_or(pkg_str);
+        let pkg = pkg_str.split_whitespace().next().unwrap_or(pkg_str);
         let pkg = clean_unresolvable_name(pkg);
         if !pkg.is_empty() && seen.insert(pkg.to_string()) {
             result.push(pkg.to_string());
@@ -258,7 +257,9 @@ fn extract_unresolvable_detail(log: &str) -> Vec<String> {
     let lines: Vec<&str> = log.lines().collect();
     for (i, raw_line) in lines.iter().enumerate() {
         let line = raw_line.trim();
-        if !line.starts_with("nothing provides") && !line.starts_with("unresolvable: nothing provides") {
+        if !line.starts_with("nothing provides")
+            && !line.starts_with("unresolvable: nothing provides")
+        {
             continue;
         }
         result.push(line.to_string());
@@ -304,7 +305,10 @@ nothing provides (python313-foo
 
     #[test]
     fn leaves_ordinary_names_untouched() {
-        assert_eq!(clean_unresolvable_name("python314-duckdb"), "python314-duckdb");
+        assert_eq!(
+            clean_unresolvable_name("python314-duckdb"),
+            "python314-duckdb"
+        );
     }
 }
 
@@ -351,14 +355,26 @@ mod fuzzy_key_tests {
 
     #[test]
     fn treats_hyphen_underscore_and_dot_as_equivalent() {
-        assert_eq!(fuzzy_key("python-pydantic-core"), fuzzy_key("python-pydantic_core"));
-        assert_eq!(fuzzy_key("python-ruamel.yaml"), fuzzy_key("python-ruamel-yaml"));
-        assert_eq!(fuzzy_key("Python-Backports.Zstd"), fuzzy_key("python-backports_zstd"));
+        assert_eq!(
+            fuzzy_key("python-pydantic-core"),
+            fuzzy_key("python-pydantic_core")
+        );
+        assert_eq!(
+            fuzzy_key("python-ruamel.yaml"),
+            fuzzy_key("python-ruamel-yaml")
+        );
+        assert_eq!(
+            fuzzy_key("Python-Backports.Zstd"),
+            fuzzy_key("python-backports_zstd")
+        );
     }
 
     #[test]
     fn distinct_names_still_produce_distinct_keys() {
-        assert_ne!(fuzzy_key("python-pydantic-core"), fuzzy_key("python-pydantic"));
+        assert_ne!(
+            fuzzy_key("python-pydantic-core"),
+            fuzzy_key("python-pydantic")
+        );
     }
 }
 
@@ -466,10 +482,7 @@ fn extract_xml_attr(tag: &str, attr: &str) -> Option<String> {
 /// This is the correct set to check for resolvability: a package is available
 /// for building if it exists in the user's own project OR in any project that
 /// the user's project is configured to build against.
-pub fn get_available_packages(
-    project: &str,
-    emit: Emit<'_>,
-) -> std::collections::HashSet<String> {
+pub fn get_available_packages(project: &str, emit: Emit<'_>) -> std::collections::HashSet<String> {
     let mut all = list_project_packages(project, emit);
     for (path_project, _repo) in get_project_repo_paths(project, emit) {
         all.extend(list_project_packages(&path_project, emit));
@@ -494,10 +507,7 @@ static PROJECT_PACKAGES_CACHE: OnceLock<Mutex<HashMap<String, std::collections::
 /// process — every package built after it would look like it still doesn't
 /// exist to every dependent package's availability check, for the entire
 /// remainder of the run, no matter how many more succeed.
-pub fn list_project_packages(
-    project: &str,
-    emit: Emit<'_>,
-) -> std::collections::HashSet<String> {
+pub fn list_project_packages(project: &str, emit: Emit<'_>) -> std::collections::HashSet<String> {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     {
@@ -508,7 +518,10 @@ pub fn list_project_packages(
     }
 
     let pkgs = fetch_project_packages(project, emit);
-    cache.lock().unwrap().insert(project.to_owned(), pkgs.clone());
+    cache
+        .lock()
+        .unwrap()
+        .insert(project.to_owned(), pkgs.clone());
     pkgs
 }
 
@@ -597,10 +610,7 @@ pub fn cat_file(project: &str, pkg: &str, filename: &str, emit: Emit<'_>) -> Opt
     Some(out.stdout)
 }
 
-fn fetch_project_packages(
-    project: &str,
-    emit: Emit<'_>,
-) -> std::collections::HashSet<String> {
+fn fetch_project_packages(project: &str, emit: Emit<'_>) -> std::collections::HashSet<String> {
     let Ok(out) = proc::capture("osc", &["ls", project], &anywhere(), emit) else {
         return Default::default();
     };
@@ -629,7 +639,12 @@ pub fn create_initial_changes(
     if checkout_dir.join(&changes_name).exists() {
         return Ok(());
     }
-    let out = proc::capture("osc", &["vc", "-m", "Initial packaging"], checkout_dir, emit)?;
+    let out = proc::capture(
+        "osc",
+        &["vc", "-m", "Initial packaging"],
+        checkout_dir,
+        emit,
+    )?;
     if !out.success() {
         return Err(Error::OscFailed {
             cmd: "vc -m \"Initial packaging\"".to_string(),
@@ -730,7 +745,11 @@ pub fn checkout(
             if out.stderr.contains("404") || out.stderr.contains("Not Found") {
                 return Ok(checkout_dir);
             }
-            return Err(Error::OscFailed { cmd: "up".into(), code: out.code, stderr: out.stderr });
+            return Err(Error::OscFailed {
+                cmd: "up".into(),
+                code: out.code,
+                stderr: out.stderr,
+            });
         }
 
         return Ok(checkout_dir);
@@ -764,9 +783,22 @@ pub fn pull(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
         // 404 means `ensure_package`'s meta push hasn't propagated to this
         // checkout's view of the server yet — the directory is valid,
         // nothing to pull.
-        let benign = ["nothing to update", "At revision", "Skipping", "404", "Not Found"];
-        if !benign.iter().any(|b| out.stdout.contains(b) || out.stderr.contains(b)) {
-            return Err(Error::OscFailed { cmd: "up".to_string(), code: out.code, stderr: out.stderr });
+        let benign = [
+            "nothing to update",
+            "At revision",
+            "Skipping",
+            "404",
+            "Not Found",
+        ];
+        if !benign
+            .iter()
+            .any(|b| out.stdout.contains(b) || out.stderr.contains(b))
+        {
+            return Err(Error::OscFailed {
+                cmd: "up".to_string(),
+                code: out.code,
+                stderr: out.stderr,
+            });
         }
     }
     Ok(())
@@ -1111,7 +1143,11 @@ pub fn get_project_build_statuses(
 
 /// Parsing half of [`get_project_build_statuses`], split out so it is
 /// testable without shelling out to `osc`.
-fn parse_project_build_statuses(stdout: &str, repo: &str, arch: &str) -> HashMap<String, BuildStatus> {
+fn parse_project_build_statuses(
+    stdout: &str,
+    repo: &str,
+    arch: &str,
+) -> HashMap<String, BuildStatus> {
     let marker = format!(" {repo} {arch} (");
     let mut statuses = HashMap::new();
     let mut pending_pkgs: Vec<String> = Vec::new();
@@ -1149,7 +1185,9 @@ fn parse_project_build_statuses(stdout: &str, repo: &str, arch: &str) -> HashMap
             pending_pkgs.clear();
             continue;
         }
-        let name = line.trim_start_matches(|c: char| c == ' ' || c == '|').trim();
+        let name = line
+            .trim_start_matches(|c: char| c == ' ' || c == '|')
+            .trim();
         if !name.is_empty() {
             pending_pkgs.push(name.to_lowercase());
         }
@@ -1265,13 +1303,25 @@ fn get_unresolvable_from_results(
 ) -> (Vec<String>, Vec<String>) {
     let Ok(out) = proc::capture(
         "osc",
-        &["results", "--verbose", "-r", repo, "-a", arch, project, pkg_name],
+        &[
+            "results",
+            "--verbose",
+            "-r",
+            repo,
+            "-a",
+            arch,
+            project,
+            pkg_name,
+        ],
         &anywhere(),
         emit,
     ) else {
         return (vec![], vec![]);
     };
-    (extract_unresolvable(&out.stdout), extract_unresolvable_detail(&out.stdout))
+    (
+        extract_unresolvable(&out.stdout),
+        extract_unresolvable_detail(&out.stdout),
+    )
 }
 
 /// Get the unresolvable package names (and raw detail lines) OBS already
@@ -1448,12 +1498,11 @@ pub fn obs_build(
 
     Err(match status {
         BuildStatus::Unresolvable => {
-            let (names, detail) = current_unresolvable(project, pkg_name, repo, arch, log_path, emit);
+            let (names, detail) =
+                current_unresolvable(project, pkg_name, repo, arch, log_path, emit);
             Error::UnresolvableDeps { names, detail }
         }
-        BuildStatus::Broken => {
-            Error::NotActionable("OBS: package source is broken".to_string())
-        }
+        BuildStatus::Broken => Error::NotActionable("OBS: package source is broken".to_string()),
         BuildStatus::Disabled => {
             Error::NotActionable("OBS: build is disabled in project config".to_string())
         }
@@ -1464,9 +1513,9 @@ pub fn obs_build(
             FailureKind::NoRepositories => Error::NotActionable(
                 "OBS project has no build repositories — configure them in OBS first".to_string(),
             ),
-            FailureKind::NotWorkingCopy => Error::NotActionable(
-                "osc checkout is not server-backed".to_string(),
-            ),
+            FailureKind::NotWorkingCopy => {
+                Error::NotActionable("osc checkout is not server-backed".to_string())
+            }
             FailureKind::UnresolvableDeps { names, detail } => {
                 Error::UnresolvableDeps { names, detail }
             }

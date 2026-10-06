@@ -40,18 +40,27 @@ pub struct Emit<'a> {
 
 impl<'a> Emit<'a> {
     pub fn new(reporter: &'a dyn Reporter, step: StepId) -> Self {
-        Self { reporter, step: Some(step) }
+        Self {
+            reporter,
+            step: Some(step),
+        }
     }
 
     /// Report against the run rather than a numbered step.
     pub fn run(reporter: &'a dyn Reporter) -> Self {
-        Self { reporter, step: None }
+        Self {
+            reporter,
+            step: None,
+        }
     }
 
     /// Record nothing. For calls whose individual invocations are noise —
     /// a status poll repeated every 15 seconds, say.
     pub fn quiet() -> Emit<'static> {
-        Emit { reporter: &NULL_REPORTER, step: None }
+        Emit {
+            reporter: &NULL_REPORTER,
+            step: None,
+        }
     }
 
     fn started(&self, program: &str, argv: &[String], cwd: &Path, log: Option<&Path>) {

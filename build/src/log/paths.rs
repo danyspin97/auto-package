@@ -10,8 +10,8 @@
 //!   try to read out of the sdist — its *presence* is diagnostic, the file is
 //!   not.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use regex::Regex;
 

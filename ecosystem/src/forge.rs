@@ -93,7 +93,10 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
     //   git@host:owner/path.git  (scp-style, no scheme at all)
     let hostpath = if let Some((_, rest)) = trimmed.split_once("://") {
         // Drop user@ prefix if present (ssh://git@host/...).
-        rest.split_once('@').map(|(_, r)| r).unwrap_or(rest).to_string()
+        rest.split_once('@')
+            .map(|(_, r)| r)
+            .unwrap_or(rest)
+            .to_string()
     } else if let Some((_user, rest)) = trimmed.split_once('@') {
         // scp-style: user@host:path  → host/path
         rest.replacen(':', "/", 1)
@@ -160,10 +163,7 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
     // A forge project path has at least two segments: owner and repo (or
     // more, for nested groups). Fewer than two means the URL points at a
     // user profile or group root, which isn't a repository.
-    let segments: Vec<&str> = project_path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = project_path.split('/').filter(|s| !s.is_empty()).collect();
     if segments.len() < 2 {
         return None;
     }
@@ -215,10 +215,7 @@ mod tests {
         let f = parse("git@github.com:NVIDIA/cuda-python.git").unwrap();
         assert_eq!(f.host, "github.com");
         assert_eq!(f.project_path, "NVIDIA/cuda-python");
-        assert_eq!(
-            f.canonical_https(),
-            "https://github.com/NVIDIA/cuda-python",
-        );
+        assert_eq!(f.canonical_https(), "https://github.com/NVIDIA/cuda-python",);
     }
 
     #[test]
@@ -248,8 +245,7 @@ mod tests {
     fn gitlab_nested_group_with_sub_path() {
         // `/-/tree/main` sits after the repo path and must be dropped before
         // we compute the project path.
-        let f = parse("https://gitlab.com/group/subgroup/project/-/tree/main")
-            .unwrap();
+        let f = parse("https://gitlab.com/group/subgroup/project/-/tree/main").unwrap();
         assert_eq!(f.project_path, "group/subgroup/project");
     }
 
@@ -272,10 +268,7 @@ mod tests {
                 "https://github.com/pallets/markupsafe/blob/main/README.md",
                 "pallets/markupsafe",
             ),
-            (
-                "https://github.com/foo/bar/releases/tag/v1.0",
-                "foo/bar",
-            ),
+            ("https://github.com/foo/bar/releases/tag/v1.0", "foo/bar"),
         ] {
             let f = parse(url).unwrap();
             assert_eq!(f.project_path, expected, "{url}");

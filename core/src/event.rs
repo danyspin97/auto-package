@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RunId(pub String);
@@ -145,7 +145,10 @@ impl std::fmt::Display for Task {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Task::Review => write!(f, "review"),
-            Task::FixAfterBuild { attempt, max_attempts } => {
+            Task::FixAfterBuild {
+                attempt,
+                max_attempts,
+            } => {
                 write!(f, "fix {attempt}/{max_attempts}")
             }
         }
