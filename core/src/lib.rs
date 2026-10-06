@@ -4,5 +4,6 @@ pub mod error;
 pub mod event;
 pub mod run;
 pub mod sink;
+pub mod skills;
 
 pub use error::{Error, Result};
