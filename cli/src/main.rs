@@ -1462,6 +1462,54 @@ fn cmd_build(
                     fail_counts.remove(&rpm_name);
                 }
                 PipelineResult::MissingDeps { deps, .. } => {
+                    // No-progress detection (review finding #15 in the Sep
+                    // report; still open in Oct). A package that keeps
+                    // surfacing MissingDeps on names already in
+                    // `attempted_deps` — and therefore skipped by the
+                    // mini-loop every time — is not making progress; it is
+                    // blocked on something that can never be built in this
+                    // environment (closed-source toolchain, PyPI name that
+                    // doesn't exist, …). Without this, the frontier would
+                    // re-select the same package forever: MissingDeps does
+                    // not consume the outer failed-target limit, so the
+                    // loop never gives up on it.
+                    //
+                    // Treat such a no-progress round the same as a Failed
+                    // result for retry-counting purposes: increment
+                    // `fail_counts`, and after `max_target_retries` of
+                    // genuinely-no-new-deps rounds, mark the package
+                    // permanently_failed and let the frontier move on.
+                    let new_deps: Vec<&String> = deps
+                        .iter()
+                        .filter(|d| !attempted_deps.contains(&ap_build::osc::fuzzy_key(d)))
+                        .collect();
+                    if new_deps.is_empty() && !deps.is_empty() {
+                        let count = fail_counts.entry(rpm_name.clone()).or_insert(0);
+                        *count += 1;
+                        if *count >= max_target_retries {
+                            permanently_failed.insert(rpm_name.clone());
+                            pkg_reporter(&rpm_name).report(&Event::Warning {
+                                step: None,
+                                message: format!(
+                                    "giving up on {rpm_name}: it needs {} but every one \
+                                     has already been attempted without success after \
+                                     {count} rounds; anything depending on it stays \
+                                     blocked, but the rest of the closure keeps going",
+                                    deps.join(", ")
+                                ),
+                            });
+                        } else {
+                            pkg_reporter(&rpm_name).report(&Event::Warning {
+                                step: None,
+                                message: format!(
+                                    "{rpm_name} reports no-progress MissingDeps {} \
+                                     (round {count}/{max_target_retries}); will retry \
+                                     after the dep queue drains",
+                                    deps.join(", ")
+                                ),
+                            });
+                        }
+                    }
                     batch_pending.extend(deps);
                 }
                 PipelineResult::Failed { reason, .. } => {
