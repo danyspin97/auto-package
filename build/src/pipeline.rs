@@ -211,6 +211,36 @@ fn find_explicit_target<'a>(
         })
 }
 
+/// Does OBS reporting this status mean a dependent package will actually find
+/// a built binary when it resolves against this one?
+///
+/// Only `Succeeded` is a hard yes; `Blocked`/`Building`/`Scheduled` are "will
+/// be, soon" and left in to avoid duplicate scheduling of work OBS is already
+/// doing. Everything else — `Failed`, `Unresolvable`, `Broken`, `Disabled`,
+/// `Excluded`, `Unknown`, or `None` (no entry at all for this distro/arch) —
+/// is a no.
+///
+/// This used to allow every non-{Failed, Unresolvable, Broken} status through
+/// (and `None` fell into "non-failed" too), which treated a Disabled source
+/// and a never-built-for-this-arch package as if their binaries were sitting
+/// in the repo waiting to be installed. The mocked disabled-source case the
+/// Oct 6 review probed with (`demo==999.0` returning Ok with no RPM produced)
+/// was exactly this: a `python-demo` source existed in the project, OBS
+/// reported it Disabled, `select_target` saw "not Failed/Unresolvable/Broken",
+/// called the package resolvable, found nothing left to build, and the whole
+/// run exited successful.
+pub(crate) fn status_is_resolvable(status: Option<&osc::BuildStatus>) -> bool {
+    matches!(
+        status,
+        Some(
+            osc::BuildStatus::Succeeded
+                | osc::BuildStatus::Blocked
+                | osc::BuildStatus::Building
+                | osc::BuildStatus::Scheduled
+        )
+    )
+}
+
 /// Resolve the dependency closure and return all currently buildable targets
 /// (the "frontier" — nodes whose declared deps in the closure are all resolved).
 ///
@@ -228,6 +258,15 @@ fn find_explicit_target<'a>(
 /// they and anything depending on them are excluded from the frontier so a
 /// package that can never succeed doesn't get re-selected forever.
 ///
+/// `force` tells the gate the user asked explicitly to rebuild (via `--force`,
+/// or by invoking `update`, which always passes it): the root (requested)
+/// node is then never treated as resolvable, even if it is already green in
+/// OBS and locally. Without this, `--force` is unenforceable from here —
+/// `run_package`'s own force check only fires if the package reaches it in the
+/// first place, and `select_target` would otherwise skip it before it ever
+/// does. This was the mechanical path the Oct 6 review's `update --force
+/// --regen` reproducer took to return Ok without ever running a build.
+///
 /// Returns `Ok(vec![])` when every package in the closure is already
 /// resolvable, or when nothing further can be built because everything left
 /// is blocked by a `permanently_failed` package.
@@ -238,6 +277,7 @@ pub fn select_target(
     pinned_version: Option<&str>,
     config: &PipelineConfig,
     permanently_failed: &std::collections::HashSet<String>,
+    force: bool,
     reporter: &dyn Reporter,
 ) -> Result<Vec<TargetInfo>, String> {
     reporter.report(&Event::ResolveStarted { root: name.to_string() });
@@ -313,6 +353,19 @@ pub fn select_target(
     let resolvable: Vec<bool> = nodes
         .iter()
         .map(|n| {
+            // `--force` on the root was previously only observed inside
+            // `run_package`, which never ran if `select_target` had already
+            // skipped the package: so a `--force` or `update --force --regen`
+            // against a package OBS already showed green silently exited
+            // successful without building anything (Oct 6 review finding #1).
+            // Mark the user's own requested root as unresolved up front so it
+            // reaches the frontier; the rest of the closure still goes
+            // through the ordinary resolvability check below so a forced
+            // rebuild does not stampede every already-built dependency with
+            // it.
+            if force && n.is_requested {
+                return false;
+            }
             // Some PyPI packages exist purely to redistribute a binary that
             // openSUSE already ships as its own identically-named system
             // package (`ninja` is the case that prompted this: it's a
@@ -328,12 +381,7 @@ pub fn select_target(
             let rpm = osc::rpm_name(&n.name);
             let key = osc::fuzzy_key(&rpm);
             if let Some(&real) = own_fuzzy.get(&key) {
-                return !matches!(
-                    build_statuses.get(real),
-                    Some(osc::BuildStatus::Failed)
-                        | Some(osc::BuildStatus::Unresolvable)
-                        | Some(osc::BuildStatus::Broken)
-                );
+                return status_is_resolvable(build_statuses.get(real));
             }
             if linked_fuzzy.contains(&key) {
                 return true;
@@ -3523,6 +3571,52 @@ mod tests {
         let back: PkgState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.last_failure_reason.as_deref(), Some("agent error: claude exited 1"));
         assert!(!back.is_built("1.2.3"), "`failed` must never satisfy is_built");
+    }
+
+    /// `Succeeded` is the only hard "available right now" status; the three
+    /// transient OBS states (`Blocked`/`Building`/`Scheduled`) are kept in to
+    /// avoid stampeding work OBS is already doing. Everything else — the
+    /// explicit terminal failures, user-disabled/excluded sources, and the
+    /// catch-all `Unknown` — is not available for a dependent build to link
+    /// against and must not be treated as resolvable.
+    #[test]
+    fn only_succeeded_and_in_flight_statuses_count_as_resolvable() {
+        for ok in [
+            crate::osc::BuildStatus::Succeeded,
+            crate::osc::BuildStatus::Blocked,
+            crate::osc::BuildStatus::Building,
+            crate::osc::BuildStatus::Scheduled,
+        ] {
+            assert!(
+                status_is_resolvable(Some(&ok)),
+                "{ok:?} should still count as resolvable"
+            );
+        }
+        for not_ok in [
+            crate::osc::BuildStatus::Failed,
+            crate::osc::BuildStatus::Unresolvable,
+            crate::osc::BuildStatus::Broken,
+            crate::osc::BuildStatus::Disabled,
+            crate::osc::BuildStatus::Excluded,
+            crate::osc::BuildStatus::Unknown("x".into()),
+        ] {
+            assert!(
+                !status_is_resolvable(Some(&not_ok)),
+                "{not_ok:?} must not count as resolvable \
+                 (Oct 6 finding #1: this was silently green)"
+            );
+        }
+    }
+
+    /// A package that is in the OBS project source listing but has no build
+    /// status entry at all for the requested distro/arch previously counted
+    /// as resolvable (the `!matches!(... Some(Failed|Unresolvable|Broken))`
+    /// returned true on `None`), making every "I added a source but haven't
+    /// ever built it for this arch" package look available to its
+    /// dependents. Must now be treated as unresolved.
+    #[test]
+    fn a_package_with_no_build_status_entry_is_not_resolvable() {
+        assert!(!status_is_resolvable(None));
     }
 
     #[test]

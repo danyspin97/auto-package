@@ -1256,12 +1256,19 @@ fn cmd_build(
         }
 
         // Select all currently buildable targets (the full frontier).
+        //
+        // `config.force` is passed down so `--force` (and `update`, which
+        // always sets it) can override the "OBS says it's already green"
+        // resolvability gate for the root -- see `select_target`'s doc
+        // comment. Without this, the gate would skip the package before
+        // `run_package`'s own force check could ever fire.
         let targets = select_target(
             name,
             explicit_target,
             pinned_version.as_deref(),
             &config,
             &permanently_failed,
+            config.force,
             reporter.as_ref(),
         )
             .map_err(|e| color_eyre::eyre::eyre!(e))?;
@@ -1373,18 +1380,51 @@ fn cmd_build(
             }
         }
 
+        // Compute what, if anything, from `batch_pending` is actually new
+        // information *before* merging it into `pending_deps` — the
+        // explicit-target branch below needs to decide "did this round
+        // discover any new missing deps, or are we spinning on the same ones
+        // every pass" and the merged list hides that.
+        let new_pending: Vec<String> = batch_pending
+            .iter()
+            .filter(|d| !attempted_deps.contains(&ap_build::osc::fuzzy_key(d)))
+            .cloned()
+            .collect();
         pending_deps.extend(batch_pending);
 
         // If an explicit target was requested, stop after one batch — there is
         // no "next round" to retry it in, so a failure here must surface as
         // an error rather than a silent `Ok`.
         if explicit_target.is_some() {
-            return match batch_failures.first() {
-                Some((rpm_name, reason)) => {
-                    Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"))
-                }
-                None => Ok(()),
-            };
+            if let Some((rpm_name, reason)) = batch_failures.first() {
+                return Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"));
+            }
+            // A `--target` run returning `MissingDeps` previously fell through
+            // to `None => Ok(())` here, reporting success for a target that
+            // was *not* built. The Oct 6 review reproduced this: an explicit
+            // target whose first batch yielded `MissingDeps` exited 0 with
+            // nothing green. Make unresolved work a non-success outcome: if
+            // this batch surfaced genuinely new deps (not ones we have
+            // already tried and failed/gave-up on), loop around once to let
+            // them build via the top-of-loop pending-deps processor and
+            // re-select the target; if we would loop on the same deps
+            // forever, error out instead.
+            if !pending_deps.is_empty() && new_pending.is_empty() {
+                let missing: Vec<&String> = pending_deps.iter().collect();
+                let names = missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                return Err(color_eyre::eyre::eyre!(
+                    "{name} needs {} but every one has already been attempted \
+                     without success; cannot build",
+                    names
+                ));
+            }
+            if pending_deps.is_empty() {
+                return Ok(());
+            }
+            // Fall through to the next loop iteration so `pending_deps` drains
+            // (building each new dep), then `select_target` re-selects the
+            // same explicit target and `run_package` retries with those deps
+            // now available.
         }
     }
 }
