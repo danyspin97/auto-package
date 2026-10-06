@@ -54,10 +54,39 @@ pub struct PipelineConfig {
     /// to. Shown to the agent as the evidence that justifies working around
     /// them rather than queueing them again.
     pub failed_deps: Vec<String>,
+    /// Names this run confirmed cannot ever be built by this pipeline at
+    /// all — no PyPI project and no discoverable public source repository
+    /// (see `resolve_dependency_config` returning `None`). Almost always a
+    /// proprietary vendor SDK/compiler (NVIDIA's `cuda-devel`/`cuda-runtime`
+    /// are the running example). Distinct from `failed_deps`: those were
+    /// attempted and failed mid-build, so "skip the optional feature/tests
+    /// that need it" applies; these were never buildable in the first place,
+    /// so re-reporting them in `unresolvable_packages` is not just wasted —
+    /// it can never succeed, and the agent needs to reach for convention 28
+    /// Exception 4 (`use_upstream_wheel`) instead if its own `%build`
+    /// genuinely requires one of these.
+    pub unbuildable_deps: Vec<String>,
     /// User-supplied source repositories, for packages PyPI ships as wheels
     /// with no repository in their metadata. Shared across the whole run so a
     /// dependency discovered mid-run picks up its override too.
     pub source_urls: std::sync::Arc<crate::sources::SourceMap>,
+    /// Which Python flavors this work directory builds for, from
+    /// `<work-dir>/flavors.toml` — see that module's doc comment. Shared the
+    /// same way as `source_urls` and for the same reason: every package in
+    /// the run targets the same distro, so the answer never differs between
+    /// them.
+    pub python_flavors: std::sync::Arc<crate::flavors::PythonFlavors>,
+}
+
+impl PipelineConfig {
+    /// The CPython ABI tag to pass as `pypi::pick_wheel_from_json`'s
+    /// `single_locked_flavor_abi`, derived from `python_flavors`. `None`
+    /// unless this project is configured for exactly one Python flavor and
+    /// that flavor's name translates to an ABI tag at all (see
+    /// `flavors::abi_tag_for_flavor`).
+    pub fn single_locked_flavor_abi(&self) -> Option<String> {
+        self.python_flavors.single_flavor().and_then(crate::flavors::abi_tag_for_flavor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +114,12 @@ pub enum PipelineResult {
 pub struct PkgState {
     pub last_built_version: Option<String>,
     pub last_outcome: Option<String>,
+    /// One-line reason recorded when `last_outcome == "failed"`, so the next
+    /// run can show WHY the previous attempt failed without re-opening the
+    /// run.jsonl stream. Preserved across runs the same way `last_outcome`
+    /// is; cleared when the package next succeeds.
+    #[serde(default)]
+    pub last_failure_reason: Option<String>,
     /// Version for which the pre-build Review turn was already run and
     /// accepted (not `Blocked`). Lets a resumed run — e.g. after a crash that
     /// left the package reviewed but never committed — skip straight to
@@ -146,6 +181,36 @@ pub struct TargetInfo {
     pub blocked_by: Vec<String>,
 }
 
+/// Find the node `--target` names in the resolved closure.
+///
+/// Matches against both the node's own (PyPI) name and its derived RPM name,
+/// fuzzily — `-`/`_`/`.` and case are not meaningful dependency identity (see
+/// `fuzzy_key`'s doc comment), and a caller has no way to know in advance
+/// which of the two spellings a given node happens to be keyed under. Getting
+/// this wrong used to silently check out and commit to a brand-new,
+/// wrongly-named OBS package instead of the real one (`python-backports.zstd`
+/// vs. the actual `python-backports-zstd`) rather than failing loudly.
+fn find_explicit_target<'a>(
+    nodes: &'a [ap_ecosystem::pip::Node],
+    target: &str,
+) -> Result<&'a ap_ecosystem::pip::Node, String> {
+    let target_key = osc::fuzzy_key(target);
+    nodes
+        .iter()
+        .find(|n| {
+            osc::fuzzy_key(&n.name) == target_key
+                || osc::fuzzy_key(&osc::rpm_name(&n.name)) == target_key
+        })
+        .ok_or_else(|| {
+            let mut names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
+            names.sort_unstable();
+            format!(
+                "package '{target}' not in dependency closure — available: {}",
+                names.join(", ")
+            )
+        })
+}
+
 /// Resolve the dependency closure and return all currently buildable targets
 /// (the "frontier" — nodes whose declared deps in the closure are all resolved).
 ///
@@ -178,12 +243,18 @@ pub fn select_target(
     reporter.report(&Event::ResolveStarted { root: name.to_string() });
 
     // Kick off the package availability fetch concurrently with pip resolve.
-    // Checks both the user's own project and all configured build/path projects
-    // (from osc meta prj) — the union is the complete set of resolvable packages.
+    // Checked separately, not merged: whether a build-status check applies
+    // depends on which side found the package (see the `resolvable` comment
+    // below).
     let obs_project = config.project.clone();
-    let (nodes, available_packages, build_statuses) = std::thread::scope(|scope| {
-        let handle = scope.spawn(|| {
-            osc::get_available_packages(&obs_project, Emit::run(reporter))
+    let (nodes, own_packages, linked_packages, build_statuses) = std::thread::scope(|scope| {
+        let own_handle = scope.spawn(|| osc::list_project_packages(&obs_project, Emit::run(reporter)));
+        let linked_handle = scope.spawn(|| {
+            let mut linked = std::collections::HashSet::new();
+            for (path_project, _repo) in osc::get_project_repo_paths(&obs_project, Emit::run(reporter)) {
+                linked.extend(osc::list_project_packages(&path_project, Emit::run(reporter)));
+            }
+            linked
         });
         let statuses_handle = scope.spawn(|| {
             osc::get_project_build_statuses(
@@ -197,7 +268,8 @@ pub fn select_target(
         // Join the fetches (likely already done while pip was resolving).
         (
             nodes,
-            handle.join().unwrap_or_default(),
+            own_handle.join().unwrap_or_default(),
+            linked_handle.join().unwrap_or_default(),
             statuses_handle.join().unwrap_or_default(),
         )
     });
@@ -205,25 +277,66 @@ pub fn select_target(
 
     let total = nodes.len();
 
-    // A node is resolvable if present in the user's project or any build
-    // project — unless OBS reports its own build as actually failing there,
-    // in which case it stays unresolved so the frontier picks it back up and
-    // `run_package`'s existing build-log-driven fix path can retry it,
-    // instead of a broken OBS package silently blocking everything above it
-    // forever. It's also resolvable if its local state.json records a prior
+    // A node already present in the user's own project is resolvable unless
+    // OBS reports its own build as actually failing there, in which case it
+    // stays unresolved so the frontier picks it back up and `run_package`'s
+    // existing build-log-driven fix path can retry it — instead of a broken
+    // OBS package silently blocking everything above it forever.
+    //
+    // A node present only in a linked/build project (e.g. openSUSE:Factory,
+    // reached via `osc meta prj`'s `<path>` entries) is resolvable on mere
+    // presence, with no build-status check: we don't own or rebuild those
+    // packages, so there is nothing to retry, and querying that project's
+    // build status per its own repo/arch is unreliable (naming and listing
+    // quirks in a project we don't control) — requiring it previously caused
+    // already-available packages like `python-setuptools` to be queued for
+    // packaging again. Presence in the linked project's sources is exactly
+    // the signal OBS itself uses to consider a package "available".
+    //
+    // It's also resolvable if its local state.json records a prior
     // "wheel-only" or "success" outcome — wheel-only packages can't be built
     // from source and should not be re-selected on every run.
+    // `osc::rpm_name` is only a guess — openSUSE has no single deterministic
+    // rule for how a PyPI name's separators map to the RPM name (see its doc
+    // comment: `pydantic_core` is packaged as `python-pydantic-core`, but
+    // `typing_extensions` keeps its underscore). Comparing the guess for
+    // exact string equality against the real project listings previously
+    // made already-available packages like `python-pydantic-core` look
+    // unresolvable and get queued as duplicates. Index both listings by a
+    // separator-blind `fuzzy_key` instead, and use the *real* listed name
+    // (not the guess) for the build-status lookup once a match is found.
+    let own_fuzzy: std::collections::HashMap<String, &String> =
+        own_packages.iter().map(|p| (osc::fuzzy_key(p), p)).collect();
+    let linked_fuzzy: std::collections::HashSet<String> =
+        linked_packages.iter().map(|p| osc::fuzzy_key(p)).collect();
+
     let resolvable: Vec<bool> = nodes
         .iter()
         .map(|n| {
+            // Some PyPI packages exist purely to redistribute a binary that
+            // openSUSE already ships as its own identically-named system
+            // package (`ninja` is the case that prompted this: it's a
+            // pip-installable copy of the `ninja` build tool, pulled in by
+            // build backends like scikit-build-core/meson-python that just
+            // shell out to it). Packaging a `python-<name>` RPM for one of
+            // these would only duplicate the system package, so treat them
+            // as already resolved rather than ever selecting them as a
+            // build target — see `SYSTEM_TOOL_ALIASES`.
+            if is_system_tool_alias(&n.name) {
+                return true;
+            }
             let rpm = osc::rpm_name(&n.name);
-            if available_packages.contains(&rpm) {
+            let key = osc::fuzzy_key(&rpm);
+            if let Some(&real) = own_fuzzy.get(&key) {
                 return !matches!(
-                    build_statuses.get(&rpm),
+                    build_statuses.get(real),
                     Some(osc::BuildStatus::Failed)
                         | Some(osc::BuildStatus::Unresolvable)
                         | Some(osc::BuildStatus::Broken)
                 );
+            }
+            if linked_fuzzy.contains(&key) {
+                return true;
             }
             // Check local workspace state.
             let ws_name = ap_core::run::sanitize_name(&rpm);
@@ -247,11 +360,7 @@ pub fn select_target(
 
     // Explicit target override — skip the resolvability gate.
     if let Some(target) = explicit_target {
-        let node = nodes
-            .iter()
-            .find(|n| n.name.eq_ignore_ascii_case(target))
-            .ok_or_else(|| format!("package '{target}' not in dependency closure"))?
-            .clone();
+        let node = find_explicit_target(&nodes, target)?.clone();
         return Ok(vec![TargetInfo {
             name: node.name,
             version: node.version,
@@ -380,9 +489,47 @@ pub fn select_target(
     Ok(frontier)
 }
 
-/// Normalize a PyPI package name to a consistent lookup key (lowercase, `-` → `_`).
+/// PyPI names (normalized, see [`normalize_pkg_name`]) that are pure
+/// redistributions of a tool openSUSE already ships as a system package of
+/// the same name. Callers depending on one of these want the executable on
+/// PATH, not an importable Python module — see the `resolvable` computation
+/// in [`select_target`] and convention 27's "PyPI packages that just
+/// redistribute a system tool" in the agent prompt.
+///
+/// Deliberately a single, hardcoded, hand-verified entry rather than a
+/// user-extensible config file: unlike `flavors.toml` (which genuinely
+/// varies per work directory/distro), whether a PyPI package just
+/// redistributes a system binary is a fixed fact about that package, not
+/// something that differs between work directories — and confirming one
+/// needs checking that the actual consumer shells out to the tool rather
+/// than importing its Python module (`ninja` is correct because that one
+/// case was spot-checked, not because every same-shaped PyPI package works
+/// this way). That verification belongs in reviewed source control, not a
+/// `<work-dir>/`-local file that `--cleanup` can wipe and that never
+/// benefits any other work directory in the first place.
+const SYSTEM_TOOL_ALIASES: &[&str] = &["ninja"];
+
+/// Whether `name` (a bare PyPI/import name, not an RPM name) is one of
+/// [`SYSTEM_TOOL_ALIASES`] — a dependency that should resolve against the
+/// existing system package instead of ever being built as its own
+/// `python-<name>` RPM. Exposed so callers outside this module (the CLI's
+/// agent-discovered-dependency queue) can skip these the same way
+/// `select_target` does for pip-closure nodes.
+pub fn is_system_tool_alias(name: &str) -> bool {
+    SYSTEM_TOOL_ALIASES.contains(&normalize_pkg_name(name).as_str())
+}
+
+/// Normalize a PyPI package name to a consistent lookup key.
+///
+/// Delegates to [`osc::fuzzy_key`] rather than keeping a second, weaker
+/// definition here: this used to only lowercase and fold `-` into `_`,
+/// which still let a dotted name (`ruamel.yaml`) fail to match a
+/// `requires_dist` entry spelling it with a hyphen or underscore instead —
+/// the exact same class of bug `fuzzy_key`'s doc comment documents for RPM
+/// names, just on the PyPI-graph side of this module instead of the OBS
+/// side.
 fn normalize_pkg_name(name: &str) -> String {
-    name.to_lowercase().replace('-', "_")
+    osc::fuzzy_key(name)
 }
 
 /// Extract bare package names from `requires_dist` lines.
@@ -417,6 +564,31 @@ pub fn run_package(
     pkg_run: &PkgRunDir,
     reporter: &dyn Reporter,
 ) -> PipelineResult {
+    let result = run_package_inner(config, pkg_run, reporter);
+    // Persist last-attempt status in the durable workspace so a resumed run
+    // (and the TUI showing per-package state across runs) can see WHY the
+    // last attempt ended, instead of only "last_outcome: null" on anything
+    // that didn't successfully build. Success paths already set
+    // `last_outcome` to "success"/"wheel-only" inline — this covers every
+    // failure path, which otherwise left state.json untouched and made a
+    // mid-run crash indistinguishable from "never attempted".
+    if let PipelineResult::Failed { reason, .. } = &result {
+        if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
+            let mut state = PkgState::load(&ws);
+            state.last_built_version = Some(config.version.clone());
+            state.last_outcome = Some("failed".to_string());
+            state.last_failure_reason = Some(reason.clone());
+            let _ = state.save(&ws);
+        }
+    }
+    result
+}
+
+fn run_package_inner(
+    config: &PipelineConfig,
+    pkg_run: &PkgRunDir,
+    reporter: &dyn Reporter,
+) -> PipelineResult {
     let rpm_name = config.rpm_name.clone();
     let ws = match Workspace::open(&config.state_root, &rpm_name) {
         Ok(w) => w,
@@ -437,6 +609,8 @@ pub fn run_package(
     let spec_path = checkout_dir.join(&spec_name);
 
     // ── Step: Checkout ───────────────────────────────────────────────────────
+    let obs_status: Option<osc::BuildStatus>;
+    let has_local_changes: bool;
     {
         let step = step_or_fail!(pkg_run, "checkout", rpm_name);
         let t = Instant::now();
@@ -482,16 +656,35 @@ pub fn run_package(
             .unwrap_or_else(|_| spec_path.clone());
         let _ = ws.link_spec(&abs);
 
-        // Fetch the previous build log if OBS reports a failed build.
-        // This is non-fatal — the pre-fix step uses ws.build_log() if present.
-        if let Ok(status) = osc::get_build_status(
+        // A checkout dir is reused across runs (see `osc::checkout`), and
+        // `osc up` never discards local uncommitted edits — so a spec that a
+        // previous, interrupted run already bumped to a new version but
+        // never `osc commit`-ed would otherwise make the AlreadyBuilt check
+        // below believe OBS built a version it never actually saw.
+        has_local_changes = osc::has_local_changes(&checkout_dir, emit);
+
+        // Fetch this package's current OBS build status once; reused below both
+        // to grab the build log on failure and to skip the rest of the
+        // pipeline when it already succeeded and nothing would change.
+        obs_status = osc::get_build_status(
             &config.project,
             &rpm_name,
             &config.distro,
             &config.arch,
             emit,
-        ) && matches!(status, osc::BuildStatus::Failed)
-        {
+        )
+        .ok();
+
+        // Fetch the previous build log if OBS reports a failed or
+        // unresolvable build. Non-fatal — PreFix uses ws.build_log() if
+        // present. No separate `osc results --verbose` fetch for the
+        // Unresolvable case: the agent already inspects the spec and reports
+        // what's missing via `unresolvable_packages`, so the OBS round-trip
+        // would only duplicate work the agent will do anyway.
+        if matches!(
+            obs_status,
+            Some(osc::BuildStatus::Failed | osc::BuildStatus::Unresolvable)
+        ) {
             let log_path = ws.build_log();
             let _ = osc::fetch_buildlog(
                 &config.project,
@@ -504,11 +697,40 @@ pub fn run_package(
         }
     }
 
-    // ── Step: GenerateSpec (if needed) ───────────────────────────────────────
-    let need_spec =
-        config.regen || !spec_path.exists() || spec_version_differs(&spec_path, &config.version);
+    // OBS already has this exact version built successfully and nothing local
+    // would change it — this covers the case local state.json (checked above)
+    // doesn't know about, e.g. a different machine or a cleared state dir.
+    // Re-checking-out and re-diffing a package that's already green wastes an
+    // OBS build slot for no reason.
+    if !config.force
+        && !config.regen
+        && spec_path.exists()
+        && !has_local_changes
+        && !spec_version_differs(&spec_path, &config.version)
+        && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
+    {
+        let mut state = PkgState::load(&ws);
+        state.last_built_version = Some(config.version.clone());
+        state.last_outcome = Some("success".to_string());
+        state.last_failure_reason = None;
+        let _ = state.save(&ws);
+        // This process may have cached `config.project`'s package listing
+        // before learning (just now, via the fresh — not cached —
+        // `get_build_status` call above) that OBS already has this one.
+        osc::invalidate_project_packages_cache(&config.project);
+        return PipelineResult::AlreadyBuilt { rpm_name };
+    }
 
-    let (sdist_top_level, is_maturin, from_repo_archive, is_rust) = if need_spec {
+    // ── Step: GenerateSpec (if needed) ───────────────────────────────────────
+    // Captured before generation can overwrite the spec: "did this package
+    // already have a spec" must reflect what was checked out, not what we
+    // are about to write.
+    let spec_existed_before_generation = spec_path.exists();
+    let need_spec = config.regen
+        || !spec_existed_before_generation
+        || spec_version_differs(&spec_path, &config.version);
+
+    let (mut sdist_top_level, is_maturin, mut from_repo_archive, is_rust) = if need_spec {
         let step = step_or_fail!(pkg_run, "spec", rpm_name);
         let t = Instant::now();
         reporter.report(&Event::StepStarted { step: step.id, kind: StepKind::GenerateSpec });
@@ -520,12 +742,19 @@ pub fn run_package(
                     outcome: StepOutcome::Ok,
                     elapsed: t.elapsed(),
                 });
-                // Create a .changes entry for new packages.
-                let _ = osc::create_initial_changes(
-                    &checkout_dir,
-                    &rpm_name,
-                    Emit::new(reporter, step.id),
-                );
+                // "Initial packaging" is only true for a package that had no
+                // spec before this run generated one — a version bump or
+                // --regen on an already-packaged package must not be
+                // (mis)recorded as an initial changelog entry. `create_initial_changes`
+                // itself also skips if a `.changes` file already exists, so
+                // either signal of "not actually new" is enough to skip.
+                if !spec_existed_before_generation {
+                    let _ = osc::create_initial_changes(
+                        &checkout_dir,
+                        &rpm_name,
+                        Emit::new(reporter, step.id),
+                    );
+                }
                 // Link spec.generated into the workspace so the review agent can compare.
                 #[cfg(unix)]
                 {
@@ -585,6 +814,7 @@ pub fn run_package(
                 let mut state = PkgState::load(&ws);
                 state.last_built_version = Some(version);
                 state.last_outcome = Some("wheel-only".to_string());
+                state.last_failure_reason = None;
                 let _ = state.save(&ws);
                 return PipelineResult::Failed {
                     rpm_name,
@@ -769,6 +999,7 @@ pub fn run_package(
                 attempt: 0,
                 hint: None,
                 unresolvable_deps: &[],
+                unresolvable_detail: &[],
                 checkout_dir: Some(&checkout_dir),
                 from_repo_archive,
                 resume: false,
@@ -792,24 +1023,28 @@ pub fn run_package(
         );
 
         if let Ok((review_step, outcome)) = turn {
-            if let crate::agent::Action::Edited = &outcome.action {
-                accept_or_restore(
-                    &spec_path,
-                    &spec_before,
-                    &review_step,
-                    reporter,
-                    &format!(
-                        "\n## Review — pre-build\nReasoning: {}\nConfidence: {:?}\n",
-                        outcome.reasoning, outcome.confidence
-                    ),
-                    ws.notes(),
-                );
-            }
-            if let crate::agent::Action::Blocked { why } = outcome.action {
-                return PipelineResult::Failed {
-                    rpm_name,
-                    reason: format!("review blocked: {why}"),
-                };
+            // A repo-based build that turned out wrong-shaped for this
+            // specific PyPI release (convention 24 Exception 3's caveat
+            // about verified-but-mismatched repos) is exactly the kind of
+            // "cannot be compiled here" call `UseUpstreamWheel` covers.
+            if let Err(reason) = apply_turn_and_reset(
+                ApplyTurnCtx {
+                    config,
+                    checkout_dir: &checkout_dir,
+                    spec_path: &spec_path,
+                    step: &review_step,
+                    before: &spec_before,
+                    rpm_name: &rpm_name,
+                    label: "Review — pre-build",
+                    attempt: 0,
+                    notes_path: ws.notes(),
+                },
+                &outcome,
+                reporter,
+                &mut sdist_top_level,
+                &mut from_repo_archive,
+            ) {
+                return PipelineResult::Failed { rpm_name, reason };
             }
             let mut state = PkgState::load(&ws);
             state.reviewed_version = Some(config.version.clone());
@@ -823,7 +1058,14 @@ pub fn run_package(
     // ── Step: PreFix (restart with previous build log) ───────────────────────
     // When this is a restart (spec was not regenerated) and a previous non-empty
     // build log exists, run an agent turn to fix the spec before a new OBS build.
-    if !need_spec && !config.no_agent && build_log_nonempty {
+    // Also runs when OBS already reports the package Unresolvable — that failure
+    // mode often never produces a real build log at all, but the agent can
+    // still inspect the spec and report what's missing via `unresolvable_packages`.
+    if !need_spec
+        && !config.no_agent
+        && (build_log_nonempty
+            || matches!(obs_status, Some(osc::BuildStatus::Unresolvable)))
+    {
         let clean = strip_and_rewrite(&spec_path);
         let extract = extract_build_log(&ws.build_log(), &sdist_top_level, reporter, None);
 
@@ -838,6 +1080,7 @@ pub fn run_package(
                 attempt: attempts + 1,
                 hint: Some(&extract),
                 unresolvable_deps: &[],
+                unresolvable_detail: &[],
                 checkout_dir: Some(&checkout_dir),
                 from_repo_archive,
                 resume: false,
@@ -851,21 +1094,46 @@ pub fn run_package(
             &mut session_id,
         );
 
-        if let Ok((prefix_step, outcome)) = turn
-            && let crate::agent::Action::Edited = &outcome.action
-            && accept_or_restore(
-                &spec_path,
-                &clean,
-                &prefix_step,
+        if let Ok((prefix_step, outcome)) = turn {
+            if !outcome.unresolvable_packages.is_empty() {
+                reporter.report(&Event::MissingPackages {
+                    step: prefix_step.id,
+                    names: outcome.unresolvable_packages.clone(),
+                    source: ap_core::event::MissingSource::Agent,
+                });
+                let mut to_build: Vec<String> = outcome
+                    .unresolvable_packages
+                    .iter()
+                    .map(|d| osc::strip_rpm_prefix(d).to_string())
+                    .collect();
+                to_build.sort_unstable();
+                to_build.dedup();
+                return PipelineResult::MissingDeps { rpm_name, deps: to_build };
+            }
+
+            let effect = match apply_turn_and_reset(
+                ApplyTurnCtx {
+                    config,
+                    checkout_dir: &checkout_dir,
+                    spec_path: &spec_path,
+                    step: &prefix_step,
+                    before: &clean,
+                    rpm_name: &rpm_name,
+                    label: "PreFix — restart from previous log",
+                    attempt: attempts + 1,
+                    notes_path: ws.notes(),
+                },
+                &outcome,
                 reporter,
-                &format!(
-                    "\n## PreFix — restart from previous log\nReasoning: {}\nConfidence: {:?}\n",
-                    outcome.reasoning, outcome.confidence
-                ),
-                ws.notes(),
-            )
-        {
-            attempts += 1;
+                &mut sdist_top_level,
+                &mut from_repo_archive,
+            ) {
+                Ok(effect) => effect,
+                Err(reason) => return PipelineResult::Failed { rpm_name, reason },
+            };
+            if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
+                attempts += 1;
+            }
         }
     }
 
@@ -889,6 +1157,108 @@ pub fn run_package(
                     name: "rpmspec.stdout".to_string(),
                     path: artifact,
                 });
+
+                let missing = missing_source_files(&expanded, &checkout_dir);
+                if !missing.is_empty() {
+                    reporter.report(&Event::StepFinished {
+                        step: validate_step.id,
+                        outcome: StepOutcome::Failed,
+                        elapsed: t.elapsed(),
+                    });
+                    reporter.report(&Event::SpecRejected {
+                        step: validate_step.id,
+                        reason: ap_core::event::SpecRejection::MissingSourceFiles {
+                            names: missing.clone(),
+                        },
+                        restored_from: spec_path.clone(),
+                    });
+
+                    if config.no_agent
+                        || attempts >= config.max_attempts
+                        || spent_usd >= config.budget_usd
+                    {
+                        return PipelineResult::Failed {
+                            rpm_name,
+                            reason: format!(
+                                "spec references source file(s) not present in the \
+                                 checkout: {}",
+                                missing.join(", ")
+                            ),
+                        };
+                    }
+
+                    // Never commit a spec whose Source/Patch files don't exist — OBS
+                    // would spend a whole remote build just to report `File ...
+                    // SOURCES/...: No such file or directory` (convention 13).
+                    attempts += 1;
+                    let clean = strip_and_rewrite(&spec_path);
+                    let context = format!(
+                        "`rpmspec --parse` succeeded, but the spec references source \
+                         file(s) that do not exist in the checkout directory: {}. Either \
+                         the file was never fetched/written, or a Source/Patch line's \
+                         name doesn't match what's actually on disk (typo, wrong \
+                         extension, stale reference after a rename). Fix the spec to \
+                         reference the real file, or create/restore the missing file if \
+                         it should exist — see \"Source Files and Cleanup\" below.",
+                        missing.join(", ")
+                    );
+                    let turn = agent_turn(
+                        TurnCtx {
+                            label: "agent",
+                            task: crate::agent::Task::FixAfterValidation,
+                            event_task: ap_core::event::Task::FixAfterBuild {
+                                attempt: attempts as u32,
+                                max_attempts: config.max_attempts as u32,
+                            },
+                            attempt: attempts,
+                            hint: None,
+                            unresolvable_deps: &[],
+                            unresolvable_detail: &[],
+                            checkout_dir: Some(&checkout_dir),
+                            from_repo_archive,
+                            resume: true,
+                            context: Some(&context),
+                        },
+                        config,
+                        &ws,
+                        pkg_run,
+                        reporter,
+                        &mut spent_usd,
+                        &mut session_id,
+                    );
+
+                    match turn {
+                        Ok((agent_step, outcome)) => {
+                            if let Err(reason) = apply_turn_and_reset(
+                                ApplyTurnCtx {
+                                    config,
+                                    checkout_dir: &checkout_dir,
+                                    spec_path: &spec_path,
+                                    step: &agent_step,
+                                    before: &clean,
+                                    rpm_name: &rpm_name,
+                                    label: "missing source files",
+                                    attempt: attempts,
+                                    notes_path: ws.notes(),
+                                },
+                                &outcome,
+                                reporter,
+                                &mut sdist_top_level,
+                                &mut from_repo_archive,
+                            ) {
+                                return PipelineResult::Failed { rpm_name, reason };
+                            }
+                        }
+                        Err(e) => {
+                            return PipelineResult::Failed {
+                                rpm_name,
+                                reason: format!("missing source files and agent failed: {e}"),
+                            };
+                        }
+                    }
+                    continue;
+                }
+
                 reporter.report(&Event::StepFinished {
                     step: validate_step.id,
                     outcome: StepOutcome::Ok,
@@ -936,6 +1306,7 @@ pub fn run_package(
                         attempt: attempts,
                         hint: None,
                         unresolvable_deps: &[],
+                        unresolvable_detail: &[],
                         checkout_dir: Some(&checkout_dir),
                         from_repo_archive,
                         resume: true,
@@ -951,25 +1322,24 @@ pub fn run_package(
 
                 match turn {
                     Ok((agent_step, outcome)) => {
-                        if let crate::agent::Action::Blocked { why } = &outcome.action {
-                            return PipelineResult::Failed {
-                                rpm_name,
-                                reason: format!("agent blocked: {why}"),
-                            };
-                        }
-                        if let crate::agent::Action::Edited = &outcome.action {
-                            accept_or_restore(
-                                &spec_path,
-                                &clean,
-                                &agent_step,
-                                reporter,
-                                &format!(
-                                    "\n## Attempt {attempts} — FixAfterValidation\n\
-                                     Reasoning: {}\nConfidence: {:?}\n",
-                                    outcome.reasoning, outcome.confidence
-                                ),
-                                ws.notes(),
-                            );
+                        if let Err(reason) = apply_turn_and_reset(
+                            ApplyTurnCtx {
+                                config,
+                                checkout_dir: &checkout_dir,
+                                spec_path: &spec_path,
+                                step: &agent_step,
+                                before: &clean,
+                                rpm_name: &rpm_name,
+                                label: "FixAfterValidation",
+                                attempt: attempts,
+                                notes_path: ws.notes(),
+                            },
+                            &outcome,
+                            reporter,
+                            &mut sdist_top_level,
+                            &mut from_repo_archive,
+                        ) {
+                            return PipelineResult::Failed { rpm_name, reason };
                         }
                     }
                     Err(e) => {
@@ -1043,8 +1413,15 @@ pub fn run_package(
                 let mut state = PkgState::load(&ws);
                 state.last_built_version = Some(config.version.clone());
                 state.last_outcome = Some("success".to_string());
+                state.last_failure_reason = None;
                 let _ = state.save(&ws);
                 let _ = ws.link_latest(&build_step.path);
+                // `config.project` now has one more package than whatever
+                // this process last cached — see `list_project_packages`'s
+                // doc comment. Without this, every package built from here
+                // on stays invisible to every dependent package's
+                // availability check for the rest of the run.
+                osc::invalidate_project_packages_cache(&config.project);
                 return PipelineResult::Built { rpm_name };
             }
             Err(osc::Error::UnresolvableDeps { names: deps, detail: _ }) => {
@@ -1088,6 +1465,8 @@ pub fn run_package(
                 // the dep name or version constraint may be wrong (e.g. requires
                 // cython >= 3.0 but only Cython0 is available).
                 let mut agent_edited = false;
+                let mut agent_unresolvable: Vec<String> = Vec::new();
+                let mut agent_step_id: Option<_> = None;
                 if !config.no_agent
                     && attempts < config.max_attempts
                     && spent_usd < config.budget_usd
@@ -1101,9 +1480,20 @@ pub fn run_package(
                         reporter,
                         Some(build_step.id),
                     );
+                    // We already know this failure's shape — OBS reported
+                    // Unresolvable with a concrete missing-package list — so
+                    // classify directly instead of running the generic
+                    // `classify_failure` over an empty build log and watching
+                    // it fall through to `Unclassified` (the drogon /
+                    // `trantor-devel` case from notes.md: dependency
+                    // resolution fails before any scriptlet runs, so the log
+                    // never contains an rpm `error:` line for the heuristic
+                    // extractor to key off).
                     reporter.report(&Event::BuildFailed {
                         step: build_step.id,
-                        classification: classify_failure(&extract),
+                        classification: ap_core::event::BuildFailure::UnresolvableDeps {
+                            packages: unresolvable_deps.clone(),
+                        },
                         log: build_log.clone(),
                     });
 
@@ -1118,7 +1508,15 @@ pub fn run_package(
                             },
                             attempt: attempts,
                             hint: Some(&extract),
-                            unresolvable_deps: &unresolvable_deps,
+                            // Don't prime the agent with OBS's extracted dep
+                            // names — the extract hint already includes the
+                            // relevant log excerpt, and feeding RPM-wrapped
+                            // names (`python314-trantor-devel`) back as
+                            // "missing" encourages the agent to echo them into
+                            // `unresolvable_packages` instead of looking the
+                            // real upstream project (`trantor`) up itself.
+                            unresolvable_deps: &[],
+                            unresolvable_detail: &[],
                             checkout_dir: Some(&checkout_dir),
                             from_repo_archive,
                             resume: true,
@@ -1132,21 +1530,47 @@ pub fn run_package(
                         &mut session_id,
                     );
 
-                    if let Ok((agent_step, outcome)) = turn
-                        && let crate::agent::Action::Edited = &outcome.action
-                    {
-                        agent_edited = accept_or_restore(
-                            &spec_path,
-                            &clean,
-                            &agent_step,
-                            reporter,
-                            &format!(
-                                "\n## Attempt {attempts} — unresolvable BuildRequires\n\
-                                 Reasoning: {}\nConfidence: {:?}\n",
-                                outcome.reasoning, outcome.confidence
-                            ),
-                            ws.notes(),
-                        );
+                    if let Ok((agent_step, outcome)) = turn {
+                        agent_unresolvable = outcome.unresolvable_packages.clone();
+                        agent_step_id = Some(agent_step.id);
+                        // Queuing the agent's reported unresolvable_packages
+                        // takes precedence over its action. `Action::Blocked`
+                        // with a non-empty unresolvable_packages list is the
+                        // *normal* shape of "I can't fix the spec; package
+                        // these first and come back" (drogon reporting
+                        // `trantor`/`jsoncpp`/`libbrotli`/`yaml-cpp` is a real
+                        // case). Running apply_turn_and_reset first would turn
+                        // the Blocked verdict into a hard `PipelineResult::Failed`
+                        // and discard the whole list. The ordering here mirrors
+                        // the PreFix and generic FixAfterBuild arms, which
+                        // already check unresolvable_packages first.
+                        if !agent_unresolvable.is_empty() {
+                            // Fall through to the shared queuing block below.
+                        } else {
+                            let effect = match apply_turn_and_reset(
+                                ApplyTurnCtx {
+                                    config,
+                                    checkout_dir: &checkout_dir,
+                                    spec_path: &spec_path,
+                                    step: &agent_step,
+                                    before: &clean,
+                                    rpm_name: &rpm_name,
+                                    label: "unresolvable BuildRequires",
+                                    attempt: attempts,
+                                    notes_path: ws.notes(),
+                                },
+                                &outcome,
+                                reporter,
+                                &mut sdist_top_level,
+                                &mut from_repo_archive,
+                            ) {
+                                Ok(effect) => effect,
+                                Err(reason) => return PipelineResult::Failed { rpm_name, reason },
+                            };
+                            if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
+                                agent_edited = true;
+                            }
+                        }
                     }
                 }
 
@@ -1155,10 +1579,30 @@ pub fn run_package(
                     continue;
                 }
 
-                // Unresolvable deps cannot be fixed by spec edits — strip the
-                // python<ver>- prefix to get the PyPI/package name and skip
-                // this package until its dependencies are built.
-                let mut to_build: Vec<String> = unresolvable_deps
+                // Unresolvable deps cannot be fixed by spec edits — queue the
+                // dependencies for packaging. Prefer the agent's
+                // `unresolvable_packages` list when it provided one: OBS
+                // complains in BuildRequires-string form (`libtrantor-devel`),
+                // but the upstream project the resolver has to find on PyPI/
+                // GitHub is `trantor` — only the agent can map one to the
+                // other, and if the pipeline passes OBS's wrapped name along
+                // untouched the lookup misses and the dep gets permanently
+                // marked unbuildable instead of built. Fall back to OBS's
+                // names only if the agent didn't rename anything (equivalent
+                // to the old behaviour).
+                if !agent_unresolvable.is_empty() {
+                    reporter.report(&Event::MissingPackages {
+                        step: agent_step_id.unwrap_or(build_step.id),
+                        names: agent_unresolvable.clone(),
+                        source: ap_core::event::MissingSource::Agent,
+                    });
+                }
+                let source_list = if agent_unresolvable.is_empty() {
+                    &unresolvable_deps
+                } else {
+                    &agent_unresolvable
+                };
+                let mut to_build: Vec<String> = source_list
                     .iter()
                     .map(|d| osc::strip_rpm_prefix(d).to_string())
                     .collect();
@@ -1229,6 +1673,7 @@ pub fn run_package(
                         attempt: attempts,
                         hint: Some(&extract),
                         unresolvable_deps: &[],
+                        unresolvable_detail: &[],
                         checkout_dir: Some(&checkout_dir),
                         from_repo_archive,
                         resume: true,
@@ -1272,31 +1717,24 @@ pub fn run_package(
                     };
                 }
 
-                match &outcome.action {
-                    crate::agent::Action::Blocked { why }
-                    | crate::agent::Action::UseUpstreamWheel { why } => {
-                        return PipelineResult::Failed {
-                            rpm_name,
-                            reason: format!("agent blocked: {why}"),
-                        };
-                    }
-                    crate::agent::Action::NoChange => {
-                        // Rebuild with the same spec.
-                    }
-                    crate::agent::Action::Edited => {
-                        accept_or_restore(
-                            &spec_path,
-                            &clean,
-                            &agent_step,
-                            reporter,
-                            &format!(
-                                "\n## Attempt {attempts} — FixAfterBuild\n\
-                                 Reasoning: {}\nConfidence: {:?}\n",
-                                outcome.reasoning, outcome.confidence
-                            ),
-                            ws.notes(),
-                        );
-                    }
+                if let Err(reason) = apply_turn_and_reset(
+                    ApplyTurnCtx {
+                        config,
+                        checkout_dir: &checkout_dir,
+                        spec_path: &spec_path,
+                        step: &agent_step,
+                        before: &clean,
+                        rpm_name: &rpm_name,
+                        label: "FixAfterBuild",
+                        attempt: attempts,
+                        notes_path: ws.notes(),
+                    },
+                    &outcome,
+                    reporter,
+                    &mut sdist_top_level,
+                    &mut from_repo_archive,
+                ) {
+                    return PipelineResult::Failed { rpm_name, reason };
                 }
             }
         }
@@ -1329,6 +1767,7 @@ struct TurnCtx<'a> {
     attempt: usize,
     hint: Option<&'a crate::log::ExtractedLog>,
     unresolvable_deps: &'a [String],
+    unresolvable_detail: &'a [String],
     checkout_dir: Option<&'a Path>,
     from_repo_archive: bool,
     /// Resume the previous `claude` session rather than starting a fresh one.
@@ -1378,6 +1817,10 @@ fn agent_turn(
         workspace: ws.dir(),
         pkg_name: &config.pkg_name,
         version: &config.version,
+        // The `python-` prefix is set by `Ecosystem::rpm_name` (see
+        // `build/src/sources.rs`) once the probe has decided the ecosystem,
+        // so it is the single stable "this is a Python package" signal the
+        // pipeline can hand the agent prompt.
         is_python: config.rpm_name.starts_with("python-"),
         task: ctx.task,
         attempt: ctx.attempt,
@@ -1390,9 +1833,9 @@ fn agent_turn(
         from_repo_archive: ctx.from_repo_archive,
         subprojects: &config.subprojects,
         unresolvable_deps: ctx.unresolvable_deps,
-        unresolvable_detail: &[],
+        unresolvable_detail: ctx.unresolvable_detail,
         failed_deps: &config.failed_deps,
-        unbuildable_deps: &[],
+        unbuildable_deps: &config.unbuildable_deps,
         session_id: if ctx.resume { session_id.as_deref() } else { None },
         checkout_dir: ctx.checkout_dir,
         context: ctx.context,
@@ -1408,6 +1851,30 @@ fn agent_turn(
     let outcome = match crate::agent::turn(req) {
         Ok(o) => o,
         Err(e) => {
+            // Any of these failing is otherwise a dead end: nothing below
+            // this point runs, so without this the prompt, stdout and stderr
+            // all vanish the moment this process exits and the failure
+            // becomes undiagnosable — exactly what happened to the
+            // `python-torchcodec`/`python-backports-zstd` "claude exited 1"
+            // crashes that prompted adding this (see `agent::Error`'s
+            // accessors for which variants carry what).
+            for (name, content) in [
+                ("crash-prompt.md", e.prompt()),
+                ("crash-stdout.log", e.stdout()),
+                ("crash-stderr.log", e.stderr()),
+            ] {
+                let Some(content) = content.filter(|c| !c.is_empty()) else {
+                    continue;
+                };
+                let path = step.file(name);
+                if std::fs::write(&path, content).is_ok() {
+                    reporter.report(&Event::Artifact {
+                        step: step.id,
+                        name: name.to_string(),
+                        path,
+                    });
+                }
+            }
             reporter.report(&Event::StepFinished {
                 step: step.id,
                 outcome: StepOutcome::Failed,
@@ -1489,6 +1956,42 @@ fn link_build_log(ws: &Workspace, build_log: &Path) {
         }
         let _ = std::os::unix::fs::symlink(build_log, &link);
     }
+}
+
+/// Basenames of every `Source`/`Patch` file the spec references but that do
+/// not exist in `checkout_dir`.
+///
+/// Takes `rpmspec --parse`'s output rather than the raw spec text so macros
+/// (`%{name}-%{version}.tar.gz`) and conditionals are already resolved —
+/// checking the raw spec would false-positive on any unexpanded macro. A URL
+/// value (the common `Source:` shape for a plain PyPI tarball) is reduced to
+/// its basename, the same name `osc::checkout`/`fetch_release_archive` save
+/// it under locally.
+fn missing_source_files(expanded_spec: &str, checkout_dir: &Path) -> Vec<String> {
+    let mut missing = Vec::new();
+    for line in expanded_spec.lines() {
+        let line = line.trim();
+        let Some(tag) = ["Source", "Patch"].iter().find(|t| line.starts_with(**t)) else {
+            continue;
+        };
+        let Some(rest) = line[tag.len()..]
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .strip_prefix(':')
+        else {
+            continue;
+        };
+        let value = rest.trim();
+        // Macro that failed to expand (shouldn't happen once `rpmspec --parse`
+        // has already succeeded) — nothing reliable to check against disk.
+        if value.is_empty() || value.contains('%') {
+            continue;
+        }
+        let name = value.rsplit('/').next().unwrap_or(value);
+        if !checkout_dir.join(name).exists() {
+            missing.push(name.to_string());
+        }
+    }
+    missing
 }
 
 /// Run the extractor over a build log, warning when the sdist root never matched.
@@ -1574,6 +2077,129 @@ fn accept_or_restore(
     });
     append_notes(notes_path, notes_entry);
     true
+}
+
+/// Everything [`apply_turn_outcome`] needs besides the outcome itself and the
+/// reporter — bundled so the function doesn't trip clippy's argument-count
+/// lint the way its five call sites' worth of parameters would inline.
+struct ApplyTurnCtx<'a> {
+    config: &'a PipelineConfig,
+    checkout_dir: &'a Path,
+    spec_path: &'a Path,
+    step: &'a StepDir,
+    /// Spec content before this turn ran, for `accept_or_restore`'s diff.
+    before: &'a str,
+    rpm_name: &'a str,
+    /// Short description of this turn used in both the notes.md heading and
+    /// any failure reason (`"FixAfterBuild"`, `"Review — pre-build"`, ...).
+    label: &'a str,
+    attempt: usize,
+    notes_path: PathBuf,
+}
+
+/// Apply one agent turn's outcome the same way at every call site that runs
+/// a fix turn (Review, PreFix, FixAfterBuild — both the unresolvable-deps and
+/// generic-failure shapes — and FixAfterValidation): accept an edit, switch
+/// to the upstream wheel and accept that instead, or report nothing changed.
+///
+/// Centralizing this is what makes `Action::UseUpstreamWheel` (convention 28
+/// Exception 4) actually available at *every* turn instead of only the ones
+/// whose call site happened to be updated — that gap is exactly how it went
+/// missing at three separate sites the first time each was patched by hand.
+/// `Blocked` and a failed wheel fallback are returned as `Err` for the
+/// caller to fold into its own `PipelineResult::Failed`.
+///
+/// Returns [`TurnEffect::SwitchedToWheel`] as a distinct case from
+/// `Edited` — not just `Ok(true)` — because switching replaces the entire
+/// spec with a wheel skeleton: `sdist_top_level` and `from_repo_archive`,
+/// both computed once from the *original* source at the top of
+/// `run_package`, describe a source tree that no longer has anything to do
+/// with the spec on disk (a wheel unpacks flat, and it isn't a repository
+/// archive). The caller resets them; folding a wheel switch into the same
+/// variant as an ordinary edit would leave those stale — a wrong
+/// `sdist_top_level` mainly degrades traceback-file matching in
+/// `extract_build_log`, not silently corrupts the package, but there is no
+/// reason to leave it wrong once we know better.
+fn apply_turn_outcome(
+    ctx: ApplyTurnCtx<'_>,
+    outcome: &crate::agent::TurnOutcome,
+    reporter: &dyn Reporter,
+) -> Result<TurnEffect, String> {
+    let ApplyTurnCtx { config, checkout_dir, spec_path, step, before, rpm_name, label, attempt, notes_path } =
+        ctx;
+    match &outcome.action {
+        crate::agent::Action::Blocked { why } => Err(format!("{label}: agent blocked: {why}")),
+        crate::agent::Action::NoChange => Ok(TurnEffect::NoChange),
+        crate::agent::Action::Edited => {
+            let changed = accept_or_restore(
+                spec_path,
+                before,
+                step,
+                reporter,
+                &format!(
+                    "\n## Attempt {attempt} — {label}\nReasoning: {}\nConfidence: {:?}\n",
+                    outcome.reasoning, outcome.confidence
+                ),
+                notes_path,
+            );
+            Ok(if changed { TurnEffect::Edited } else { TurnEffect::NoChange })
+        }
+        crate::agent::Action::UseUpstreamWheel { why } => {
+            reporter.report(&Event::Warning {
+                step: Some(step.id),
+                message: format!(
+                    "{rpm_name} reported unbuildable from source in this environment \
+                     ({why}); trying to repackage the upstream PyPI wheel instead"
+                ),
+            });
+            match try_wheel_fallback(config, checkout_dir, spec_path, step) {
+                Ok(()) => {
+                    let changed = accept_or_restore(
+                        spec_path,
+                        before,
+                        step,
+                        reporter,
+                        &format!("\n## {label} — switched to upstream wheel\nReasoning: {why}\n"),
+                        notes_path,
+                    );
+                    Ok(if changed { TurnEffect::SwitchedToWheel } else { TurnEffect::NoChange })
+                }
+                Err(e) => Err(format!("{label}: unbuildable from source ({why}), and {e}")),
+            }
+        }
+    }
+}
+
+/// [`apply_turn_outcome`] plus the one side effect every one of its 6 call
+/// sites in `run_package` must perform identically on `SwitchedToWheel`
+/// (reset `sdist_top_level`/`from_repo_archive` — see that doc comment for
+/// why). Four of the six needed nothing beyond that and were byte-identical;
+/// the other two layer one extra statement (bumping `attempts`, or setting
+/// `agent_edited`) on the returned `TurnEffect` — this is that shared base,
+/// not a sixth copy of the same reset.
+fn apply_turn_and_reset(
+    ctx: ApplyTurnCtx<'_>,
+    outcome: &crate::agent::TurnOutcome,
+    reporter: &dyn Reporter,
+    sdist_top_level: &mut String,
+    from_repo_archive: &mut bool,
+) -> Result<TurnEffect, String> {
+    let effect = apply_turn_outcome(ctx, outcome, reporter)?;
+    if effect == TurnEffect::SwitchedToWheel {
+        *sdist_top_level = String::new();
+        *from_repo_archive = false;
+    }
+    Ok(effect)
+}
+
+/// What happened to the spec as a result of [`apply_turn_outcome`]. See its
+/// doc comment for why `SwitchedToWheel` needs to be distinguishable from
+/// `Edited` rather than folded into one "changed" boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnEffect {
+    NoChange,
+    Edited,
+    SwitchedToWheel,
 }
 
 /// Count added/removed lines in a diff produced by [`unified_diff`].
@@ -1747,7 +2373,11 @@ fn generate_spec(
                             // running example) — repackage the wheel itself
                             // rather than getting permanently stuck. See
                             // convention 24 Exception 3.
-                            match pypi::pick_wheel_from_json(&json, &config.arch, None) {
+                            match pypi::pick_wheel_from_json(
+                                &json,
+                                &config.arch,
+                                config.single_locked_flavor_abi().as_deref(),
+                            ) {
                                 Ok(wheel) => {
                                     return generate_wheel_binary_spec(
                                         config,
@@ -1913,14 +2543,33 @@ fn generate_from_repo(
         } else {
             declared_names.join(", ")
         };
-        return Err(GenSpecError::Other(format!(
+        let mismatch_reason = format!(
             "{url} does not declare a project named {wanted:?} (found: {found}). \
              This usually means {} is binary-only upstream and this repository \
-             is not its real source — check whether the PyPI release is a \
-             wheel with no matching sdist (convention 24 Exception 3) before \
-             retrying with a different --source-url.",
+             is not its real source.",
             config.pkg_name
-        )));
+        );
+        // Don't just die here: a repo-guessing heuristic that "verified" (the
+        // repo exists) but picked the wrong artifact for this specific PyPI
+        // release is exactly what convention 28 Exception 4's second
+        // paragraph covers when the Review agent finds it — the fix is the
+        // same either way (repackage the upstream wheel), so do it now
+        // instead of hard-failing and waiting for a human to notice the
+        // error message's own advice ("check whether ... a wheel"). The
+        // wrongly-fetched archive is no longer needed either way.
+        let _ = std::fs::remove_file(&tarball);
+        return match try_wheel_fallback(config, checkout_dir, spec_path, step) {
+            Ok(()) => Ok(GenSpecResult {
+                sdist_top_level: String::new(),
+                is_maturin: false,
+                is_rust: false,
+                from_repo_archive: false,
+            }),
+            Err(e) => Err(GenSpecError::Other(format!(
+                "{mismatch_reason} Tried repackaging the upstream wheel instead, but {e} \
+                 (retry with a different --source-url if one exists)."
+            ))),
+        };
     }
 
     if info.python_packaging {
@@ -2150,6 +2799,47 @@ fn generate_repo_python_spec(
     })
 }
 
+/// Convention 28 Exception 4: the agent decided THIS package's own source
+/// cannot be compiled in this environment (e.g. it needs NVIDIA's `nvcc` to
+/// build `.cu` device code, which OBS cannot provide) even though, unlike
+/// [`generate_wheel_binary_spec`]'s callers, a real sdist exists. Re-fetches
+/// the PyPI release JSON and, if it also publishes a wheel, overwrites
+/// `spec_path` with the same wheel-binary skeleton the no-sdist path uses —
+/// this is an independent check, not trust in the agent's claim: if PyPI has
+/// no wheel either, the caller still fails the package.
+fn try_wheel_fallback(
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+) -> Result<(), String> {
+    let pypi_url = format!(
+        "https://pypi.org/pypi/{}/{}/json",
+        config.pkg_name, config.version
+    );
+    let json = ureq::get(&pypi_url)
+        .call()
+        .map_err(|e| format!("PyPI fetch failed: {e}"))?
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("PyPI read failed: {e}"))?;
+    let wheel = ap_ecosystem::pypi::pick_wheel_from_json(
+        &json,
+        &config.arch,
+        config.single_locked_flavor_abi().as_deref(),
+    )
+    .map_err(|e| format!("no usable upstream wheel either: {e}"))?;
+    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step).map_err(|e| {
+        match e {
+            GenSpecError::Other(msg) => format!("wheel spec generation failed: {msg}"),
+            GenSpecError::WheelOnly { .. } => {
+                "wheel spec generation failed unexpectedly".to_string()
+            }
+        }
+    })?;
+    Ok(())
+}
+
 /// Repackage a prebuilt wheel as-is, for a release with no sdist and no
 /// discoverable source repository — a closed-source binary redistribution
 /// (NVIDIA's individual CUDA toolkit component wheels are the running
@@ -2235,27 +2925,100 @@ fn render_service_file(github_url: &str, version: &str, pkg_name: &str) -> Strin
     )
 }
 
+/// `BuildFailure`'s variants (`PrepFailed`/`BuildFailed`/`InstallFailed`/
+/// `CheckFailed`) name *phases*, not failure *shapes* — so this has to switch
+/// on `failure.phase`, not `failure.genre`. The previous version switched on
+/// genre (`ShellError` always became `PrepFailed`, `PythonTraceback` always
+/// became `BuildFailed`, regardless of which section actually failed) and
+/// genres it didn't recognize a mapping for — `Genre::Unknown`, which is
+/// exactly what a plain GCC/Clang compiler diagnostic or a linker error looks
+/// like, since neither is a Python traceback or a `script: line N:` shell
+/// error — fell all the way to `Unclassified` even when the phase was known
+/// perfectly well (a real `%build` compiler failure in `triton`,
+/// `python-hf-xet` and `python-torchcodec` all did this). Phase is already
+/// the more reliable signal here: `rpm_reported_failure` gets it from rpm's
+/// own `(%section)` in "Bad exit status from ... (%section)", so use it
+/// directly and only fall back to genre for phases that aren't one of the
+/// four rpm sections at all (rpm's own post-install file-list check often
+/// gets attributed to whichever section ran last, e.g. `%license`).
 fn classify_failure(
     extracted: &crate::log::ExtractedLog,
 ) -> ap_core::event::BuildFailure {
     use crate::log::{Genre, Phase};
-    if let Some(failure) = &extracted.failure {
-        if failure.phase == Phase::Section("%check".into()) {
-            return ap_core::event::BuildFailure::CheckFailed;
+    let Some(failure) = &extracted.failure else {
+        return ap_core::event::BuildFailure::Unclassified {
+            raw: unclassified_raw(extracted),
+        };
+    };
+    match &failure.phase {
+        Phase::Section(s) if s == "%prep" => ap_core::event::BuildFailure::PrepFailed,
+        Phase::Section(s) if s == "%build" => ap_core::event::BuildFailure::BuildFailed,
+        Phase::Section(s) if s == "%install" => ap_core::event::BuildFailure::InstallFailed,
+        Phase::Section(s) if s == "%check" => ap_core::event::BuildFailure::CheckFailed,
+        _ if failure.genre == Genre::PostBuildCheck || failure.phase == Phase::PostBuild => {
+            ap_core::event::BuildFailure::InstallFailed
         }
-        match failure.genre {
-            Genre::PythonTraceback => ap_core::event::BuildFailure::BuildFailed,
-            Genre::ShellError => ap_core::event::BuildFailure::PrepFailed,
-            Genre::PostBuildCheck => ap_core::event::BuildFailure::InstallFailed,
-            Genre::Unknown => ap_core::event::BuildFailure::Unclassified {
-                raw: extracted.error_lines.first().cloned().unwrap_or_default(),
-            },
-        }
-    } else {
-        ap_core::event::BuildFailure::Unclassified {
-            raw: extracted.error_lines.first().cloned().unwrap_or_default(),
+        // Any other named rpm section — `%generate_buildrequires` (a real
+        // case for pyproject-rpm-macros' dynamic BuildRequires resolution),
+        // `%conf`, `%mkbuilddir`, etc. These all run before `%build` as part
+        // of setting up the build, so `PrepFailed` is the closest existing
+        // bucket rather than falling all the way through to `Unclassified`
+        // and losing the phase signal `failure.phase` already captured.
+        Phase::Section(_) => ap_core::event::BuildFailure::PrepFailed,
+        // Phase::Setup: the failure landed before any spec section began —
+        // buildroot resolution, workflow aborted mid-setup, or OBS never
+        // produced a real log at all. Not a code-shaped failure, but still
+        // worth reporting more than an empty string (which is what we used
+        // to do when `error_lines` was empty — common for a build that
+        // never progressed far enough to emit an rpm `error:` line, which
+        // in turn looked like an extraction bug to users and buried the
+        // real problem).
+        _ => ap_core::event::BuildFailure::Unclassified {
+            raw: unclassified_raw(extracted),
+        },
+    }
+}
+
+/// What to show for an `Unclassified` failure.
+///
+/// The old code just took `error_lines[0]`, which is empty for a log with no
+/// rpm `error:` line or Python exception at all — common for OBS failures
+/// that never produced a real build log (status `Broken`, `Excluded`, a
+/// buildroot resolution that aborted before scriptlets started, or an osc
+/// invocation that got no bytes back at all). Fall back through progressively
+/// weaker signals so the TUI/CLI shows SOMETHING actionable instead of an
+/// empty string that reads like a bug in extraction itself.
+fn unclassified_raw(extracted: &crate::log::ExtractedLog) -> String {
+    if let Some(first) = extracted.error_lines.iter().find(|l| !l.trim().is_empty()) {
+        return first.clone();
+    }
+    // The excerpt is already filtered to interesting content when the
+    // extractor found a failure signal of ANY kind, so prefer it to the raw
+    // tail.
+    if let Some(f) = &extracted.failure {
+        let trimmed = f.excerpt.trim();
+        if !trimmed.is_empty() {
+            return tail_lines(trimmed, 5);
         }
     }
+    let tail = extracted.log_tail.trim();
+    if tail.is_empty() {
+        return "(no build log — OBS likely rejected the build before any \
+                scriptlet ran; check `osc results` for the status)"
+            .to_string();
+    }
+    tail_lines(tail, 5)
+}
+
+/// Keep the last `n` non-empty lines of `text`.
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(n)
+        .collect();
+    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
 fn unified_diff(before: &str, after: &str) -> String {
@@ -2438,19 +3201,25 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
     Ok(())
 }
 
-/// Source repository candidates for a wheel-only package.
-struct RepoCandidates {
+/// Source repository candidates for a package with no (or no usable) PyPI
+/// entry.
+pub struct RepoCandidates {
     /// Confirmed to exist via `verify_repo_exists` — safe to build from
     /// automatically without a human/agent confirming it first.
-    verified: Vec<String>,
+    pub verified: Vec<String>,
     /// Unverified guesses, surfaced only for a human/agent to check manually.
-    guessed: Vec<String>,
+    pub guessed: Vec<String>,
 }
 
 /// Find candidate source repositories for a package.
 ///
-/// Uses GitHub API search, known package mappings, and common patterns.
-fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
+/// Uses GitHub API search, known package mappings, and common patterns. This
+/// is the same lookup `generate_spec` uses for a PyPI wheel-only release with
+/// no sdist; it is also `pub` so the CLI's dependency-discovery loop can fall
+/// back to it for a name that PyPI has no record of at all (not a Python
+/// package, or a Python package not published to PyPI) — see convention 27's
+/// "handle any package, not just PyPI" note.
+pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     ap_core::diag!("info: searching for source repository candidates for: {}", pkg_name);
 
     let lower = pkg_name.to_lowercase();
@@ -2677,6 +3446,169 @@ fn verify_repo_exists(url: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn fake_node(name: &str) -> ap_ecosystem::pip::Node {
+        ap_ecosystem::pip::Node {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            sha256: String::new(),
+            requires_dist: vec![],
+            requires_python: None,
+            is_requested: false,
+            is_yanked: false,
+        }
+    }
+
+    /// `last_failure_reason` is a new field: old state.json files on disk
+    /// won't have it, and must still deserialize cleanly (otherwise anyone
+    /// upgrading past this change would lose their whole package state).
+    /// It must also round-trip, so the next run reads back exactly what the
+    /// crashing run wrote.
+    #[test]
+    fn pkg_state_round_trips_and_tolerates_the_missing_failure_reason_field() {
+        let legacy = r#"{"last_built_version":"1.2.3","last_outcome":"success"}"#;
+        let s: PkgState = serde_json::from_str(legacy)
+            .expect("legacy state.json without last_failure_reason must still parse");
+        assert_eq!(s.last_built_version.as_deref(), Some("1.2.3"));
+        assert_eq!(s.last_outcome.as_deref(), Some("success"));
+        assert!(s.last_failure_reason.is_none());
+
+        let fresh = PkgState {
+            last_built_version: Some("1.2.3".into()),
+            last_outcome: Some("failed".into()),
+            last_failure_reason: Some("agent error: claude exited 1".into()),
+            reviewed_version: None,
+            reviewed_spec_hash: None,
+        };
+        let json = serde_json::to_string(&fresh).unwrap();
+        let back: PkgState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.last_failure_reason.as_deref(), Some("agent error: claude exited 1"));
+        assert!(!back.is_built("1.2.3"), "`failed` must never satisfy is_built");
+    }
+
+    #[test]
+    fn explicit_target_matches_regardless_of_dot_vs_hyphen_spelling() {
+        // The real incident this guards against: the closure holds the node
+        // under its PyPI name `backports.zstd`, but the already-committed
+        // OBS package is `python-backports-zstd` (hyphenated per convention
+        // 2). A caller passing either `backports-zstd` or
+        // `python-backports.zstd` must land on the same node instead of
+        // `find_explicit_target` reporting no match and the caller going on
+        // to check out a brand-new, wrongly-named package.
+        let nodes = vec![fake_node("backports.zstd"), fake_node("other-pkg")];
+
+        for spelling in ["backports.zstd", "backports-zstd", "python-backports-zstd", "BACKPORTS_ZSTD"] {
+            let found = find_explicit_target(&nodes, spelling)
+                .unwrap_or_else(|e| panic!("expected a match for {spelling:?}: {e}"));
+            assert_eq!(found.name, "backports.zstd");
+        }
+    }
+
+    #[test]
+    fn explicit_target_error_lists_available_names() {
+        let nodes = vec![fake_node("torchcodec"), fake_node("backports.zstd")];
+        let err = find_explicit_target(&nodes, "nonexistent").unwrap_err();
+        assert!(err.contains("torchcodec"), "error should list available names: {err}");
+        assert!(err.contains("backports.zstd"), "error should list available names: {err}");
+    }
+
+    /// Real shape from `triton`/`python-hf-xet`/`python-torchcodec`: a plain
+    /// GCC compiler diagnostic in `%build` is neither a Python traceback nor
+    /// a `script: line N:` shell error, so its genre is `Unknown` — but the
+    /// phase is unambiguous (`error: Bad exit status from ... (%build)`
+    /// names it), and this used to get thrown away by switching on genre
+    /// instead of phase, reporting `Unclassified` for a perfectly ordinary
+    /// `%build` failure.
+    #[test]
+    fn a_compiler_error_in_build_is_build_failed_not_unclassified() {
+        let raw = "\
+[    1s] Executing(%build): /usr/bin/bash -e /var/tmp/rpm-tmp.abc123
+[    2s] + cmake --build .
+[   64s] /build/triton-0.9/src/utils.cpp:39:34: error: 'PyLong_AsUnsignedLongLongAndOverflow' was not declared in this scope
+[   64s] make[1]: *** [Makefile:149: all] Error 2
+[   64s] error: Bad exit status from /var/tmp/rpm-tmp.abc123 (%build)
+";
+        let mapper = crate::log::PathMapper::with_sdist_root("triton-0.9");
+        let extracted = crate::log::extract(raw, &mapper);
+        assert_eq!(
+            extracted.failure.as_ref().map(|f| f.genre),
+            Some(crate::log::Genre::Unknown),
+            "fixture must reproduce the Unknown-genre shape this test guards against"
+        );
+        match classify_failure(&extracted) {
+            ap_core::event::BuildFailure::BuildFailed => {}
+            other => panic!("expected BuildFailed, got {other:?}"),
+        }
+    }
+
+    /// Real shape from `drogon`: OBS reported the build as Failed but no
+    /// build.log was ever produced (the worker aborted during buildroot
+    /// resolution). `error_lines` is empty, so the old `error_lines.first()`
+    /// pick returned an empty `raw` — the TUI then just showed
+    /// "classification: Unclassified { raw: '' }" with no clue what happened.
+    /// Now we fall back to the log tail (or an explicit "no build log"
+    /// placeholder) so the operator sees something they can act on.
+    #[test]
+    fn unclassified_falls_back_to_log_tail_when_no_error_lines() {
+        // Shaped like an aborted buildroot resolution: lots of chatter, no
+        // `error:` line, no Python traceback, no `Bad exit status`.
+        let raw = "\
+[    0s] expanding package dependencies for openSUSE_Tumbleweed/x86_64 ...
+[    1s] cannot find libtrantor-devel in any configured repository
+[    1s] worker aborted
+";
+        let mapper = crate::log::PathMapper::with_sdist_root("drogon-1.9.13");
+        let extracted = crate::log::extract(raw, &mapper);
+        assert!(
+            extracted.error_lines.is_empty(),
+            "fixture must reproduce the no-error-lines shape"
+        );
+        match classify_failure(&extracted) {
+            ap_core::event::BuildFailure::Unclassified { raw } => {
+                assert!(!raw.is_empty(), "raw should not fall back to empty");
+                assert!(
+                    raw.contains("libtrantor-devel") || raw.contains("worker aborted"),
+                    "raw should carry a line from the log tail; got {raw:?}"
+                );
+            }
+            other => panic!("expected Unclassified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unclassified_reports_the_missing_log_explicitly_when_log_is_empty() {
+        let mapper = crate::log::PathMapper::with_sdist_root("foo-1.0");
+        let extracted = crate::log::extract("", &mapper);
+        match classify_failure(&extracted) {
+            ap_core::event::BuildFailure::Unclassified { raw } => {
+                assert!(
+                    raw.contains("no build log"),
+                    "empty-log raw should name the condition, got {raw:?}"
+                );
+            }
+            other => panic!("expected Unclassified, got {other:?}"),
+        }
+    }
+
+    /// A phase other than the 4 explicitly named ones (`%generate_buildrequires`
+    /// is a real case for pyproject-rpm-macros' dynamic BuildRequires
+    /// resolution) used to fall all the way through to `Unclassified`,
+    /// discarding the phase `failure.phase` already captured.
+    #[test]
+    fn an_unnamed_section_failure_is_prep_failed_not_unclassified() {
+        let raw = "\
+[    1s] Executing(%generate_buildrequires): /usr/bin/bash -e /var/tmp/rpm-tmp.abc123
+[    2s] + pyproject_buildrequires
+[    3s] ModuleNotFoundError: No module named 'setuptools_scm'
+[    3s] error: Bad exit status from /var/tmp/rpm-tmp.abc123 (%generate_buildrequires)
+";
+        let mapper = crate::log::PathMapper::with_sdist_root("foo-1.0");
+        let extracted = crate::log::extract(raw, &mapper);
+        match classify_failure(&extracted) {
+            ap_core::event::BuildFailure::PrepFailed => {}
+            other => panic!("expected PrepFailed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn diff_counts_reports_both_directions() {
         // The old code hard-coded lines_removed to 0 and derived lines_added
@@ -2697,9 +3629,59 @@ mod tests {
             "requests[socks] >= 2.0".to_string(),
             "typing-extensions".to_string(),
         ];
+        // `normalize_pkg_name` (== `osc::fuzzy_key`) strips separators
+        // entirely rather than picking one canonical spelling — it's a
+        // comparison-only key, never displayed or built from.
         assert_eq!(
             dep_names_from_requires_dist(&reqs),
-            vec!["requests", "typing_extensions"]
+            vec!["requests", "typingextensions"]
         );
+    }
+
+    #[test]
+    fn dep_names_match_regardless_of_the_original_dependencys_separator_style() {
+        // A `ruamel.yaml`-style dotted node name and a `requires_dist` entry
+        // that spells the same project with a hyphen or underscore instead
+        // must normalize to the same key, or the dependency-graph edge
+        // between them silently fails to resolve.
+        let reqs = vec!["ruamel-yaml".to_string(), "ruamel_yaml".to_string()];
+        assert_eq!(normalize_pkg_name("ruamel.yaml"), normalize_pkg_name("ruamel-yaml"));
+        for name in dep_names_from_requires_dist(&reqs) {
+            assert_eq!(name, normalize_pkg_name("ruamel.yaml"));
+        }
+    }
+
+    #[test]
+    fn missing_source_files_flags_a_source_or_patch_not_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo-1.0.tar.gz"), b"").unwrap();
+
+        let spec = "\
+Name:           foo
+Source:         https://example.com/foo-1.0.tar.gz
+Source1:        registry.tar.zst
+Patch0:         0001-fix.patch
+";
+        let mut missing = missing_source_files(spec, dir.path());
+        missing.sort();
+        assert_eq!(missing, vec!["0001-fix.patch", "registry.tar.zst"]);
+    }
+
+    #[test]
+    fn missing_source_files_is_empty_when_everything_is_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo-1.0.tar.gz"), b"").unwrap();
+
+        let spec = "Source: https://example.com/foo-1.0.tar.gz\n";
+        assert!(missing_source_files(spec, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn missing_source_files_ignores_unexpanded_macros_and_lookalike_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "\
+Sourceforge is not a tag\n\
+Source:         %{undefined_macro}\n";
+        assert!(missing_source_files(spec, dir.path()).is_empty());
     }
 }

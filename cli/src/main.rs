@@ -500,7 +500,9 @@ fn cmd_build(
         source_repo: source_repo.clone(),
         subprojects,
         source_urls,
+        python_flavors: Arc::new(ap_build::flavors::PythonFlavors::default()),
         failed_deps: Vec::new(),
+        unbuildable_deps: Vec::new(),
     };
 
     let mut config = config;
