@@ -52,11 +52,11 @@ enum Commands {
         tui: bool,
 
         /// Maximum agent fix attempts per package.
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 5)]
         max_attempts: usize,
 
         /// USD budget cap for agent calls.
-        #[arg(long, default_value_t = 2.0)]
+        #[arg(long, default_value_t = 0.30)]
         budget_usd: f64,
 
         /// Build this specific dependency node instead of the auto-selected one.
@@ -103,6 +103,64 @@ enum Commands {
         #[arg(long, value_name = "[PKG=]URL")]
         source_url: Vec<String>,
     },
+
+    /// Scan an OBS project for packages with a newer upstream release and
+    /// optionally rebuild them at the new version.
+    ///
+    /// `--check` just prints the plan (which packages have updates, and from
+    /// what to what) without touching anything; without it, each package
+    /// needing an update runs through the ordinary build pipeline with the
+    /// new version pinned and `--force --regen` on, so a new release that
+    /// changes build system or deps is picked up correctly.
+    Update {
+        /// Limit the sweep to a single RPM package name (otherwise all
+        /// packages in the project are checked).
+        name: Option<String>,
+
+        /// OBS project (e.g. home:you:python).
+        #[arg(long)]
+        project: String,
+
+        #[arg(long, default_value = "ap-work")]
+        work_dir: PathBuf,
+
+        #[arg(long, default_value = "openSUSE_Tumbleweed")]
+        distro: String,
+
+        #[arg(long, default_value = "x86_64")]
+        arch: String,
+
+        /// Log level: error, warn, info, debug, trace.
+        #[arg(long, default_value = "info")]
+        log: String,
+
+        /// Enable interactive TUI mode for the per-package rebuilds.
+        #[arg(long, default_value_t = false)]
+        tui: bool,
+
+        /// Just report what would be updated; do not run any builds.
+        #[arg(long, default_value_t = false)]
+        check: bool,
+
+        /// Maximum agent fix attempts per package (passed through to each
+        /// rebuild).
+        #[arg(long, default_value_t = 10)]
+        max_attempts: usize,
+
+        /// USD budget cap for agent calls (per rebuild).
+        #[arg(long, default_value_t = 2.0)]
+        budget_usd: f64,
+
+        /// Build only; never call the model.
+        #[arg(long, default_value_t = false)]
+        no_agent: bool,
+
+        /// Maximum number of packages to rebuild concurrently (0 = unlimited).
+        /// Each rebuild still runs its own dep closure, so this bounds the
+        /// top-level update loop, not every spawned sub-build.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+    },
 }
 
 /// Whether a positional target is a repository URL rather than a package name.
@@ -120,6 +178,173 @@ fn repo_package_name(url: &str) -> String {
         .next()
         .unwrap_or(url)
         .to_string()
+}
+
+/// Resolve a bare dependency name (already stripped of any `python-` RPM
+/// prefix) discovered at runtime into a buildable [`PipelineConfig`].
+///
+/// For Python parents: tries PyPI first — the overwhelmingly common case —
+/// then falls back to discovering a public source repository the same way a
+/// wheel-only PyPI release does (`find_source_repo_candidates`).
+///
+/// For non-Python parents (plain C/C++, Rust): skips PyPI and goes straight to
+/// source-repo discovery. A C++ library like `trantor` (drogon's TCP backend)
+/// collides on PyPI with an unrelated Python package of the same name — PyPI
+/// first would silently queue `python-trantor` from that unrelated project
+/// instead of the C++ library the parent actually links against. The parent's
+/// ecosystem is read off `config.rpm_name`'s `python-` prefix, which the
+/// upstream probe sets through `Ecosystem::rpm_name` (see `build/src/sources.rs`).
+///
+/// Returns `None` — after reporting a `Warning` event explaining why — when
+/// neither source has anything. A closed-source/proprietary dependency
+/// (NVIDIA's CUDA toolkit `cuda-devel`/`cuda-runtime` are the running
+/// example convention 27 already names) has no public source of any kind and
+/// must already be provided by the target OBS project's own repository
+/// configuration; this tool cannot manufacture one no matter how many times
+/// the agent reports it.
+fn resolve_dependency_config(
+    dep: &str,
+    config: &PipelineConfig,
+    reporter: &dyn Reporter,
+) -> Option<PipelineConfig> {
+    let parent_is_python = config.rpm_name.starts_with("python-");
+
+    if parent_is_python {
+        let pypi_version = ap_ecosystem::pypi::fetch_latest_release(dep)
+            .ok()
+            .map(|r| r.version);
+
+        if let Some(version) = pypi_version {
+            ap_core::diag!(
+                "  queuing missing dependency: {} (PyPI: {dep})",
+                ap_build::osc::rpm_name(dep)
+            );
+            return Some(PipelineConfig {
+                pkg_name: dep.to_string(),
+                rpm_name: ap_build::osc::rpm_name(dep),
+                version,
+                // A PyPI-resolved dependency never comes from a repository, even
+                // if the parent package the agent found it from did.
+                source_repo: None,
+                subprojects: Vec::new(),
+                ..config.clone()
+            });
+        }
+    }
+
+    // Non-Python parent, or Python parent whose dep has no PyPI release:
+    // discover a public source repository and probe it. The probe decides
+    // whether it builds under Python/Rust/PlainC — one more layer of
+    // insurance that the queued dep carries the right RPM name regardless of
+    // what the parent's ecosystem was.
+    let repos = ap_build::pipeline::find_source_repo_candidates(dep);
+    let Some(repo_url) = repos.verified.first() else {
+        reporter.report(&Event::Warning {
+            step: None,
+            message: format!(
+                "{dep} has no PyPI package and no discoverable public source \
+                 repository — cannot be automatically packaged. If this is a \
+                 system library or a closed-source redistribution (like \
+                 NVIDIA's cuda-devel/cuda-runtime), it must already be \
+                 provided by the target project's own repository \
+                 configuration; this tool has no way to manufacture one."
+            ),
+        });
+        return None;
+    };
+
+    let version = match ap_build::sources::latest_release(repo_url) {
+        Ok(v) => v,
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!(
+                    "found a likely source repository for {dep} ({repo_url}) \
+                     but could not resolve its latest release: {e}"
+                ),
+            });
+            return None;
+        }
+    };
+
+    let probe = match ap_build::sources::probe(repo_url, &version, dep) {
+        Ok(p) => p,
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!(
+                    "found a likely source repository for {dep} ({repo_url}) \
+                     but could not tell how to build it: {e}"
+                ),
+            });
+            return None;
+        }
+    };
+
+    // Mirrors `cmd_build`'s explicit --source-url handling: the user-given
+    // name wins for a monorepo (it names one specific subproject), otherwise
+    // the repository's own declared name wins over our guess.
+    let effective_name = if probe.subprojects.len() > 1 {
+        dep.to_string()
+    } else {
+        probe.project_name.clone().unwrap_or_else(|| dep.to_string())
+    };
+    let dep_rpm = probe.ecosystem.rpm_name(&effective_name);
+    ap_core::diag!(
+        "  queuing missing dependency: {dep_rpm} (source repository: {repo_url}, not on PyPI)"
+    );
+    Some(PipelineConfig {
+        pkg_name: effective_name,
+        rpm_name: dep_rpm,
+        version,
+        source_repo: Some(repo_url.clone()),
+        subprojects: probe.subprojects,
+        ..config.clone()
+    })
+}
+
+/// Clean process-wide shutdown for Ctrl-C — restore the terminal if the TUI
+/// had it, print token usage so far, and actually end the process.
+///
+/// Called from two places: the `ctrlc` crate's real-SIGINT handler (no TUI,
+/// or a TUI that for some reason isn't in raw mode) and, directly, from the
+/// TUI's own key-handling loop. Raw mode disables signal generation for
+/// Ctrl-C entirely, so while the TUI is running the OS never delivers SIGINT
+/// at all — Ctrl-C only reaches the process as an ordinary
+/// `KeyCode::Char('c')` + `CONTROL` keypress, which is why the TUI cannot
+/// just rely on the handler below firing and must call this itself. Either
+/// way this has to actually terminate the whole process, not merely stop
+/// rendering — the pipeline's package-build threads keep running otherwise,
+/// unaffected by whatever the TUI's own event loop does.
+fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
+    // The TUI leaves the terminal in raw mode + the alternate screen;
+    // without restoring it first, this message and the shell prompt after
+    // exit both land inside that broken state instead of the user's normal
+    // screen.
+    if tui_active {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        );
+    }
+    let usage = memory
+        .events()
+        .iter()
+        .fold(ap_core::event::Usage::default(), |mut acc, ev| {
+            if let Event::AgentReply { usage, .. } = ev {
+                acc.input_tokens += usage.input_tokens;
+                acc.output_tokens += usage.output_tokens;
+                acc.cost_usd += usage.cost_usd;
+            }
+            acc
+        });
+    eprintln!(
+        "\nInterrupted — tokens: {} in / {} out — cost: ${:.4}",
+        usage.input_tokens, usage.output_tokens, usage.cost_usd
+    );
+    std::process::exit(1);
 }
 
 fn main() -> color_eyre::Result<()> {
@@ -171,41 +396,31 @@ fn main() -> color_eyre::Result<()> {
                 ));
             }
 
-            if cleanup && work_dir.exists() {
-                std::fs::remove_dir_all(&work_dir)?;
+            // `--work-dir` is the root; each OBS project lives in its own
+            // subdir inside it (`<work-dir>/<sanitized-project>/`), so one
+            // root can hold state for several projects side by side without
+            // the one-project-per-work-dir mismatch guard the previous layout
+            // had to carry. `--cleanup` scopes to just this project's subdir.
+            let project_dir_name = ap_core::run::sanitize_name(&project);
+            let project_dir = work_dir.join(&project_dir_name);
+            if cleanup && project_dir.exists() {
+                std::fs::remove_dir_all(&project_dir)?;
             }
+            std::fs::create_dir_all(&project_dir)?;
 
-            // Canonicalize work_dir — fixes defect (a): no relative path can reach
-            // a subprocess whose cwd is the osc checkout.
-            let work_dir = {
-                std::fs::create_dir_all(&work_dir)?;
-                work_dir.canonicalize()?
-            };
+            // Canonicalize so no relative path can reach a subprocess whose
+            // cwd is the osc checkout.
+            let project_dir = project_dir.canonicalize()?;
 
-            let rpms_dir = work_dir.join("rpms");
+            let rpms_dir = project_dir.join("rpms");
             std::fs::create_dir_all(&rpms_dir)?;
-            let state_root = work_dir.join("state");
+            let state_root = project_dir.join("state");
             std::fs::create_dir_all(&state_root)?;
-
-            // Persist the project name so a mis-matched --project is caught early.
-            let project_file = work_dir.join("project");
-            if project_file.exists() {
-                let saved = std::fs::read_to_string(&project_file)?;
-                let saved = saved.trim();
-                if saved != project {
-                    return Err(color_eyre::eyre::eyre!(
-                        "work directory was created for project '{saved}' but --project is '{project}'; \
-                         use --cleanup to start fresh or pick the matching work directory"
-                    ));
-                }
-            } else {
-                std::fs::write(&project_file, &project)?;
-            }
 
             // Source overrides: whatever is on disk, plus anything given on
             // this command line, written straight back so the answer is only
             // ever given once.
-            let mut source_urls = ap_build::sources::SourceMap::load(&work_dir)
+            let mut source_urls = ap_build::sources::SourceMap::load(&project_dir)
                 .map_err(|e| color_eyre::eyre::eyre!(e))?;
             if !source_url.is_empty() {
                 for arg in &source_url {
@@ -214,12 +429,27 @@ fn main() -> color_eyre::Result<()> {
                     source_urls.insert(&pkg, &repo);
                 }
                 source_urls
-                    .save(&work_dir)
+                    .save(&project_dir)
                     .map_err(|e| color_eyre::eyre::eyre!(e))?;
             }
             let source_urls = Arc::new(source_urls);
 
-            let run_dir = RunDir::allocate(&work_dir)?;
+            // Which Python flavors this project builds for, read once from
+            // `<project-dir>/flavors.toml` if present.
+            let python_flavors = Arc::new(
+                ap_build::flavors::PythonFlavors::load(&project_dir)
+                    .map_err(|e| color_eyre::eyre::eyre!(e))?,
+            );
+
+            let run_dir = RunDir::allocate(&project_dir)?;
+            let work_dir = project_dir;
+
+            // Built before the TUI so it can be handed straight to
+            // `TuiController::new` — the TUI's raw-mode terminal swallows a
+            // real SIGINT (Ctrl-C only reaches it as a keypress), so it has
+            // to call `handle_interrupt` itself with the same usage data
+            // rather than relying on the `ctrlc` handler below ever firing.
+            let memory = std::sync::Arc::new(MemorySink::new());
 
             // The TUI takes over the terminal, so text output is dropped in
             // favor of it; jsonl/memory logging are unaffected either way.
@@ -227,7 +457,11 @@ fn main() -> color_eyre::Result<()> {
             // through resolution/search code that don't go through a
             // `Reporter` at all — left unguarded they'd print straight over
             // the TUI's alternate screen.
-            let tui_ctrl = if enable_tui { Some(tui::TuiController::new()?) } else { None };
+            let tui_ctrl = if enable_tui {
+                Some(tui::TuiController::new(memory.clone())?)
+            } else {
+                None
+            };
             ap_core::sink::set_quiet(tui_ctrl.is_some());
 
             let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
@@ -237,8 +471,6 @@ fn main() -> color_eyre::Result<()> {
 
             // Always add JSONL logging
             sinks.push(Box::new(JsonlSink::open(&run_dir.jsonl())?));
-
-            let memory = std::sync::Arc::new(MemorySink::new());
             sinks.push(Box::new(memory.clone()));
 
             let base_reporter: Arc<dyn Reporter + Send + Sync> =
@@ -251,37 +483,8 @@ fn main() -> color_eyre::Result<()> {
             {
                 let memory = memory.clone();
                 let tui_active = tui_ctrl.is_some();
-                ctrlc::set_handler(move || {
-                    // The TUI leaves the terminal in raw mode + the alternate
-                    // screen; without restoring it first, this message and
-                    // the shell prompt after exit both land inside that
-                    // broken state instead of the user's normal screen.
-                    if tui_active {
-                        let _ = crossterm::terminal::disable_raw_mode();
-                        let _ = crossterm::execute!(
-                            std::io::stdout(),
-                            crossterm::terminal::LeaveAlternateScreen,
-                            crossterm::event::DisableMouseCapture
-                        );
-                    }
-                    let usage = memory.events().iter().fold(
-                        ap_core::event::Usage::default(),
-                        |mut acc, ev| {
-                            if let Event::AgentReply { usage, .. } = ev {
-                                acc.input_tokens += usage.input_tokens;
-                                acc.output_tokens += usage.output_tokens;
-                                acc.cost_usd += usage.cost_usd;
-                            }
-                            acc
-                        },
-                    );
-                    eprintln!(
-                        "\nInterrupted — tokens: {} in / {} out — cost: ${:.4}",
-                        usage.input_tokens, usage.output_tokens, usage.cost_usd
-                    );
-                    std::process::exit(1);
-                })
-                .expect("failed to set Ctrl-C handler");
+                ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
+                    .expect("failed to set Ctrl-C handler");
             }
 
             let argv: Vec<String> = std::env::args().collect();
@@ -290,6 +493,29 @@ fn main() -> color_eyre::Result<()> {
                 argv,
                 work_dir: work_dir.clone(),
             });
+
+            // Fail fast if the OBS project has no `<repository>` entries — otherwise
+            // every per-package `osc build` would fail downstream with "no
+            // repositories defined" after we had already checked each one out.
+            match ap_build::osc::project_has_repositories(
+                &project,
+                ap_build::proc::Emit::run(reporter.as_ref()),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(color_eyre::eyre::eyre!(
+                        "OBS project '{project}' has no build repositories defined — \
+                         configure at least one (e.g. openSUSE_Tumbleweed → openSUSE:Factory) \
+                         in its project meta before building."
+                    ));
+                }
+                Err(e) => {
+                    return Err(color_eyre::eyre::eyre!(
+                        "could not read OBS meta for project '{project}' to verify its \
+                         build repositories: {e}"
+                    ));
+                }
+            }
 
             let start = Instant::now();
             let result = cmd_build(
@@ -310,6 +536,7 @@ fn main() -> color_eyre::Result<()> {
                 jobs,
                 source_repo,
                 source_urls,
+                python_flavors,
                 &run_dir,
                 reporter.clone(),
                 base_reporter.clone(),
@@ -322,6 +549,150 @@ fn main() -> color_eyre::Result<()> {
                 RunOutcome::Failed
             };
             // Sum usage from all AgentReply events recorded during the run.
+            let total_usage = memory.events().iter().fold(
+                ap_core::event::Usage::default(),
+                |mut acc, ev| {
+                    if let Event::AgentReply { usage, .. } = ev {
+                        acc.input_tokens += usage.input_tokens;
+                        acc.output_tokens += usage.output_tokens;
+                        acc.cost_usd += usage.cost_usd;
+                    }
+                    acc
+                },
+            );
+            reporter.report(&Event::RunFinished {
+                outcome,
+                elapsed: start.elapsed(),
+                usage: total_usage,
+            });
+
+            result?;
+        }
+        Commands::Update {
+            name: only,
+            project,
+            work_dir,
+            distro,
+            arch,
+            log,
+            tui: enable_tui,
+            check,
+            max_attempts,
+            budget_usd,
+            no_agent,
+            jobs,
+        } => {
+            let level: LogLevel = log.parse().map_err(|e: String| color_eyre::eyre::eyre!(e))?;
+
+            // Same per-project subdir layout as Build (see that arm for the
+            // rationale) — a single `--work-dir` can hold state for multiple
+            // OBS projects side by side.
+            std::fs::create_dir_all(&work_dir)?;
+            let project_dir = work_dir.join(ap_core::run::sanitize_name(&project));
+            std::fs::create_dir_all(&project_dir)?;
+            let work_dir = project_dir.canonicalize()?;
+
+            let rpms_dir = work_dir.join("rpms");
+            std::fs::create_dir_all(&rpms_dir)?;
+            let state_root = work_dir.join("state");
+            std::fs::create_dir_all(&state_root)?;
+
+            let source_urls = Arc::new(
+                ap_build::sources::SourceMap::load(&work_dir)
+                    .map_err(|e| color_eyre::eyre::eyre!(e))?,
+            );
+            let python_flavors = Arc::new(
+                ap_build::flavors::PythonFlavors::load(&work_dir)
+                    .map_err(|e| color_eyre::eyre::eyre!(e))?,
+            );
+
+            let run_dir = RunDir::allocate(&work_dir)?;
+            let memory = std::sync::Arc::new(MemorySink::new());
+            let tui_ctrl = if enable_tui {
+                Some(tui::TuiController::new(memory.clone())?)
+            } else {
+                None
+            };
+            ap_core::sink::set_quiet(tui_ctrl.is_some());
+
+            let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
+            if tui_ctrl.is_none() {
+                sinks.push(Box::new(HumanSink::new(level)));
+            }
+            sinks.push(Box::new(JsonlSink::open(&run_dir.jsonl())?));
+            sinks.push(Box::new(memory.clone()));
+
+            let base_reporter: Arc<dyn Reporter + Send + Sync> =
+                Arc::new(FanoutReporter::new(sinks));
+            let reporter: Arc<dyn Reporter + Send + Sync> = match &tui_ctrl {
+                Some(t) => t.tap(base_reporter.clone(), None),
+                None => base_reporter.clone(),
+            };
+
+            {
+                let memory = memory.clone();
+                let tui_active = tui_ctrl.is_some();
+                ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
+                    .expect("failed to set Ctrl-C handler");
+            }
+
+            let argv: Vec<String> = std::env::args().collect();
+            reporter.report(&Event::RunStarted {
+                run_id: run_dir.run_id.clone(),
+                argv,
+                work_dir: work_dir.clone(),
+            });
+
+            // Fail fast if the OBS project has no `<repository>` entries — otherwise
+            // every per-package `osc build` would fail downstream with "no
+            // repositories defined" after we had already checked each one out.
+            match ap_build::osc::project_has_repositories(
+                &project,
+                ap_build::proc::Emit::run(reporter.as_ref()),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(color_eyre::eyre::eyre!(
+                        "OBS project '{project}' has no build repositories defined — \
+                         configure at least one (e.g. openSUSE_Tumbleweed → openSUSE:Factory) \
+                         in its project meta before building."
+                    ));
+                }
+                Err(e) => {
+                    return Err(color_eyre::eyre::eyre!(
+                        "could not read OBS meta for project '{project}' to verify its \
+                         build repositories: {e}"
+                    ));
+                }
+            }
+
+            let start = Instant::now();
+            let result = cmd_update(
+                &project,
+                only.as_deref(),
+                &work_dir,
+                &state_root,
+                &rpms_dir,
+                &distro,
+                &arch,
+                max_attempts,
+                budget_usd,
+                no_agent,
+                jobs,
+                check,
+                source_urls,
+                python_flavors,
+                &run_dir,
+                reporter.clone(),
+                base_reporter.clone(),
+                tui_ctrl.clone(),
+            );
+
+            let outcome = if result.is_ok() {
+                RunOutcome::Success
+            } else {
+                RunOutcome::Failed
+            };
             let total_usage = memory.events().iter().fold(
                 ap_core::event::Usage::default(),
                 |mut acc, ev| {
@@ -396,8 +767,9 @@ fn cmd_build(
     regen: bool,
     no_agent: bool,
     jobs: usize,
-    source_repo: Option<String>,
+    mut source_repo: Option<String>,
     source_urls: Arc<ap_build::sources::SourceMap>,
+    python_flavors: Arc<ap_build::flavors::PythonFlavors>,
     run_dir: &RunDir,
     reporter: Arc<dyn Reporter + Send + Sync>,
     base_reporter: Arc<dyn Reporter + Send + Sync>,
@@ -427,10 +799,42 @@ fn cmd_build(
                 });
                 v
             } else {
-                let url = format!("https://pypi.org/pypi/{name}/json");
-                let json = ureq::get(&url).call()?.into_body().read_to_string()?;
-                let release = ap_ecosystem::pypi::parse_release(&json)?;
-                release.version
+                // Probe PyPI first — the overwhelmingly common case — then
+                // fall back to public-source-repository discovery for names
+                // PyPI does not carry (standalone Rust crates, plain C/C++
+                // libraries, or PyPI releases that ship no usable sdist).
+                // Mirrors `resolve_dependency_config` so a bare CLI name
+                // goes through the same resolution a runtime-discovered
+                // dependency does, instead of hard-failing the moment PyPI
+                // comes back empty.
+                let pypi_version = ap_ecosystem::pypi::fetch_latest_release(name)
+                    .ok()
+                    .map(|r| r.version);
+                if let Some(v) = pypi_version {
+                    v
+                } else {
+                    let repos = ap_build::pipeline::find_source_repo_candidates(name);
+                    let Some(repo_url) = repos.verified.first() else {
+                        return Err(color_eyre::eyre::eyre!(
+                            "{name} has no usable PyPI release and no \
+                             discoverable public source repository. Pass \
+                             --url, --source-url, or a repository URL as \
+                             the positional argument to point it at the \
+                             source."
+                        ));
+                    };
+                    let v = ap_build::sources::latest_release(repo_url)
+                        .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                    reporter.report(&Event::Progress {
+                        step: None,
+                        message: format!(
+                            "{name}: not on PyPI, using discovered source \
+                             repository {repo_url} (latest release {v})"
+                        ),
+                    });
+                    source_repo = Some(repo_url.clone());
+                    v
+                }
             }
         }
     };
@@ -500,7 +904,7 @@ fn cmd_build(
         source_repo: source_repo.clone(),
         subprojects,
         source_urls,
-        python_flavors: Arc::new(ap_build::flavors::PythonFlavors::default()),
+        python_flavors,
         failed_deps: Vec::new(),
         unbuildable_deps: Vec::new(),
     };
@@ -512,6 +916,86 @@ fn cmd_build(
     let mut pending_deps: Vec<String> = Vec::new();
     // Tracks deps we have already attempted to avoid infinite retry loops.
     let mut attempted_deps: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Deps seeded below because OBS already reports them Unresolvable, Failed,
+    // or Broken. These are by definition already present in the project's own
+    // package list, so the "skip deps already present" filter a few lines
+    // down — meant for ordinary runtime-discovered deps — must not apply to
+    // them, or they can never actually get re-queued. Holds `fuzzy_key`s, not
+    // raw names — see where it's populated below.
+    let mut stuck_seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Seed the queue with every package OBS itself already reports as
+    // Unresolvable, Failed, or Broken in this project — not just ones that
+    // happen to be a dependency of whatever target this particular
+    // invocation asked for. A previous run can leave a package stuck (its own
+    // missing dependency was never itself resolved, the run was interrupted,
+    // an agent fix never landed, ...) with nothing left that keeps retrying
+    // it once its immediate parent build is done; this makes every
+    // invocation opportunistically pick those back up too, going through the
+    // exact same PyPI-then-source-repo resolution as any other
+    // runtime-discovered dependency (see `resolve_dependency_config`). This
+    // mirrors the per-target retry `select_target` already does for packages
+    // inside the current target's own pip closure (see
+    // `pipeline.rs::select_target`'s `resolvable` check) — but covers the
+    // whole project, including packages unrelated to whatever target this
+    // invocation happens to name.
+    //
+    // `--target` asks for exactly one node and nothing else — see its help
+    // text ("Build this specific dependency node instead of the
+    // auto-selected one") — so skip this opportunistic sweep when it's set.
+    // Without this, a `--target` run meant to isolate and debug one package
+    // silently spends its whole budget retrying unrelated broken packages
+    // elsewhere in the project before ever reaching the one actually asked
+    // for.
+    if explicit_target.is_none() {
+        // The root target itself must never enter this generic sweep: it
+        // goes on to `resolve_dependency_config` just like any other
+        // runtime-discovered dependency, which always re-fetches the
+        // *latest* PyPI release and clears `source_repo` (see its doc
+        // comment) — silently discarding this exact invocation's
+        // `--version`/`--source-url`/`--url` and spawning a second,
+        // wrongly-configured `run_package` thread racing the correctly
+        // configured one `select_target` selects below, against the same
+        // checkout and rpm name. OBS showing the root package itself as
+        // Failed/Unresolvable/Broken from an earlier interrupted run is
+        // exactly the common case this would trigger on.
+        let root_key = ap_build::osc::fuzzy_key(&rpm_name);
+        let already_stuck: Vec<String> = ap_build::osc::get_project_build_statuses(
+            project,
+            distro,
+            arch,
+            ap_build::proc::Emit::run(reporter.as_ref()),
+        )
+        .into_iter()
+        .filter(|(_, status)| {
+            matches!(
+                status,
+                ap_build::osc::BuildStatus::Unresolvable
+                    | ap_build::osc::BuildStatus::Failed
+                    | ap_build::osc::BuildStatus::Broken
+            )
+        })
+        .map(|(pkg, _)| pkg)
+        .filter(|pkg| ap_build::osc::fuzzy_key(pkg) != root_key)
+        .collect();
+        if !already_stuck.is_empty() {
+            ap_core::diag!(
+                "{} package(s) already unresolvable/failed/broken in {project}, queuing: {}",
+                already_stuck.len(),
+                already_stuck.join(", ")
+            );
+        }
+        // Keyed by `fuzzy_key`, not the raw stripped name: OBS's real listing
+        // and whatever spelling an agent later reports the same dependency
+        // under (`pydantic_core` vs. the real `pydantic-core`, say) are not
+        // guaranteed to agree on separators — see `osc::fuzzy_key`'s doc
+        // comment. An exact-string seed set would silently fail to recognize
+        // its own entries.
+        stuck_seeds.extend(already_stuck.iter().map(|pkg| {
+            ap_build::osc::fuzzy_key(pkg.strip_prefix("python-").unwrap_or(pkg))
+        }));
+        pending_deps.extend(already_stuck);
+    }
 
     // A failed top-level target is retried automatically: it stays in the
     // dependency closure, so the next iteration's `select_target` re-selects
@@ -532,6 +1016,7 @@ fn cmd_build(
         // deps the agent found to be unresolvable).
         while !pending_deps.is_empty() {
             let batch = std::mem::take(&mut pending_deps);
+            let mut newly_unbuildable: Vec<String> = Vec::new();
             let handles: Vec<_> = batch
                 .into_iter()
                 // Convert RPM names to PyPI names: "python-foo" → "foo"
@@ -542,42 +1027,85 @@ fn cmd_build(
                         .unwrap_or(&rpm_name)
                         .to_string()
                 })
-                .filter(|dep| attempted_deps.insert(dep.clone()))
+                .filter(|dep| {
+                    // Some PyPI packages (`ninja`, reported by an agent per
+                    // convention 27 the same as any other missing
+                    // dependency) just redistribute a tool openSUSE already
+                    // ships as its own system package of the same name.
+                    // Building a `python-<name>` RPM for one would only
+                    // duplicate it — see `is_system_tool_alias`.
+                    !ap_build::pipeline::is_system_tool_alias(dep)
+                })
+                .filter(|dep| attempted_deps.insert(ap_build::osc::fuzzy_key(dep)))
                 .filter(|dep| {
                     // Skip deps already present in the project or any of its
-                    // configured build/path projects.
-                    let rpm = ap_build::osc::rpm_name(dep);
-                    !ap_build::osc::get_available_packages(
+                    // configured build/path projects — unless it's already
+                    // present precisely because OBS reports it
+                    // Unresolvable/Failed/Broken, which is exactly the case
+                    // this queue exists to retry. The ecosystem (and so the
+                    // real RPM name) is not known yet at this point — a
+                    // system package like `cmake` or `cuda-devel` never gets
+                    // the `python-` prefix a Python dependency would, so
+                    // check both spellings rather than assuming Python.
+                    // Everything here compares by `fuzzy_key`, not the raw
+                    // string — see its doc comment for why an exact match on
+                    // a guessed or agent-reported spelling is not reliable.
+                    let bare_key = ap_build::osc::fuzzy_key(dep);
+                    if stuck_seeds.contains(&bare_key) {
+                        return true;
+                    }
+                    let available = ap_build::osc::get_available_packages(
                         project,
                         ap_build::proc::Emit::run(reporter.as_ref()),
-                    )
-                    .contains(&rpm)
+                    );
+                    let rpm_key = ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(dep));
+                    if available
+                        .iter()
+                        .any(|a| {
+                            let k = ap_build::osc::fuzzy_key(a);
+                            k == rpm_key || k == bare_key
+                        })
+                    {
+                        return false;
+                    }
+                    // A local workspace already existing for this name means
+                    // some earlier round already checked it out — most
+                    // likely it's a node in the target's own pip-resolution
+                    // closure, mid-build or queued for the next round via
+                    // the ordinary frontier mechanism (`select_target`),
+                    // which knows nothing about this ad-hoc queue and will
+                    // keep retrying it on its own. A second, redundant
+                    // report of the same dependency here (a real case: one
+                    // package's agent reporting `z3-solver` as missing while
+                    // `python-z3-solver` is simultaneously mid-build
+                    // elsewhere in the very same run — OBS genuinely didn't
+                    // have it *yet*, but "not yet" isn't "nobody's on it")
+                    // must not spawn a second, parallel build attempt. This
+                    // check comes after the `stuck_seeds` early-return above,
+                    // not before: a genuinely stuck package also has local
+                    // state, and that's exactly the case this queue exists
+                    // to retry.
+                    let state_path = config
+                        .state_root
+                        .join(ap_core::run::sanitize_name(&ap_build::osc::rpm_name(dep)))
+                        .join("state.json");
+                    !state_path.exists()
                 })
-                .map(|dep| {
-                    ap_core::diag!("  queuing missing dependency: {} (PyPI: {})",
-                              ap_build::osc::rpm_name(&dep), dep);
-                    let url = format!("https://pypi.org/pypi/{dep}/json");
-                    let dep_version = ureq::get(&url)
-                        .call()
-                        .and_then(|r| r.into_body().read_to_string().map_err(Into::into))
-                        .ok()
-                        .and_then(|json| ap_ecosystem::pypi::parse_release(&json).ok())
-                        .map(|r| r.version);
-                    let dep_version = match dep_version {
-                        Some(v) => v,
-                        None => return None,
+                .filter_map(|dep| {
+                    let dep_config = match resolve_dependency_config(&dep, &config, reporter.as_ref()) {
+                        Some(c) => c,
+                        None => {
+                            // No PyPI project and no discoverable source repo —
+                            // this is never going to become buildable no matter
+                            // how many times it's reported. Record it so every
+                            // package needing it learns that from its next
+                            // prompt (convention 28 Exception 4) instead of
+                            // reporting it again forever.
+                            newly_unbuildable.push(dep);
+                            return None;
+                        }
                     };
-                    let dep_rpm = ap_build::osc::rpm_name(&dep);
-                    let dep_config = PipelineConfig {
-                        pkg_name: dep.clone(),
-                        rpm_name: dep_rpm.clone(),
-                        version: dep_version,
-                        // A dependency always comes from PyPI, never from the
-                        // repository the root package was given.
-                        source_repo: None,
-                        subprojects: Vec::new(),
-                        ..config.clone()
-                    };
+                    let dep_rpm = dep_config.rpm_name.clone();
                     let dep_pkg_run = run_dir.pkg(&dep_rpm);
                     if dep_pkg_run.ensure().is_err() {
                         return None;
@@ -598,8 +1126,13 @@ fn cmd_build(
                         (dep_rpm, dep_version, result)
                     }))
                 })
-                .flatten()
                 .collect();
+
+            for dep in newly_unbuildable {
+                if !config.unbuildable_deps.contains(&dep) {
+                    config.unbuildable_deps.push(dep);
+                }
+            }
 
             for handle in handles {
                 let (dep_rpm, version, result) = handle.join().expect("dep thread panicked");
@@ -683,10 +1216,11 @@ fn cmd_build(
                 }
                 PipelineResult::MissingDeps { deps, .. } => {
                     // Only queue deps we haven't tried yet; if every dep was
-                    // already attempted we cannot make progress.
+                    // already attempted we cannot make progress. Compared by
+                    // `fuzzy_key`, not the raw string — see its doc comment.
                     let new_deps: Vec<String> = deps
                         .iter()
-                        .filter(|d| !attempted_deps.contains(*d))
+                        .filter(|d| !attempted_deps.contains(&ap_build::osc::fuzzy_key(d)))
                         .cloned()
                         .collect();
                     if new_deps.is_empty() {
@@ -834,6 +1368,185 @@ fn cmd_build(
             };
         }
     }
+}
+
+/// Scan `project` for packages with a newer upstream release, print the plan,
+/// and (unless `--check`) hand each candidate to the ordinary build pipeline
+/// pinned to its new version with `--force --regen` on.
+///
+/// Rebuilds run sequentially by default (`--jobs 1`) because each one already
+/// kicks off its own dep-closure concurrency inside `cmd_build`; stacking
+/// multiple top-level updates on top of that would multiply, not add. A user
+/// who knows their machine can take it can raise `--jobs`.
+#[allow(clippy::too_many_arguments)]
+fn cmd_update(
+    project: &str,
+    only: Option<&str>,
+    work_dir: &PathBuf,
+    state_root: &PathBuf,
+    rpms_dir: &PathBuf,
+    distro: &str,
+    arch: &str,
+    max_attempts: usize,
+    budget_usd: f64,
+    no_agent: bool,
+    jobs: usize,
+    check: bool,
+    source_urls: Arc<ap_build::sources::SourceMap>,
+    python_flavors: Arc<ap_build::flavors::PythonFlavors>,
+    run_dir: &RunDir,
+    reporter: Arc<dyn Reporter + Send + Sync>,
+    base_reporter: Arc<dyn Reporter + Send + Sync>,
+    tui_ctrl: Option<tui::TuiController>,
+) -> color_eyre::Result<()> {
+    let emit = ap_build::proc::Emit::run(reporter.as_ref());
+    let candidates = ap_build::update::plan(project, only, emit);
+
+    if candidates.is_empty() {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: match only {
+                Some(name) => format!("no package named {name} in {project}"),
+                None => format!("project {project} has no packages"),
+            },
+        });
+        return Ok(());
+    }
+
+    report_update_plan(&candidates, reporter.as_ref());
+
+    if check {
+        return Ok(());
+    }
+
+    let to_build: Vec<(ap_build::update::Ecosystem, String)> = candidates
+        .iter()
+        .filter_map(|c| match &c.decision {
+            ap_build::update::Decision::Update {
+                ecosystem,
+                new_version,
+                ..
+            } => Some((ecosystem.clone(), new_version.clone())),
+            _ => None,
+        })
+        .collect();
+
+    if to_build.is_empty() {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: "nothing to update".into(),
+        });
+        return Ok(());
+    }
+
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for (ecosystem, new_version) in to_build {
+        // The build pipeline wants a plain "name" positional and an optional
+        // source-repo URL. For a PyPI update that's just the PyPI name; for a
+        // git-forge update it's the repo's final path segment (what
+        // `repo_package_name` would compute for the CLI's own URL arg), and
+        // we also hand `source_repo` back in so the pipeline fetches the
+        // tarball from the forge rather than guessing a PyPI release.
+        let (name, source_repo) = match &ecosystem {
+            ap_build::update::Ecosystem::Pypi { pypi_name } => (pypi_name.clone(), None),
+            ap_build::update::Ecosystem::GitRepo { url } => {
+                (repo_package_name(url), Some(url.clone()))
+            }
+        };
+        reporter.report(&Event::Progress {
+            step: None,
+            message: format!("updating {name} to {new_version}"),
+        });
+        // `--force` so the state.json "already built at <old>" check doesn't
+        // skip us; `--regen` so a new release that moved to a different build
+        // system or added deps gets a freshly generated spec instead of a
+        // stale one in the osc checkout.
+        let r = cmd_build(
+            &name,
+            Some(&new_version),
+            project,
+            work_dir,
+            state_root,
+            rpms_dir,
+            distro,
+            arch,
+            max_attempts,
+            budget_usd,
+            None,
+            true,  // force
+            true,  // regen
+            no_agent,
+            jobs,
+            source_repo,
+            source_urls.clone(),
+            python_flavors.clone(),
+            run_dir,
+            reporter.clone(),
+            base_reporter.clone(),
+            tui_ctrl.clone(),
+        );
+        if let Err(e) = r {
+            failures.push((name, e.to_string()));
+        }
+    }
+
+    match failures.first() {
+        Some((pkg, err)) => Err(color_eyre::eyre::eyre!(
+            "{} update(s) failed; first: {pkg} ({err})",
+            failures.len()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Render the planned updates as per-line Progress events so the human/TUI
+/// sinks all see the same formatting without this function knowing which
+/// backend is active.
+fn report_update_plan(
+    candidates: &[ap_build::update::Candidate],
+    reporter: &(dyn Reporter + Send + Sync),
+) {
+    use ap_build::update::{Decision, Ecosystem};
+    let eco_tag = |e: &Ecosystem| match e {
+        Ecosystem::Pypi { .. } => "pypi",
+        Ecosystem::GitRepo { .. } => "git",
+    };
+    let mut n_update = 0;
+    let mut n_uptodate = 0;
+    let mut n_skipped = 0;
+    for c in candidates {
+        let line = match &c.decision {
+            Decision::Update {
+                ecosystem,
+                old_version,
+                new_version,
+            } => {
+                n_update += 1;
+                format!(
+                    "[update]  {}  {} → {}  ({})",
+                    c.rpm_name,
+                    old_version,
+                    new_version,
+                    eco_tag(ecosystem),
+                )
+            }
+            Decision::UpToDate { ecosystem, version } => {
+                n_uptodate += 1;
+                format!("[current] {}  {}  ({})", c.rpm_name, version, eco_tag(ecosystem))
+            }
+            Decision::Skipped(reason) => {
+                n_skipped += 1;
+                format!("[skip]    {}  ({reason})", c.rpm_name)
+            }
+        };
+        reporter.report(&Event::Progress { step: None, message: line });
+    }
+    reporter.report(&Event::Progress {
+        step: None,
+        message: format!(
+            "update plan: {n_update} to update, {n_uptodate} up to date, {n_skipped} skipped"
+        ),
+    });
 }
 
 #[cfg(test)]

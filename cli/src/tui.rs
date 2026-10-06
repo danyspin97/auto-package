@@ -30,7 +30,7 @@ use ratatui::{
 };
 
 use ap_core::event::{Event, PackageOutcome, RunOutcome, StepKind, StepOutcome, Task};
-use ap_core::sink::Reporter;
+use ap_core::sink::{MemorySink, Reporter};
 
 const MAX_LOG_LINES: usize = 300;
 const MAX_AGENT_ACTIVITY: usize = 100;
@@ -50,10 +50,14 @@ struct Msg {
 
 impl TuiController {
     /// Spawn the render thread and return a handle to feed it events.
-    pub fn new() -> io::Result<Self> {
+    ///
+    /// `memory` is only used for a Ctrl-C keypress inside the TUI — see
+    /// `crate::handle_interrupt` for why the TUI cannot just rely on the
+    /// process's real SIGINT handler firing.
+    pub fn new(memory: std::sync::Arc<MemorySink>) -> io::Result<Self> {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            if let Err(e) = run(rx) {
+            if let Err(e) = run(rx, memory) {
                 eprintln!("TUI error: {e}");
             }
         });
@@ -144,17 +148,53 @@ impl PkgStatus {
     }
 }
 
+/// What kind of thing an [`ActivityEntry`] records — lets the Agent Activity
+/// pane style each kind differently instead of a single uniform color, since
+/// a turn's start, its tool calls, and its final decision read very
+/// differently in a wall of otherwise-identical text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActivityKind {
+    /// A new agent turn starting (`Event::AgentPrompt`).
+    Task,
+    /// A tool call the agent made mid-turn (`Event::AgentToolUse`).
+    ToolUse,
+    /// The agent's final decision for the turn (`Event::AgentReply`).
+    Reply,
+}
+
+impl ActivityKind {
+    fn color(self) -> Color {
+        match self {
+            ActivityKind::Task => Color::Cyan,
+            ActivityKind::ToolUse => Color::Blue,
+            ActivityKind::Reply => Color::Green,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ActivityEntry {
+    kind: ActivityKind,
+    text: String,
+}
+
 struct PkgState {
     version: String,
     status: PkgStatus,
     current_step: Option<(u32, StepKind)>,
     log_lines: Vec<LogLine>,
-    agent_activity: Vec<String>,
+    agent_activity: Vec<ActivityEntry>,
     input_tokens: u64,
     output_tokens: u64,
     cost_usd: f64,
     started: Instant,
     finished: bool,
+    /// Current/max agent fix-attempt count within this `run_package` call
+    /// (`Task::FixAfterBuild`'s `attempt`/`max_attempts`). Stays `0`/`0`
+    /// until the first post-build fix attempt — a package fixed on the
+    /// first try, or still on its initial build, never needed one.
+    tries: u32,
+    max_tries: u32,
 }
 
 impl PkgState {
@@ -170,6 +210,8 @@ impl PkgState {
             cost_usd: 0.0,
             started: Instant::now(),
             finished: false,
+            tries: 0,
+            max_tries: 0,
         }
     }
 
@@ -180,8 +222,8 @@ impl PkgState {
         }
     }
 
-    fn add_agent_activity(&mut self, activity: String) {
-        self.agent_activity.push(activity);
+    fn add_agent_activity(&mut self, kind: ActivityKind, text: String) {
+        self.agent_activity.push(ActivityEntry { kind, text });
         if self.agent_activity.len() > MAX_AGENT_ACTIVITY {
             self.agent_activity.remove(0);
         }
@@ -197,6 +239,9 @@ struct TuiState {
     last_global_log: Option<LogLine>,
     run_outcome: Option<RunOutcome>,
     run_start: Option<Instant>,
+    /// Toggled with `a` — show every package, including ones `visible_order`
+    /// would otherwise hide once they succeed.
+    show_all: bool,
 }
 
 impl TuiState {
@@ -207,6 +252,7 @@ impl TuiState {
             last_global_log: None,
             run_outcome: None,
             run_start: None,
+            show_all: false,
         }
     }
 
@@ -220,6 +266,27 @@ impl TuiState {
 
     fn add_global_log(&mut self, level: LogLevel, message: String) {
         self.last_global_log = Some(LogLine { level, message });
+    }
+
+    /// Packages still worth showing in the table: everything except ones that
+    /// built fine and need no further attention. Failed and missing-deps
+    /// packages stay visible since they may still need attention or get
+    /// retried; the header's `n/N packages done` count still includes the
+    /// hidden ones (it is derived from `packages`, not this list). Hiding
+    /// them is only the default — `show_all` (toggled with `a`) lets you
+    /// spot-check a specific package that already succeeded instead of
+    /// having to trust the aggregate count with no way to see which ones.
+    fn visible_order(&self) -> Vec<&String> {
+        self.order
+            .iter()
+            .filter(|name| {
+                self.show_all
+                    || !matches!(
+                        self.packages[*name].status,
+                        PkgStatus::Succeeded | PkgStatus::AlreadyBuilt
+                    )
+            })
+            .collect()
     }
 
     fn pkg_mut(&mut self, name: &str) -> &mut PkgState {
@@ -346,22 +413,27 @@ impl TuiState {
                 let task_str = match task {
                     Task::Review => "Reviewing spec".to_string(),
                     Task::FixAfterBuild { attempt, max_attempts } => {
+                        state.tries = *attempt;
+                        state.max_tries = *max_attempts;
                         format!("Fixing spec (attempt {attempt}/{max_attempts})")
                     }
                 };
-                state.add_agent_activity(task_str.clone());
+                state.add_agent_activity(ActivityKind::Task, task_str.clone());
                 state.add_log(LogLevel::Info, format!("Agent: {task_str}"));
             }
             Event::AgentReply { response, usage, .. } => {
                 state.input_tokens += usage.input_tokens;
                 state.output_tokens += usage.output_tokens;
                 state.cost_usd += usage.cost_usd;
-                state.add_agent_activity(format!(
-                    "{} (confidence: {}, ${:.4})",
-                    response.action,
-                    response.confidence.as_deref().unwrap_or("?"),
-                    usage.cost_usd
-                ));
+                state.add_agent_activity(
+                    ActivityKind::Reply,
+                    format!(
+                        "{} (confidence: {}, ${:.4})",
+                        response.action,
+                        response.confidence.as_deref().unwrap_or("?"),
+                        usage.cost_usd
+                    ),
+                );
                 let reasoning = if response.reasoning.chars().count() > 80 {
                     format!("{}...", response.reasoning.chars().take(77).collect::<String>())
                 } else {
@@ -371,7 +443,7 @@ impl TuiState {
             }
             Event::AgentToolUse { tool, input, .. } => {
                 let input_short: String = input.chars().take(60).collect();
-                state.add_agent_activity(format!("→ {tool} {input_short}"));
+                state.add_agent_activity(ActivityKind::ToolUse, format!("→ {tool} {input_short}"));
             }
             Event::Progress { message, .. } => {
                 state.add_log(LogLevel::Info, message.clone());
@@ -412,19 +484,29 @@ impl TuiState {
     }
 }
 
-fn run(rx: Receiver<Msg>) -> io::Result<()> {
+fn run(rx: Receiver<Msg>, memory: std::sync::Arc<MemorySink>) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    // Without this, the alternate screen keeps whatever happened to be in its
+    // buffer when we switched to it (shell scrollback on terminals that mirror
+    // the primary buffer, previous-run leftovers on terminals that preserve
+    // the alt buffer across invocations). Ratatui's `draw` only sends diffs
+    // against its own previous buffer — not the terminal's — so cells we
+    // render as default (space + default style) silently keep that leftover
+    // content showing through. One hard clear up front wipes the slate.
+    terminal.clear()?;
 
     // However the event loop ends — clean exit, a render/input error, or a
     // panic unwinding through here — raw mode and the alternate screen must
     // be torn down. Left engaged, every line printed afterwards (including
     // the error itself) lands inside the broken terminal state instead of
-    // the user's normal screen.
-    let result = event_loop(&mut terminal, rx);
+    // the user's normal screen. (Ctrl-C is the one exit path that does NOT
+    // come back through here at all — `crate::handle_interrupt` does its own
+    // equivalent teardown and then ends the process on the spot.)
+    let result = event_loop(&mut terminal, rx, &memory);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
@@ -436,9 +518,14 @@ fn run(rx: Receiver<Msg>) -> io::Result<()> {
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     rx: Receiver<Msg>,
+    memory: &MemorySink,
 ) -> io::Result<()> {
     let mut state = TuiState::new();
     let mut table_state = TableState::default();
+    // Tracked by package name rather than raw table index: `visible_order()`
+    // shrinks whenever a package finishes, which would otherwise shift every
+    // later row up and silently hand the highlight to a different package.
+    let mut selected: Option<String> = None;
     let tick_rate = Duration::from_millis(150);
     let mut finished_at: Option<Instant> = None;
 
@@ -456,8 +543,19 @@ fn event_loop(
             }
         }
 
-        if table_state.selected().is_none() && !state.order.is_empty() {
-            table_state.select(Some(0));
+        {
+            let visible = state.visible_order();
+            if selected
+                .as_deref()
+                .is_none_or(|s| !visible.iter().any(|n| n.as_str() == s))
+            {
+                selected = visible.first().map(|n| (*n).clone());
+            }
+            table_state.select(
+                selected
+                    .as_ref()
+                    .and_then(|s| visible.iter().position(|n| n.as_str() == s)),
+            );
         }
 
         terminal.draw(|f| render(f, &state, &mut table_state))?;
@@ -468,10 +566,17 @@ fn event_loop(
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                    break;
+                    // Raw mode disables signal generation entirely, so the OS
+                    // never delivers a real SIGINT while the TUI is running —
+                    // this keypress IS the only place Ctrl-C shows up. `q`/Esc
+                    // above only ends the TUI and hands control back to the
+                    // still-running pipeline (by design — it's a UI-detach,
+                    // not an abort); this must stop the whole process instead.
+                    crate::handle_interrupt(true, memory);
                 }
-                KeyCode::Down | KeyCode::Char('j') => select_next(&mut table_state, &state),
-                KeyCode::Up | KeyCode::Char('k') => select_prev(&mut table_state, &state),
+                KeyCode::Down | KeyCode::Char('j') => select_next(&mut selected, &state),
+                KeyCode::Up | KeyCode::Char('k') => select_prev(&mut selected, &state),
+                KeyCode::Char('a') => state.show_all = !state.show_all,
                 _ => {}
             }
         }
@@ -487,33 +592,47 @@ fn event_loop(
     Ok(())
 }
 
-fn select_next(table_state: &mut TableState, state: &TuiState) {
-    if state.order.is_empty() {
+fn select_next(selected: &mut Option<String>, state: &TuiState) {
+    let visible = state.visible_order();
+    if visible.is_empty() {
+        *selected = None;
         return;
     }
-    let i = table_state.selected().unwrap_or(0);
-    table_state.select(Some((i + 1).min(state.order.len() - 1)));
+    let i = selected
+        .as_deref()
+        .and_then(|s| visible.iter().position(|n| n.as_str() == s))
+        .unwrap_or(0);
+    *selected = Some(visible[(i + 1).min(visible.len() - 1)].clone());
 }
 
-fn select_prev(table_state: &mut TableState, _state: &TuiState) {
-    let i = table_state.selected().unwrap_or(0);
-    table_state.select(Some(i.saturating_sub(1)));
+fn select_prev(selected: &mut Option<String>, state: &TuiState) {
+    let visible = state.visible_order();
+    if visible.is_empty() {
+        *selected = None;
+        return;
+    }
+    let i = selected
+        .as_deref()
+        .and_then(|s| visible.iter().position(|n| n.as_str() == s))
+        .unwrap_or(0);
+    *selected = Some(visible[i.saturating_sub(1)].clone());
 }
 
 fn render(f: &mut Frame, state: &TuiState, table_state: &mut TableState) {
+    let visible = state.visible_order();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),                     // Summary header
-            Constraint::Length((state.order.len() as u16 + 3).clamp(5, 12)), // Package table
+            Constraint::Length((visible.len() as u16 + 3).clamp(5, 12)), // Package table
             Constraint::Min(8),                         // Detail pane
             Constraint::Length(3),                      // Global log / footer
         ])
         .split(f.area());
 
     render_summary(f, state, chunks[0]);
-    render_table(f, state, chunks[1], table_state);
-    render_detail(f, state, chunks[2], table_state.selected());
+    render_table(f, state, &visible, chunks[1], table_state);
+    render_detail(f, state, &visible, chunks[2], table_state.selected());
     render_footer(f, state, chunks[3]);
 }
 
@@ -531,23 +650,34 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     f.render_widget(header, area);
 }
 
-fn render_table(f: &mut Frame, state: &TuiState, area: Rect, table_state: &mut TableState) {
-    let rows: Vec<Row> = state
-        .order
+fn render_table(
+    f: &mut Frame,
+    state: &TuiState,
+    visible: &[&String],
+    area: Rect,
+    table_state: &mut TableState,
+) {
+    let rows: Vec<Row> = visible
         .iter()
         .map(|name| {
-            let pkg = &state.packages[name];
+            let pkg = &state.packages[*name];
             let step = pkg
                 .current_step
                 .as_ref()
                 .map(|(n, k)| format!("{}: {k}", n + 1))
                 .unwrap_or_else(|| "-".to_string());
             let elapsed = pkg.started.elapsed().as_secs();
+            let tries = if pkg.max_tries > 0 {
+                format!("{}/{}", pkg.tries, pkg.max_tries)
+            } else {
+                "-".to_string()
+            };
             Row::new(vec![
                 Cell::from(pkg.status.label()).style(Style::default().fg(pkg.status.color())),
                 Cell::from(name.as_str()),
                 Cell::from(pkg.version.as_str()),
                 Cell::from(step),
+                Cell::from(tries),
                 Cell::from(format!("{elapsed}s")),
                 Cell::from(format!("${:.4}", pkg.cost_usd)),
             ])
@@ -560,12 +690,13 @@ fn render_table(f: &mut Frame, state: &TuiState, area: Rect, table_state: &mut T
         Constraint::Length(12),
         Constraint::Percentage(30),
         Constraint::Length(7),
+        Constraint::Length(7),
         Constraint::Length(9),
     ];
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(vec!["Status", "Package", "Version", "Step", "Time", "Cost"])
+            Row::new(vec!["Status", "Package", "Version", "Step", "Tries", "Time", "Cost"])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         )
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
@@ -574,13 +705,21 @@ fn render_table(f: &mut Frame, state: &TuiState, area: Rect, table_state: &mut T
     f.render_stateful_widget(table, area, table_state);
 }
 
-fn render_detail(f: &mut Frame, state: &TuiState, area: Rect, selected: Option<usize>) {
+fn render_detail(
+    f: &mut Frame,
+    state: &TuiState,
+    visible: &[&String],
+    area: Rect,
+    selected: Option<usize>,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(area);
 
-    let Some(pkg) = selected.and_then(|i| state.order.get(i)).and_then(|n| state.packages.get(n))
+    let Some(pkg) = selected
+        .and_then(|i| visible.get(i))
+        .and_then(|n| state.packages.get(n.as_str()))
     else {
         f.render_widget(
             Paragraph::new("No package selected yet").block(
@@ -613,7 +752,7 @@ fn render_detail(f: &mut Frame, state: &TuiState, area: Rect, selected: Option<u
         .rev()
         .take(chunks[1].height.saturating_sub(2) as usize)
         .rev()
-        .map(|a| ListItem::new(a.clone()).style(Style::default().fg(Color::Magenta)))
+        .map(|a| ListItem::new(a.text.clone()).style(Style::default().fg(a.kind.color())))
         .collect();
     let activity = List::new(activity_items)
         .block(Block::default().borders(Borders::ALL).title(format!(
@@ -630,7 +769,10 @@ fn render_footer(f: &mut Frame, state: &TuiState, area: Rect) {
         .map(|l| Span::styled(l.message.clone(), Style::default().fg(l.level.color())))
         .unwrap_or_else(|| Span::raw(""));
     let hint = Span::styled(
-        "  ↑/↓ select package │ q/Esc quit",
+        format!(
+            "  ↑/↓ select package │ a {} succeeded │ q/Esc quit",
+            if state.show_all { "hide" } else { "show" }
+        ),
         Style::default().fg(Color::DarkGray),
     );
     let line = Line::from(vec![last, hint]);
