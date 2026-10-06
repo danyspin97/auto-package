@@ -4214,24 +4214,12 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
 
     ap_core::diag!("  searching GitHub API for: {}", normalized);
 
-    // Honor GITHUB_TOKEN / GH_TOKEN to raise the 60/hour anon limit to
-    // 5000/hour, same as `sources::get_json` does for the release-tag
-    // lookups. Without this, running a dep-heavy stack rate-limits the
-    // very first repo-search call for the next hour.
-    let mut req = ureq::get(&search_url)
-        .header("User-Agent", "auto-package")
-        .header("Accept", "application/json");
-    for var in &["GITHUB_TOKEN", "GH_TOKEN"] {
-        if let Ok(tok) = std::env::var(var)
-            && !tok.is_empty()
-        {
-            req = req.header("Authorization", format!("Bearer {tok}"));
-            break;
-        }
-    }
-    let body = req.call().ok()?.into_body().read_to_string().ok()?;
+    // Route through `sources::get_json`, which prefers the `gh` CLI (so
+    // the user's `gh auth login` auth and gh's own rate-limit backoff
+    // both apply) and only falls back to raw ureq + GITHUB_TOKEN when
+    // `gh` isn't installed. See `sources::try_gh_api`'s doc comment.
+    let json = crate::sources::get_json_for_search(&search_url).ok()?;
 
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
     let items = json.get("items")?.as_array()?;
 
     let mut matches = Vec::new();

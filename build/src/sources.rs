@@ -251,24 +251,94 @@ fn owner_repo(repo_url: &str) -> Result<(String, String, String), String> {
     Ok((forge.host, forge.project_path, forge.repo_name))
 }
 
-/// Pick the right auth header for a forge API URL, if the user has set an
-/// environment variable for that forge.
+/// Hand a GitHub API URL to the `gh` CLI if it's installed, otherwise
+/// return `None` so the caller falls back to a raw HTTP call.
 ///
-/// GitHub's unauthenticated REST limit is 60 requests/hour per IP — a single
-/// `auto-package build` of a dep-heavy stack like drogon or vllm blows
-/// through that in minutes, and the next call then fails with the exact
-/// 403 the Oct 7 user report hit. A bearer token raises the ceiling to
-/// 5000/hour. Same shape for GitLab (anonymous is unmetered on some
-/// instances but tight on gitlab.com).
+/// `gh api <path>` is strictly better than hand-rolling the HTTP call:
 ///
-/// Nothing is fatal here: if no env is set we send an unauthenticated
-/// request and let the caller see any 403 as-is (now with a clearer
-/// error message, see [`describe_forge_http_error`]).
+/// * It reads the token from `~/.config/gh/hosts.yml` (`gh auth login`),
+///   so the user doesn't have to also keep `GITHUB_TOKEN` in their shell
+///   env. The Oct 7 drogon-build report hit this: the user had `gh`
+///   logged in but hadn't exported `GITHUB_TOKEN`, and the previous raw-
+///   ureq-with-bearer-header path couldn't pick that up.
+/// * It honors `gh`'s own 60-sec per-request-category rate-limit backoff
+///   and retries the standard GitHub error-shape responses, so a
+///   transient secondary rate limit no longer surfaces as a hard failure.
+/// * It handles GitHub Enterprise automatically: `gh auth login`
+///   remembers the host, and `gh api` dispatches accordingly without us
+///   caring whether the URL is `api.github.com` or
+///   `github.corp.example.com/api/v3`.
+///
+/// Non-GitHub URLs (gitlab, gitea, forgejo) stay on the raw HTTP path —
+/// `gh` doesn't speak them.
+fn try_gh_api(url: &str) -> Option<Result<String, String>> {
+    // Only usable for GitHub API URLs. Keep the match deliberately strict
+    // so an unrelated `api.github.com`-mentioning path (e.g. a
+    // documentation link in a diag message that happens to come through
+    // this function) doesn't get mis-routed.
+    let path = url
+        .strip_prefix("https://api.github.com/")
+        .or_else(|| url.strip_prefix("http://api.github.com/"))?;
+
+    // Resolve `gh` on PATH exactly once per process. Caching the "not
+    // installed" result avoids spawning a doomed child subprocess on
+    // every API call for the rest of the run.
+    use std::sync::OnceLock;
+    static GH_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let gh = GH_PATH
+        .get_or_init(|| {
+            // Trivial PATH scan — avoiding a `which` crate dep for one
+            // callsite. `is_file()` is enough: if the entry isn't
+            // executable, the subsequent `Command::new(gh).output()` will
+            // just fail and we fall back to raw ureq like any other
+            // `gh`-not-usable case.
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|p| p.join("gh"))
+                    .find(|p| p.is_file())
+            })
+        })
+        .as_ref()?;
+
+    let out = std::process::Command::new(gh)
+        .arg("api")
+        // Pass the path verbatim including any query string — gh accepts
+        // `repos/owner/repo/tags?per_page=1` directly.
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        return Some(Err(format!(
+            "gh api {path}: {}{}",
+            if stderr.is_empty() {
+                format!("exit {}", out.status.code().unwrap_or(-1))
+            } else {
+                stderr.trim().to_string()
+            },
+            // The two most common `gh api` failure shapes carry their own
+            // fix-it hint — add one if it isn't already in stderr.
+            if stderr.contains("401") || stderr.contains("authentication") {
+                " (run `gh auth login` to refresh the token)"
+            } else if stderr.contains("rate limit") || stderr.contains("secondary rate limit") {
+                " (gh already retries on rate limits; this one persisted — \
+                 wait, or re-run with --version to skip the API call)"
+            } else {
+                ""
+            }
+        )));
+    }
+
+    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+    Some(Ok(body))
+}
+
+/// Fall-back auth for raw HTTP: a bearer token for GitHub, a PRIVATE-
+/// TOKEN header for GitLab. Only used when `gh`/`glab` aren't on PATH or
+/// the URL isn't one those CLIs can talk to.
 fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
     if url.contains("api.github.com") || url.starts_with("https://api.github.com") {
-        // GitHub accepts either `GITHUB_TOKEN` (the Actions / CLI name) or
-        // `GH_TOKEN` (the gh CLI name) — honor both so `gh auth login`
-        // works transparently.
         for var in &["GITHUB_TOKEN", "GH_TOKEN"] {
             if let Ok(tok) = std::env::var(var)
                 && !tok.is_empty()
@@ -277,9 +347,6 @@ fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
             }
         }
     } else if url.contains("gitlab") {
-        // GitLab uses the `PRIVATE-TOKEN` header for personal access
-        // tokens; `GITLAB_TOKEN` is the conventional env name
-        // (equivalent to `glab auth token`).
         for var in &["GITLAB_TOKEN", "CI_JOB_TOKEN"] {
             if let Ok(tok) = std::env::var(var)
                 && !tok.is_empty()
@@ -292,9 +359,11 @@ fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
 }
 
 /// Translate a bare `url: <ureq Error>` string into a message that names
-/// the specific failure modes a forge API call usually hits — most
-/// importantly the GitHub rate-limit 403 and the auth-token
-/// 401/403 — and tells the user how to fix each one.
+/// the specific failure modes a forge API call usually hits.
+///
+/// Only reached on the raw-HTTP fall-back path — `gh` is strongly
+/// preferred for GitHub and has its own friendlier errors (see
+/// [`try_gh_api`]).
 fn describe_forge_http_error(url: &str, raw: &str) -> String {
     let authed = forge_auth_header(url).is_some();
     if raw.contains("status: 403") || raw.contains("status: 429") {
@@ -307,8 +376,10 @@ fn describe_forge_http_error(url: &str, raw: &str) -> String {
         } else if url.contains("api.github.com") {
             format!(
                 "{url}: {raw} (GitHub unauthenticated REST is 60 req/hour \
-                 per IP; set GITHUB_TOKEN or GH_TOKEN to raise the ceiling \
-                 to 5000/hour, or pass --version to skip the API call)"
+                 per IP; install the `gh` CLI and run `gh auth login` so \
+                 this process can use its auth automatically, or set \
+                 GITHUB_TOKEN/GH_TOKEN, or pass --version to skip the \
+                 API call)"
             )
         } else {
             format!(
@@ -328,7 +399,21 @@ fn describe_forge_http_error(url: &str, raw: &str) -> String {
     }
 }
 
+/// `get_json`, exposed under a distinct name so cross-crate call sites
+/// (currently `pipeline::search_github_repos`) can share the same
+/// gh-preferring path without exposing the internal `get_json` name.
+pub fn get_json_for_search(url: &str) -> Result<serde_json::Value, String> {
+    get_json(url)
+}
+
 fn get_json(url: &str) -> Result<serde_json::Value, String> {
+    // Prefer `gh api` for GitHub URLs when it's installed — see
+    // `try_gh_api`'s doc comment for the three reasons.
+    if let Some(result) = try_gh_api(url) {
+        let body = result?;
+        return serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"));
+    }
+
     let mut req = ureq::get(url)
         .header("User-Agent", "auto-package")
         .header("Accept", "application/json");
