@@ -102,6 +102,18 @@ enum Commands {
         /// pick it up without being asked again.
         #[arg(long, value_name = "[PKG=]URL")]
         source_url: Vec<String>,
+
+        /// Also retry every other package that OBS currently reports as
+        /// Failed/Unresolvable/Broken in this project, not just the ones
+        /// the requested target's own dependency closure needs.
+        ///
+        /// Off by default so a build request targets exactly what was
+        /// asked for; the Oct 6 review flagged the implicit sweep (then
+        /// always-on) as broadening the operation beyond the requested
+        /// closure and quietly resolving unrelated packages to current
+        /// upstream versions.
+        #[arg(long, default_value_t = false)]
+        sweep: bool,
     },
 
     /// Scan an OBS project for packages with a newer upstream release and
@@ -160,6 +172,20 @@ enum Commands {
         /// top-level update loop, not every spawned sub-build.
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+
+        /// Regenerate each updated package's spec from scratch instead of
+        /// carrying the existing recipe forward.
+        ///
+        /// Off by default so a version bump preserves established patches,
+        /// BuildRequires choices, %check skips and other hand-tuned
+        /// decisions — a spec that already built the previous version
+        /// correctly is usually the right starting point. Pass this when
+        /// an upstream release changes build system or dependency layout
+        /// enough that reusing the old recipe is worse than starting over;
+        /// the Oct 6 review flagged the previous always-regenerate default
+        /// as silently discarding recipe-specific work.
+        #[arg(long, default_value_t = false)]
+        regen: bool,
     },
 }
 
@@ -372,6 +398,7 @@ fn main() -> color_eyre::Result<()> {
             jobs,
             url,
             source_url,
+            sweep,
         } => {
             // `build https://github.com/owner/repo` — the URL is the source and
             // the repository name is the package name. `--url` does the same
@@ -547,6 +574,7 @@ fn main() -> color_eyre::Result<()> {
                 regen,
                 no_agent,
                 jobs,
+                sweep,
                 source_repo,
                 source_urls,
                 python_flavors,
@@ -594,6 +622,7 @@ fn main() -> color_eyre::Result<()> {
             budget_usd,
             no_agent,
             jobs,
+            regen,
         } => {
             let level: LogLevel = log.parse().map_err(|e: String| color_eyre::eyre::eyre!(e))?;
 
@@ -699,6 +728,7 @@ fn main() -> color_eyre::Result<()> {
                 no_agent,
                 jobs,
                 check,
+                regen,
                 source_urls,
                 python_flavors,
                 &run_dir,
@@ -786,6 +816,12 @@ fn cmd_build(
     regen: bool,
     no_agent: bool,
     jobs: usize,
+    // When true, also opportunistically retry every OTHER
+    // Failed/Unresolvable/Broken package in the project (not just the ones
+    // the requested target's own dep closure needs). Off by default; see
+    // the `--sweep` doc on `Commands::Build` for why the Oct 6 review
+    // flipped this from always-on to opt-in.
+    sweep: bool,
     mut source_repo: Option<String>,
     source_urls: Arc<ap_build::sources::SourceMap>,
     python_flavors: Arc<ap_build::flavors::PythonFlavors>,
@@ -949,7 +985,7 @@ fn cmd_build(
     // invocation asked for. A previous run can leave a package stuck (its own
     // missing dependency was never itself resolved, the run was interrupted,
     // an agent fix never landed, ...) with nothing left that keeps retrying
-    // it once its immediate parent build is done; this makes every
+    // it once its immediate parent build is done; `--sweep` makes an
     // invocation opportunistically pick those back up too, going through the
     // exact same PyPI-then-source-repo resolution as any other
     // runtime-discovered dependency (see `resolve_dependency_config`). This
@@ -959,14 +995,19 @@ fn cmd_build(
     // whole project, including packages unrelated to whatever target this
     // invocation happens to name.
     //
+    // OFF by default (Oct 6 review finding #5): the implicit always-on
+    // sweep broadened a build request beyond its own dependency closure
+    // and quietly resolved unrelated stuck packages to current upstream
+    // versions. The user opts in with `--sweep` when they want that; the
+    // default build now stays scoped to what the requested target
+    // actually needs.
+    //
     // `--target` asks for exactly one node and nothing else — see its help
     // text ("Build this specific dependency node instead of the
-    // auto-selected one") — so skip this opportunistic sweep when it's set.
-    // Without this, a `--target` run meant to isolate and debug one package
-    // silently spends its whole budget retrying unrelated broken packages
-    // elsewhere in the project before ever reaching the one actually asked
-    // for.
-    if explicit_target.is_none() {
+    // auto-selected one") — so skip the sweep when it's set even if the
+    // flag was passed; a `--target` run meant to isolate and debug one
+    // package should not pick up unrelated project-wide work.
+    if sweep && explicit_target.is_none() {
         // The root target itself must never enter this generic sweep: it
         // goes on to `resolve_dependency_config` just like any other
         // runtime-discovered dependency, which always re-fetches the
@@ -1431,7 +1472,17 @@ fn cmd_build(
 
 /// Scan `project` for packages with a newer upstream release, print the plan,
 /// and (unless `--check`) hand each candidate to the ordinary build pipeline
-/// pinned to its new version with `--force --regen` on.
+/// pinned to its new version.
+///
+/// `--force` is always passed to the per-package build (the whole point is
+/// to rebuild at a new version, so state.json's "already built at <old>"
+/// check must not short-circuit). `--regen` is passed through from the
+/// update command's own `--regen`: default off, so a bump preserves the
+/// existing recipe's hand-tuned decisions (patches, BuildRequires choices,
+/// `%check` skips); the user opts in when upstream has changed build system
+/// or dependency layout enough that reusing the old recipe is worse than
+/// starting over. The Oct 6 review flagged the previous always-regenerate
+/// default as silently discarding recipe-specific work.
 ///
 /// Rebuilds run sequentially by default (`--jobs 1`) because each one already
 /// kicks off its own dep-closure concurrency inside `cmd_build`; stacking
@@ -1451,6 +1502,7 @@ fn cmd_update(
     no_agent: bool,
     jobs: usize,
     check: bool,
+    regen: bool,
     source_urls: Arc<ap_build::sources::SourceMap>,
     python_flavors: Arc<ap_build::flavors::PythonFlavors>,
     run_dir: &RunDir,
@@ -1516,10 +1568,14 @@ fn cmd_update(
             step: None,
             message: format!("updating {name} to {new_version}"),
         });
-        // `--force` so the state.json "already built at <old>" check doesn't
-        // skip us; `--regen` so a new release that moved to a different build
-        // system or added deps gets a freshly generated spec instead of a
-        // stale one in the osc checkout.
+        // `--force` always on so the state.json "already built at <old>"
+        // check doesn't short-circuit a rebuild at the new version.
+        // `--regen` is a passthrough from the caller: off by default so a
+        // bump preserves the existing recipe (see this function's doc
+        // comment for why that is the safer default), on when the user
+        // asked for it. `sweep` stays off: an `update` of package X must
+        // not opportunistically start rebuilding every other stuck
+        // package in the project.
         let r = cmd_build(
             &name,
             Some(&new_version),
@@ -1532,10 +1588,11 @@ fn cmd_update(
             max_attempts,
             budget_usd,
             None,
-            true,  // force
-            true,  // regen
+            true,   // force
+            regen,  // passthrough from Update's own --regen
             no_agent,
             jobs,
+            false,  // sweep: never from inside an update
             source_repo,
             source_urls.clone(),
             python_flavors.clone(),
