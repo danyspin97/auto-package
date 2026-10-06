@@ -105,6 +105,58 @@ pub enum FetchError {
         expected: String,
         actual: String,
     },
+
+    #[error(transparent)]
+    Parse(#[from] Error),
+}
+
+/// Fetch and parse the latest release for `name` from PyPI's JSON API.
+pub fn fetch_latest_release(name: &str) -> Result<Release, FetchError> {
+    let url = format!("https://pypi.org/pypi/{name}/json");
+    let to_http_err = |e| FetchError::Http { url: url.clone(), source: Box::new(e) };
+    let json = ureq::get(&url)
+        .call()
+        .map_err(to_http_err)?
+        .into_body()
+        .read_to_string()
+        .map_err(to_http_err)?;
+    Ok(parse_release(&json)?)
+}
+
+/// Just the latest-release version string, without the sdist/wheel/license
+/// bookkeeping [`fetch_latest_release`] enforces.
+///
+/// For an update sweep: we only need to know whether upstream has moved past
+/// what's packaged. A wheel-only release (common for NVIDIA's CUDA toolkit
+/// bindings) has a legitimate version but no sdist, which makes the full
+/// `fetch_latest_release` reject it — and misses the whole point of a check
+/// that's trying to flag the bump. Reads `info.version` straight from the
+/// envelope and nothing else.
+pub fn fetch_latest_version(name: &str) -> Result<String, FetchError> {
+    let url = format!("https://pypi.org/pypi/{name}/json");
+    let to_http_err = |e| FetchError::Http { url: url.clone(), source: Box::new(e) };
+    let json = ureq::get(&url)
+        .call()
+        .map_err(to_http_err)?
+        .into_body()
+        .read_to_string()
+        .map_err(to_http_err)?;
+    parse_version_only(&json).map_err(FetchError::from)
+}
+
+/// Extract `info.version` from a PyPI JSON envelope. Separated out so a
+/// test can run it without an HTTP call.
+pub fn parse_version_only(json: &str) -> Result<String, Error> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        info: Info,
+    }
+    #[derive(Deserialize)]
+    struct Info {
+        version: String,
+    }
+    let env: Envelope = serde_json::from_str(json)?;
+    Ok(env.info.version)
 }
 
 impl Sdist {
@@ -270,13 +322,27 @@ fn pick_sdist(urls: &[RawFile]) -> Option<&RawFile> {
 /// neither an sdist nor a discoverable source repository. Prefers a
 /// universal `py3-none-any` wheel (installable regardless of platform), then
 /// a wheel whose platform tag names `arch`, then whatever wheel exists.
-pub fn pick_wheel_from_json(json: &str, arch: &str) -> Result<WheelFile, Error> {
+///
+/// `single_locked_flavor_abi` is the CPython ABI tag (`cp313`, not
+/// `python313`) of the one Python flavor this project is configured to build
+/// for, when it is configured for exactly one — see
+/// `ap_build::flavors::PythonFlavors::single_flavor`, which is the only
+/// producer of this value and documents why anything other than exactly one
+/// configured flavor must pass `None` here. `None` otherwise (including
+/// "don't know"), which keeps the historical, maximally conservative
+/// behavior of refusing every CPython-ABI-locked wheel.
+pub fn pick_wheel_from_json(
+    json: &str,
+    arch: &str,
+    single_locked_flavor_abi: Option<&str>,
+) -> Result<WheelFile, Error> {
     let raw: Envelope = serde_json::from_str(json)?;
     let info = &raw.info;
-    let wheel = pick_wheel(&raw.urls, arch).ok_or_else(|| Error::NoWheel {
-        name: info.name.clone(),
-        version: info.version.clone(),
-    })?;
+    let wheel =
+        pick_wheel(&raw.urls, arch, single_locked_flavor_abi).ok_or_else(|| Error::NoWheel {
+            name: info.name.clone(),
+            version: info.version.clone(),
+        })?;
     let sha256 = wheel.digests.sha256.clone().ok_or_else(|| Error::NoDigest(wheel.filename.clone()))?;
     Ok(WheelFile {
         filename: wheel.filename.clone(),
@@ -286,15 +352,53 @@ pub fn pick_wheel_from_json(json: &str, arch: &str) -> Result<WheelFile, Error> 
     })
 }
 
-fn pick_wheel<'a>(urls: &'a [RawFile], arch: &str) -> Option<&'a RawFile> {
+fn pick_wheel<'a>(
+    urls: &'a [RawFile],
+    arch: &str,
+    single_locked_flavor_abi: Option<&str>,
+) -> Option<&'a RawFile> {
     let wheels = || {
-        urls.iter()
-            .filter(|f| f.packagetype == "bdist_wheel" && !f.yanked && f.filename.ends_with(".whl"))
+        urls.iter().filter(|f| {
+            f.packagetype == "bdist_wheel"
+                && !f.yanked
+                && f.filename.ends_with(".whl")
+                && wheel_is_flavor_agnostic(&f.filename, single_locked_flavor_abi)
+        })
     };
     wheels()
         .find(|f| f.filename.ends_with("-none-any.whl"))
         .or_else(|| wheels().find(|f| f.filename.contains(arch)))
         .or_else(|| wheels().next())
+}
+
+/// Whether a wheel's ABI tag makes it safe to repackage as a single file,
+/// either because it is agnostic to which Python flavor(s) an openSUSE spec
+/// builds for (this project builds `python313`+`python314` side by side,
+/// sometimes more), or because the project builds for only one flavor and
+/// this wheel is locked to exactly that one.
+///
+/// A wheel filename's last three `-`-separated components are its Python
+/// tag, ABI tag, and platform tag. ABI tag `none` means no CPython C-API
+/// dependency at all — pure Python, or (the shape every NVIDIA CUDA toolkit
+/// wheel this fallback was built for uses) a native library loaded via
+/// `dlopen`/`ctypes` rather than compiled as a Python C extension — so the
+/// same file installs correctly under any flavor. A `cpXYZ` ABI tag
+/// (`cp313`, `cp310t`, ...) means the opposite: it was compiled against one
+/// specific CPython's C API. Picking one of those and repackaging it as if
+/// it worked everywhere produces a package that is broken for every flavor
+/// except the one it happened to be built for — better to find no usable
+/// wheel at all than a silently wrong one (Triton is the real example: it
+/// publishes wheels, but one per CPython version with no universal one, so
+/// this fallback must refuse rather than pick an arbitrary `cp3xx` build) —
+/// *unless* `single_locked_flavor_abi` says this project only ever builds
+/// for the one flavor this exact wheel is locked to, in which case there is
+/// no second flavor left for it to be broken under.
+fn wheel_is_flavor_agnostic(filename: &str, single_locked_flavor_abi: Option<&str>) -> bool {
+    let stem = filename.strip_suffix(".whl").unwrap_or(filename);
+    match stem.rsplitn(3, '-').collect::<Vec<_>>().as_slice() {
+        [_platform, abi, _rest] => *abi == "none" || Some(*abi) == single_locked_flavor_abi,
+        _ => false,
+    }
 }
 
 /// The best upstream URL, preferring the project's own page over its host.
@@ -559,6 +663,94 @@ pub fn parse_dep_names(requires_dist: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Extract the PyPI project name from a spec's `Source:` URL.
+///
+/// Matches the `files.pythonhosted.org/packages/source/<letter>/<name>/...`
+/// layout openSUSE's generator writes. Returns `None` for non-PyPI hosts and
+/// for malformed paths — the update sweep uses that `None` to skip packages
+/// it doesn't know how to resolve a latest version for.
+pub fn pypi_name_from_source_url(url: &str) -> Option<String> {
+    // Trim `%{...}` RPM macros (the usual one is `%{version}` in the filename)
+    // so the host/path check doesn't trip over them; nothing before the
+    // filename segment should contain a macro in practice.
+    let host_marker = "files.pythonhosted.org/packages/source/";
+    let idx = url.find(host_marker)?;
+    let tail = &url[idx + host_marker.len()..];
+    // Expect `<letter>/<name>/<name>-<version>.tar.gz`. We just need `<name>`
+    // (the second segment); the first-letter segment is PyPI's bucket shard.
+    let mut parts = tail.splitn(3, '/');
+    let _letter = parts.next()?;
+    let name = parts.next()?;
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+/// Extract the PyPI project name and version from a PEP 427 wheel filename.
+///
+/// Wheel filenames are `{distribution}-{version}(-{build})?-{py}-{abi}-{plat}.whl`,
+/// so splitting on `-` from the left gives the first two components. The
+/// `{distribution}` segment is the PyPI name with hyphens normalised to
+/// underscores; it is returned verbatim — the caller can pass either spelling
+/// to PyPI's JSON API, which treats them interchangeably.
+///
+/// Returns `None` for a filename that isn't a `.whl` or doesn't have at least
+/// the five mandatory hyphen-separated segments.
+pub fn pypi_name_and_version_from_wheel_filename(filename: &str) -> Option<(String, String)> {
+    let stem = filename.strip_suffix(".whl")?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    Some((parts[0].to_string(), parts[1].to_string()))
+}
+
+/// Extract the PyPI project name from a bare tarball-filename source like
+/// `torchaudio-%{version}.tar.gz` — one openSUSE's generator sometimes writes
+/// instead of a full PyPI URL for packages fetched via `_service`.
+///
+/// `spec_version` lets this also handle filenames that embed a literal
+/// version (`cuda-core-1.2.0.tar.gz`) rather than the `%{version}` macro,
+/// by using the spec's own `Version:` to split the tail from the name — a
+/// `<name>-<version>` split from the right is otherwise ambiguous (plenty
+/// of PyPI names contain dashes).
+///
+/// Returns `None` when neither template nor literal-version form matches.
+/// The returned name is a *candidate* PyPI project name — the caller still has
+/// to query PyPI and handle a 404 (the package genuinely isn't on PyPI).
+pub fn pypi_name_from_versioned_tarball(filename: &str, spec_version: &str) -> Option<String> {
+    // Accept .tar.gz, .tar.xz, .tar.bz2, .tgz.
+    let stem = filename
+        .strip_suffix(".tar.gz")
+        .or_else(|| filename.strip_suffix(".tar.xz"))
+        .or_else(|| filename.strip_suffix(".tar.bz2"))
+        .or_else(|| filename.strip_suffix(".tgz"))?;
+    // Macro form first — the generator's usual output.
+    if let Some(name) = stem.strip_suffix("-%{version}")
+        && !name.is_empty()
+    {
+        return Some(name.to_string());
+    }
+    // Literal-version form, resolved against the spec's own Version:.
+    let suffix = format!("-{spec_version}");
+    if let Some(name) = stem.strip_suffix(&suffix)
+        && !name.is_empty()
+    {
+        return Some(name.to_string());
+    }
+    None
+}
+
+/// True iff `latest` is a strictly newer PEP 440 version than `packaged`.
+///
+/// Both strings are parsed as PEP 440. Unparseable versions return `false` —
+/// an update sweep must not act on a comparison it couldn't actually make.
+pub fn is_newer_pep440(latest: &str, packaged: &str) -> bool {
+    use pep440_rs::Version;
+    use std::str::FromStr;
+    let Ok(l) = Version::from_str(latest) else { return false };
+    let Ok(p) = Version::from_str(packaged) else { return false };
+    l > p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,10 +784,10 @@ mod tests {
       "urls": [
         {
           "digests": {"md5": "aaa", "sha256": "0123456789abcdef"},
-          "filename": "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl",
+          "filename": "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
           "packagetype": "bdist_wheel",
           "size": 21978,
-          "url": "https://files.pythonhosted.org/packages/aa/markupsafe-3.0.3-cp314.whl",
+          "url": "https://files.pythonhosted.org/packages/aa/markupsafe-3.0.3-py3-none.whl",
           "yanked": false
         },
         {
@@ -662,8 +854,8 @@ mod tests {
 
     #[test]
     fn picks_the_wheel_matching_the_requested_arch() {
-        let wheel = pick_wheel_from_json(MARKUPSAFE, "x86_64").expect("a wheel exists");
-        assert_eq!(wheel.filename, "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl");
+        let wheel = pick_wheel_from_json(MARKUPSAFE, "x86_64", None).expect("a wheel exists");
+        assert_eq!(wheel.filename, "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl");
         assert_eq!(wheel.sha256, "0123456789abcdef");
     }
 
@@ -671,14 +863,78 @@ mod tests {
     fn falls_back_to_any_wheel_when_none_match_the_arch() {
         // No aarch64 build in the fixture — still returns the one wheel there is
         // rather than failing outright.
-        let wheel = pick_wheel_from_json(MARKUPSAFE, "aarch64").expect("falls back to the only wheel");
+        let wheel =
+            pick_wheel_from_json(MARKUPSAFE, "aarch64", None).expect("falls back to the only wheel");
+        assert_eq!(wheel.filename, "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl");
+    }
+
+    #[test]
+    fn flavor_agnostic_check_reads_the_abi_tag_not_the_platform_tag() {
+        assert!(wheel_is_flavor_agnostic(
+            "nvidia_nccl_cu13-2.29.7-py3-none-manylinux2014_x86_64.whl",
+            None
+        ));
+        assert!(wheel_is_flavor_agnostic("somepkg-1.0-py3-none-any.whl", None));
+        assert!(!wheel_is_flavor_agnostic(
+            "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl",
+            None
+        ));
+        assert!(!wheel_is_flavor_agnostic(
+            "triton-3.8.0-cp310-cp310-manylinux_2_27_x86_64.whl",
+            None
+        ));
+    }
+
+    #[test]
+    fn refuses_a_wheel_locked_to_one_cpython_abi() {
+        // Triton's real shape: genuine compiled extensions, published per
+        // CPython version (cp310, cp311, ...) with no universal build. A
+        // single such wheel cannot satisfy every Python flavor an openSUSE
+        // spec builds for (python313 *and* python314 side by side) — picking
+        // one and repackaging it as if it were universal would silently
+        // break every flavor except the one it was built for, so this must
+        // report no usable wheel rather than pick an arbitrary one.
+        let json = MARKUPSAFE.replace(
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
+            "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl",
+        );
+        let err =
+            pick_wheel_from_json(&json, "x86_64", None).expect_err("cp-locked wheel must be refused");
+        assert!(matches!(err, Error::NoWheel { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn a_locked_wheel_matching_the_single_configured_flavor_is_accepted() {
+        // A project configured (via flavors.toml) to build for exactly one
+        // Python flavor has no second flavor left for a cp-locked wheel to be
+        // broken under, so the one wheel matching that exact ABI is safe to
+        // repackage automatically.
+        let json = MARKUPSAFE.replace(
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
+            "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl",
+        );
+        let wheel = pick_wheel_from_json(&json, "x86_64", Some("cp314"))
+            .expect("the single configured flavor's own wheel must be accepted");
         assert_eq!(wheel.filename, "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl");
+    }
+
+    #[test]
+    fn a_locked_wheel_not_matching_the_single_configured_flavor_is_still_refused() {
+        // Configured for cp314 but the only wheel on offer is cp313 — still
+        // broken for the one flavor this project actually builds.
+        let json = MARKUPSAFE.replace(
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
+            "markupsafe-3.0.3-cp313-cp313-manylinux_2_5_x86_64.whl",
+        );
+        let err = pick_wheel_from_json(&json, "x86_64", Some("cp314"))
+            .expect_err("a wheel for the wrong flavor must still be refused");
+        assert!(matches!(err, Error::NoWheel { .. }), "got {err:?}");
     }
 
     #[test]
     fn no_wheel_at_all_is_an_error() {
         let json = MARKUPSAFE.replace(r#""packagetype": "bdist_wheel""#, r#""packagetype": "sdist""#);
-        let err = pick_wheel_from_json(&json, "x86_64").expect_err("no wheel in this fixture");
+        let err = pick_wheel_from_json(&json, "x86_64", None).expect_err("no wheel in this fixture");
         assert!(matches!(err, Error::NoWheel { .. }), "got {err:?}");
     }
 
@@ -774,5 +1030,128 @@ mod tests {
             parse_release(&json),
             Err(Error::NoDigest(f)) if f == "markupsafe-3.0.3.tar.gz"
         ));
+    }
+
+    #[test]
+    fn pypi_name_from_canonical_source_url() {
+        assert_eq!(
+            pypi_name_from_source_url(
+                "https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{version}.tar.gz"
+            )
+            .as_deref(),
+            Some("attrs"),
+        );
+    }
+
+    #[test]
+    fn pypi_name_rejects_github_source() {
+        assert_eq!(
+            pypi_name_from_source_url("https://github.com/pallets/markupsafe/archive/3.0.3.tar.gz"),
+            None,
+        );
+    }
+
+    #[test]
+    fn pypi_name_preserves_case() {
+        assert_eq!(
+            pypi_name_from_source_url(
+                "https://files.pythonhosted.org/packages/source/M/MarkupSafe/MarkupSafe-%{version}.tar.gz"
+            )
+            .as_deref(),
+            Some("MarkupSafe"),
+        );
+    }
+
+    #[test]
+    fn is_newer_decimal_segments_compared_numerically() {
+        assert!(is_newer_pep440("1.10.0", "1.9.0"));
+        assert!(!is_newer_pep440("1.9.0", "1.10.0"));
+        assert!(!is_newer_pep440("1.9.0", "1.9.0"));
+    }
+
+    #[test]
+    fn is_newer_prerelease_is_older_than_release() {
+        assert!(!is_newer_pep440("2.0.0rc1", "2.0.0"));
+        assert!(is_newer_pep440("2.0.0", "2.0.0rc1"));
+    }
+
+    #[test]
+    fn is_newer_refuses_on_parse_failure() {
+        assert!(!is_newer_pep440("not-a-version", "1.0"));
+        assert!(!is_newer_pep440("1.0", "not-a-version"));
+    }
+
+    #[test]
+    fn wheel_filename_yields_distribution_and_version() {
+        assert_eq!(
+            pypi_name_and_version_from_wheel_filename(
+                "nvidia_cublas-13.1.1.3-py3-none-manylinux_2_27_x86_64.whl"
+            ),
+            Some(("nvidia_cublas".to_string(), "13.1.1.3".to_string())),
+        );
+    }
+
+    #[test]
+    fn wheel_filename_keeps_local_version_qualifier() {
+        // PyPI wheels can embed `+<local>` — the version segment is still just
+        // the single dash-delimited token at position 1.
+        assert_eq!(
+            pypi_name_and_version_from_wheel_filename(
+                "torch-2.4.0+cpu-cp311-cp311-linux_x86_64.whl"
+            ),
+            Some(("torch".to_string(), "2.4.0+cpu".to_string())),
+        );
+    }
+
+    #[test]
+    fn wheel_filename_rejects_non_wheel() {
+        assert_eq!(
+            pypi_name_and_version_from_wheel_filename("attrs-26.1.0.tar.gz"),
+            None,
+        );
+    }
+
+    #[test]
+    fn wheel_filename_rejects_truncated_filename() {
+        // Fewer than 5 hyphen-separated segments means not a real wheel name.
+        assert_eq!(pypi_name_and_version_from_wheel_filename("foo-1.0.whl"), None);
+    }
+
+    #[test]
+    fn tarball_filename_extracts_name_from_template() {
+        assert_eq!(
+            pypi_name_from_versioned_tarball("torchaudio-%{version}.tar.gz", "2.4.0").as_deref(),
+            Some("torchaudio"),
+        );
+        assert_eq!(
+            pypi_name_from_versioned_tarball("nvidia-cuda-cccl-%{version}.tar.gz", "13.4.92")
+                .as_deref(),
+            Some("nvidia-cuda-cccl"),
+        );
+    }
+
+    #[test]
+    fn tarball_filename_extracts_name_against_literal_version() {
+        assert_eq!(
+            pypi_name_from_versioned_tarball("cuda-core-1.2.0.tar.gz", "1.2.0").as_deref(),
+            Some("cuda-core"),
+        );
+        assert_eq!(
+            pypi_name_from_versioned_tarball("cuda-python-13.4.1.tar.gz", "13.4.1").as_deref(),
+            Some("cuda-python"),
+        );
+    }
+
+    #[test]
+    fn tarball_filename_literal_form_needs_the_right_version() {
+        assert!(
+            pypi_name_from_versioned_tarball("cuda-core-1.2.0.tar.gz", "1.3.0").is_none(),
+            "spec version has to actually match the embedded one"
+        );
+    }
+
+    #[test]
+    fn tarball_filename_rejects_pure_name() {
+        assert!(pypi_name_from_versioned_tarball("something.tar.gz", "9.9.9").is_none());
     }
 }

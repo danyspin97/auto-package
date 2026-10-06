@@ -1047,7 +1047,7 @@ pub fn run_package(
                 let _ = ws.link_latest(&build_step.path);
                 return PipelineResult::Built { rpm_name };
             }
-            Err(osc::Error::UnresolvableDeps(deps)) => {
+            Err(osc::Error::UnresolvableDeps { names: deps, detail: _ }) => {
                 reporter.report(&Event::StepFinished {
                     step: build_step.id,
                     outcome: StepOutcome::Failed,
@@ -1743,7 +1743,7 @@ fn generate_spec(
                             // running example) — repackage the wheel itself
                             // rather than getting permanently stuck. See
                             // convention 24 Exception 3.
-                            match pypi::pick_wheel_from_json(&json, &config.arch) {
+                            match pypi::pick_wheel_from_json(&json, &config.arch, None) {
                                 Ok(wheel) => {
                                     return generate_wheel_binary_spec(
                                         config,

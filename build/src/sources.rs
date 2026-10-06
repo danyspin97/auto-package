@@ -97,6 +97,10 @@ pub enum Ecosystem {
     Python,
     /// A standalone Rust crate: cargo-packaging macros, unprefixed RPM name.
     Rust,
+    /// A plain C/C++ project (CMake or autotools, no Python/Cargo at all):
+    /// unprefixed RPM name, same as Rust — see the `plain-c-cpp-packaging`
+    /// skill.
+    PlainC,
 }
 
 impl Ecosystem {
@@ -104,7 +108,7 @@ impl Ecosystem {
     pub fn rpm_name(self, pkg: &str) -> String {
         match self {
             Ecosystem::Python => format!("python-{}", pkg.to_lowercase()),
-            Ecosystem::Rust => pkg.to_lowercase(),
+            Ecosystem::Rust | Ecosystem::PlainC => pkg.to_lowercase(),
         }
     }
 }
@@ -163,10 +167,13 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
             Ecosystem::Python
         } else if info.cargo_manifest {
             Ecosystem::Rust
+        } else if info.cmake_manifest || info.autotools_manifest {
+            Ecosystem::PlainC
         } else {
             return Err(format!(
-                "{url} contains no pyproject.toml, setup.py or Cargo.toml, so \
-                 auto-package cannot tell how to build it"
+                "{url} contains no pyproject.toml, setup.py, Cargo.toml, \
+                 CMakeLists.txt or configure.ac, so auto-package cannot tell \
+                 how to build it"
             ));
         };
 
@@ -571,6 +578,7 @@ mod tests {
     fn rust_crates_are_not_given_the_python_prefix() {
         assert_eq!(Ecosystem::Rust.rpm_name("ripgrep"), "ripgrep");
         assert_eq!(Ecosystem::Python.rpm_name("MarkupSafe"), "python-markupsafe");
+        assert_eq!(Ecosystem::PlainC.rpm_name("nlohmann-json"), "nlohmann-json");
     }
 
     #[test]

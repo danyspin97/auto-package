@@ -115,6 +115,7 @@ pub enum BuildFailure {
 pub enum SpecRejection {
     MacroInComment { line: u32, text: String },
     RpmspecParseFailed { stderr: String },
+    MissingSourceFiles { names: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

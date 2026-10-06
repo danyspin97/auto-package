@@ -143,6 +143,30 @@ fn tag_value<'a>(spec: &'a str, tag: &str) -> Option<&'a str> {
         .map(|l| l[tag.len()..].trim())
 }
 
+/// Minimal spec header: just the three fields the update sweep needs.
+///
+/// `source` is the first `Source:` or `Source0:` line verbatim, including any
+/// `%{version}` or `%{name}` macros — callers detect the ecosystem from the
+/// host, not from the expanded URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header {
+    pub name: String,
+    pub version: String,
+    pub source: Option<String>,
+}
+
+/// Parse `Name:`, `Version:`, and the first `Source:` / `Source0:` line out of
+/// a spec file's text. Returns `None` when `Name:` or `Version:` is missing —
+/// a spec without either is not something this tool should try to update.
+pub fn parse_header(spec: &str) -> Option<Header> {
+    let name = tag_value(spec, "Name:")?.to_string();
+    let version = tag_value(spec, "Version:")?.to_string();
+    let source = tag_value(spec, "Source:")
+        .or_else(|| tag_value(spec, "Source0:"))
+        .map(str::to_string);
+    Some(Header { name, version, source })
+}
+
 /// The expanded `%autosetup -n` directory for a spec with the given name and
 /// version. Used by `check_autosetup_dir` and exposed for testing.
 pub fn autosetup_expected_dir(spec: &str, name: &str, version: &str) -> Option<String> {
@@ -180,6 +204,46 @@ Version:        3.0.3
 %prep
 %autosetup -p1
 ";
+
+    #[test]
+    fn parses_header_fields_from_a_pypi_spec() {
+        let spec = "\
+Name:           python-attrs
+Version:        26.1.0
+Release:        0
+Summary:        Classes Without Boilerplate
+License:        MIT
+URL:            https://www.attrs.org/
+Source:         https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{version}.tar.gz
+";
+        let h = parse_header(spec).expect("header");
+        assert_eq!(h.name, "python-attrs");
+        assert_eq!(h.version, "26.1.0");
+        assert_eq!(
+            h.source.as_deref(),
+            Some("https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{version}.tar.gz"),
+        );
+    }
+
+    #[test]
+    fn parse_header_accepts_source0_as_fallback() {
+        let spec = "\
+Name:           foo
+Version:        1.2.3
+Source0:        https://example.com/foo-%{version}.tar.gz
+";
+        let h = parse_header(spec).expect("header");
+        assert_eq!(
+            h.source.as_deref(),
+            Some("https://example.com/foo-%{version}.tar.gz")
+        );
+    }
+
+    #[test]
+    fn parse_header_requires_name_and_version() {
+        assert!(parse_header("Version: 1.0\n").is_none());
+        assert!(parse_header("Name: foo\n").is_none());
+    }
 
     #[test]
     fn explicit_n_is_expanded() {

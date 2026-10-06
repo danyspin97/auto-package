@@ -30,6 +30,12 @@ const TAIL_FRAMES: usize = 4;
 /// `+ ` xtrace lines to keep before a shell error — enough to show what ran.
 const XTRACE_CONTEXT: usize = 8;
 
+/// Indented continuation lines to keep after a bare `error:`/`warning:` line —
+/// enough to show a file list like `Installed (but unpackaged) file(s)
+/// found:` actually names, which rpm always puts on the lines *after* the
+/// error, never before it.
+const MAX_TRAILING_CONTEXT: usize = 20;
+
 /// What kind of failure this is. Determines how it gets quoted, and is a useful
 /// clustering key for the cross-package fix cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -225,9 +231,20 @@ fn bare_error_line(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Optio
     let phase = span_at(spans, idx)
         .map(|s| s.phase.clone())
         .unwrap_or(Phase::Setup);
+    // rpm often follows a bare `error:`/`warning:` line with the actual
+    // detail indented on the lines after it — `Installed (but unpackaged)
+    // file(s) found:` is the running example, where the offending paths
+    // (the one thing worth fixing %files over) come next, never before.
+    let end = lines[idx + 1..]
+        .iter()
+        .take(MAX_TRAILING_CONTEXT)
+        .take_while(|l| l.starts_with(char::is_whitespace))
+        .count()
+        + idx
+        + 1;
     Some(quote(
         lines,
-        (idx.saturating_sub(30), idx + 1),
+        (idx.saturating_sub(30), end),
         phase,
         mapper,
         BY_BARE_ERROR,
@@ -255,7 +272,17 @@ fn quote(
         return finish(kept, from, Genre::ShellError, phase, located_by);
     }
 
-    // Nothing recognised: drop the chatter and keep the tail.
+    // Nothing shaped like a traceback or shell error: drop the chatter and
+    // keep the tail. rpm's own post-install checks (unpackaged files,
+    // scriptlet failures, unowned directories) have a recognisable
+    // vocabulary of their own wherever they land in the log — not only
+    // inside an explicit OBS `... running NN-check-*` span, which is all
+    // `post_build_failure` above can see. rpm's unpackaged-file check in
+    // particular runs as part of core `rpmbuild` right after the last
+    // scriptlet section (tagged with whatever section that was, e.g.
+    // `%license`), never inside one of those spans, so without this check
+    // it always fell through to `bare_error_line` and got mislabelled
+    // Unknown instead of PostBuildCheck.
     let mut kept: Vec<&str> = Vec::new();
     let mut elided = 0;
     for line in region {
@@ -265,7 +292,12 @@ fn quote(
             kept.push(line);
         }
     }
-    finish(kept, elided, Genre::Unknown, phase, located_by)
+    let genre = if region.iter().any(|l| POST_BUILD_PROBLEM.is_match(l)) {
+        Genre::PostBuildCheck
+    } else {
+        Genre::Unknown
+    };
+    finish(kept, elided, genre, phase, located_by)
 }
 
 /// Keep the frames that say something; elide runs of interpreter plumbing.
@@ -459,6 +491,34 @@ mod tests {
         assert_eq!(f.genre, Genre::PythonTraceback);
         assert_eq!(f.elided, 0);
         assert!(!f.excerpt.contains("elided"));
+    }
+
+    /// Real shape from `python-duckdb`: rpm's own unpackaged-file check runs
+    /// right after the last scriptlet section (`%license` here), never
+    /// inside an OBS `... running NN-check-*` span — so there is no
+    /// `Phase::PostBuild` for `post_build_failure` to find, and this used to
+    /// fall through `bare_error_line` into `Genre::Unknown` instead of being
+    /// recognised as the same kind of failure `post_build_failure` handles.
+    #[test]
+    fn unpackaged_files_outside_a_postbuild_span_is_still_post_build_check() {
+        let lines = &[
+            "Executing(%license): /usr/bin/bash -e /var/tmp/rpm-tmp.vgFDg8",
+            "+ cp -pr /build/duckdb-1.5.6/LICENSE /buildroot/usr/share/licenses/python313-duckdb",
+            "+ exit 0",
+            "Provides: python313-duckdb = 1.5.6-3.1",
+            "Checking for unpackaged file(s): /usr/lib/rpm/check-files /buildroot",
+            "error: Installed (but unpackaged) file(s) found:",
+            "   /usr/lib/python3.13/site-packages/_duckdb.cpython-313-x86_64-linux-gnu.so",
+        ];
+        assert!(
+            !lines.iter().any(|l| l.starts_with("... running")),
+            "fixture must not contain an OBS check-scriptlet marker"
+        );
+
+        let f = run(lines);
+        assert_eq!(f.genre, Genre::PostBuildCheck);
+        assert!(f.excerpt.contains("Installed (but unpackaged)"));
+        assert!(f.excerpt.contains("_duckdb.cpython"));
     }
 
     #[test]
