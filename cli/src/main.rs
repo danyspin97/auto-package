@@ -1172,9 +1172,27 @@ fn cmd_build(
                     // ships as its own system package of the same name.
                     // Building a `python-<name>` RPM for one would only
                     // duplicate it — see `is_system_tool_alias`.
-                    !ap_build::pipeline::is_system_tool_alias(dep)
+                    let keep = !ap_build::pipeline::is_system_tool_alias(dep);
+                    if !keep {
+                        ap_core::diag!(
+                            "dep queue: dropping {dep} (redistributes a \
+                             system package of the same name — see \
+                             SYSTEM_TOOL_ALIASES)"
+                        );
+                    }
+                    keep
                 })
-                .filter(|dep| attempted_deps.insert(ap_build::osc::fuzzy_key(dep)))
+                .filter(|dep| {
+                    let fresh = attempted_deps.insert(ap_build::osc::fuzzy_key(dep));
+                    if !fresh {
+                        ap_core::diag!(
+                            "dep queue: dropping {dep} (already attempted \
+                             this run — see earlier log lines for the \
+                             outcome)"
+                        );
+                    }
+                    fresh
+                })
                 .filter(|dep| {
                     // Skip deps already resolvable in the project or any of
                     // its configured build/path projects — unless the
@@ -1231,7 +1249,24 @@ fn cmd_build(
                         // at it.
                         let statuses =
                             ap_build::osc::get_project_build_statuses(project, distro, arch, emit);
-                        return !ap_build::pipeline::status_is_resolvable(statuses.get(real_pkg));
+                        let status = statuses.get(real_pkg);
+                        let skip = ap_build::pipeline::status_is_resolvable(status);
+                        if skip {
+                            ap_core::diag!(
+                                "dep queue: dropping {dep} (already in \
+                                 {project} as {real_pkg}, status {:?} — \
+                                 treating as resolvable)",
+                                status.map(|s| s.to_string()).unwrap_or_default()
+                            );
+                        } else {
+                            ap_core::diag!(
+                                "dep queue: keeping {dep} (in {project} as \
+                                 {real_pkg} with status {:?} — not \
+                                 resolvable, retrying)",
+                                status.map(|s| s.to_string()).unwrap_or_default()
+                            );
+                        }
+                        return !skip;
                     }
 
                     // Linked / build-path projects: trust presence (see
@@ -1240,10 +1275,14 @@ fn cmd_build(
                         ap_build::osc::get_project_repo_paths(project, emit)
                     {
                         let linked = ap_build::osc::list_project_packages(&path_project, emit);
-                        if linked.iter().any(|p| {
+                        if let Some(match_name) = linked.iter().find(|p| {
                             let k = ap_build::osc::fuzzy_key(p);
                             k == rpm_key || k == bare_key
                         }) {
+                            ap_core::diag!(
+                                "dep queue: dropping {dep} (available from \
+                                 linked project {path_project} as {match_name})"
+                            );
                             return false;
                         }
                     }
@@ -1268,7 +1307,16 @@ fn cmd_build(
                         .state_root
                         .join(ap_core::run::sanitize_name(&ap_build::osc::rpm_name(dep)))
                         .join("state.json");
-                    !state_path.exists()
+                    let keep = !state_path.exists();
+                    if !keep {
+                        ap_core::diag!(
+                            "dep queue: dropping {dep} (local workspace at \
+                             {} already exists — probably mid-build via the \
+                             frontier mechanism; it keeps retrying on its own)",
+                            state_path.display()
+                        );
+                    }
+                    keep
                 })
                 .filter_map(|dep| {
                     let dep_config =
@@ -1402,8 +1450,36 @@ fn cmd_build(
                         .cloned()
                         .collect();
                     if new_deps.is_empty() {
-                        ap_core::diag!("{rpm_name} needs: {}", deps.join(", "));
-                        return Ok(());
+                        // Previously fell through to `return Ok(())` here,
+                        // which the drogon-shaped case (keeps surfacing
+                        // the SAME unresolvable deps because the agent
+                        // can't rename them to anything findable on a
+                        // forge) silently exited successful on. A target
+                        // that still needs deps was NOT built — surface
+                        // that as a failure, same shape as the frontier
+                        // path's no-progress give-up.
+                        let unbuildable = config.unbuildable_deps.join(", ");
+                        let failed = config.failed_deps.join(", ");
+                        return Err(color_eyre::eyre::eyre!(
+                            "{rpm_name} needs {} but every one has already \
+                             been attempted without success{}{}; cannot \
+                             build. Check the per-dep warnings above for \
+                             WHY each dep couldn't be queued (no PyPI \
+                             release AND no discoverable source repo is \
+                             the usual answer — pass --source-url to \
+                             point it at one).",
+                            deps.join(", "),
+                            if unbuildable.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (unbuildable: {unbuildable})")
+                            },
+                            if failed.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (failed-to-build: {failed})")
+                            },
+                        ));
                     }
                     pending_deps.extend(new_deps);
                     continue;

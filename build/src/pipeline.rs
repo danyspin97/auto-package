@@ -708,13 +708,15 @@ fn run_package_inner(
         });
 
         let emit = Emit::new(reporter, step.id);
+        // `osc::checkout` already runs `osc up` when the checkout dir
+        // exists (and freshly `osc co`s when it doesn't), so this one
+        // call brings the local tree up to date in both cases. The
+        // previous flow also ran `osc::pull` right after, which is a
+        // second `osc up` on the same directory — the server round-trip
+        // was doubled on every single build. Removed.
         let result = osc::ensure_package(&config.project, &rpm_name, &config.work_dir, emit)
             .and_then(|()| {
                 osc::checkout(&config.project, &rpm_name, &config.work_dir, emit).map(|_| ())
-            })
-            .and_then(|()| {
-                let cd = config.work_dir.join(&config.project).join(&rpm_name);
-                osc::pull(&cd, emit)
             });
 
         match result {
