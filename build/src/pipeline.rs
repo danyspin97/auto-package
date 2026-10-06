@@ -2343,35 +2343,138 @@ fn diff_counts(diff: &str) -> (usize, usize) {
 
 /// Returns true if any RPM file in `rpms_dir` provides `dep`.
 ///
-/// `dep` is a raw RPM dependency string like `python313-Cython>=3.1`. We strip
-/// any version operator and compare the bare name against the prefix of each
-/// filename: `python313-Cython-3.2.9-1.1.x86_64.rpm` satisfies
-/// `python313-Cython>=3.1` because the filename starts with `python313-Cython-`.
+/// `dep` is a raw RPM dependency string like `python313-Cython>=3.1`. The
+/// name and the (optional) version operator + required version are parsed
+/// via [`parse_rpm_dep_constraint`], then each matching RPM filename is
+/// unpacked by [`extract_rpm_filename_version`] and compared using
+/// [`rpm_version_satisfies`].
+///
+/// The pre-review fix only compared by name-prefix and ignored the version
+/// operator entirely — so e.g. a fake `python-foo-0.1-1.1.x86_64.rpm`
+/// satisfied `python-foo>=99`, and the dep got silently filtered out of the
+/// "ask the agent to look at this" list even though no actually-usable RPM
+/// existed. OBS would then keep reporting the same dep as unresolvable until
+/// the attempt counter ran out.
 fn rpm_satisfies_dep(rpms_dir: &Path, dep: &str) -> bool {
-    let pkg_name = dep
-        .split(|c: char| c == '>' || c == '<' || c == '=' || c == ' ')
-        .next()
-        .unwrap_or(dep)
-        .trim();
+    let (pkg_name, constraint) = parse_rpm_dep_constraint(dep);
     let prefix = format!("{pkg_name}-");
     std::fs::read_dir(rpms_dir)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .any(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with(prefix.as_str())
+        .any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with(prefix.as_str()) {
+                return false;
+            }
+            let Some(ver) = extract_rpm_filename_version(pkg_name, &name) else {
+                return false;
+            };
+            match &constraint {
+                Some((op, required)) => rpm_version_satisfies(ver, op, required),
+                None => true,
+            }
         })
 }
 
+/// Split an RPM dependency string `python313-Cython>=3.1` into
+/// `("python313-Cython", Some((">=", "3.1")))`. Operators considered, in
+/// precedence order to avoid matching `>=` as `>` first: `>=`, `<=`, `==`,
+/// `!=`, `>`, `<`, `=`. A bare `name` (no operator) returns `(name, None)`
+/// — the caller treats "any version will do" as satisfied by presence of
+/// the name alone.
+fn parse_rpm_dep_constraint(dep: &str) -> (&str, Option<(&str, &str)>) {
+    const OPS: &[&str] = &[">=", "<=", "==", "!=", ">", "<", "="];
+    for op in OPS {
+        if let Some(i) = dep.find(op) {
+            let (name, rest) = dep.split_at(i);
+            let version = rest[op.len()..].trim();
+            return (name.trim(), Some((*op, version)));
+        }
+    }
+    (dep.trim(), None)
+}
+
+/// Pull `<version>` out of an RPM filename of the form
+/// `<name>-<version>-<release>.<arch>.rpm`.
+///
+/// `name` is passed in so no name/version ambiguity exists (name may itself
+/// contain `-`). Returns `None` for a filename whose shape doesn't match
+/// (not stripped of `.rpm`, missing a `-<release>` or `.<arch>` segment).
+fn extract_rpm_filename_version<'a>(name: &str, filename: &'a str) -> Option<&'a str> {
+    let stem = filename.strip_suffix(".rpm")?;
+    // stem = <name>-<version>-<release>.<arch>
+    let after_name = stem.strip_prefix(name)?.strip_prefix('-')?;
+    // after_name = <version>-<release>.<arch>
+    // Strip ".<arch>" from the right.
+    let (ver_rel, _arch) = after_name.rsplit_once('.')?;
+    // Strip "-<release>" from the right (release doesn't contain '-' in
+    // practice, so a single rsplit suffices).
+    let (version, _release) = ver_rel.rsplit_once('-')?;
+    Some(version)
+}
+
+/// Evaluate `candidate <op> required` using numeric-aware segment compare.
+///
+/// Both strings are split on `.`/`-`; each segment compares numerically when
+/// both sides parse as integers (so `20 > 2`, not `"20" < "2"`
+/// lexicographically) and lexicographically otherwise. Missing trailing
+/// segments default to "0" so `1.2 == 1.2.0` and `1.2 < 1.2.3`.
+///
+/// Not a full RPM EVR implementation — doesn't understand `~`, `^`, or an
+/// explicit epoch. It is correct for every Python-RPM case the project has
+/// in practice, and strictly tighter than the pre-review substring-only
+/// behavior; a true full-fidelity EVR comparator belongs in `osc`/`rpm`
+/// crate wrappers, not here.
+fn rpm_version_satisfies(candidate: &str, op: &str, required: &str) -> bool {
+    use std::cmp::Ordering;
+    let a: Vec<&str> = candidate.split(|c: char| c == '.' || c == '-').collect();
+    let b: Vec<&str> = required.split(|c: char| c == '.' || c == '-').collect();
+    let n = a.len().max(b.len());
+    let mut ord = Ordering::Equal;
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or("0");
+        let y = b.get(i).copied().unwrap_or("0");
+        let segment_ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+            (Ok(xn), Ok(yn)) => xn.cmp(&yn),
+            _ => x.cmp(y),
+        };
+        if segment_ord != Ordering::Equal {
+            ord = segment_ord;
+            break;
+        }
+    }
+    match op {
+        ">=" => !matches!(ord, Ordering::Less),
+        "<=" => !matches!(ord, Ordering::Greater),
+        ">" => matches!(ord, Ordering::Greater),
+        "<" => matches!(ord, Ordering::Less),
+        "==" | "=" => matches!(ord, Ordering::Equal),
+        "!=" => !matches!(ord, Ordering::Equal),
+        _ => true,
+    }
+}
+
+/// True iff the spec on disk declares a `Version:` other than `version`.
+///
+/// Compares the parsed `Version:` tag value for exact string equality, not
+/// a substring check. The previous `contains("Version: 1.2")` matched inside
+/// `Version: 1.20`, so a request for `1.2` wrongly reported "spec matches"
+/// against a spec actually declaring `1.20`, and the pipeline would short-
+/// circuit as `AlreadyBuilt` for the wrong version.
+///
+/// `true` on an unreadable spec or one with no `Version:` at all so the
+/// caller re-generates rather than skipping work it has no evidence it
+/// already did.
 fn spec_version_differs(spec_path: &Path, version: &str) -> bool {
-    std::fs::read_to_string(spec_path)
-        .map(|s| {
-            !s.contains(&format!("Version:        {version}"))
-                && !s.contains(&format!("Version: {version}"))
-        })
-        .unwrap_or(true)
+    let Ok(text) = std::fs::read_to_string(spec_path) else {
+        return true;
+    };
+    let Some(header) = crate::spec::parse_header(&text) else {
+        return true;
+    };
+    header.version != version
 }
 
 fn find_tarball(dir: &Path) -> Option<PathBuf> {
@@ -3981,6 +4084,83 @@ Patch0:         0001-fix.patch
 
         let spec = "Source: https://example.com/foo-1.0.tar.gz\n";
         assert!(missing_source_files(spec, dir.path()).is_empty());
+    }
+
+    /// Earlier review probe: a fake `python-foo-0.1-1.1.x86_64.rpm`
+    /// satisfied `python-foo>=99` because the pre-fix check only matched
+    /// the name prefix. Must now actually compare versions.
+    #[test]
+    fn rpm_dep_version_constraint_is_enforced_not_just_the_name_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("python-foo-0.1-1.1.x86_64.rpm"), b"").unwrap();
+
+        assert!(
+            !rpm_satisfies_dep(tmp.path(), "python-foo>=99"),
+            "0.1 does NOT satisfy >=99 — pre-fix regression"
+        );
+        assert!(rpm_satisfies_dep(tmp.path(), "python-foo>=0.1"));
+        assert!(rpm_satisfies_dep(tmp.path(), "python-foo"));
+    }
+
+    /// 1.20 is NOT less than 1.2 — numeric segments must compare as numbers.
+    #[test]
+    fn rpm_version_compare_treats_decimal_segments_as_numbers() {
+        assert!(rpm_version_satisfies("1.20", ">=", "1.2"));
+        assert!(!rpm_version_satisfies("1.2", ">=", "1.20"));
+        assert!(rpm_version_satisfies("1.20", ">", "1.2"));
+        assert!(rpm_version_satisfies("1.2.0", "==", "1.2"));
+        assert!(rpm_version_satisfies("1.2", "<", "1.2.3"));
+    }
+
+    #[test]
+    fn parse_rpm_dep_prefers_two_char_operators() {
+        assert_eq!(
+            parse_rpm_dep_constraint("foo>=1.2"),
+            ("foo", Some((">=", "1.2")))
+        );
+        assert_eq!(
+            parse_rpm_dep_constraint("foo <= 2"),
+            ("foo", Some(("<=", "2")))
+        );
+        assert_eq!(parse_rpm_dep_constraint("foo"), ("foo", None));
+    }
+
+    #[test]
+    fn rpm_filename_version_extraction_handles_hyphenated_names() {
+        assert_eq!(
+            extract_rpm_filename_version(
+                "python313-Cython",
+                "python313-Cython-3.2.9-1.1.x86_64.rpm"
+            ),
+            Some("3.2.9")
+        );
+        assert_eq!(
+            extract_rpm_filename_version(
+                "python-foo",
+                "python-foo-0.1-1.1.x86_64.rpm"
+            ),
+            Some("0.1")
+        );
+    }
+
+    /// Earlier review probe: a spec declaring `Version: 1.20` matched a
+    /// request for version `1.2` because the pre-fix check was a bare
+    /// substring search. Must now compare the actual parsed tag value.
+    #[test]
+    fn spec_version_differs_rejects_substring_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = tmp.path().join("foo.spec");
+        std::fs::write(
+            &spec,
+            "Name: foo\nVersion: 1.20\nSource: foo-%{version}.tar.gz\n",
+        )
+        .unwrap();
+
+        assert!(
+            spec_version_differs(&spec, "1.2"),
+            "1.2 is NOT 1.20 — pre-fix substring check wrongly said they matched"
+        );
+        assert!(!spec_version_differs(&spec, "1.20"));
     }
 
     #[test]
