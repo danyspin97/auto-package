@@ -357,18 +357,130 @@ fn pick_wheel<'a>(
     arch: &str,
     single_locked_flavor_abi: Option<&str>,
 ) -> Option<&'a RawFile> {
-    let wheels = || {
+    let installable = || {
         urls.iter().filter(|f| {
             f.packagetype == "bdist_wheel"
                 && !f.yanked
-                && f.filename.ends_with(".whl")
-                && wheel_is_flavor_agnostic(&f.filename, single_locked_flavor_abi)
+                && wheel_is_installable(&f.filename, arch, single_locked_flavor_abi)
         })
     };
-    wheels()
+    // Prefer the most-portable `-none-any.whl` among the installable set,
+    // then anything else that passes. Previously the fallback chain ended in
+    // `wheels().next()` (any wheel of the right ABI, regardless of its
+    // platform or Python tag), which the Oct 6 review reproduced as:
+    //   - an aarch64 request accepting `py3-none-win_amd64`,
+    //   - a Python 3.13-locked project accepting `py2-none-any`.
+    // The platform/Python checks are inside `wheel_is_installable` now, so
+    // nothing incompatible can land in `installable()` to fall back onto.
+    installable()
         .find(|f| f.filename.ends_with("-none-any.whl"))
-        .or_else(|| wheels().find(|f| f.filename.contains(arch)))
-        .or_else(|| wheels().next())
+        .or_else(|| installable().next())
+}
+
+/// Full PEP 425 / PEP 600 tag-triple compatibility check: a wheel's Python
+/// tag, ABI tag, AND platform tag must all be installable on the target.
+///
+/// Composed of three independent predicates — `wheel_is_flavor_agnostic`
+/// (ABI), [`wheel_python_is_installable`] (Python tag), and
+/// [`wheel_platform_matches_linux_arch`] (platform tag). The Oct 6 review
+/// found this check previously existed only for the ABI tag, so a wheel like
+/// `py3-none-win_amd64` passed every filter on an aarch64 Linux target and
+/// got silently repackaged into the spec; now the whole triple is validated
+/// up front and the pick fails loudly rather than producing a broken binary.
+fn wheel_is_installable(
+    filename: &str,
+    arch: &str,
+    single_locked_flavor_abi: Option<&str>,
+) -> bool {
+    let Some((python, abi, platform)) = split_wheel_tags(filename) else {
+        return false;
+    };
+    wheel_is_flavor_agnostic(filename, single_locked_flavor_abi)
+        && wheel_python_is_installable(python, abi, single_locked_flavor_abi)
+        && wheel_platform_matches_linux_arch(platform, arch)
+}
+
+/// Split a wheel filename into its (Python tag, ABI tag, platform tag)
+/// triple, as the last three `-`-separated segments before `.whl`. Returns
+/// `None` for a non-wheel filename or one that doesn't have those segments.
+fn split_wheel_tags(filename: &str) -> Option<(&str, &str, &str)> {
+    let stem = filename.strip_suffix(".whl")?;
+    let (rest, platform) = stem.rsplit_once('-')?;
+    let (rest, abi) = rest.rsplit_once('-')?;
+    let (_, python) = rest.rsplit_once('-')?;
+    Some((python, abi, platform))
+}
+
+/// Does this wheel's platform tag describe a filesystem layout installable
+/// on `arch`-architecture Linux?
+///
+/// `any` is universal. The three Linux platform families — the historical
+/// `linux_<arch>`, the baseline-pegged `manylinux*_<arch>`, and the
+/// musl-targeted `musllinux_*_<arch>` — all end in `_<arch>`. Everything
+/// else (`win_amd64`, `macosx_*`, `android_*`, ...) is not an openSUSE
+/// target. A compressed platform tag like
+/// `manylinux1_x86_64.manylinux_2_17_x86_64` is PEP 425's way of listing
+/// multiple compatible platforms in one wheel; the `.`-split handles that.
+pub(crate) fn wheel_platform_matches_linux_arch(tag: &str, arch: &str) -> bool {
+    if tag == "any" {
+        return true;
+    }
+    let suffix = format!("_{arch}");
+    tag.split('.').any(|p| {
+        let is_linux = p.starts_with("linux_")
+            || p.starts_with("manylinux")
+            || p.starts_with("musllinux_");
+        is_linux && p.ends_with(&suffix)
+    })
+}
+
+/// Does this wheel's Python tag describe an interpreter the openSUSE spec
+/// will build for?
+///
+/// Three admitted shapes:
+///   - `py<N>` / `py<N>.py<M>` — pure Python language level. `py3`/`py3x`
+///     admitted; `py2` refused (we never build Python 2 flavors).
+///   - `cp<XYZ>` — specific CPython version. Only safe when either (a) the
+///     project is locked to exactly this flavor
+///     (`single_locked_flavor_abi`), which is the same gate
+///     `wheel_is_flavor_agnostic` enforces for the ABI tag, or (b) the ABI
+///     tag is `abi3` (CPython's forward-compatible stable ABI), in which
+///     case the wheel installs under any CPython ≥ the tagged version.
+///   - Compressed `.`-separated combinations of either admitted shape.
+///
+/// Everything else — `py2*`, PyPy's `pp*`, Jython's `jp*`, IronPython's
+/// `ip*`, anything we don't recognise — is refused. The Oct 6 review probed
+/// this with a `py2-none-any` wheel being accepted for a Python 3.13 build.
+pub(crate) fn wheel_python_is_installable(
+    tag: &str,
+    abi: &str,
+    single_locked_flavor_abi: Option<&str>,
+) -> bool {
+    tag.split('.').any(|p| {
+        if let Some(ver) = p.strip_prefix("py") {
+            // `py<N>` or `py<N><M>` — language-level tag. First digit must
+            // be '3' or newer (never Python 2).
+            ver.chars().next().is_some_and(|c| c.is_ascii_digit() && c >= '3')
+        } else if let Some(ver) = p.strip_prefix("cp") {
+            // CPython-locked. Accept iff the project is pinned to exactly
+            // this flavor OR the wheel uses the stable ABI (`abi3`) and we
+            // have *some* CPython flavor configured to install into. A
+            // bare `cp313` wheel against a dual-flavor project with no
+            // single lock stays refused — same reasoning as
+            // `wheel_is_flavor_agnostic`.
+            if Some(p) == single_locked_flavor_abi {
+                return true;
+            }
+            if abi == "abi3" {
+                // Must still have a plausible digit-shape Python version
+                // (not `cpABC`) and be an openSUSE-era Python (>= 3).
+                return ver.chars().next().is_some_and(|c| c == '3');
+            }
+            false
+        } else {
+            false
+        }
+    })
 }
 
 /// Whether a wheel's ABI tag makes it safe to repackage as a single file,
@@ -377,28 +489,27 @@ fn pick_wheel<'a>(
 /// sometimes more), or because the project builds for only one flavor and
 /// this wheel is locked to exactly that one.
 ///
-/// A wheel filename's last three `-`-separated components are its Python
-/// tag, ABI tag, and platform tag. ABI tag `none` means no CPython C-API
-/// dependency at all — pure Python, or (the shape every NVIDIA CUDA toolkit
-/// wheel this fallback was built for uses) a native library loaded via
-/// `dlopen`/`ctypes` rather than compiled as a Python C extension — so the
-/// same file installs correctly under any flavor. A `cpXYZ` ABI tag
-/// (`cp313`, `cp310t`, ...) means the opposite: it was compiled against one
-/// specific CPython's C API. Picking one of those and repackaging it as if
-/// it worked everywhere produces a package that is broken for every flavor
-/// except the one it happened to be built for — better to find no usable
-/// wheel at all than a silently wrong one (Triton is the real example: it
-/// publishes wheels, but one per CPython version with no universal one, so
-/// this fallback must refuse rather than pick an arbitrary `cp3xx` build) —
-/// *unless* `single_locked_flavor_abi` says this project only ever builds
-/// for the one flavor this exact wheel is locked to, in which case there is
-/// no second flavor left for it to be broken under.
+/// ABI tag `none` means no CPython C-API dependency at all — pure Python, or
+/// (the shape every NVIDIA CUDA toolkit wheel this fallback was built for
+/// uses) a native library loaded via `dlopen`/`ctypes` rather than compiled
+/// as a Python C extension — so the same file installs correctly under any
+/// flavor. `abi3` is similar: a stable CPython ABI that works across every
+/// CPython 3.x. A `cpXYZ` ABI tag (`cp313`, `cp310t`, ...) means the
+/// opposite: compiled against one specific CPython's C API. Picking one and
+/// repackaging it as if it worked everywhere produces a package that is
+/// broken for every flavor except the one it happened to be built for —
+/// better to find no usable wheel at all than a silently wrong one (Triton
+/// is the real example: it publishes wheels, but one per CPython version
+/// with no universal one, so this fallback must refuse rather than pick an
+/// arbitrary `cp3xx` build) — *unless* `single_locked_flavor_abi` says this
+/// project only ever builds for the one flavor this exact wheel is locked
+/// to, in which case there is no second flavor left for it to be broken
+/// under.
 fn wheel_is_flavor_agnostic(filename: &str, single_locked_flavor_abi: Option<&str>) -> bool {
-    let stem = filename.strip_suffix(".whl").unwrap_or(filename);
-    match stem.rsplitn(3, '-').collect::<Vec<_>>().as_slice() {
-        [_platform, abi, _rest] => *abi == "none" || Some(*abi) == single_locked_flavor_abi,
-        _ => false,
-    }
+    let Some((_python, abi, _platform)) = split_wheel_tags(filename) else {
+        return false;
+    };
+    abi == "none" || abi == "abi3" || Some(abi) == single_locked_flavor_abi
 }
 
 /// The best upstream URL, preferring the project's own page over its host.
@@ -860,12 +971,85 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_any_wheel_when_none_match_the_arch() {
-        // No aarch64 build in the fixture — still returns the one wheel there is
-        // rather than failing outright.
-        let wheel =
-            pick_wheel_from_json(MARKUPSAFE, "aarch64", None).expect("falls back to the only wheel");
-        assert_eq!(wheel.filename, "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl");
+    fn refuses_the_wrong_arch_rather_than_falling_back_to_whatever_wheel_exists() {
+        // The fixture only ships an x86_64 wheel. An aarch64 request used to
+        // silently return that x86_64 wheel ("falls back to the only wheel")
+        // and let the spec-generation code paper over the mismatch, which
+        // the Oct 6 review probed as `py3-none-win_amd64` being accepted for
+        // an aarch64 target. Now the pick fails outright so the agent can
+        // report "no usable upstream wheel" instead of generating a broken
+        // package.
+        let err = pick_wheel_from_json(MARKUPSAFE, "aarch64", None)
+            .expect_err("the only wheel is x86_64; aarch64 must refuse it");
+        assert!(matches!(err, Error::NoWheel { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn refuses_a_wheel_whose_platform_tag_is_not_linux() {
+        // The win_amd64 case from the Oct 6 review: a `py3-none-win_amd64`
+        // wheel passed every filter when the project arch was aarch64 (or
+        // anything non-win), because the previous fallback ended at
+        // `wheels().next()` with no platform validation at all.
+        let json = MARKUPSAFE.replace(
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
+            "markupsafe-3.0.3-py3-none-win_amd64.whl",
+        );
+        assert!(matches!(
+            pick_wheel_from_json(&json, "x86_64", None),
+            Err(Error::NoWheel { .. }),
+        ));
+        assert!(matches!(
+            pick_wheel_from_json(&json, "aarch64", None),
+            Err(Error::NoWheel { .. }),
+        ));
+    }
+
+    #[test]
+    fn refuses_a_wheel_whose_python_tag_is_python_2() {
+        // The `py2-none-any` case from the Oct 6 review: the ABI check
+        // alone said "none, OK" and the universal `any` platform passed,
+        // but the wheel's Python tag was py2 and no openSUSE spec this
+        // project writes builds for Python 2.
+        let json = MARKUPSAFE.replace(
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
+            "markupsafe-3.0.3-py2-none-any.whl",
+        );
+        assert!(matches!(
+            pick_wheel_from_json(&json, "x86_64", None),
+            Err(Error::NoWheel { .. }),
+        ));
+        // The locked-flavor variant must also reject it — the lock covers
+        // the ABI, not the language level.
+        assert!(matches!(
+            pick_wheel_from_json(&json, "x86_64", Some("cp313")),
+            Err(Error::NoWheel { .. }),
+        ));
+    }
+
+    #[test]
+    fn accepts_a_compressed_platform_tag_covering_our_arch() {
+        // PEP 425 allows a wheel to list several compatible platforms in
+        // one `.`-separated tag. A `manylinux1_x86_64.manylinux_2_17_x86_64`
+        // wheel is installable on x86_64 even though neither segment is the
+        // exact tag osc/zypper would print.
+        let json = MARKUPSAFE.replace(
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
+            "markupsafe-3.0.3-py3-none-manylinux1_x86_64.manylinux_2_17_x86_64.whl",
+        );
+        let wheel = pick_wheel_from_json(&json, "x86_64", None).expect("compressed tag OK");
+        assert!(wheel.filename.contains("manylinux"));
+    }
+
+    #[test]
+    fn accepts_an_abi3_wheel_regardless_of_its_cp_tag() {
+        // A stable-ABI wheel tagged `cp310-abi3-...` installs under every
+        // CPython 3.x, so no single-flavor lock is needed.
+        let json = MARKUPSAFE.replace(
+            "markupsafe-3.0.3-py3-none-manylinux_2_5_x86_64.whl",
+            "markupsafe-3.0.3-cp310-abi3-manylinux_2_17_x86_64.whl",
+        );
+        let wheel = pick_wheel_from_json(&json, "x86_64", None).expect("abi3 is universal");
+        assert!(wheel.filename.contains("abi3"));
     }
 
     #[test]
