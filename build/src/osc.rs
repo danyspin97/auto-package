@@ -15,6 +15,28 @@ fn anywhere() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
 }
 
+/// Fired at most once per process the first time `rpmspec --parse` is
+/// invoked, surfacing the known host-vs-target-repo macro-mismatch gap the
+/// 2026-10-06 external review flagged. Behavior is unchanged — this just
+/// tells the user to treat a passing `rpmspec` as a cheap syntax check, not
+/// as a reproduction of what the OBS worker will do.
+fn emit_host_macro_warning(emit: Emit<'_>) {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        emit.reporter.report(&Event::Warning {
+            step: emit.step,
+            message:
+                "`rpmspec --parse` validates specs using host RPM macros, not \
+                 the target OBS build repo's macros — a clean parse here does \
+                 not guarantee the OBS worker will see the same expansions \
+                 (e.g. `%python3_sitelib`, `%python_module`, `%suse_version`). \
+                 Treat it as a syntax check, not a reproduction."
+                    .to_string(),
+        });
+    });
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("could not run osc: {0}")]
@@ -915,7 +937,20 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 ///
 /// Judges on exit status only (warnings in stderr are not treated as failures).
 /// Returns the expanded spec on success (stdout from `rpmspec --parse`).
+///
+/// **Caveat (flagged by the 2026-10-06 external review):** `rpmspec` expands
+/// macros using the **host** RPM configuration, not the target build repo's
+/// configuration. A spec that `rpmspec --parse`s cleanly on this machine can
+/// still fail to parse (or expand to different Requires / BuildRequires) on
+/// the OBS build worker if the host's macro set diverges from the target
+/// distro's — `%python3_sitelib`, `%python_module`, `%suse_version` and the
+/// like are all host-local here. The agent still relies on this as a cheap
+/// pre-flight syntax check; the one-shot [`emit_host_macro_warning`] call
+/// below surfaces the gap to the user. A durable fix would require
+/// containerized validation against the target repo's rpm-config.
 pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> {
+    emit_host_macro_warning(emit);
+
     let out = proc::capture(
         "rpmspec",
         &["--parse", &spec_path.to_string_lossy()],
