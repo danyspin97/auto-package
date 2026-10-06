@@ -160,9 +160,20 @@ impl PkgState {
         std::fs::write(ws.state_json(), s)
     }
 
+    /// Does state.json record a GREEN build of this version?
+    ///
+    /// Only `success` qualifies. `wheel-only` previously counted too, but
+    /// the Sep review (reproduced in the Oct follow-up) called that out:
+    /// the generation branch that writes `wheel-only` ALSO returns
+    /// `PipelineResult::Failed { reason: "wheel-only package - candidates: ..." }`.
+    /// So the state tag and the pipeline result disagree — a package the
+    /// pipeline reports as failed looks "already built" to the very next
+    /// `select_target` call, which then skips it forever and anything
+    /// that depends on it is unresolvable with no visible retry.
+    /// `wheel-only` is a terminal failure marker, not a success.
     pub fn is_built(&self, version: &str) -> bool {
         self.last_built_version.as_deref() == Some(version)
-            && matches!(self.last_outcome.as_deref(), Some("success") | Some("wheel-only"))
+            && self.last_outcome.as_deref() == Some("success")
     }
 
     pub fn is_reviewed(&self, version: &str, spec_content: &str) -> bool {
@@ -334,8 +345,11 @@ pub fn select_target(
     // the signal OBS itself uses to consider a package "available".
     //
     // It's also resolvable if its local state.json records a prior
-    // "wheel-only" or "success" outcome — wheel-only packages can't be built
-    // from source and should not be re-selected on every run.
+    // "success" outcome. (`wheel-only` state is a terminal FAILURE marker,
+    // not a success — see `PkgState::is_built`'s doc comment — so it does
+    // not count here. A wheel-only package stays unresolved and
+    // re-selected until it either becomes genuinely buildable from source
+    // or the top-level retry gives up on it.)
     // `osc::rpm_name` is only a guess — openSUSE has no single deterministic
     // rule for how a PyPI name's separators map to the RPM name (see its doc
     // comment: `pydantic_core` is packaged as `python-pydantic-core`, but
@@ -3935,6 +3949,42 @@ mod tests {
     /// upgrading past this change would lose their whole package state).
     /// It must also round-trip, so the next run reads back exactly what the
     /// crashing run wrote.
+    /// Earlier review probe: `wheel-only` state counted as built. But the
+    /// generation branch that writes `wheel-only` also returns
+    /// `PipelineResult::Failed` — treating the recorded tag as success
+    /// made the pipeline-failed package look resolved to the next
+    /// `select_target` call, silently blocking every dependent build
+    /// forever.
+    #[test]
+    fn wheel_only_outcome_is_not_a_built_state() {
+        let state = PkgState {
+            last_built_version: Some("1.2.3".into()),
+            last_outcome: Some("wheel-only".into()),
+            last_failure_reason: None,
+            reviewed_version: None,
+            reviewed_spec_hash: None,
+        };
+        assert!(
+            !state.is_built("1.2.3"),
+            "wheel-only is a terminal failure marker, not a success"
+        );
+    }
+
+    #[test]
+    fn only_success_is_a_built_state() {
+        let make = |outcome: &str| PkgState {
+            last_built_version: Some("1.0".into()),
+            last_outcome: Some(outcome.into()),
+            last_failure_reason: None,
+            reviewed_version: None,
+            reviewed_spec_hash: None,
+        };
+        assert!(make("success").is_built("1.0"));
+        assert!(!make("failed").is_built("1.0"));
+        assert!(!make("wheel-only").is_built("1.0"));
+        assert!(!make("something-else").is_built("1.0"));
+    }
+
     #[test]
     fn pkg_state_round_trips_and_tolerates_the_missing_failure_reason_field() {
         let legacy = r#"{"last_built_version":"1.2.3","last_outcome":"success"}"#;
