@@ -1981,6 +1981,117 @@ package whose build backend happens to be maturin — that's convention 4's
 `maturin-packaging` skill instead. A package with both Cargo and Python
 components mixes the two skills' rules freely."#;
 
+/// Workflow/header/cleanup boilerplate that, like [`CONVENTIONS`], is
+/// identical on every turn regardless of package, task, or attempt — kept as
+/// a separate constant (rather than folded into `CONVENTIONS` itself) only
+/// because its numbered lists would otherwise collide with
+/// `conventions_are_numbered_consecutively_from_one`'s check that the real
+/// conventions number 1..n with no gaps or repeats. Combined with
+/// `CONVENTIONS` in [`static_system_prompt`].
+const STATIC_WORKFLOW: &str = r#"
+CRITICAL: NEVER delete the spec file completely. You can edit it, but it must
+remain present. Deleting it will break the build system.
+
+### Finding Missing C Headers and Libraries
+
+When a build fails with "fatal error: <header.h>: No such file or directory" or
+linker errors about missing libraries:
+
+1. **Search for the providing package**: Use `zypper search --provides --match-exact "/usr/include/<header.h>"`
+or `zypper what-provides '<library>.so*'` to find which package provides the missing file.
+
+2. **Add the -devel package**: C headers are typically in -devel packages.
+For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
+
+3. **Common patterns**:
+- `Python.h: No such file` → add `BuildRequires: %{python_module devel}`
+- `pkg-config` errors → add `BuildRequires: pkg-config` or `pkgconfig(<name>)`
+- Library linking errors → search for the library and add its -devel package
+- CUDA headers/libraries → add `BuildRequires: cuda-devel` and `cuda-runtime`
+
+4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check
+the build log for hints about which library the build system is trying to find.
+
+If zypper finds nothing, this is convention 27's territory: report the package in
+`unresolvable_packages` rather than working around it.
+
+## Source Files and Cleanup
+
+Before finishing, check for untracked files and source availability:
+
+1. **Check untracked files**: Run `osc status` in the package directory to see
+untracked files (marked with `?`).
+2. **Handle each untracked file**:
+- If it's a legitimate source file needed for the build, add it to the spec with
+`Source<N>:` (where N is the next available number).
+- If it's a generated file, build artifact, or not needed, delete it with `rm`.
+- **IMPORTANT**: Avoid tarballs of different versions of the current package
+(these are leftovers from previous attempts). Delete them unless they're
+explicitly referenced in the spec.
+3. **Verify all sources exist**: Read the spec and check that every `Source:` and
+`Source<N>:` line points to a file that actually exists in the package directory.
+Use `ls` to verify files exist. Missing sources will cause the build to fail.
+4. **Examples of files to DELETE**:
+- Old version tarballs: `<pkg>-1.2.3.tar.gz` when the current version is 1.2.4
+- Build artifacts: `.pyc`, `__pycache__/`, `*.egg-info/`, `.pytest_cache/`
+- Editor temporaries: `.swp`, `*~`, `.#*`
+
+## Workflow
+
+1. **Investigate FIRST**: Use your tools to gather information BEFORE editing.
+2. **Edit the spec**: Use Edit on the spec path given above (never return the
+full spec as text). You MUST call the Edit tool BEFORE setting action to
+"edited". Never describe a change in reasoning without having called Edit
+first. If you identified a fix but did not apply it, set action to
+"no_change" and explain why.
+3. **Check sources and cleanup**: see "Source Files and Cleanup" above —
+verify sources exist, handle untracked files, delete stale artifacts.
+4. **Validate**: Run `rpmspec --parse <that same path>` to verify syntax.
+Do this after your last edit, not only after the first one.
+5. **Finish**: Return a JSON object with:
+- "action": "edited", "no_change", "blocked", or "use_upstream_wheel"
+- "why": required when action is "blocked" or "use_upstream_wheel" — for the
+latter, name the exact missing compiler/SDK and quote the build.log line proving it
+(convention 28 Exception 4)
+- "reasoning": one sentence summarising what you did
+- "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.
+  REQUIRED format (each entry must name a specific file or pattern):
+  ["Read source/pyproject.toml lines 1-50",
+   "Read source/my_package.egg-info/top_level.txt",
+   "Grep 'import' in source/tests/*.py",
+   "Grep 'console_scripts' in source/setup.cfg"]
+  Generic entries like "checked the source" or "verified files" are NOT evidence.
+  Must be non-empty when action is "edited". This proves you investigated rather
+  than assumed. If you edited based on a specific file's content, that file MUST
+  appear in evidence.
+- "confidence": "high", "medium", or "low"
+- "unresolvable_packages": RPM names of packages that OBS cannot resolve and
+must be built first. **IMPORTANT**: Before listing any python-* package here,
+verify it exists on PyPI with `curl -s https://pypi.org/pypi/<name>/json`. Never
+report system tools (cmake, ninja, pkg-config, gcc) as python-* packages — fix
+the spec to use the plain package name instead."#;
+
+/// Everything sent to `claude --append-system-prompt`: [`CONVENTIONS`] plus
+/// [`STATIC_WORKFLOW`], neither of which varies by package, task, or attempt.
+///
+/// This used to be interpolated straight into the per-turn user prompt
+/// (`-p`) alongside genuinely dynamic content — package name, workspace
+/// paths, notes.md, build failure hints. Since Anthropic's prompt cache
+/// only hits on a byte-identical prefix, mixing ~140KB of unchanging
+/// instructions into a string that's different on every single call meant
+/// it could never be served from cache, on any turn, for any package. As a
+/// separate system-prompt append it becomes a stable prefix shared by every
+/// turn across every package in a run — this is the entire point of moving
+/// it here, not a stylistic preference.
+fn static_system_prompt() -> &'static str {
+    // `turn()` calls this once per agent turn — potentially hundreds of times
+    // over a single `run_package` build+fix loop — and the ~140KB result
+    // never changes within the process, so compute it once and hand out the
+    // same allocation instead of re-formatting and recopying it every call.
+    static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROMPT.get_or_init(|| format!("{CONVENTIONS}\n\n{STATIC_WORKFLOW}"))
+}
+
 // ── public types ──────────────────────────────────────────────────────────────
 
 /// Token counts and cost from one API call.
@@ -2025,13 +2136,45 @@ pub enum Error {
     Launch(std::io::Error),
 
     #[error("claude exited {code}:\n{stderr}")]
-    Failed { code: i32, stderr: String },
+    Failed { code: i32, stderr: String, stdout: String, prompt: String },
 
-    #[error("unexpected response: {0}")]
-    Parse(String),
+    #[error("unexpected response: {message}")]
+    Parse { message: String, stdout: String, prompt: String },
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl Error {
+    /// The prompt sent for the turn this error aborted, when one had already
+    /// been built — `None` only for failures that precede that point
+    /// (`Launch`, a stream-read `Io` error), which have nothing turn-specific
+    /// to show.
+    pub fn prompt(&self) -> Option<&str> {
+        match self {
+            Error::Failed { prompt, .. } | Error::Parse { prompt, .. } => Some(prompt),
+            Error::Launch(_) | Error::Io(_) => None,
+        }
+    }
+
+    /// The claude CLI's raw stdout transcript up to the point of failure, when
+    /// captured — the single most useful artifact for diagnosing a crash or a
+    /// malformed response, since it is otherwise discarded the moment this
+    /// process exits (see `turn`'s `stdout_raw` doc comment).
+    pub fn stdout(&self) -> Option<&str> {
+        match self {
+            Error::Failed { stdout, .. } | Error::Parse { stdout, .. } => Some(stdout),
+            Error::Launch(_) | Error::Io(_) => None,
+        }
+    }
+
+    /// The claude CLI's captured stderr, when any was produced.
+    pub fn stderr(&self) -> Option<&str> {
+        match self {
+            Error::Failed { stderr, .. } => Some(stderr),
+            Error::Parse { .. } | Error::Launch(_) | Error::Io(_) => None,
+        }
+    }
 }
 
 /// Confidence the model reports about its fix.
@@ -2072,6 +2215,15 @@ pub struct TurnRequest<'a> {
     pub workspace: &'a std::path::Path,
     pub pkg_name: &'a str,
     pub version: &'a str,
+    /// Whether this package is a Python project (per the `python-` RPM-name
+    /// prefix set by `Ecosystem::rpm_name`). Controls which Review checklist
+    /// the agent gets: a plain-C/C++ or Rust package has no pyproject.toml,
+    /// no `%{python_module ...}` macros, no `%python_subpackages`, so handing
+    /// it the Python-centric checklist (import name, console scripts, pytest
+    /// config, %fdupes sitelib vs. sitearch) is a wall of irrelevant work —
+    /// a real drogon run spent a whole Review turn concluding "no_change"
+    /// against a 10-item Python checklist.
+    pub is_python: bool,
     pub task: Task,
     pub attempt: usize,
     pub max_attempts: usize,
@@ -2089,9 +2241,23 @@ pub struct TurnRequest<'a> {
     pub subprojects: &'a [(String, String)],
     /// Packages OBS reported as unresolvable during the last build attempt.
     pub unresolvable_deps: &'a [String],
+    /// The raw `nothing provides <pkg> <op> <version>` / `(got version
+    /// <installed>)` lines behind `unresolvable_deps`, verbatim — `..._deps`
+    /// itself keeps only the bare package name (needed to queue it for
+    /// building), which reads identically whether the package is genuinely
+    /// missing or, as in the `setuptools<70.0.0` case that prompted this,
+    /// already present at a version this spec's own upper-bound constraint
+    /// rules out. Empty when OBS gave no version detail to show.
+    pub unresolvable_detail: &'a [String],
     /// Packages this run already tried to build, and failed to. These are the
     /// only ones it is right to work around rather than report again.
     pub failed_deps: &'a [String],
+    /// Packages confirmed to have no PyPI project and no discoverable public
+    /// source repository at all — this pipeline can never build them, no
+    /// matter how many times they're reported (almost always a proprietary
+    /// vendor SDK/compiler like NVIDIA's `cuda-devel`). See convention 28
+    /// Exception 4.
+    pub unbuildable_deps: &'a [String],
     /// Session ID from the previous turn, used to resume the claude session.
     pub session_id: Option<&'a str>,
     /// OBS checkout directory — when set, QUILT_PATCHES is pointed here so the
@@ -2110,6 +2276,13 @@ pub enum Action {
     Edited,
     NoChange,
     Blocked { why: String },
+    /// The package's own source cannot be built in this environment (e.g. it
+    /// requires a proprietary compiler/toolchain OBS cannot provide, per
+    /// convention 28 Exception 3's "environment" case) and a prebuilt wheel
+    /// exists on PyPI for this exact version. `why` is the agent's cited
+    /// evidence — the pipeline still independently verifies a wheel exists
+    /// before acting on this.
+    UseUpstreamWheel { why: String },
 }
 
 /// One tool invocation the agent made during a turn.
@@ -2149,7 +2322,7 @@ const PACKAGING_SKILLS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../pack
 const TURN_RESPONSE_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
-    "action": {"type": "string", "enum": ["edited", "no_change", "blocked"]},
+    "action": {"type": "string", "enum": ["edited", "no_change", "blocked", "use_upstream_wheel"]},
     "why": {"type": "string"},
     "reasoning": {"type": "string"},
     "evidence": {
@@ -2177,6 +2350,99 @@ struct TurnResponse {
     unresolvable_packages: Vec<String>,
 }
 
+/// Pick a usable `TurnResponse` out of a finished turn's output.
+///
+/// The normal source is the `result` event's `result` field. When the CLI
+/// aborted mid-turn (budget exhausted, time limit, SIGPIPE) that field is
+/// empty, but the model may still have called `StructuredOutput` earlier in
+/// the stream — its `input` has the same shape as the final response, so
+/// using it salvages a valid fix the pipeline would otherwise discard as
+/// "claude exited 1".
+///
+/// Last-resort: Haiku occasionally describes the structured response in prose
+/// instead of calling the tool ("I've already called the StructuredOutput tool
+/// at the end of my response. The structured output includes: `**action**:
+/// no_change`, `**unresolvable_packages**: trantor, jsoncpp, ...`"). Parse the
+/// markdown-style `**key**: value` lines so the pipeline can still queue the
+/// reported deps — otherwise the whole turn (and the four C++ libs drogon
+/// listed) is discarded for a formatting mistake.
+fn pick_turn_response(result_payload: &str, tool_calls: &[ToolCall]) -> Option<TurnResponse> {
+    if let Ok(r) = serde_json::from_str::<TurnResponse>(result_payload.trim()) {
+        return Some(r);
+    }
+    if let Some(r) = tool_calls
+        .iter()
+        .rev()
+        .find(|t| t.name == "StructuredOutput")
+        .and_then(|t| serde_json::from_str::<TurnResponse>(&t.input).ok())
+    {
+        return Some(r);
+    }
+    parse_turn_response_from_prose(result_payload)
+}
+
+/// Extract a [`TurnResponse`] from markdown prose of the form
+/// ```text
+/// - **action**: `no_change`
+/// - **reasoning**: The spec is correct ...
+/// - **evidence**: a, b, c
+/// - **confidence**: `high`
+/// - **unresolvable_packages**: `trantor`, `jsoncpp`
+/// ```
+///
+/// Only used after both JSON parse paths fail. Treats every field as optional
+/// at the parse level — missing required fields fall back to safe defaults
+/// (`action: "no_change"`, empty evidence, `confidence: "low"`) so the
+/// pipeline can at least act on whatever list the model gave; the caller
+/// still rejects a response that has no `action` marker at all.
+fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
+    fn find_field(text: &str, key: &str) -> Option<String> {
+        let needle = format!("**{key}**:");
+        let start = text.find(&needle)? + needle.len();
+        let rest = &text[start..];
+        let end = rest.find('\n').unwrap_or(rest.len());
+        Some(rest[..end].trim().to_string())
+    }
+    fn strip_wrapping(s: &str) -> String {
+        s.trim().trim_matches('`').trim().to_string()
+    }
+    fn split_list(s: &str) -> Vec<String> {
+        s.split(',')
+            .map(|v| strip_wrapping(v))
+            .filter(|v| !v.is_empty())
+            .collect()
+    }
+
+    // Require at least `action` — without it there is no shape at all, and
+    // treating a random text reply as a `no_change` would mask real bugs.
+    let action = strip_wrapping(&find_field(text, "action")?);
+    let reasoning = find_field(text, "reasoning")
+        .unwrap_or_else(|| text.trim().chars().take(500).collect());
+    let evidence = find_field(text, "evidence")
+        .map(|s| split_list(&s))
+        .unwrap_or_default();
+    let confidence_raw = find_field(text, "confidence")
+        .map(|s| strip_wrapping(&s))
+        .unwrap_or_else(|| "low".to_string());
+    let confidence = match confidence_raw.to_lowercase().as_str() {
+        "high" => Confidence::High,
+        "medium" => Confidence::Medium,
+        _ => Confidence::Low,
+    };
+    let unresolvable_packages = find_field(text, "unresolvable_packages")
+        .map(|s| split_list(&s))
+        .unwrap_or_default();
+
+    Some(TurnResponse {
+        action,
+        why: String::new(),
+        evidence,
+        reasoning,
+        confidence,
+        unresolvable_packages,
+    })
+}
+
 /// Run one agent turn. The agent has tool access to the workspace and edits
 /// `spec` in place. The caller is responsible for validating and rolling back
 /// on failure.
@@ -2193,21 +2459,27 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         "Read,Grep,Edit,Write,Skill,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch"
     };
 
-    // Escalate with the attempt number: the first 3 attempts go to the
-    // previous-generation Sonnet (cheapest), the next 3 to Sonnet 5, and
-    // everything from attempt 6 on — the packages the cheaper tiers already
-    // failed on — to Opus 5.
+    // Escalate with the attempt number: the first 2 attempts go to Haiku 4.5
+    // (cheapest), the next 3 to Sonnet 4.5, and everything from attempt 6 on —
+    // the packages the cheaper tiers already failed on — to Sonnet 5.
     let model = if req.attempt <= 2 {
-        "claude-sonnet-4-5"
+        "claude-haiku-4-5-20251001"
     } else if req.attempt <= 5 {
-        "claude-sonnet-5"
+        "claude-sonnet-4-5"
     } else {
-        "claude-opus-5"
+        "claude-sonnet-5"
     };
 
     // Cap this turn at whatever is left of the package budget, so one runaway
     // turn cannot overshoot it — the caller only checks between turns.
     let remaining_usd = (req.budget_usd - req.spent_usd).max(0.01);
+
+    // Sent via `--append-system-prompt` instead of folded into `prompt`
+    // below — see `static_system_prompt`'s doc comment for why that's what
+    // actually lets this ~140KB of unchanging instructions be served from
+    // Anthropic's prompt cache instead of re-billed as fresh input on every
+    // single turn, for every package.
+    let system_prompt = static_system_prompt();
 
     let mut cmd = Command::new("claude");
     cmd.args([
@@ -2227,6 +2499,13 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         allowed_tools,
         "--max-budget-usd",
         &format!("{remaining_usd:.4}"),
+        "--append-system-prompt",
+        system_prompt,
+        // The default system prompt's per-machine sections (cwd, env info,
+        // git status) otherwise differ across packages' checkout
+        // directories and would break cache-prefix reuse between them even
+        // with a shared `--append-system-prompt`.
+        "--exclude-dynamic-system-prompt-sections",
     ]);
     // The agent edits the spec through the checkout, not through the
     // workspace's `spec` symlink, so it needs access to both directories.
@@ -2254,9 +2533,14 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         let stderr = child.stderr.take().unwrap();
         std::thread::spawn(move || {
             use std::io::Read;
-            let mut buf = String::new();
-            let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
-            buf
+            // `read_to_string` would fail outright on any invalid UTF-8 byte
+            // and discard everything read — plausible for a crash that dumps
+            // a native backtrace or truncates mid-codepoint. Reading raw
+            // bytes and converting lossily means a crash-stderr.log is never
+            // silently empty just because one byte in it wasn't UTF-8.
+            let mut buf = Vec::new();
+            let _ = std::io::BufReader::new(stderr).read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
         })
     };
 
@@ -2285,14 +2569,30 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
 
     let mut result_event = ResultEvent::default();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    // Raw copy of every stdout line, kept independent of JSON parsing so a
+    // crash mid-stream (or an unparseable line) still leaves something to
+    // inspect — the parsed path above silently drops anything it can't read.
+    let mut stdout_raw = String::new();
     {
         use std::io::BufRead;
         let reader = std::io::BufReader::new(child.stdout.take().unwrap());
         for line in reader.lines() {
             let line = match line {
                 Ok(l) => l,
-                Err(_) => break,
+                // A read error (e.g. invalid UTF-8 from `BufRead::lines`, a
+                // broken pipe) used to break silently, leaving `stdout_raw`
+                // truncated with nothing to say why — indistinguishable from
+                // the process simply having nothing more to say. Recording
+                // the reason inline means a crash-stdout.log that stops
+                // mid-stream is diagnosable instead of a second mystery on
+                // top of the one it was captured to explain.
+                Err(e) => {
+                    stdout_raw.push_str(&format!("[stdout read error: {e}]\n"));
+                    break;
+                }
             };
+            stdout_raw.push_str(&line);
+            stdout_raw.push('\n');
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -2344,15 +2644,37 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
 
     let stderr_content = stderr_handle.join().unwrap_or_default();
     let status = child.wait().map_err(Error::Io)?;
-    if !status.success() {
-        return Err(Error::Failed {
-            code: status.code().unwrap_or(-1),
-            stderr: stderr_content,
-        });
-    }
 
-    let resp: TurnResponse = serde_json::from_str(result_event.result.trim())
-        .map_err(|e| Error::Parse(format!("bad turn JSON: {e}\nraw: {}", result_event.result)))?;
+    // Prefer the `result` event's payload (the normal success path), but fall
+    // back to the last `StructuredOutput` tool call the model emitted during
+    // the stream when it's empty or unparseable. This matters most for the
+    // budget-exhausted case: the claude CLI exits 1 and leaves
+    // `result_event.result` empty even when the model DID produce a valid
+    // `StructuredOutput` call before being cut off, and treating that as a
+    // hard package failure throws away a usable fix for no good reason.
+    let resp = match pick_turn_response(&result_event.result, &tool_calls) {
+        Some(r) => r,
+        None => {
+            return Err(if !status.success() {
+                Error::Failed {
+                    code: status.code().unwrap_or(-1),
+                    stderr: stderr_content,
+                    stdout: stdout_raw,
+                    prompt: prompt.clone(),
+                }
+            } else {
+                Error::Parse {
+                    message: format!(
+                        "no usable turn response: result event is {:?} \
+                         and no StructuredOutput tool call was made",
+                        result_event.result
+                    ),
+                    stdout: stdout_raw,
+                    prompt: prompt.clone(),
+                }
+            });
+        }
+    };
     let _ = result_event.num_turns;
 
     let usage = Usage {
@@ -2365,6 +2687,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let action = match resp.action.as_str() {
         "edited" => Action::Edited,
         "no_change" => Action::NoChange,
+        "use_upstream_wheel" => Action::UseUpstreamWheel { why: resp.why },
         _ => Action::Blocked { why: resp.why },
     };
 
@@ -2402,8 +2725,87 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
 
 // ── prompt construction ───────────────────────────────────────────────────────
 
+/// Review-prompt branch for a non-Python package (plain C/C++ CMake/autotools
+/// project, or a standalone Rust crate). The ordinary Review prompt is
+/// built around pyproject.toml, `%{python_module ...}` macros, `%pytest`,
+/// `%python_subpackages`, `%fdupes` sitelib/sitearch and so on — a wall of
+/// text that reduces to "no_change" at the first checklist item for a
+/// package that has none of those shapes (real case: drogon, run
+/// `20261005-145029-f054b0`). This branch keeps only the items that still
+/// apply (license, Source0 extension, sibling projects) and hands the rest
+/// off to the appropriate `packaging-skills/` entry.
+fn review_prompt_non_python() -> &'static str {
+    "Review the generated spec before the first build.\n\
+     \n\
+     This is NOT a Python package — the RPM name has no `python-` prefix and \
+     the generator found no Python packaging metadata under `source/`. Do not \
+     read Python packaging files, do not touch python-module macros, pytest \
+     macros, python_subpackages, or sitelib/sitearch %fdupes targets: none of \
+     them apply.\n\
+     \n\
+     ## Which skill applies\n\
+     \n\
+     Load exactly one of these up front — the detailed packaging rules live \
+     there, not in this prompt:\n\
+     \n\
+     - **`plain-c-cpp-packaging`** — CMakeLists.txt / configure.ac / \
+       meson.build at the source root. Covers `find_package`/`PKG_CHECK_MODULES` \
+       → BuildRequires lookup, shared-library SONAME subpackage split, \
+       `%ldconfig_scriptlets`, `%files devel` layout for `-devel`/`.pc`/`.so` \
+       split, and how to report missing `-devel` deps in `unresolvable_packages` \
+       (strip `lib`-prefix and `-devel` suffix: `libtrantor-devel` → `trantor`).\n\
+     - **`maturin-packaging`** — `Cargo.toml` at the root AND a `[build-system] \
+       requires` naming maturin (but the latter would normally mean `is_python` \
+       was true; load this one only if the Cargo-based build has no Python \
+       surface at all, otherwise it's a Python package after all).\n\
+     - **`rust-cargo-packaging`** — bare `Cargo.toml` at the root with no \
+       Python wrapper. Uses `_service` + cargo-vendor + `%cargo_build`/`%cargo_install`.\n\
+     \n\
+     ## Review Checklist\n\
+     \n\
+     Work through these in order. If one does not apply, say so in one clause; \
+     do not invent work.\n\
+     \n\
+     1. **License**: if the `License:` field is `FIXME` or not a valid SPDX \
+        expression, fix it from `source/LICENSE`/`source/COPYING` (convention 5).\n\
+     \n\
+     2. **Source0 extension**: `ls sdist/` and compare the actual tarball's \
+        extension against the spec's `Source0:` line — the generator sometimes \
+        writes `.zip` when the real file is `.tar.gz` (or vice versa). This \
+        fails `%prep` with 'No such file or directory' on the very first build. \
+        Fix `Source0:` to match the real filename now, before anything else \
+        depends on it.\n\
+     \n\
+     3. **BuildRequires for library deps**: list `find_package(...)` from \
+        CMakeLists.txt or `PKG_CHECK_MODULES(...)` from configure.ac, and \
+        verify each has a matching `-devel` or `pkgconfig(...)` BuildRequires \
+        in the spec. For deps NOT yet in OBS, report them in `unresolvable_packages` \
+        using the UPSTREAM project name — strip `lib`-prefix and `-devel`/`-dev` \
+        suffix (`libtrantor-devel` → `trantor`), because the resolver searches \
+        GitHub for the upstream project, not the distro's devel-package wrapping. \
+        Full details in the `plain-c-cpp-packaging` skill.\n\
+     \n\
+     4. **Shared library split**: if the project builds a `lib<name>.so.<ver>`, \
+        a proper openSUSE package splits into a runtime subpackage \
+        (`lib<name><soversion>`) carrying only the versioned `.so.*` symlinks, \
+        plus `%{name}-devel` carrying headers + `.pc` + the unversioned `.so`. \
+        See the `plain-c-cpp-packaging` skill for the exact layout and the \
+        `%ldconfig_scriptlets` lines the runtime subpackage needs.\n\
+     \n\
+     5. **Sibling projects**, if the archive holds more than one — decide the \
+        subpackage layout now, before the first build, because it changes \
+        `%build`, `%install` and every `%files` section (convention 30).\n\
+     \n\
+     6. **%check**: if there is no automated test target (no `enable_testing()` \
+        in CMakeLists.txt, no `make check` in configure.ac), note that in the \
+        spec and leave `%check` empty rather than inventing one.\n\
+     \n\
+     If a check does not apply, say so in one clause; do not invent work."
+}
+
 fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     let task_desc = match req.task {
+        Task::Review if !req.is_python => review_prompt_non_python(),
         Task::Review => {
             "Review the generated spec before the first build.\n\
              \n\
@@ -2435,7 +2837,17 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  extension against the spec's `Source0:` line — the generator sometimes writes \
                  `.zip` when the real file is `.tar.gz` (or vice versa). This fails `%prep` with \
                  'No such file or directory' on the very first build. Fix `Source0:` to match \
-                 the real filename now, before anything else depends on it.\n\
+                 the real filename now, before anything else depends on it. If fixing this \
+                 means pointing `Source0:` at a DIFFERENT filename than the one currently in \
+                 the checkout (e.g. it was a plain sdist tarball but should be the upstream \
+                 wheel itself — convention 32), editing the spec line is not the whole fix: \
+                 download the real file into the checkout and `osc add` it in the same turn. \
+                 A spec correctly pointing at a filename that does not exist on disk yet still \
+                 fails `%prep` with the exact same error, just one turn later — the checkout \
+                 does not gain a file just because the spec now names it correctly (real \
+                 example: `python-nvidia-nccl-cu13`, where the wrong tarball was deleted but \
+                 the correct 197MB wheel was never fetched in the same turn, costing an entire \
+                 extra attempt to notice and fix).\n\
              \n\
              0d. **System tools wrapped in `%{python_module ...}`**: Grep the spec's \
                  BuildRequires for `%{python_module cmake}`, `%{python_module ninja}`, or the \
@@ -2445,6 +2857,23 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  `python<NNN>-<tool>` package to resolve and the build fails dependency \
                  resolution with an empty build log. Unwrap them to plain package names: \
                  `BuildRequires: cmake` / `BuildRequires: ninja`, etc.\n\
+             \n\
+             0e. **Build-backend name in `[build-system] requires` copied verbatim, wrong**: \
+                 the generator writes a `BuildRequires: %{python_module <backend>}` line for \
+                 whatever `[build-system] requires` says, straight from pyproject.toml's own \
+                 spelling — and that spelling is exactly as likely to be the NORMALIZED name \
+                 rather than the PyPI DISPLAY name as any runtime dependency (convention 2), \
+                 except here nothing in %check ever imports it to surface the mismatch early — \
+                 dependency resolution just fails outright with an empty build log. Verify \
+                 EVERY build-backend BuildRequires against PyPI now, before the first build; \
+                 `flit_core` alone caused an otherwise-avoidable extra turn in eight separate \
+                 packages in the corpus so far — more than any other single cause of a wasted \
+                 turn found in this review. Known repeat offenders — verify these are hyphenated even \
+                 though pyproject.toml spells them with an underscore: `flit_core` → \
+                 `flit-core`, `tomli_w` → `tomli-w`, `uv_build` → `uv-build`, \
+                 `backports.zstd` → `backports-zstd` (a dot, not even an underscore). Don't \
+                 stop at this list — `curl -s https://pypi.org/pypi/<name>/json | jq .info.name` \
+                 every backend name you have not already verified this session.\n\
              \n\
              ## Main Review Checklist\n\
              \n\
@@ -2468,11 +2897,22 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 - %python_alternative %{_bindir}/<script> in %files (one per script)\n\
                 Missing ANY component will cause build failure.\n\
              \n\
-             3. **Main runtime dependencies**: diff `[project.dependencies]` (pyproject.toml) \
-                or `install_requires` (setup.cfg/setup.py) against the spec's Requires/ \
-                BuildRequires. The generator sometimes copies test/optional dependencies \
-                faithfully but drops the package's own main dependencies entirely — %check \
-                then fails to even `import` the package. Add any missing ones as \
+             3. **Main runtime dependencies** from TWO sources, same split as test \
+                dependencies below:\n\
+                a. DECLARED: diff `[project.dependencies]` (pyproject.toml) or \
+                   `install_requires` (setup.cfg/setup.py) against the spec's Requires/ \
+                   BuildRequires. Also check a top-level `requirements.txt` — some projects \
+                   declare real runtime dependencies there instead of (or in addition to) \
+                   pyproject.toml, and the generator does not always read it.\n\
+                b. UNDECLARED: grep the package's actual source code (not test files — that's \
+                   item 4) for `import`/`from ... import` naming a third-party package absent \
+                   from every declared-dependency source above. Upstream's own dependency list \
+                   is sometimes incomplete, and a declared list looking complete is not the \
+                   same as every import the real code performs actually being covered — a gap \
+                   here surfaces as %check failing to even `import` the package, one turn later \
+                   than it needed to.\n\
+                The generator sometimes copies test/optional dependencies faithfully but drops \
+                the package's own main dependencies entirely. Add any missing ones as \
                 `BuildRequires: %{python_module <name>}` (needed so %check can import them) \
                 AND `Requires: %{python_module <name>}` (needed at install time). Do NOT copy \
                 the name's casing verbatim from the dependency list — convention 2 explains \
@@ -2524,7 +2964,17 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              If the failure is in `%check`, prefer skipping the failing tests over \
              adding more dependencies — see convention 11. The hint below is a \
              heuristic extract of the failure; read build.log yourself whenever \
-             the extract looks like it caught the wrong thing."
+             the extract looks like it caught the wrong thing.\n\
+             \n\
+             Before concluding a prior fix did not work, rule out a stale build.log: \
+             compare this attempt's build.log against the previous one (md5sum, or the \
+             VM boot timestamp/line count) — if they are byte-for-byte identical, OBS \
+             has not actually rebuilt against your last commit yet, and this log says \
+             nothing about whether that fix worked. Re-run the build (or verify the fix \
+             statically, e.g. a local `rpmbuild`/`rpmspec --parse` check) instead of \
+             reverting a plausible fix on the strength of a stale log — two real cases \
+             (`triton`'s `PYTHONPATH` fix, `python-duckdb`'s `%dir` fix) were both nearly \
+             undone this way before the staleness was caught."
         }
         Task::FixAfterValidation => {
             "Fix the spec after a failed `rpmspec --parse`.\n\
@@ -2554,13 +3004,18 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     };
 
     let ws = req.workspace;
+    let source_desc = if req.is_python {
+        "THE UNPACKED SOURCE — read pyproject.toml etc. under here"
+    } else {
+        "THE UNPACKED SOURCE — CMakeLists.txt / configure.ac / Cargo.toml etc. live here"
+    };
     let mut map_lines = Vec::new();
     for (name, desc, always) in &[
         ("spec", "the spec file — see \"Editing the spec\" below", true),
         ("spec.generated", "pristine generated spec for reference", false),
         ("build.log", "full osc build log from the last attempt", false),
         ("rpmspec.txt", "rpmspec --parse stderr from the last failure", false),
-        ("source/", "THE UNPACKED SOURCE — read pyproject.toml etc. under here", false),
+        ("source/", source_desc, false),
         ("sdist/", "the extraction root; `source/` is the directory inside it", false),
         ("notes.md", "attempt journal — also inlined below", false),
     ] {
@@ -2652,7 +3107,21 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     let notes_section = if req.notes.is_empty() {
         String::new()
     } else {
-        format!("## Prior attempt journal (notes.md)\n\n{}\n\n", req.notes)
+        format!(
+            "## Prior attempt journal (notes.md)\n\n{}\n\n\
+             Before proposing a fix, check whether it matches — or reverses — something \
+             already listed above. Two or more entries here quietly flipping back and \
+             forth on the same line (e.g. an env var vs. a `-D` CMake arg for the same \
+             variable, or a package name tried both with `-` and `.`) is not \
+             progress — it means neither attempt was verified against the actual build \
+             log before the next one reverted it. If your fix would repeat or reverse a \
+             prior entry, you MUST cite concrete evidence from THIS run's build.log \
+             explaining what specifically was wrong with the earlier attempt — not just \
+             restate the same reasoning with the opposite polarity. If you cannot point to \
+             that evidence, the earlier attempt was likely never the problem; look \
+             elsewhere in the log instead of alternating between the same two guesses.\n\n",
+            req.notes
+        )
     };
 
     let bullets = |deps: &[String]| {
@@ -2662,12 +3131,28 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             .join("\n")
     };
 
+    let unresolvable_detail_section = if req.unresolvable_detail.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Raw OBS detail for the above (verbatim `nothing provides ...` / \
+             `(got version ...)` lines):\n{}\n\n\
+             Read this before assuming any name above is simply missing: if a line \
+             names a version constraint (`< X`) and the next line says OBS already \
+             `got version` something *newer* than `X`, this package is NOT missing — \
+             the repository already has it, just not at a version this constraint \
+             accepts. See item 6 below.\n\n",
+            bullets(req.unresolvable_detail),
+        )
+    };
+
     let unresolvable_section = if req.unresolvable_deps.is_empty() {
         String::new()
     } else {
         format!(
             "## Missing BuildRequires\n\n\
              OBS could not find these RPM packages in any of its repositories:\n{}\n\n\
+             {unresolvable_detail_section}\
              They are not packaged yet. **Your goal is to get this package built by \
              packaging ALL missing dependencies.** Put their names in \
              `unresolvable_packages` in your response and the build system will build \
@@ -2691,7 +3176,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              - CORRECT: `BuildRequires: patchelf`\n\
              Common system tools: cmake, ninja, pkg-config, gcc, g++, make, automake, \
              autoconf, libtool, gettext, flex, bison, patchelf.\n\
-             4. **A missing `python<NNN>-<dep>` is a flavor gap, not a new package**: \
+             4. **A missing `python<NNN>-<dep>` is USUALLY a flavor gap, not a new package**: \
              `%{{python_module <dep>}}` expands to one BuildRequires per active Python flavor \
              on this build target, and a newer flavor sometimes lacks a subpackage that older \
              flavors already have (e.g. `python314-cython` missing while `python312-cython` \
@@ -2699,10 +3184,25 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              pipeline strips the `python<NNN>-` prefix before treating a name as buildable, so \
              reporting `python314-cython` just queues a redundant duplicate build of `cython`, \
              which already exists. Leave the BuildRequires as `%{{python_module <dep>}}` in the \
-             spec; the gap closes on its own once that flavor catches up.\n\
+             spec; the gap closes on its own once that flavor catches up. **But check the raw \
+             detail above first** — if OBS's `(got version ...)` line shows a version that \
+             already satisfies (or exceeds) what a real flavor gap would need, this is item 6's \
+             case instead, and leaving the spec alone will never close it.\n\
              5. **Fix the spec**: If the spec incorrectly uses `%{{python_module <system-tool>}}`, \
              remove the macro and use the plain package name instead. Do NOT report these \
-             as unresolvable.\n\n\
+             as unresolvable.\n\
+             6. **A version constraint YOUR OWN spec wrote can make a real, present package look \
+             missing**: `nothing provides python314-setuptools < 70.0.0 (got version 80.9.0-3.3)` \
+             means OBS DOES have `setuptools` — installed 80.9.0 — but this spec's own \
+             `BuildRequires: %{{python_module setuptools < 70.0.0}}` (usually copied verbatim from \
+             `[build-system] requires` in pyproject.toml) demands something older. A rolling-release \
+             distro ships exactly one current version of a package; it can never satisfy a `<` \
+             upper bound once that version has moved past it, no matter how many times you report \
+             it. Do NOT put this name in `unresolvable_packages` — reporting it changes nothing, \
+             since the pipeline sees the package already exists. Fix the spec instead: drop the \
+             upper bound entirely (`%{{python_module setuptools}}`) and let `%check`/the actual \
+             build prove whether the newer version really breaks anything; only reach for a \
+             version-specific workaround if it demonstrably does.\n\n\
              Exception: if a package name in the spec is clearly wrong (e.g. wrong \
              capitalisation or an extra prefix), fix the name in the spec instead of \
              reporting it as unresolvable.\n\n",
@@ -2726,113 +3226,56 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         )
     };
 
+    // Ground truth the pipeline itself already verified — not a guess the
+    // agent could be wrong about — so the guidance is unconditional, unlike
+    // `failed_section`'s "skip the tests/feature" (these are required
+    // BuildRequires, not optional test deps; there is no feature to drop).
+    let unbuildable_section = if req.unbuildable_deps.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Dependencies that can never be built here\n\n\
+             These have no PyPI project and no discoverable public source \
+             repository at all — confirmed, not a guess — so this pipeline can \
+             never build them no matter how many times they're reported: \
+             {}\n\n\
+             This is almost always a proprietary vendor SDK/compiler (NVIDIA's \
+             `cuda-devel`/`cuda-runtime` are the running example — the actual \
+             CUDA compiler toolkit, which only exists as a system package this \
+             pipeline cannot create). Do NOT put any of these in \
+             `unresolvable_packages` — that restarts a cycle that can only ever \
+             end the same way. If your spec's `%build` genuinely needs one of \
+             these to compile from source, that means THIS package cannot be \
+             compiled in this environment at all: check whether PyPI publishes \
+             a prebuilt wheel for this package at this version and, if so, set \
+             action to `\"use_upstream_wheel\"` per convention 28 Exception 4 \
+             instead of continuing to report the dependency.\n\n",
+            bullets(req.unbuildable_deps),
+        )
+    };
+
     format!(
         "You are fixing an openSUSE RPM spec for the package {pkg} {version}.\n\
          Task: {task}\n\
          \n\
          {budget}\n\
          \n\
-         **GOAL**: Your ultimate objective is to get this package successfully built. \
-         When you encounter missing dependencies, report ALL of them in \
-         `unresolvable_packages` so they can be packaged. This process continues \
-         recursively — each missing dependency will be packaged, which may reveal more \
-         missing dependencies, until the entire dependency tree is satisfied and this \
-         package builds successfully.\n\
+         **GOAL**: Get this package built. Report ALL missing dependencies in \
+         `unresolvable_packages` — each gets packaged in turn, which may reveal more, \
+         recursively, until the whole dependency tree is satisfied.\n\
          \n\
          {source_note}\
          ## Workspace\n\
          {map}\n\
          \n\
          {spec_section}\
-         {conventions}\n\
-         \n\
-         CRITICAL: NEVER delete the spec file completely. You can edit it, but it must \
-         remain present. Deleting it will break the build system.\n\
-         \n\
          {subprojects}\
          {notes}\
          {unresolvable}\
          {failed}\
+         {unbuildable}\
          {context}\
-         {hint}\
-         \n\
-         ### Finding Missing C Headers and Libraries\n\
-         \n\
-         When a build fails with \"fatal error: <header.h>: No such file or directory\" or \
-         linker errors about missing libraries:\n\
-         \n\
-         1. **Search for the providing package**: Use `zypper search --provides --match-exact \"/usr/include/<header.h>\"` \
-         or `zypper what-provides '<library>.so*'` to find which package provides the missing file.\n\
-         \n\
-         2. **Add the -devel package**: C headers are typically in -devel packages. \
-         For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.\n\
-         \n\
-         3. **Common patterns**:\n\
-         - `Python.h: No such file` → add `BuildRequires: %{{python_module devel}}`\n\
-         - `pkg-config` errors → add `BuildRequires: pkg-config` or `pkgconfig(<name>)`\n\
-         - Library linking errors → search for the library and add its -devel package\n\
-         - CUDA headers/libraries → add `BuildRequires: cuda-devel` and `cuda-runtime`\n\
-         \n\
-         4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check \
-         the build log for hints about which library the build system is trying to find.\n\
-         \n\
-         If zypper finds nothing, this is convention 27's territory: report the package in \
-         `unresolvable_packages` rather than working around it.\n\
-         \n\
-         ## Source Files and Cleanup\n\
-         \n\
-         Before finishing, check for untracked files and source availability:\n\
-         \n\
-         1. **Check untracked files**: Run `osc status` in the package directory to see \
-         untracked files (marked with `?`).\n\
-         2. **Handle each untracked file**:\n\
-         - If it's a legitimate source file needed for the build, add it to the spec with \
-         `Source<N>:` (where N is the next available number).\n\
-         - If it's a generated file, build artifact, or not needed, delete it with `rm`.\n\
-         - **IMPORTANT**: Avoid tarballs of different versions of the current package \
-         (these are leftovers from previous attempts). Delete them unless they're \
-         explicitly referenced in the spec.\n\
-         3. **Verify all sources exist**: Read the spec and check that every `Source:` and \
-         `Source<N>:` line points to a file that actually exists in the package directory. \
-         Use `ls` to verify files exist. Missing sources will cause the build to fail.\n\
-         4. **Examples of files to DELETE**:\n\
-         - Old version tarballs: `{pkg}-1.2.3.tar.gz` when the current version is 1.2.4\n\
-         - Build artifacts: `.pyc`, `__pycache__/`, `*.egg-info/`, `.pytest_cache/`\n\
-         - Editor temporaries: `.swp`, `*~`, `.#*`\n\
-         \n\
-         ## Workflow\n\
-         \n\
-         1. **Investigate FIRST**: Use your tools to gather information BEFORE editing.\n\
-         2. **Edit the spec**: Use Edit on the spec path given above (never return the \
-         full spec as text). You MUST call the Edit tool BEFORE setting action to \
-         \"edited\". Never describe a change in reasoning without having called Edit \
-         first. If you identified a fix but did not apply it, set action to \
-         \"no_change\" and explain why.\n\
-         3. **Check sources and cleanup**: Verify all Source: and Source<N>: lines point \
-         to files that exist. Run `osc status` and handle untracked files (see \"Source \
-         Files and Cleanup\" above). Delete old version tarballs and build artifacts.\n\
-         4. **Validate**: Run `rpmspec --parse <that same path>` to verify syntax. \
-         Do this after your last edit, not only after the first one.\n\
-         5. **Finish**: Return a JSON object with:\n\
-         - \"action\": \"edited\", \"no_change\", or \"blocked\"\n\
-         - \"why\": required when action is \"blocked\"\n\
-         - \"reasoning\": one sentence summarising what you did\n\
-         - \"evidence\": MUST list SPECIFIC files/patterns you Read or Grepped before editing.\n\
-           REQUIRED format (each entry must name a specific file or pattern):\n\
-           [\"Read source/pyproject.toml lines 1-50\",\n\
-            \"Read source/my_package.egg-info/top_level.txt\",\n\
-            \"Grep 'import' in source/tests/*.py\",\n\
-            \"Grep 'console_scripts' in source/setup.cfg\"]\n\
-           Generic entries like \"checked the source\" or \"verified files\" are NOT evidence.\n\
-           Must be non-empty when action is \"edited\". This proves you investigated rather \n\
-           than assumed. If you edited based on a specific file's content, that file MUST \n\
-           appear in evidence.\n\
-         - \"confidence\": \"high\", \"medium\", or \"low\"\n\
-         - \"unresolvable_packages\": RPM names of packages that OBS cannot resolve and \
-         must be built first. **IMPORTANT**: Before listing any python-* package here, \
-         verify it exists on PyPI with `curl -s https://pypi.org/pypi/<name>/json`. Never \
-         report system tools (cmake, ninja, pkg-config, gcc) as python-* packages — fix \
-         the spec to use the plain package name instead.",
+         {hint}",
         pkg = req.pkg_name,
         version = req.version,
         task = task_desc,
@@ -2841,10 +3284,10 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         source_note = source_note,
         subprojects = subproject_section,
         spec_section = spec_section,
-        conventions = CONVENTIONS,
         notes = notes_section,
         unresolvable = unresolvable_section,
         failed = failed_section,
+        unbuildable = unbuildable_section,
         context = context_section,
         hint = hint_section,
     )
@@ -2882,6 +3325,7 @@ mod tests {
             workspace: ws,
             pkg_name: "cuda-python",
             version: "13.0.2",
+            is_python: true,
             task: Task::Review,
             attempt: 0,
             max_attempts: 10,
@@ -2893,7 +3337,9 @@ mod tests {
             from_repo_archive: true,
             subprojects,
             unresolvable_deps: &[],
+            unresolvable_detail: &[],
             failed_deps: &[],
+            unbuildable_deps: &[],
             session_id: None,
             checkout_dir: None,
             context: None,
@@ -2922,6 +3368,177 @@ mod tests {
         let ws = std::path::Path::new("/nonexistent-workspace");
         let prompt = build_turn_prompt(&request(ws, &[]));
         assert!(!prompt.contains("## Other projects in this archive"));
+    }
+
+    /// Regression test for the whole point of `static_system_prompt`: the
+    /// per-turn user prompt must NOT contain the static conventions/workflow
+    /// text, or re-inlining it here would silently defeat prompt caching
+    /// (Anthropic's cache only hits on a byte-identical prefix, and this
+    /// prompt differs on every call by construction — package name, spec
+    /// content, notes.md, ...). The static content belongs only in
+    /// `--append-system-prompt`, sent once per turn as its own argument.
+    #[test]
+    fn static_conventions_and_workflow_text_are_not_inlined_into_the_user_prompt() {
+        let ws = std::path::Path::new("/nonexistent-workspace");
+        let prompt = build_turn_prompt(&request(ws, &[]));
+        assert!(
+            !prompt.contains("29. Missing source code"),
+            "a CONVENTIONS entry leaked into the per-turn user prompt"
+        );
+        assert!(
+            !prompt.contains("### Finding Missing C Headers and Libraries"),
+            "STATIC_WORKFLOW leaked into the per-turn user prompt"
+        );
+    }
+
+    #[test]
+    fn static_system_prompt_carries_both_conventions_and_workflow() {
+        let combined = static_system_prompt();
+        assert!(combined.contains("29. Missing source code"));
+        assert!(combined.contains("### Finding Missing C Headers and Libraries"));
+        assert!(combined.contains("## Workflow"));
+    }
+
+    /// Real shape from a `drogon` build where the claude CLI hit its budget
+    /// cap AFTER the model had already emitted a valid `StructuredOutput`
+    /// call: the final `result` event's `result` field was empty and the CLI
+    /// exited 1, so the previous `turn()` returned `Error::Failed` and the
+    /// pipeline logged "agent error: claude exited 1" even though the model's
+    /// answer was sitting right there in the tool-call stream.
+    #[test]
+    fn pick_turn_response_falls_back_to_structured_output_tool_call() {
+        let tool_calls = vec![
+            ToolCall { name: "Read".into(), input: "{}".into() },
+            ToolCall {
+                name: "StructuredOutput".into(),
+                input: r#"{
+                    "action": "no_change",
+                    "reasoning": "deps missing — report trantor",
+                    "evidence": ["Read drogon.spec"],
+                    "confidence": "high",
+                    "unresolvable_packages": ["trantor"]
+                }"#
+                .into(),
+            },
+        ];
+        let resp = pick_turn_response("", &tool_calls)
+            .expect("fallback must salvage the StructuredOutput call");
+        assert_eq!(resp.action, "no_change");
+        assert_eq!(resp.unresolvable_packages, vec!["trantor"]);
+    }
+
+    #[test]
+    fn pick_turn_response_prefers_result_payload_over_tool_call() {
+        let tool_calls = vec![ToolCall {
+            name: "StructuredOutput".into(),
+            input: r#"{"action":"no_change","reasoning":"stale","evidence":[],"confidence":"low"}"#
+                .into(),
+        }];
+        let resp = pick_turn_response(
+            r#"{"action":"edited","reasoning":"fresh","evidence":["x"],"confidence":"high"}"#,
+            &tool_calls,
+        )
+        .expect("result payload must take priority");
+        assert_eq!(resp.action, "edited");
+        assert_eq!(resp.reasoning, "fresh");
+    }
+
+    #[test]
+    fn pick_turn_response_returns_none_when_nothing_usable() {
+        assert!(pick_turn_response("", &[]).is_none());
+        assert!(
+            pick_turn_response(
+                "",
+                &[ToolCall { name: "Read".into(), input: "{}".into() }]
+            )
+            .is_none()
+        );
+    }
+
+    /// Real-shape regression from drogon run `20261005-145029-f054b0`: Haiku
+    /// described the structured response in prose instead of calling the tool,
+    /// so both JSON paths found nothing and the four reported C++ libraries
+    /// (trantor, jsoncpp, libbrotli, yaml-cpp) got discarded. The prose parser
+    /// recovers at least the actionable `unresolvable_packages` list.
+    #[test]
+    fn pick_turn_response_parses_prose_when_tool_call_was_skipped() {
+        let text = "I've already called the StructuredOutput tool at the end of my response. \
+                    The structured output includes:\n\
+                    \n\
+                    - **action**: `no_change`\n\
+                    - **reasoning**: The spec is correct; deps missing in OBS\n\
+                    - **evidence**: Read drogon.spec, Read CMakeLists.txt\n\
+                    - **confidence**: `high`\n\
+                    - **unresolvable_packages**: `trantor`, `jsoncpp`, `libbrotli`, `yaml-cpp`\n";
+        let resp = pick_turn_response(text, &[])
+            .expect("prose fallback must salvage the four reported deps");
+        assert_eq!(resp.action, "no_change");
+        assert_eq!(resp.confidence, Confidence::High);
+        assert_eq!(
+            resp.unresolvable_packages,
+            vec!["trantor", "jsoncpp", "libbrotli", "yaml-cpp"]
+        );
+        assert_eq!(resp.evidence, vec!["Read drogon.spec", "Read CMakeLists.txt"]);
+    }
+
+    /// A non-Python package (drogon-shape: no `python-` RPM prefix) must get
+    /// the shorter non-Python Review prompt. The Python checklist mentions
+    /// pyproject.toml, `%python_module`, `%pytest` — none of which apply.
+    #[test]
+    fn review_prompt_drops_python_checklist_for_non_python_packages() {
+        let tmp = std::env::temp_dir().join("ap-build-review-nonpython-test");
+        let _ = std::fs::create_dir_all(&tmp);
+        // `source/` exists for a real review turn — make sure the workspace
+        // map description doesn't tell the agent to read pyproject.toml under
+        // a non-Python package's `source/`.
+        let _ = std::fs::create_dir_all(tmp.join("source"));
+        let subprojects: Vec<(String, String)> = Vec::new();
+        let mut req = request(&tmp, &subprojects);
+        req.is_python = false;
+        req.pkg_name = "drogon";
+        let prompt = build_turn_prompt(&req);
+        assert!(
+            prompt.contains("This is NOT a Python package"),
+            "non-Python Review prompt should announce the branch; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("plain-c-cpp-packaging"),
+            "non-Python Review prompt should point at the plain-c-cpp skill"
+        );
+        // The Python checklist's defining items must not appear:
+        for python_term in [
+            "pyproject.toml",
+            "%{python_module",
+            "%python_subpackages",
+            "%pytest",
+            "python_sitelib",
+            "console_scripts",
+        ] {
+            assert!(
+                !prompt.contains(python_term),
+                "non-Python Review prompt still contains Python-only term {python_term:?}"
+            );
+        }
+    }
+
+    /// A Python package must still get the full Python checklist.
+    #[test]
+    fn review_prompt_keeps_python_checklist_for_python_packages() {
+        let tmp = std::env::temp_dir().join("ap-build-review-python-test");
+        let _ = std::fs::create_dir_all(&tmp);
+        let subprojects: Vec<(String, String)> = Vec::new();
+        let req = request(&tmp, &subprojects); // is_python: true from request()
+        let prompt = build_turn_prompt(&req);
+        assert!(prompt.contains("pyproject.toml"));
+        assert!(prompt.contains("%{python_module"));
+    }
+
+    #[test]
+    fn prose_fallback_requires_an_action_marker() {
+        // A plain acknowledgement with no **action**: line is just chatter —
+        // treating it as `no_change` would mask real bugs upstream.
+        let text = "The review is complete. See you later.";
+        assert!(pick_turn_response(text, &[]).is_none());
     }
 
     /// Every `convention N` reference must name a convention that exists.

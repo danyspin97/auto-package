@@ -1273,7 +1273,8 @@ pub fn run_package(
                 }
 
                 match &outcome.action {
-                    crate::agent::Action::Blocked { why } => {
+                    crate::agent::Action::Blocked { why }
+                    | crate::agent::Action::UseUpstreamWheel { why } => {
                         return PipelineResult::Failed {
                             rpm_name,
                             reason: format!("agent blocked: {why}"),
@@ -1377,6 +1378,7 @@ fn agent_turn(
         workspace: ws.dir(),
         pkg_name: &config.pkg_name,
         version: &config.version,
+        is_python: config.rpm_name.starts_with("python-"),
         task: ctx.task,
         attempt: ctx.attempt,
         max_attempts: config.max_attempts,
@@ -1388,7 +1390,9 @@ fn agent_turn(
         from_repo_archive: ctx.from_repo_archive,
         subprojects: &config.subprojects,
         unresolvable_deps: ctx.unresolvable_deps,
+        unresolvable_detail: &[],
         failed_deps: &config.failed_deps,
+        unbuildable_deps: &[],
         session_id: if ctx.resume { session_id.as_deref() } else { None },
         checkout_dir: ctx.checkout_dir,
         context: ctx.context,
