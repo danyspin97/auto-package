@@ -251,12 +251,93 @@ fn owner_repo(repo_url: &str) -> Result<(String, String, String), String> {
     Ok((forge.host, forge.project_path, forge.repo_name))
 }
 
+/// Pick the right auth header for a forge API URL, if the user has set an
+/// environment variable for that forge.
+///
+/// GitHub's unauthenticated REST limit is 60 requests/hour per IP — a single
+/// `auto-package build` of a dep-heavy stack like drogon or vllm blows
+/// through that in minutes, and the next call then fails with the exact
+/// 403 the Oct 7 user report hit. A bearer token raises the ceiling to
+/// 5000/hour. Same shape for GitLab (anonymous is unmetered on some
+/// instances but tight on gitlab.com).
+///
+/// Nothing is fatal here: if no env is set we send an unauthenticated
+/// request and let the caller see any 403 as-is (now with a clearer
+/// error message, see [`describe_forge_http_error`]).
+fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
+    if url.contains("api.github.com") || url.starts_with("https://api.github.com") {
+        // GitHub accepts either `GITHUB_TOKEN` (the Actions / CLI name) or
+        // `GH_TOKEN` (the gh CLI name) — honor both so `gh auth login`
+        // works transparently.
+        for var in &["GITHUB_TOKEN", "GH_TOKEN"] {
+            if let Ok(tok) = std::env::var(var)
+                && !tok.is_empty()
+            {
+                return Some(("Authorization", format!("Bearer {tok}")));
+            }
+        }
+    } else if url.contains("gitlab") {
+        // GitLab uses the `PRIVATE-TOKEN` header for personal access
+        // tokens; `GITLAB_TOKEN` is the conventional env name
+        // (equivalent to `glab auth token`).
+        for var in &["GITLAB_TOKEN", "CI_JOB_TOKEN"] {
+            if let Ok(tok) = std::env::var(var)
+                && !tok.is_empty()
+            {
+                return Some(("PRIVATE-TOKEN", tok));
+            }
+        }
+    }
+    None
+}
+
+/// Translate a bare `url: <ureq Error>` string into a message that names
+/// the specific failure modes a forge API call usually hits — most
+/// importantly the GitHub rate-limit 403 and the auth-token
+/// 401/403 — and tells the user how to fix each one.
+fn describe_forge_http_error(url: &str, raw: &str) -> String {
+    let authed = forge_auth_header(url).is_some();
+    if raw.contains("status: 403") || raw.contains("status: 429") {
+        if authed {
+            format!(
+                "{url}: {raw} (your GITHUB_TOKEN/GITLAB_TOKEN is being \
+                 rate-limited — wait or rotate to a token with a higher \
+                 quota)"
+            )
+        } else if url.contains("api.github.com") {
+            format!(
+                "{url}: {raw} (GitHub unauthenticated REST is 60 req/hour \
+                 per IP; set GITHUB_TOKEN or GH_TOKEN to raise the ceiling \
+                 to 5000/hour, or pass --version to skip the API call)"
+            )
+        } else {
+            format!(
+                "{url}: {raw} (rate-limited; set GITLAB_TOKEN for \
+                 authenticated access, or pass --version to skip the API \
+                 call)"
+            )
+        }
+    } else if raw.contains("status: 401") {
+        format!(
+            "{url}: {raw} (the authentication token this process has for \
+             the forge was rejected — rotate it, or unset it to retry \
+             unauthenticated)"
+        )
+    } else {
+        format!("{url}: {raw}")
+    }
+}
+
 fn get_json(url: &str) -> Result<serde_json::Value, String> {
-    let body = ureq::get(url)
+    let mut req = ureq::get(url)
         .header("User-Agent", "auto-package")
-        .header("Accept", "application/json")
+        .header("Accept", "application/json");
+    if let Some((name, value)) = forge_auth_header(url) {
+        req = req.header(name, value);
+    }
+    let body = req
         .call()
-        .map_err(|e| format!("{url}: {e}"))?
+        .map_err(|e| describe_forge_http_error(url, &e.to_string()))?
         .into_body()
         .read_to_string()
         .map_err(|e| format!("{url}: {e}"))?;
@@ -507,6 +588,89 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// User-reported Oct 7 regression: `could not work out the latest
+    /// version of https://github.com/drogonframework/drogon; ...
+    /// api.github.com/.../tags?per_page=1: http status: 403`.
+    ///
+    /// 403 on the anon GitHub API means the IP has blown through the
+    /// 60-req/hour cap. Error must mention the GITHUB_TOKEN remedy so
+    /// the user doesn't have to go read the GitHub docs.
+    #[test]
+    fn describe_forge_error_names_the_github_token_remedy_on_403() {
+        // Make sure neither env var is set so the "no auth, show the fix"
+        // branch runs — tests run in parallel, so take a stable snapshot
+        // of the env and restore it at the end (never panic across the
+        // unsafe restore).
+        let saved_gh = std::env::var("GH_TOKEN").ok();
+        let saved_gh_token = std::env::var("GITHUB_TOKEN").ok();
+        // SAFETY: single-threaded within this test; restored below.
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+
+        let msg = describe_forge_http_error(
+            "https://api.github.com/repos/drogonframework/drogon/tags?per_page=1",
+            "http status: 403",
+        );
+
+        // Restore before any assertion that might panic.
+        unsafe {
+            if let Some(v) = saved_gh {
+                std::env::set_var("GH_TOKEN", v);
+            }
+            if let Some(v) = saved_gh_token {
+                std::env::set_var("GITHUB_TOKEN", v);
+            }
+        }
+
+        assert!(
+            msg.contains("GITHUB_TOKEN") && msg.contains("60 req/hour"),
+            "403 must point the user at GITHUB_TOKEN and name the rate limit; got {msg:?}"
+        );
+    }
+
+    /// With a token present, 403 means the token itself is being
+    /// rate-limited (abuse detection, hitting the 5000/hour ceiling, or
+    /// a secondary rate limit) — the fix is different, so the message
+    /// must be different.
+    #[test]
+    fn describe_forge_error_hints_rotate_token_when_authed() {
+        let saved = std::env::var("GITHUB_TOKEN").ok();
+        unsafe {
+            std::env::set_var("GITHUB_TOKEN", "ghp_fake");
+        }
+
+        let msg = describe_forge_http_error(
+            "https://api.github.com/repos/x/y/releases/latest",
+            "http status: 403",
+        );
+
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+        }
+
+        assert!(
+            msg.contains("rate-limited") && msg.contains("rotate"),
+            "authed 403 must suggest wait/rotate; got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn describe_forge_error_leaves_non_auth_errors_alone() {
+        let msg = describe_forge_http_error(
+            "https://api.github.com/repos/x/y/tags?per_page=1",
+            "http status: 500",
+        );
+        assert!(
+            msg.contains("500") && !msg.contains("GITHUB_TOKEN"),
+            "non-auth errors stay a raw passthrough; got {msg:?}"
+        );
+    }
 
     #[test]
     fn lookup_ignores_name_spelling() {
