@@ -1052,6 +1052,11 @@ fn run_package_inner(
     // ── Step: Review (freshly generated specs, or existing spec with no prior build) ──
     if !config.no_agent && (need_spec || !build_log_nonempty) && !already_reviewed {
         let spec_before = std::fs::read_to_string(&spec_path).unwrap_or_default();
+        // Full-checkout snapshot taken BEFORE the agent runs so a reject /
+        // blocked / no-change outcome can roll back every top-level
+        // checkout edit, not just the spec. See `CheckoutSnapshot` and
+        // `apply_turn_outcome`'s Blocked / NoChange arms.
+        let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
 
         let turn = agent_turn(
             TurnCtx {
@@ -1100,6 +1105,7 @@ fn run_package_inner(
                     label: "Review — pre-build",
                     attempt: 0,
                     notes_path: ws.notes(),
+                    snapshot: Some(&checkout_snapshot),
                 },
                 &outcome,
                 reporter,
@@ -1130,6 +1136,7 @@ fn run_package_inner(
     {
         let clean = strip_and_rewrite(&spec_path);
         let extract = extract_build_log(&ws.build_log(), &sdist_top_level, reporter, None);
+        let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
 
         let turn = agent_turn(
             TurnCtx {
@@ -1184,6 +1191,7 @@ fn run_package_inner(
                     label: "PreFix — restart from previous log",
                     attempt: attempts + 1,
                     notes_path: ws.notes(),
+                    snapshot: Some(&checkout_snapshot),
                 },
                 &outcome,
                 reporter,
@@ -1264,6 +1272,7 @@ fn run_package_inner(
                          it should exist — see \"Source Files and Cleanup\" below.",
                         missing.join(", ")
                     );
+                    let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                     let turn = agent_turn(
                         TurnCtx {
                             label: "agent",
@@ -1302,6 +1311,7 @@ fn run_package_inner(
                                     label: "missing source files",
                                     attempt: attempts,
                                     notes_path: ws.notes(),
+                                    snapshot: Some(&checkout_snapshot),
                                 },
                                 &outcome,
                                 reporter,
@@ -1357,6 +1367,7 @@ fn run_package_inner(
                 // here and re-validate on the next pass of the loop.
                 attempts += 1;
                 let clean = strip_and_rewrite(&spec_path);
+                let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                 let turn = agent_turn(
                     TurnCtx {
                         label: "agent",
@@ -1395,6 +1406,7 @@ fn run_package_inner(
                                 label: "FixAfterValidation",
                                 attempt: attempts,
                                 notes_path: ws.notes(),
+                                snapshot: Some(&checkout_snapshot),
                             },
                             &outcome,
                             reporter,
@@ -1560,6 +1572,7 @@ fn run_package_inner(
                     });
 
                     let clean = strip_and_rewrite(&spec_path);
+                    let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                     let turn = agent_turn(
                         TurnCtx {
                             label: "agent",
@@ -1620,6 +1633,7 @@ fn run_package_inner(
                                     label: "unresolvable BuildRequires",
                                     attempt: attempts,
                                     notes_path: ws.notes(),
+                                    snapshot: Some(&checkout_snapshot),
                                 },
                                 &outcome,
                                 reporter,
@@ -1724,6 +1738,7 @@ fn run_package_inner(
                 });
 
                 let clean = strip_and_rewrite(&spec_path);
+                let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                 let turn = agent_turn(
                     TurnCtx {
                         label: "agent",
@@ -1790,6 +1805,7 @@ fn run_package_inner(
                         label: "FixAfterBuild",
                         attempt: attempts,
                         notes_path: ws.notes(),
+                        snapshot: Some(&checkout_snapshot),
                     },
                     &outcome,
                     reporter,
@@ -2106,9 +2122,119 @@ fn extract_build_log(
 /// macro reference inside a comment is only warned about, because RPM expands
 /// comments but the great majority of such lines still parse fine, and
 /// throwing away an otherwise good fix costs an attempt.
+/// Snapshot of every top-level file in a checkout directory before an agent
+/// turn runs, so a reject can roll back ALL of the agent's changes — not
+/// just the spec, which was the only file the pre-fix `accept_or_restore`
+/// touched. Patches, `_service`, `.changes`, and anything else at the
+/// checkout root are now part of the atomic unit.
+///
+/// Scoped to top-level files (`checkout_dir/*`): the agent's expected
+/// write surface is just the OSC-committed artifacts. The `.osc/` metadata
+/// directory and the extracted source tree (potentially millions of files)
+/// are deliberately NOT snapshotted — editing those would be the agent
+/// stepping well outside the recipe, and copying them around on every
+/// turn would be prohibitively expensive.
+struct CheckoutSnapshot {
+    checkout_dir: PathBuf,
+    /// filename → contents at snapshot time
+    files: std::collections::HashMap<std::ffi::OsString, Vec<u8>>,
+}
+
+impl CheckoutSnapshot {
+    fn take(checkout_dir: &Path) -> Self {
+        let mut files = std::collections::HashMap::new();
+        if let Ok(iter) = std::fs::read_dir(checkout_dir) {
+            for entry in iter.filter_map(|e| e.ok()) {
+                let ty = match entry.file_type() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if !ty.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                if let Ok(bytes) = std::fs::read(entry.path()) {
+                    files.insert(name, bytes);
+                }
+            }
+        }
+        Self { checkout_dir: checkout_dir.to_path_buf(), files }
+    }
+
+    /// Restore every top-level file to its snapshot state: restore
+    /// modified files, re-create deleted ones, and delete any top-level
+    /// files the agent added. Idempotent — called on reject only.
+    fn restore(&self, reporter: &dyn Reporter, step: &StepDir) {
+        // 1) Re-write every snapshotted file (handles both edited and
+        //    deleted ones).
+        for (name, bytes) in &self.files {
+            let path = self.checkout_dir.join(name);
+            if let Err(e) = std::fs::write(&path, bytes) {
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message: format!("could not restore {}: {e}", path.display()),
+                });
+            }
+        }
+        // 2) Delete any top-level files that didn't exist in the snapshot
+        //    (i.e. new files the agent added).
+        if let Ok(iter) = std::fs::read_dir(&self.checkout_dir) {
+            for entry in iter.filter_map(|e| e.ok()) {
+                let ty = match entry.file_type() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if !ty.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                if !self.files.contains_key(&name) {
+                    let path = entry.path();
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        reporter.report(&Event::Warning {
+                            step: Some(step.id),
+                            message: format!(
+                                "could not delete agent-added file {}: {e}",
+                                path.display()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn accept_or_restore(
     spec_path: &Path,
     before: &str,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_entry: &str,
+    notes_path: PathBuf,
+) -> bool {
+    accept_or_restore_with_snapshot(spec_path, before, None, step, reporter, notes_entry, notes_path)
+}
+
+/// `accept_or_restore` extended with a full-checkout snapshot taken BEFORE
+/// the agent turn ran. On reject (rpmspec --parse fails on the agent's
+/// new spec), both the spec AND every other top-level checkout file the
+/// agent may have edited are rolled back from the snapshot.
+///
+/// The two-function split exists because `accept_or_restore` is also
+/// called from the automatic retry path inside `generate_from_repo` where
+/// there is no "before this turn" snapshot to take — a `None` snapshot
+/// there means "spec-only restore", preserving pre-fix behavior for that
+/// one caller.
+///
+/// Oct 6 review (reproducing Sep): the pre-fix function restored only the
+/// spec text, so a `.changes`/patch/`_service` edit the agent made in the
+/// same turn survived even when the spec itself was rejected. The next
+/// turn then saw a half-reverted state and could commit it.
+fn accept_or_restore_with_snapshot(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
     step: &StepDir,
     reporter: &dyn Reporter,
     notes_entry: &str,
@@ -2136,6 +2262,13 @@ fn accept_or_restore(
             restored_from: spec_path.to_path_buf(),
         });
         let _ = std::fs::write(spec_path, before);
+        // When we have a full-checkout snapshot, roll back patches /
+        // `.changes` / `_service` / etc. too — the agent's edits are an
+        // atomic unit, and a half-reverted checkout is a worse state
+        // than any version this run has actually validated.
+        if let Some(snap) = snapshot {
+            snap.restore(reporter, step);
+        }
         return false;
     }
 
@@ -2170,6 +2303,15 @@ struct ApplyTurnCtx<'a> {
     label: &'a str,
     attempt: usize,
     notes_path: PathBuf,
+    /// Full-checkout snapshot taken BEFORE the agent turn ran. When `Some`,
+    /// a rejected / blocked / no-change outcome rolls back every top-level
+    /// checkout file the agent may have edited (patches, `.changes`,
+    /// `_service`, …), not just the spec. The Sep review called out spec-
+    /// only rollback as insufficient; this field is the plumbing. Each
+    /// call site opts in by capturing a snapshot right before `agent_turn`
+    /// and passing `Some(&snap)` here. Sites that don't opt in get the
+    /// pre-fix spec-only restore (safe default).
+    snapshot: Option<&'a CheckoutSnapshot>,
 }
 
 /// Apply one agent turn's outcome the same way at every call site that runs
@@ -2200,15 +2342,35 @@ fn apply_turn_outcome(
     outcome: &crate::agent::TurnOutcome,
     reporter: &dyn Reporter,
 ) -> Result<TurnEffect, String> {
-    let ApplyTurnCtx { config, checkout_dir, spec_path, step, before, rpm_name, label, attempt, notes_path } =
-        ctx;
+    let ApplyTurnCtx {
+        config, checkout_dir, spec_path, step, before, rpm_name, label, attempt, notes_path,
+        snapshot,
+    } = ctx;
     let effect = match &outcome.action {
-        crate::agent::Action::Blocked { why } => Err(format!("{label}: agent blocked: {why}")),
-        crate::agent::Action::NoChange => Ok(TurnEffect::NoChange),
+        crate::agent::Action::Blocked { why } => {
+            // Oct 6 finding (sibling of #7): on Blocked, restore the full
+            // checkout too — the agent may have written speculative
+            // patches/_service files before deciding it's blocked, and
+            // those should not survive the rejection.
+            if let Some(snap) = snapshot {
+                snap.restore(reporter, step);
+            }
+            let _ = std::fs::write(spec_path, before);
+            Err(format!("{label}: agent blocked: {why}"))
+        }
+        crate::agent::Action::NoChange => {
+            // On NoChange, also restore — the agent's "no change needed"
+            // verdict shouldn't paper over an unreported partial edit.
+            if let Some(snap) = snapshot {
+                snap.restore(reporter, step);
+            }
+            Ok(TurnEffect::NoChange)
+        }
         crate::agent::Action::Edited => {
-            let changed = accept_or_restore(
+            let changed = accept_or_restore_with_snapshot(
                 spec_path,
                 before,
+                snapshot,
                 step,
                 reporter,
                 &format!(
@@ -4388,6 +4550,55 @@ Patch0:         0001-fix.patch
             "1.2 is NOT 1.20 — pre-fix substring check wrongly said they matched"
         );
         assert!(!spec_version_differs(&spec, "1.20"));
+    }
+
+    #[test]
+    fn checkout_snapshot_restores_edited_deleted_and_added_top_level_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // Pre-snapshot state: three top-level files.
+        std::fs::write(dir.join("foo.spec"), "Name: foo\nVersion: 1.0\n").unwrap();
+        std::fs::write(dir.join("fix.patch"), "--- orig\n+++ new\n").unwrap();
+        std::fs::write(dir.join("foo.changes"), "entry\n").unwrap();
+        // A nested dir that must survive snapshot/restore untouched (the
+        // snapshot is top-level only).
+        std::fs::create_dir_all(dir.join(".osc")).unwrap();
+        std::fs::write(dir.join(".osc").join("_meta"), "osc internal\n").unwrap();
+
+        let snap = CheckoutSnapshot::take(dir);
+
+        // Simulate agent edits: modify one, delete one, add a new one.
+        std::fs::write(dir.join("foo.spec"), "Name: foo\nVersion: 2.0\n").unwrap();
+        std::fs::remove_file(dir.join("fix.patch")).unwrap();
+        std::fs::write(dir.join("new-patch.patch"), "agent-added\n").unwrap();
+
+        // Reporter stub.
+        struct Null;
+        impl Reporter for Null {
+            fn report(&self, _: &Event) {}
+        }
+        let step = StepDir { path: dir.to_path_buf(), id: ap_core::event::StepId(0) };
+        snap.restore(&Null, &step);
+
+        // Edited file restored.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("foo.spec")).unwrap(),
+            "Name: foo\nVersion: 1.0\n",
+            "spec must be rolled back"
+        );
+        // Deleted file re-created.
+        assert!(dir.join("fix.patch").exists(), "deleted patch must be restored");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("fix.patch")).unwrap(),
+            "--- orig\n+++ new\n",
+        );
+        // Agent-added file removed.
+        assert!(
+            !dir.join("new-patch.patch").exists(),
+            "agent-added top-level file must be deleted on restore"
+        );
+        // Nested .osc untouched.
+        assert!(dir.join(".osc").join("_meta").exists());
     }
 
     #[test]
