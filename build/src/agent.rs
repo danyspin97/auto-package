@@ -3,11 +3,137 @@
 //! The only backend is the `claude` CLI (`--agent-backend cli`). Vertex AI and
 //! direct-API backends are removed in M1 per REDESIGN §5.1.
 
+use std::collections::BTreeMap;
 use std::process::Command;
 
 use serde::Deserialize;
 
 use crate::log::ExtractedLog;
+
+// ── subprocess environment scrubbing ──────────────────────────────────────────
+
+/// Env vars the Claude subprocess is allowed to inherit from this process.
+///
+/// Added in response to the Oct 2026 external review of `build/src/agent.rs`:
+///
+/// > The Claude subprocess inherits the caller's environment and grants tool
+/// > access including `rm`, `zypper` and `rpmspec`. There is no OS sandbox or
+/// > credential separation implemented here. Prompt/tool restrictions alone
+/// > are not that boundary.
+///
+/// A real OS sandbox / credential separation is out of scope for this change,
+/// but the obvious credential-flow hazard — OBS publishing credentials,
+/// cloud/forge push tokens etc. silently reaching a subprocess that holds
+/// `Bash(rm *)`, `Bash(zypper *)` and `Bash(curl ...)` tool grants — is not.
+/// Publishing (osc commit/push, GitHub tokens, cloud credentials) happens in
+/// the pipeline's own subprocess calls, NOT in the agent's turn; the agent
+/// legitimately needs none of them.
+///
+/// This list is intentionally short — anything not listed here is dropped,
+/// including things the agent might arguably want (SSH_AUTH_SOCK, GPG_*,
+/// NIX_PATH, …). Add new entries only after confirming the agent actually
+/// needs them AND that forwarding them does not grant publish/network/auth
+/// authority outside the local checkout.
+const AGENT_ENV_ALLOWLIST: &[&str] = &[
+    // Tool bootstrapping: many CLIs refuse to start without a HOME, and
+    // `claude` itself writes session state under $HOME/.claude.
+    "HOME",
+    "USER",
+    "LOGNAME",
+    // Needed to locate `claude`, `osc`, `rpmspec`, `curl`, `quilt`, …
+    "PATH",
+    // Pretty output / terminal detection on the stderr side. Some tools only
+    // emit color warnings when TERM is set.
+    "TERM",
+    "TERMINFO",
+    // Locale — a missing LANG makes Python and gettext-wrapped tools default
+    // to the C locale and corrupt non-ASCII filenames in spec files.
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    // Scratch and cache paths. If the user has moved these off $HOME (e.g.
+    // onto a bigger disk), honoring their choice is cheaper than silently
+    // thrashing / in a multi-package run — and claude's own session cache
+    // lives under $XDG_CACHE_HOME.
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    // The ONLY credentials this list keeps: the Anthropic API key (and its
+    // alternate spellings). Everything else — OBS, AWS, GCP, Azure, GitHub,
+    // GitLab, netrc, GIT_ASKPASS — is dropped on the floor.
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_API_KEY",
+];
+
+/// Case-sensitive suffix patterns that mark a credential-shaped env var.
+///
+/// The vetted ANTHROPIC_* / CLAUDE_* entries in `AGENT_ENV_ALLOWLIST` are
+/// checked first and short-circuit out — this guard only applies to
+/// everything else, including `extra_allow` entries from a (future)
+/// `--pass-env` CLI flag. That way `--pass-env=MYSERVICE_TOKEN` would still
+/// be dropped with a loud warning rather than silently forwarded.
+const CREDENTIAL_SUFFIX_PATTERNS: &[&str] = &["_TOKEN", "_SECRET", "_PASSWORD", "_API_KEY"];
+
+/// Build the environment map handed to the `claude` subprocess.
+///
+/// Written as a pure function over `(name, value)` pairs so the unit tests
+/// can drive it with crafted inputs (OSC_PASSWORD, AWS_SECRET_ACCESS_KEY,
+/// FOO_TOKEN, …) that we don't want in — and often don't have in — CI. The
+/// production call site is a one-liner: `scrub_env_for_agent(std::env::vars()
+/// .collect(), &[])`.
+///
+/// `extra_allow` is the extension point for a future `--pass-env=FOO,BAR` CLI
+/// flag: entries whose names appear there are kept exactly as if they were in
+/// `AGENT_ENV_ALLOWLIST`. The credential-suffix check still fires on them, so
+/// `--pass-env=MYSERVICE_TOKEN` would still be dropped with a warning rather
+/// than silently forwarded. Pass `&[]` when no extension is requested.
+pub(crate) fn scrub_env_for_agent(
+    vars: Vec<(String, String)>,
+    extra_allow: &[String],
+) -> BTreeMap<String, String> {
+    let mut kept: BTreeMap<String, String> = BTreeMap::new();
+    for (name, value) in vars {
+        // Order matters: the explicit allow-list wins over the credential
+        // suffix guard, because the Anthropic/Claude keys we DO want to keep
+        // (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_API_KEY`)
+        // obviously look credential-shaped and would otherwise be stripped.
+        // Those names are vetted by hand in AGENT_ENV_ALLOWLIST.
+        if AGENT_ENV_ALLOWLIST.iter().any(|a| *a == name.as_str()) {
+            kept.insert(name, value);
+            continue;
+        }
+        // The suffix guard still fires on everything else — including
+        // `extra_allow` entries from a (future) `--pass-env` flag — so that
+        // forwarding a secret-shaped name is never silent.
+        if matches_credential_pattern(&name) {
+            eprintln!(
+                "ap-build: scrubbing credential-shaped env var {name} from agent subprocess \
+                 (publishing credentials and host secrets must not flow through — see the \
+                 Oct 2026 build/src/agent.rs review)"
+            );
+            continue;
+        }
+        if extra_allow.iter().any(|a| a == &name) {
+            kept.insert(name, value);
+            continue;
+        }
+        // Strict allow-list: anything else is dropped silently. The common
+        // case here is the hundreds of SHELL/EDITOR/XDG_SESSION_*/DBUS_*/…
+        // variables an interactive shell exports, none of which the agent
+        // needs; warning on each would drown out the credential warnings
+        // above, which are the ones that actually matter.
+    }
+    kept
+}
+
+fn matches_credential_pattern(name: &str) -> bool {
+    CREDENTIAL_SUFFIX_PATTERNS
+        .iter()
+        .any(|pat| name.ends_with(pat))
+}
 
 // ── conventions ───────────────────────────────────────────────────────────────
 
@@ -2482,6 +2608,17 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let system_prompt = static_system_prompt();
 
     let mut cmd = Command::new("claude");
+    // Scrub the inherited environment before applying any `.env(...)` call
+    // below: `env_clear` drops the parent env, `envs(scrubbed)` adds back
+    // only the allow-listed entries. See `scrub_env_for_agent` for the
+    // rationale (Oct 2026 review of this file). Any extra `cmd.env(...)`
+    // after this point — e.g. QUILT_PATCHES below — is additive and NOT
+    // credential-shaped, so it is fine to set after the clear.
+    //
+    // No `--pass-env` CLI flag yet; wire the extension through by threading
+    // a `&[String]` down from the caller when one is added.
+    let scrubbed_env = scrub_env_for_agent(std::env::vars().collect(), &[]);
+    cmd.env_clear().envs(&scrubbed_env);
     cmd.args([
         "--print",
         "--verbose",
@@ -3549,6 +3686,119 @@ mod tests {
         // treating it as `no_change` would mask real bugs upstream.
         let text = "The review is complete. See you later.";
         assert!(pick_turn_response(text, &[]).is_none());
+    }
+
+    // ── scrub_env_for_agent ───────────────────────────────────────────────────
+
+    fn pair(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    #[test]
+    fn scrub_env_keeps_anthropic_api_key() {
+        let scrubbed = scrub_env_for_agent(vec![pair("ANTHROPIC_API_KEY", "sk-ant-x")], &[]);
+        assert_eq!(scrubbed.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-ant-x"));
+    }
+
+    #[test]
+    fn scrub_env_drops_osc_password() {
+        // OSC_PASSWORD is a publishing credential — the agent must never see
+        // it. OSC pushes happen in the pipeline's own subprocesses, not the
+        // agent's turn.
+        let scrubbed = scrub_env_for_agent(vec![pair("OSC_PASSWORD", "hunter2")], &[]);
+        assert!(scrubbed.get("OSC_PASSWORD").is_none(), "OSC_PASSWORD must not pass through");
+    }
+
+    #[test]
+    fn scrub_env_drops_aws_secret_access_key() {
+        // Cloud credentials — not in the allow-list and matches *_SECRET too.
+        let scrubbed =
+            scrub_env_for_agent(vec![pair("AWS_SECRET_ACCESS_KEY", "AKIA...")], &[]);
+        assert!(
+            scrubbed.get("AWS_SECRET_ACCESS_KEY").is_none(),
+            "AWS_SECRET_ACCESS_KEY must not pass through"
+        );
+    }
+
+    #[test]
+    fn scrub_env_drops_arbitrary_token_pattern() {
+        // The suffix matcher catches unknown credential-shaped names that no
+        // one thought to list explicitly — e.g. some new forge's auth token.
+        let scrubbed = scrub_env_for_agent(vec![pair("FOO_TOKEN", "ghp_abc")], &[]);
+        assert!(scrubbed.get("FOO_TOKEN").is_none(), "FOO_TOKEN must be dropped by the suffix guard");
+    }
+
+    #[test]
+    fn scrub_env_keeps_path() {
+        let scrubbed = scrub_env_for_agent(vec![pair("PATH", "/usr/bin:/bin")], &[]);
+        assert_eq!(scrubbed.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
+    }
+
+    #[test]
+    fn scrub_env_keeps_home() {
+        let scrubbed = scrub_env_for_agent(vec![pair("HOME", "/home/u")], &[]);
+        assert_eq!(scrubbed.get("HOME").map(String::as_str), Some("/home/u"));
+    }
+
+    #[test]
+    fn scrub_env_drops_unknown_benign_var() {
+        // Strict allow-list: SOMETHING_IRRELEVANT doesn't look like a secret
+        // and doesn't appear in the allow-list, so it is dropped. The agent
+        // should run in a maximally minimal environment.
+        let scrubbed =
+            scrub_env_for_agent(vec![pair("SOMETHING_IRRELEVANT", "value")], &[]);
+        assert!(
+            scrubbed.get("SOMETHING_IRRELEVANT").is_none(),
+            "unknown non-allowlisted names are dropped under the strict allow-list"
+        );
+    }
+
+    #[test]
+    fn scrub_env_passes_through_every_allowlist_entry() {
+        // Every entry in the explicit allow-list, each with a distinct value,
+        // must survive scrubbing. Regression guard: if someone adds a name
+        // that collides with the credential-suffix patterns (e.g. a
+        // hypothetical `AGENT_API_KEY`), this test will spot it.
+        let input: Vec<(String, String)> = AGENT_ENV_ALLOWLIST
+            .iter()
+            .enumerate()
+            .map(|(i, name)| ((*name).to_string(), format!("v{i}")))
+            .collect();
+        let scrubbed = scrub_env_for_agent(input.clone(), &[]);
+        for (name, expected) in &input {
+            assert_eq!(
+                scrubbed.get(name).map(String::as_str),
+                Some(expected.as_str()),
+                "allow-list entry {name} failed to survive scrubbing"
+            );
+        }
+    }
+
+    #[test]
+    fn scrub_env_credential_suffix_overrides_extra_allow() {
+        // The extension point for a future `--pass-env` flag still runs
+        // through the credential-suffix guard: a secret-shaped name does NOT
+        // get forwarded just because someone put it on the CLI.
+        let extra = vec!["MYSERVICE_TOKEN".to_string()];
+        let scrubbed =
+            scrub_env_for_agent(vec![pair("MYSERVICE_TOKEN", "secret")], &extra);
+        assert!(
+            scrubbed.get("MYSERVICE_TOKEN").is_none(),
+            "credential-suffix guard must override extra_allow"
+        );
+    }
+
+    #[test]
+    fn scrub_env_extra_allow_forwards_benign_names() {
+        // A benign extra-allow name DOES pass through — proof the extension
+        // point is wired up for real, not just dead code.
+        let extra = vec!["MYSERVICE_HOST".to_string()];
+        let scrubbed =
+            scrub_env_for_agent(vec![pair("MYSERVICE_HOST", "example.com")], &extra);
+        assert_eq!(
+            scrubbed.get("MYSERVICE_HOST").map(String::as_str),
+            Some("example.com")
+        );
     }
 
     /// Every `convention N` reference must name a convention that exists.
