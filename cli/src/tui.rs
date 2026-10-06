@@ -43,6 +43,38 @@ pub struct TuiController {
     tx: Sender<Msg>,
 }
 
+/// Drop-based terminal restorer.
+///
+/// The TUI's own render thread also tears the terminal down (see [`run`]'s
+/// internal guard), but it runs detached — if `main` returns while that
+/// thread is still rendering, Rust terminates the thread before its teardown
+/// executes. Mouse capture (enabled for the TUI's own click handling) then
+/// stays on in the user's shell, which among other things disables native
+/// click-drag selection in the terminal emulator for the rest of the
+/// session.
+///
+/// Install one of these in `main` immediately after constructing a
+/// [`TuiController`], and declare it BEFORE the controller so Rust's
+/// reverse-declaration drop order runs it last — after every sender is gone
+/// and the render thread has had its chance to tear down normally. Running
+/// the sequence twice (here and in the render thread) is idempotent.
+pub struct TerminalGuard {
+    _priv: (),
+}
+
+impl TerminalGuard {
+    pub fn new() -> Self {
+        Self { _priv: () }
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    }
+}
+
 struct Msg {
     pkg: Option<String>,
     event: Event,
@@ -488,6 +520,20 @@ fn run(rx: Receiver<Msg>, memory: std::sync::Arc<MemorySink>) -> io::Result<()> 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+    // However the event loop ends — clean exit, a render/input error, or a
+    // panic unwinding through here — raw mode, the alternate screen, and
+    // mouse capture must be torn down. Left engaged, every line printed
+    // afterwards (including the error itself) lands inside the broken
+    // terminal state instead of the user's normal screen, and mouse capture
+    // in particular keeps hijacking click-drag selection in the user's
+    // shell after this process has exited. The guard restores all three on
+    // ANY exit path from this function. (Ctrl-C is the one exit path that
+    // does NOT come back through here at all — `crate::handle_interrupt`
+    // does its own equivalent teardown and then ends the process on the
+    // spot.)
+    let _terminal_guard = TerminalGuard::new();
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     // Without this, the alternate screen keeps whatever happened to be in its
@@ -499,19 +545,8 @@ fn run(rx: Receiver<Msg>, memory: std::sync::Arc<MemorySink>) -> io::Result<()> 
     // content showing through. One hard clear up front wipes the slate.
     terminal.clear()?;
 
-    // However the event loop ends — clean exit, a render/input error, or a
-    // panic unwinding through here — raw mode and the alternate screen must
-    // be torn down. Left engaged, every line printed afterwards (including
-    // the error itself) lands inside the broken terminal state instead of
-    // the user's normal screen. (Ctrl-C is the one exit path that does NOT
-    // come back through here at all — `crate::handle_interrupt` does its own
-    // equivalent teardown and then ends the process on the spot.)
     let result = event_loop(&mut terminal, rx, &memory);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-    terminal.show_cursor()?;
-
+    let _ = terminal.show_cursor();
     result
 }
 
@@ -528,6 +563,7 @@ fn event_loop(
     let mut selected: Option<String> = None;
     let tick_rate = Duration::from_millis(150);
     let mut finished_at: Option<Instant> = None;
+    let mut senders_dropped = false;
 
     loop {
         // Drain everything currently queued so a burst of events (e.g. many
@@ -537,6 +573,7 @@ fn event_loop(
                 Ok(msg) => state.apply(msg),
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    senders_dropped = true;
                     finished_at.get_or_insert(Instant::now());
                     break;
                 }
@@ -586,6 +623,13 @@ fn event_loop(
             if at.elapsed() >= Duration::from_secs(2) {
                 break;
             }
+        } else if senders_dropped {
+            // All senders are gone but no `RunFinished` ever arrived (early
+            // abort before the run was announced, or the main thread
+            // dropped its reporters). No more events can ever arrive — spin
+            // only to let input finish and then exit so the terminal
+            // teardown guard runs.
+            break;
         }
     }
 

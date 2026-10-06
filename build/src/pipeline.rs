@@ -1947,14 +1947,27 @@ fn strip_and_rewrite(spec_path: &Path) -> String {
 }
 
 /// Point the durable workspace's `build.log` at this run's build log.
+///
+/// Uses a hard link rather than a symlink so the workspace entry stays a
+/// plain file for the agent. The claude CLI's `--add-dir` sandbox resolves
+/// a symlink to its real target before admitting the read, and the real
+/// target lives under `runs/<run-id>/<pkg>/05-build/` — a sibling of the
+/// workspace, outside anything the agent is granted. A symlink there surfaces
+/// to the agent as `"the symlink target is outside the allowed working
+/// directories"` and blocks the entire turn on an otherwise readable file.
+/// A hard link appears to the sandbox as the workspace path itself and is
+/// admitted; `fetch_buildlog`'s `std::fs::write(log_path, ...)` truncates
+/// the inode in place, so both entries continue to reflect the latest log.
+///
+/// `hard_link` fails with `EXDEV` across filesystems; the copy fallback
+/// covers that at the cost of duplicating the bytes.
 fn link_build_log(ws: &Workspace, build_log: &Path) {
-    #[cfg(unix)]
-    {
-        let link = ws.build_log();
-        if link.symlink_metadata().is_ok() {
-            let _ = std::fs::remove_file(&link);
-        }
-        let _ = std::os::unix::fs::symlink(build_log, &link);
+    let link = ws.build_log();
+    if link.symlink_metadata().is_ok() {
+        let _ = std::fs::remove_file(&link);
+    }
+    if std::fs::hard_link(build_log, &link).is_err() {
+        let _ = std::fs::copy(build_log, &link);
     }
 }
 
@@ -2127,7 +2140,7 @@ fn apply_turn_outcome(
 ) -> Result<TurnEffect, String> {
     let ApplyTurnCtx { config, checkout_dir, spec_path, step, before, rpm_name, label, attempt, notes_path } =
         ctx;
-    match &outcome.action {
+    let effect = match &outcome.action {
         crate::agent::Action::Blocked { why } => Err(format!("{label}: agent blocked: {why}")),
         crate::agent::Action::NoChange => Ok(TurnEffect::NoChange),
         crate::agent::Action::Edited => {
@@ -2167,7 +2180,34 @@ fn apply_turn_outcome(
                 Err(e) => Err(format!("{label}: unbuildable from source ({why}), and {e}")),
             }
         }
+    };
+
+    // After any accepted agent edit, re-run OBS services so a newly-added or
+    // renamed Source the agent fetches via a service — one it may have just
+    // written a `_service` file for in this very turn, including on a
+    // checkout that had none before — is actually materialised on disk
+    // before the next validation sees it. Convention 13's "the checkout
+    // does not gain a file just because the spec now names it correctly"
+    // trip-up (drogon-shape case) costs an entire extra attempt without
+    // this. Called unconditionally rather than only when `_service` already
+    // existed, because that gate would silently miss exactly the case this
+    // was added for; `osc` itself is the authority on what to do when none
+    // is present. Non-fatal: a service failure here surfaces as a warning
+    // and lets the existing validation gate catch any actual breakage,
+    // instead of masking whatever the agent was trying to fix behind an
+    // unrelated service error.
+    if matches!(&effect, Ok(TurnEffect::Edited | TurnEffect::SwitchedToWheel)) {
+        if let Err(e) = osc::run_service(checkout_dir, Emit::new(reporter, step.id)) {
+            reporter.report(&Event::Warning {
+                step: Some(step.id),
+                message: format!(
+                    "osc service ra after {label} failed: {e}; proceeding anyway"
+                ),
+            });
+        }
     }
+
+    effect
 }
 
 /// [`apply_turn_outcome`] plus the one side effect every one of its 6 call
