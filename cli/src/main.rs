@@ -424,10 +424,16 @@ fn main() -> color_eyre::Result<()> {
             }
 
             // `--work-dir` is the root; each OBS project lives in its own
-            // subdir inside it (`<work-dir>/<sanitized-project>/`), so one
-            // root can hold state for several projects side by side without
-            // the one-project-per-work-dir mismatch guard the previous layout
-            // had to carry. `--cleanup` scopes to just this project's subdir.
+            // subdir inside it (`<work-dir>/<sanitized-project>-<arch>/`),
+            // so one root can hold state for several projects (and now
+            // several arches) side by side. `--cleanup` scopes to just
+            // this project-arch's subdir.
+            //
+            // The arch suffix guards against cross-arch bleed — the external
+            // 2026-10-06 review flagged that running once with `--arch x86_64`
+            // and then with `--arch aarch64` under the same `--work-dir`
+            // SHARED state (RPMs, source checkouts, state.json), so each
+            // arch's artifacts collided with the other's.
             //
             // Guarded by an ownership marker (`.auto-package`) written at
             // the project_dir root on first creation. `--cleanup` refuses
@@ -437,7 +443,11 @@ fn main() -> color_eyre::Result<()> {
             // wiped out just because `--cleanup` was passed. For existing
             // project_dirs with no marker, the user has to add it manually
             // if they want the clean-up to proceed.
-            let project_dir_name = ap_core::run::sanitize_name(&project);
+            let project_dir_name = format!(
+                "{}-{}",
+                ap_core::run::sanitize_name(&project),
+                ap_core::run::sanitize_name(&arch),
+            );
             let project_dir = work_dir.join(&project_dir_name);
             const OWNERSHIP_MARKER: &str = ".auto-package";
             if cleanup && project_dir.exists() {
@@ -652,11 +662,16 @@ fn main() -> color_eyre::Result<()> {
         } => {
             let level: LogLevel = log.parse().map_err(|e: String| color_eyre::eyre::eyre!(e))?;
 
-            // Same per-project subdir layout as Build (see that arm for the
-            // rationale) — a single `--work-dir` can hold state for multiple
-            // OBS projects side by side.
+            // Same per-project-arch subdir layout as Build (see that arm for
+            // the rationale, including the Oct 6 cross-arch-bleed review) — a
+            // single `--work-dir` can hold state for multiple OBS projects
+            // (and arches) side by side.
             std::fs::create_dir_all(&work_dir)?;
-            let project_dir = work_dir.join(ap_core::run::sanitize_name(&project));
+            let project_dir = work_dir.join(format!(
+                "{}-{}",
+                ap_core::run::sanitize_name(&project),
+                ap_core::run::sanitize_name(&arch),
+            ));
             std::fs::create_dir_all(&project_dir)?;
             let work_dir = project_dir.canonicalize()?;
 
