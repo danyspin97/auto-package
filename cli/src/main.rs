@@ -874,10 +874,23 @@ fn cmd_build(
     // Reporter for events belonging to a single package: still delivered to
     // jsonl/memory like `reporter`, but tagged so the TUI can attribute
     // per-step events to the right row (see `tui::TuiController::tap`).
+    //
+    // `PkgContextReporter` sets an ambient pkg name for the duration of each
+    // `report()` call so JsonlSink (and any other reporter that cares) can
+    // tag its output line with the package name — otherwise JSONL step
+    // events from two parallel package threads would be indistinguishable
+    // (same `StepId(0)` for both). The 2026-10-06 external review flagged
+    // this gap: the TUI already had attribution via `tap`, but the base
+    // JSONL stream had none.
     let pkg_reporter = |pkg: &str| -> Arc<dyn Reporter + Send + Sync> {
+        let tagged: Arc<dyn Reporter + Send + Sync> =
+            Arc::new(ap_core::sink::PkgContextReporter::new(
+                base_reporter.clone(),
+                Some(pkg.to_string()),
+            ));
         match &tui_ctrl {
-            Some(t) => t.tap(base_reporter.clone(), Some(pkg.to_string())),
-            None => reporter.clone(),
+            Some(t) => t.tap(tagged, Some(pkg.to_string())),
+            None => tagged,
         }
     };
     // Resolve the version if it was not pinned. A repository has no package
