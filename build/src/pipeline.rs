@@ -66,6 +66,12 @@ pub struct PipelineConfig {
     /// Exception 4 (`use_upstream_wheel`) instead if its own `%build`
     /// genuinely requires one of these.
     pub unbuildable_deps: Vec<String>,
+    /// Current CLI invocation's run_id, used to scope the per-package
+    /// cumulative-spend tracking in state.json. A fresh CLI invocation
+    /// gets a different run_id; `run_package` sees the mismatch and
+    /// resets `cumulative_spent_usd` to 0 for that package. See
+    /// `PkgState::cumulative_spent_run_id`.
+    pub run_id: String,
     /// User-supplied source repositories, for packages PyPI ships as wheels
     /// with no repository in their metadata. Shared across the whole run so a
     /// dependency discovered mid-run picks up its override too.
@@ -132,15 +138,30 @@ pub struct PkgState {
     /// reviewed just because the version tag matches.
     #[serde(default)]
     pub reviewed_spec_hash: Option<u64>,
-    /// Total model-call USD spent across every `run_package` invocation
-    /// for this package. Persisted so an outer-loop retry can enforce
-    /// \`budget_usd\` as a durable per-package cap rather than resetting
+    /// Total model-call USD spent during the `cumulative_spent_run_id`
+    /// run. Persisted so an outer-loop retry WITHIN that run (which
+    /// recreates `run_package` from scratch for the same package)
+    /// enforces `budget_usd` as a per-package cap rather than resetting
     /// to zero on every call — the Sep review called out the per-call
     /// reset as "neither a whole-closure nor a durable per-package cap".
-    /// A fresh `run_package` sums `budget_usd - prior_spend` and refuses
-    /// agent turns once that reaches zero.
+    ///
+    /// Deliberately scoped to one run (keyed by `cumulative_spent_run_id`)
+    /// rather than running since the dawn of time: a fresh invocation of
+    /// the CLI gets a fresh \$0 budget. Carrying balances across
+    /// restarts would mean the first run accidentally spent its whole
+    /// budget on a doomed package, every subsequent run would refuse to
+    /// touch it with no visible way to reset short of editing state.json
+    /// by hand. The user explicitly asked for the restart-reset.
     #[serde(default)]
     pub cumulative_spent_usd: f64,
+    /// Which run_id's spend `cumulative_spent_usd` belongs to. When
+    /// `run_package` loads state.json and this doesn't match the current
+    /// run_id, `cumulative_spent_usd` is treated as 0 (and the field is
+    /// overwritten with the new run_id on the next save). Serde-defaulted
+    /// so pre-existing state.json files without this field read as 'from
+    /// an earlier run, start fresh' automatically.
+    #[serde(default)]
+    pub cumulative_spent_run_id: Option<String>,
 }
 
 /// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
@@ -1091,17 +1112,26 @@ fn run_package_inner(
 
     // ── Build + fix loop ──────────────────────────────────────────────────────
     let mut attempts = 0usize;
-    // Resume cumulative spend from state.json so an outer-loop retry
-    // enforces `budget_usd` as a durable per-package cap, not a per-call
-    // reset (Sep review). An agent-turn tick on a retry still has
-    // `budget_usd - prior_cumulative` left, not a fresh `budget_usd`.
-    let mut spent_usd = PkgState::load(&ws).cumulative_spent_usd;
+    // Resume cumulative spend from state.json ONLY for an outer-loop
+    // retry inside the current CLI run (same run_id), so the budget cap
+    // is enforced across the retries of one package during one
+    // invocation. A fresh CLI invocation (different run_id) starts the
+    // package at $0 — the user asked for the restart-reset explicitly,
+    // and it matches the mental model that a new command is a new
+    // budget. See `PkgState::cumulative_spent_run_id`.
+    let prior = PkgState::load(&ws);
+    let mut spent_usd = if prior.cumulative_spent_run_id.as_deref() == Some(config.run_id.as_str())
+    {
+        prior.cumulative_spent_usd
+    } else {
+        0.0
+    };
     if spent_usd > 0.0 {
         reporter.report(&Event::Progress {
             step: None,
             message: format!(
                 "{rpm_name}: resuming with ${spent_usd:.4} already spent on this \
-                 package in prior runs (budget cap ${:.4})",
+                 package in this CLI run (budget cap ${:.4})",
                 config.budget_usd
             ),
         });
@@ -2056,11 +2086,15 @@ fn agent_turn(
     *session_id = outcome.session_id.clone();
     *spent_usd += outcome.usage.cost_usd();
     // Persist the running total so an outer-loop retry (or a crash
-    // mid-pipeline) resumes with the correct cumulative spend instead
-    // of a reset-to-zero cap. See `PkgState::cumulative_spent_usd`.
+    // mid-pipeline) within the SAME CLI invocation resumes with the
+    // correct cumulative spend instead of a reset-to-zero cap. Tagged
+    // with the current run_id so a fresh CLI invocation reads a
+    // mismatch and starts the package at $0 — the user asked for that
+    // restart-reset. See `PkgState::cumulative_spent_run_id`.
     if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
         let mut st = PkgState::load(&ws);
         st.cumulative_spent_usd = *spent_usd;
+        st.cumulative_spent_run_id = Some(config.run_id.clone());
         let _ = st.save(&ws);
     }
 
@@ -4285,6 +4319,69 @@ mod tests {
     /// upgrading past this change would lose their whole package state).
     /// It must also round-trip, so the next run reads back exactly what the
     /// crashing run wrote.
+    /// User explicitly asked: when restarting (new CLI invocation),
+    /// per-package spend resets to \$0. The field is scoped by
+    /// `cumulative_spent_run_id`; a mismatch between the stored run_id
+    /// and the current one means the stored spend belonged to a
+    /// previous invocation and must be ignored.
+    #[test]
+    fn cumulative_spend_only_resumes_within_the_same_run_id() {
+        let old = PkgState {
+            last_built_version: Some("1.2.3".into()),
+            last_outcome: Some("failed".into()),
+            last_failure_reason: None,
+            reviewed_version: None,
+            reviewed_spec_hash: None,
+            cumulative_spent_usd: 1.75,
+            cumulative_spent_run_id: Some("20260107-120000-abcdef".into()),
+        };
+        // Serde round-trip to confirm persistence.
+        let json = serde_json::to_string(&old).unwrap();
+        let back: PkgState = serde_json::from_str(&json).unwrap();
+
+        // Same run_id → spend resumes.
+        let same_run = Some("20260107-120000-abcdef");
+        let resume = if back.cumulative_spent_run_id.as_deref() == same_run {
+            back.cumulative_spent_usd
+        } else {
+            0.0
+        };
+        assert_eq!(resume, 1.75, "same-run retry resumes the running total");
+
+        // New CLI invocation → different run_id → reset to 0.
+        let fresh_run = Some("20260108-000000-ff00ff");
+        let resume_after_restart = if back.cumulative_spent_run_id.as_deref() == fresh_run {
+            back.cumulative_spent_usd
+        } else {
+            0.0
+        };
+        assert_eq!(
+            resume_after_restart, 0.0,
+            "restart (different run_id) starts the package at \\$0 — \
+             what the user asked for explicitly"
+        );
+    }
+
+    /// Pre-fix state.json files from before this change don't have the
+    /// `cumulative_spent_run_id` field at all. Serde-default to None, and
+    /// a None stored run_id vs any current run_id is a mismatch — so
+    /// those packages also start at \$0 on the first run that reads them.
+    #[test]
+    fn pre_restart_fix_state_defaults_to_zero_spend_on_next_run() {
+        let legacy = r#"{"last_built_version":"1.0","last_outcome":"failed",
+                        "cumulative_spent_usd": 2.50}"#;
+        let st: PkgState = serde_json::from_str(legacy).expect("legacy state must parse");
+        assert_eq!(st.cumulative_spent_usd, 2.50);
+        assert!(st.cumulative_spent_run_id.is_none());
+        // The resume check: None vs Some(run_id) ⇒ mismatch ⇒ 0.
+        let resume = if st.cumulative_spent_run_id.as_deref() == Some("any-run") {
+            st.cumulative_spent_usd
+        } else {
+            0.0
+        };
+        assert_eq!(resume, 0.0);
+    }
+
     /// Earlier review probe: `wheel-only` state counted as built. But the
     /// generation branch that writes `wheel-only` also returns
     /// `PipelineResult::Failed` — treating the recorded tag as success
@@ -4300,6 +4397,7 @@ mod tests {
             reviewed_version: None,
             reviewed_spec_hash: None,
             cumulative_spent_usd: 0.0,
+            cumulative_spent_run_id: None,
         };
         assert!(
             !state.is_built("1.2.3"),
@@ -4316,6 +4414,7 @@ mod tests {
             reviewed_version: None,
             reviewed_spec_hash: None,
             cumulative_spent_usd: 0.0,
+            cumulative_spent_run_id: None,
         };
         assert!(make("success").is_built("1.0"));
         assert!(!make("failed").is_built("1.0"));
@@ -4339,6 +4438,7 @@ mod tests {
             reviewed_version: None,
             reviewed_spec_hash: None,
             cumulative_spent_usd: 0.0,
+            cumulative_spent_run_id: None,
         };
         let json = serde_json::to_string(&fresh).unwrap();
         let back: PkgState = serde_json::from_str(&json).unwrap();

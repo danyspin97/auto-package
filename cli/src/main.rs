@@ -1032,6 +1032,7 @@ fn cmd_build(
         regen,
         source_repo: source_repo.clone(),
         subprojects,
+        run_id: run_dir.run_id.clone().0,
         source_urls,
         python_flavors,
         failed_deps: Vec::new(),
