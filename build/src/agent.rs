@@ -3330,17 +3330,14 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  extension against the spec's `Source0:` line — the generator sometimes writes \
                  `.zip` when the real file is `.tar.gz` (or vice versa). This fails `%prep` with \
                  'No such file or directory' on the very first build. Fix `Source0:` to match \
-                 the real filename now, before anything else depends on it. If fixing this \
-                 means pointing `Source0:` at a DIFFERENT filename than the one currently in \
-                 the checkout (e.g. it was a plain sdist tarball but should be the upstream \
-                 wheel itself — convention 32), editing the spec line is not the whole fix: \
-                 download the real file into the checkout and `osc add` it in the same turn. \
-                 A spec correctly pointing at a filename that does not exist on disk yet still \
-                 fails `%prep` with the exact same error, just one turn later — the checkout \
-                 does not gain a file just because the spec now names it correctly (real \
-                 example: `python-nvidia-nccl-cu13`, where the wrong tarball was deleted but \
-                 the correct 197MB wheel was never fetched in the same turn, costing an entire \
-                 extra attempt to notice and fix).\n\
+                 the real filename now, before anything else depends on it. You cannot \
+                 download files or `osc add` them (neither is in your tool list): if \
+                 `Source0:` must name a file that is not in the checkout at all, do not \
+                 just rename the line — a spec pointing at a missing file fails `%prep` \
+                 with the same error one turn later (real example: \
+                 `python-nvidia-nccl-cu13`). Say exactly which file is missing and return \
+                 `blocked` (or `use_upstream_wheel` when convention 28 Exception 4 \
+                 applies); the pipeline fetches sources outside your turn.\n\
              \n\
              0d. **System tools wrapped in `%{python_module ...}`**: Grep the spec's \
                  BuildRequires for `%{python_module cmake}`, `%{python_module ninja}`, or the \

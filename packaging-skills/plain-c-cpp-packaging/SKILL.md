@@ -73,8 +73,8 @@ generalize perfectly to this package.
   **DO NOT rewrite `%ldconfig_scriptlets` to manual `%post -n <lib> -p
   /sbin/ldconfig` / `%postun -n <lib> -p /sbin/ldconfig` just because
   your local `rpmspec --parse` complains the macro is undefined.** That
-  warning is a host-macro-vs-target-macro mismatch (see auto-package's
-  built-in rpmspec note) — the macro IS defined on every openSUSE
+  warning is a host-macro-vs-target-macro mismatch (your local `rpmspec` runs
+  on the review host, not an openSUSE build worker) — the macro IS defined on every openSUSE
   build worker, and the manual rewrite is strictly worse because it
   loses the single-source-of-truth property of the macro (if openSUSE
   ever changes what ldconfig invocation to use, every manual spec has

@@ -38,12 +38,21 @@ R3. Build with the `%{cargo_build}` macro. Pass optional Cargo features with
 
    Do NOT add `-j` flags — the macro already uses maximum parallelism.
 
-R4. Install binaries manually (no install macro exists for Rust):
+R4. Install with `%{cargo_install}` (from `cargo-packaging`), which puts the
+   crate's binaries into `%{buildroot}%{_bindir}`:
 
      %install
-     install -D -d -m 0755 %{buildroot}%{_bindir}
-     install -m 0755 %{_builddir}/%{name}-%{version}/target/release/<binary> \
-             %{buildroot}%{_bindir}/<binary>
+     %{cargo_install}
+
+   Install by hand only what it does not cover (man pages, completions,
+   extra binaries built with other features):
+
+     install -D -m 0755 target/release/<extra-binary> %{buildroot}%{_bindir}/<extra-binary>
+
+R4b. `vendor.tar.zst` comes from the `cargo_vendor` OBS service declared in
+   `_service`; you cannot run services. If the checkout has no vendor tarball
+   and `_service` does not declare one, report `blocked` naming the
+   `cargo_vendor` service as the missing step rather than inventing a Source.
 
 R5. Shell-completion subpackages (bash, zsh, fish): each is `BuildArch: noarch`
    and adds `Supplements: (%{name} and <shell>)` alongside its normal
