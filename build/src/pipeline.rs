@@ -1490,7 +1490,18 @@ fn run_package_inner(
                     path: artifact,
                 });
 
-                let missing = missing_source_files(&expanded, &checkout_dir);
+                let mut missing = missing_source_files(&expanded, &checkout_dir);
+                // A `_service` (download_file / download_files) is how a Source
+                // that is a URL gets onto disk — and the agent cannot run it.
+                // Run it before calling the files missing, and keep its error
+                // so the agent sees why a download did not happen.
+                let mut service_error = None;
+                if !missing.is_empty() && checkout_dir.join("_service").is_file() {
+                    match osc::run_service(&checkout_dir, Emit::new(reporter, validate_step.id)) {
+                        Ok(()) => missing = missing_source_files(&expanded, &checkout_dir),
+                        Err(e) => service_error = Some(e.to_string()),
+                    }
+                }
                 if !missing.is_empty() {
                     reporter.report(&Event::StepFinished {
                         step: validate_step.id,
@@ -1531,8 +1542,14 @@ fn run_package_inner(
                          name doesn't match what's actually on disk (typo, wrong \
                          extension, stale reference after a rename). Fix the spec to \
                          reference the real file, or create/restore the missing file if \
-                         it should exist — see \"Source Files and Cleanup\" below.",
-                        missing.join(", ")
+                         it should exist — see \"Source Files and Cleanup\" below.{}",
+                        missing.join(", "),
+                        service_error
+                            .map(|e| format!(
+                                " The checkout's `_service` was run (`osc service ra`) to \
+                                 fetch it and failed: {e}"
+                            ))
+                            .unwrap_or_default()
                     );
                     let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                     let turn = agent_turn(

@@ -1133,10 +1133,12 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    These bundled C/C++ sources are build-time artifacts that have no use at
    runtime in the RPM environment (they require CUDA, GPU, etc.) — strip them
    when they are vendored third-party copies nothing downstream compiles
-   against. Do NOT strip headers that ARE the package's public interface (a
-   redistributed SDK such as the NVIDIA CUDA wheels' `include/`, or a Python
-   C-API's own headers): other packages `#include` those, so move them to a
-   `%package devel` subpackage instead (convention 53).
+   against. Do NOT strip headers that ARE a Python C-API's public interface:
+   other packages `#include` those, so move them to a `%package devel`
+   subpackage instead (convention 53). The exception is NVIDIA's CUDA wheels:
+   delete their `include/` — a package that needs CUDA to build is
+   repackaged from its wheel (convention 27), so no build here ever uses
+   those headers (see the prebuilt-wheel-packaging skill).
 
 25. rpmlint badness is a budget: the build fails when the TOTAL exceeds 999,
    so the fix is whichever group of files contributes the most, not the first
@@ -1859,7 +1861,12 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       flavor has no matching wheel, this technique doesn't fully apply —
       report the gap rather than guessing one.
    c. Delete `%build` entirely (there is nothing to compile) and add one
-      `SourceN:` per flavor, each pointing at that flavor's own wheel URL.
+      `SourceN:` per flavor THIS PROJECT BUILDS (step a — not every CPython
+      PyPI has a wheel for), each a bare wheel file name. You cannot download
+      the files: declare each with an OBS `_service` `download_file` (exact
+      `urls[].url` from the PyPI JSON; the prebuilt-wheel-packaging skill has
+      the XML) — the pipeline runs `osc service ra` before the missing-source
+      check. Remove the old source tarball from the checkout.
    d. In `%install`, call each flavor's OWN install macro by its real,
       hardcoded name — not the shared multi-flavor `%pyproject_install`,
       which runs the identical argument for every flavor and so cannot pick

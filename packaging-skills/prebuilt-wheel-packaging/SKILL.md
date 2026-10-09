@@ -64,14 +64,30 @@ must account for. Do this before touching %files; never guess the layout.
 - Namespace package directories (`nvidia/`, `nvidia/cu13/`) shared with other
   wheels need `%dir` entries in `%files`, or rpmlint reports
   `directories not owned by a package` (convention 17).
-- Prebuilt vendor binaries trip rpmlint rules a source build would not:
-  `.so` files without an ELF hash section (`shlib-with-no-hash-section`-style
-  badness of 10000 each) are expected for NVIDIA's libraries — add an
-  rpmlintrc `addFilter(...)` for them (convention 39) instead of trying to
-  rebuild them. Bundled C headers in a CUDA wheel are the SDK's public API
-  that dependent extensions compile against: put them in a `-devel`
-  subpackage (convention 53) rather than deleting them; only strip headers
-  nothing downstream could use.
+- Prebuilt vendor binaries trip rpmlint rules a source build would not, and
+  every NVIDIA wheel package has burned two or three attempts rediscovering
+  them one at a time (cudnn, cusparse, cufft, cufile, cusparselt). Do all of
+  this in the FIRST pass:
+  * Headers: delete them in `%install` —
+    `%python_expand rm -rf %{buildroot}%{$python_sitelib}/nvidia/*/include`
+    (what the green nvidia-cuda-cupti and nvidia-curand specs do). Nothing
+    here compiles against them: a package that needs CUDA to build is itself
+    repackaged from its wheel (convention 27), so a `-devel` subpackage buys
+    nothing and costs `%exclude` plumbing and extra rpmlint surface.
+  * `.so` rpmlint noise (`missing-hash-section` at badness 10000 per file,
+    `shared-library-not-executable`, `library-without-ldconfig-post*`) is
+    expected for NVIDIA's prebuilt libraries: add `Source99:
+    python-<name>.rpmlintrc` containing `addFilter("<rule>.*")` for exactly
+    the rules build.log reports (convention 39). Do not try to `chmod`/relink
+    vendor binaries, and do not add `Requires: python-base` guesses.
+  * `%files`: the `%{python_sitelib}/<dist>-%{version}.dist-info/` directory
+    claim already owns `licenses/` and everything under it — a second
+    `%license` line for a file inside it makes "File listed twice" fail the
+    build. Keep ONE of the two. A `%license` path is relative to the build
+    tree, never prefixed with `%{buildroot}` (one attempt added it and broke
+    the file lookup).
+  * Remove pip's `INSTALLER`/`REQUESTED` files from the dist-info in
+    `%install` if rpmlint lists them as unpackaged (convention 23).
 - License: read `source/*.dist-info/METADATA`'s `License-Expression` or
   `Classifier: License ::` lines, or the packaged `LICENSE`/`NOTICE` file
   if `source/` ships one — the PyPI JSON alone is frequently `FIXME` for
@@ -95,7 +111,31 @@ yourself:
     %python_expand %fdupes %{buildroot}%{$python_sitearch}
 
 There is no `%build`. Get the flavors from `rpmspec -E '%{pythons}'` and
-pick one wheel per flavor for the target arch. Each wheel must be in the
-checkout (`osc add`); `%python<NNN>_pyproject_install` is used by its
-hardcoded name because the shared multi-flavor `%pyproject_install` repeats
-one argument for every flavor.
+pick one wheel per flavor THIS PROJECT BUILDS for the target arch — not every
+CPython PyPI happens to have a wheel for (onnxruntime was rewritten for
+cp311/cp312/cp313/cp314 when only cp313/cp314 are built).
+`%python<NNN>_pyproject_install` is used by its hardcoded name because the
+shared multi-flavor `%pyproject_install` repeats one argument for every
+flavor.
+
+You cannot download the wheels, and a `Source:` whose file is not in the
+checkout is rejected before the build ("missing source files"). Declare them
+with an OBS `_service` instead — the pipeline runs `osc service ra` before the
+check and again after your edit, so the files arrive on their own. Use the
+exact `url` of each wheel from the release's PyPI JSON
+(`urls[].url`, `https://files.pythonhosted.org/packages/<h1>/<h2>/<hash>/<file>.whl`),
+and keep the `Source<N>:` lines as the bare file names:
+
+    <services>
+      <service name="download_file">
+        <param name="protocol">https</param>
+        <param name="host">files.pythonhosted.org</param>
+        <param name="path">/packages/<h1>/<h2>/<hash>/<file>.whl</param>
+        <param name="filename"><file>.whl</param>
+      </service>
+      ... one per flavor ...
+    </services>
+
+Delete the source tarball the earlier recipe used from the checkout (a spec
+that no longer lists it must not leave it behind to be built from source).
+If the service fails, the error is shown to you on the next turn.
