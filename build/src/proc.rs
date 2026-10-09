@@ -248,6 +248,11 @@ pub fn capture_with_timeout_env(
     if let Some(env) = env {
         command.env_clear().envs(env);
     }
+    // Own process group, so a timeout can kill the child's descendants too:
+    // grandchildren (the agent CLI's tool subprocesses) would otherwise keep
+    // the output pipes open and block the reader threads below forever.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .args(args)
         .current_dir(cwd)
@@ -278,6 +283,12 @@ pub fn capture_with_timeout_env(
         match child.try_wait()? {
             Some(status) => break Some(status),
             None if start.elapsed() >= timeout => {
+                #[cfg(unix)]
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -335,6 +346,22 @@ mod capture_timeout_tests {
         let err = capture_with_timeout(
             "sleep",
             &["30"],
+            Path::new("/"),
+            quiet(),
+            Duration::from_millis(200),
+        )
+        .err()
+        .expect("must time out");
+        assert!(matches!(err, ProcessError::Timeout { .. }));
+        assert!(t.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn timeout_kills_grandchildren_holding_the_pipes() {
+        let t = Instant::now();
+        let err = capture_with_timeout(
+            "sh",
+            &["-c", "sleep 30 & wait"],
             Path::new("/"),
             quiet(),
             Duration::from_millis(200),
