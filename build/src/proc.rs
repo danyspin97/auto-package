@@ -228,7 +228,7 @@ pub fn capture(
 /// SIGKILL a child's whole process group (the child must have been spawned
 /// with `process_group(0)`). Best effort: the group may already be gone.
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+pub(crate) fn kill_process_group(pid: u32) {
     let _ = Command::new("kill")
         .args(["-KILL", "--", &format!("-{pid}")])
         .stdout(Stdio::null())
@@ -237,7 +237,7 @@ fn kill_process_group(pid: u32) {
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {}
+pub(crate) fn kill_process_group(_pid: u32) {}
 
 /// [`capture`] with a wall-clock limit: the child is killed if it has not
 /// exited after `timeout`.

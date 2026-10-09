@@ -51,6 +51,9 @@ const AGENT_ENV_DENYLIST: &[&str] = &[
     "NETRC",
     "GIT_ASKPASS",
     "GIT_SSH_COMMAND",
+    "SSH_AUTH_SOCK",
+    "DATABASE_URL",
+    "PGPASSWORD",
 ];
 
 /// Credential-shaped suffixes dropped even when not explicitly listed.
@@ -60,7 +63,20 @@ const AGENT_ENV_DENYLIST: &[&str] = &[
 /// Anthropic / Claude keys the agent legitimately needs match this
 /// pattern too (`ANTHROPIC_API_KEY`), so they are kept via explicit
 /// exceptions.
-const CREDENTIAL_SUFFIX_PATTERNS: &[&str] = &["_TOKEN", "_SECRET", "_PASSWORD", "_API_KEY"];
+const CREDENTIAL_SUFFIX_PATTERNS: &[&str] = &[
+    "_TOKEN",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_PASSWORD",
+    "_PASSWD",
+    "_PASS",
+    "_PAT",
+    "_API_KEY",
+    "_APIKEY",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+    "_PRIVATE_KEY",
+];
 
 /// Credential-shaped names the agent IS allowed to keep, even though the
 /// suffix guard would otherwise strip them.
@@ -90,7 +106,8 @@ pub(crate) fn scrub_env_for_agent(
 ) -> BTreeMap<String, String> {
     let mut kept: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in vars {
-        if AGENT_ENV_DENYLIST.contains(&name.as_str()) {
+        let upper = name.to_ascii_uppercase();
+        if AGENT_ENV_DENYLIST.contains(&upper.as_str()) {
             ap_core::diag!(
                 "ap-build: scrubbing publishing credential {name} from agent subprocess \
                  (the agent never commits — see the Oct 2026 build/src/agent.rs review)"
@@ -101,7 +118,16 @@ pub(crate) fn scrub_env_for_agent(
             ap_core::diag!("ap-build: scrubbing user-denied env var {name} from agent subprocess");
             continue;
         }
-        if matches_credential_pattern(&name) && !CREDENTIAL_EXCEPTIONS.contains(&name.as_str()) {
+        // Proxy URLs routinely embed credentials and the CLI itself needs
+        // them to reach the API; dropping them would break every turn.
+        if !upper.ends_with("_PROXY") && value_embeds_credentials(&value) {
+            ap_core::diag!(
+                "ap-build: scrubbing {name} from agent subprocess (its value is a URL \
+                 with embedded credentials)"
+            );
+            continue;
+        }
+        if matches_credential_pattern(&upper) && !CREDENTIAL_EXCEPTIONS.contains(&upper.as_str()) {
             ap_core::diag!(
                 "ap-build: scrubbing credential-shaped env var {name} from agent subprocess \
                  (name ends in _TOKEN/_SECRET/_PASSWORD/_API_KEY)"
@@ -113,11 +139,31 @@ pub(crate) fn scrub_env_for_agent(
     kept
 }
 
+/// A value shaped like `scheme://user:password@host` (proxy URLs, database
+/// URLs, git remotes with tokens).
+fn value_embeds_credentials(value: &str) -> bool {
+    let Some((_, rest)) = value.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority
+        .rsplit_once('@')
+        .is_some_and(|(userinfo, _)| userinfo.contains(':'))
+}
+
+/// `name` must already be upper-case.
 fn matches_credential_pattern(name: &str) -> bool {
     CREDENTIAL_SUFFIX_PATTERNS
         .iter()
         .any(|pat| name.ends_with(pat))
 }
+
+/// Wall-clock limit for one `claude` turn.
+const AGENT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45 * 60);
+/// Most stdout/stderr text kept from one turn for post-mortem files.
+const MAX_AGENT_STREAM_BYTES: u64 = 32 * 1024 * 1024;
+/// Most bytes kept of one tool call's input.
+const MAX_TOOL_INPUT_BYTES: usize = 256 * 1024;
 
 // ── conventions ───────────────────────────────────────────────────────────────
 
@@ -2871,6 +2917,10 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     }
     cmd.args(["-p", &prompt]);
 
+    // Own process group so the watchdog (and cleanup after exit) can kill the
+    // CLI's tool subprocesses too; they would otherwise keep the pipes open.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd
         .current_dir(req.workspace)
         .stdin(std::process::Stdio::null())
@@ -2879,9 +2929,29 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         .spawn()
         .map_err(Error::Launch)?;
 
+    // A turn that never ends (network stall, a tool waiting for input) would
+    // otherwise block the stdout loop below forever; the per-package budget is
+    // only checked between turns. Kill the whole group after the deadline.
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let pid = child.id();
+        let timed_out = timed_out.clone();
+        std::thread::spawn(move || {
+            if matches!(
+                done_rx.recv_timeout(AGENT_TURN_TIMEOUT),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::proc::kill_process_group(pid);
+            }
+        });
+    }
+
     // Collect stderr in a background thread so it doesn't block stdout reads.
-    let stderr_handle = {
+    let stderr_rx = {
         let stderr = child.stderr.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::Read;
             // `read_to_string` would fail outright on any invalid UTF-8 byte
@@ -2890,9 +2960,12 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
             // bytes and converting lossily means a crash-stderr.log is never
             // silently empty just because one byte in it wasn't UTF-8.
             let mut buf = Vec::new();
-            let _ = std::io::BufReader::new(stderr).read_to_end(&mut buf);
-            String::from_utf8_lossy(&buf).into_owned()
-        })
+            let _ = std::io::BufReader::new(stderr)
+                .take(MAX_AGENT_STREAM_BYTES)
+                .read_to_end(&mut buf);
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+        });
+        rx
     };
 
     // Stream stdout line by line: display text/tool events and collect the
@@ -2927,8 +3000,14 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     break;
                 }
             };
-            stdout_raw.push_str(&line);
-            stdout_raw.push('\n');
+            // Keep a bounded copy: a long turn streams every Edit/Write input,
+            // and the raw copy is only for post-mortem reading.
+            if (stdout_raw.len() as u64) < MAX_AGENT_STREAM_BYTES {
+                stdout_raw.push_str(&line);
+                stdout_raw.push('\n');
+            } else if !stdout_raw.ends_with("[stdout truncated]\n") {
+                stdout_raw.push_str("[stdout truncated]\n");
+            }
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -2952,10 +3031,15 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                                     .get("name")
                                     .and_then(|n| n.as_str())
                                     .unwrap_or("(unnamed)");
-                                let input = block
+                                let mut input = block
                                     .get("input")
                                     .map(|i| i.to_string())
                                     .unwrap_or_default();
+                                // Whole-file Write inputs can be megabytes; the
+                                // StructuredOutput fallback needs only a small one.
+                                if input.len() > MAX_TOOL_INPUT_BYTES {
+                                    input.truncate(input.floor_char_boundary(MAX_TOOL_INPUT_BYTES));
+                                }
                                 let summary: String = input.chars().take(160).collect();
                                 if let Some(cb) = req.on_tool_use {
                                     cb(name, &summary);
@@ -2978,8 +3062,20 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         }
     }
 
-    let stderr_content = stderr_handle.join().unwrap_or_default();
     let status = child.wait().map_err(Error::Io)?;
+    let _ = done_tx.send(());
+    // The CLI is gone; reap anything it left in its group, then give the
+    // stderr reader a moment (a surviving descendant could hold the pipe).
+    crate::proc::kill_process_group(child.id());
+    let mut stderr_content = stderr_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap_or_default();
+    if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+        stderr_content = format!(
+            "claude turn timed out after {} minutes and was killed\n{stderr_content}",
+            AGENT_TURN_TIMEOUT.as_secs() / 60
+        );
+    }
 
     // Lift the structured end-early signal out of the result event once,
     // so both the error branch (no usable response) and the Ok branch
@@ -4041,6 +4137,38 @@ mod tests {
             !scrubbed.contains_key("FOO_TOKEN"),
             "FOO_TOKEN must be dropped by the suffix guard"
         );
+    }
+
+    #[test]
+    fn scrub_env_is_case_insensitive_and_covers_more_credential_shapes() {
+        let vars = vec![
+            pair("github_token", "x"),
+            pair("DB_PASSWD", "x"),
+            pair("DEPLOY_PAT", "x"),
+            pair("STRIPE_SECRET_KEY", "x"),
+            pair("SSH_AUTH_SOCK", "/tmp/agent.1"),
+            pair("DATABASE_URL", "postgres://u:p@h/db"),
+        ];
+        assert!(scrub_env_for_agent(vars, &[]).is_empty());
+        // ...but a proxy URL keeps its credentials: the CLI needs them.
+        let proxied = scrub_env_for_agent(
+            vec![pair("HTTPS_PROXY", "http://user:hunter2@proxy:3128")],
+            &[],
+        );
+        assert!(proxied.contains_key("HTTPS_PROXY"));
+    }
+
+    #[test]
+    fn scrub_env_keeps_credential_free_urls_and_anthropic_keys_in_any_case() {
+        let scrubbed = scrub_env_for_agent(
+            vec![
+                pair("HTTPS_PROXY", "http://proxy:3128"),
+                pair("anthropic_api_key", "sk-ant-x"),
+            ],
+            &[],
+        );
+        assert!(scrubbed.contains_key("HTTPS_PROXY"));
+        assert!(scrubbed.contains_key("anthropic_api_key"));
     }
 
     #[test]
