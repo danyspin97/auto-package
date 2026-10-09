@@ -379,6 +379,29 @@ mod fuzzy_key_tests {
     }
 }
 
+/// Whether `s` is safe to hand to `osc` as a project or package name and to
+/// join into a path: no leading `-` (would be parsed as an option), no path
+/// separators or `..`, nothing but the characters OBS itself allows.
+pub fn is_valid_obs_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | ':'))
+        && !s.contains("..")
+}
+
+fn check_obs_name(what: &str, name: &str) -> Result<(), Error> {
+    if is_valid_obs_name(name) {
+        Ok(())
+    } else {
+        Err(Error::NotActionable(format!(
+            "refusing to use {what} {name:?}: not a valid OBS name"
+        )))
+    }
+}
+
 /// Strip the `python<digits>-` or `python-` prefix from an RPM name to get
 /// the underlying package name (PyPI name for Python packages, or the bare
 /// name for system packages).
@@ -512,7 +535,7 @@ pub fn list_project_packages(project: &str, emit: Emit<'_>) -> std::collections:
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     {
-        let guard = cache.lock().unwrap();
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pkgs) = guard.get(project) {
             return pkgs.clone();
         }
@@ -544,7 +567,10 @@ pub fn list_project_packages(project: &str, emit: Emit<'_>) -> std::collections:
 /// rest of the run, not just the one for the package just built.
 pub fn invalidate_project_packages_cache(project: &str) {
     if let Some(cache) = PROJECT_PACKAGES_CACHE.get() {
-        cache.lock().unwrap().remove(project);
+        cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(project);
     }
 }
 
@@ -694,6 +720,8 @@ pub fn ensure_package(
     work_dir: &Path,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", pkg_name)?;
     // `osc ls project/pkg` exits non-zero when the package does not exist.
     let check = proc::capture(
         "osc",
@@ -707,8 +735,10 @@ pub fn ensure_package(
     }
 
     let meta = format!(
-        "<package name=\"{pkg_name}\" project=\"{project}\">\n  \
-         <title/>\n  <description/>\n</package>\n"
+        "<package name=\"{}\" project=\"{}\">\n  \
+         <title/>\n  <description/>\n</package>\n",
+        xml_escape(pkg_name),
+        xml_escape(project)
     );
     let meta_file = work_dir.join(format!(".{pkg_name}.meta.xml"));
     fs::write(&meta_file, &meta).map_err(|e| Error::OscFailed {
@@ -754,6 +784,8 @@ pub fn checkout(
     into_dir: &Path,
     emit: Emit<'_>,
 ) -> Result<PathBuf, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", pkg_name)?;
     let checkout_dir = into_dir.join(project).join(pkg_name);
 
     // Re-use an existing checkout rather than re-cloning every run.
@@ -861,7 +893,9 @@ fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Er
         return Ok(proc::capture("osc", &["up"], checkout_dir, emit)?);
     }
 
-    if let Some(name) = changes_conflict_file(&out.stderr) {
+    if let Some(name) = changes_conflict_file(&out.stderr)
+        .filter(|n| !n.contains('/') && !n.contains("..") && !n.starts_with('-'))
+    {
         // osc only raises this when `name` is untracked in this working
         // copy's `.osc/_files` (see `Package.__update`'s check against
         // `filenamelist_unvers`), so it is always safe to move aside — it
@@ -1110,8 +1144,20 @@ fn osc_api(path: &str) -> Option<String> {
         Emit::quiet(),
         OSC_QUERY_TIMEOUT,
     )
+    .map_err(|e| ap_core::diag!("  osc api {path}: {e}"))
     .ok()?;
-    out.success().then_some(out.stdout)
+    if !out.success() {
+        ap_core::diag!("  osc api {path}: exit {}: {}", out.code, out.stderr.trim());
+        return None;
+    }
+    Some(out.stdout)
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Percent-encode one URL component. Package names like `libsigc++` contain
@@ -1228,7 +1274,10 @@ pub fn get_project_build_statuses(
     // positional letter table below (which depends on terminal width and
     // `osc`'s padding). Fall back to the table if the API path yields nothing.
     if let Some(xml) = osc_api(&format!(
-        "/build/{project}/_result?repository={repo}&arch={arch}"
+        "/build/{}/_result?repository={}&arch={}",
+        enc(project),
+        enc(repo),
+        enc(arch)
     )) {
         let statuses: HashMap<String, BuildStatus> = obs_status::parse_results(&xml)
             .into_iter()
@@ -1722,6 +1771,26 @@ pub fn obs_build(
             },
         },
     })
+}
+
+#[cfg(test)]
+mod obs_name_tests {
+    use super::*;
+
+    #[test]
+    fn obs_names_reject_options_paths_and_junk() {
+        for ok in ["python-Events", "libsigc++", "home:dspinella:python3", "a_b.c-1"] {
+            assert!(is_valid_obs_name(ok), "{ok}");
+        }
+        for bad in ["", "-rf", "../x", "a/b", "a b", "a\nb", "x..y", "/abs"] {
+            assert!(!is_valid_obs_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn xml_escape_covers_attribute_metacharacters() {
+        assert_eq!(xml_escape("a&b<c>\"d"), "a&amp;b&lt;c&gt;&quot;d");
+    }
 }
 
 #[cfg(test)]
