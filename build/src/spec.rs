@@ -835,6 +835,39 @@ pub fn normalize_files_paths(spec: &str, pypi_name: &str) -> String {
     out
 }
 
+/// [`wheel_binary_skeleton`] for a release whose wheels are each locked to one
+/// CPython (convention 49's Triton shape): one `SourceN:` per flavor and one
+/// hardcoded `%python<NNN>_pyproject_install` per flavor, since the shared
+/// `%pyproject_install` repeats a single argument for every flavor.
+///
+/// `wheels` is `(flavor, wheel filename)` — e.g. `("python313", "x-cp313-...whl")`,
+/// in flavor order.
+pub fn wheel_multi_flavor_skeleton(
+    pkg_name: &str,
+    version: &str,
+    wheels: &[(String, String)],
+    release: &Release,
+    root_is_purelib: Option<bool>,
+) -> String {
+    let Some((_, first)) = wheels.first() else {
+        return String::new();
+    };
+    let single = wheel_binary_skeleton(pkg_name, version, first, release, root_is_purelib);
+    let sources: String = wheels
+        .iter()
+        .enumerate()
+        .map(|(i, (_, file))| format!("Source{i}:        {file}\n"))
+        .collect();
+    let installs: String = wheels
+        .iter()
+        .enumerate()
+        .map(|(i, (flavor, _))| format!("%{flavor}_pyproject_install %{{SOURCE{i}}}\n"))
+        .collect();
+    single
+        .replacen(&format!("Source0:        {first}\n"), &sources, 1)
+        .replacen("%pyproject_install %{SOURCE0}\n", &installs, 1)
+}
+
 /// Generate a minimal skeleton spec for a monorepo package.
 ///
 /// py2pack only understands single-project PyPI packages; for a monorepo with
@@ -1282,6 +1315,41 @@ BuildRequires:  %{python_module cmake}
         assert!(spec.contains("ExclusiveArch:  x86_64"), "{spec}");
         assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");
         assert!(!spec.contains("python_sitearch"), "{spec}");
+    }
+
+    #[test]
+    fn a_multi_flavor_skeleton_installs_each_flavors_own_wheel() {
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let wheels = vec![
+            (
+                "python313".to_string(),
+                "triton-3.8.0-cp313-cp313-manylinux_2_27_x86_64.whl".to_string(),
+            ),
+            (
+                "python314".to_string(),
+                "triton-3.8.0-cp314-cp314-manylinux_2_27_x86_64.whl".to_string(),
+            ),
+        ];
+        let spec = wheel_multi_flavor_skeleton("triton", "3.8.0", &wheels, &release, Some(false));
+        assert!(
+            spec.contains("Source0:        triton-3.8.0-cp313-cp313"),
+            "{spec}"
+        );
+        assert!(
+            spec.contains("Source1:        triton-3.8.0-cp314-cp314"),
+            "{spec}"
+        );
+        assert!(
+            spec.contains("%python313_pyproject_install %{SOURCE0}"),
+            "{spec}"
+        );
+        assert!(
+            spec.contains("%python314_pyproject_install %{SOURCE1}"),
+            "{spec}"
+        );
+        assert!(!spec.contains("%pyproject_install %{SOURCE0}"), "{spec}");
+        assert!(spec.contains("ExclusiveArch:  x86_64"), "{spec}");
+        assert!(spec.contains("%{buildroot}/%{$python_sitearch}"), "{spec}");
     }
 
     #[test]

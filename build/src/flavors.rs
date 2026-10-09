@@ -53,6 +53,28 @@ impl PythonFlavors {
         }
     }
 
+    /// The flavors to build wheels for: the configured set, else the host's
+    /// `%{pythons}` (what the target distro builds for; the review agent reads
+    /// it the same way). Empty when neither is known.
+    pub fn effective(&self) -> Vec<String> {
+        if !self.flavors.is_empty() {
+            return self.flavors.clone();
+        }
+        std::process::Command::new("rpmspec")
+            .args(["-E", "%{pythons}"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .filter(|f| abi_tag_for_flavor(f).is_some())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The single flavor this project is configured to build for, when it is
     /// configured for exactly one. `None` both when the file is absent
     /// (default, "don't know") and when it names several — only the

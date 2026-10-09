@@ -1375,14 +1375,15 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
 
    BEFORE choosing `"use_upstream_wheel"`, look at the wheels PyPI actually
    publishes for this release (`curl -s https://pypi.org/pypi/<name>/<version>/json`
-   — the `urls[].filename` list). The automatic switch only works when ONE
-   wheel can serve every flavor: a `-none-any.whl`, an `abi3` wheel, or a
-   single configured flavor. If the only wheels are locked to one CPython
-   each (`...-cp313-cp313-manylinux...`, `...-cp314-cp314-manylinux...` —
-   Triton's shape), the switch is refused and the package fails with "no
-   usable upstream wheel either". In that case do NOT return
-   `"use_upstream_wheel"`: follow convention 49 and return `"edited"` after
-   writing the per-flavor wheel spec yourself.
+   — the `urls[].filename` list). The automatic switch handles two shapes:
+   ONE wheel that serves every flavor (a `-none-any.whl`, an `abi3` wheel, or a
+   single configured flavor), and wheels each locked to one CPython
+   (`...-cp313-cp313-manylinux...`, `...-cp314-cp314-manylinux...` — Triton's
+   shape) when EVERY flavor the project builds has one for this arch: the
+   pipeline then downloads them all and writes the per-flavor spec itself
+   (convention 49's layout). It is refused — "no usable upstream wheel either" —
+   only when some flavor has no wheel at all; then follow convention 49 by
+   hand if you can, or return `"blocked"` naming the flavor that has none.
 
    This exception also covers Review discovering that the checked-out
    source is simply the wrong artifact for this specific PyPI release — a
@@ -1845,13 +1846,11 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    CPython ABI (`cp313-cp313-...`, `cp314-cp314-...`), with no `-none-any`
    and no `abi3` tag covering every flavor this project builds.
 
-   The automatic `"use_upstream_wheel"` action (Exception 4) cannot handle
-   this shape: it calls `pick_wheel_from_json`, which deliberately REFUSES
-   every cp-locked wheel rather than guess one — `wheel_is_flavor_agnostic`
-   in `ecosystem/src/pypi.rs` names Triton as the exact reason for that
-   refusal — so the turn would fail with "no usable upstream wheel either"
-   instead of switching. Do it by hand instead, as an ordinary `"edited"`
-   action:
+   The `"use_upstream_wheel"` action (Exception 4) now writes this layout
+   itself when every flavor the project builds has its own wheel, so prefer
+   it. The steps below are what it does — and what to do by hand, as an
+   ordinary `"edited"` action, when you need to adjust the generated spec or
+   it was refused:
    a. Find which Python flavors this project actually builds:
       `rpmspec -E '%{pythons}'` (e.g. `python313 python314`).
    b. Check the release's PyPI JSON

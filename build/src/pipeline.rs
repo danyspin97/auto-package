@@ -4026,12 +4026,31 @@ fn try_wheel_fallback(
             .map_err(|e| format!("PyPI fetch failed: {e}"))?,
     )
     .map_err(|e| format!("PyPI read failed: {e}"))?;
-    let wheel = ap_ecosystem::pypi::pick_wheel_from_json(
+    let wheel = match ap_ecosystem::pypi::pick_wheel_from_json(
         &json,
         &config.arch,
         config.single_locked_flavor_abi().as_deref(),
-    )
-    .map_err(|e| format!("no usable upstream wheel either: {e}"))?;
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            // No single wheel serves every flavor; one per flavor may (Triton).
+            return match generate_multi_flavor_wheel_spec(
+                config,
+                &json,
+                checkout_dir,
+                spec_path,
+                step,
+            ) {
+                Some(Ok((_, first))) => Ok(first),
+                Some(Err(GenSpecError::Other(m) | GenSpecError::NoReleaseArchive(m))) => {
+                    Err(format!("per-flavor wheel spec generation failed: {m}"))
+                }
+                Some(Err(GenSpecError::WheelOnly { .. })) | None => {
+                    Err(format!("no usable upstream wheel either: {e}"))
+                }
+            };
+        }
+    };
     generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step).map_err(
         |e| match e {
             GenSpecError::Other(msg) | GenSpecError::NoReleaseArchive(msg) => {
@@ -4158,12 +4177,86 @@ fn wheel_or_wheel_only(
         Ok(wheel) => {
             generate_wheel_binary_spec(config, &wheel, json, checkout_dir, spec_path, step)
         }
-        Err(_) => Err(GenSpecError::WheelOnly {
-            pkg_name: config.pkg_name.clone(),
-            version: config.version.clone(),
-            candidates,
-        }),
+        Err(_) => {
+            match generate_multi_flavor_wheel_spec(config, json, checkout_dir, spec_path, step) {
+                Some(result) => result.map(|(r, _)| r),
+                None => Err(GenSpecError::WheelOnly {
+                    pkg_name: config.pkg_name.clone(),
+                    version: config.version.clone(),
+                    candidates,
+                }),
+            }
+        }
     }
+}
+
+/// Wheels each locked to one CPython (Triton, onnxruntime): when EVERY flavor
+/// the project builds has its own wheel for this arch, download them all and
+/// write the per-flavor spec (convention 49) instead of leaving the agent to do
+/// it by hand without being able to fetch the files. `None` when it does not
+/// apply (fewer than two flavors, or a flavor with no wheel).
+fn generate_multi_flavor_wheel_spec(
+    config: &PipelineConfig,
+    json: &str,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+) -> Option<Result<(GenSpecResult, ap_ecosystem::pypi::WheelFile), GenSpecError>> {
+    let flavors = config.python_flavors.effective();
+    if flavors.len() < 2 {
+        return None;
+    }
+    let abis: Vec<String> = flavors
+        .iter()
+        .filter_map(|f| crate::flavors::abi_tag_for_flavor(f))
+        .collect();
+    let picked = ap_ecosystem::pypi::pick_wheels_per_flavor(json, &config.arch, &abis).ok()?;
+    ap_core::diag!(
+        "info: {} {}'s wheels are each locked to one CPython — repackaging one wheel per flavor ({})",
+        config.pkg_name,
+        config.version,
+        flavors.join(", ")
+    );
+    Some((|| {
+        let mut wheels: Vec<(String, String)> = Vec::new();
+        let mut first_path = None;
+        for (flavor, (_, wheel)) in flavors.iter().zip(&picked) {
+            let path = wheel
+                .fetch(checkout_dir)
+                .map_err(|e| GenSpecError::Other(format!("wheel download failed: {e}")))?;
+            first_path.get_or_insert(path);
+            wheels.push((flavor.clone(), wheel.filename.clone()));
+        }
+        let release = ap_ecosystem::pypi::parse_release_with_tarball(json, &wheels[0].1)
+            .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
+        let root_is_purelib = first_path
+            .as_deref()
+            .and_then(ap_ecosystem::sdist::wheel_root_is_purelib);
+        let spec_text =
+            crate::spec::strip_ap_fix_comments(&crate::spec::wheel_multi_flavor_skeleton(
+                &config.pkg_name,
+                &config.version,
+                &wheels,
+                &release,
+                root_is_purelib,
+            ));
+        std::fs::write(spec_path, &spec_text)
+            .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
+        let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+        Ok((
+            GenSpecResult {
+                sdist_top_level: String::new(),
+                is_maturin: false,
+                is_rust: false,
+                from_repo_archive: false,
+            },
+            picked
+                .into_iter()
+                .next()
+                .map(|(_, w)| w)
+                .expect("two flavors"),
+        ))
+    })())
 }
 
 fn generate_wheel_binary_spec(

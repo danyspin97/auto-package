@@ -424,6 +424,25 @@ pub fn pick_wheel_from_json(
     })
 }
 
+/// One wheel per CPython flavor, for a release whose wheels are each locked to
+/// a single CPython (`cp313-cp313`, `cp314-cp314` — Triton's shape), where no
+/// single wheel can serve every flavor. `abis` are ABI tags (`cp313`).
+///
+/// Fails with [`Error::NoWheel`] if ANY flavor has no installable wheel for
+/// `arch`: a package missing one flavor must not be silently half-built.
+pub fn pick_wheels_per_flavor(
+    json: &str,
+    arch: &str,
+    abis: &[String],
+) -> Result<Vec<(String, WheelFile)>, Error> {
+    let mut out: Vec<(String, WheelFile)> = Vec::new();
+    for abi in abis {
+        let wheel = pick_wheel_from_json(json, arch, Some(abi))?;
+        out.push((abi.clone(), wheel));
+    }
+    Ok(out)
+}
+
 fn pick_wheel<'a>(
     urls: &'a [RawFile],
     arch: &str,
@@ -1170,6 +1189,33 @@ mod tests {
             wheel.filename,
             "markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl"
         );
+    }
+
+    /// Triton's shape: one wheel per CPython, none universal. Each flavor gets
+    /// its own; a flavor with no wheel fails the whole pick.
+    #[test]
+    fn one_locked_wheel_per_flavor_is_picked_and_a_gap_fails_the_set() {
+        let mut v: serde_json::Value = serde_json::from_str(MARKUPSAFE).unwrap();
+        let first = v["urls"][0].clone();
+        let mk = |name: &str| {
+            let mut u = first.clone();
+            u["filename"] = name.into();
+            u["url"] = format!("https://files.example/{name}").into();
+            u
+        };
+        v["urls"] = serde_json::Value::Array(vec![
+            mk("markupsafe-3.0.3-cp313-cp313-manylinux_2_5_x86_64.whl"),
+            mk("markupsafe-3.0.3-cp314-cp314-manylinux_2_5_x86_64.whl"),
+        ]);
+        let json = v.to_string();
+        let abis = vec!["cp313".to_string(), "cp314".to_string()];
+        let picked = pick_wheels_per_flavor(&json, "x86_64", &abis).unwrap();
+        assert_eq!(picked[0].0, "cp313");
+        assert!(picked[0].1.filename.contains("cp313-cp313"));
+        assert!(picked[1].1.filename.contains("cp314-cp314"));
+
+        let with_gap = vec!["cp313".to_string(), "cp312".to_string()];
+        assert!(pick_wheels_per_flavor(&json, "x86_64", &with_gap).is_err());
     }
 
     #[test]
