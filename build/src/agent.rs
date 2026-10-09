@@ -398,6 +398,13 @@ openSUSE spec conventions to keep in mind:
    (convention 27). Only skip the tests instead when the dependency has
    already been tried and failed (convention 15 Step B).
 
+   Add ALL of them in the same turn, not one per build: when one import is
+   missing, `Grep` every `^import |^from ` line under the tests directory
+   (and any `requirements*.txt`/`test` extras), list the third-party modules,
+   and add every one that is not already a BuildRequires. python-aiocache
+   spent three attempts adding aiohttp, then aiomcache, msgpack and redis,
+   then marshmallow, one failed collection at a time.
+
    The same applies when tests are not failing but merely *skipping*: a test
    file that does `try: import aiohttp \n except ImportError: aiohttp = None`
    plus `@unittest.skipUnless(aiohttp, ...)` for an optional integration

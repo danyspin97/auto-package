@@ -684,6 +684,37 @@ fn dep_names_from_requires_dist(requires_dist: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// When the model API said to back off until; shared by all packages.
+static RATE_LIMIT_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// Block until any process-wide rate-limit pause has passed, plus a little
+/// jitter so the packages that were waiting do not all fire at once.
+fn wait_out_rate_limit() {
+    loop {
+        let until = *RATE_LIMIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(until) = until else { return };
+        let now = Instant::now();
+        if now >= until {
+            return;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        let jitter = std::time::Duration::from_millis(nanos % 2000);
+        std::thread::sleep((until - now).min(std::time::Duration::from_secs(30)) + jitter);
+    }
+}
+
+/// Record that the API asked everyone to back off for `wait`.
+fn note_rate_limited(wait: std::time::Duration) {
+    let mut guard = RATE_LIMIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    let until = Instant::now() + wait;
+    if guard.is_none_or(|cur| until > cur) {
+        *guard = Some(until);
+    }
+}
+
 /// Join a resolve-phase worker, reporting a panic instead of treating it as
 /// an empty (and therefore believable) answer.
 fn join_or_warn<T: Default>(h: std::thread::ScopedJoinHandle<'_, T>, what: &str) -> T {
@@ -2201,9 +2232,14 @@ fn agent_turn(
     // give up at once and get permanently excluded.
     let mut rate_limit_waits = 0u32;
     let turn_result = loop {
+        // The quota is shared by every package running in parallel: when any
+        // turn hits a 429, all of them pause instead of each discovering it
+        // separately and retrying in lockstep.
+        wait_out_rate_limit();
         match crate::agent::turn(make_req()) {
             Err(e) if e.is_rate_limited() && rate_limit_waits < 4 => {
                 let wait = std::time::Duration::from_secs(30 << rate_limit_waits);
+                note_rate_limited(wait);
                 rate_limit_waits += 1;
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
@@ -2212,7 +2248,7 @@ fn agent_turn(
                         wait.as_secs()
                     ),
                 });
-                std::thread::sleep(wait);
+                // (the pause itself happens at the top of the loop, shared)
             }
             other => break other,
         }
