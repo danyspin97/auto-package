@@ -995,7 +995,7 @@ fn run_package_inner(
                     ),
                 };
             }
-            Err(GenSpecError::Other(e)) => {
+            Err(GenSpecError::Other(e) | GenSpecError::NoReleaseArchive(e)) => {
                 reporter.report(&Event::StepFinished {
                     step: step.id,
                     outcome: StepOutcome::Failed,
@@ -3015,6 +3015,10 @@ enum GenSpecError {
         version: String,
         candidates: Vec<String>,
     },
+    /// The repository exists but has no release archive for the wanted
+    /// version (a guessed repo for a wheel-only vendor package, or a tag
+    /// scheme the archive-URL guesses don't cover). Carries the full message.
+    NoReleaseArchive(String),
     Other(String),
 }
 
@@ -3044,7 +3048,16 @@ fn generate_spec(
     // An explicit repository bypasses PyPI entirely: there may be no PyPI
     // project at all, and if there is, the user asked for the repo anyway.
     if let Some(ref repo_url) = config.source_repo {
-        return generate_from_repo(config, repo_url, checkout_dir, spec_path, step);
+        match generate_from_repo(config, repo_url, checkout_dir, spec_path, step) {
+            // A repository with no archive for this version cannot be the
+            // source of this release (a guessed repo for a wheel-only vendor
+            // package, or an unusual tag scheme): use PyPI's own artifacts
+            // below rather than failing the package outright.
+            Err(GenSpecError::NoReleaseArchive(msg)) => {
+                ap_core::diag!("  {msg}\n  falling back to PyPI's own release artifacts");
+            }
+            result => return result,
+        }
     }
 
     use ap_ecosystem::pypi;
@@ -3393,7 +3406,7 @@ fn fetch_release_archive(repo_url: &str, version: &str) -> Result<(Vec<u8>, Stri
             return Ok((buf, url.clone()));
         }
     }
-    Err(GenSpecError::Other(format!(
+    Err(GenSpecError::NoReleaseArchive(format!(
         "no release archive for version {version} at {repo_url}. Tried:\n{}",
         candidates
             .iter()
@@ -3662,7 +3675,9 @@ fn try_wheel_fallback(
     .map_err(|e| format!("no usable upstream wheel either: {e}"))?;
     generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step).map_err(
         |e| match e {
-            GenSpecError::Other(msg) => format!("wheel spec generation failed: {msg}"),
+            GenSpecError::Other(msg) | GenSpecError::NoReleaseArchive(msg) => {
+                format!("wheel spec generation failed: {msg}")
+            }
             GenSpecError::WheelOnly { .. } => {
                 "wheel spec generation failed unexpectedly".to_string()
             }
