@@ -2087,6 +2087,23 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `python-poetry-core` collects LICENSE files from 4 vendored libs
    (lark, fastjsonschema, packaging, tomli).
 
+59. **Exact `==` pin on a build/runtime dependency that openSUSE ships at a
+   different version** (OBS: `nothing provides python313-pybind11 = 2.11.1
+   (got version 3.0.4-1.3)`). The pin comes from the upstream metadata
+   (`[build-system] requires = ["pybind11==2.11.1"]`, `Requires-Dist: x==1.2`)
+   and the generator copies it faithfully into `BuildRequires:`/`Requires:`.
+   It is almost never a real constraint — it records the version upstream
+   happened to build with. Do NOT queue the exact old version as a package
+   to build and do NOT report the dependency unresolvable. Relax it:
+   `%{python_module pybind11 >= 2.11}` (drop the upper bound unless the
+   package's tests or build fail against the newer release). Only if the
+   build then fails with a real API break, patch the package for the newer
+   dependency, or as a last resort report that specific incompatibility.
+   Applies equally to `setuptools==`, `cython==`, `numpy==` pins; for
+   `numpy` pins in `[build-system] requires`, upstream commonly pins the
+   OLDEST ABI it supports (`oldest-supported-numpy`) — the distro's current
+   numpy is correct there.
+
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
 A standalone Rust package (binary/library built entirely with Cargo — a
