@@ -45,6 +45,11 @@ pub enum CauseKind {
     MissingPkgConfig {
         package: String,
     },
+    /// A test run with many failures: a digest grouped by file and reason, so
+    /// the agent fixes the whole set in one edit instead of one test at a time.
+    PytestFailures {
+        failed: usize,
+    },
 }
 
 /// A recognised cause, ready to be put in front of the agent.
@@ -87,6 +92,149 @@ static PKGCONFIG: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:No package '(?<a>[A-Za-z0-9_.+-]+)' found|Package '(?<b>[A-Za-z0-9_.+-]+)', required by .*, not found)")
         .expect("static pattern")
 });
+
+static PYTEST_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?<kind>FAILED|ERROR) (?<path>[^\s:]+)(?:::\S+)?(?: - (?<msg>.*))?$")
+        .expect("static pattern")
+});
+
+/// At least this many FAILED/ERROR lines before the failure is treated as "a
+/// broken test environment" (digest) rather than one specific test.
+const DIGEST_THRESHOLD: usize = 5;
+
+#[derive(Default)]
+struct FileGroup {
+    count: usize,
+    network: usize,
+    missing_file: usize,
+    missing_module: usize,
+    other: usize,
+}
+
+fn classify_message(msg: &str) -> &'static str {
+    let m = msg.to_lowercase();
+    if m.contains("connect")
+        || m.contains("timeout")
+        || m.contains("urllib")
+        || m.contains("socket")
+        || m.contains("httpx")
+        || m.contains("resolution")
+        || m.contains("network")
+    {
+        "network"
+    } else if m.contains("filenotf") || m.contains("no such file") {
+        "missing_file"
+    } else if m.contains("modulenotf") || m.contains("importerr") {
+        "missing_module"
+    } else {
+        "other"
+    }
+}
+
+/// Digest of a pytest summary: files with their failure counts and reasons.
+fn pytest_digest(haystack: &[&str]) -> Option<ProbableCause> {
+    let mut groups: std::collections::BTreeMap<String, FileGroup> = Default::default();
+    let mut seen = std::collections::HashSet::new();
+    for l in haystack {
+        let Some(c) = PYTEST_LINE.captures(l.trim()) else {
+            continue;
+        };
+        // The same summary can appear in both the excerpt and the tail.
+        if !seen.insert(l.trim().to_string()) {
+            continue;
+        }
+        let g = groups.entry(c["path"].to_string()).or_default();
+        g.count += 1;
+        match classify_message(c.name("msg").map(|m| m.as_str()).unwrap_or("")) {
+            "network" => g.network += 1,
+            "missing_file" => g.missing_file += 1,
+            "missing_module" => g.missing_module += 1,
+            _ => g.other += 1,
+        }
+    }
+    let failed: usize = groups.values().map(|g| g.count).sum();
+    if failed < DIGEST_THRESHOLD {
+        return None;
+    }
+    let is_test_tree = |p: &str| p.starts_with("tests/") || p.starts_with("test/");
+    let helper_files: Vec<&String> = groups.keys().filter(|p| !is_test_tree(p)).collect();
+    let mut rows: Vec<String> = groups
+        .iter()
+        .map(|(path, g)| {
+            let mut why = Vec::new();
+            if g.missing_file > 0 {
+                why.push(format!("{} missing file/fixture", g.missing_file));
+            }
+            if g.network > 0 {
+                why.push(format!("{} need network", g.network));
+            }
+            if g.missing_module > 0 {
+                why.push(format!("{} missing module", g.missing_module));
+            }
+            if g.other > 0 {
+                why.push(format!("{} other", g.other));
+            }
+            format!("{path}: {} failed ({})", g.count, why.join(", "))
+        })
+        .collect();
+    rows.sort();
+    let mut steps: Vec<String> = Vec::new();
+    if !helper_files.is_empty() {
+        steps.push(format!(
+            "{} of the failing files are outside `tests/` ({}) — pytest collected helper \
+             scripts as tests. Restrict collection to the real test directory (`%pytest tests/`) \
+             rather than deselecting them one by one.",
+            helper_files.len(),
+            helper_files
+                .iter()
+                .map(|s| s.as_str())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let missing_files: usize = groups.values().map(|g| g.missing_file).sum();
+    if missing_files > 0 {
+        steps.push(format!(
+            "{missing_files} failures are a missing file or fixture (data the sdist does not ship, \
+             or a tool run from the wrong directory): fetch the data from the upstream tag as a \
+             `SourceN` (convention 44) or ignore those files — do not patch the tests."
+        ));
+    }
+    let network: usize = groups.values().map(|g| g.network).sum();
+    if network > 0 {
+        steps.push(format!(
+            "{network} failures need network access, which build workers lack (convention 11): \
+             deselect exactly those tests or files."
+        ));
+    }
+    let modules: usize = groups.values().map(|g| g.missing_module).sum();
+    if modules > 0 {
+        steps.push(format!(
+            "{modules} failures are an import error: add EVERY missing third-party module as a \
+             BuildRequires in this same edit (convention 10)."
+        ));
+    }
+    if steps.is_empty() {
+        steps.push("Group the failures by file and reason before changing anything.".into());
+    }
+    Some(ProbableCause {
+        summary: format!(
+            "{failed} tests failed across {} files — a test ENVIRONMENT problem, not one bug. \
+             Decide the whole set in a single edit; fixing one test per build wastes an \
+             attempt each.",
+            groups.len()
+        ),
+        action: steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("({}) {s}", i + 1))
+            .collect::<Vec<_>>()
+            .join(" "),
+        evidence: rows.into_iter().take(12).collect(),
+        kind: CauseKind::PytestFailures { failed },
+    })
+}
 
 /// Modules whose import name is not their PyPI/RPM distribution name.
 const IMPORT_TO_DIST: &[(&str, &str)] = &[
@@ -209,6 +357,12 @@ pub fn detect(log: &ExtractedLog, own_module: &str, spec: &str) -> Option<Probab
         .chain(log.log_tail.lines())
         .collect();
     let section = log.effective_section().to_string();
+
+    // Many failing tests: the cause is the test environment as a whole, and
+    // any single missing module is just one row of it.
+    if let Some(digest) = pytest_digest(&haystack) {
+        return Some(digest);
+    }
 
     // Python import of something that is not installed.
     if let Some(module) = haystack
@@ -552,6 +706,64 @@ mod tests {
         let log = log_from(&[
             "Executing(%check): /usr/bin/bash -e /var/tmp/x",
             "AssertionError: 1 != 2",
+            "error: Bad exit status from /var/tmp/x (%check)",
+        ]);
+        assert_eq!(detect(&log, "foo", ""), None);
+    }
+
+    /// python-accelerate's real %check: dozens of failures from four different
+    /// environment causes, which the agent had been peeling off one per build.
+    #[test]
+    fn many_failing_tests_become_one_digest_with_a_single_plan() {
+        let mut lines =
+            vec!["Executing(%check): /usr/bin/bash -e /var/tmp/rpm-tmp.abc".to_string()];
+        for t in ["a", "b", "c"] {
+            lines.push(format!(
+                "FAILED src/accelerate/test_utils/scripts/test_sync.py::test_{t} - AssertionError"
+            ));
+        }
+        for t in ["a", "b", "c", "d"] {
+            lines.push(format!(
+                "FAILED tests/test_cli.py::TpuConfigTester::test_{t} - FileNotFoundError: x"
+            ));
+        }
+        lines.push(
+            "FAILED tests/test_cli.py::ModelEstimatorTester::test_gated - httpx2.ConnectError"
+                .into(),
+        );
+        lines.push(
+            "FAILED tests/test_utils.py::UtilsTester::test_fp32 - ModuleNotFoundError: triton"
+                .into(),
+        );
+        lines.push("error: Bad exit status from /var/tmp/rpm-tmp.abc (%check)".into());
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let log = log_from(&refs);
+        let c = detect(&log, "accelerate", "").expect("digest");
+        assert_eq!(c.kind, CauseKind::PytestFailures { failed: 9 });
+        assert!(c.summary.contains("test ENVIRONMENT"), "{}", c.summary);
+        assert!(c.action.contains("`%pytest tests/`"), "{}", c.action);
+        assert!(c.action.contains("missing file or fixture"), "{}", c.action);
+        assert!(c.action.contains("need network"), "{}", c.action);
+        assert!(
+            c.action.contains("EVERY missing third-party module"),
+            "{}",
+            c.action
+        );
+        assert!(
+            c.evidence
+                .iter()
+                .any(|e| e.starts_with("tests/test_cli.py: 5 failed")),
+            "{:?}",
+            c.evidence
+        );
+    }
+
+    #[test]
+    fn a_handful_of_failures_is_not_a_digest() {
+        let log = log_from(&[
+            "Executing(%check): /usr/bin/bash -e /var/tmp/x",
+            "FAILED tests/test_a.py::test_x - AssertionError",
+            "FAILED tests/test_a.py::test_y - AssertionError",
             "error: Bad exit status from /var/tmp/x (%check)",
         ]);
         assert_eq!(detect(&log, "foo", ""), None);
