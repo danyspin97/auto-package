@@ -206,9 +206,10 @@ fn looks_like_url(s: &str) -> bool {
     s.starts_with("https://") || s.starts_with("http://") || s.starts_with("git@")
 }
 
-/// The package name implied by a repository URL: its last path segment.
+/// The package name implied by a repository URL: its repository name.
 ///
-/// `https://github.com/BurntSushi/ripgrep.git` → `ripgrep`.
+/// `https://github.com/BurntSushi/ripgrep.git` → `ripgrep`; sub-paths
+/// (`…/tree/main`), queries and fragments do not leak into the name.
 fn repo_package_name(url: &str) -> String {
     // A direct tarball URL names the project in its file name, not as the last
     // path segment (`…/hello-2.12.tar.gz` is `hello`, not the file).
@@ -221,12 +222,38 @@ fn repo_package_name(url: &str) -> String {
     {
         return name;
     }
-    url.trim_end_matches('/')
+    let bare = url.split(['?', '#']).next().unwrap_or(url);
+    if let Some(forge) = ap_ecosystem::forge::parse(bare)
+        && !forge.repo_name.is_empty()
+    {
+        return forge.repo_name;
+    }
+    bare.trim_end_matches('/')
         .trim_end_matches(".git")
         .rsplit(['/', ':'])
         .next()
-        .unwrap_or(url)
+        .unwrap_or(bare)
         .to_string()
+}
+
+/// Reject package names that would be unsafe or meaningless downstream (they
+/// flow into osc argv, state paths and pip): empty, leading `-`, or containing
+/// `/`, whitespace or control characters.
+fn validate_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("package name is empty".to_string());
+    }
+    if name.starts_with('-') {
+        return Err(format!(
+            "invalid package name '{name}': must not start with '-'"
+        ));
+    }
+    if name.contains('/') || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "invalid package name '{name}': must not contain '/', whitespace or control characters"
+        ));
+    }
+    Ok(())
 }
 
 /// Produce candidate upstream-project names for a dep the agent (or OBS)
@@ -529,6 +556,7 @@ fn main() -> color_eyre::Result<()> {
                 (true, None) => (repo_package_name(&name), Some(name)),
                 (false, u) => (name, u),
             };
+            validate_package_name(&name).map_err(|e| color_eyre::eyre::eyre!(e))?;
 
             // Both of these are silent-wrong-behaviour traps otherwise: a
             // mistyped level would quietly log at info, and an unsupported
@@ -720,7 +748,11 @@ fn main() -> color_eyre::Result<()> {
             // The dispatcher below ends when the TUI exits (its channel
             // disconnects), so quitting the TUI never leaves it waiting.
             let add_rx = tui_ctrl.as_ref().and_then(|t| t.take_add_requests());
+            // One semaphore for the whole run: `--jobs` caps concurrent package
+            // builds across the root build and every TUI-added root.
+            let sem = make_semaphore(jobs);
             let result = {
+                let sem = &sem;
                 let (project, work_dir, state_root, rpms_dir) =
                     (&project, &work_dir, &state_root, &rpms_dir);
                 let (distro, arch, run_dir) = (&distro, &arch, &run_dir);
@@ -738,31 +770,37 @@ fn main() -> color_eyre::Result<()> {
                                         } else {
                                             (raw.clone(), None)
                                         };
-                                        let r = cmd_build(
-                                            &extra,
-                                            None,
-                                            project,
-                                            work_dir,
-                                            state_root,
-                                            rpms_dir,
-                                            distro,
-                                            arch,
-                                            max_attempts,
-                                            budget_usd,
-                                            None,
-                                            false, // force: reuse anything already built
-                                            false, // regen
-                                            no_agent,
-                                            jobs,
-                                            false, // sweep
-                                            extra_repo,
-                                            source_urls.clone(),
-                                            python_flavors.clone(),
-                                            run_dir,
-                                            reporter.clone(),
-                                            base_reporter.clone(),
-                                            tui_ctrl.clone(),
-                                        );
+                                        let r = validate_package_name(&extra)
+                                            .map_err(|e| color_eyre::eyre::eyre!(e))
+                                            .and_then(|()| {
+                                                catch_panic(|| {
+                                                    cmd_build(
+                                                        &extra,
+                                                        None,
+                                                        project,
+                                                        work_dir,
+                                                        state_root,
+                                                        rpms_dir,
+                                                        distro,
+                                                        arch,
+                                                        max_attempts,
+                                                        budget_usd,
+                                                        None,
+                                                        false, // force: reuse anything already built
+                                                        false, // regen
+                                                        no_agent,
+                                                        sem.clone(),
+                                                        false, // sweep
+                                                        extra_repo,
+                                                        source_urls.clone(),
+                                                        python_flavors.clone(),
+                                                        run_dir,
+                                                        reporter.clone(),
+                                                        base_reporter.clone(),
+                                                        tui_ctrl.clone(),
+                                                    )
+                                                })
+                                            });
                                         reporter.report(&match r {
                                             Ok(()) => Event::Progress {
                                                 step: None,
@@ -778,31 +816,36 @@ fn main() -> color_eyre::Result<()> {
                             }
                         });
                     }
-                    let first = cmd_build(
-                        &name,
-                        version.as_deref(),
-                        project,
-                        work_dir,
-                        state_root,
-                        rpms_dir,
-                        distro,
-                        arch,
-                        max_attempts,
-                        budget_usd,
-                        target.as_deref(),
-                        force,
-                        regen,
-                        no_agent,
-                        jobs,
-                        sweep,
-                        source_repo,
-                        source_urls.clone(),
-                        python_flavors.clone(),
-                        run_dir,
-                        reporter.clone(),
-                        base_reporter.clone(),
-                        tui_ctrl.clone(),
-                    );
+                    // A panic here must become an `Err`: the scope also joins the
+                    // add-request dispatcher, which only ends when the TUI quits,
+                    // and the panic text would be invisible in the alternate screen.
+                    let first = catch_panic(|| {
+                        cmd_build(
+                            &name,
+                            version.as_deref(),
+                            project,
+                            work_dir,
+                            state_root,
+                            rpms_dir,
+                            distro,
+                            arch,
+                            max_attempts,
+                            budget_usd,
+                            target.as_deref(),
+                            force,
+                            regen,
+                            no_agent,
+                            sem.clone(),
+                            sweep,
+                            source_repo,
+                            source_urls.clone(),
+                            python_flavors.clone(),
+                            run_dir,
+                            reporter.clone(),
+                            base_reporter.clone(),
+                            tui_ctrl.clone(),
+                        )
+                    });
                     if tui_ctrl.is_some() {
                         // The TUI stays open after the root build, and `result?`
                         // below only runs once it quits — so a failure (e.g. pip
@@ -978,7 +1021,7 @@ fn main() -> color_eyre::Result<()> {
                 max_attempts,
                 budget_usd,
                 no_agent,
-                jobs,
+                make_semaphore(jobs),
                 check,
                 regen,
                 source_urls,
@@ -1019,40 +1062,82 @@ fn main() -> color_eyre::Result<()> {
     Ok(())
 }
 
-/// A counting semaphore that limits how many threads run concurrently.
+/// A counting semaphore that limits how many package builds run concurrently.
 ///
-/// `None` means unlimited. Each thread acquires a slot at the start of its
-/// work and releases it when done; threads block until a slot is free.
-type Semaphore = Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>;
+/// `None` means unlimited. One instance is created per Build/Update command
+/// and shared by every `cmd_build` it spawns (including TUI-added roots), so
+/// `--jobs` is a global cap. Threads block in `acquire` until a slot is free.
+struct Limiter {
+    limit: usize,
+    active: std::sync::Mutex<usize>,
+    cvar: std::sync::Condvar,
+}
+
+type Semaphore = Arc<Limiter>;
 
 fn make_semaphore(jobs: usize) -> Option<Semaphore> {
-    if jobs == 0 {
-        None
-    } else {
-        Some(Arc::new((
-            std::sync::Mutex::new(0usize),
-            std::sync::Condvar::new(),
-        )))
-    }
+    (jobs != 0).then(|| {
+        Arc::new(Limiter {
+            limit: jobs,
+            active: std::sync::Mutex::new(0),
+            cvar: std::sync::Condvar::new(),
+        })
+    })
 }
 
-fn sem_acquire(sem: &Option<Semaphore>, limit: usize) {
-    if let Some(s) = sem {
-        let (lock, cvar) = &**s;
-        let mut active = lock.lock().unwrap();
-        while *active >= limit {
-            active = cvar.wait(active).unwrap();
+/// A held semaphore slot, released on drop so a panicking build cannot leak it.
+struct Permit(Option<Semaphore>);
+
+impl Permit {
+    fn acquire(sem: &Option<Semaphore>) -> Permit {
+        if let Some(s) = sem {
+            // A poisoned lock only means another holder panicked; the count
+            // itself is still consistent because release happens in `drop`.
+            let mut active = s.active.lock().unwrap_or_else(|e| e.into_inner());
+            while *active >= s.limit {
+                active = s.cvar.wait(active).unwrap_or_else(|e| e.into_inner());
+            }
+            *active += 1;
         }
-        *active += 1;
+        Permit(sem.clone())
     }
 }
 
-fn sem_release(sem: &Option<Semaphore>) {
-    if let Some(s) = sem {
-        let (lock, cvar) = &**s;
-        *lock.lock().unwrap() -= 1;
-        cvar.notify_one();
+impl Drop for Permit {
+    fn drop(&mut self) {
+        if let Some(s) = &self.0 {
+            *s.active.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+            s.cvar.notify_one();
+        }
     }
+}
+
+/// Best-effort message from a `catch_unwind` / `JoinHandle::join` panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
+/// Run `f`, converting a panic into an `Err` carrying the panic message.
+fn catch_panic<T>(f: impl FnOnce() -> color_eyre::Result<T>) -> color_eyre::Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|p| {
+        Err(color_eyre::eyre::eyre!(
+            "build panicked: {}",
+            panic_message(p.as_ref())
+        ))
+    })
+}
+
+/// Join a package thread, turning a panic into a per-package failure so one
+/// crashed build does not take the whole run down.
+fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str) -> PipelineResult {
+    handle.join().unwrap_or_else(|p| PipelineResult::Failed {
+        rpm_name: rpm_name.to_string(),
+        reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1071,7 +1156,7 @@ fn cmd_build(
     force: bool,
     regen: bool,
     no_agent: bool,
-    jobs: usize,
+    sem: Option<Semaphore>,
     // When true, also opportunistically retry every OTHER
     // Failed/Unresolvable/Broken package in the project (not just the ones
     // the requested target's own dep closure needs). Off by default; see
@@ -1238,7 +1323,6 @@ fn cmd_build(
     };
 
     let mut config = config;
-    let sem = make_semaphore(jobs);
 
     // Deps discovered at runtime that need to be built before the next resolve.
     let mut pending_deps: Vec<String> = Vec::new();
@@ -1546,12 +1630,11 @@ fn cmd_build(
                     let dep_version = dep_config.version.clone();
                     let r = pkg_reporter(&dep_rpm);
                     let sem2 = sem.clone();
-                    Some(std::thread::spawn(move || {
-                        sem_acquire(&sem2, jobs);
-                        let result = run_package(&dep_config, &dep_pkg_run, r.as_ref());
-                        sem_release(&sem2);
-                        (dep_rpm, dep_version, result)
-                    }))
+                    let handle = std::thread::spawn(move || {
+                        let _permit = Permit::acquire(&sem2);
+                        run_package(&dep_config, &dep_pkg_run, r.as_ref())
+                    });
+                    Some((dep_rpm, dep_version, handle))
                 })
                 .collect();
 
@@ -1561,8 +1644,8 @@ fn cmd_build(
                 }
             }
 
-            for handle in handles {
-                let (dep_rpm, version, result) = handle.join().expect("dep thread panicked");
+            for (dep_rpm, version, handle) in handles {
+                let result = join_package(handle, &dep_rpm);
                 let outcome = match &result {
                     PipelineResult::Built { .. } => PackageOutcome::Built,
                     PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
@@ -1746,20 +1829,19 @@ fn cmd_build(
                 pkg_run.ensure().expect("failed to create pkg run dir");
                 let r = pkg_reporter(&rpm_name);
                 let sem2 = sem.clone();
-                std::thread::spawn(move || {
-                    sem_acquire(&sem2, jobs);
-                    let result = run_package(&pkg_config, &pkg_run, r.as_ref());
-                    sem_release(&sem2);
-                    (rpm_name, target_info.version, result)
-                })
+                let handle = std::thread::spawn(move || {
+                    let _permit = Permit::acquire(&sem2);
+                    run_package(&pkg_config, &pkg_run, r.as_ref())
+                });
+                (rpm_name, target_info.version, handle)
             })
             .collect();
 
         let mut batch_pending: Vec<String> = Vec::new();
         let mut batch_failures: Vec<(String, String)> = Vec::new();
 
-        for handle in handles {
-            let (rpm_name, version, result) = handle.join().expect("build thread panicked");
+        for (rpm_name, version, handle) in handles {
+            let result = join_package(handle, &rpm_name);
             let outcome = match &result {
                 PipelineResult::Built { .. } => PackageOutcome::Built,
                 PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
@@ -1945,7 +2027,7 @@ fn cmd_update(
     max_attempts: usize,
     budget_usd: f64,
     no_agent: bool,
-    jobs: usize,
+    sem: Option<Semaphore>,
     check: bool,
     regen: bool,
     source_urls: Arc<ap_build::sources::SourceMap>,
@@ -2036,7 +2118,7 @@ fn cmd_update(
             true,  // force
             regen, // passthrough from Update's own --regen
             no_agent,
-            jobs,
+            sem.clone(),
             false, // sweep: never from inside an update
             source_repo,
             source_urls.clone(),
@@ -2121,6 +2203,42 @@ fn report_update_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_package_name_ignores_subpaths_and_queries() {
+        for url in [
+            "https://github.com/o/r",
+            "https://github.com/o/r.git",
+            "https://github.com/o/r/tree/main",
+            "https://github.com/o/r/releases/tag/v1",
+            "https://github.com/o/r?tab=readme",
+            "https://github.com/o/r#readme",
+        ] {
+            assert_eq!(repo_package_name(url), "r", "{url}");
+        }
+    }
+
+    #[test]
+    fn validate_package_name_rejects_unsafe_names() {
+        assert!(validate_package_name("ripgrep").is_ok());
+        for bad in ["", "-rf", "a/b", "a b", "a\nb", "a\tb"] {
+            assert!(validate_package_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn permit_releases_on_panic() {
+        let sem = make_semaphore(1);
+        let s2 = sem.clone();
+        let r = std::thread::spawn(move || {
+            let _p = Permit::acquire(&s2);
+            panic!("boom");
+        })
+        .join();
+        assert!(r.is_err());
+        // Would deadlock if the slot had leaked.
+        let _p = Permit::acquire(&sem);
+    }
 
     /// drogon-shaped case the user reported: the agent passed
     /// `trantor-devel` through as the dep name instead of translating

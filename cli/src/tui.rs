@@ -12,7 +12,8 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -35,12 +36,17 @@ use ap_core::sink::{MemorySink, Reporter};
 const MAX_LOG_LINES: usize = 300;
 const MAX_AGENT_ACTIVITY: usize = 100;
 
+/// Bound on events queued for the render thread; beyond it events are dropped.
+const EVENT_QUEUE_CAP: usize = 8192;
+
 /// Handle used by the CLI to obtain reporters that feed the TUI.
 ///
 /// Cheap to clone; every clone shares the same channel to the render thread.
 #[derive(Clone)]
 pub struct TuiController {
-    tx: Sender<Msg>,
+    tx: SyncSender<Msg>,
+    /// Events dropped because the render thread's queue was full.
+    dropped: std::sync::Arc<AtomicUsize>,
     /// Package names the user typed into the TUI's `n` prompt. Handed out
     /// once, via [`TuiController::take_add_requests`]; disconnects when the
     /// render thread exits, which is how the consumer learns the user quit.
@@ -91,7 +97,7 @@ impl TuiController {
     /// `crate::handle_interrupt` for why the TUI cannot just rely on the
     /// process's real SIGINT handler firing.
     pub fn new(memory: std::sync::Arc<MemorySink>) -> io::Result<Self> {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(EVENT_QUEUE_CAP);
         let (add_tx, add_rx) = channel();
         std::thread::spawn(move || {
             if let Err(e) = run(rx, add_tx, memory) {
@@ -100,6 +106,7 @@ impl TuiController {
         });
         Ok(Self {
             tx,
+            dropped: std::sync::Arc::new(AtomicUsize::new(0)),
             add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
         })
     }
@@ -123,6 +130,7 @@ impl TuiController {
             base,
             pkg,
             tx: self.tx.clone(),
+            dropped: self.dropped.clone(),
         })
     }
 }
@@ -130,16 +138,31 @@ impl TuiController {
 struct Tapped {
     base: std::sync::Arc<dyn Reporter + Send + Sync>,
     pkg: Option<String>,
-    tx: Sender<Msg>,
+    tx: SyncSender<Msg>,
+    dropped: std::sync::Arc<AtomicUsize>,
 }
 
 impl Reporter for Tapped {
     fn report(&self, event: &Event) {
         self.base.report(event);
-        let _ = self.tx.send(Msg {
+        // Never block a reporter on a slow render thread: if the queue is
+        // full the TUI misses this event (jsonl/memory already have it).
+        match self.tx.try_send(Msg {
             pkg: self.pkg.clone(),
             event: event.clone(),
-        });
+        }) {
+            Err(TrySendError::Full(_)) => {
+                if self.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
+                    self.base.report(&Event::Warning {
+                        step: None,
+                        message: "TUI cannot keep up; dropping events from its view \
+                                  (the run log is complete)"
+                            .to_string(),
+                    });
+                }
+            }
+            Err(TrySendError::Disconnected(_)) | Ok(()) => {}
+        }
     }
 }
 
@@ -577,6 +600,10 @@ fn run(
     add_tx: Sender<String>,
     memory: std::sync::Arc<MemorySink>,
 ) -> io::Result<()> {
+    // Installed before the fallible calls: `enable_raw_mode` succeeding and
+    // `EnterAlternateScreen` then failing must still restore the terminal.
+    // (Teardown is idempotent, so a guard after a failed first call is fine.)
+    let _terminal_guard = TerminalGuard::new();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -592,8 +619,6 @@ fn run(
     // does NOT come back through here at all — `crate::handle_interrupt`
     // does its own equivalent teardown and then ends the process on the
     // spot.)
-    let _terminal_guard = TerminalGuard::new();
-
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     // Without this, the alternate screen keeps whatever happened to be in its
