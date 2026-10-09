@@ -51,16 +51,21 @@ e. %build — set CARGO env vars so maturin builds fully offline, plus the
      export CARGO_PROFILE_RELEASE_DEBUG=full
      export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
      export CARGO_PROFILE_RELEASE_STRIP=false
-     # PyO3's build.rs probes the host interpreter by default; without this
-     # it bakes the wrong ABI tag into every flavor's extension.
-     %python_expand export PYO3_PYTHON="%{_bindir}/$python"
      # Rust + C LTO interop is broken on openSUSE's toolchain for PyO3.
      %global _lto_cflags %{nil}
      # Python 3.12+ enables subinterpreter isolation checks PyO3 doesn't
      # fully implement; this cfg silences the build-time hard-fail.
      RUSTFLAGS="${RUSTFLAGS:-} --cfg pyo3_unsafe_allow_subinterpreters"
      export RUSTFLAGS
-     %pyproject_wheel
+     # PyO3's build.rs probes the host interpreter by default; without
+     # PYO3_PYTHON it bakes the wrong ABI tag into a flavor's extension.
+     # Set it INSIDE the per-flavor expansion, together with the build: a bare
+     # `%python_expand export PYO3_PYTHON=...` followed by a separate
+     # `%pyproject_wheel` leaves only the LAST flavor's interpreter set, so
+     # every flavor is built against it.
+     %{python_expand export PYO3_PYTHON=%{_bindir}/$python
+     %{$python_pyproject_wheel}
+     }
 
 f. %install — repeat the CARGO vars (they do not persist across sections):
      export CARGO_NET_OFFLINE=true

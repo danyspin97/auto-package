@@ -16,15 +16,20 @@ them would mean checking the same source in several times.
 CRITICAL — the source package name and the subpackages:
 - The top-level `Name:` field stays as given (e.g. `python-cuda-python`).
   Do NOT rename it to match one of the subprojects.
-- Every relevant subproject becomes a `%package -n python-%{name}-<sub>`
+- Every relevant subproject becomes a `%package -n %{name}-<sub>`
   section (or the appropriate openSUSE Python subpackage macro). None of
   them replaces or is promoted to the top-level package.
 - The top-level package itself may be a metapackage (empty %files, only
   Requires on each subpackage) if there is no module at the root level.
-- Do NOT create a separate OBS package for a subproject that belongs here.
-  If you find yourself writing a spec whose Name: is a sub-project of the
-  archive (e.g. `Name: python-cuda-bindings` inside the cuda-python zip),
-  stop — restructure so that subproject is a `%package` block instead.
+- Do NOT create a separate OBS package for a subproject that belongs here —
+  EXCEPT a sibling that is independently versioned and published on PyPI
+  under its own name (the `cuda-bindings` / `cuda-core` / `cuda-pathfinder`
+  family of NVIDIA/cuda-python). Those ARE separate OBS packages built from
+  the same tarball: the spec for `python-cuda-bindings` builds only its own
+  subdirectory (`cd cuda_bindings` in each section) and lists its siblings as
+  ordinary `%{python_module cuda-pathfinder}` style dependencies. Writing
+  `Name: python-cuda-bindings` inside that archive's spec is correct, not a
+  mistake to restructure away.
 
 The shape:
 - %build and %install change into each project directory in turn and run
