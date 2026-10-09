@@ -2264,6 +2264,10 @@ fn agent_turn(
             input: input.to_string(),
         });
     };
+    // After a prose-only reply the retry runs in a fresh session with this
+    // nudge added to the prompt context (see below).
+    let fresh_session = std::cell::Cell::new(false);
+    let nudge: std::cell::OnceCell<String> = std::cell::OnceCell::new();
     let make_req = || crate::agent::TurnRequest {
         workspace: ws.dir(),
         pkg_name: &config.pkg_name,
@@ -2287,13 +2291,13 @@ fn agent_turn(
         unresolvable_detail: ctx.unresolvable_detail,
         failed_deps: &config.failed_deps,
         unbuildable_deps: &config.unbuildable_deps,
-        session_id: if ctx.resume {
+        session_id: if ctx.resume && !fresh_session.get() {
             session_id.as_deref()
         } else {
             None
         },
         checkout_dir: ctx.checkout_dir,
-        context: ctx.context,
+        context: nudge.get().map(String::as_str).or(ctx.context),
         on_tool_use: Some(&on_tool_use),
     };
 
@@ -2308,7 +2312,30 @@ fn agent_turn(
         // separately and retrying in lockstep.
         wait_out_rate_limit();
         let slot = AgentSlot::acquire();
-        let result = crate::agent::turn(make_req());
+        let mut result = crate::agent::turn(make_req());
+        // A resumed session can answer in prose ("I already called
+        // StructuredOutput in my previous message") without making the call in
+        // THIS turn, which leaves nothing to act on (python-brotlicffi's last
+        // failure). Ask once more in a fresh session, saying what happened.
+        if matches!(&result, Err(crate::agent::Error::Parse { message, .. })
+            if message.contains("no usable turn response"))
+        {
+            reporter.report(&Event::Warning {
+                step: Some(step.id),
+                message: "the agent ended its turn without calling StructuredOutput; \
+                          retrying once in a fresh session"
+                    .to_string(),
+            });
+            let _ = nudge.set(format!(
+                "{}Your previous reply did not call the StructuredOutput tool, so \
+                 nothing you did was recorded. The checkout and spec on disk are in \
+                 whatever state you left them: re-read them, finish the task, and END \
+                 by calling StructuredOutput with your result.",
+                ctx.context.map(|c| format!("{c}\n\n")).unwrap_or_default()
+            ));
+            fresh_session.set(true);
+            result = crate::agent::turn(make_req());
+        }
         drop(slot);
         match result {
             Err(e) if e.is_rate_limited() && rate_limit_waits < MAX_RATE_LIMIT_WAITS => {

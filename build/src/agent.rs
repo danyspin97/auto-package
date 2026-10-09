@@ -1659,6 +1659,14 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    recognize these so you don't spend an attempt "fixing" something that was
    never broken:
    - **A test file/fixture is simply absent from the release tarball.**
+     (If it is a `conftest.py` that fails at IMPORT — `FileNotFoundError` on a
+     data directory it lists at module level — the whole suite is gone, not
+     one test, and patching the conftest is fragile: python-brotlicffi lost
+     six attempts to hand-patching `test/conftest.py` for a missing
+     `libbrotli/tests/testdata` (a submodule of ANOTHER project). Do not patch
+     test infrastructure to tolerate missing data: fetch the data as a
+     `SourceN` when it is one small file or tarball, otherwise replace
+     `%pytest` with the import smoke test of convention 11 rung (iv).)
      Some maintainers' `MANIFEST.in`/packaging config excludes test helper
      files from the sdist even though the test files that `import` them are
      included, so specific tests fail with an import/file-not-found error no
