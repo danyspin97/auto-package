@@ -16,8 +16,10 @@ generalize perfectly to this package.
   `add_library(... SHARED ...)` (CMake defaults to `STATIC` unless
   `BUILD_SHARED_LIBS` is set) or `configure.ac` for `LT_INIT`/
   `AC_PROG_LIBTOOL` (libtool-managed shared libraries). If it only builds
-  a binary or a static library, one package with no split is enough —
-  skip the rest of this list.
+  a binary with no installed headers, one package with no split is enough —
+  skip the rest of this list. A static or header-only library that
+  installs headers still needs `%package devel` (headers + cmake/`.pc`
+  files); only the runtime `lib<name><soversion>` subpackage is skipped.
 - **Shared library split**: a versioned shared library needs its own
   `%package -n lib<name><soversion>` (the soname's major version, e.g.
   `libfmt12`, `libz1-ng`, `libuv1` — find it from `set(SOVERSION ...)`/
@@ -25,16 +27,101 @@ generalize perfectly to this package.
   configure.ac/Makefile.am) plus a `%package devel` with
   `Requires: lib<name><soversion> = %{version}`. The base `Name:` package
   can stay empty (metapackage) or hold a CLI binary if there is one.
+  **No SOVERSION set is NOT a reason to drop the split.** Installed
+  headers (`.h`/`.hpp`) and `lib/cmake/` / `.pc` files must always go in a
+  `-devel` package, or rpmlint's `devel-file-in-non-devel-package`
+  (Badness 50 per header) blows the 999 budget — a header-heavy C++
+  framework like oatpp ships ~170 headers = Badness 8500. Never "simplify"
+  to one package after a link error; fix the link error and keep
+  `%package devel`. If the library has no SOVERSION, name the runtime
+  package `lib<name>-<version-major>_<minor>` or keep the `.so` in the base
+  package and put only headers/cmake/pkgconfig in `-devel`
+  (`Requires: %{name} = %{version}`).
+- **Install dirs named after a version the CMake script computes**
+  (e.g. `include/oatpp-1.3.0/` while the tag is 1.3.1 — the project parses
+  its own header, not the tag): list `%{buildroot}` after `%install` and use
+  `%{_includedir}/<name>-*/` globs in `%files devel` rather than
+  `%{version}`.
+- **Package-private directories must be owned, exactly once.** The build
+  fails late (after `%install`, in `50-check-filelist`) with
+  `<pkg>.rpm: directories not owned by a package: - /usr/lib64/<name>-X.Y`
+  when `%files` lists files *inside* a directory that nothing owns — a
+  file entry claims the file, not its parent. Real example: `oatpp`
+  installs `liboatpp.so` under `%{_libdir}/oatpp-1.3.0/`; listing only
+  `%{_libdir}/oatpp-*/liboatpp.so` leaves the directory orphaned. Fix: add
+  `%dir %{_libdir}/oatpp-*` to the package that owns the files in it (or
+  list the whole directory `%{_libdir}/oatpp-*/` with no `%dir`). The
+  opposite mistake is `RPM build warnings: File listed twice: <dir>` — a
+  directory listed as a whole (`%{_includedir}/foo-*/`) plus an extra
+  `%dir` line for it, or the same path in two `%files` sections. Pick one
+  form per directory. A directory shared by runtime and `-devel` (e.g. the
+  `.so` in the runtime package and headers/cmake in `-devel` under one
+  versioned dir) is owned by the package it is *not* a leaf-only part of:
+  give the `%dir` to the runtime package and list only files in `-devel`
+  — never `%dir` the same path in both. After `%install`, run
+  `find %{buildroot} -type d` against your `%files` to confirm every
+  non-system directory is claimed once. The build log's `check-filelist`
+  and `File listed twice` lines are the authoritative list; read them
+  before editing `%files`.
 - **`%ldconfig_scriptlets`**: every shared-library subpackage needs
   `%ldconfig_scriptlets -n lib<name><soversion>` (expands to the
   `%post`/`%postun -p /sbin/ldconfig` pair) directly before its `%files`
   section. Do not hand-write the ldconfig calls — the macro is the current
   idiom (do not invent macros; this one is real, confirmed on the build
   host's `/usr/lib/rpm/macros.d/macros.ldconfig`).
+
+  **DO NOT rewrite `%ldconfig_scriptlets` to manual `%post -n <lib> -p
+  /sbin/ldconfig` / `%postun -n <lib> -p /sbin/ldconfig` just because
+  your local `rpmspec --parse` complains the macro is undefined.** That
+  warning is a host-macro-vs-target-macro mismatch (see auto-package's
+  built-in rpmspec note) — the macro IS defined on every openSUSE
+  build worker, and the manual rewrite is strictly worse because it
+  loses the single-source-of-truth property of the macro (if openSUSE
+  ever changes what ldconfig invocation to use, every manual spec has
+  to be hand-updated, while every `%ldconfig_scriptlets` user picks it
+  up for free). The drogon run burned a whole attempt doing this
+  manual rewrite believing the macro was "deprecated" — it is not.
 - **CMake `%build`/`%install`**: `%cmake` (configure) then `%cmake_build`,
   then `%cmake_install`. Never hand-write `mkdir build && cd build && cmake
   ..` — the macros already do the out-of-tree build and set the standard
   flags (`CMAKE_INSTALL_PREFIX`, `CMAKE_BUILD_TYPE`, etc.).
+- **CMake `BUILD_*` knob discipline for library packages**: a typical
+  upstream library CMakeLists.txt has 3–8 orthogonal `BUILD_<THING>` and
+  `USE_<THING>` options that default ON for standalone development. For a
+  distro library spec you almost always want the opposite defaults —
+  grep `CMakeLists.txt` for `option(BUILD_` and `option(USE_` early and
+  decide ALL of them in one pass:
+    * `BUILD_SHARED_LIBS=ON` — the whole point of the shared-library split.
+    * `BUILD_STATIC_LIBS=OFF` — openSUSE's `%cmake` already defaults this
+      way; set it explicitly if the upstream default is ON.
+    * `BUILD_TESTING=OFF` **when** the test suite's fixtures aren't in the
+      archive (e.g. a `USE_SUBMODULE=OFF` build whose tests reference files
+      from the never-fetched submodule — drogon's `trantor/trantor/tests/
+      server.crt` is the recurring case). Only enable `BUILD_TESTING=ON`
+      if you can actually run `%ctest` AND the fixtures exist in `source/`.
+    * `BUILD_EXAMPLES=OFF` / `BUILD_DEMOS=OFF` — demo apps install to
+      `/usr/bin/` under short benign names (`helloworld`, `benchmark`,
+      `client`, `websocket_server`, …) and immediately produce an
+      "Installed (but unpackaged)" error AND can collide with system
+      binaries. Disable them unless you deliberately want an examples
+      subpackage.
+    * `USE_SUBMODULE=OFF` (or whatever the vendor-vs-system knob is
+      called) — openSUSE strongly prefers system libraries. If this is on,
+      the vendored submodule needs to be in the archive AND the system
+      package must be absent — rarely the right choice. Pair with
+      `BUILD_TESTING=OFF` per the previous bullet.
+    * Opt-in tool subpackages: a code-gen or CLI tool (drogon's
+      `drogon_ctl`, protobuf's `protoc`, gRPC's `grpc_cpp_plugin`) is a
+      conscious decision — EITHER package it as `-n <name>-tools` /
+      `-n <name>-ctl` with its own `%files` section AND leave the
+      corresponding `BUILD_<TOOL>` ON, OR drop it entirely with
+      `BUILD_<TOOL>=OFF`. Flipping between the two across attempts just
+      burns attempts: pick one upfront and commit.
+  Real example: drogon took 4 attempts to settle on the right four
+  knobs (`BUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
+  -DUSE_SUBMODULE=OFF`); each wrong attempt cost a full OBS build.
+  Decide all four in one pass by reading `CMakeLists.txt`'s `option(...)`
+  lines directly.
 - **Meson `%build`/`%install`/`%check`**: the same idea, different macro set —
   `%meson` (configure) then `%meson_build`, `%meson_install`, and
   `%meson_test` for `%check`. Detect via `meson.build` at the source root.
