@@ -1302,6 +1302,17 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    sees a fresh spec shaped like Exception 3's — load the
    `prebuilt-wheel-packaging` skill to finish it.
 
+   BEFORE choosing `"use_upstream_wheel"`, look at the wheels PyPI actually
+   publishes for this release (`curl -s https://pypi.org/pypi/<name>/<version>/json`
+   — the `urls[].filename` list). The automatic switch only works when ONE
+   wheel can serve every flavor: a `-none-any.whl`, an `abi3` wheel, or a
+   single configured flavor. If the only wheels are locked to one CPython
+   each (`...-cp313-cp313-manylinux...`, `...-cp314-cp314-manylinux...` —
+   Triton's shape), the switch is refused and the package fails with "no
+   usable upstream wheel either". In that case do NOT return
+   `"use_upstream_wheel"`: follow convention 49 and return `"edited"` after
+   writing the per-flavor wheel spec yourself.
+
    This exception also covers Review discovering that the checked-out
    source is simply the wrong artifact for this specific PyPI release — a
    `find_source_repo_candidates` guess can be a real, existing repository

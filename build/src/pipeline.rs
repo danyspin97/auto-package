@@ -2756,6 +2756,33 @@ fn apply_turn_outcome(
                         TurnEffect::NoChange
                     })
                 }
+                // A per-CPython-locked wheel set (Triton) is refused by the
+                // automatic switch but IS packageable by hand (convention
+                // 49). Failing the package here threw that away even when
+                // the agent had correctly diagnosed it; hand the agent the
+                // redirect through the notes it reads next turn and carry on.
+                Err(e) if e.contains("no usable upstream wheel either") => {
+                    append_notes(
+                        notes_path,
+                        &format!(
+                            "\n## {label} — use_upstream_wheel was refused\n\
+                             {e}\n\
+                             The automatic wheel switch cannot serve every flavor from one \
+                             wheel. Do NOT return `use_upstream_wheel` again: if PyPI has a \
+                             wheel for each flavor's CPython ABI, follow convention 49 and \
+                             write the per-flavor wheel spec yourself with action `edited`; \
+                             otherwise report `blocked` naming the flavor that has no wheel.\n"
+                        ),
+                    );
+                    reporter.report(&Event::Warning {
+                        step: Some(step.id),
+                        message: format!(
+                            "{rpm_name}: use_upstream_wheel refused ({e}); asking the \
+                             agent to repackage per-flavor wheels by hand (convention 49)"
+                        ),
+                    });
+                    Ok(TurnEffect::NoChange)
+                }
                 Err(e) => Err(format!("{label}: unbuildable from source ({why}), and {e}")),
             }
         }
