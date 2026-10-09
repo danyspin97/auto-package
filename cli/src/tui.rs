@@ -718,14 +718,16 @@ fn event_loop(
             }
             match key.code {
                 KeyCode::Char('n') | KeyCode::Char('+') => input = Some(String::new()),
-                KeyCode::Char('q') | KeyCode::Esc => break,
+                // Quit means quit: end the whole process (killing the running
+                // builds), not just the UI. Detaching used to leave the
+                // pipeline running headless with nothing on screen and no
+                // way to stop it short of `kill`.
+                KeyCode::Char('q') | KeyCode::Esc => crate::handle_interrupt(true, memory),
                 KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                     // Raw mode disables signal generation entirely, so the OS
                     // never delivers a real SIGINT while the TUI is running —
-                    // this keypress IS the only place Ctrl-C shows up. `q`/Esc
-                    // above only ends the TUI and hands control back to the
-                    // still-running pipeline (by design — it's a UI-detach,
-                    // not an abort); this must stop the whole process instead.
+                    // this keypress IS the only place Ctrl-C shows up. Same
+                    // shutdown as `q`/Esc above.
                     crate::handle_interrupt(true, memory);
                 }
                 KeyCode::Down | KeyCode::Char('j') => select_next(&mut selected, &state),

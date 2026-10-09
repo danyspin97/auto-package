@@ -481,6 +481,9 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     // without restoring it first, this message and the shell prompt after
     // exit both land inside that broken state instead of the user's normal
     // screen.
+    // Stop the build workers (own process groups, so the terminal's Ctrl-C
+    // never reached them): otherwise `osc`/`claude` outlive this process.
+    ap_build::proc::kill_all_groups();
     if tui_active {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(

@@ -166,6 +166,7 @@ pub fn run(
         program: program.to_string(),
         source: e,
     })?;
+    let _group = track_group(child.id());
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
@@ -227,6 +228,47 @@ pub fn capture(
 
 /// SIGKILL a child's whole process group (the child must have been spawned
 /// with `process_group(0)`). Best effort: the group may already be gone.
+/// Process groups of children currently running. Children get their own group
+/// (so a timeout can kill their descendants), which also means a terminal
+/// Ctrl-C no longer reaches them — when this process is told to stop it must
+/// kill them itself or `osc`/`claude` keep running, orphaned.
+static ACTIVE_GROUPS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Registration of a running child's group; removed on drop.
+pub(crate) struct GroupGuard(u32);
+
+/// Record `pid` (spawned with `process_group(0)`) as running until the guard drops.
+pub(crate) fn track_group(pid: u32) -> GroupGuard {
+    ACTIVE_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(pid);
+    GroupGuard(pid)
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        ACTIVE_GROUPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// SIGKILL every child still running. For process shutdown (Ctrl-C, quit).
+pub fn kill_all_groups() {
+    let pids: Vec<u32> = ACTIVE_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .collect();
+    for pid in pids {
+        kill_process_group(pid);
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn kill_process_group(pid: u32) {
     let _ = Command::new("kill")
@@ -295,6 +337,7 @@ pub fn capture_with_timeout_env(
             program: program.to_string(),
             source: e,
         })?;
+    let _group = track_group(child.id());
 
     // Drain both pipes on their own threads so a chatty child can't fill a
     // pipe buffer and deadlock against our `try_wait` polling. Each keeps at

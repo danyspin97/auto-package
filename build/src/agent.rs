@@ -2942,6 +2942,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(Error::Launch)?;
+    let _group = crate::proc::track_group(child.id());
 
     // A turn that never ends (network stall, a tool waiting for input) would
     // otherwise block the stdout loop below forever; the per-package budget is
