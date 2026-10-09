@@ -664,13 +664,26 @@ fn fetch_project_packages(
     if !out.success() {
         return Err(format!("osc ls exited {}: {}", out.code, out.stderr.trim()));
     }
-    Ok(out
-        .stdout
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_lowercase())
-        .collect())
+    Ok(parse_package_listing(&out.stdout))
+}
+
+/// Package names from `osc ls <project>`, lowercased. A multibuild package is
+/// listed as `<source>:<flavor>` (`apache-arrow:python-pyarrow`) and its flavor
+/// is itself a package that gets built and published (python313-pyarrow), so
+/// the flavor name counts as available too — otherwise a dependency Factory
+/// already ships looks absent and gets queued to be built again.
+fn parse_package_listing(stdout: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for line in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        let name = line.to_lowercase();
+        if let Some((_, flavor)) = name.split_once(':')
+            && flavor.starts_with("python")
+        {
+            out.insert(flavor.to_string());
+        }
+        out.insert(name);
+    }
+    out
 }
 
 /// Create an initial `.changes` entry for a new package using `osc vc`.
@@ -1771,6 +1784,28 @@ pub fn obs_build(
             },
         },
     })
+}
+
+#[cfg(test)]
+mod package_listing_tests {
+    use super::*;
+
+    #[test]
+    fn a_python_multibuild_flavor_counts_as_an_available_package() {
+        let pkgs =
+            parse_package_listing("apache-arrow\napache-arrow:python-pyarrow\nPython-Foo\n\n");
+        assert!(pkgs.contains("python-pyarrow"));
+        assert!(pkgs.contains("apache-arrow:python-pyarrow"));
+        assert!(pkgs.contains("apache-arrow"));
+        assert!(pkgs.contains("python-foo"));
+    }
+
+    #[test]
+    fn a_non_python_multibuild_flavor_is_not_promoted_to_a_package() {
+        let pkgs = parse_package_listing("gcc15:bootstrap\nfoo:test\n");
+        assert!(!pkgs.contains("bootstrap"));
+        assert!(!pkgs.contains("test"));
+    }
 }
 
 #[cfg(test)]

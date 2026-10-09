@@ -1196,6 +1196,16 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      this bug, not a real unbuildable dep; re-report it under the stripped
      name).
    - **System tools**: cmake, ninja, specialized build tools — report if missing
+
+   **Check the distro before reporting a C/C++ library as missing.** Package
+   names rarely match the upstream/library name, and reporting a name that
+   exists under another spelling queues a pointless (and often huge) source
+   build. First `zypper search -s '<guess>*'` and `zypper search --provides
+   --match-exact 'pkgconfig(<lib>)'` / `'cmake(<Lib>)'`: Arrow is
+   `apache-arrow-devel` and `apache-parquet-devel`, not `libarrow-devel`
+   (python-pyarrow itself is a flavor of the distro's `apache-arrow`). Use the
+   name the distro has as the BuildRequires; only when the search truly finds
+   nothing do you report the library in `unresolvable_packages`.
    - **CUDA Python packages** that build without CUDA (never cuda-devel /
      cuda-runtime — see the CUDA special case below)
    - **ANY other dependency**: regardless of type, size, or complexity
