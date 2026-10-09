@@ -534,6 +534,9 @@ impl Reporter for HumanSink {
 
 pub struct JsonlSink {
     writer: Mutex<BufWriter<File>>,
+    /// Set after the first write failure so the diagnostic prints once, not
+    /// once per event.
+    warned: AtomicBool,
 }
 
 impl JsonlSink {
@@ -541,6 +544,7 @@ impl JsonlSink {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             writer: Mutex::new(BufWriter::new(file)),
+            warned: AtomicBool::new(false),
         })
     }
 }
@@ -565,11 +569,16 @@ impl Reporter for JsonlSink {
             pkg: current_pkg(),
             event,
         };
-        if let Ok(line) = serde_json::to_string(&envelope)
-            && let Ok(mut w) = self.writer.lock()
-        {
-            let _ = writeln!(w, "{line}");
-            let _ = w.flush();
+        if let Ok(line) = serde_json::to_string(&envelope) {
+            // A panic in another thread mid-write poisons the lock; the
+            // buffer is still usable, so keep logging.
+            let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            let res = writeln!(w, "{line}").and_then(|()| w.flush());
+            if let Err(e) = res
+                && !self.warned.swap(true, Ordering::Relaxed)
+            {
+                diag!("warning: run.jsonl write failed ({e}); events may be missing");
+            }
         }
     }
 }
@@ -586,7 +595,10 @@ impl MemorySink {
     }
 
     pub fn events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -598,7 +610,10 @@ impl Default for MemorySink {
 
 impl Reporter for MemorySink {
     fn report(&self, event: &Event) {
-        self.events.lock().unwrap().push(event.clone());
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event.clone());
     }
 }
 
@@ -642,6 +657,29 @@ mod tests {
         );
         assert!(contents.contains("\"event\":\"step_started\""));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn jsonl_write_failure_warns_once_and_does_not_panic() {
+        let sink = JsonlSink::open(Path::new("/dev/full")).unwrap();
+        assert!(!sink.warned.load(Ordering::Relaxed));
+        sink.report(&Event::ResolveStarted { root: "x".into() });
+        assert!(sink.warned.load(Ordering::Relaxed));
+        sink.report(&Event::ResolveStarted { root: "y".into() });
+    }
+
+    #[test]
+    fn memory_sink_survives_a_poisoned_lock() {
+        let sink = Arc::new(MemorySink::new());
+        let s2 = sink.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = s2.events.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
+        sink.report(&Event::ResolveStarted { root: "x".into() });
+        assert_eq!(sink.events().len(), 1);
     }
 
     #[test]

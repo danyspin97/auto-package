@@ -98,7 +98,7 @@ fn is_leap(y: u64) -> bool {
 pub struct RunDir {
     pub path: PathBuf,
     pub run_id: RunId,
-    /// Shared step counters, keyed by rpm name. The outer build loop calls
+    /// Shared step counters, keyed by sanitized rpm name. The outer build loop calls
     /// `pkg(rpm_name)` once per retry — if each call allocated a fresh
     /// counter, two attempts of the same package would both allocate
     /// `01-build/`, `02-fix/`, etc., and the second attempt's log would
@@ -130,15 +130,18 @@ impl RunDir {
     }
 
     pub fn pkg(&self, rpm_name: &str) -> PkgRunDir {
+        // Key by the sanitized name: it is what names the directory, so two
+        // rpm names that sanitize alike must share one counter.
+        let dir_name = sanitize_name(rpm_name);
         let counter = self
             .pkg_counters
             .lock()
-            .unwrap()
-            .entry(rpm_name.to_string())
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(dir_name.clone())
             .or_insert_with(|| Arc::new(AtomicU32::new(0)))
             .clone();
         PkgRunDir {
-            path: self.path.join(sanitize_name(rpm_name)),
+            path: self.path.join(dir_name),
             counter,
         }
     }
@@ -216,6 +219,17 @@ mod tests {
         assert_eq!(sanitize_name("."), "_");
         assert_eq!(sanitize_name("..."), "_"); // multi-dot too
         assert_eq!(sanitize_name(""), "_");
+    }
+
+    #[test]
+    fn names_that_sanitize_alike_share_one_counter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = RunDir::allocate(tmp.path()).unwrap();
+        let a = run.pkg("home:foo");
+        let b = run.pkg("home_foo");
+        assert_eq!(a.path, b.path);
+        a.step("build").unwrap();
+        b.step("build").unwrap();
     }
 
     #[test]
