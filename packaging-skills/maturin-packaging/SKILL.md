@@ -87,3 +87,23 @@ g. %check — when the upstream test suite needs something the build worker
 h. %files %{python_files} — use %{python_sitearch}:
      %{python_sitearch}/<pkg>/
      %{python_sitearch}/<pkg>-%{version}.dist-info/
+
+i. "no matching package named `X` found" during the offline build — the
+   registry tarball lacks a crate. Do NOT declare the package blocked until
+   you have checked what pulls `X` in (`grep -rn '\bX\b' Cargo.toml
+   */Cargo.toml Cargo.lock` in the unpacked source):
+   - `X` is an `optional = true` dependency enabled only by a feature the
+     wheel build does not turn on (`profiling = ["pprof"]`, `jemalloc`,
+     `tracing-*` extras), a `[dev-dependencies]` entry, or a `cfg(target_os
+     = ...)` dependency for another OS: cargo still has to resolve it
+     offline even though nothing compiles it. Fix it in the spec, not in
+     OBS: add a small patch (PATCH-FIX-OPENSUSE, `-p1`) that deletes the
+     dependency line and the feature entries that reference it from the
+     affected Cargo.toml, and drop the matching `Cargo.lock` entry if
+     cargo complains that the lock needs updating (`--offline` forbids it).
+   - `X` is a normal dependency of the extension itself: then the registry
+     really is incomplete. Check the registry was generated from the same
+     tarball the spec builds (a `Cargo.toml` edited after generation, e.g.
+     by the workspace-member fix noted in `cargo-workspace-fix.txt`, can
+     change resolution), and only then report it as blocked, naming the
+     crate and the service step that must be re-run.
