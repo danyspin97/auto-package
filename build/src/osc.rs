@@ -518,10 +518,21 @@ pub fn list_project_packages(project: &str, emit: Emit<'_>) -> std::collections:
         }
     }
 
-    let pkgs = fetch_project_packages(project, emit);
+    // A failed listing must not be cached: an empty set would make every
+    // package look absent from OBS for the rest of the run. Retry once, then
+    // answer empty for this call only so the next call tries again.
+    let pkgs = match fetch_project_packages(project, emit)
+        .or_else(|_| fetch_project_packages(project, Emit::quiet()))
+    {
+        Ok(pkgs) => pkgs,
+        Err(e) => {
+            ap_core::diag!("  could not list packages of {project}: {e}");
+            return Default::default();
+        }
+    };
     cache
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .insert(project.to_owned(), pkgs.clone());
     pkgs
 }
@@ -611,19 +622,29 @@ pub fn cat_file(project: &str, pkg: &str, filename: &str, emit: Emit<'_>) -> Opt
     Some(out.stdout)
 }
 
-fn fetch_project_packages(project: &str, emit: Emit<'_>) -> std::collections::HashSet<String> {
-    let Ok(out) = proc::capture("osc", &["ls", project], &anywhere(), emit) else {
-        return Default::default();
-    };
+fn fetch_project_packages(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<std::collections::HashSet<String>, String> {
+    let out = proc::capture_with_timeout(
+        "osc",
+        &["ls", project],
+        &anywhere(),
+        emit,
+        // A whole distro project (openSUSE:Factory) is a long listing.
+        Duration::from_secs(180),
+    )
+    .map_err(|e| e.to_string())?;
     if !out.success() {
-        return Default::default();
+        return Err(format!("osc ls exited {}: {}", out.code, out.stderr.trim()));
     }
-    out.stdout
+    Ok(out
+        .stdout
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_lowercase())
-        .collect()
+        .collect())
 }
 
 /// Create an initial `.changes` entry for a new package using `osc vc`.
