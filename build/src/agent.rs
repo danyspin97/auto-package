@@ -136,7 +136,7 @@ openSUSE spec conventions to keep in mind:
      `<normalized>-%{version}.dist-info/`, and the generator already writes it;
    - the IMPORT name is whatever directory actually lands in site-packages,
      and it is frequently neither of the above. Never derive it — look it up.
-     Convention 13 says how.
+     Convention 16 says how.
    `%autosetup -n` takes the tarball's top-level directory, which is usually
    but not always the normalized name; the generator sets it from the tarball.
 
@@ -497,7 +497,9 @@ openSUSE spec conventions to keep in mind:
    inside comments (see the note below the conventions). Write
    `# TODO: tests are not run - all tests require network access`, never
    `# no %check - ...`. Never leave %check empty, never add '|| true', and
-   never add '|| [ "$?" = "5" ]'.
+   never add '|| [ "$?" = "5" ]'. (Sole exception: convention 48's per-arch
+   `test_failok` second pass, which may end in `||:` — the main pass must
+   still fail the build.)
 
 12. **pytest configuration pitfalls that look like a code failure but aren't.**
    Before assuming the tests themselves are broken, check whether pytest's
@@ -650,7 +652,9 @@ openSUSE spec conventions to keep in mind:
    evidence. If you cannot verify it with the tools available, say so in reasoning.
 
 15. Missing module in %check (e.g. `ModuleNotFoundError: No module named
-   'conftest'` or any other import error): a test dependency is absent.
+   'pytest_asyncio'` or any other THIRD-PARTY import error): a test dependency
+   is absent. (A missing LOCAL helper — `conftest`, `tests.helpers`, a
+   fixture file — is not a dependency: the sdist omitted it, see convention 44.)
    Read the packaging file (pyproject.toml [project.optional-dependencies] /
    setup.cfg [options.extras_require]) to identify all test deps and add
    them as `BuildRequires: %{python_module <dep>}`.
@@ -897,7 +901,7 @@ openSUSE spec conventions to keep in mind:
    `%python_find_lang` in the `gettext-i18n-packaging` skill) — that wiki
    page is not a complete list of every real python-rpm-macros macro. Do NOT
    invent a macro beyond those two sources. If a macro you want is in
-   neither, confirm it actually exists with `rpm -E %<macro>` (a real macro
+   neither, confirm it actually exists with `rpmspec -E '%<macro>'` (a real macro
    expands to something other than its own literal name) or
    `rpmspec --parse` before using it — do not guess from the name alone.
 
@@ -1068,8 +1072,12 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      %python_expand rm -rf %{buildroot}%{$python_sitelib}/<pkg>/data/
 
    These bundled C/C++ sources are build-time artifacts that have no use at
-   runtime in the RPM environment (they require CUDA, GPU, etc.) and should
-   always be stripped.
+   runtime in the RPM environment (they require CUDA, GPU, etc.) — strip them
+   when they are vendored third-party copies nothing downstream compiles
+   against. Do NOT strip headers that ARE the package's public interface (a
+   redistributed SDK such as the NVIDIA CUDA wheels' `include/`, or a Python
+   C-API's own headers): other packages `#include` those, so move them to a
+   `%package devel` subpackage instead (convention 53).
 
 25. rpmlint badness is a budget: the build fails when the TOTAL exceeds 999,
    so the fix is whichever group of files contributes the most, not the first
@@ -1102,7 +1110,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      backend fails outright — convention 22 covers the fix.
    - **Extra top-level content.** CI configuration, docs, benchmarks and
      vendored third-party trees come along with a repository archive and none
-     of it belongs in the RPM; conventions 22 and 23 cover removing it.
+     of it belongs in the RPM; conventions 23 and 25 cover removing it.
 
 27. **ANY dependency missing from OBS is something to BUILD, not something to
    work around.** This is the CORE PRINCIPLE of the entire packaging system.
@@ -1149,8 +1157,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       BuildRequires:  cuda-devel
       BuildRequires:  cuda-runtime
    3. Also add CUDA to `unresolvable_packages` if OBS reports it as
-      unresolvable — report it regardless, there is no downside to reporting
-      a dependency that turns out to already be satisfied. But know what to
+      unresolvable — report it ONCE. If it already appears under "Dependencies
+      that can never be built here" (turn prompt), do not report it again:
+      `%build` genuinely needing it means convention 28 Exception 4
+      (`use_upstream_wheel`) or convention 49. But know what to
       expect: the build system resolves a missing name from PyPI first, then
       falls back to a discoverable public source repository (the same
       fallback a wheel-only PyPI release uses) — `cuda-devel`/`cuda-runtime`
@@ -1251,7 +1261,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    dependency genuinely imports the PyPI package's Python module, it needs
    the real `python-ninja`, and this substitution does not apply to it.
 
-28. **The only three exceptions where working around a dependency (rather
+28. **The only four exceptions where working around a dependency (rather
    than reporting it per convention 27) is justified.** All three need
    EVIDENCE from the current run or from upstream, not a guess about how
    hard something looks. If you have not seen it fail in THIS run
@@ -1336,14 +1346,20 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    - Releases or tags matching the package version
    - Monorepo structures where the package is a subdirectory
    Once found, report the GitHub repository URL and the specific tag/release
-   in your reasoning, and set action to "blocked" with why: "source not on
-   PyPI, available at https://github.com/..." so the build system can fetch
-   it from there.
+   in your reasoning. Prefer fixing the spec to build from that repository
+   (convention 26) when you can. Setting action to "blocked" with that URL in
+   `why` ENDS this package for the run — nothing in the pipeline fetches the
+   URL; it is there for the human operator to read.
 
 30. Monorepos: when the "Other projects in this archive" section above lists
    more than one project, package ALL sibling projects as subpackages of this
-   one spec — not one project built and the rest thrown away, and not a
-   separate OBS package per subdirectory. Use the `monorepo-packaging` skill
+   one spec — not one project built and the rest thrown away — UNLESS a
+   sibling is independently versioned and published on PyPI under its own
+   name (the `cuda-bindings` / `cuda-core` / `cuda-pathfinder` family of
+   `NVIDIA/cuda-python`). Those are separate OBS packages built from the same
+   tarball: this spec builds ONLY its own subdirectory (`cd <subdir>` in each
+   section) and lists the siblings as ordinary `%{python_module <name>}`
+   dependencies. Use the `monorepo-packaging` skill
    for the full treatment (subpackage shape, the `%python_subpackages`
    single-invocation limitation, when an umbrella/metapackage is right
    instead of re-vendoring an independently-released sibling).
@@ -1394,7 +1410,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    discovering them one build at a time.
 
 34. **Optional extras are `Recommends`, not a build-blocking dependency.**
-   Convention 24 says any MISSING package should be built — but that applies
+   Convention 27 says any MISSING package should be built — but that applies
    to dependencies the package actually needs to build, import, or pass its
    test suite. `pyproject.toml`'s `[project.optional-dependencies]` /
    `extras_require` frequently lists integrations the package only uses if
@@ -1776,7 +1792,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    instead of switching. Do it by hand instead, as an ordinary `"edited"`
    action:
    a. Find which Python flavors this project actually builds:
-      `rpm --eval '%{pythons}'` (e.g. `python313 python314`).
+      `rpmspec -E '%{pythons}'` (e.g. `python313 python314`).
    b. Check the release's PyPI JSON
       (`https://pypi.org/pypi/<name>/<version>/json`) for a `bdist_wheel`
       matching EACH flavor's ABI tag (`cp313-cp313-manylinux..._<arch>.whl`
@@ -1798,12 +1814,13 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       and `%python<NNN>_fix_shebang` — the same macro the shared
       multi-flavor loop calls internally, just invoked once per flavor with
       a different argument instead of the same one N times.)
-   e. Everything else — License from `source/*.dist-info/`,
-      `Root-Is-Purelib` deciding arch vs. noarch, `%check` needing a real
+   e. Everything else — License from `source/*.dist-info/`, arch vs. noarch
+      from each wheel's platform tag (NOT `Root-Is-Purelib`: a `manylinux_*`
+      wheel is arch-specific even when that says true), `%check` needing a real
       import/file check rather than a blind `%pytest_arch` if the actual
       test suite needs a GPU (Exception 2) — follows the
       `prebuilt-wheel-packaging` skill exactly as for a single wheel; load
-      it for the multi-flavor worked example and finish the spec from
+      it (it carries the multi-flavor example) and finish the spec from
       there.
 
 50. **OOM / disk-full build failures are a worker-sizing problem, not a
@@ -2153,7 +2170,15 @@ For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
 - `Python.h: No such file` → add `BuildRequires: %{python_module devel}`
 - `pkg-config` errors → add `BuildRequires: pkg-config` or `pkgconfig(<name>)`
 - Library linking errors → search for the library and add its -devel package
-- CUDA headers/libraries → add `BuildRequires: cuda-devel` and `cuda-runtime`
+- CUDA headers/libraries → add `BuildRequires: cuda-devel` and `cuda-runtime`,
+  but read convention 27 first: they can never be built here, so a package
+  whose `%build` truly needs them is Exception 4 (`use_upstream_wheel`)
+- A missing build-time EXECUTABLE (`command not found`, `No such file or
+  directory: 'pg_config'`) → `zypper search --provides --match-exact
+  /usr/bin/<tool>` and BuildRequire the package it names. Never guess: plain
+  `-devel` or `-mini` variants often do not ship the tool (python-psycopg-binary
+  spent two attempts on `postgresql-devel` then `postgresql` for `pg_config`;
+  the provider is `postgresql18-server-devel`)
 
 4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check
 the build log for hints about which library the build system is trying to find.
@@ -2211,8 +2236,10 @@ latter, name the exact missing compiler/SDK and quote the build.log line proving
   than assumed. If you edited based on a specific file's content, that file MUST
   appear in evidence.
 - "confidence": "high", "medium", or "low"
-- "unresolvable_packages": RPM names of packages that OBS cannot resolve and
-must be built first. **IMPORTANT**: Before listing any python-* package here,
+- "unresolvable_packages": upstream project names of packages that OBS cannot
+resolve and must be built first — Python dependencies as the PyPI name, C/C++
+libraries with the `lib` prefix and `-devel` suffix stripped (`libtrantor-devel`
+→ `trantor`, convention 27). **IMPORTANT**: Before listing any python-* package here,
 verify it exists on PyPI with `curl -s https://pypi.org/pypi/<name>/json`. Never
 report system tools (cmake, ninja, pkg-config, gcc) as python-* packages — fix
 the spec to use the plain package name instead."#;
@@ -2236,6 +2263,25 @@ fn static_system_prompt() -> &'static str {
     // same allocation instead of re-formatting and recopying it every call.
     static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PROMPT.get_or_init(|| format!("{CONVENTIONS}\n\n{STATIC_WORKFLOW}"))
+}
+
+/// [`static_system_prompt`] written once per process to a file for
+/// `--append-system-prompt-file`. The path is stable for the process, so
+/// every turn reuses it.
+fn static_system_prompt_file() -> std::io::Result<&'static std::path::Path> {
+    static FILE: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("auto-package-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = dir.join("system-prompt.md");
+        std::fs::write(&path, static_system_prompt())
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(path)
+    })
+    .as_ref()
+    .map(|p| p.as_path())
+    .map_err(|e| std::io::Error::other(e.clone()))
 }
 
 // ── public types ──────────────────────────────────────────────────────────────
@@ -2769,7 +2815,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // actually lets this ~140KB of unchanging instructions be served from
     // Anthropic's prompt cache instead of re-billed as fresh input on every
     // single turn, for every package.
-    let system_prompt = static_system_prompt();
+    let system_prompt_file = static_system_prompt_file().map_err(Error::Io)?;
 
     let mut cmd = Command::new("claude");
     // Scrub the inherited environment before applying any `.env(...)` call
@@ -2800,8 +2846,12 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         allowed_tools,
         "--max-budget-usd",
         &format!("{remaining_usd:.4}"),
-        "--append-system-prompt",
-        system_prompt,
+        // By file, not as an argument: a single argv entry is capped at
+        // 131072 bytes (E2BIG, an opaque launch error) and this prompt is
+        // within a few KB of that. The text — and so the prompt cache — is
+        // identical either way.
+        "--append-system-prompt-file",
+        &system_prompt_file.to_string_lossy(),
         // The default system prompt's per-machine sections (cwd, env info,
         // git status) otherwise differ across packages' checkout
         // directories and would break cache-prefix reuse between them even
@@ -3143,7 +3193,9 @@ fn review_prompt_non_python() -> &'static str {
      \n\
      6. **%check**: if there is no automated test target (no `enable_testing()` \
         in CMakeLists.txt, no `make check` in configure.ac), note that in the \
-        spec and leave `%check` empty rather than inventing one.\n\
+        spec: omit `%check` and put a `# TODO: no upstream test suite` comment where \
+        it would go (matches the plain-c-cpp-packaging skill) rather than inventing \
+        one.\n\
      \n\
      If a check does not apply, say so in one clause; do not invent work."
 }
@@ -3325,8 +3377,9 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              compare this attempt's build.log against the previous one (md5sum, or the \
              VM boot timestamp/line count) — if they are byte-for-byte identical, OBS \
              has not actually rebuilt against your last commit yet, and this log says \
-             nothing about whether that fix worked. Re-run the build (or verify the fix \
-             statically, e.g. a local `rpmbuild`/`rpmspec --parse` check) instead of \
+             nothing about whether that fix worked. You cannot re-run the build: verify the \
+             fix statically (`rpmspec --parse`), say in your reasoning that the log looks \
+             stale, and return `no_change` rather than \
              reverting a plausible fix on the strength of a stale log — two real cases \
              (`triton`'s `PYTHONPATH` fix, `python-duckdb`'s `%dir` fix) were both nearly \
              undone this way before the staleness was caught."
@@ -3551,7 +3604,9 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              - CORRECT: `BuildRequires: patchelf`\n\
              Common system tools: cmake, ninja, pkg-config, gcc, g++, make, automake, \
              autoconf, libtool, gettext, flex, bison, patchelf.\n\
-             4. **A missing `python<NNN>-<dep>` is USUALLY a flavor gap, not a new package**: \
+             4. **A missing `python<NNN>-<dep>` is a flavor gap ONLY if the same dep resolves for \
+             another flavor** (the list names some flavors but not all); if EVERY flavor is \
+             missing, it is a new package — report it as `python-<dep>`. A flavor gap: \
              `%{{python_module <dep>}}` expands to one BuildRequires per active Python flavor \
              on this build target, and a newer flavor sometimes lacks a subpackage that older \
              flavors already have (e.g. `python314-cython` missing while `python312-cython` \
@@ -3766,6 +3821,18 @@ mod tests {
         assert!(
             !prompt.contains("### Finding Missing C Headers and Libraries"),
             "STATIC_WORKFLOW leaked into the per-turn user prompt"
+        );
+    }
+
+    /// The prompt is handed to `claude` by file because it no longer fits
+    /// comfortably in one argv entry (131072-byte cap); the file must hold
+    /// exactly the cached text.
+    #[test]
+    fn system_prompt_file_holds_the_static_prompt() {
+        let path = static_system_prompt_file().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            static_system_prompt()
         );
     }
 
