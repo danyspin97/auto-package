@@ -240,7 +240,8 @@ openSUSE spec conventions to keep in mind:
      reliably adds it for the CMake case, so check for it whenever the
      language is C++ (not C) regardless of build system. Add cmake itself
      only when CMakeLists.txt is actually present.
-   - cuda-devel, cuda-runtime (for CUDA extensions — see convention 27)
+   - NOT cuda-devel/cuda-runtime: a package that needs CUDA to build is not
+     built here at all, it is repackaged from its upstream wheel (convention 27)
 
    Add BuildRequires for any C libraries the extension links against,
    e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
@@ -1193,7 +1194,8 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      this bug, not a real unbuildable dep; re-report it under the stripped
      name).
    - **System tools**: cmake, ninja, specialized build tools — report if missing
-   - **CUDA libraries**: cuda-devel, cuda-runtime, CUDA Python packages
+   - **CUDA Python packages** that build without CUDA (never cuda-devel /
+     cuda-runtime — see the CUDA special case below)
    - **ANY other dependency**: regardless of type, size, or complexity
 
    Do not treat a big or awkward package as out of reach, and do not disable
@@ -1204,46 +1206,43 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    C libraries, system tools, everything) so the build uses them once they exist.
    Never remove a BuildRequires line just because the package is not available yet.
 
-   **Special case — CUDA libraries and packages:**
+   **Special case — CUDA at build time means: use the upstream wheel.**
 
-   Packages that link against or provide bindings to CUDA libraries (like
-   cuda-python, nvmath-python, etc.) MUST declare CUDA as a BuildRequires:
+   openSUSE has no CUDA toolkit (`cuda-devel`/`cuda-runtime` have no PyPI
+   package and no public source), so a Python package whose BUILD needs CUDA
+   can never be compiled here — and no amount of BuildRequires or reporting
+   changes that. Do not try. Repackage the upstream PyPI wheel instead
+   (convention 28 Exception 4), and do it in the FIRST review turn when the
+   source already shows the need, not after a failed build:
 
-   1. Check the source for CUDA references: #include <cuda.h>, libcuda.so,
-      libcudart.so, find_package(CUDAToolkit), etc.
-   2. If found, add these BuildRequires:
-      BuildRequires:  cuda-devel
-      BuildRequires:  cuda-runtime
-   3. Also add CUDA to `unresolvable_packages` if OBS reports it as
-      unresolvable — report it ONCE. If it already appears under "Dependencies
-      that can never be built here" (turn prompt), do not report it again:
-      `%build` genuinely needing it means convention 28 Exception 4
-      (`use_upstream_wheel`) or convention 49. But know what to
-      expect: the build system resolves a missing name from PyPI first, then
-      falls back to a discoverable public source repository (the same
-      fallback a wheel-only PyPI release uses) — `cuda-devel`/`cuda-runtime`
-      specifically are the closed-source CUDA Toolkit compiler/runtime
-      itself, with neither a PyPI package nor any public source anywhere, so
-      this specific pair can only ever resolve if the target OBS project's
-      own repository configuration already provides it (e.g. a path to
-      NVIDIA's official repo, or a project maintainer's own import) — no
-      amount of re-reporting manufactures a package that has no buildable
-      source. This is unlike every CUDA *Python* ecosystem library below,
-      which the build system CAN and does build automatically once reported.
-   4. NEVER skip packages that require CUDA libraries — report the need even
-      when you expect `cuda-devel`/`cuda-runtime` to stay unresolved; that is
-      still correct information for whoever is watching the project, and
-      costs nothing.
+   1. Look for a BUILD-time CUDA need: `find_package(CUDAToolkit ...)`,
+      `enable_language(CUDA)`, `nvcc` in setup.py/CMake/Makefile, `.cu` files
+      compiled by `ext_modules`/CMake (`CUDAExtension`), `#include <cuda*.h>` /
+      `<cub/...>` / `<nccl.h>` in sources that are compiled, linking
+      `libcudart`/`libcublas`/`libnccl`, or `cuda-devel`/`cuda-runtime`
+      already in the spec's BuildRequires.
+   2. If found: do NOT add `cuda-devel`/`cuda-runtime` and do NOT report them
+      in `unresolvable_packages`. Check the wheels PyPI publishes
+      (`curl -s https://pypi.org/pypi/<name>/<version>/json`) and return
+      action `"use_upstream_wheel"` with `why` naming what needs CUDA and the
+      line that proves it. If every wheel is locked to one CPython each
+      (`cp313`, `cp314`, ...), follow convention 49 instead and return
+      `"edited"`. If PyPI publishes no usable wheel at all, return `"blocked"`
+      naming CUDA as the reason.
+   3. A package that merely DEPENDS on a CUDA-needing package at runtime is
+      unaffected: it keeps its own normal build and `Requires` — the
+      dependency is built by this same rule (wheel) when the pipeline gets
+      to it.
+   4. CUDA is NOT a build-time need when it is only used at import/run time:
+      NVRTC / Triton / `torch.utils.cpp_extension` JIT-compiling `.cu` strings
+      at run time, or the `dlopen` shape below. Those build normally.
 
-   CUDA Python ecosystem libraries are all open source and available on GitHub.
-   When encountering any of these as dependencies, report them for packaging:
-   cuda-python (cuda.core, cuda.bindings, cuda.pathfinder), cuda-compute,
-   numba-cuda-mlir, cuda-tile, nvmath-python (nvmath.bindings), nvshmem4py,
-   and similar NVIDIA CUDA Python libraries. Unlike `cuda-devel`/
-   `cuda-runtime` above, these publish real source (PyPI sdist or a public
-   GitHub repository) and the build system resolves and builds them the same
-   way it does any other missing dependency — report them with full
-   confidence, not just for completeness.
+   CUDA Python ecosystem libraries (cuda-python's cuda.core / cuda.bindings /
+   cuda.pathfinder, nvmath-python, nvshmem4py, cuda-compute, numba-cuda-mlir,
+   cuda-tile) publish real source and the pipeline builds missing ones like any
+   other dependency — but only when their own build does not need the CUDA
+   headers or toolchain; `cuda-bindings`, for one, compiles against `cuda.h`,
+   so by the rule above it is repackaged from its wheel.
 
    **Clarification, not an exception — dlopen/dlsym at runtime is not a
    build-time dependency at all**: some packages talk to CUDA/cuFile/NCCL
@@ -1350,7 +1349,9 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    from source looks hard.
 
    Exception 4 — THIS package (not a dependency) cannot be compiled in this
-   environment at all: the source is real and public, but `%build` needs a
+   environment at all (a Python package whose build needs CUDA is the
+   standing case — see the CUDA special case in convention 27; act on it in
+   the first review turn): the source is real and public, but `%build` needs a
    proprietary vendor compiler/SDK that has no distro package and no
    open-source substitute — e.g. NVIDIA's `nvcc` to compile `.cu` device
    code (`nvidia-nccl-cu13`, `nvidia-nvshmem-cu13`, CUDA-CCCL and similar all
@@ -2230,9 +2231,9 @@ For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
 - `Python.h: No such file` → add `BuildRequires: %{python_module devel}`
 - `pkg-config` errors → add `BuildRequires: pkg-config` or `pkgconfig(<name>)`
 - Library linking errors → search for the library and add its -devel package
-- CUDA headers/libraries → add `BuildRequires: cuda-devel` and `cuda-runtime`,
-  but read convention 27 first: they can never be built here, so a package
-  whose `%build` truly needs them is Exception 4 (`use_upstream_wheel`)
+- CUDA headers/libraries (`cuda.h`, `libcudart`, `nvcc`) → do NOT add
+  `cuda-devel`/`cuda-runtime`: they cannot exist here. A package whose build
+  needs them is repackaged from its upstream wheel (convention 27, Exception 4)
 - A missing build-time EXECUTABLE (`command not found`, `No such file or
   directory: 'pg_config'`) → `zypper search --provides --match-exact
   /usr/bin/<tool>` and BuildRequire the package it names. Never guess: plain
@@ -3380,6 +3381,15 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  stop at this list — `curl -s https://pypi.org/pypi/<name>/json | jq .info.name` \
                  every backend name you have not already verified this session.\n\
              \n\
+             0f. **CUDA needed to BUILD**: `Grep` the source for `find_package(CUDAToolkit`, \
+                 `enable_language(CUDA)`, `nvcc`, `CUDAExtension`, compiled `.cu` files, and \
+                 `#include <cuda` / `<cub/` / `<nccl.h>` in compiled sources, and check the \
+                 spec's BuildRequires for `cuda-devel`/`cuda-runtime`. If the BUILD needs \
+                 CUDA, stop reviewing a source build: this package is repackaged from its \
+                 upstream wheel — return `use_upstream_wheel` now (convention 27 CUDA special \
+                 case; convention 49 when the wheels are per-CPython). Run-time-only use \
+                 (NVRTC/Triton JIT, `dlopen`) is not a build need.\n\
+             \n\
              ## Main Review Checklist\n\
              \n\
              The generator switched to arch macros if it saw C/C++/Cython source — that's \
@@ -3783,11 +3793,11 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              pipeline cannot create). Do NOT put any of these in \
              `unresolvable_packages` — that restarts a cycle that can only ever \
              end the same way. If your spec's `%build` genuinely needs one of \
-             these to compile from source, that means THIS package cannot be \
-             compiled in this environment at all: check whether PyPI publishes \
-             a prebuilt wheel for this package at this version and, if so, set \
-             action to `\"use_upstream_wheel\"` per convention 28 Exception 4 \
-             instead of continuing to report the dependency.\n\n",
+             these to compile from source (CUDA above all), THIS package cannot be \
+             compiled in this environment at all: do not add or keep the \
+             BuildRequires — check what wheels PyPI publishes for this version and \
+             set action to `\"use_upstream_wheel\"` (or follow convention 49 for \
+             per-CPython wheels) per convention 27's CUDA special case.\n\n",
             bullets(req.unbuildable_deps),
         )
     };
