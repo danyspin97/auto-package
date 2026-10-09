@@ -79,6 +79,7 @@ enum Commands {
         force: bool,
 
         /// Regenerate the spec from scratch (ignores any existing spec).
+        /// Implies `--force`.
         #[arg(long, default_value_t = false)]
         regen: bool,
 
@@ -209,6 +210,17 @@ fn looks_like_url(s: &str) -> bool {
 ///
 /// `https://github.com/BurntSushi/ripgrep.git` → `ripgrep`.
 fn repo_package_name(url: &str) -> String {
+    // A direct tarball URL names the project in its file name, not as the last
+    // path segment (`…/hello-2.12.tar.gz` is `hello`, not the file).
+    if ap_build::sources::source_kind(url) == ap_build::sources::SourceKind::DirectArchive
+        && let Some((name, _)) = url
+            .split(['?', '#'])
+            .next()
+            .and_then(|u| u.trim_end_matches('/').rsplit('/').next())
+            .and_then(ap_build::sources::archive_name_version)
+    {
+        return name;
+    }
     url.trim_end_matches('/')
         .trim_end_matches(".git")
         .rsplit(['/', ':'])
@@ -495,6 +507,16 @@ fn main() -> color_eyre::Result<()> {
             source_url,
             sweep,
         } => {
+            // `--regen` means "start over": without this, an already-built
+            // package returned AlreadyBuilt (state.json / OBS-green fast paths,
+            // `select_target`) before the regeneration ever ran, so `--regen`
+            // alone was a silent no-op and needed `--force` alongside it.
+            let force = force || regen;
+
+            // `--no-agent` promises no model calls at all, including the
+            // web-search fallback that locates an upstream for unknown names.
+            ap_build::discovery::set_agent_enabled(!no_agent);
+
             // `build https://github.com/owner/repo` — the URL is the source and
             // the repository name is the package name. `--url` does the same
             // thing but lets the package be named separately.
@@ -758,6 +780,8 @@ fn main() -> color_eyre::Result<()> {
             jobs,
             regen,
         } => {
+            ap_build::discovery::set_agent_enabled(!no_agent);
+
             let level: LogLevel = log
                 .parse()
                 .map_err(|e: String| color_eyre::eyre::eyre!(e))?;
@@ -2096,6 +2120,14 @@ mod tests {
         ] {
             assert_eq!(repo_package_name(url), "ripgrep", "{url}");
         }
+        assert_eq!(
+            repo_package_name("https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz"),
+            "hello"
+        );
+        assert_eq!(
+            repo_package_name("https://download.savannah.gnu.org/releases/lzip/"),
+            "lzip"
+        );
         assert_eq!(
             repo_package_name("https://gitlab.com/group/sub/thing"),
             "thing"

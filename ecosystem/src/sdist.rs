@@ -132,6 +132,11 @@ pub struct SdistInfo {
     /// (rather than a `make dist` tarball) ships these instead of a
     /// generated `configure` script, so the build needs `autoreconf` first.
     pub autotools_manifest: bool,
+    /// Raw `CMakeLists.txt` at the archive root, even when Python or Cargo
+    /// packaging also claims the archive (unlike `cmake_manifest`).
+    pub cmake_at_root: bool,
+    /// Raw autotools manifest at the archive root; see `cmake_at_root`.
+    pub autotools_at_root: bool,
     /// Every project found alongside the chosen one, when the archive holds
     /// more than one. Empty for an ordinary single-project sdist.
     ///
@@ -513,8 +518,7 @@ fn inspect_from_entries(
     let declared_name = |src: &str| {
         toml::from_str::<PyprojectToml>(src)
             .ok()
-            .and_then(|d| d.project)
-            .and_then(|p| p.name)
+            .and_then(PyprojectToml::declared_name)
     };
     let rank_of = |depth: usize, dir: &str| {
         let norm = dir.to_lowercase().replace(['-', '.'], "_");
@@ -531,11 +535,14 @@ fn inspect_from_entries(
     let build_system = match &pyproject {
         None => BuildSystem::setuptools_default(),
         Some((_, _, src)) => {
-            let doc: PyprojectToml = toml::from_str(src)?;
-            project_name = doc.project.and_then(|p| p.name);
-            doc.build_system
+            let mut doc: PyprojectToml = toml::from_str(src)?;
+            let build_system = doc
+                .build_system
+                .take()
                 .map(BuildSystem::from)
-                .unwrap_or_else(BuildSystem::setuptools_default)
+                .unwrap_or_else(BuildSystem::setuptools_default);
+            project_name = doc.declared_name();
+            build_system
         }
     };
 
@@ -614,6 +621,8 @@ fn inspect_from_entries(
         // archive — a maturin/PyO3 crate has both Cargo.toml and
         // pyproject.toml, and a CMake-based Python extension (scikit-build)
         // has both CMakeLists.txt and pyproject.toml. Python and Cargo win.
+        cmake_at_root: cmake_manifest,
+        autotools_at_root: autotools_manifest,
         cmake_manifest: cmake_manifest && python_depth.is_none() && cargo.is_none(),
         autotools_manifest: autotools_manifest && python_depth.is_none() && cargo.is_none(),
         subprojects,
@@ -650,11 +659,26 @@ struct PyprojectToml {
     #[serde(rename = "build-system")]
     build_system: Option<RawBuildSystem>,
     project: Option<RawProject>,
+    tool: Option<RawTool>,
 }
 
 #[derive(Deserialize)]
 struct RawProject {
     name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawTool {
+    poetry: Option<RawProject>,
+}
+
+impl PyprojectToml {
+    /// `[project].name`, else the legacy `[tool.poetry].name`.
+    fn declared_name(self) -> Option<String> {
+        self.project
+            .and_then(|p| p.name)
+            .or_else(|| self.tool.and_then(|t| t.poetry).and_then(|p| p.name))
+    }
 }
 
 #[derive(Deserialize)]
@@ -714,6 +738,30 @@ mod tests {
         );
         // Both manifests present: the Python name wins (maturin projects).
         assert_eq!(info.project_name.as_deref(), Some("thing-py"));
+    }
+
+    #[test]
+    fn a_poetry_only_pyproject_still_yields_its_declared_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                (
+                    "llama.cpp-b1/pyproject.toml",
+                    b"[tool.poetry]\nname = \"llama-cpp-scripts\"\n".as_slice(),
+                ),
+                (
+                    "llama.cpp-b1/CMakeLists.txt",
+                    b"project(llama)\n".as_slice(),
+                ),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert!(info.python_packaging);
+        assert!(info.cmake_at_root);
+        assert!(!info.cmake_manifest);
+        assert_eq!(info.project_name.as_deref(), Some("llama-cpp-scripts"));
     }
 
     #[test]

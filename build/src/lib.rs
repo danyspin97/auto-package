@@ -2,6 +2,7 @@
 //! and the validation gate.
 
 pub mod agent;
+pub mod discovery;
 pub mod flavors;
 pub mod log;
 pub mod obs_status;

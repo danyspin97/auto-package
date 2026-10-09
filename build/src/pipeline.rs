@@ -3181,6 +3181,19 @@ fn generate_from_repo(
     let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
         .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
 
+    // Mirror `sources::probe`: a CMake/autotools root with a non-matching
+    // pyproject.toml beside it is a C/C++ project with a Python-helper
+    // sidecar (llama.cpp's root `pyproject` declares `llama-cpp-scripts`
+    // for shipping helper scripts), not a Python project. Without this
+    // check `info.python_packaging` wins the ecosystem decision below
+    // and the pipeline either falls into the mismatch-block's
+    // `try_wheel_fallback` (no PyPI wheel exists for a C++ library like
+    // llama.cpp, so it dies with "no usable upstream wheel either") or
+    // — when the pyproject name happens to match the wanted name —
+    // calls py2pack on a C/C++ project. Probe already decided PlainC
+    // via `is_python_hijack`; align the generator with that decision.
+    let is_python_hijack = crate::sources::is_python_hijack(&info, &config.pkg_name);
+
     // A monorepo may hold several projects, and `inspect_preferring` falls
     // back to the shallowest manifest when none of them declares the wanted
     // name. That fallback is fine for browsing, but generating a spec from it
@@ -3196,7 +3209,13 @@ fn generate_from_repo(
         .map(String::as_str)
         .chain(info.subprojects.iter().filter_map(|s| s.name.as_deref()))
         .collect();
-    if (info.python_packaging || info.cargo_manifest)
+    // Skip the mismatch guard when the archive is a Python-hijacked
+    // C/C++ project: the "declared name doesn't match wanted" condition
+    // is true BY CONSTRUCTION in that case (it's the hijack's own
+    // trigger), and letting it fall through sends a C/C++ project to
+    // `try_wheel_fallback` which cannot possibly help.
+    if !is_python_hijack
+        && (info.python_packaging || info.cargo_manifest)
         && !declared_names.iter().any(|n| normalize(n) == wanted)
     {
         let found = if declared_names.is_empty() {
@@ -3240,7 +3259,10 @@ fn generate_from_repo(
         };
     }
 
-    if info.python_packaging {
+    // Treat a Python-hijacked archive as C/C++ before any Python/Rust
+    // branch has a chance to claim it — the pyproject.toml here is a
+    // scripts sidecar, not the primary build system.
+    if info.python_packaging && !is_python_hijack {
         // py2pack needs PyPI metadata for the summary, license and deps. When
         // the project is not on PyPI at all there is nothing to fetch, and the
         // agent fills those in from the source during the review turn.
@@ -3255,10 +3277,10 @@ fn generate_from_repo(
         return generate_rust_spec(config, repo_url, spec_path, step);
     }
 
-    if info.cmake_manifest || info.autotools_manifest {
+    if info.cmake_at_root || info.autotools_at_root {
         // Unlike Rust, a plain C/C++ project vendors nothing through OBS
         // services — the archive already downloaded is the real Source0.
-        let build = if info.cmake_manifest {
+        let build = if info.cmake_at_root {
             crate::spec::CBuildSystem::Cmake
         } else {
             crate::spec::CBuildSystem::Autotools
@@ -3316,6 +3338,40 @@ fn fetch_release_archive(repo_url: &str, version: &str) -> Result<(Vec<u8>, Stri
             .collect::<Vec<_>>()
             .join("\n"),
     )))
+}
+
+/// Build a minimal `Release` for a Python project that isn't on PyPI at
+/// all (an upstream stub that was never published, a vendor-internal
+/// package, a monorepo subproject). `name`/`version`/`tarball_filename`
+/// are all we know; everything else (summary, license, homepage,
+/// `requires_python`) is left blank for the Review agent to fill in
+/// from the pyproject.toml during the first fix turn — the same path
+/// the monorepo skeleton already takes.
+///
+/// `sdist.sha256`/`url`/`size` stay empty for the same reason
+/// `parse_release_with_tarball` leaves them so: the tarball has
+/// already been downloaded locally, and the generator uses only the
+/// filename.
+fn synthesize_release_without_pypi(
+    name: String,
+    version: String,
+    tarball_filename: String,
+) -> ap_ecosystem::pypi::Release {
+    ap_ecosystem::pypi::Release {
+        name,
+        version,
+        summary: None,
+        homepage: None,
+        license: ap_ecosystem::pypi::License::Unknown,
+        requires_python: None,
+        yanked: false,
+        sdist: ap_ecosystem::pypi::Sdist {
+            filename: tarball_filename,
+            url: String::new(),
+            sha256: String::new(),
+            size: 0,
+        },
+    }
 }
 
 fn fetch_pypi_json(name: &str, version: &str) -> Option<String> {
@@ -3436,13 +3492,32 @@ fn generate_repo_python_spec(
 
     // Build a Release from the PyPI JSON metadata, substituting the forge
     // tarball name so py2pack writes the correct Source0.
-    let release = ap_ecosystem::pypi::parse_release_with_tarball(pypi_json, &tarball_name)
-        .map_err(|e| {
+    //
+    // When pypi_json is empty, the project simply isn't on PyPI — this
+    // function's own doc comment on `pypi_json` says that's expected
+    // ("py2pack fills in what it can and the review turn supplies the
+    // rest from the source"), and the design intent is to still produce
+    // a usable skeleton. Previously the code tried `parse_release_with_tarball("")`
+    // anyway, got `Error::Malformed`, and surfaced a hard
+    // "project is not on PyPI, so py2pack has nothing to describe it
+    // with" error that killed the whole pipeline run — exactly the
+    // crash the user hit on `llama-cpp-scripts` (llama.cpp's root
+    // pyproject stub that upstream never published). Synthesize a
+    // minimal `Release` directly in that case so py2pack produces a
+    // skeleton the Review agent can fill in from source.
+    let release = if pypi_json.is_empty() {
+        synthesize_release_without_pypi(name.clone(), version.clone(), tarball_name.clone())
+    } else {
+        ap_ecosystem::pypi::parse_release_with_tarball(pypi_json, &tarball_name).map_err(|e| {
             GenSpecError::Other(format!(
-                "no usable metadata for {name} {version}: {e}. The project is not on \
-                 PyPI, so py2pack has nothing to describe it with."
+                "PyPI metadata for {name} {version} was returned but could not be \
+                     parsed ({e}). This is distinct from the no-PyPI case (which uses \
+                     the synthetic-release fallback) — a non-empty-but-malformed body \
+                     usually means the index returned an error page where JSON was \
+                     expected; inspect the request manually."
             ))
-        })?;
+        })?
+    };
 
     // Generate spec via py2pack (same path as a normal PyPI-sourced package).
     let spec_text = crate::spec::generate(&release, &sdist_info.build_system)
@@ -4156,6 +4231,7 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     let lower = pkg_name.to_lowercase();
     let mut candidates = Vec::new();
     let mut verified_candidates = Vec::new();
+    let mut distro_evidence: Option<crate::discovery::DistroInfo> = None;
 
     // Known package mappings for special cases
     // NOTE: nvidia-cuda-nvrtc, nvidia-cuda-runtime, nvidia-cuda-cupti and
@@ -4263,6 +4339,29 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
                 }
             }
         }
+        // Not everything lives on GitHub: ask Repology (the upstream other
+        // distributions record) and GitLab/Codeberg search too. Their hits
+        // are real search results, but a homepage can be stale, so they still
+        // have to answer a reachability probe below.
+        let (others, distro) = crate::discovery::search_other_forges(pkg_name);
+        // openSUSE's own spec points at a non-forge release directory
+        // (Savannah, ftp.gnu.org): if it lists real releases it is the
+        // distro-confirmed upstream, ahead of anything a name search found.
+        for dir in &distro.index_candidates {
+            if let Ok(url) = crate::discovery::validate_found_url(dir)
+                && !verified_candidates.contains(&url)
+            {
+                ap_core::diag!("  ✓ openSUSE's spec records release directory: {url}");
+                verified_candidates.insert(0, url);
+            }
+        }
+        for url in &others {
+            if !verified_candidates.contains(url) && !candidates.contains(url) {
+                ap_core::diag!("  found via forge search: {}", url);
+                candidates.push(url.clone());
+            }
+        }
+        distro_evidence = Some(distro);
     }
 
     // Try common organization patterns for other vendor-prefixed packages
@@ -4313,11 +4412,20 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     for url in &candidates {
         if !verified_candidates.contains(url) {
             ap_core::diag!("  checking: {}", url);
-            if verify_repo_exists(url) {
+            // An owner/org/user page (`github.com/oatpp`) is reachable but is
+            // not a repository: there is nothing in it to package.
+            if crate::discovery::is_repository_url(url) && verify_repo_exists(url) {
                 ap_core::diag!("  ✓ verified: {}", url);
                 verified_candidates.push(url.clone());
             }
         }
+    }
+
+    // Repology-confirmed upstreams outrank search hits that merely share the
+    // name; the sort is stable, so everything else keeps its order.
+    if let Some(distro) = &distro_evidence {
+        verified_candidates
+            .sort_by_key(|c| !distro.forge_repos.iter().any(|r| c.eq_ignore_ascii_case(r)));
     }
 
     if verified_candidates.is_empty() {
@@ -4325,7 +4433,30 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             "  ✗ no verified repositories found after trying {} URLs",
             candidates.len()
         );
-    } else {
+    }
+
+    // Last resort, after every deterministic source: let the agent search the
+    // web (Savannah, SourceForge, project sites, renamed projects) when there
+    // is nothing, or when what there is contradicts what other distributions
+    // record (a name collision — see `candidates_unconfirmed`). Its answer is
+    // validated before it is used, and goes first.
+    let unconfirmed = distro_evidence
+        .as_ref()
+        .is_some_and(|r| crate::discovery::candidates_unconfirmed(&verified_candidates, r));
+    if verified_candidates.is_empty() || unconfirmed {
+        let hints = crate::discovery::Hints {
+            homepages: distro_evidence
+                .as_ref()
+                .map(|r| r.homepages.clone())
+                .unwrap_or_default(),
+            candidates: verified_candidates.clone(),
+        };
+        if let Some(url) = crate::discovery::agent_find_source(pkg_name, &hints) {
+            verified_candidates.retain(|c| c != &url);
+            verified_candidates.insert(0, url);
+        }
+    }
+    if !verified_candidates.is_empty() {
         ap_core::diag!(
             "  ✓ found {} verified candidates",
             verified_candidates.len()
@@ -4408,6 +4539,34 @@ fn verify_repo_exists(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The synthetic-release fallback for "project genuinely not on
+    /// PyPI": fills in only what we know (name, version, local tarball
+    /// filename) and leaves summary/license/homepage/requires_python
+    /// blank for the Review agent to fill in from the pyproject.toml
+    /// during the first fix turn. If any of these fields silently gets
+    /// a non-empty default — a placeholder "FIXME" summary or a bogus
+    /// "SPDX-NOASSERTION" license — the generated spec would ship
+    /// garbage upstream, so this test locks each field explicitly.
+    #[test]
+    fn synthesize_release_without_pypi_leaves_every_unknown_field_blank() {
+        let r = synthesize_release_without_pypi(
+            "llama-cpp-scripts".to_string(),
+            "0.6.0".to_string(),
+            "llama-cpp-scripts-0.6.0.tar.gz".to_string(),
+        );
+        assert_eq!(r.name, "llama-cpp-scripts");
+        assert_eq!(r.version, "0.6.0");
+        assert_eq!(r.sdist.filename, "llama-cpp-scripts-0.6.0.tar.gz");
+        assert_eq!(r.summary, None);
+        assert_eq!(r.homepage, None);
+        assert_eq!(r.license, ap_ecosystem::pypi::License::Unknown);
+        assert_eq!(r.requires_python, None);
+        assert!(!r.yanked);
+        assert!(r.sdist.url.is_empty());
+        assert!(r.sdist.sha256.is_empty());
+        assert_eq!(r.sdist.size, 0);
+    }
 
     fn fake_node(name: &str) -> ap_ecosystem::pip::Node {
         ap_ecosystem::pip::Node {

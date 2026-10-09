@@ -113,6 +113,44 @@ impl Ecosystem {
     }
 }
 
+/// Should the probe treat this archive as a C/C++ project despite the
+/// presence of a `pyproject.toml` at the same root?
+///
+/// Returns `true` when every one of these holds:
+///   - the archive has native build-system files at the root
+///     (`CMakeLists.txt`, `configure.ac`, …);
+///   - the archive has a `pyproject.toml` (so the default rule would
+///     normally pick Python);
+///   - there is NO `Cargo.toml` at the root (a maturin project genuinely
+///     IS a Python-primary build with a Rust extension, so we leave it
+///     alone);
+///   - the `pyproject.toml` declares a name that doesn't match (after
+///     the usual normalization) the name the user asked for.
+///
+/// The llama.cpp motivator: `CMakeLists.txt` + `pyproject.toml` at the
+/// root, where the pyproject declares `name = "llama-cpp-scripts"` for
+/// shipping Python helper scripts. The user asked for `llama-cpp` (the
+/// C++ library). Without this exception the auto-rename in
+/// `cli/src/main.rs` quietly flips `llama-cpp` → `llama-cpp-scripts`,
+/// the pipeline goes down the Python path, py2pack 404s on PyPI, and
+/// the whole run dies with "project not on PyPI" and no mention of C++
+/// at all — exactly the drogon-shape mis-trip the plain-c-cpp skill
+/// was supposed to catch.
+pub(crate) fn is_python_hijack(info: &ap_ecosystem::sdist::SdistInfo, want: &str) -> bool {
+    let native_root = info.cmake_at_root || info.autotools_at_root;
+    info.python_packaging
+        && native_root
+        && !info.cargo_manifest
+        && info
+            .project_name
+            .as_deref()
+            .map(|declared| {
+                let normalize = |s: &str| s.to_lowercase().replace(['-', '.'], "_");
+                normalize(declared) != normalize(want)
+            })
+            .unwrap_or(false)
+}
+
 /// What a release archive turned out to be.
 #[derive(Debug, Clone)]
 pub struct RepoProbe {
@@ -171,11 +209,15 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
 
         // Python packaging wins when both are present: a maturin project has
         // a Cargo.toml too, and it is a Python package that compiles Rust.
-        let ecosystem = if info.python_packaging {
+        //
+        // EXCEPTION — see `is_python_hijack`.
+        let native_root = info.cmake_at_root || info.autotools_at_root;
+        let python_hijack = is_python_hijack(&info, want);
+        let ecosystem = if info.python_packaging && !python_hijack {
             Ecosystem::Python
         } else if info.cargo_manifest {
             Ecosystem::Rust
-        } else if info.cmake_manifest || info.autotools_manifest {
+        } else if native_root {
             Ecosystem::PlainC
         } else {
             return Err(format!(
@@ -185,9 +227,20 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
             ));
         };
 
+        // Under the Python-hijack exception, `info.project_name` still
+        // holds the pyproject.toml's declared name (`llama-cpp-scripts`
+        // etc.) — surfacing it would make cli/src/main.rs's auto-rename
+        // flip the user's request to that name anyway, defeating the
+        // whole point of picking PlainC here. Suppress it so the caller
+        // keeps the user-supplied name.
+        let project_name = if python_hijack {
+            None
+        } else {
+            info.project_name
+        };
         return Ok(RepoProbe {
             ecosystem,
-            project_name: info.project_name,
+            project_name,
             project_dir: info.project_dir,
             subprojects: info
                 .subprojects
@@ -442,6 +495,275 @@ fn first_tag(v: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+// ── non-forge sources: release directories and direct tarballs ─────────────────
+//
+// Plenty of upstreams (GNU Savannah, ftp.gnu.org, self-hosted project sites)
+// have no forge API at all: just a directory of release tarballs. They are
+// recognised by shape, not by a hard-coded host list:
+//
+// * a URL whose last segment is a tarball is a *direct archive*;
+// * a URL on an unknown host with an index-like path segment
+//   (`/releases/`, `/pub/`, `/gnu/`, ...) is a *release index* — an HTML
+//   directory listing whose links are the tarballs.
+//
+// Only `.tar.gz`/`.tgz` are used: every later stage stores and extracts the
+// download as gzip, and an `.xz`-only release is reported as unsupported
+// rather than silently mis-extracted.
+
+/// How a source URL is to be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// A git forge with a REST API (GitHub, GitLab, Gitea/Forgejo).
+    Forge,
+    /// A directory listing of release tarballs.
+    ReleaseIndex,
+    /// One specific release tarball.
+    DirectArchive,
+}
+
+const GZIP_EXTS: &[&str] = &[".tar.gz", ".tgz"];
+const OTHER_ARCHIVE_EXTS: &[&str] = &[
+    ".tar.xz", ".txz", ".tar.lz", ".tar.bz2", ".tbz2", ".tar.zst", ".zip",
+];
+const INDEX_HINTS: &[&str] = &[
+    "releases",
+    "release",
+    "pub",
+    "gnu",
+    "files",
+    "download",
+    "downloads",
+    "dist",
+    "distfiles",
+    "sources",
+    "src",
+    "ftp",
+    "mirror",
+    "archive",
+];
+
+fn last_segment(url: &str) -> &str {
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+}
+
+fn is_gzip_archive(file: &str) -> bool {
+    let f = file.to_ascii_lowercase();
+    GZIP_EXTS.iter().any(|e| f.ends_with(e))
+}
+
+fn is_any_archive(file: &str) -> bool {
+    let f = file.to_ascii_lowercase();
+    GZIP_EXTS
+        .iter()
+        .chain(OTHER_ARCHIVE_EXTS)
+        .any(|e| f.ends_with(e))
+}
+
+/// Classify a source URL. See the section comment above.
+pub fn source_kind(url: &str) -> SourceKind {
+    if is_any_archive(last_segment(url)) {
+        return SourceKind::DirectArchive;
+    }
+    let Some(forge) = ap_ecosystem::forge::parse(url) else {
+        return SourceKind::Forge;
+    };
+    if ap_ecosystem::forge::is_known_host(&forge.host) {
+        return SourceKind::Forge;
+    }
+    let indexish = forge
+        .project_path
+        .split('/')
+        .any(|seg| INDEX_HINTS.contains(&seg.to_ascii_lowercase().as_str()));
+    if indexish {
+        SourceKind::ReleaseIndex
+    } else {
+        SourceKind::Forge
+    }
+}
+
+/// `(name, version)` from a release tarball filename: `foo-1.2.3.tar.gz` →
+/// `("foo", "1.2.3")`. The split is at the last `-` or `_` that is followed
+/// by a digit, so `foo-bar-2.0.tar.gz` → `("foo-bar", "2.0")`.
+pub fn archive_name_version(file: &str) -> Option<(String, String)> {
+    let lower = file.to_ascii_lowercase();
+    let ext = GZIP_EXTS
+        .iter()
+        .chain(OTHER_ARCHIVE_EXTS)
+        .find(|e| lower.ends_with(**e))?;
+    let stem = &file[..file.len() - ext.len()];
+    let idx = stem
+        .char_indices()
+        .rev()
+        .find(|&(i, c)| {
+            (c == '-' || c == '_') && stem[i + 1..].starts_with(|d: char| d.is_ascii_digit())
+        })?
+        .0;
+    let (name, version) = (&stem[..idx], &stem[idx + 1..]);
+    (!name.is_empty()).then(|| (name.to_string(), version.to_string()))
+}
+
+/// Link targets of an HTML directory listing, reduced to their last path
+/// segment. Queries, anchors, parent/sort links and absolute foreign links
+/// are dropped; entity-escaped ampersands are not an issue because only the
+/// file name survives.
+pub fn parse_index_links(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(i) = rest.to_ascii_lowercase().find("href=") {
+        let after = &rest[i + 5..];
+        let (quote, body) = match after.chars().next() {
+            Some(q @ ('"' | '\'')) => (q, &after[1..]),
+            _ => {
+                rest = after;
+                continue;
+            }
+        };
+        let Some(end) = body.find(quote) else { break };
+        let target = &body[..end];
+        rest = &body[end..];
+        let file = last_segment(target);
+        if !file.is_empty()
+            && !target.contains("..")
+            && !target.starts_with('?')
+            && !target.starts_with('#')
+            && !out.contains(&file.to_string())
+        {
+            out.push(file.to_string());
+        }
+    }
+    out
+}
+
+/// Component-wise version comparison: numeric parts compare as numbers
+/// (`1.10 > 1.9`), anything else lexically. A shorter version that is a
+/// prefix of a longer one sorts first.
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let split = |v: &str| -> Vec<String> {
+        v.split(|c: char| c == '.' || c == '-' || c == '_')
+            .map(str::to_string)
+            .collect()
+    };
+    let (pa, pb) = (split(a), split(b));
+    for (x, y) in pa.iter().zip(&pb) {
+        let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+            (Ok(nx), Ok(ny)) => nx.cmp(&ny),
+            _ => x.cmp(y),
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    pa.len().cmp(&pb.len())
+}
+
+fn is_prerelease(version: &str) -> bool {
+    let v = version.to_ascii_lowercase();
+    ["rc", "alpha", "beta", "pre", "dev", "snapshot", "git"]
+        .iter()
+        .any(|m| v.contains(m))
+}
+
+/// The gzip tarballs in an index for the project `hint` (the index URL's own
+/// directory name), as `(file, version)`, newest first with pre-releases
+/// last. If nothing in the index carries the hinted name, every tarball is
+/// kept — a project may publish under a slightly different name than its
+/// directory.
+pub fn index_archives(links: &[String], hint: &str) -> Vec<(String, String)> {
+    let norm = |s: &str| s.replace('_', "-").to_ascii_lowercase();
+    let all: Vec<(String, String, String)> = links
+        .iter()
+        .filter(|f| is_gzip_archive(f))
+        .filter_map(|f| archive_name_version(f).map(|(n, v)| (f.clone(), n, v)))
+        .collect();
+    let named: Vec<_> = all
+        .iter()
+        .filter(|(_, n, _)| norm(n) == norm(hint))
+        .cloned()
+        .collect();
+    let mut chosen = if named.is_empty() { all } else { named };
+    chosen.sort_by(|a, b| {
+        is_prerelease(&a.2)
+            .cmp(&is_prerelease(&b.2))
+            .then_with(|| version_cmp(&b.2, &a.2))
+    });
+    chosen.into_iter().map(|(f, _, v)| (f, v)).collect()
+}
+
+/// Whether an index lists gzip tarballs at all, and whether it lists only
+/// archive kinds the pipeline cannot extract — used for an accurate error.
+pub fn index_has_only_unsupported(links: &[String]) -> bool {
+    !links.iter().any(|f| is_gzip_archive(f)) && links.iter().any(|f| is_any_archive(f))
+}
+
+fn fetch_index(index_url: &str) -> Result<Vec<String>, String> {
+    let body = ureq::get(index_url)
+        .header("User-Agent", "auto-package")
+        .call()
+        .map_err(|e| format!("{index_url}: {e}"))?
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("{index_url}: {e}"))?;
+    Ok(parse_index_links(&body))
+}
+
+fn index_dir(index_url: &str) -> String {
+    format!(
+        "{}/",
+        index_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(index_url)
+            .trim_end_matches('/')
+    )
+}
+
+fn latest_release_non_forge(url: &str, kind: SourceKind) -> Result<String, String> {
+    if kind == SourceKind::DirectArchive {
+        return archive_name_version(last_segment(url))
+            .map(|(_, v)| v)
+            .ok_or_else(|| format!("cannot read a version from the file name in {url}"));
+    }
+    let links = fetch_index(&index_dir(url))?;
+    index_archives(&links, last_segment(url))
+        .into_iter()
+        .next()
+        .map(|(_, v)| v)
+        .ok_or_else(|| {
+            if index_has_only_unsupported(&links) {
+                format!(
+                    "{url} lists only non-gzip tarballs (.tar.xz/.tar.bz2/...), which \
+                     auto-package cannot extract yet; pass --version and a .tar.gz URL"
+                )
+            } else {
+                format!("{url} lists no release tarballs")
+            }
+        })
+}
+
+fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<String> {
+    if kind == SourceKind::DirectArchive {
+        return vec![url.to_string()];
+    }
+    let dir = index_dir(url);
+    match fetch_index(&dir) {
+        Ok(links) => index_archives(&links, last_segment(url))
+            .into_iter()
+            .filter(|(_, v)| v == version)
+            .map(|(f, _)| format!("{dir}{f}"))
+            .collect(),
+        Err(e) => {
+            ap_core::diag!("  could not read release index: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// Ask the forge for the newest release tag of `repo_url`, and reduce it to a
 /// version.
 ///
@@ -450,6 +772,10 @@ fn first_tag(v: &serde_json::Value) -> Option<String> {
 /// project that tags but never cuts releases (common outside GitHub) still has
 /// a newest version, and a project that does both means the release.
 pub fn latest_release(repo_url: &str) -> Result<String, String> {
+    match source_kind(repo_url) {
+        SourceKind::Forge => {}
+        kind => return latest_release_non_forge(repo_url, kind),
+    }
     let (host, project_path, repo_name) = owner_repo(repo_url)?;
 
     // Each forge family gets its release endpoint and its tag-list fallback.
@@ -525,6 +851,9 @@ pub fn version_from_tag(tag: &str, repo: &str) -> String {
 
 /// Get all tags from a repository via the forge API.
 fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
+    if source_kind(repo_url) != SourceKind::Forge {
+        return Ok(Vec::new());
+    }
     let (host, project_path, _repo_name) = owner_repo(repo_url)?;
 
     let api_url = if host.contains("github.com") {
@@ -609,6 +938,10 @@ fn find_matching_tag(tags: &[String], version: &str, repo: &str) -> Option<Strin
 /// `/archive/refs/tags/<tag>.tar.gz`, GitLab serves
 /// `/-/archive/<tag>/<repo>-<tag>.tar.gz`.
 pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
+    match source_kind(repo_url) {
+        SourceKind::Forge => {}
+        kind => return archive_urls_non_forge(repo_url, kind, version),
+    }
     let base = repo_url.trim_end_matches('/').trim_end_matches(".git");
     let repo = base.rsplit('/').next().unwrap_or("source");
     let is_gitlab = base.contains("gitlab");
@@ -902,5 +1235,193 @@ mod tests {
         assert!(SourceMap::load(dir.path()).unwrap().is_empty());
         std::fs::write(SourceMap::path(dir.path()), "this is not toml {{{").unwrap();
         assert!(SourceMap::load(dir.path()).is_err());
+    }
+
+    /// Baseline `SdistInfo` with all layout booleans cleared — build it
+    /// up per-test by toggling the fields the scenario depends on, so
+    /// the test reads as "project X with layout Y" instead of a wall of
+    /// `..Default::default()` boilerplate.
+    fn bare_info() -> ap_ecosystem::sdist::SdistInfo {
+        ap_ecosystem::sdist::SdistInfo {
+            project_name: None,
+            project_dir: None,
+            top_level_dir: None,
+            subprojects: Vec::new(),
+            build_system: ap_ecosystem::sdist::BuildSystem {
+                requires: Vec::new(),
+                backend: None,
+            },
+            python_packaging: false,
+            cargo_manifest: false,
+            cmake_manifest: false,
+            autotools_manifest: false,
+            cmake_at_root: false,
+            autotools_at_root: false,
+            has_c_extensions: false,
+            has_tests: false,
+            files: Vec::new(),
+        }
+    }
+
+    /// The llama.cpp motivator: `CMakeLists.txt` + `pyproject.toml` at
+    /// the root, pyproject declares `llama-cpp-scripts`, user asked for
+    /// `llama-cpp`. Must flip the ecosystem choice to C/C++ instead of
+    /// silently renaming through to the Python stub.
+    #[test]
+    fn python_hijack_fires_when_cmake_and_a_different_pyproject_name_coexist() {
+        let mut info = bare_info();
+        info.python_packaging = true;
+        info.cmake_at_root = true;
+        info.project_name = Some("llama-cpp-scripts".to_string());
+        assert!(
+            is_python_hijack(&info, "llama-cpp"),
+            "CMake + pyproject with a different declared name must be \
+             treated as a C/C++ project with a Python-helper sidecar"
+        );
+    }
+
+    /// Same decision on autotools, so the fix is not CMake-only.
+    #[test]
+    fn python_hijack_also_fires_on_autotools_plus_pyproject() {
+        let mut info = bare_info();
+        info.python_packaging = true;
+        info.autotools_at_root = true;
+        info.project_name = Some("some-tool-scripts".to_string());
+        assert!(is_python_hijack(&info, "some-tool"));
+    }
+
+    /// A maturin project (pyproject + Cargo.toml, no CMake) must NOT
+    /// be flipped — it is a Python package that compiles Rust, and the
+    /// Python side is primary. This is the invariant the original
+    /// comment at `probe` was protecting; the fix must preserve it.
+    #[test]
+    fn python_hijack_does_not_fire_on_maturin_projects() {
+        let mut info = bare_info();
+        info.python_packaging = true;
+        info.cargo_manifest = true;
+        info.cmake_at_root = true;
+        info.project_name = Some("totally-different-name".to_string());
+        assert!(
+            !is_python_hijack(&info, "pydantic-core"),
+            "a maturin project (pyproject + Cargo + maybe CMake) must \
+             stay Python-primary even when its declared name differs"
+        );
+    }
+
+    /// A Python-only project (no CMake, no autotools) must still rename
+    /// through its declared name — the Flask / Pallets case the original
+    /// comment at `probe` was built for.
+    #[test]
+    fn python_hijack_does_not_fire_without_a_native_manifest() {
+        let mut info = bare_info();
+        info.python_packaging = true;
+        info.project_name = Some("Flask".to_string());
+        assert!(!is_python_hijack(&info, "flask"));
+    }
+
+    /// If the user asked for the Python name itself (after
+    /// normalization), there is no mismatch and nothing to flip —
+    /// building `llama-cpp-scripts` on purpose must stay on the Python
+    /// path.
+    #[test]
+    fn python_hijack_does_not_fire_when_the_user_wanted_the_python_name() {
+        let mut info = bare_info();
+        info.python_packaging = true;
+        info.cmake_at_root = true;
+        info.project_name = Some("llama-cpp-scripts".to_string());
+        assert!(!is_python_hijack(&info, "llama_cpp_scripts"));
+        assert!(!is_python_hijack(&info, "Llama-CPP-Scripts"));
+    }
+
+    #[test]
+    fn source_kind_tells_forges_indexes_and_archives_apart() {
+        use SourceKind::*;
+        assert_eq!(source_kind("https://github.com/oatpp/oatpp"), Forge);
+        assert_eq!(source_kind("https://gitlab.gnome.org/GNOME/glib"), Forge);
+        assert_eq!(source_kind("https://git.example.com/owner/repo"), Forge);
+        assert_eq!(
+            source_kind("https://download.savannah.gnu.org/releases/lzip/"),
+            ReleaseIndex
+        );
+        assert_eq!(source_kind("https://ftp.gnu.org/gnu/hello"), ReleaseIndex);
+        assert_eq!(
+            source_kind("https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz"),
+            DirectArchive
+        );
+        assert_eq!(
+            source_kind("https://example.org/dl/foo-1.0.tar.xz?x=1"),
+            DirectArchive
+        );
+    }
+
+    #[test]
+    fn archive_name_and_version_are_split_at_the_last_dash_before_a_digit() {
+        let nv = |f| archive_name_version(f);
+        assert_eq!(
+            nv("hello-2.12.tar.gz"),
+            Some(("hello".into(), "2.12".into()))
+        );
+        assert_eq!(
+            nv("foo-bar-2.0.1.tgz"),
+            Some(("foo-bar".into(), "2.0.1".into()))
+        );
+        assert_eq!(
+            nv("lib_x-1.0rc1.tar.gz"),
+            Some(("lib_x".into(), "1.0rc1".into()))
+        );
+        assert_eq!(nv("README"), None);
+        assert_eq!(nv("noversion.tar.gz"), None);
+        assert_eq!(nv("-1.0.tar.gz"), None);
+    }
+
+    #[test]
+    fn index_links_keep_only_file_names() {
+        let html = r##"<a href="?C=N;O=D">Name</a> <a href="../">Parent</a>
+            <a href='/releases/lzip/lzip-1.24.tar.gz'>x</a>
+            <A HREF="lzip-1.24.tar.gz.sig">sig</A>
+            <a href="lzip-1.24.tar.gz">dup</a><a href="#top">t</a>"##;
+        assert_eq!(
+            parse_index_links(html),
+            ["lzip-1.24.tar.gz", "lzip-1.24.tar.gz.sig"]
+        );
+    }
+
+    #[test]
+    fn index_archives_sort_numerically_and_demote_prereleases() {
+        let links: Vec<String> = [
+            "foo-1.9.tar.gz",
+            "foo-1.10.tar.gz",
+            "foo-2.0rc1.tar.gz",
+            "foo-1.10.tar.xz",
+            "foo-1.10.tar.gz.sig",
+            "other-9.9.tar.gz",
+        ]
+        .map(String::from)
+        .to_vec();
+        let got = index_archives(&links, "foo");
+        let versions: Vec<_> = got.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(versions, ["1.10", "1.9", "2.0rc1"]);
+        assert_eq!(got[0].0, "foo-1.10.tar.gz");
+    }
+
+    #[test]
+    fn a_hint_that_matches_nothing_falls_back_to_every_tarball() {
+        let links: Vec<String> = ["bar-1.0.tar.gz".to_string()].to_vec();
+        assert_eq!(index_archives(&links, "foo").len(), 1);
+    }
+
+    #[test]
+    fn xz_only_index_is_reported_as_unsupported_not_empty() {
+        let links: Vec<String> = ["foo-1.0.tar.xz".to_string()].to_vec();
+        assert!(index_archives(&links, "foo").is_empty());
+        assert!(index_has_only_unsupported(&links));
+        assert!(!index_has_only_unsupported(&["x.html".to_string()]));
+    }
+
+    #[test]
+    fn direct_archive_resolves_without_any_network() {
+        let u = "https://example.org/pub/foo-3.1.4.tar.gz";
+        assert_eq!(latest_release(u).unwrap(), "3.1.4");
+        assert_eq!(archive_urls(u, "3.1.4"), [u]);
     }
 }
