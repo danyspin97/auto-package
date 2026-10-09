@@ -2246,7 +2246,11 @@ For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
   /usr/bin/<tool>` and BuildRequire the package it names. Never guess: plain
   `-devel` or `-mini` variants often do not ship the tool (python-psycopg-binary
   spent two attempts on `postgresql-devel` then `postgresql` for `pg_config`;
-  the provider is `postgresql18-server-devel`)
+  the provider is the server-devel package: write `BuildRequires:
+  postgresql-server-devel`, the unversioned name that always resolves to
+  the distro's current one — `postgresql-devel` is the client package, and
+  OBS may pick its `-mini` flavour, which has no `pg_config`. Do not try PATH
+  tricks or a different package after that; the file is in `/usr/bin`)
 
 4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check
 the build log for hints about which library the build system is trying to find.

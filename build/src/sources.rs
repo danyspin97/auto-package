@@ -138,17 +138,21 @@ impl Ecosystem {
 /// was supposed to catch.
 pub(crate) fn is_python_hijack(info: &ap_ecosystem::sdist::SdistInfo, want: &str) -> bool {
     let native_root = info.cmake_at_root || info.autotools_at_root;
-    info.python_packaging
-        && native_root
-        && !info.cargo_manifest
-        && info
-            .project_name
-            .as_deref()
-            .map(|declared| {
-                let normalize = |s: &str| s.to_lowercase().replace(['-', '.'], "_");
-                normalize(declared) != normalize(want)
-            })
-            .unwrap_or(false)
+    if !(info.python_packaging && native_root && !info.cargo_manifest) {
+        return false;
+    }
+    match info.project_name.as_deref() {
+        Some(declared) => {
+            let normalize = |s: &str| s.to_lowercase().replace(['-', '.'], "_");
+            normalize(declared) != normalize(want)
+        }
+        // No name declared anywhere, and the Python packaging sits in a
+        // SUBDIRECTORY of a CMake/autotools root: that is a C/C++ library that
+        // ships a Python binding under `python/` (google/re2, protobuf-style
+        // trees), not a Python project with a native sidecar. Python
+        // packaging at the root with no declared name stays Python.
+        None => info.project_dir.is_some(),
+    }
 }
 
 /// What a release archive turned out to be.
@@ -1346,6 +1350,20 @@ mod tests {
     }
 
     /// Same decision on autotools, so the fix is not CMake-only.
+    /// google/re2: CMake at the root, a Python wrapper under `python/` whose
+    /// setup.py declares no pyproject name. The C++ library is the project.
+    #[test]
+    fn python_hijack_fires_for_a_nameless_python_binding_in_a_subdirectory() {
+        let mut info = bare_info();
+        info.python_packaging = true;
+        info.cmake_at_root = true;
+        info.project_dir = Some("python".to_string());
+        assert!(is_python_hijack(&info, "re2"));
+        // ...but nameless Python packaging AT the root stays Python.
+        info.project_dir = None;
+        assert!(!is_python_hijack(&info, "re2"));
+    }
+
     #[test]
     fn python_hijack_also_fires_on_autotools_plus_pyproject() {
         let mut info = bare_info();
