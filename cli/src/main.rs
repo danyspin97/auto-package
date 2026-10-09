@@ -64,10 +64,11 @@ enum Commands {
         /// $0.30 was the Oct 2026 default; drogon-shaped C++ builds
         /// routinely need 5–10 agent turns to work through missing
         /// BuildRequires and CMake flag discovery, and $0.30 burned out
-        /// mid-fix in a well-reproduced case. $4.00 is double the per-
-        /// package `update` default and is still cheap enough that an
-        /// accidental runaway on one package costs less than lunch.
-        #[arg(long, default_value_t = 4.0)]
+        /// mid-fix in a well-reproduced case. $4.00 followed, and large
+        /// closures (open-webui's ML stack) then ran packages into it, so
+        /// the default is $10.00: the point of the cap is to stop a runaway,
+        /// not to ration an ordinary hard package.
+        #[arg(long, default_value_t = 10.0)]
         budget_usd: f64,
 
         /// Build this specific dependency node instead of the auto-selected one.
