@@ -111,20 +111,44 @@ struct FileGroup {
     other: usize,
 }
 
+/// `msg` either contains `needle` outright, or is a truncated prefix of it.
+///
+/// pytest's one-line failure summary is cut to terminal width with a
+/// trailing `...`, so a long exception name like `FileNotFoundError` often
+/// survives as `FileN...` or shorter. A plain substring check misses those;
+/// this also accepts `msg` (minus the ellipsis) as a prefix of `needle`,
+/// with a minimum length so a single stray letter can't match everything.
+fn truncated_match(msg: &str, needle: &str) -> bool {
+    if msg.contains(needle) {
+        return true;
+    }
+    match msg.strip_suffix("...") {
+        Some(prefix) if prefix.len() >= 3 => needle.starts_with(prefix),
+        _ => false,
+    }
+}
+
 fn classify_message(msg: &str) -> &'static str {
     let m = msg.to_lowercase();
-    if m.contains("connect")
-        || m.contains("timeout")
-        || m.contains("urllib")
-        || m.contains("socket")
-        || m.contains("httpx")
-        || m.contains("resolution")
-        || m.contains("network")
-    {
+    const NETWORK: &[&str] = &[
+        "connectionerror",
+        "connect",
+        "timeout",
+        "urllib",
+        "socket",
+        "httpx",
+        "resolutionimpossible",
+        "resolution",
+        "network",
+    ];
+    const MISSING_FILE: &[&str] = &["filenotfounderror", "no such file"];
+    const MISSING_MODULE: &[&str] = &["modulenotfounderror", "importerror"];
+
+    if NETWORK.iter().any(|n| truncated_match(&m, n)) {
         "network"
-    } else if m.contains("filenotf") || m.contains("no such file") {
+    } else if MISSING_FILE.iter().any(|n| truncated_match(&m, n)) {
         "missing_file"
-    } else if m.contains("modulenotf") || m.contains("importerr") {
+    } else if MISSING_MODULE.iter().any(|n| truncated_match(&m, n)) {
         "missing_module"
     } else {
         "other"
@@ -753,6 +777,37 @@ mod tests {
             c.evidence
                 .iter()
                 .any(|e| e.starts_with("tests/test_cli.py: 5 failed")),
+            "{:?}",
+            c.evidence
+        );
+    }
+
+    /// pytest truncates its one-line failure summary to terminal width, so a
+    /// long exception name often arrives as `FileN...` rather than in full.
+    #[test]
+    fn truncated_exception_names_still_classify() {
+        let mut lines =
+            vec!["Executing(%check): /usr/bin/bash -e /var/tmp/rpm-tmp.abc".to_string()];
+        for (i, tail) in [
+            "FileN...",
+            "FileNo...",
+            "FileNotF...",
+            "FileNotFoundErro...",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            lines.push(format!("FAILED tests/test_cli.py::Tester::test_{i} - {tail}"));
+        }
+        lines.push("FAILED tests/test_cli.py::Tester::test_net - httpx2.ConnectEr...".into());
+        lines.push("error: Bad exit status from /var/tmp/rpm-tmp.abc (%check)".into());
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let log = log_from(&refs);
+        let c = detect(&log, "accelerate", "").expect("digest");
+        assert!(
+            c.evidence
+                .iter()
+                .any(|e| e.contains("4 missing file/fixture") && e.contains("1 need network")),
             "{:?}",
             c.evidence
         );
