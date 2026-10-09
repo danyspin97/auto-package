@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use ap_core::event::Event;
 
+use crate::obs_status;
 use crate::proc::{self, Captured, Emit};
 
 /// Where `osc` runs when the command is not scoped to a checkout.
@@ -1027,8 +1028,15 @@ pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), 
 
 /// Query the OBS build status for one repo/arch combination.
 ///
-/// Runs `osc results -r <repo> -a <arch> <project> <package>` and parses
-/// the last whitespace-separated token on the first result line as the status.
+/// Reads `/build/<project>/_result` (XML) and interprets it with
+/// [`obs_status::resolve`]: a bare `finished` is resolved through its
+/// `<details>` verdict, and a terminal result in a `dirty` repository is only
+/// trusted once the job history confirms it was built from the source
+/// revision currently on the server (otherwise `Unknown("stale: ...")`).
+///
+/// If the API call or its parse fails, falls back to scraping `osc results`
+/// so a surprising response shape degrades to the old behaviour instead of
+/// breaking the build loop.
 pub fn get_build_status(
     project: &str,
     pkg_name: &str,
@@ -1036,11 +1044,16 @@ pub fn get_build_status(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    let out = proc::capture(
+    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch) {
+        return Ok(status);
+    }
+
+    let out = proc::capture_with_timeout(
         "osc",
         &["results", "-r", repo, "-a", arch, project, pkg_name],
         &anywhere(),
         emit,
+        OSC_QUERY_TIMEOUT,
     )?;
 
     if !out.success() {
@@ -1052,6 +1065,62 @@ pub fn get_build_status(
     }
 
     Ok(parse_single_build_status(&out.stdout))
+}
+
+/// Per-call limit for the short, network-bound `osc` queries used while
+/// polling. Generous for a healthy OBS, but finite: see
+/// [`proc::capture_with_timeout`].
+const OSC_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `osc api <path>` stdout, or `None` on any failure or timeout.
+fn osc_api(path: &str) -> Option<String> {
+    let out = proc::capture_with_timeout(
+        "osc",
+        &["api", path],
+        &anywhere(),
+        Emit::quiet(),
+        OSC_QUERY_TIMEOUT,
+    )
+    .ok()?;
+    out.success().then_some(out.stdout)
+}
+
+/// Percent-encode one URL component. Package names like `libsigc++` contain
+/// `+`, which a query string would otherwise read as a space, and `&` or `#`
+/// would end the value outright.
+fn enc(s: &str) -> std::borrow::Cow<'_, str> {
+    urlencoding::encode(s)
+}
+
+fn get_build_status_xml(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+) -> Option<BuildStatus> {
+    let xml = osc_api(&format!(
+        "/build/{project}/_result?package={}&repository={}&arch={}",
+        enc(pkg_name),
+        enc(repo),
+        enc(arch)
+    ))?;
+    let entry = obs_status::find_entry(&xml, repo, arch, pkg_name)?;
+    let evidence = if obs_status::needs_evidence(&entry) {
+        obs_status::Evidence {
+            source: osc_api(&format!("/source/{project}/{}?view=info", enc(pkg_name)))
+                .and_then(|x| obs_status::parse_source_info(&x)),
+            job: osc_api(&format!(
+                "/build/{project}/{}/{}/_jobhistory?package={}&limit=1",
+                enc(repo),
+                enc(arch),
+                enc(pkg_name)
+            ))
+            .and_then(|x| obs_status::parse_latest_job(&x)),
+        }
+    } else {
+        obs_status::Evidence::default()
+    };
+    Some(obs_status::resolve(&entry, &evidence))
 }
 
 /// Parsing half of [`get_build_status`], split out so it is testable without
@@ -1126,6 +1195,22 @@ pub fn get_project_build_statuses(
     arch: &str,
     emit: Emit<'_>,
 ) -> HashMap<String, BuildStatus> {
+    // XML first: one entry per package with a named code, instead of the
+    // positional letter table below (which depends on terminal width and
+    // `osc`'s padding). Fall back to the table if the API path yields nothing.
+    if let Some(xml) = osc_api(&format!(
+        "/build/{project}/_result?repository={repo}&arch={arch}"
+    )) {
+        let statuses: HashMap<String, BuildStatus> = obs_status::parse_results(&xml)
+            .into_iter()
+            .filter(|e| e.repo == repo && e.arch == arch)
+            .map(|e| (e.pkg.to_lowercase(), obs_status::resolve_lenient(&e)))
+            .collect();
+        if !statuses.is_empty() {
+            return statuses;
+        }
+    }
+
     let Ok(out) = proc::capture(
         "osc",
         &["results", "-r", repo, "-a", arch, project],
@@ -1387,19 +1472,51 @@ pub fn obs_build(
         log: Some(log_path.to_path_buf()),
     });
 
+    // A single `osc` hiccup (network blip, OBS 5xx, rate limit) during a
+    // build that can run for many minutes must not abort the wait and throw
+    // the build away: tolerate a few consecutive poll failures, then give up.
+    const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 8;
+    let mut poll_errors: u32 = 0;
+    const STALE_PATIENCE: Duration = Duration::from_secs(600);
+    let mut stale_since: Option<Instant> = None;
+
     let status = loop {
         if start.elapsed() >= MAX_WAIT {
             return Err(Error::OscFailed {
                 cmd: format!("wait {project}/{pkg_name}"),
                 code: -1,
                 stderr: format!(
-                    "timed out after {}s waiting for OBS build",
-                    MAX_WAIT.as_secs()
+                    "timed out after {}s waiting for OBS build (last status: {})",
+                    MAX_WAIT.as_secs(),
+                    if prev_status.is_empty() {
+                        "none"
+                    } else {
+                        &prev_status
+                    }
                 ),
             });
         }
 
-        let status = get_build_status(project, pkg_name, repo, arch, Emit::quiet())?;
+        let status = match get_build_status(project, pkg_name, repo, arch, Emit::quiet()) {
+            Ok(s) => {
+                poll_errors = 0;
+                s
+            }
+            Err(e) => {
+                poll_errors += 1;
+                if poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                    return Err(e);
+                }
+                reporter.report(&Event::Warning {
+                    step,
+                    message: format!(
+                        "OBS status poll failed ({poll_errors}/{MAX_CONSECUTIVE_POLL_ERRORS}), retrying: {e}"
+                    ),
+                });
+                std::thread::sleep(POLL_INTERVAL);
+                continue;
+            }
+        };
         let status_str = status.to_string();
 
         if status_str != prev_status {
@@ -1412,6 +1529,31 @@ pub fn obs_build(
 
         if status.is_terminal() {
             break status;
+        }
+
+        // `stale: <verdict>` means "a terminal result I couldn't confirm is
+        // for the current sources". Normally the scheduler catches up within
+        // a minute or two; if it stays like that this long the repo is stuck
+        // dirty, so take the verdict at face value instead of idling until
+        // the overall timeout.
+        if let BuildStatus::Unknown(s) = &status
+            && let Some(word) = s.strip_prefix("stale: ")
+        {
+            let since = *stale_since.get_or_insert_with(Instant::now);
+            let verdict = BuildStatus::from(word);
+            if since.elapsed() >= STALE_PATIENCE && verdict.is_terminal() {
+                reporter.report(&Event::Warning {
+                    step,
+                    message: format!(
+                        "OBS result has been unconfirmed for {}s (repository stuck dirty?); \
+                         taking its verdict, {verdict}, at face value",
+                        STALE_PATIENCE.as_secs()
+                    ),
+                });
+                break verdict;
+            }
+        } else {
+            stale_since = None;
         }
 
         std::thread::sleep(POLL_INTERVAL);

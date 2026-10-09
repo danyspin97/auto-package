@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod flavors;
 pub mod log;
+pub mod obs_status;
 pub mod osc;
 pub mod pipeline;
 pub mod proc;
