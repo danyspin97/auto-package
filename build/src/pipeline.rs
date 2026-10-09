@@ -684,33 +684,37 @@ fn dep_names_from_requires_dist(requires_dist: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// How many times one turn waits out a 429 before giving up.
-const MAX_RATE_LIMIT_WAITS: u32 = 6;
+/// How many times one turn is simply re-issued, with no pause, when the API
+/// answers 429. A rejected call costs nothing and the quota is a moving
+/// window, so retrying straight away is the fastest way through; past this
+/// the failure goes to the round loop, which retries the package next round.
+const MAX_IMMEDIATE_RATE_LIMIT_RETRIES: u32 = 5;
 
-/// Agent turns running at once, process-wide. Every package shares one model
-/// quota; with a dozen packages in parallel the quota is gone within minutes
-/// and the whole run spends its time in 429 back-off. Defaults to 3; set
-/// `AUTO_PACKAGE_AGENT_JOBS` to raise or lower it.
+/// Agent turns running at once, process-wide. Unlimited by default so packages
+/// get built as fast as the API allows; set `AUTO_PACKAGE_AGENT_JOBS=<n>` to cap
+/// it if the model quota (429s) is the bottleneck.
 static AGENT_ACTIVE: (std::sync::Mutex<usize>, std::sync::Condvar) =
     (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
 struct AgentSlot;
 
 impl AgentSlot {
-    fn limit() -> usize {
+    /// `None` = no cap.
+    fn limit() -> Option<usize> {
         std::env::var("AUTO_PACKAGE_AGENT_JOBS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n > 0)
-            .unwrap_or(3)
     }
 
     fn acquire() -> Self {
         let (lock, cvar) = &AGENT_ACTIVE;
         let max = Self::limit();
         let mut active = lock.lock().unwrap_or_else(|e| e.into_inner());
-        while *active >= max {
-            active = cvar.wait(active).unwrap_or_else(|e| e.into_inner());
+        if let Some(max) = max {
+            while *active >= max {
+                active = cvar.wait(active).unwrap_or_else(|e| e.into_inner());
+            }
         }
         *active += 1;
         AgentSlot
@@ -722,37 +726,6 @@ impl Drop for AgentSlot {
         let (lock, cvar) = &AGENT_ACTIVE;
         *lock.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
         cvar.notify_one();
-    }
-}
-
-/// When the model API said to back off until; shared by all packages.
-static RATE_LIMIT_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-
-/// Block until any process-wide rate-limit pause has passed, plus a little
-/// jitter so the packages that were waiting do not all fire at once.
-fn wait_out_rate_limit() {
-    loop {
-        let until = *RATE_LIMIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(until) = until else { return };
-        let now = Instant::now();
-        if now >= until {
-            return;
-        }
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as u64)
-            .unwrap_or(0);
-        let jitter = std::time::Duration::from_millis(nanos % 2000);
-        std::thread::sleep((until - now).min(std::time::Duration::from_secs(30)) + jitter);
-    }
-}
-
-/// Record that the API asked everyone to back off for `wait`.
-fn note_rate_limited(wait: std::time::Duration) {
-    let mut guard = RATE_LIMIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
-    let until = Instant::now() + wait;
-    if guard.is_none_or(|cur| until > cur) {
-        *guard = Some(until);
     }
 }
 
@@ -2267,6 +2240,9 @@ fn agent_turn(
     // After a prose-only reply the retry runs in a fresh session with this
     // nudge added to the prompt context (see below).
     let fresh_session = std::cell::Cell::new(false);
+    // Moved along after each 429 so the retry runs on a different model (each
+    // model has its own quota).
+    let model_rotation = std::cell::Cell::new(0usize);
     let nudge: std::cell::OnceCell<String> = std::cell::OnceCell::new();
     let make_req = || crate::agent::TurnRequest {
         workspace: ws.dir(),
@@ -2298,6 +2274,7 @@ fn agent_turn(
         },
         checkout_dir: ctx.checkout_dir,
         context: nudge.get().map(String::as_str).or(ctx.context),
+        model_rotation: model_rotation.get(),
         on_tool_use: Some(&on_tool_use),
     };
 
@@ -2305,12 +2282,11 @@ fn agent_turn(
     // on its own: wait it out (30s, 1m, 2m, 4m) before spending one of the
     // package's attempts — failing here made a burst of parallel packages all
     // give up at once and get permanently excluded.
-    let mut rate_limit_waits = 0u32;
+    let mut rate_limit_retries = 0u32;
     let turn_result = loop {
         // The quota is shared by every package running in parallel: when any
         // turn hits a 429, all of them pause instead of each discovering it
         // separately and retrying in lockstep.
-        wait_out_rate_limit();
         let slot = AgentSlot::acquire();
         let mut result = crate::agent::turn(make_req());
         // A resumed session can answer in prose ("I already called
@@ -2338,18 +2314,19 @@ fn agent_turn(
         }
         drop(slot);
         match result {
-            Err(e) if e.is_rate_limited() && rate_limit_waits < MAX_RATE_LIMIT_WAITS => {
-                let wait = std::time::Duration::from_secs((30u64 << rate_limit_waits).min(300));
-                note_rate_limited(wait);
-                rate_limit_waits += 1;
+            Err(e)
+                if e.is_rate_limited() && rate_limit_retries < MAX_IMMEDIATE_RATE_LIMIT_RETRIES =>
+            {
+                rate_limit_retries += 1;
+                model_rotation.set(model_rotation.get() + 1);
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
                     message: format!(
-                        "model API rate-limited (429); waiting {}s before retrying ({rate_limit_waits}/{MAX_RATE_LIMIT_WAITS})",
-                        wait.as_secs()
+                        "model API rate-limited (429) on {}; retrying now on {} ({rate_limit_retries}/{MAX_IMMEDIATE_RATE_LIMIT_RETRIES})",
+                        crate::agent::model_for_attempt(ctx.attempt, model_rotation.get() - 1),
+                        crate::agent::model_for_attempt(ctx.attempt, model_rotation.get()),
                     ),
                 });
-                // (the pause itself happens at the top of the loop, shared)
             }
             other => break other,
         }
@@ -5212,32 +5189,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_job_limit_defaults_to_three_and_ignores_junk() {
+    fn agent_turns_are_uncapped_unless_asked() {
         // SAFETY: tests in this module that touch this variable run serially
         // through the lock below.
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("AUTO_PACKAGE_AGENT_JOBS") };
-        assert_eq!(AgentSlot::limit(), 3);
+        assert_eq!(AgentSlot::limit(), None);
         for junk in ["0", "-1", "many", ""] {
             unsafe { std::env::set_var("AUTO_PACKAGE_AGENT_JOBS", junk) };
-            assert_eq!(AgentSlot::limit(), 3, "{junk:?}");
+            assert_eq!(AgentSlot::limit(), None, "{junk:?}");
         }
         unsafe { std::env::set_var("AUTO_PACKAGE_AGENT_JOBS", "7") };
-        assert_eq!(AgentSlot::limit(), 7);
+        assert_eq!(AgentSlot::limit(), Some(7));
         unsafe { std::env::remove_var("AUTO_PACKAGE_AGENT_JOBS") };
-    }
-
-    #[test]
-    fn rate_limit_cooldown_is_shared_and_only_ever_extended() {
-        note_rate_limited(std::time::Duration::from_secs(40));
-        let first = (*RATE_LIMIT_UNTIL.lock().unwrap()).unwrap();
-        note_rate_limited(std::time::Duration::from_secs(1)); // shorter: ignored
-        assert_eq!((*RATE_LIMIT_UNTIL.lock().unwrap()).unwrap(), first);
-        note_rate_limited(std::time::Duration::from_secs(400)); // longer: extends
-        assert!((*RATE_LIMIT_UNTIL.lock().unwrap()).unwrap() > first);
-        // leave no pause behind for other tests
-        *RATE_LIMIT_UNTIL.lock().unwrap() = None;
     }
 
     /// The service-run gate trusts `missing_source_files`: a URL Source is judged

@@ -210,6 +210,12 @@ fn looks_like_url(s: &str) -> bool {
 ///
 /// `https://github.com/BurntSushi/ripgrep.git` → `ripgrep`; sub-paths
 /// (`…/tree/main`), queries and fragments do not leak into the name.
+/// Whether a package failed only because the model API answered 429 (the
+/// pipeline's message for that case contains "rate limit (429)").
+fn is_rate_limit_failure(reason: &str) -> bool {
+    reason.contains("rate limit (429)")
+}
+
 fn repo_package_name(url: &str) -> String {
     // A direct tarball URL names the project in its file name, not as the last
     // path segment (`…/hello-2.12.tar.gz` is `hello`, not the file).
@@ -1430,6 +1436,12 @@ fn cmd_build(
     let max_target_retries = max_attempts;
     let mut fail_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    // Quota (429) failures say nothing about the package, and with no back-off
+    // a package can be rejected many times in quick succession: they get their
+    // own, much higher, limit instead of using up the real-failure budget.
+    let mut rate_limited_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    const MAX_RATE_LIMITED_ROUNDS: usize = 200;
     let mut permanently_failed: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
@@ -1922,9 +1934,19 @@ fn cmd_build(
                 }
                 PipelineResult::Failed { reason, .. } => {
                     batch_failures.push((rpm_name.clone(), reason.clone()));
-                    let count = fail_counts.entry(rpm_name.clone()).or_insert(0);
+                    let rate_limited = is_rate_limit_failure(&reason);
+                    let count = if rate_limited {
+                        rate_limited_counts.entry(rpm_name.clone()).or_insert(0)
+                    } else {
+                        fail_counts.entry(rpm_name.clone()).or_insert(0)
+                    };
                     *count += 1;
-                    if *count >= max_target_retries {
+                    let limit = if rate_limited {
+                        MAX_RATE_LIMITED_ROUNDS
+                    } else {
+                        max_target_retries
+                    };
+                    if *count >= limit {
                         permanently_failed.insert(rpm_name.clone());
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
@@ -1938,7 +1960,7 @@ fn cmd_build(
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
                             message: format!(
-                                "{rpm_name} failed (attempt {count}/{max_target_retries}): \
+                                "{rpm_name} failed (attempt {count}/{limit}): \
                                  {reason}; retrying next round"
                             ),
                         });
@@ -2206,6 +2228,17 @@ fn report_update_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_429_failure_is_recognised_by_the_pipelines_message() {
+        assert!(is_rate_limit_failure(
+            "the model API rejected the turn with a quota/rate limit (429): API Error"
+        ));
+        assert!(!is_rate_limit_failure("claude exited 1"));
+        assert!(!is_rate_limit_failure(
+            "budget exhausted ($4.00 spent of $4.00)"
+        ));
+    }
 
     #[test]
     fn repo_package_name_ignores_subpaths_and_queries() {

@@ -165,6 +165,29 @@ const MAX_AGENT_STREAM_BYTES: u64 = 32 * 1024 * 1024;
 /// Most bytes kept of one tool call's input.
 const MAX_TOOL_INPUT_BYTES: usize = 256 * 1024;
 
+/// Models the agent runs on, cheapest first. Each has its own API quota.
+const AGENT_MODELS: [&str; 3] = [
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-5",
+    "claude-sonnet-5",
+];
+
+/// The model for an attempt: escalate with the attempt number (the first 2
+/// attempts on Haiku 4.5, the next 3 on Sonnet 4.5, from attempt 6 on — the
+/// packages the cheaper tiers already failed — on Sonnet 5), then move
+/// `rotation` places along the list (wrapping) to dodge a model whose quota is
+/// exhausted.
+pub(crate) fn model_for_attempt(attempt: usize, rotation: usize) -> &'static str {
+    let base = if attempt <= 2 {
+        0
+    } else if attempt <= 5 {
+        1
+    } else {
+        2
+    };
+    AGENT_MODELS[(base + rotation) % AGENT_MODELS.len()]
+}
+
 // ── conventions ───────────────────────────────────────────────────────────────
 
 const CONVENTIONS: &str = r#"
@@ -2617,6 +2640,10 @@ pub struct TurnRequest<'a> {
     pub checkout_dir: Option<&'a std::path::Path>,
     /// Optional short note injected into the prompt just before the hint section.
     pub context: Option<&'a str>,
+    /// How many models to move along [`AGENT_MODELS`] from the one the attempt
+    /// number picks. Quota is per model, so the pipeline bumps this after a 429
+    /// to retry the same turn on a different model.
+    pub model_rotation: usize,
     /// Called in real-time as each tool-use block is parsed, with `(tool_name,
     /// input_summary)`. Used by the pipeline to stream AgentToolUse events
     /// while the turn is still running so the TUI stays alive.
@@ -2890,13 +2917,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // Escalate with the attempt number: the first 2 attempts go to Haiku 4.5
     // (cheapest), the next 3 to Sonnet 4.5, and everything from attempt 6 on —
     // the packages the cheaper tiers already failed on — to Sonnet 5.
-    let model = if req.attempt <= 2 {
-        "claude-haiku-4-5-20251001"
-    } else if req.attempt <= 5 {
-        "claude-sonnet-4-5"
-    } else {
-        "claude-sonnet-5"
-    };
+    let model = model_for_attempt(req.attempt, req.model_rotation);
 
     // Cap this turn at whatever is left of the package budget, so one runaway
     // turn cannot overshoot it — the caller only checks between turns.
@@ -3922,8 +3943,23 @@ mod tests {
             session_id: None,
             checkout_dir: None,
             context: None,
+            model_rotation: 0,
             on_tool_use: None,
         }
+    }
+
+    #[test]
+    fn models_escalate_with_the_attempt_and_rotate_on_demand() {
+        assert_eq!(model_for_attempt(1, 0), "claude-haiku-4-5-20251001");
+        assert_eq!(model_for_attempt(3, 0), "claude-sonnet-4-5");
+        assert_eq!(model_for_attempt(6, 0), "claude-sonnet-5");
+        // after a 429 the same turn moves to the next model, wrapping around
+        assert_eq!(model_for_attempt(1, 1), "claude-sonnet-4-5");
+        assert_eq!(model_for_attempt(1, 2), "claude-sonnet-5");
+        assert_eq!(model_for_attempt(6, 1), "claude-haiku-4-5-20251001");
+        // every rotation of one attempt yields a distinct model until it wraps
+        let seen: std::collections::HashSet<_> = (0..3).map(|r| model_for_attempt(4, r)).collect();
+        assert_eq!(seen.len(), 3);
     }
 
     #[test]
