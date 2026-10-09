@@ -804,11 +804,23 @@ fn main() -> color_eyre::Result<()> {
                         tui_ctrl.clone(),
                     );
                     if tui_ctrl.is_some() {
-                        reporter.report(&Event::Progress {
-                            step: None,
-                            message: "Root build finished — press n to add a package, q to quit"
-                                .to_string(),
-                        });
+                        // The TUI stays open after the root build, and `result?`
+                        // below only runs once it quits — so a failure (e.g. pip
+                        // finding no version for this interpreter) must be shown
+                        // here, not left looking like a hang.
+                        match &first {
+                            Ok(_) => reporter.report(&Event::Progress {
+                                step: None,
+                                message: "Root build finished — press n to add a package, q to quit"
+                                    .to_string(),
+                            }),
+                            Err(e) => reporter.report(&Event::Warning {
+                                step: None,
+                                message: format!(
+                                    "Root build of {name} failed: {e:#} — press n to add a package, q to quit"
+                                ),
+                            }),
+                        }
                     }
                     first
                 })
