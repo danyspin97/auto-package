@@ -54,11 +54,20 @@ enum Commands {
         tui: bool,
 
         /// Maximum agent fix attempts per package.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 10)]
         max_attempts: usize,
 
-        /// USD budget cap for agent calls.
-        #[arg(long, default_value_t = 0.30)]
+        /// USD budget cap for agent calls (total across every turn for
+        /// one package, within one CLI invocation — see
+        /// `PkgState::cumulative_spent_usd`).
+        ///
+        /// $0.30 was the Oct 2026 default; drogon-shaped C++ builds
+        /// routinely need 5–10 agent turns to work through missing
+        /// BuildRequires and CMake flag discovery, and $0.30 burned out
+        /// mid-fix in a well-reproduced case. $4.00 is double the per-
+        /// package `update` default and is still cheap enough that an
+        /// accidental runaway on one package costs less than lunch.
+        #[arg(long, default_value_t = 4.0)]
         budget_usd: f64,
 
         /// Build this specific dependency node instead of the auto-selected one.

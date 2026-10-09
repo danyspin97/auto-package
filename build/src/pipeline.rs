@@ -1830,11 +1830,20 @@ fn run_package_inner(
 
                 attempts += 1;
                 if attempts > config.max_attempts || spent_usd >= config.budget_usd {
+                    let why = if spent_usd >= config.budget_usd {
+                        format!(
+                            "budget exhausted (${:.2} spent of ${:.2})",
+                            spent_usd, config.budget_usd
+                        )
+                    } else {
+                        format!("attempt limit {} reached", config.max_attempts)
+                    };
                     return PipelineResult::Failed {
                         rpm_name,
                         reason: format!(
-                            "gave up after {} attempt(s); log: {}",
+                            "gave up after {} attempt(s): {}; log: {}",
                             attempts,
+                            why,
                             build_log.display()
                         ),
                     };
@@ -1880,9 +1889,13 @@ fn run_package_inner(
                 let (agent_step, outcome) = match turn {
                     Ok(v) => v,
                     Err(e) => {
+                        // `agent_turn` already routed the Error through
+                        // `friendly_agent_error`, so this is a
+                        // user-ready message (budget-exhausted hint
+                        // included); pass it through verbatim.
                         return PipelineResult::Failed {
                             rpm_name,
-                            reason: format!("agent error: {e}"),
+                            reason: e,
                         };
                     }
                 };
@@ -1965,6 +1978,58 @@ struct TurnCtx<'a> {
     resume: bool,
     /// Optional short note injected into the prompt before the hint section.
     context: Option<&'a str>,
+}
+
+/// Reshape an agent turn's `Error` into the one-line reason the pipeline
+/// propagates to the user via `PipelineResult::Failed`.
+///
+/// The default `Display` for `Error::Failed`/`Error::EndedEarly` is useful
+/// for debugging (full stderr dump) but doesn't tell the user how to fix
+/// the common cases. In particular, the drogon-build crash the Oct 2026
+/// user hit was `claude exited 1` with empty stderr because
+/// `--max-budget-usd` ran out mid-turn — nothing in the opaque message
+/// pointed at the one knob (`--budget-usd`) they needed to raise. The
+/// claude CLI DOES emit the diagnosis in the stream (`subtype:
+/// "error_max_budget_usd"`, `errors: ["Reached maximum budget (...)"]`)
+/// and `Error::EndedEarly` carries both; translate them into something
+/// the user can act on.
+///
+/// Pull the inner CLI message out via `ended_early_message()` rather than
+/// embedding `{e}`'s `Display` — `Display` prepends
+/// `"claude ended turn with <subtype>: "` AND repeats the subtype, so
+/// wrapping it in the budget sentence used to produce
+/// `"model budget of $2.00 (--budget-usd) exhausted mid-turn (claude
+/// ended turn with error_max_budget_usd: Reached maximum budget ($0.03))"`
+/// — two different dollar figures with no indication that $2.00 is the
+/// per-package cap and $0.03 is the per-turn remainder.
+fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64) -> String {
+    if e.is_budget_exhausted() {
+        let detail = e.ended_early_message().unwrap_or("budget exhausted");
+        return format!(
+            "model budget of ${budget_usd:.2} (--budget-usd) exhausted \
+             mid-turn: {detail}. Raise --budget-usd for this package \
+             and retry. The agent's prompt + partial output are \
+             preserved in the step dir (crash-prompt.md, \
+             crash-stdout.log) if you need to see how far it got."
+        );
+    }
+    if e.is_rate_limited() {
+        let detail = e.ended_early_message().unwrap_or("rate limited");
+        return format!(
+            "the model API rejected the turn with a quota/rate limit (429): \
+             {detail}\nThis is a provider-side limit, not a package problem: \
+             wait a minute and re-run (state is kept), lower --jobs, or raise \
+             the quota. Partial output is in the step dir (crash-stdout.log)."
+        );
+    }
+    if let (Some(subtype), Some(message)) = (e.ended_early_subtype(), e.ended_early_message()) {
+        return format!(
+            "claude ended turn early ({subtype}): {message}. The \
+             agent's prompt + partial output are preserved in the \
+             step dir (crash-prompt.md, crash-stdout.log)."
+        );
+    }
+    format!("agent error: {e}")
 }
 
 /// Run one agent turn and emit every event it produces.
@@ -2075,16 +2140,49 @@ fn agent_turn(
                 outcome: StepOutcome::Failed,
                 elapsed: t.elapsed(),
             });
+            let message = friendly_agent_error(&e, config.budget_usd);
             reporter.report(&Event::Warning {
                 step: Some(step.id),
-                message: format!("agent error: {e}"),
+                message: message.clone(),
             });
-            return Err(e.to_string());
+            return Err(message);
         }
     };
 
     *session_id = outcome.session_id.clone();
     *spent_usd += outcome.usage.cost_usd();
+
+    // If the claude CLI's final `result` event carried a structured
+    // end-early signal but `pick_turn_response` still rescued a usable
+    // `StructuredOutput` from the stream, we return Ok but the turn
+    // was NOT clean — surface it as a Warning so a budget-cut-but-
+    // rescued turn is distinguishable from a clean one in the event
+    // stream (otherwise the per-package budget runs out one turn
+    // later with no visible warning to the user). The budget-cap case
+    // additionally gets the --budget-usd hint, since that is the one
+    // knob the user can actually turn.
+    if let Some(signal) = &outcome.ended_early {
+        let hint = if signal.subtype.starts_with("error_max_budget") {
+            format!(
+                " Raise --budget-usd (currently ${:.2}) if the next \
+                 turn needs more headroom.",
+                config.budget_usd
+            )
+        } else {
+            String::new()
+        };
+        reporter.report(&Event::Warning {
+            step: Some(step.id),
+            message: format!(
+                "claude ended turn early ({}): {} — a StructuredOutput \
+                 was rescued from the stream so the turn is being \
+                 applied, but the model was cut off before it could \
+                 finish.{hint}",
+                signal.subtype, signal.message,
+            ),
+        });
+    }
+
     // Persist the running total so an outer-loop retry (or a crash
     // mid-pipeline) within the SAME CLI invocation resumes with the
     // correct cumulative spend instead of a reset-to-zero cap. Tagged

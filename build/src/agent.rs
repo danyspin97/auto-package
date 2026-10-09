@@ -91,18 +91,18 @@ pub(crate) fn scrub_env_for_agent(
     let mut kept: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in vars {
         if AGENT_ENV_DENYLIST.contains(&name.as_str()) {
-            eprintln!(
+            ap_core::diag!(
                 "ap-build: scrubbing publishing credential {name} from agent subprocess \
                  (the agent never commits — see the Oct 2026 build/src/agent.rs review)"
             );
             continue;
         }
         if extra_deny.iter().any(|a| a == &name) {
-            eprintln!("ap-build: scrubbing user-denied env var {name} from agent subprocess");
+            ap_core::diag!("ap-build: scrubbing user-denied env var {name} from agent subprocess");
             continue;
         }
         if matches_credential_pattern(&name) && !CREDENTIAL_EXCEPTIONS.contains(&name.as_str()) {
-            eprintln!(
+            ap_core::diag!(
                 "ap-build: scrubbing credential-shaped env var {name} from agent subprocess \
                  (name ends in _TOKEN/_SECRET/_PASSWORD/_API_KEY)"
             );
@@ -1054,7 +1054,9 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      find %{buildroot}%{$python_sitearch}/<pkg>/_libs -name '*.[ch]' -delete
      sed -i -e '/\.[ch],/d' %{buildroot}%{$python_sitearch}/<pkg>-%{version}.dist-info/RECORD
 
-24. rpmlint devel-file-in-non-devel-package: Each bundled C/C++ header
+24. rpmlint devel-file-in-non-devel-package (PYTHON packages that bundle
+   headers; for a C/C++ library's OWN installed headers do the opposite —
+   put them in `%package devel`, never delete them): Each bundled C/C++ header
    (`.h`, `.hpp`) in a non-devel package generates a `devel-file-in-non-devel-package`
    rpmlint error (Badness: 50). Packages that bundle 3rdparty C/C++ libraries
    under `data/`, `3rdparty/`, `include/`, or similar subdirectories can easily
@@ -1373,6 +1375,12 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    Use the `plain-c-cpp-packaging` skill for the full treatment (shared-
    library SONAME subpackage split, `%ldconfig_scriptlets`, CMake/autotools
    `%build`/`%check` patterns, `%files` layout).
+
+   BEFORE writing the first `%cmake` line, invoke
+   `Skill plain-c-cpp-packaging` — it has a `BUILD_*` / `USE_*` knob
+   checklist that drogon took four OBS attempts to learn, and getting
+   those switches right in one pass is strictly cheaper than
+   discovering them one build at a time.
 
 34. **Optional extras are `Recommends`, not a build-blocking dependency.**
    Convention 24 says any MISSING package should be built — but that applies
@@ -2253,6 +2261,20 @@ pub enum Error {
         prompt: String,
     },
 
+    /// Claude ended mid-turn with a known structured error: budget cap
+    /// reached, rate-limited, context overflow, etc. The `subtype`
+    /// originates verbatim from the claude CLI (`error_max_budget_usd`,
+    /// `error_rate_limited`, …) so the caller can both show the user a
+    /// specific actionable message AND decide whether to retry at the
+    /// outer loop (budget: no; rate-limit: maybe later; etc.).
+    #[error("claude ended turn with {subtype}: {message}")]
+    EndedEarly {
+        subtype: String,
+        message: String,
+        stdout: String,
+        prompt: String,
+    },
+
     #[error("unexpected response: {message}")]
     Parse {
         message: String,
@@ -2265,13 +2287,51 @@ pub enum Error {
 }
 
 impl Error {
+    /// Is this error a budget cap hit (as opposed to a crash or a bad
+    /// response shape)? The caller treats this specifically — surfaces
+    /// a 'raise --budget-usd' hint and does NOT keep retrying since
+    /// every retry will hit the same cap.
+    pub fn is_budget_exhausted(&self) -> bool {
+        matches!(self, Error::EndedEarly { subtype, .. } if subtype.starts_with("error_max_budget"))
+    }
+
+    /// For `EndedEarly`, the human-readable message the claude CLI
+    /// supplied verbatim (e.g. "Reached maximum budget ($0.03)") —
+    /// use this instead of the `Display` impl when assembling a
+    /// user-facing wrapper, so the wrapper's own context (the cap in
+    /// --budget-usd) isn't shown alongside the CLI's own dollar figure
+    /// in a way that reads like two different budgets.
+    pub fn ended_early_message(&self) -> Option<&str> {
+        match self {
+            Error::EndedEarly { message, .. } => Some(message),
+            _ => None,
+        }
+    }
+
+    /// Was this turn rejected by the API for quota/rate limiting (HTTP 429)?
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, Error::EndedEarly { subtype, .. }
+            if subtype == "api_error_429" || subtype == "error_rate_limited")
+    }
+
+    /// For `EndedEarly`, the subtype slug (`error_max_budget_usd`,
+    /// `error_rate_limited`, …) exactly as the claude CLI emitted it.
+    pub fn ended_early_subtype(&self) -> Option<&str> {
+        match self {
+            Error::EndedEarly { subtype, .. } => Some(subtype),
+            _ => None,
+        }
+    }
+
     /// The prompt sent for the turn this error aborted, when one had already
     /// been built — `None` only for failures that precede that point
     /// (`Launch`, a stream-read `Io` error), which have nothing turn-specific
     /// to show.
     pub fn prompt(&self) -> Option<&str> {
         match self {
-            Error::Failed { prompt, .. } | Error::Parse { prompt, .. } => Some(prompt),
+            Error::Failed { prompt, .. }
+            | Error::Parse { prompt, .. }
+            | Error::EndedEarly { prompt, .. } => Some(prompt),
             Error::Launch(_) | Error::Io(_) => None,
         }
     }
@@ -2282,7 +2342,9 @@ impl Error {
     /// process exits (see `turn`'s `stdout_raw` doc comment).
     pub fn stdout(&self) -> Option<&str> {
         match self {
-            Error::Failed { stdout, .. } | Error::Parse { stdout, .. } => Some(stdout),
+            Error::Failed { stdout, .. }
+            | Error::Parse { stdout, .. }
+            | Error::EndedEarly { stdout, .. } => Some(stdout),
             Error::Launch(_) | Error::Io(_) => None,
         }
     }
@@ -2291,7 +2353,9 @@ impl Error {
     pub fn stderr(&self) -> Option<&str> {
         match self {
             Error::Failed { stderr, .. } => Some(stderr),
-            Error::Parse { .. } | Error::Launch(_) | Error::Io(_) => None,
+            Error::Parse { .. } | Error::EndedEarly { .. } | Error::Launch(_) | Error::Io(_) => {
+                None
+            }
         }
     }
 }
@@ -2435,6 +2499,25 @@ pub struct TurnOutcome {
     /// The raw `result` payload from the CLI, before parsing.
     pub raw: String,
     pub session_id: Option<String>,
+    /// Set when the claude CLI's final `result` event carried
+    /// `is_error: true` with a known `subtype` (budget cap, rate limit,
+    /// context overflow) — EVEN IF a usable `StructuredOutput` was
+    /// rescued from the stream and the turn therefore returned `Ok`.
+    /// The pipeline surfaces this as a warning so a budget-cut-but-
+    /// rescued turn doesn't look identical to a clean one in the
+    /// event stream, which would otherwise let the per-package budget
+    /// state silently drift under the user.
+    pub ended_early: Option<EndedEarlySignal>,
+}
+
+/// Structured end-of-turn signal from the claude CLI. Same fields as
+/// `Error::EndedEarly`, carried on the `Ok` path when the model emitted
+/// a usable `StructuredOutput` before being cut off — see
+/// `TurnOutcome::ended_early`.
+#[derive(Debug, Clone)]
+pub struct EndedEarlySignal {
+    pub subtype: String,
+    pub message: String,
 }
 
 // ── turn ──────────────────────────────────────────────────────────────────────
@@ -2573,6 +2656,57 @@ fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
     })
 }
 
+/// The final `result` event the claude CLI emits at the end of a turn,
+/// as serialized on stdout under `--output-format stream-json`.
+///
+/// At module scope (rather than nested inside `turn`) only so that
+/// `tests::result_event_deserializes_budget_cap_fixture` can parse a
+/// realistic payload through the SAME serde definition the production
+/// code uses. If the CLI silently renames `subtype`/`is_error`/`errors`,
+/// that test fails CI loudly instead of leaving `friendly_agent_error`
+/// quietly degraded back to the opaque "claude exited 1" path.
+#[derive(Deserialize, Default)]
+struct ResultEvent {
+    #[serde(default)]
+    result: String,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+    #[serde(default)]
+    usage: StreamUsage,
+    #[serde(default)]
+    num_turns: usize,
+    #[serde(default)]
+    session_id: Option<String>,
+    /// When claude ends mid-turn — budget cap, rate limit, context
+    /// overflow — the result event carries `is_error: true` plus a
+    /// `subtype` identifying which. Previously ignored, which turned
+    /// every one of those into an opaque `claude exited 1` with no
+    /// hint of what the user should actually do about it. The real
+    /// drogon-build case the user hit was
+    /// `subtype: "error_max_budget_usd"` with
+    /// `errors: ["Reached maximum budget ($0.03)"]`.
+    #[serde(default)]
+    is_error: bool,
+    #[serde(default)]
+    subtype: String,
+    #[serde(default)]
+    errors: Vec<String>,
+    /// HTTP status of a failed API call (429 = quota/rate limit); the CLI
+    /// still reports `subtype: "success"` for these.
+    #[serde(default)]
+    api_error_status: Option<u16>,
+    #[serde(default)]
+    terminal_reason: String,
+}
+
+#[derive(Deserialize, Default)]
+struct StreamUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+}
+
 /// Run one agent turn. The agent has tool access to the workspace and edits
 /// `spec` in place. The caller is responsible for validating and rolling back
 /// on failure.
@@ -2687,27 +2821,12 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
 
     // Stream stdout line by line: display text/tool events and collect the
     // final `result` event which carries the structured JSON response.
-    #[derive(Deserialize, Default)]
-    struct ResultEvent {
-        #[serde(default)]
-        result: String,
-        #[serde(default)]
-        total_cost_usd: Option<f64>,
-        #[serde(default)]
-        usage: StreamUsage,
-        #[serde(default)]
-        num_turns: usize,
-        #[serde(default)]
-        session_id: Option<String>,
-    }
-    #[derive(Deserialize, Default)]
-    struct StreamUsage {
-        #[serde(default)]
-        input_tokens: u64,
-        #[serde(default)]
-        output_tokens: u64,
-    }
-
+    // `ResultEvent`/`StreamUsage` live at module scope (see below) so that
+    // a schema fixture test can parse a real claude-CLI payload against
+    // the exact same deserializer the production path uses — otherwise
+    // a silent rename of `subtype`/`is_error`/`errors` on the CLI side
+    // would downgrade this whole mechanism to the old opaque path with
+    // no CI signal.
     let mut result_event = ResultEvent::default();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     // Raw copy of every stdout line, kept independent of JSON parsing so a
@@ -2786,6 +2905,34 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let stderr_content = stderr_handle.join().unwrap_or_default();
     let status = child.wait().map_err(Error::Io)?;
 
+    // Lift the structured end-early signal out of the result event once,
+    // so both the error branch (no usable response) and the Ok branch
+    // (StructuredOutput rescued despite the cut-off) can see it. On the
+    // Ok branch the pipeline uses it to emit a warning; otherwise a
+    // budget-cut-but-rescued turn would look indistinguishable from a
+    // clean one in the event stream and the per-package budget would
+    // silently run out one turn later with no visible warning.
+    let ended_early = if result_event.is_error && !result_event.subtype.is_empty() {
+        // `subtype: "success"` with `is_error: true` is how the CLI reports a
+        // failure whose reason only lives in the `result` text (API errors,
+        // a refused tool call); the subtype alone says nothing there.
+        let message = if !result_event.errors.is_empty() {
+            result_event.errors.join("; ")
+        } else if !result_event.result.trim().is_empty() {
+            let t = result_event.result.trim();
+            t.chars().take(600).collect::<String>()
+        } else {
+            result_event.subtype.clone()
+        };
+        let subtype = match result_event.api_error_status {
+            Some(status) => format!("api_error_{status}"),
+            None => result_event.subtype.clone(),
+        };
+        Some(EndedEarlySignal { subtype, message })
+    } else {
+        None
+    };
+
     // Prefer the `result` event's payload (the normal success path), but fall
     // back to the last `StructuredOutput` tool call the model emitted during
     // the stream when it's empty or unparseable. This matters most for the
@@ -2796,6 +2943,23 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let resp = match pick_turn_response(&result_event.result, &tool_calls) {
         Some(r) => r,
         None => {
+            // Prefer the structured end-early signals the claude CLI
+            // emits on its final `result` event (`is_error: true` plus
+            // `subtype: "error_max_budget_usd"` / `"error_rate_limited"`
+            // / etc.) over the opaque "process exited N". The user's
+            // drogon-build crash was exactly this: the model made real
+            // progress for 10+ turns, hit the --max-budget-usd flag's
+            // $0.03 remaining, and the pipeline reported
+            // "claude exited 1" with empty stderr — nothing in that
+            // output told the user to raise --budget-usd.
+            if let Some(signal) = ended_early {
+                return Err(Error::EndedEarly {
+                    subtype: signal.subtype,
+                    message: signal.message,
+                    stdout: stdout_raw,
+                    prompt: prompt.clone(),
+                });
+            }
             return Err(if !status.success() {
                 Error::Failed {
                     code: status.code().unwrap_or(-1),
@@ -2861,6 +3025,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         output,
         raw: result_event.result,
         session_id: result_event.session_id,
+        ended_early,
     })
 }
 
@@ -2926,12 +3091,25 @@ fn review_prompt_non_python() -> &'static str {
         GitHub for the upstream project, not the distro's devel-package wrapping. \
         Full details in the `plain-c-cpp-packaging` skill.\n\
      \n\
-     4. **Shared library split**: if the project builds a `lib<name>.so.<ver>`, \
-        a proper openSUSE package splits into a runtime subpackage \
-        (`lib<name><soversion>`) carrying only the versioned `.so.*` symlinks, \
-        plus `%{name}-devel` carrying headers + `.pc` + the unversioned `.so`. \
+     4. **`-devel` split (mandatory whenever headers are installed)**: if the \
+        project installs ANY header (`install(DIRECTORY include ...)`, \
+        `install(FILES *.h/*.hpp)`, `make install` into `/usr/include`), a \
+        `%package devel` is required — headers, `.pc` and `lib/cmake/` files go \
+        there, never in the main package. This holds with or without a SOVERSION, \
+        for static or shared libs, and for header-only libs. Without it rpmlint \
+        `devel-file-in-non-devel-package` (Badness 50 per header) fails the build. \
+        Do NOT drop or merge `-devel` to work around a build error, and do NOT \
+        reason \"no SOVERSION, so no split\" — that only removes the runtime \
+        `lib<name><soversion>` subpackage, never `-devel`. If the project builds a \
+        `lib<name>.so.<ver>`, additionally add the runtime subpackage \
+        (`lib<name><soversion>`) carrying only the versioned `.so.*`, with \
+        `%{name}-devel` carrying headers + `.pc` + the unversioned `.so`. \
         See the `plain-c-cpp-packaging` skill for the exact layout and the \
-        `%ldconfig_scriptlets` lines the runtime subpackage needs.\n\
+        `%ldconfig_scriptlets` lines the runtime subpackage needs. Every \
+        package-private install directory (e.g. `%{_libdir}/<name>-X.Y/`) must \
+        be owned exactly once — `%dir` it, or list the whole directory; listing \
+        only files inside it fails `check-filelist` ('directories not owned by a \
+        package'), and listing it twice warns 'File listed twice'.\n\
      \n\
      5. **Sibling projects**, if the archive holds more than one — decide the \
         subpackage layout now, before the first build, because it changes \
@@ -3846,6 +4024,100 @@ mod tests {
                 "{var} ends in a credential-suffix pattern and must be dropped"
             );
         }
+    }
+
+    #[test]
+    fn is_budget_exhausted_recognises_the_subtype_the_claude_cli_emits() {
+        let e = Error::EndedEarly {
+            subtype: "error_max_budget_usd".to_string(),
+            message: "Reached maximum budget ($0.03)".to_string(),
+            stdout: String::new(),
+            prompt: String::new(),
+        };
+        assert!(e.is_budget_exhausted());
+        assert_eq!(e.ended_early_subtype(), Some("error_max_budget_usd"));
+        assert_eq!(
+            e.ended_early_message(),
+            Some("Reached maximum budget ($0.03)")
+        );
+
+        let not_budget = Error::EndedEarly {
+            subtype: "error_rate_limited".to_string(),
+            message: "rate limited".to_string(),
+            stdout: String::new(),
+            prompt: String::new(),
+        };
+        assert!(!not_budget.is_budget_exhausted());
+
+        let generic = Error::Failed {
+            code: 1,
+            stderr: String::new(),
+            stdout: String::new(),
+            prompt: String::new(),
+        };
+        assert!(!generic.is_budget_exhausted());
+        assert_eq!(generic.ended_early_subtype(), None);
+        assert_eq!(generic.ended_early_message(), None);
+    }
+
+    /// Lock the claude-CLI schema contract: the exact field names the
+    /// production code reads out of the final `result` event
+    /// (`is_error`, `subtype`, `errors`). If the CLI silently renames
+    /// any of these — e.g. `subtype` → `error_type` or wraps them under
+    /// a nested `error` object — `#[serde(default)]` would otherwise
+    /// swallow the rename and leave `friendly_agent_error` quietly
+    /// degraded back to the opaque "claude exited 1" path with no CI
+    /// signal. This test fails loudly on that drift.
+    ///
+    /// Fixture reproduces the actual drogon-build payload the user hit
+    /// (modulo cost figures): `is_error: true`, `subtype:
+    /// "error_max_budget_usd"`, `errors: ["Reached maximum budget
+    /// ($0.03)"]`, together with the usual success-path fields so the
+    /// test also catches the case where someone accidentally reshapes
+    /// those out of sync.
+    #[test]
+    fn result_event_deserializes_budget_cap_fixture() {
+        let fixture = r#"{
+            "type": "result",
+            "result": "",
+            "total_cost_usd": 0.0297,
+            "usage": { "input_tokens": 12345, "output_tokens": 678 },
+            "num_turns": 11,
+            "session_id": "sess_abc123",
+            "is_error": true,
+            "subtype": "error_max_budget_usd",
+            "errors": ["Reached maximum budget ($0.03)"]
+        }"#;
+        let ev: ResultEvent = serde_json::from_str(fixture).expect("result event schema parses");
+        assert!(ev.is_error, "is_error must round-trip as true");
+        assert_eq!(ev.subtype, "error_max_budget_usd");
+        assert_eq!(ev.errors, vec!["Reached maximum budget ($0.03)"]);
+        assert_eq!(ev.session_id.as_deref(), Some("sess_abc123"));
+        assert_eq!(ev.total_cost_usd, Some(0.0297));
+        assert_eq!(ev.usage.input_tokens, 12345);
+        assert_eq!(ev.usage.output_tokens, 678);
+        assert_eq!(ev.num_turns, 11);
+    }
+
+    /// The clean-success path (no `is_error`): confirm defaults keep
+    /// behaving — a `result` event without any of the end-early fields
+    /// must come out with `is_error: false` and an empty `subtype`/
+    /// `errors`, otherwise the pipeline would spuriously warn on every
+    /// clean turn.
+    #[test]
+    fn result_event_without_error_fields_defaults_cleanly() {
+        let fixture = r#"{
+            "type": "result",
+            "result": "{\"action\":\"no_change\"}",
+            "total_cost_usd": 0.012,
+            "usage": { "input_tokens": 100, "output_tokens": 20 },
+            "num_turns": 2,
+            "session_id": "sess_ok"
+        }"#;
+        let ev: ResultEvent = serde_json::from_str(fixture).expect("clean result event parses");
+        assert!(!ev.is_error);
+        assert!(ev.subtype.is_empty());
+        assert!(ev.errors.is_empty());
     }
 
     #[test]
