@@ -235,6 +235,36 @@ fn classify_failure(name: &str, code: i32, stderr: String) -> Error {
     Error::Failed { code, stderr }
 }
 
+/// Interpreters tried, in order, when the default pip's Python is outside a
+/// project's `Requires-Python`. Stable releases first, newest-compatible
+/// guesses before older ones.
+const ALTERNATE_PYTHON_MINORS: [u32; 5] = [12, 11, 13, 10, 14];
+
+/// Run `pip install --dry-run --report -` through `program` (a pip command
+/// line prefix) and return its JSON report.
+fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, Error> {
+    let out = Command::new(program[0])
+        .args(&program[1..])
+        .args([
+            "install",
+            "--dry-run",
+            "--ignore-installed",
+            "--quiet",
+            "--disable-pip-version-check",
+            "--report",
+            "-",
+            spec,
+        ])
+        .output()
+        .map_err(Error::Launch)?;
+    if !out.status.success() {
+        let code = out.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        return Err(classify_failure(name, code, stderr));
+    }
+    Ok(out.stdout)
+}
+
 pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
     // Try to load from cache first
     if let Some(cached) = load_cached_resolve(name, version) {
@@ -248,28 +278,28 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         None => name.to_string(),
     };
 
-    let out = Command::new("pip")
-        .args([
-            "install",
-            "--dry-run",
-            "--ignore-installed",
-            "--quiet",
-            "--disable-pip-version-check",
-            "--report",
-            "-",
-            &spec,
-        ])
-        .output()
-        .map_err(Error::Launch)?;
+    let stdout = match run_pip_report(&["pip"], name, &spec) {
+        Err(e @ Error::IncompatiblePython { .. }) => {
+            // The default pip's interpreter is outside every release's
+            // Requires-Python (open-webui needs <3.13 on a 3.13 system):
+            // the project is fine, so resolve under another installed Python.
+            let mut found = None;
+            for minor in ALTERNATE_PYTHON_MINORS {
+                let py = format!("python3.{minor}");
+                if let Ok(out) = run_pip_report(&[&py, "-m", "pip"], name, &spec) {
+                    ap_core::diag!(
+                        "  default pip's Python is incompatible with {name}; resolved with {py}"
+                    );
+                    found = Some(out);
+                    break;
+                }
+            }
+            found.ok_or(e)?
+        }
+        other => other?,
+    };
 
-    if !out.status.success() {
-        let code = out.status.code().unwrap_or(-1);
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-
-        return Err(classify_failure(name, code, stderr));
-    }
-
-    let report: Report = serde_json::from_slice(&out.stdout)?;
+    let report: Report = serde_json::from_slice(&stdout)?;
     let nodes: Vec<Node> = report
         .install
         .into_iter()
