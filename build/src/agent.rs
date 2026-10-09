@@ -2695,8 +2695,6 @@ struct ResultEvent {
     /// still reports `subtype: "success"` for these.
     #[serde(default)]
     api_error_status: Option<u16>,
-    #[serde(default)]
-    terminal_reason: String,
 }
 
 #[derive(Deserialize, Default)]
