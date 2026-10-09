@@ -243,7 +243,8 @@ in order of preference:
    `-DUSE_SYSTEM_<NAME>=ON` / `-DCMAKE_DISABLE_FIND_PACKAGE_...` — read the
    project's CMake options), adding the matching `BuildRequires`;
 2. add the submodule's own release tarball as an extra `SourceN:` (declared
-   via `_service` `download_file`) and unpack it into the empty directory in
+   as a full-URL `Source` fetched by a `_service` with the `download_files`
+   service) and unpack it into the empty directory in
    `%prep` with `tar -xf %{SOURCE1} --strip-components=1 -C third_party/<dir>`;
 3. if neither is possible, report the dependency in `unresolvable_packages`
    (convention 27) rather than inventing a source.

@@ -222,6 +222,57 @@ fn read_manifest(entry: &mut impl Read) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// What a wheel installs, read from its file list — enough to write a correct
+/// `%check` without the agent rediscovering it from a failed build.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WheelLayout {
+    /// A name `import` can resolve at the top level: a `<pkg>/__init__.py`
+    /// directory or a `<mod>.py` module. `None` for namespace-only or
+    /// binary-only wheels (NVIDIA's `nvidia/` with just `lib/*.so`).
+    pub importable: Option<String>,
+    /// Shortest path (relative to site-packages) of a shared library in the
+    /// wheel, for a file-existence check when there is nothing to import.
+    pub first_shared_lib: Option<String>,
+}
+
+/// Inspect a wheel's file list. `None` when it cannot be read as a zip.
+pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
+    let file = std::fs::File::open(wheel).ok()?;
+    let zip_archive = zip::ZipArchive::new(file).ok()?;
+    let names: Vec<String> = zip_archive.file_names().map(str::to_string).collect();
+    let top_of = |n: &str| n.split('/').next().unwrap_or("").to_string();
+    let skip =
+        |top: &str| top.ends_with(".dist-info") || top.ends_with(".data") || top == "__pycache__";
+    let mut importable = None;
+    for n in &names {
+        let top = top_of(n);
+        if skip(&top) {
+            continue;
+        }
+        let is_pkg = n == &format!("{top}/__init__.py");
+        let is_mod = n.ends_with(".py") && !n.contains('/');
+        if is_pkg {
+            importable = Some(top);
+            break;
+        }
+        if is_mod && importable.is_none() {
+            importable = Some(n.trim_end_matches(".py").to_string());
+        }
+    }
+    let first_shared_lib = names
+        .iter()
+        .filter(|n| {
+            let file = n.rsplit('/').next().unwrap_or("");
+            !skip(&top_of(n)) && (file.ends_with(".so") || file.contains(".so."))
+        })
+        .min_by_key(|n| n.len())
+        .cloned();
+    Some(WheelLayout {
+        importable,
+        first_shared_lib,
+    })
+}
+
 /// The `Root-Is-Purelib` value from a wheel's `*.dist-info/WHEEL` file.
 ///
 /// This — not the platform tag — decides where `pip install` puts a wheel's
@@ -1407,5 +1458,60 @@ build-backend = "flit_core.buildapi"
             assert_eq!(wheel_root_is_purelib(&path), Some(expect));
         }
         assert_eq!(wheel_root_is_purelib(&dir.path().join("missing.whl")), None);
+    }
+
+    fn write_wheel(path: &Path, files: &[&str]) {
+        use std::io::Write;
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        for f in files {
+            zw.start_file(*f, opts).unwrap();
+            zw.write_all(b"x").unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    #[test]
+    fn wheel_layout_finds_an_importable_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("a.whl");
+        write_wheel(
+            &w,
+            &["pkg/__init__.py", "pkg/x.py", "pkg-1.0.dist-info/RECORD"],
+        );
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(l.importable.as_deref(), Some("pkg"));
+        assert_eq!(l.first_shared_lib, None);
+    }
+
+    /// NVIDIA's shape: a PEP 420 namespace with only shared libraries — nothing
+    /// to import, so the check must look at the file instead.
+    #[test]
+    fn wheel_layout_of_a_namespace_only_wheel_offers_a_file_to_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("n.whl");
+        write_wheel(
+            &w,
+            &[
+                "nvidia/cu13/lib/libnvJitLink.so.13",
+                "nvidia/cu13/lib/deep/libother.so.1",
+                "nvidia/cu13/include/nvJitLink.h",
+                "nvidia_nvjitlink-1.0.dist-info/RECORD",
+            ],
+        );
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(l.importable, None);
+        assert_eq!(
+            l.first_shared_lib.as_deref(),
+            Some("nvidia/cu13/lib/libnvJitLink.so.13")
+        );
+    }
+
+    #[test]
+    fn wheel_layout_accepts_a_single_module_wheel() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("m.whl");
+        write_wheel(&w, &["six.py", "six-1.0.dist-info/METADATA"]);
+        assert_eq!(wheel_layout(&w).unwrap().importable.as_deref(), Some("six"));
     }
 }

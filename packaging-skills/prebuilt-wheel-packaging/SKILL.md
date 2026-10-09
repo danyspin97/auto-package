@@ -119,22 +119,23 @@ shared multi-flavor `%pyproject_install` repeats one argument for every
 flavor.
 
 You cannot download the wheels, and a `Source:` whose file is not in the
-checkout is rejected before the build ("missing source files"). Declare them
-with an OBS `_service` instead — the pipeline runs `osc service ra` before the
-check and again after your edit, so the files arrive on their own. Use the
-exact `url` of each wheel from the release's PyPI JSON
-(`urls[].url`, `https://files.pythonhosted.org/packages/<h1>/<h2>/<hash>/<file>.whl`),
-and keep the `Source<N>:` lines as the bare file names:
+checkout is rejected before the build ("missing source files"). The pipeline now
+downloads the per-flavor wheels itself and writes this spec when every flavor
+has a wheel (`use_upstream_wheel` triggers it), so prefer that. If you must
+declare them by hand, use the `download_files` OBS service — it is the one
+installed here (`/usr/lib/obs/service/`); a `download_file`/`download_url` service
+is NOT available and `osc service ra` fails on it (triton's attempt). Put the
+full wheel URL (`urls[].url` from the PyPI JSON,
+`https://files.pythonhosted.org/packages/<h1>/<h2>/<hash>/<file>.whl`) in each
+`Source<N>:` and add:
 
     <services>
-      <service name="download_file">
-        <param name="protocol">https</param>
-        <param name="host">files.pythonhosted.org</param>
-        <param name="path">/packages/<h1>/<h2>/<hash>/<file>.whl</param>
-        <param name="filename"><file>.whl</param>
-      </service>
-      ... one per flavor ...
+      <service name="download_files" mode="manual"/>
     </services>
+
+The pipeline runs `osc service ra` before the check, so the files arrive on
+their own (the check compares the URL's file name with what is on disk). A bare
+file name in `Source<N>:` with no URL cannot be fetched by the service.
 
 Delete the source tarball the earlier recipe used from the checkout (a spec
 that no longer lists it must not leave it behind to be built from source).

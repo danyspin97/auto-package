@@ -1504,7 +1504,7 @@ fn run_package_inner(
                 });
 
                 let mut missing = missing_source_files(&expanded, &checkout_dir);
-                // A `_service` (download_file / download_files) is how a Source
+                // A `_service` (`download_files`, the one installed here) is how a Source
                 // that is a URL gets onto disk — and the agent cannot run it.
                 // Run it before calling the files missing, and keep its error
                 // so the agent sees why a download did not happen.
@@ -4259,6 +4259,9 @@ fn generate_multi_flavor_wheel_spec(
         let root_is_purelib = first_path
             .as_deref()
             .and_then(ap_ecosystem::sdist::wheel_root_is_purelib);
+        let layout = first_path
+            .as_deref()
+            .and_then(ap_ecosystem::sdist::wheel_layout);
         let spec_text =
             crate::spec::strip_ap_fix_comments(&crate::spec::wheel_multi_flavor_skeleton(
                 &config.pkg_name,
@@ -4266,6 +4269,7 @@ fn generate_multi_flavor_wheel_spec(
                 &wheels,
                 &release,
                 root_is_purelib,
+                layout.as_ref(),
             ));
         std::fs::write(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
@@ -4315,6 +4319,7 @@ fn generate_wheel_binary_spec(
         &wheel.filename,
         &release,
         root_is_purelib,
+        ap_ecosystem::sdist::wheel_layout(&wheel_path).as_ref(),
     );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
     std::fs::write(spec_path, &spec_text)

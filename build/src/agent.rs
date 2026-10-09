@@ -1869,10 +1869,13 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       report the gap rather than guessing one.
    c. Delete `%build` entirely (there is nothing to compile) and add one
       `SourceN:` per flavor THIS PROJECT BUILDS (step a — not every CPython
-      PyPI has a wheel for), each a bare wheel file name. You cannot download
-      the files: declare each with an OBS `_service` `download_file` (exact
-      `urls[].url` from the PyPI JSON; the prebuilt-wheel-packaging skill has
-      the XML) — the pipeline runs `osc service ra` before the missing-source
+      PyPI has a wheel for). You cannot download
+      the files: the pipeline downloads them for you when it writes this layout
+      (`use_upstream_wheel`); by hand, put each wheel's full PyPI URL
+      (`urls[].url`) in its `SourceN:` and add a `_service` with the installed
+      `download_files` service (`download_file`/`download_url` do not exist
+      here) — the prebuilt-wheel-packaging skill has the XML; the pipeline runs
+      `osc service ra` before the missing-source
       check. Remove the old source tarball from the checkout.
    d. In `%install`, call each flavor's OWN install macro by its real,
       hardcoded name — not the shared multi-flavor `%pyproject_install`,

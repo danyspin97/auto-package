@@ -848,11 +848,12 @@ pub fn wheel_multi_flavor_skeleton(
     wheels: &[(String, String)],
     release: &Release,
     root_is_purelib: Option<bool>,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
 ) -> String {
     let Some((_, first)) = wheels.first() else {
         return String::new();
     };
-    let single = wheel_binary_skeleton(pkg_name, version, first, release, root_is_purelib);
+    let single = wheel_binary_skeleton(pkg_name, version, first, release, root_is_purelib, layout);
     let sources: String = wheels
         .iter()
         .enumerate()
@@ -982,6 +983,7 @@ pub fn wheel_binary_skeleton(
     wheel_filename: &str,
     release: &Release,
     root_is_purelib: Option<bool>,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
 ) -> String {
     let name = pkg_name.to_lowercase();
     let summary = release
@@ -1014,6 +1016,25 @@ pub fn wheel_binary_skeleton(
         "python_sitelib"
     } else {
         "python_sitearch"
+    };
+    // A `%check` that works the first time. There is no source tree to test, so
+    // either import the top-level package, or — for namespace-only/binary-only
+    // wheels (NVIDIA's `nvidia/` holding just `lib/*.so`) — assert that the
+    // payload landed where `%files` will look. Importing needs the buildroot on
+    // PYTHONPATH (the build directory is not on `sys.path`), and everything runs
+    // inside `%python_expand` so each flavor gets its own interpreter and path.
+    let check_block = match layout {
+        Some(l) if l.importable.is_some() => format!(
+            "%check\n%python_expand PYTHONPATH=%{{buildroot}}%{{${sitedir}}} $python -c \"import {}\"\n",
+            l.importable.as_deref().unwrap_or_default()
+        ),
+        Some(l) if l.first_shared_lib.is_some() => format!(
+            "%check\n%python_expand test -e %{{buildroot}}%{{${sitedir}}}/{}\n",
+            l.first_shared_lib.as_deref().unwrap_or_default()
+        ),
+        _ => "%check\n# TODO: smoke-test the import name from source/*.dist-info/METADATA:\n\
+              # %python_expand PYTHONPATH=%{buildroot}%{$python_sitelib} $python -c \"import <name>\"\n"
+            .to_string(),
     };
 
     format!(
@@ -1068,9 +1089,7 @@ pub fn wheel_binary_skeleton(
          %pyproject_install %{{SOURCE0}}\n\
          %python_expand %fdupes %{{buildroot}}/%{{${sitedir}}}\n\
          \n\
-         %check\n\
-         # TODO: confirm the import name from source/*.dist-info/METADATA and\n\
-         # smoke-test it: %%python_expand $python -c \"import <name>\"\n\
+         {check_block}\
          \n\
          %files %{{python_files}}\n\
          # TODO: list the exact paths %%pyproject_install put in the buildroot\n\
@@ -1086,6 +1105,7 @@ pub fn wheel_binary_skeleton(
         wheel_filename = wheel_filename,
         arch_line = arch_line,
         sitedir = sitedir,
+        check_block = check_block,
     )
 }
 
@@ -1292,6 +1312,7 @@ BuildRequires:  %{python_module cmake}
             wheel,
             &release,
             Some(false),
+            None,
         );
 
         assert!(spec.contains(&format!("Source0:        {wheel}")), "{spec}");
@@ -1310,7 +1331,14 @@ BuildRequires:  %{python_module cmake}
     fn a_manylinux_purelib_wheel_is_arch_specific_but_installs_to_sitelib() {
         let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
         let wheel = "nvidia_curand-10.4.0.35-py3-none-manylinux_2_27_x86_64.whl";
-        let spec = wheel_binary_skeleton("nvidia-curand", "10.4.0.35", wheel, &release, Some(true));
+        let spec = wheel_binary_skeleton(
+            "nvidia-curand",
+            "10.4.0.35",
+            wheel,
+            &release,
+            Some(true),
+            None,
+        );
         assert!(!spec.contains("BuildArch:      noarch"), "{spec}");
         assert!(spec.contains("ExclusiveArch:  x86_64"), "{spec}");
         assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");
@@ -1330,7 +1358,8 @@ BuildRequires:  %{python_module cmake}
                 "triton-3.8.0-cp314-cp314-manylinux_2_27_x86_64.whl".to_string(),
             ),
         ];
-        let spec = wheel_multi_flavor_skeleton("triton", "3.8.0", &wheels, &release, Some(false));
+        let spec =
+            wheel_multi_flavor_skeleton("triton", "3.8.0", &wheels, &release, Some(false), None);
         assert!(
             spec.contains("Source0:        triton-3.8.0-cp313-cp313"),
             "{spec}"
@@ -1352,11 +1381,58 @@ BuildRequires:  %{python_module cmake}
         assert!(spec.contains("%{buildroot}/%{$python_sitearch}"), "{spec}");
     }
 
+    /// The generated `%check` must be one that works first time: importable
+    /// wheels import with the buildroot on PYTHONPATH inside %python_expand;
+    /// namespace/binary-only wheels assert their payload file instead.
+    #[test]
+    fn the_generated_check_imports_or_asserts_the_payload() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let wheel = "pkg-1.0-py3-none-any.whl";
+
+        let importable = WheelLayout {
+            importable: Some("pkg".into()),
+            first_shared_lib: None,
+        };
+        let spec =
+            wheel_binary_skeleton("pkg", "1.0", wheel, &release, Some(true), Some(&importable));
+        assert!(
+            spec.contains(
+                "%check\n%python_expand PYTHONPATH=%{buildroot}%{$python_sitelib} $python -c \"import pkg\"\n"
+            ),
+            "{spec}"
+        );
+        assert!(!spec.contains("# TODO: smoke-test"), "{spec}");
+
+        let binary_only = WheelLayout {
+            importable: None,
+            first_shared_lib: Some("nvidia/cu13/lib/libnvJitLink.so.13".into()),
+        };
+        let spec = wheel_binary_skeleton(
+            "nvidia-nvjitlink",
+            "1.0",
+            "nvidia_nvjitlink-1.0-py3-none-manylinux_2_27_x86_64.whl",
+            &release,
+            Some(true),
+            Some(&binary_only),
+        );
+        assert!(
+            spec.contains(
+                "%check\n%python_expand test -e %{buildroot}%{$python_sitelib}/nvidia/cu13/lib/libnvJitLink.so.13\n"
+            ),
+            "{spec}"
+        );
+
+        // Unknown layout keeps the TODO rather than guessing.
+        let spec = wheel_binary_skeleton("pkg", "1.0", wheel, &release, Some(true), None);
+        assert!(spec.contains("# TODO: smoke-test"), "{spec}");
+    }
+
     #[test]
     fn wheel_binary_skeleton_marks_pure_wheels_as_noarch() {
         let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
         let wheel = "somepkg-1.0-py3-none-any.whl";
-        let spec = wheel_binary_skeleton("somepkg", "1.0", wheel, &release, Some(true));
+        let spec = wheel_binary_skeleton("somepkg", "1.0", wheel, &release, Some(true), None);
 
         assert!(spec.contains("BuildArch:      noarch"), "{spec}");
         assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");
