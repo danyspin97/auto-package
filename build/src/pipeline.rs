@@ -755,7 +755,7 @@ pub fn run_package(
         state.last_built_version = Some(config.version.clone());
         state.last_outcome = Some("failed".to_string());
         state.last_failure_reason = Some(reason.clone());
-        let _ = state.save(&ws);
+        save_state(&state, &ws, reporter);
     }
     result
 }
@@ -835,7 +835,7 @@ fn run_package_inner(
         let abs = spec_path
             .canonicalize()
             .unwrap_or_else(|_| spec_path.clone());
-        let _ = ws.link_spec(&abs);
+        warn_if_err(reporter, "updating the spec link", ws.link_spec(&abs));
 
         // A checkout dir is reused across runs (see `osc::checkout`), and
         // `osc up` never discards local uncommitted edits — so a spec that a
@@ -894,7 +894,7 @@ fn run_package_inner(
         state.last_built_version = Some(config.version.clone());
         state.last_outcome = Some("success".to_string());
         state.last_failure_reason = None;
-        let _ = state.save(&ws);
+        save_state(&state, &ws, reporter);
         // This process may have cached `config.project`'s package listing
         // before learning (just now, via the fresh — not cached —
         // `get_build_status` call above) that OBS already has this one.
@@ -947,7 +947,11 @@ fn run_package_inner(
                     if link.symlink_metadata().is_ok() {
                         let _ = std::fs::remove_file(&link);
                     }
-                    let _ = std::os::unix::fs::symlink(&src, &link);
+                    warn_if_err(
+                        reporter,
+                        "linking spec.generated",
+                        std::os::unix::fs::symlink(&src, &link),
+                    );
                 }
                 (
                     res.sdist_top_level,
@@ -1009,7 +1013,7 @@ fn run_package_inner(
                 state.last_built_version = Some(version);
                 state.last_outcome = Some("wheel-only".to_string());
                 state.last_failure_reason = None;
-                let _ = state.save(&ws);
+                save_state(&state, &ws, reporter);
                 return PipelineResult::Failed {
                     rpm_name,
                     reason: format!(
@@ -1152,7 +1156,14 @@ fn run_package_inner(
         if let Some(tarball) = find_tarball(&checkout_dir) {
             let sdist_dir = ws.sdist_dir();
             let _ = std::fs::create_dir_all(&sdist_dir);
-            let _ = ap_ecosystem::sdist::extract(&tarball, &sdist_dir);
+            if let Err(e) = ap_ecosystem::sdist::extract(&tarball, &sdist_dir) {
+                // The agent reads `sdist/` to review the package; an empty one
+                // looks like "no sources" with no hint why.
+                reporter.report(&Event::Warning {
+                    step: Some(sdist_step.id),
+                    message: format!("extracting {} failed: {e}", tarball.display()),
+                });
+            }
         }
 
         reporter.report(&Event::StepFinished {
@@ -1173,7 +1184,11 @@ fn run_package_inner(
         }
         let source_target = ws.sdist_dir().join(&sdist_top_level);
         if source_target.exists() {
-            let _ = std::os::unix::fs::symlink(&source_target, &source_link);
+            warn_if_err(
+                reporter,
+                "linking source/",
+                std::os::unix::fs::symlink(&source_target, &source_link),
+            );
         }
     }
 
@@ -1292,7 +1307,7 @@ fn run_package_inner(
             state.reviewed_spec_hash = Some(hash_spec(
                 &std::fs::read_to_string(&spec_path).unwrap_or_default(),
             ));
-            let _ = state.save(&ws);
+            save_state(&state, &ws, reporter);
         }
     }
 
@@ -1666,8 +1681,12 @@ fn run_package_inner(
                 state.last_built_version = Some(config.version.clone());
                 state.last_outcome = Some("success".to_string());
                 state.last_failure_reason = None;
-                let _ = state.save(&ws);
-                let _ = ws.link_latest(&build_step.path);
+                save_state(&state, &ws, reporter);
+                warn_if_err(
+                    reporter,
+                    "updating the latest-build link",
+                    ws.link_latest(&build_step.path),
+                );
                 // `config.project` now has one more package than whatever
                 // this process last cached — see `list_project_packages`'s
                 // doc comment. Without this, every package built from here
@@ -3142,16 +3161,13 @@ fn generate_spec(
     use ap_ecosystem::pypi;
     use ap_ecosystem::sdist;
 
-    let pypi_url = format!(
-        "https://pypi.org/pypi/{}/{}/json",
-        config.pkg_name, config.version
-    );
-    let json = ureq::get(&pypi_url)
-        .call()
-        .map_err(|e| GenSpecError::Other(format!("PyPI fetch failed: {e}")))?
-        .into_body()
-        .read_to_string()
-        .map_err(|e| GenSpecError::Other(format!("PyPI read failed: {e}")))?;
+    let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
+    let json = crate::http::read_text(
+        crate::http::get(&pypi_url)
+            .call()
+            .map_err(|e| GenSpecError::Other(format!("PyPI fetch failed: {e}")))?,
+    )
+    .map_err(|e| GenSpecError::Other(format!("PyPI read failed: {e}")))?;
     let release = match pypi::parse_release(&json) {
         Ok(r) => r,
         Err(pypi::Error::NoSdist { .. }) => {
@@ -3217,8 +3233,8 @@ fn generate_spec(
 
             let tarball = checkout_dir.join(format!(
                 "{}-{}.tar.gz",
-                config.pkg_name.to_lowercase(),
-                config.version
+                safe_file_part(&config.pkg_name.to_lowercase()),
+                safe_file_part(&config.version)
             ));
             let (bytes, url) = fetch_release_archive(&source_url, &config.version)?;
             std::fs::write(&tarball, &bytes)
@@ -3325,7 +3341,11 @@ fn generate_from_repo(
     step: &StepDir,
 ) -> Result<GenSpecResult, GenSpecError> {
     let name = config.pkg_name.to_lowercase();
-    let tarball = checkout_dir.join(format!("{name}-{}.tar.gz", config.version));
+    let tarball = checkout_dir.join(format!(
+        "{}-{}.tar.gz",
+        safe_file_part(&name),
+        safe_file_part(&config.version)
+    ));
 
     let (bytes, url) = fetch_release_archive(repo_url, &config.version)?;
     std::fs::write(&tarball, &bytes)
@@ -3421,7 +3441,16 @@ fn generate_from_repo(
         // py2pack needs PyPI metadata for the summary, license and deps. When
         // the project is not on PyPI at all there is nothing to fetch, and the
         // agent fills those in from the source during the review turn.
-        let pypi_json = fetch_pypi_json(&config.pkg_name, &config.version).unwrap_or_default();
+        let pypi_json = match fetch_pypi_json(&config.pkg_name, &config.version) {
+            Ok(json) => json.unwrap_or_default(),
+            Err(e) => {
+                // Not "not on PyPI": the spec would silently lack its license,
+                // summary and dependencies. Say so; the review turn still fills
+                // them in from the source.
+                ap_core::diag!("  warning: {e}; generating the spec without PyPI metadata");
+                String::new()
+            }
+        };
         return generate_repo_python_spec(config, &tarball, &info, &pypi_json, spec_path, step);
     }
 
@@ -3476,12 +3505,12 @@ fn generate_from_repo(
 fn fetch_release_archive(repo_url: &str, version: &str) -> Result<(Vec<u8>, String), GenSpecError> {
     let candidates = crate::sources::archive_urls(repo_url, version);
     for url in &candidates {
-        let Ok(resp) = ureq::get(url).call() else {
+        let Ok(resp) = crate::http::get_download(url).call() else {
             continue;
         };
-        use std::io::Read;
-        let mut buf = Vec::new();
-        if resp.into_body().into_reader().read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+        if let Ok(buf) = crate::http::read_download(resp)
+            && !buf.is_empty()
+        {
             return Ok((buf, url.clone()));
         }
     }
@@ -3529,13 +3558,57 @@ fn synthesize_release_without_pypi(
     }
 }
 
-fn fetch_pypi_json(name: &str, version: &str) -> Option<String> {
-    ureq::get(&format!("https://pypi.org/pypi/{name}/{version}/json"))
-        .call()
-        .ok()?
-        .into_body()
-        .read_to_string()
-        .ok()
+/// `https://pypi.org/pypi/<name>/<version>/json` with both parts URL-encoded.
+fn pypi_json_url(name: &str, version: &str) -> String {
+    format!(
+        "https://pypi.org/pypi/{}/{}/json",
+        urlencoding::encode(name),
+        urlencoding::encode(version)
+    )
+}
+
+/// PyPI's JSON for a release: `Ok(None)` when the project/version is simply not
+/// on PyPI (404), `Err` for anything else (network, 5xx, oversized body) so the
+/// caller can tell "not published" from "could not ask".
+fn fetch_pypi_json(name: &str, version: &str) -> Result<Option<String>, String> {
+    match crate::http::get(&pypi_json_url(name, version)).call() {
+        Ok(resp) => crate::http::read_text(resp)
+            .map(Some)
+            .map_err(|e| format!("reading PyPI JSON for {name} {version}: {e}")),
+        Err(ureq::Error::StatusCode(404)) => Ok(None),
+        Err(e) => Err(format!("PyPI JSON for {name} {version}: {e}")),
+    }
+}
+
+/// A component of a file name built from untrusted text (package name, tag):
+/// anything but `[A-Za-z0-9._+-]` becomes `_`, and `..` cannot survive.
+fn save_state(state: &PkgState, ws: &Workspace, reporter: &dyn Reporter) {
+    warn_if_err(reporter, "saving state.json", state.save(ws));
+}
+
+/// Report a failed bookkeeping step (state file, convenience symlinks the
+/// agent reads) as a warning instead of dropping it.
+fn warn_if_err<T, E: std::fmt::Display>(reporter: &dyn Reporter, what: &str, result: Result<T, E>) {
+    if let Err(e) = result {
+        reporter.report(&Event::Warning {
+            step: None,
+            message: format!("{what} failed: {e}"),
+        });
+    }
+}
+
+fn safe_file_part(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cleaned.replace("..", "_")
 }
 
 fn generate_rust_spec(
@@ -3736,16 +3809,13 @@ fn try_wheel_fallback(
     spec_path: &Path,
     step: &StepDir,
 ) -> Result<ap_ecosystem::pypi::WheelFile, String> {
-    let pypi_url = format!(
-        "https://pypi.org/pypi/{}/{}/json",
-        config.pkg_name, config.version
-    );
-    let json = ureq::get(&pypi_url)
-        .call()
-        .map_err(|e| format!("PyPI fetch failed: {e}"))?
-        .into_body()
-        .read_to_string()
-        .map_err(|e| format!("PyPI read failed: {e}"))?;
+    let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
+    let json = crate::http::read_text(
+        crate::http::get(&pypi_url)
+            .call()
+            .map_err(|e| format!("PyPI fetch failed: {e}"))?,
+    )
+    .map_err(|e| format!("PyPI read failed: {e}"))?;
     let wheel = ap_ecosystem::pypi::pick_wheel_from_json(
         &json,
         &config.arch,
@@ -4273,16 +4343,18 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
     let mut tar_builder = tar::Builder::new(enc);
 
     // Add all files from extract_dir
-    for entry in walkdir::WalkDir::new(extract_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in walkdir::WalkDir::new(extract_dir) {
+        // An unreadable entry must fail the rebuild: skipping it would ship a
+        // tarball that silently lacks files.
+        let entry = entry.map_err(|e| format!("walking {}: {e}", extract_dir.display()))?;
         let path = entry.path();
         if path == extract_dir {
             continue;
         }
 
-        let relative = path.strip_prefix(extract_dir).unwrap();
+        let relative = path
+            .strip_prefix(extract_dir)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
 
         if path.is_file() {
             tar_builder
@@ -4695,7 +4767,7 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
 
 /// Verify that a repository URL exists by making a HEAD request.
 fn verify_repo_exists(url: &str) -> bool {
-    ureq::head(url)
+    crate::http::head(url)
         .call()
         .map(|r| r.status() == 200)
         .unwrap_or(false)
@@ -4704,6 +4776,26 @@ fn verify_repo_exists(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_file_part_cannot_escape_a_directory() {
+        for bad in ["a/b", "../x", "/abs", "a b", "v1\n"] {
+            let out = safe_file_part(bad);
+            assert!(
+                !out.contains('/') && !out.contains(".."),
+                "{bad:?} -> {out:?}"
+            );
+        }
+        assert_eq!(safe_file_part("Foo_bar-1.2+git"), "Foo_bar-1.2+git");
+    }
+
+    #[test]
+    fn pypi_json_url_encodes_both_parts() {
+        assert_eq!(
+            pypi_json_url("a/b", "1 0"),
+            "https://pypi.org/pypi/a%2Fb/1%200/json"
+        );
+    }
 
     #[test]
     fn append_notes_appends_and_never_truncates() {
