@@ -42,6 +42,14 @@ pub enum Error {
     #[error("package not found on PyPI: {0}")]
     NotFound(String),
 
+    /// Every release exists but pip skipped all of them because their
+    /// `Requires-Python` excludes the interpreter pip runs under.
+    #[error(
+        "{name} is on PyPI, but no release supports the Python that pip runs under \
+         (e.g. {example}); put a pip for an older/newer Python first on PATH"
+    )]
+    IncompatiblePython { name: String, example: String },
+
     #[error("pip exited {code}:\n{stderr}")]
     Failed { code: i32, stderr: String },
 
@@ -199,6 +207,34 @@ fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
 ///
 /// Results are cached in `~/.cache/auto-package/pip-resolve/`. Cached results
 /// for pinned versions are valid for 7 days, "latest" queries for 1 day.
+/// Turn a failed `pip install --dry-run` into the most specific error.
+///
+/// pip says "No matching distribution found" both when the project does not
+/// exist and when every release was skipped for its `Requires-Python`; only
+/// the preceding "Ignored the following versions…" line tells them apart.
+fn classify_failure(name: &str, code: i32, stderr: String) -> Error {
+    if let Some(line) = stderr.lines().find(|l| {
+        l.contains("Ignored the following versions that require a different python version")
+    }) {
+        let example = line
+            .split("version: ")
+            .nth(1)
+            .and_then(|l| l.split("; ").next())
+            .unwrap_or("all releases")
+            .to_string();
+        return Error::IncompatiblePython {
+            name: name.to_string(),
+            example,
+        };
+    }
+    if stderr.contains("Could not find a version that satisfies the requirement")
+        || stderr.contains("No matching distribution found for")
+    {
+        return Error::NotFound(name.to_string());
+    }
+    Error::Failed { code, stderr }
+}
+
 pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
     // Try to load from cache first
     if let Some(cached) = load_cached_resolve(name, version) {
@@ -230,14 +266,7 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         let code = out.status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
 
-        // Detect "package not found" errors
-        if stderr.contains("Could not find a version that satisfies the requirement")
-            || stderr.contains("No matching distribution found for")
-        {
-            return Err(Error::NotFound(name.to_string()));
-        }
-
-        return Err(Error::Failed { code, stderr });
+        return Err(classify_failure(name, code, stderr));
     }
 
     let report: Report = serde_json::from_slice(&out.stdout)?;
@@ -515,5 +544,31 @@ mod tests {
         let old = "httpx-0.28.1.json";
         let new = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
         assert_ne!(old, new);
+    }
+}
+
+#[cfg(test)]
+mod classify_failure_tests {
+    use super::*;
+
+    #[test]
+    fn skipped_for_requires_python_is_not_reported_as_missing() {
+        let stderr = "ERROR: Ignored the following versions that require a different python version: 0.8.12 Requires-Python >=3.11,<3.13.0a1; 0.9.0 Requires-Python >=3.11,<3.13.0a1\nERROR: Could not find a version that satisfies the requirement open-webui (from versions: none)\nERROR: No matching distribution found for open-webui\n";
+        match classify_failure("open-webui", 1, stderr.to_string()) {
+            Error::IncompatiblePython { name, example } => {
+                assert_eq!(name, "open-webui");
+                assert_eq!(example, "0.8.12 Requires-Python >=3.11,<3.13.0a1");
+            }
+            e => panic!("wrong error: {e}"),
+        }
+    }
+
+    #[test]
+    fn a_truly_missing_project_is_not_found() {
+        let stderr = "ERROR: Could not find a version that satisfies the requirement nope (from versions: none)\nERROR: No matching distribution found for nope\n";
+        assert!(matches!(
+            classify_failure("nope", 1, stderr.to_string()),
+            Error::NotFound(_)
+        ));
     }
 }
