@@ -1067,6 +1067,9 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Tests that touch the process environment must not run concurrently.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// User-reported Oct 7 regression: `could not work out the latest
     /// version of https://github.com/drogonframework/drogon; ...
     /// api.github.com/.../tags?per_page=1: http status: 403`.
@@ -1080,6 +1083,7 @@ mod tests {
         // branch runs — tests run in parallel, so take a stable snapshot
         // of the env and restore it at the end (never panic across the
         // unsafe restore).
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved_gh = std::env::var("GH_TOKEN").ok();
         let saved_gh_token = std::env::var("GITHUB_TOKEN").ok();
         // SAFETY: single-threaded within this test; restored below.
@@ -1115,6 +1119,7 @@ mod tests {
     /// must be different.
     #[test]
     fn describe_forge_error_hints_rotate_token_when_authed() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("GITHUB_TOKEN").ok();
         unsafe {
             std::env::set_var("GITHUB_TOKEN", "ghp_fake");
