@@ -108,6 +108,25 @@ impl ProcessOutput {
     }
 }
 
+/// Limit for [`run`] (package builds): long enough for the biggest compile,
+/// finite so a wedged child cannot hold the run forever.
+const RUN_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
+
+/// The last `cap` bytes of `path` (all of it when smaller); empty on error.
+fn read_tail(path: &Path, cap: u64) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = File::open(path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len > cap {
+        let _ = f.seek(SeekFrom::Start(len - cap));
+    }
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    buf
+}
+
 /// Run a subprocess, capturing stdout+stderr to a single log file.
 ///
 /// Both file descriptors share the same underlying file description so
@@ -133,21 +152,39 @@ pub fn run(
     let log_clone = log_file.try_clone()?;
 
     let start = Instant::now();
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
         .envs(env.iter())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_clone))
-        .stderr(Stdio::from(log_file))
-        .status()
-        .map_err(|e| ProcessError::Launch {
-            program: program.to_string(),
-            source: e,
-        })?;
+        .stderr(Stdio::from(log_file));
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn().map_err(|e| ProcessError::Launch {
+        program: program.to_string(),
+        source: e,
+    })?;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if start.elapsed() >= RUN_TIMEOUT => {
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                emit.done(-1, start.elapsed(), 0, 0);
+                return Err(ProcessError::Timeout {
+                    program: program.to_string(),
+                    secs: RUN_TIMEOUT.as_secs(),
+                });
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
     let elapsed = start.elapsed();
 
-    let combined = std::fs::read(log_path).unwrap_or_default();
+    let combined = read_tail(log_path, MAX_CAPTURE_BYTES);
     let total_bytes = combined.len() as u64;
     let code = status.code().unwrap_or(-1);
 
@@ -163,50 +200,44 @@ pub fn run(
     })
 }
 
+/// Wall-clock limit applied by [`capture`] when the caller has no tighter one:
+/// generous enough for `osc service ra` or a large `osc ci`, finite so a
+/// stalled connection cannot hang the run forever.
+pub const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Cap on what one captured stream keeps. A chatty child is still drained
+/// (so it never blocks on a full pipe) but the excess is discarded.
+const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Run a subprocess and capture stdout/stderr separately as strings.
 ///
 /// Intended for short commands (`osc ls`, `rpmspec --parse`) where the caller
 /// needs to inspect the output. Emits the same `Command`/`CommandDone` pair as
 /// [`run`], so `--log debug` shows every subprocess and not just the build.
+/// Bounded by [`DEFAULT_CAPTURE_TIMEOUT`]; use [`capture_with_timeout`] for a
+/// different limit.
 pub fn capture(
     program: &str,
     args: &[impl AsRef<std::ffi::OsStr>],
     cwd: &Path,
     emit: Emit<'_>,
 ) -> Result<Captured, ProcessError> {
-    let argv: Vec<String> = args
-        .iter()
-        .map(|a| a.as_ref().to_string_lossy().into_owned())
-        .collect();
-
-    emit.started(program, &argv, cwd, None);
-
-    let start = Instant::now();
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| ProcessError::Launch {
-            program: program.to_string(),
-            source: e,
-        })?;
-    let elapsed = start.elapsed();
-
-    let code = output.status.code().unwrap_or(-1);
-    emit.done(
-        code,
-        elapsed,
-        output.stdout.len() as u64,
-        output.stderr.len() as u64,
-    );
-
-    Ok(Captured {
-        code,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    capture_with_timeout(program, args, cwd, emit, DEFAULT_CAPTURE_TIMEOUT)
 }
+
+/// SIGKILL a child's whole process group (the child must have been spawned
+/// with `process_group(0)`). Best effort: the group may already be gone.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
 
 /// [`capture`] with a wall-clock limit: the child is killed if it has not
 /// exited after `timeout`.
@@ -266,29 +297,35 @@ pub fn capture_with_timeout_env(
         })?;
 
     // Drain both pipes on their own threads so a chatty child can't fill a
-    // pipe buffer and deadlock against our `try_wait` polling.
-    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    // pipe buffer and deadlock against our `try_wait` polling. Each keeps at
+    // most MAX_CAPTURE_BYTES and discards the rest, and reports back over a
+    // channel so the join below can have a deadline.
+    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut r) = r {
-                let _ = r.read_to_end(&mut buf);
+                let mut chunk = [0u8; 16 * 1024];
+                while let Ok(n) = r.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    let room = (MAX_CAPTURE_BYTES as usize).saturating_sub(buf.len());
+                    buf.extend_from_slice(&chunk[..n.min(room)]);
+                }
             }
-            buf
-        })
+            let _ = tx.send(buf);
+        });
+        rx
     }
-    let out_h = drain(child.stdout.take());
-    let err_h = drain(child.stderr.take());
+    let out_rx = drain(child.stdout.take());
+    let err_rx = drain(child.stderr.take());
 
     let status = loop {
         match child.try_wait()? {
             Some(status) => break Some(status),
             None if start.elapsed() >= timeout => {
-                #[cfg(unix)]
-                let _ = Command::new("kill")
-                    .args(["-KILL", "--", &format!("-{}", child.id())])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -296,8 +333,14 @@ pub fn capture_with_timeout_env(
             None => std::thread::sleep(Duration::from_millis(25)),
         }
     };
-    let stdout = out_h.join().unwrap_or_default();
-    let stderr = err_h.join().unwrap_or_default();
+    // The child is gone, but a descendant it left behind can still hold the
+    // pipes open: reap the group, then wait only briefly for the readers.
+    kill_process_group(child.id());
+    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
+    };
+    let stdout = collect(out_rx);
+    let stderr = collect(err_rx);
     let elapsed = start.elapsed();
 
     let code = status.map_or(-1, |s| s.code().unwrap_or(-1));
