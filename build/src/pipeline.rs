@@ -684,6 +684,47 @@ fn dep_names_from_requires_dist(requires_dist: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// How many times one turn waits out a 429 before giving up.
+const MAX_RATE_LIMIT_WAITS: u32 = 6;
+
+/// Agent turns running at once, process-wide. Every package shares one model
+/// quota; with a dozen packages in parallel the quota is gone within minutes
+/// and the whole run spends its time in 429 back-off. Defaults to 3; set
+/// `AUTO_PACKAGE_AGENT_JOBS` to raise or lower it.
+static AGENT_ACTIVE: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+struct AgentSlot;
+
+impl AgentSlot {
+    fn limit() -> usize {
+        std::env::var("AUTO_PACKAGE_AGENT_JOBS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(3)
+    }
+
+    fn acquire() -> Self {
+        let (lock, cvar) = &AGENT_ACTIVE;
+        let max = Self::limit();
+        let mut active = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while *active >= max {
+            active = cvar.wait(active).unwrap_or_else(|e| e.into_inner());
+        }
+        *active += 1;
+        AgentSlot
+    }
+}
+
+impl Drop for AgentSlot {
+    fn drop(&mut self) {
+        let (lock, cvar) = &AGENT_ACTIVE;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        cvar.notify_one();
+    }
+}
+
 /// When the model API said to back off until; shared by all packages.
 static RATE_LIMIT_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 
@@ -2236,15 +2277,18 @@ fn agent_turn(
         // turn hits a 429, all of them pause instead of each discovering it
         // separately and retrying in lockstep.
         wait_out_rate_limit();
-        match crate::agent::turn(make_req()) {
-            Err(e) if e.is_rate_limited() && rate_limit_waits < 4 => {
-                let wait = std::time::Duration::from_secs(30 << rate_limit_waits);
+        let slot = AgentSlot::acquire();
+        let result = crate::agent::turn(make_req());
+        drop(slot);
+        match result {
+            Err(e) if e.is_rate_limited() && rate_limit_waits < MAX_RATE_LIMIT_WAITS => {
+                let wait = std::time::Duration::from_secs((30u64 << rate_limit_waits).min(300));
                 note_rate_limited(wait);
                 rate_limit_waits += 1;
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
                     message: format!(
-                        "model API rate-limited (429); waiting {}s before retrying ({rate_limit_waits}/4)",
+                        "model API rate-limited (429); waiting {}s before retrying ({rate_limit_waits}/{MAX_RATE_LIMIT_WAITS})",
                         wait.as_secs()
                     ),
                 });
@@ -3336,29 +3380,14 @@ fn generate_spec(
                             // running example) — repackage the wheel itself
                             // rather than getting permanently stuck. See
                             // convention 24 Exception 3.
-                            match pypi::pick_wheel_from_json(
+                            return wheel_or_wheel_only(
+                                config,
                                 &json,
-                                &config.arch,
-                                config.single_locked_flavor_abi().as_deref(),
-                            ) {
-                                Ok(wheel) => {
-                                    return generate_wheel_binary_spec(
-                                        config,
-                                        &wheel,
-                                        &json,
-                                        checkout_dir,
-                                        spec_path,
-                                        step,
-                                    );
-                                }
-                                Err(_) => {
-                                    return Err(GenSpecError::WheelOnly {
-                                        pkg_name: config.pkg_name.clone(),
-                                        version: config.version.clone(),
-                                        candidates: repos.guessed,
-                                    });
-                                }
-                            }
+                                checkout_dir,
+                                spec_path,
+                                step,
+                                repos.guessed,
+                            );
                         }
                     }
                 }
@@ -3369,7 +3398,25 @@ fn generate_spec(
                 safe_file_part(&config.pkg_name.to_lowercase()),
                 safe_file_part(&config.version)
             ));
-            let (bytes, url) = fetch_release_archive(&source_url, &config.version)?;
+            let (bytes, url) = match fetch_release_archive(&source_url, &config.version) {
+                Ok(v) => v,
+                // The repository exists but has no archive for THIS version (a
+                // guessed repo for a vendor wheel such as nvidia-nccl-cu13, or an
+                // unusual tag scheme): it cannot be this release's source. Use
+                // PyPI's own artifact instead of failing the package.
+                Err(GenSpecError::NoReleaseArchive(msg)) => {
+                    ap_core::diag!("  {msg}\n  falling back to PyPI's wheel");
+                    return wheel_or_wheel_only(
+                        config,
+                        &json,
+                        checkout_dir,
+                        spec_path,
+                        step,
+                        vec![source_url.clone()],
+                    );
+                }
+                Err(e) => return Err(e),
+            };
             std::fs::write(&tarball, &bytes)
                 .map_err(|e| GenSpecError::Other(format!("writing {}: {e}", tarball.display())))?;
             let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
@@ -4063,6 +4110,32 @@ fn write_wheel_switch_provenance(
 /// (NVIDIA's individual CUDA toolkit component wheels are the running
 /// example: nvcc, cupti, nvrtc, cudart have no public source at all). See
 /// convention 24 Exception 3 in the agent prompt.
+/// Repackage the release's upstream wheel when one is usable for every flavor;
+/// otherwise report it wheel-only (with `candidates` for the operator).
+fn wheel_or_wheel_only(
+    config: &PipelineConfig,
+    json: &str,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+    candidates: Vec<String>,
+) -> Result<GenSpecResult, GenSpecError> {
+    match ap_ecosystem::pypi::pick_wheel_from_json(
+        json,
+        &config.arch,
+        config.single_locked_flavor_abi().as_deref(),
+    ) {
+        Ok(wheel) => {
+            generate_wheel_binary_spec(config, &wheel, json, checkout_dir, spec_path, step)
+        }
+        Err(_) => Err(GenSpecError::WheelOnly {
+            pkg_name: config.pkg_name.clone(),
+            version: config.version.clone(),
+            candidates,
+        }),
+    }
+}
+
 fn generate_wheel_binary_spec(
     config: &PipelineConfig,
     wheel: &ap_ecosystem::pypi::WheelFile,
