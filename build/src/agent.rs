@@ -669,6 +669,11 @@ openSUSE spec conventions to keep in mind:
        cd source && quilt add path/to/file.py   # BEFORE editing the file
        # Edit source/path/to/file.py using the Edit tool
        cd source && quilt refresh
+     NEVER create or edit a `.patch` file with Write/Edit: hand-written hunk
+     headers have wrong line counts and the build dies in `%prep` with
+     `malformed patch` (python-python-docx, python-brotlicffi each lost two
+     attempts to this). The pipeline now applies every `PatchN:` to the
+     pristine source before accepting your edit and rolls it back if one fails.
      Each patch must be small and self-contained (one logical fix per patch).
      After creating patches, add them to the spec header using Edit:
        Patch0: 0001-short-description.patch

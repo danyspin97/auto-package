@@ -2644,6 +2644,33 @@ fn accept_or_restore_with_snapshot(
         return false;
     }
 
+    // `rpmspec --parse` cannot see a patch that does not apply; that would only
+    // surface as a `%prep` failure after a full OBS cycle. Hand-written patches
+    // with wrong hunk counts ("malformed patch") are the usual culprit.
+    if let Err(problem) = check_patches_apply(spec_path, &after) {
+        reporter.report(&Event::SpecRejected {
+            step: step.id,
+            reason: ap_core::event::SpecRejection::RpmspecParseFailed {
+                stderr: problem.clone(),
+            },
+            restored_from: spec_path.to_path_buf(),
+        });
+        restore_spec(spec_path, before, step, reporter);
+        if let Some(snap) = snapshot {
+            snap.restore(reporter, step);
+        }
+        append_notes(
+            notes_path,
+            &format!(
+                "\n## Edit rejected — a patch does not apply\n{problem}\n\
+                 Create or change patches ONLY with quilt (`cd source && quilt new/add/refresh`), \
+                 never by writing a .patch file by hand: hand-written hunk headers are wrong. \
+                 The edit was rolled back.\n"
+            ),
+        );
+        return false;
+    }
+
     let diff = unified_diff(before, &after);
     let (added, removed) = diff_counts(&diff);
     let diff_path = step.file("spec.diff");
@@ -3066,6 +3093,76 @@ fn spec_version_differs(spec_path: &Path, version: &str) -> bool {
         return true;
     };
     header.version != version
+}
+
+/// Apply the spec's `PatchN:` files, in order, to a scratch copy of the source
+/// tarball the way `%autosetup -p1` will. `Ok` when there is nothing to check
+/// (no patches, no tarball, not a `-p1` autosetup) or all of them apply.
+fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
+    let patches: Vec<String> = spec
+        .lines()
+        .filter_map(|l| {
+            let (tag, value) = l.split_once(':')?;
+            let tag = tag.trim();
+            (tag.len() > 5
+                && tag[..5].eq_ignore_ascii_case("patch")
+                && tag[5..].chars().all(|c| c.is_ascii_digit()))
+            .then(|| value.trim().to_string())
+        })
+        .collect();
+    if patches.is_empty() || !spec.contains("%autosetup") || !spec.contains("-p1") {
+        return Ok(());
+    }
+    let Some(checkout) = spec_path.parent() else {
+        return Ok(());
+    };
+    let Some(tarball) = find_tarball(checkout) else {
+        return Ok(());
+    };
+    let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
+    if ap_ecosystem::sdist::extract(&tarball, scratch.path()).is_err() {
+        return Ok(());
+    }
+    // A single top-level directory is what `%autosetup -n` enters.
+    let entries: Vec<_> = std::fs::read_dir(scratch.path())
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .collect();
+    let root = match entries.as_slice() {
+        [only] if only.path().is_dir() => only.path(),
+        _ => scratch.path().to_path_buf(),
+    };
+    for name in patches {
+        let name = name.replace("%{version}", "");
+        let patch_file = checkout.join(&name);
+        if !patch_file.is_file() {
+            // A missing patch file is reported by the missing-source check.
+            continue;
+        }
+        let out = std::process::Command::new("patch")
+            .args([
+                "-p1",
+                "--fuzz=0",
+                "-f",
+                "-s",
+                "--no-backup-if-mismatch",
+                "-i",
+            ])
+            .arg(&patch_file)
+            .current_dir(&root)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run patch: {e}"))?;
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "{name} does not apply to the pristine source with `patch -p1 --fuzz=0`: {}",
+                detail.trim().chars().take(600).collect::<String>()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn find_tarball(dir: &Path) -> Option<PathBuf> {
@@ -4778,6 +4875,51 @@ fn verify_repo_exists(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_malformed_hand_written_patch_is_caught_before_the_build() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        // pristine tarball with one file
+        let tarball = dir.path().join("pkg-1.0.tar.gz");
+        {
+            let enc = flate2::write::GzEncoder::new(
+                std::fs::File::create(&tarball).unwrap(),
+                flate2::Compression::default(),
+            );
+            let mut tb = tar::Builder::new(enc);
+            let data = b"a\nb\nc\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tb.append_data(&mut h, "pkg-1.0/f.txt", &data[..]).unwrap();
+            tb.into_inner().unwrap().finish().unwrap();
+        }
+        let spec = "%autosetup -p1 -n pkg-%{version}\nPatch0:         fix.patch\n";
+        let spec_path = dir.path().join("pkg.spec");
+        std::fs::write(&spec_path, spec).unwrap();
+
+        // hunk header says 5 lines, body has 3: the shape hand-written patches get wrong
+        std::fs::write(
+            dir.path().join("fix.patch"),
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n",
+        )
+        .unwrap();
+        assert!(check_patches_apply(&spec_path, spec).is_err());
+
+        let mut good = std::fs::File::create(dir.path().join("fix.patch")).unwrap();
+        write!(
+            good,
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+        )
+        .unwrap();
+        drop(good);
+        assert!(check_patches_apply(&spec_path, spec).is_ok());
+
+        // nothing to check without patches
+        assert!(check_patches_apply(&spec_path, "%autosetup -p1\n").is_ok());
+    }
 
     #[test]
     fn safe_file_part_cannot_escape_a_directory() {
