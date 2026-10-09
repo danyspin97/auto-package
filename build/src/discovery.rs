@@ -440,6 +440,11 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     if !AGENT_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
+    // One lookup at a time: with the cache check and the insert separated by a
+    // slow model call, concurrent callers asking about the same name each
+    // spawned the CLI and each spent one of the per-process lookups.
+    static LOOKUP_LOCK: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = LOOKUP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let key = normalize(name);
     if let Some(hit) = agent_cache().lock().ok()?.get(&key) {
         return hit.clone();
