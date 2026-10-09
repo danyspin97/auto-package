@@ -1169,7 +1169,20 @@ fn run_package_inner(
 
     // ── Step: OscService (maturin packages) ──────────────────────────────────
     if is_maturin {
-        let need_service = need_spec || !checkout_dir.join("registry.tar.zst").exists();
+        // The crate maturin actually builds is `[tool.maturin] manifest-path`,
+        // which is often NOT the root Cargo.toml (hf_xet: the root is a
+        // workspace that EXCLUDES hf_xet/, whose own Cargo.lock holds `pprof`).
+        // Vendoring only the root manifest leaves the registry short of the
+        // build's crates: "no matching package named `pprof` found".
+        let extra_manifests = find_tarball(&checkout_dir)
+            .and_then(|t| maturin_manifest_path(&t))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let service_lacks_manifest = std::fs::read_to_string(checkout_dir.join("_service"))
+            .map(|svc| extra_manifests.iter().any(|m| !svc.contains(m.as_str())))
+            .unwrap_or(false);
+        let need_service =
+            need_spec || !checkout_dir.join("registry.tar.zst").exists() || service_lacks_manifest;
         if need_service {
             let step = step_or_fail!(pkg_run, "service", rpm_name);
             let t = Instant::now();
@@ -1184,7 +1197,7 @@ fn run_package_inner(
             }
 
             let normalized = config.pkg_name.replace('-', "_").to_lowercase();
-            let service_xml = render_maturin_service_file(&normalized);
+            let service_xml = render_maturin_service_file(&normalized, &extra_manifests);
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| format!("writing _service failed: {e}"))
                 .and_then(|()| {
@@ -4359,7 +4372,14 @@ fn unified_diff(before: &str, after: &str) -> String {
 ///
 /// `normalized_name` is the PyPI package name with hyphens replaced by
 /// underscores (e.g. `outlines_core`), matching the sdist tarball filename.
-fn render_maturin_service_file(normalized_name: &str) -> String {
+/// `extra_manifests` are further Cargo manifests (relative to the archive
+/// root) to vendor alongside the root one — see [`maturin_manifest_path`].
+fn render_maturin_service_file(normalized_name: &str, extra_manifests: &[String]) -> String {
+    let extra: String = extra_manifests
+        .iter()
+        .filter(|m| m.as_str() != "Cargo.toml")
+        .map(|m| format!("         \x20    <param name=\"cargotoml\">{m}</param>\n"))
+        .collect();
     format!(
         "<?xml version=\"1.0\"?>\n\
          <services>\n\
@@ -4371,9 +4391,36 @@ fn render_maturin_service_file(normalized_name: &str) -> String {
          \x20    <param name=\"compression\">zst</param>\n\
          \x20    <param name=\"no-root-manifest\">false</param>\n\
          \x20    <param name=\"cargotoml\">Cargo.toml</param>\n\
+         {extra}\
          \x20 </service>\n\
          </services>\n"
     )
+}
+
+/// The `[tool.maturin] manifest-path` of an sdist's root `pyproject.toml`,
+/// relative to the archive root, when it names a manifest other than the root
+/// `Cargo.toml`. `None` when absent, default, or the archive cannot be read.
+fn maturin_manifest_path(tarball: &Path) -> Option<String> {
+    let scratch = tempfile::tempdir().ok()?;
+    ap_ecosystem::sdist::extract(tarball, scratch.path()).ok()?;
+    let entries: Vec<_> = std::fs::read_dir(scratch.path())
+        .ok()?
+        .filter_map(|e| e.ok())
+        .collect();
+    let root = match entries.as_slice() {
+        [only] if only.path().is_dir() => only.path(),
+        _ => scratch.path().to_path_buf(),
+    };
+    let text = std::fs::read_to_string(root.join("pyproject.toml")).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    let path = doc
+        .get("tool")?
+        .get("maturin")?
+        .get("manifest-path")?
+        .as_str()?
+        .trim_start_matches("./")
+        .to_string();
+    (path != "Cargo.toml" && !path.starts_with('/') && !path.contains("..")).then_some(path)
 }
 
 fn append_notes(notes_path: PathBuf, section: &str) {
@@ -5001,6 +5048,46 @@ fn verify_repo_exists(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maturin_service_vendors_the_crate_maturin_builds() {
+        let plain = render_maturin_service_file("outlines_core", &[]);
+        assert_eq!(plain.matches("name=\"cargotoml\"").count(), 1);
+        let xml = render_maturin_service_file("hf_xet", &["hf_xet/Cargo.toml".to_string()]);
+        assert!(
+            xml.contains("<param name=\"cargotoml\">Cargo.toml</param>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<param name=\"cargotoml\">hf_xet/Cargo.toml</param>"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn maturin_manifest_path_is_read_from_pyproject() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("hf_xet-1.7.0.tar.gz");
+        {
+            let enc = flate2::write::GzEncoder::new(
+                std::fs::File::create(&tarball).unwrap(),
+                flate2::Compression::default(),
+            );
+            let mut tb = tar::Builder::new(enc);
+            let data = b"[build-system]\nrequires=[\"maturin\"]\nbuild-backend=\"maturin\"\n[tool.maturin]\nmanifest-path = \"hf_xet/Cargo.toml\"\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tb.append_data(&mut h, "hf_xet-1.7.0/pyproject.toml", &data[..])
+                .unwrap();
+            tb.into_inner().unwrap().finish().unwrap();
+        }
+        assert_eq!(
+            maturin_manifest_path(&tarball).as_deref(),
+            Some("hf_xet/Cargo.toml")
+        );
+    }
 
     #[test]
     fn a_malformed_hand_written_patch_is_caught_before_the_build() {

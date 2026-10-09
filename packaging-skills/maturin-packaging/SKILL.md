@@ -106,6 +106,14 @@ i. "no matching package named `X` found" during the offline build — the
      dependency line and the feature entries that reference it from the
      affected Cargo.toml, and drop the matching `Cargo.lock` entry if
      cargo complains that the lock needs updating (`--offline` forbids it).
+   - The checkout's `_service` vendors the wrong manifest: the crate maturin
+     builds is `[tool.maturin] manifest-path` in pyproject.toml (hf_xet's is
+     `hf_xet/Cargo.toml`, and its root `Cargo.toml` is a workspace that EXCLUDES
+     it), so a `cargo_vendor` that only lists the root `Cargo.toml` yields a
+     registry missing that crate's own dependencies (`pprof`). The pipeline
+     now adds a `<param name="cargotoml">` for the maturin manifest and re-runs
+     the service when it is missing; if the registry is still short, check
+     that param before anything else — and never report blocked for it.
    - `X` is a normal dependency of the extension itself: then the registry
      really is incomplete. Check the registry was generated from the same
      tarball the spec builds (a `Cargo.toml` edited after generation, e.g.
