@@ -672,11 +672,57 @@ fn post_process(
     let out = normalize_python_module_versions(&out);
     let out = dedupe_build_requires(&out);
     let out = normalize_files_paths(&out, &release.name);
+    let out = fix_bare_source_filename(&out, release);
     if facts.has_c_extensions {
         fix_c_extension_arch(&out)
     } else {
         out
     }
+}
+
+/// Point a bare-filename `Source:` at the archive actually in the checkout.
+///
+/// py2pack names the tarball after PyPI's own sdist (`Events-%{version}.zip`)
+/// even when the checkout holds a different file — a forge release archive
+/// (`events-0.5.tar.gz`) that the pipeline downloaded because the project has
+/// no sdist. `%prep` then fails on the very first build, and `unzip` is
+/// requested for nothing. A URL `Source:` is left alone: it names where the
+/// file comes from, not which file is on disk.
+fn fix_bare_source_filename(spec: &str, release: &Release) -> String {
+    let actual = release.sdist.filename.as_str();
+    if actual.is_empty() {
+        return spec.to_string();
+    }
+    let templated = actual.replace(&release.version, "%{version}");
+    let mut changed = false;
+    let mut out = String::with_capacity(spec.len());
+    for line in spec.lines() {
+        let rewritten = ["Source:", "Source0:"].iter().find_map(|tag| {
+            let value = line.strip_prefix(tag)?.trim();
+            (!value.is_empty() && !value.contains("://") && value != templated)
+                .then(|| format!("{tag:<16}{templated}"))
+        });
+        match rewritten {
+            Some(l) if !changed => {
+                changed = true;
+                out.push_str(&l);
+            }
+            _ => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    if !spec.ends_with('\n') {
+        out.pop();
+    }
+    if changed && !actual.ends_with(".zip") {
+        out = out
+            .lines()
+            .filter(|l| l.trim() != "BuildRequires:  unzip")
+            .collect::<Vec<_>>()
+            .join("\n")
+            + if spec.ends_with('\n') { "\n" } else { "" };
+    }
+    out
 }
 
 /// The pip-installed form of a PyPI name: lowercase, `-`/`.` → `_`.
@@ -1281,6 +1327,36 @@ BuildRequires:  %{python_module cmake}
             out.contains("%{python_sitelib}/rich_toolkit-%{version}.dist-info/"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_bare_source_filename_follows_the_real_archive() {
+        let mut release = ap_ecosystem::pypi::Release {
+            name: "Events".into(),
+            version: "0.5".into(),
+            summary: None,
+            homepage: None,
+            license: ap_ecosystem::pypi::License::Unknown,
+            requires_python: None,
+            yanked: false,
+            sdist: ap_ecosystem::pypi::Sdist {
+                filename: "events-0.5.tar.gz".into(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
+            },
+        };
+        let spec = "Source:         Events-%{version}.zip\nBuildRequires:  unzip\nBuildRequires:  fdupes\n";
+        assert_eq!(
+            fix_bare_source_filename(spec, &release),
+            "Source:         events-%{version}.tar.gz\nBuildRequires:  fdupes\n"
+        );
+        // A URL names where the file comes from; leave it.
+        let url = "Source:         https://files.pythonhosted.org/x/Events-%{version}.zip\n";
+        assert_eq!(fix_bare_source_filename(url, &release), url);
+        // Nothing to say without a known archive.
+        release.sdist.filename.clear();
+        assert_eq!(fix_bare_source_filename(spec, &release), spec);
     }
 
     #[test]
