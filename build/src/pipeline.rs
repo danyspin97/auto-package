@@ -2109,7 +2109,7 @@ fn agent_turn(
     }
 
     let notes = std::fs::read_to_string(ws.notes()).unwrap_or_default();
-    let req = crate::agent::TurnRequest {
+    let make_req = || crate::agent::TurnRequest {
         workspace: ws.dir(),
         pkg_name: &config.pkg_name,
         version: &config.version,
@@ -2148,7 +2148,29 @@ fn agent_turn(
         }),
     };
 
-    let outcome = match crate::agent::turn(req) {
+    // A 429 is the provider's quota, not this package's fault, and it clears
+    // on its own: wait it out (30s, 1m, 2m, 4m) before spending one of the
+    // package's attempts — failing here made a burst of parallel packages all
+    // give up at once and get permanently excluded.
+    let mut rate_limit_waits = 0u32;
+    let turn_result = loop {
+        match crate::agent::turn(make_req()) {
+            Err(e) if e.is_rate_limited() && rate_limit_waits < 4 => {
+                let wait = std::time::Duration::from_secs(30 << rate_limit_waits);
+                rate_limit_waits += 1;
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message: format!(
+                        "model API rate-limited (429); waiting {}s before retrying ({rate_limit_waits}/4)",
+                        wait.as_secs()
+                    ),
+                });
+                std::thread::sleep(wait);
+            }
+            other => break other,
+        }
+    };
+    let outcome = match turn_result {
         Ok(o) => o,
         Err(e) => {
             // Any of these failing is otherwise a dead end: nothing below
