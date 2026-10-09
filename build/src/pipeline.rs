@@ -2109,6 +2109,13 @@ fn agent_turn(
     }
 
     let notes = std::fs::read_to_string(ws.notes()).unwrap_or_default();
+    let on_tool_use = |tool: &str, input: &str| {
+        reporter.report(&Event::AgentToolUse {
+            step: step.id,
+            tool: tool.to_string(),
+            input: input.to_string(),
+        });
+    };
     let make_req = || crate::agent::TurnRequest {
         workspace: ws.dir(),
         pkg_name: &config.pkg_name,
@@ -2139,13 +2146,7 @@ fn agent_turn(
         },
         checkout_dir: ctx.checkout_dir,
         context: ctx.context,
-        on_tool_use: Some(&|tool, input| {
-            reporter.report(&Event::AgentToolUse {
-                step: step.id,
-                tool: tool.to_string(),
-                input: input.to_string(),
-            });
-        }),
+        on_tool_use: Some(&on_tool_use),
     };
 
     // A 429 is the provider's quota, not this package's fault, and it clears
