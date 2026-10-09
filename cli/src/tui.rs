@@ -41,6 +41,10 @@ const MAX_AGENT_ACTIVITY: usize = 100;
 #[derive(Clone)]
 pub struct TuiController {
     tx: Sender<Msg>,
+    /// Package names the user typed into the TUI's `n` prompt. Handed out
+    /// once, via [`TuiController::take_add_requests`]; disconnects when the
+    /// render thread exits, which is how the consumer learns the user quit.
+    add_rx: std::sync::Arc<std::sync::Mutex<Option<Receiver<String>>>>,
 }
 
 /// Drop-based terminal restorer.
@@ -88,12 +92,22 @@ impl TuiController {
     /// process's real SIGINT handler firing.
     pub fn new(memory: std::sync::Arc<MemorySink>) -> io::Result<Self> {
         let (tx, rx) = channel();
+        let (add_tx, add_rx) = channel();
         std::thread::spawn(move || {
-            if let Err(e) = run(rx, memory) {
+            if let Err(e) = run(rx, add_tx, memory) {
                 eprintln!("TUI error: {e}");
             }
         });
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
+        })
+    }
+
+    /// Take the receiver for package names entered at runtime (`n` key).
+    /// `None` after the first call. `recv` fails once the TUI has exited.
+    pub fn take_add_requests(&self) -> Option<Receiver<String>> {
+        self.add_rx.lock().ok()?.take()
     }
 
     /// Wrap `base` so every event is still delivered to it (jsonl/memory
@@ -558,7 +572,11 @@ impl TuiState {
     }
 }
 
-fn run(rx: Receiver<Msg>, memory: std::sync::Arc<MemorySink>) -> io::Result<()> {
+fn run(
+    rx: Receiver<Msg>,
+    add_tx: Sender<String>,
+    memory: std::sync::Arc<MemorySink>,
+) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -587,7 +605,7 @@ fn run(rx: Receiver<Msg>, memory: std::sync::Arc<MemorySink>) -> io::Result<()> 
     // content showing through. One hard clear up front wipes the slate.
     terminal.clear()?;
 
-    let result = event_loop(&mut terminal, rx, &memory);
+    let result = event_loop(&mut terminal, rx, &add_tx, &memory);
     let _ = terminal.show_cursor();
     result
 }
@@ -595,9 +613,12 @@ fn run(rx: Receiver<Msg>, memory: std::sync::Arc<MemorySink>) -> io::Result<()> 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     rx: Receiver<Msg>,
+    add_tx: &Sender<String>,
     memory: &MemorySink,
 ) -> io::Result<()> {
     let mut state = TuiState::new();
+    // `Some` while the "add package" prompt is open and capturing keys.
+    let mut input: Option<String> = None;
     let mut table_state = TableState::default();
     // Tracked by package name rather than raw table index: `visible_order()`
     // shrinks whenever a package finishes, which would otherwise shift every
@@ -637,12 +658,41 @@ fn event_loop(
             );
         }
 
-        terminal.draw(|f| render(f, &state, &mut table_state))?;
+        terminal.draw(|f| render(f, &state, &mut table_state, input.as_deref()))?;
 
         if event::poll(tick_rate)?
             && let TermEvent::Key(key) = event::read()?
         {
+            // The prompt swallows every key except Ctrl-C, so typing a name
+            // containing `q`, `j`, `a`... doesn't quit or move the selection.
+            if let Some(buf) = input.as_mut()
+                && !(key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(event::KeyModifiers::CONTROL))
+            {
+                match prompt_key(buf, key.code) {
+                    PromptAction::Pending => {}
+                    PromptAction::Cancel => input = None,
+                    PromptAction::Submit(name) => {
+                        input = None;
+                        if add_tx.send(name.clone()).is_ok() {
+                            state.add_global_log(
+                                LogLevel::Info,
+                                format!("Queued {name} as a new root package"),
+                            );
+                        } else {
+                            state.add_global_log(
+                                LogLevel::Error,
+                                format!(
+                                    "Cannot add {name}: the run is no longer accepting packages"
+                                ),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
             match key.code {
+                KeyCode::Char('n') | KeyCode::Char('+') => input = Some(String::new()),
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                     // Raw mode disables signal generation entirely, so the OS
@@ -678,6 +728,86 @@ fn event_loop(
     Ok(())
 }
 
+enum PromptAction {
+    Pending,
+    Cancel,
+    Submit(String),
+}
+
+/// Apply one keypress to the "add package" prompt buffer.
+fn prompt_key(buf: &mut String, code: KeyCode) -> PromptAction {
+    match code {
+        KeyCode::Esc => PromptAction::Cancel,
+        KeyCode::Enter => {
+            let name = buf.trim().to_string();
+            if name.is_empty() {
+                PromptAction::Cancel
+            } else {
+                PromptAction::Submit(name)
+            }
+        }
+        KeyCode::Backspace => {
+            buf.pop();
+            PromptAction::Pending
+        }
+        KeyCode::Char(c) => {
+            buf.push(c);
+            PromptAction::Pending
+        }
+        _ => PromptAction::Pending,
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    fn type_str(buf: &mut String, s: &str) {
+        for c in s.chars() {
+            assert!(matches!(
+                prompt_key(buf, KeyCode::Char(c)),
+                PromptAction::Pending
+            ));
+        }
+    }
+
+    #[test]
+    fn typing_q_or_j_edits_the_buffer_not_the_ui() {
+        let mut b = String::new();
+        type_str(&mut b, "jq-cpp");
+        assert_eq!(b, "jq-cpp");
+    }
+
+    #[test]
+    fn enter_submits_the_trimmed_name() {
+        let mut b = String::new();
+        type_str(&mut b, "  oatpp ");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Enter),
+            PromptAction::Submit(n) if n == "oatpp"
+        ));
+    }
+
+    #[test]
+    fn enter_on_blank_and_esc_cancel_and_backspace_edits() {
+        let mut b = String::from("  ");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Enter),
+            PromptAction::Cancel
+        ));
+        let mut b = String::from("ab");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Backspace),
+            PromptAction::Pending
+        ));
+        assert_eq!(b, "a");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Esc),
+            PromptAction::Cancel
+        ));
+    }
+}
+
 fn select_next(selected: &mut Option<String>, state: &TuiState) {
     let visible = state.visible_order();
     if visible.is_empty() {
@@ -704,7 +834,7 @@ fn select_prev(selected: &mut Option<String>, state: &TuiState) {
     *selected = Some(visible[i.saturating_sub(1)].clone());
 }
 
-fn render(f: &mut Frame, state: &TuiState, table_state: &mut TableState) {
+fn render(f: &mut Frame, state: &TuiState, table_state: &mut TableState, input: Option<&str>) {
     let visible = state.visible_order();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -719,7 +849,7 @@ fn render(f: &mut Frame, state: &TuiState, table_state: &mut TableState) {
     render_summary(f, state, chunks[0]);
     render_table(f, state, &visible, chunks[1], table_state);
     render_detail(f, state, &visible, chunks[2], table_state.selected());
-    render_footer(f, state, chunks[3]);
+    render_footer(f, state, input, chunks[3]);
 }
 
 fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
@@ -854,7 +984,26 @@ fn render_detail(
     f.render_widget(activity, chunks[1]);
 }
 
-fn render_footer(f: &mut Frame, state: &TuiState, area: Rect) {
+fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rect) {
+    if let Some(buf) = input {
+        let line = Line::from(vec![
+            Span::styled(
+                "add package (name or repo URL): ",
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(buf.to_string()),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "   Enter queue │ Esc cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).block(Block::default().borders(Borders::ALL)),
+            area,
+        );
+        return;
+    }
     let last = state
         .last_global_log
         .as_ref()
@@ -862,7 +1011,7 @@ fn render_footer(f: &mut Frame, state: &TuiState, area: Rect) {
         .unwrap_or_else(|| Span::raw(""));
     let hint = Span::styled(
         format!(
-            "  ↑/↓ select package │ a {} succeeded │ q/Esc quit",
+            "  ↑/↓ select │ n add package │ a {} succeeded │ q/Esc quit",
             if state.show_all { "hide" } else { "show" }
         ),
         Style::default().fg(Color::DarkGray),

@@ -713,31 +713,106 @@ fn main() -> color_eyre::Result<()> {
             }
 
             let start = Instant::now();
-            let result = cmd_build(
-                &name,
-                version.as_deref(),
-                &project,
-                &work_dir,
-                &state_root,
-                &rpms_dir,
-                &distro,
-                &arch,
-                max_attempts,
-                budget_usd,
-                target.as_deref(),
-                force,
-                regen,
-                no_agent,
-                jobs,
-                sweep,
-                source_repo,
-                source_urls,
-                python_flavors,
-                &run_dir,
-                reporter.clone(),
-                base_reporter.clone(),
-                tui_ctrl.clone(),
-            );
+            // In TUI mode the user can add more root packages at runtime
+            // (`n` key). Each becomes an independent `cmd_build` on its own
+            // thread, sharing the reporter/TUI/run directory; overlapping
+            // dependencies are serialised per package inside `run_package`.
+            // The dispatcher below ends when the TUI exits (its channel
+            // disconnects), so quitting the TUI never leaves it waiting.
+            let add_rx = tui_ctrl.as_ref().and_then(|t| t.take_add_requests());
+            let result = {
+                let (project, work_dir, state_root, rpms_dir) =
+                    (&project, &work_dir, &state_root, &rpms_dir);
+                let (distro, arch, run_dir) = (&distro, &arch, &run_dir);
+                let (source_urls, python_flavors) = (&source_urls, &python_flavors);
+                let (reporter, base_reporter, tui_ctrl) = (&reporter, &base_reporter, &tui_ctrl);
+                std::thread::scope(|scope| {
+                    if let Some(add_rx) = add_rx {
+                        scope.spawn(move || {
+                            for raw in add_rx {
+                                scope.spawn({
+                                    let raw = raw.clone();
+                                    move || {
+                                        let (extra, extra_repo) = if looks_like_url(&raw) {
+                                            (repo_package_name(&raw), Some(raw.clone()))
+                                        } else {
+                                            (raw.clone(), None)
+                                        };
+                                        let r = cmd_build(
+                                            &extra,
+                                            None,
+                                            project,
+                                            work_dir,
+                                            state_root,
+                                            rpms_dir,
+                                            distro,
+                                            arch,
+                                            max_attempts,
+                                            budget_usd,
+                                            None,
+                                            false, // force: reuse anything already built
+                                            false, // regen
+                                            no_agent,
+                                            jobs,
+                                            false, // sweep
+                                            extra_repo,
+                                            source_urls.clone(),
+                                            python_flavors.clone(),
+                                            run_dir,
+                                            reporter.clone(),
+                                            base_reporter.clone(),
+                                            tui_ctrl.clone(),
+                                        );
+                                        reporter.report(&match r {
+                                            Ok(()) => Event::Progress {
+                                                step: None,
+                                                message: format!("{raw}: build finished"),
+                                            },
+                                            Err(e) => Event::Warning {
+                                                step: None,
+                                                message: format!("{raw}: {e}"),
+                                            },
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    let first = cmd_build(
+                        &name,
+                        version.as_deref(),
+                        project,
+                        work_dir,
+                        state_root,
+                        rpms_dir,
+                        distro,
+                        arch,
+                        max_attempts,
+                        budget_usd,
+                        target.as_deref(),
+                        force,
+                        regen,
+                        no_agent,
+                        jobs,
+                        sweep,
+                        source_repo,
+                        source_urls.clone(),
+                        python_flavors.clone(),
+                        run_dir,
+                        reporter.clone(),
+                        base_reporter.clone(),
+                        tui_ctrl.clone(),
+                    );
+                    if tui_ctrl.is_some() {
+                        reporter.report(&Event::Progress {
+                            step: None,
+                            message: "Root build finished — press n to add a package, q to quit"
+                                .to_string(),
+                        });
+                    }
+                    first
+                })
+            };
 
             let outcome = if result.is_ok() {
                 RunOutcome::Success

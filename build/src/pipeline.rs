@@ -668,11 +668,51 @@ fn dep_names_from_requires_dist(requires_dist: &[String]) -> Vec<String> {
 
 // ── main pipeline ─────────────────────────────────────────────────────────────
 
+/// RPM names currently inside `run_package` anywhere in this process.
+///
+/// Several root builds can share one process (the TUI lets the user add more
+/// at runtime), and two of them can discover the same dependency. Both would
+/// then drive the same checkout, state dir and OBS package at once. Holding
+/// this guard serialises them: the second waits, then its own `is_built`
+/// check turns a success into `AlreadyBuilt` instead of a duplicate build.
+static IN_FLIGHT: (
+    std::sync::Mutex<std::collections::BTreeSet<String>>,
+    std::sync::Condvar,
+) = (
+    std::sync::Mutex::new(std::collections::BTreeSet::new()),
+    std::sync::Condvar::new(),
+);
+
+struct InFlightGuard(String);
+
+impl InFlightGuard {
+    fn acquire(rpm_name: &str) -> Self {
+        let (lock, cvar) = &IN_FLIGHT;
+        let mut busy = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while busy.contains(rpm_name) {
+            busy = cvar.wait(busy).unwrap_or_else(|e| e.into_inner());
+        }
+        busy.insert(rpm_name.to_string());
+        Self(rpm_name.to_string())
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = &IN_FLIGHT;
+        lock.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+        cvar.notify_all();
+    }
+}
+
 pub fn run_package(
     config: &PipelineConfig,
     pkg_run: &PkgRunDir,
     reporter: &dyn Reporter,
 ) -> PipelineResult {
+    let _in_flight = InFlightGuard::acquire(&config.rpm_name);
     let result = run_package_inner(config, pkg_run, reporter);
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the
