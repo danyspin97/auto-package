@@ -756,6 +756,14 @@ pub fn checkout(
         return Ok(checkout_dir);
     }
 
+    // Every `osc co` into the same directory rewrites the shared
+    // `<project>/.osc/_packages` file (write `.new`, rename). With several
+    // packages checking out in parallel (`--jobs`, or roots added from the
+    // TUI) the renames race and one fails with FileNotFoundError, so
+    // serialise checkouts process-wide.
+    static CHECKOUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CHECKOUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let out = proc::capture(
         "osc",
         &["co", &format!("{project}/{pkg_name}")],
