@@ -648,11 +648,7 @@ pub fn parse_index_links(html: &str) -> Vec<String> {
 /// (`1.10 > 1.9`), anything else lexically. A shorter version that is a
 /// prefix of a longer one sorts first.
 fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let split = |v: &str| -> Vec<String> {
-        v.split(['.', '-', '_'])
-            .map(str::to_string)
-            .collect()
-    };
+    let split = |v: &str| -> Vec<String> { v.split(['.', '-', '_']).map(str::to_string).collect() };
     let (pa, pb) = (split(a), split(b));
     for (x, y) in pa.iter().zip(&pb) {
         let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
