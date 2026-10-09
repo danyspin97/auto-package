@@ -181,18 +181,13 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
     let mut last_err = None;
 
     for url in &candidates {
-        let Ok(resp) = ureq::get(url).call() else {
+        let Ok(resp) = crate::http::get_download(url).call() else {
             continue;
         };
-        let mut buf = Vec::new();
-        use std::io::Read;
-        if resp
-            .into_body()
-            .into_reader()
-            .read_to_end(&mut buf)
-            .is_err()
-            || buf.is_empty()
-        {
+        let Ok(buf) = crate::http::read_download(resp) else {
+            continue;
+        };
+        if buf.is_empty() {
             continue;
         }
 
@@ -391,22 +386,27 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
 /// TOKEN header for GitLab. Only used when `gh`/`glab` aren't on PATH or
 /// the URL isn't one those CLIs can talk to.
 fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
-    if url.contains("api.github.com") || url.starts_with("https://api.github.com") {
-        for var in &["GITHUB_TOKEN", "GH_TOKEN"] {
-            if let Ok(tok) = std::env::var(var)
-                && !tok.is_empty()
-            {
-                return Some(("Authorization", format!("Bearer {tok}")));
-            }
-        }
-    } else if url.contains("gitlab") {
-        for var in &["GITLAB_TOKEN", "CI_JOB_TOKEN"] {
-            if let Ok(tok) = std::env::var(var)
-                && !tok.is_empty()
-            {
-                return Some(("PRIVATE-TOKEN", tok));
-            }
-        }
+    // Decide on the parsed HOST, never a substring: `https://evil.com/api.github.com/x`
+    // or `https://gitlab-mirror.evil.com` must not receive a token. https only.
+    if !url.starts_with("https://") {
+        return None;
+    }
+    let host = crate::http::host_of(url)?;
+    let first_set = |vars: &[&str]| {
+        vars.iter()
+            .find_map(|v| std::env::var(v).ok().filter(|t| !t.is_empty()))
+    };
+    if host == "api.github.com" {
+        return first_set(&["GITHUB_TOKEN", "GH_TOKEN"])
+            .map(|tok| ("Authorization", format!("Bearer {tok}")));
+    }
+    let self_hosted = std::env::var("GITLAB_HOST").ok().map(|h| {
+        h.trim_start_matches("https://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    });
+    if host == "gitlab.com" || self_hosted.as_deref() == Some(host.as_str()) {
+        return first_set(&["GITLAB_TOKEN", "CI_JOB_TOKEN"]).map(|tok| ("PRIVATE-TOKEN", tok));
     }
     None
 }
@@ -467,19 +467,55 @@ fn get_json(url: &str) -> Result<serde_json::Value, String> {
         return serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"));
     }
 
-    let mut req = ureq::get(url)
-        .header("User-Agent", "auto-package")
-        .header("Accept", "application/json");
-    if let Some((name, value)) = forge_auth_header(url) {
-        req = req.header(name, value);
-    }
-    let body = req
-        .call()
-        .map_err(|e| describe_forge_http_error(url, &e.to_string()))?
-        .into_body()
-        .read_to_string()
-        .map_err(|e| format!("{url}: {e}"))?;
+    let body = http_get_text(url)?;
     serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"))
+}
+
+/// GET `url` as JSON text with timeout and size cap. A token is attached only
+/// for the hosts [`forge_auth_header`] allows, and redirects are followed by
+/// hand so it is never carried to a different host (ureq would forward a
+/// custom header like `PRIVATE-TOKEN` across any redirect).
+fn http_get_text(url: &str) -> Result<String, String> {
+    let agent = crate::http::agent(crate::http::API_TIMEOUT, 0);
+    let mut current = url.to_string();
+    for _ in 0..5 {
+        let mut req = agent
+            .get(&current)
+            .header("User-Agent", "auto-package")
+            .header("Accept", "application/json");
+        let origin_host = crate::http::host_of(url);
+        if crate::http::host_of(&current) == origin_host
+            && let Some((name, value)) = forge_auth_header(&current)
+        {
+            req = req.header(name, value);
+        }
+        let resp = req
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .call()
+            .map_err(|e| describe_forge_http_error(url, &e.to_string()))?;
+        let status = resp.status().as_u16();
+        if (300..400).contains(&status)
+            && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
+        {
+            current = if loc.starts_with("http") {
+                loc.to_string()
+            } else {
+                let host = crate::http::host_of(&current).unwrap_or_default();
+                format!("https://{host}{loc}")
+            };
+            continue;
+        }
+        if status >= 400 {
+            return Err(describe_forge_http_error(
+                url,
+                &format!("http status: {status}"),
+            ));
+        }
+        return crate::http::read_text(resp).map_err(|e| format!("{url}: {e}"));
+    }
+    Err(format!("{url}: too many redirects"))
 }
 
 /// The first `tag_name` (or `name`, for a bare tag list) in a forge response,
@@ -702,13 +738,13 @@ pub fn index_has_only_unsupported(links: &[String]) -> bool {
 }
 
 fn fetch_index(index_url: &str) -> Result<Vec<String>, String> {
-    let body = ureq::get(index_url)
-        .header("User-Agent", "auto-package")
-        .call()
-        .map_err(|e| format!("{index_url}: {e}"))?
-        .into_body()
-        .read_to_string()
-        .map_err(|e| format!("{index_url}: {e}"))?;
+    let body = crate::http::read_text(
+        crate::http::get(index_url)
+            .header("User-Agent", "auto-package")
+            .call()
+            .map_err(|e| format!("{index_url}: {e}"))?,
+    )
+    .map_err(|e| format!("{index_url}: {e}"))?;
     Ok(parse_index_links(&body))
 }
 
@@ -942,9 +978,26 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
         SourceKind::Forge => {}
         kind => return archive_urls_non_forge(repo_url, kind, version),
     }
-    let base = repo_url.trim_end_matches('/').trim_end_matches(".git");
-    let repo = base.rsplit('/').next().unwrap_or("source");
-    let is_gitlab = base.contains("gitlab");
+    // Build from the PARSED repository (host/owner/repo), not the raw string:
+    // `…/tree/main`, `git@host:o/r`, `?query` and `.git` all used to leak
+    // into the archive URL and make the repo name `main`.
+    let parsed = ap_ecosystem::forge::parse(repo_url);
+    let base = parsed
+        .as_ref()
+        .map(|f| f.canonical_https())
+        .unwrap_or_else(|| {
+            repo_url
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .to_string()
+        });
+    let base = base.as_str();
+    let repo = parsed
+        .as_ref()
+        .map(|f| f.repo_name.as_str())
+        .unwrap_or_else(|| base.rsplit('/').next().unwrap_or("source"));
+    let is_gitlab =
+        crate::http::host_of(base).is_some_and(|h| h == "gitlab.com" || h.starts_with("gitlab."));
 
     let mut tags = Vec::new();
 
@@ -994,6 +1047,13 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
     unique_tags
         .iter()
         .map(|tag| {
+            // A tag from the API or a guess may hold characters that are not
+            // URL-safe; encode each segment but keep `/` (`release/1.0`).
+            let tag = tag
+                .split('/')
+                .map(|seg| urlencoding::encode(seg).into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
             if is_gitlab {
                 format!("{base}/-/archive/{tag}/{repo}-{tag}.tar.gz")
             } else {
@@ -1372,6 +1432,19 @@ mod tests {
         assert_eq!(nv("README"), None);
         assert_eq!(nv("noversion.tar.gz"), None);
         assert_eq!(nv("-1.0.tar.gz"), None);
+    }
+
+    #[test]
+    fn forge_tokens_go_to_exact_hosts_over_https_only() {
+        // SAFETY of test env: variables are process-global; use unlikely values
+        // and only assert the negative cases plus host routing.
+        assert_eq!(forge_auth_header("https://evil.com/api.github.com/x"), None);
+        assert_eq!(
+            forge_auth_header("https://gitlab-mirror.evil.com/a/b"),
+            None
+        );
+        assert_eq!(forge_auth_header("http://api.github.com/x"), None);
+        assert_eq!(forge_auth_header("https://notgitlab.com/api/v4/x"), None);
     }
 
     #[test]

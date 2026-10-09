@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod discovery;
 pub mod flavors;
+pub mod http;
 pub mod log;
 pub mod obs_status;
 pub mod osc;

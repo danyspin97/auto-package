@@ -344,7 +344,7 @@ pub fn parse_finding(text: &str) -> Option<Finding> {
 
 /// Whether a URL answers at all (HEAD, then GET for servers that refuse HEAD).
 fn reachable(url: &str) -> bool {
-    ureq::head(url).call().is_ok() || ureq::get(url).call().is_ok()
+    crate::http::head(url).call().is_ok() || crate::http::get(url).call().is_ok()
 }
 
 /// Accept the agent's URL only if the pipeline can actually use it. The model
