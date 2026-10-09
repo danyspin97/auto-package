@@ -247,11 +247,13 @@ impl HumanSink {
             Event::ResolveFinished {
                 total,
                 built,
+                in_distro,
                 remaining,
             } => Some(format!(
-                "  {} packages in closure · {} already built · {} remaining",
+                "  {} packages in closure · {} already built · {} in the distro · {} remaining",
                 total,
                 built.if_supports_color(Stderr, |t| t.green()),
+                in_distro.if_supports_color(Stderr, |t| t.dimmed()),
                 remaining,
             )),
             Event::TargetSelected {

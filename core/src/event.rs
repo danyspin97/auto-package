@@ -208,6 +208,7 @@ pub enum Event {
     ResolveFinished {
         total: usize,
         built: usize,
+        in_distro: usize,
         remaining: usize,
     },
     TargetSelected {

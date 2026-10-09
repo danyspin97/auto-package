@@ -409,11 +409,14 @@ impl TuiState {
             Event::ResolveFinished {
                 total,
                 built,
+                in_distro,
                 remaining,
             } => {
                 self.add_global_log(
                     LogLevel::Info,
-                    format!("Resolved: {total} total, {built} built, {remaining} remaining"),
+                    format!(
+                        "Resolved: {total} total, {built} built, {in_distro} in the distro, {remaining} remaining"
+                    ),
                 );
             }
             Event::TargetSelected { pkg, version, .. } => {

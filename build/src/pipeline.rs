@@ -419,7 +419,22 @@ pub fn select_target(
     let linked_fuzzy: std::collections::HashSet<String> =
         linked_packages.iter().map(|p| osc::fuzzy_key(p)).collect();
 
-    let resolvable: Vec<bool> = nodes
+    // How a node came to be resolvable, so the two very different reasons —
+    // "already in the distro, nothing to build" vs. "this project built it"
+    // — can be reported as separate counts instead of one combined number
+    // that made the distro's own contribution look like this run's work.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Resolution {
+        No,
+        /// Present in a linked/path project, or a system-tool alias
+        /// ([`SYSTEM_TOOL_ALIASES`]) — the distro already has it.
+        Distro,
+        /// Present in this project's own OBS listing, or already built in
+        /// the local workspace.
+        Built,
+    }
+
+    let resolution: Vec<Resolution> = nodes
         .iter()
         .map(|n| {
             // `--force` on the root was previously only observed inside
@@ -433,7 +448,7 @@ pub fn select_target(
             // rebuild does not stampede every already-built dependency with
             // it.
             if force && n.is_requested {
-                return false;
+                return Resolution::No;
             }
             // Some PyPI packages exist purely to redistribute a binary that
             // openSUSE already ships as its own identically-named system
@@ -445,33 +460,45 @@ pub fn select_target(
             // as already resolved rather than ever selecting them as a
             // build target — see `SYSTEM_TOOL_ALIASES`.
             if is_system_tool_alias(&n.name) {
-                return true;
+                return Resolution::Distro;
             }
             let rpm = osc::rpm_name(&n.name);
             let key = osc::fuzzy_key(&rpm);
             if let Some(&real) = own_fuzzy.get(&key) {
-                return status_is_resolvable(build_statuses.get(real));
+                return if status_is_resolvable(build_statuses.get(real)) {
+                    Resolution::Built
+                } else {
+                    Resolution::No
+                };
             }
             if linked_fuzzy.contains(&key) {
-                return true;
+                return Resolution::Distro;
             }
             // Check local workspace state.
             let ws_name = ap_core::run::sanitize_name(&rpm);
             let state_path = config.state_root.join(ws_name).join("state.json");
-            std::fs::read_to_string(&state_path)
+            let built = std::fs::read_to_string(&state_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<PkgState>(&s).ok())
                 .map(|st| st.is_built(&n.version))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            if built {
+                Resolution::Built
+            } else {
+                Resolution::No
+            }
         })
         .collect();
 
-    let already_built_count = resolvable.iter().filter(|&&r| r).count();
-    let remaining = total - already_built_count;
+    let resolvable: Vec<bool> = resolution.iter().map(|r| *r != Resolution::No).collect();
+    let in_distro_count = resolution.iter().filter(|r| **r == Resolution::Distro).count();
+    let built_count = resolution.iter().filter(|r| **r == Resolution::Built).count();
+    let remaining = total - in_distro_count - built_count;
 
     reporter.report(&Event::ResolveFinished {
         total,
-        built: already_built_count,
+        built: built_count,
+        in_distro: in_distro_count,
         remaining,
     });
 
