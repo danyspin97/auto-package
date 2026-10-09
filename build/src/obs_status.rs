@@ -168,6 +168,25 @@ pub fn parse_results(xml: &str) -> Vec<ResultEntry> {
     entries
 }
 
+/// File names of the `.rpm` binaries in a `/build/<prj>/<repo>/<arch>/<pkg>`
+/// listing (`<binarylist><binary filename="..." .../>`), source RPMs excluded.
+pub fn parse_binary_rpms(xml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(tag) = next_tag(xml, pos) {
+        pos = tag.end;
+        if tag.name == "binary"
+            && !tag.closing
+            && let Some(f) = tag.attr("filename")
+            && f.ends_with(".rpm")
+            && !f.ends_with(".src.rpm")
+        {
+            out.push(f.to_string());
+        }
+    }
+    out
+}
+
 /// The entry for one package in one repository/arch, if present.
 pub fn find_entry(xml: &str, repo: &str, arch: &str, pkg: &str) -> Option<ResultEntry> {
     parse_results(xml)
@@ -532,6 +551,20 @@ mod tests {
         assert_eq!(
             (src.srcmd5.as_str(), src.verifymd5.as_deref()),
             ("bbb", Some("ccc"))
+        );
+    }
+
+    #[test]
+    fn binary_list_yields_binary_rpms_only() {
+        let xml = r#"<binarylist>
+  <binary filename="_buildenv" size="1" mtime="1"/>
+  <binary filename="python313-Events-0.5-2.1.noarch.rpm" size="1" mtime="1"/>
+  <binary filename="python-events-0.5-2.1.src.rpm" size="1" mtime="1"/>
+  <binary filename="buildinfo" size="1" mtime="1"/>
+</binarylist>"#;
+        assert_eq!(
+            parse_binary_rpms(xml),
+            ["python313-Events-0.5-2.1.noarch.rpm"]
         );
     }
 }

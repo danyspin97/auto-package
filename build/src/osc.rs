@@ -1321,18 +1321,38 @@ pub fn fetch_buildlog(
 
 /// Download built binaries from OBS into `dest_dir`.
 ///
-/// Count `.rpm` files under `rpms_dir` whose filename starts with
-/// `<pkg_name>-`.
+/// How many of the binary RPMs OBS lists for `pkg_name` are now in `rpms_dir`.
 ///
-/// Used by `wait_for_build` to confirm that `osc getbinaries` actually
-/// produced artifacts for the package it was asked about, rather than
-/// silently exiting 0 with an empty binary set (which happens when the
-/// OBS project's publishing config for the requested repo/arch pair is
-/// misconfigured). Returns 0 when the directory doesn't exist or can't
-/// be read — the caller treats that the same as "no RPMs produced",
-/// which is the strictly safe interpretation.
-fn count_rpms(rpms_dir: &std::path::Path, pkg_name: &str) -> usize {
-    let prefix = format!("{pkg_name}-");
+/// Used after `osc getbinaries` to confirm it actually produced artifacts
+/// rather than silently exiting 0 with an empty binary set (a misconfigured
+/// publishing setup for the repo/arch pair). The RPMs are matched by the
+/// names OBS lists, NOT by the source package name: a multi-flavor Python
+/// package `python-events` ships `python313-Events-…rpm`, which no
+/// `python-events-` prefix would ever match. If the listing cannot be read,
+/// fall back to counting RPMs written in the last few minutes.
+fn downloaded_rpm_count(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    rpms_dir: &std::path::Path,
+) -> usize {
+    let listing = osc_api(&format!(
+        "/build/{project}/{}/{}/{}",
+        enc(repo),
+        enc(arch),
+        enc(pkg_name)
+    ))
+    .map(|xml| obs_status::parse_binary_rpms(&xml));
+    match listing {
+        Some(names) => names.iter().filter(|n| rpms_dir.join(n).is_file()).count(),
+        None => count_recent_rpms(rpms_dir, Duration::from_secs(600)),
+    }
+}
+
+/// `.rpm` files (not `.src.rpm`) in `rpms_dir` modified within `window`.
+/// Returns 0 when the directory doesn't exist or can't be read.
+fn count_recent_rpms(rpms_dir: &std::path::Path, window: Duration) -> usize {
     let Ok(iter) = std::fs::read_dir(rpms_dir) else {
         return 0;
     };
@@ -1340,7 +1360,14 @@ fn count_rpms(rpms_dir: &std::path::Path, pkg_name: &str) -> usize {
         .filter(|e| {
             let n = e.file_name();
             let n = n.to_string_lossy();
-            n.starts_with(prefix.as_str()) && n.ends_with(".rpm")
+            n.ends_with(".rpm") && !n.ends_with(".src.rpm")
+        })
+        .filter(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age <= window)
         })
         .count()
 }
@@ -1591,7 +1618,7 @@ pub fn obs_build(
         // (empty binary set for this repo/arch pair), which the warning
         // version silently papered over.
         let fetch_result = get_binaries(project, pkg_name, repo, arch, rpms_dir, emit);
-        let downloaded_count = count_rpms(rpms_dir, pkg_name);
+        let downloaded_count = downloaded_rpm_count(project, pkg_name, repo, arch, rpms_dir);
         if let Err(e) = fetch_result {
             reporter.report(&Event::CommandDone {
                 step,
@@ -1681,24 +1708,23 @@ mod count_rpms_tests {
     use super::*;
 
     #[test]
-    fn count_rpms_sees_only_matching_rpm_files() {
+    fn recent_rpms_exclude_source_rpms_and_other_files() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("python-foo-1.0-1.1.x86_64.rpm"), b"").unwrap();
-        std::fs::write(tmp.path().join("python-foo-doc-1.0-1.1.noarch.rpm"), b"").unwrap();
-        std::fs::write(tmp.path().join("python-bar-1.0-1.1.x86_64.rpm"), b"").unwrap();
-        std::fs::write(tmp.path().join("python-foo-1.0-1.1.x86_64.src.rpm"), b"").unwrap();
-        std::fs::write(tmp.path().join("not-an-rpm.txt"), b"").unwrap();
-
-        // Both the main binary and the `-doc` subpackage count — anything
-        // starting with "python-foo-" and ending with .rpm.
-        assert!(count_rpms(tmp.path(), "python-foo") >= 2);
-        assert!(count_rpms(tmp.path(), "python-bar") >= 1);
-        assert_eq!(count_rpms(tmp.path(), "python-nonexistent"), 0);
+        std::fs::write(tmp.path().join("python313-Events-0.5-2.1.noarch.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("python-events-0.5-2.1.src.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("_buildenv"), b"").unwrap();
+        assert_eq!(count_recent_rpms(tmp.path(), Duration::from_secs(60)), 1);
     }
 
     #[test]
-    fn count_rpms_tolerates_missing_dir() {
-        assert_eq!(count_rpms(std::path::Path::new("/does/not/exist"), "x"), 0);
+    fn recent_rpms_tolerates_missing_dir() {
+        assert_eq!(
+            count_recent_rpms(
+                std::path::Path::new("/does/not/exist"),
+                Duration::from_secs(60)
+            ),
+            0
+        );
     }
 }
 
