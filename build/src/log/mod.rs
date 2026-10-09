@@ -7,6 +7,7 @@
 //! compiles C is worse. Sending raw logs would make the log the dominant cost
 //! of every attempt *and* bury the signal.
 
+pub mod cause;
 pub mod failure;
 pub mod line;
 pub mod paths;

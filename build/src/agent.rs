@@ -3646,7 +3646,15 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     };
 
     let hint_section = if let Some(hint) = req.hint {
-        let mut s = String::from(
+        let mut s = String::new();
+        // Lead with the mechanically-recognised cause, if any, so the agent
+        // acts on it instead of re-deriving it from the log.
+        let spec_text = std::fs::read_to_string(req.workspace.join("spec")).unwrap_or_default();
+        let own_module = req.pkg_name.to_lowercase().replace(['-', '.'], "_");
+        if let Some(cause) = crate::log::cause::detect(hint, &own_module, &spec_text) {
+            s.push_str(&cause.render());
+        }
+        s.push_str(
             "The following is a heuristic extract of the build log. \
              It may be incomplete or wrong. The full log is at build.log.\n\n",
         );
@@ -3979,6 +3987,36 @@ mod tests {
         assert!(prompt.contains("convention 30"));
         // And the repository-archive note, since this did not come from a sdist.
         assert!(prompt.contains("archive of the upstream repository"));
+    }
+
+    /// The mechanically-recognised cause leads the hint section, before the
+    /// excerpt, so the agent acts on it instead of re-reading the log.
+    #[test]
+    fn a_probable_cause_leads_the_hint_section() {
+        let log_text = [
+            "[   1s] Executing(%check): /usr/bin/bash -e /var/tmp/rpm-tmp.abc",
+            "[   2s] Traceback (most recent call last):",
+            "[   3s] ModuleNotFoundError: No module named 'transformers'",
+            "[   4s] error: Bad exit status from /var/tmp/rpm-tmp.abc (%check)",
+        ]
+        .join("\n");
+        let hint = crate::log::extract(
+            &log_text,
+            &crate::log::PathMapper::with_sdist_root("cuda-python-1.0"),
+        );
+        let ws = std::path::Path::new("/nonexistent-workspace");
+        let mut req = request(ws, &[]);
+        req.hint = Some(&hint);
+        let prompt = build_turn_prompt(&req);
+
+        let cause = prompt
+            .find("## Probable cause (read from the build log by auto-package)")
+            .expect("the cause section is present");
+        let excerpt = prompt
+            .find("heuristic extract of the build log")
+            .expect("the heuristic hint is still there");
+        assert!(cause < excerpt, "{prompt}");
+        assert!(prompt.contains("%{python_module transformers}"), "{prompt}");
     }
 
     #[test]
