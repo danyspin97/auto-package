@@ -1457,6 +1457,52 @@ mod tests {
         assert_eq!(nv("-1.0.tar.gz"), None);
     }
 
+    /// The positive half: the right host over https does get its token, and a
+    /// self-hosted GitLab only when `GITLAB_HOST` names it.
+    #[test]
+    fn forge_tokens_are_attached_to_the_matching_host_only() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<_> = [
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GITLAB_TOKEN",
+            "CI_JOB_TOKEN",
+            "GITLAB_HOST",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
+        unsafe {
+            for (k, _) in &saved {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("GITHUB_TOKEN", "gh-secret");
+            std::env::set_var("GITLAB_TOKEN", "gl-secret");
+        }
+        let gh = forge_auth_header("https://api.github.com/repos/o/r/tags");
+        let gl = forge_auth_header("https://gitlab.com/api/v4/projects?search=x");
+        let selfhosted_before = forge_auth_header("https://git.example.org/api/v4/projects");
+        unsafe { std::env::set_var("GITLAB_HOST", "git.example.org") };
+        let selfhosted_after = forge_auth_header("https://git.example.org/api/v4/projects");
+        let other = forge_auth_header("https://evil.example.net/api/v4/projects");
+        unsafe {
+            for (k, v) in &saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert_eq!(gh, Some(("Authorization", "Bearer gh-secret".to_string())));
+        assert_eq!(gl, Some(("PRIVATE-TOKEN", "gl-secret".to_string())));
+        assert_eq!(selfhosted_before, None);
+        assert_eq!(
+            selfhosted_after,
+            Some(("PRIVATE-TOKEN", "gl-secret".to_string()))
+        );
+        assert_eq!(other, None);
+    }
+
     #[test]
     fn forge_tokens_go_to_exact_hosts_over_https_only() {
         // SAFETY of test env: variables are process-global; use unlikely values

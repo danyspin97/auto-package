@@ -5175,6 +5175,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pkg_state_survives_a_round_trip_and_leaves_no_temp_file() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        let st = PkgState {
+            last_built_version: Some("1.2.3".into()),
+            last_outcome: Some("success".into()),
+            ..Default::default()
+        };
+        st.save(&ws).unwrap();
+        let loaded = PkgState::load(&ws);
+        assert_eq!(loaded.last_built_version.as_deref(), Some("1.2.3"));
+        assert!(!ws.state_json().with_extension("json.tmp").exists());
+    }
+
+    /// A truncated/corrupt state.json used to be silently replaced by the
+    /// default on the next save, erasing the package's history. It must be
+    /// kept aside instead.
+    #[test]
+    fn a_corrupt_state_file_is_preserved_not_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        std::fs::write(ws.state_json(), "{ \"last_built_version\": \"1.0\", ").unwrap();
+        let loaded = PkgState::load(&ws);
+        assert!(loaded.last_built_version.is_none());
+        let kept = ws.state_json().with_extension("json.bad");
+        assert!(std::fs::read_to_string(kept).unwrap().contains("1.0"));
+    }
+
+    #[test]
+    fn a_missing_state_file_is_just_the_default() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        assert!(PkgState::load(&ws).last_built_version.is_none());
+        assert!(!ws.state_json().with_extension("json.bad").exists());
+    }
+
+    #[test]
+    fn agent_job_limit_defaults_to_three_and_ignores_junk() {
+        // SAFETY: tests in this module that touch this variable run serially
+        // through the lock below.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("AUTO_PACKAGE_AGENT_JOBS") };
+        assert_eq!(AgentSlot::limit(), 3);
+        for junk in ["0", "-1", "many", ""] {
+            unsafe { std::env::set_var("AUTO_PACKAGE_AGENT_JOBS", junk) };
+            assert_eq!(AgentSlot::limit(), 3, "{junk:?}");
+        }
+        unsafe { std::env::set_var("AUTO_PACKAGE_AGENT_JOBS", "7") };
+        assert_eq!(AgentSlot::limit(), 7);
+        unsafe { std::env::remove_var("AUTO_PACKAGE_AGENT_JOBS") };
+    }
+
+    #[test]
+    fn rate_limit_cooldown_is_shared_and_only_ever_extended() {
+        note_rate_limited(std::time::Duration::from_secs(40));
+        let first = (*RATE_LIMIT_UNTIL.lock().unwrap()).unwrap();
+        note_rate_limited(std::time::Duration::from_secs(1)); // shorter: ignored
+        assert_eq!((*RATE_LIMIT_UNTIL.lock().unwrap()).unwrap(), first);
+        note_rate_limited(std::time::Duration::from_secs(400)); // longer: extends
+        assert!((*RATE_LIMIT_UNTIL.lock().unwrap()).unwrap() > first);
+        // leave no pause behind for other tests
+        *RATE_LIMIT_UNTIL.lock().unwrap() = None;
+    }
+
+    /// The service-run gate trusts `missing_source_files`: a URL Source is judged
+    /// by the file name it would download to.
+    #[test]
+    fn a_url_source_is_present_once_its_file_is_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Source0: https://files.pythonhosted.org/packages/ab/cd/x-1.0-cp313-cp313-manylinux_2_27_x86_64.whl\n";
+        assert_eq!(
+            missing_source_files(spec, dir.path()),
+            vec!["x-1.0-cp313-cp313-manylinux_2_27_x86_64.whl"]
+        );
+        std::fs::write(
+            dir.path()
+                .join("x-1.0-cp313-cp313-manylinux_2_27_x86_64.whl"),
+            b"",
+        )
+        .unwrap();
+        assert!(missing_source_files(spec, dir.path()).is_empty());
+    }
+
+    #[test]
     fn maturin_service_vendors_the_crate_maturin_builds() {
         let plain = render_maturin_service_file("outlines_core", &[]);
         assert_eq!(plain.matches("name=\"cargotoml\"").count(), 1);
