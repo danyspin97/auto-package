@@ -173,7 +173,7 @@ enum Commands {
         max_attempts: usize,
 
         /// USD budget cap for agent calls (per rebuild).
-        #[arg(long, default_value_t = 2.0)]
+        #[arg(long, default_value_t = 10.0)]
         budget_usd: f64,
 
         /// Build only; never call the model.
