@@ -222,6 +222,31 @@ fn read_manifest(entry: &mut impl Read) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// The `Root-Is-Purelib` value from a wheel's `*.dist-info/WHEEL` file.
+///
+/// This — not the platform tag — decides where `pip install` puts a wheel's
+/// files: `true` means `purelib` (`%{python_sitelib}`), `false` means
+/// `platlib` (`%{python_sitearch}`). NVIDIA's CUDA wheels carry a
+/// `py3-none-manylinux_*` tag (they ship `.so` files) yet say `true`, so their
+/// files land in sitelib. `None` when the file cannot be read.
+pub fn wheel_root_is_purelib(wheel: &Path) -> Option<bool> {
+    let file = std::fs::File::open(wheel).ok()?;
+    let mut zip_archive = zip::ZipArchive::new(file).ok()?;
+    let name = (0..zip_archive.len()).find_map(|i| {
+        let n = zip_archive.name_for_index(i)?;
+        (n.ends_with(".dist-info/WHEEL") && n.matches('/').count() == 1).then(|| n.to_string())
+    })?;
+    let entry = zip_archive.by_name(&name).ok()?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut std::io::Read::take(entry, 64 * 1024), &mut text).ok()?;
+    text.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("Root-Is-Purelib")
+            .then(|| v.trim().eq_ignore_ascii_case("true"))
+    })
+}
+
 /// Extract the sdist tarball into `dest`.
 ///
 /// Every entry in the archive is unpacked under `dest`. Well-formed sdists
@@ -1365,5 +1390,22 @@ build-backend = "flit_core.buildapi"
     fn tar_error_display_includes_cause() {
         let e = Error::Tar(std::io::Error::other("boom"));
         assert!(e.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn wheel_root_is_purelib_reads_the_wheel_metadata() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        for (value, expect) in [("true", true), ("false", false)] {
+            let path = dir.path().join(format!("w-{value}.whl"));
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            zw.start_file("pkg-1.0.dist-info/WHEEL", opts).unwrap();
+            write!(zw, "Wheel-Version: 1.0\nRoot-Is-Purelib: {value}\nTag: py3-none-manylinux_2_17_x86_64\n").unwrap();
+            zw.finish().unwrap();
+            assert_eq!(wheel_root_is_purelib(&path), Some(expect));
+        }
+        assert_eq!(wheel_root_is_purelib(&dir.path().join("missing.whl")), None);
     }
 }

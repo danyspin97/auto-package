@@ -948,6 +948,7 @@ pub fn wheel_binary_skeleton(
     version: &str,
     wheel_filename: &str,
     release: &Release,
+    root_is_purelib: Option<bool>,
 ) -> String {
     let name = pkg_name.to_lowercase();
     let summary = release
@@ -956,17 +957,27 @@ pub fn wheel_binary_skeleton(
         .unwrap_or("FIXME: add package summary");
     let license = license_tag(&release.license);
     let url = release.homepage.as_deref().unwrap_or("FIXME");
-    // A platform wheel (`...-manylinux_2_17_x86_64.whl`) carries compiled
-    // binaries and belongs in sitearch; a universal wheel (`...-none-any.whl`)
-    // is the noarch/sitelib case. Best-effort guess from the filename tag —
-    // confirm against the actual unpacked contents before the first build.
+    // Two independent facts about a wheel:
+    //  * is the PACKAGE arch-specific? Only the platform tag says so:
+    //    `-none-any.whl` is noarch; anything else (`manylinux_*_x86_64`) is not,
+    //    and gets `ExclusiveArch` for the architecture it was built for.
+    //  * which DIRECTORY does it install into? That is `Root-Is-Purelib` in the
+    //    wheel's WHEEL file (`true` -> %{python_sitelib}, `false` ->
+    //    %{python_sitearch}), whatever the tag. NVIDIA's CUDA wheels are
+    //    manylinux-tagged but purelib, so a spec that assumes sitearch for them
+    //    packages nothing and `%check` cannot import the module.
     let is_pure = wheel_filename.ends_with("-none-any.whl");
     let arch_line = if is_pure {
-        "BuildArch:      noarch\n"
+        "BuildArch:      noarch\n".to_string()
+    } else if wheel_filename.contains("x86_64") {
+        "ExclusiveArch:  x86_64\n".to_string()
+    } else if wheel_filename.contains("aarch64") {
+        "ExclusiveArch:  aarch64\n".to_string()
     } else {
-        ""
+        String::new()
     };
-    let sitedir = if is_pure {
+    let purelib = root_is_purelib.unwrap_or(is_pure);
+    let sitedir = if purelib {
         "python_sitelib"
     } else {
         "python_sitearch"
@@ -1242,7 +1253,13 @@ BuildRequires:  %{python_module cmake}
             License::FreeText("NVIDIA Proprietary".to_string()),
         );
         let wheel = "nvidia_cuda_nvcc_cu13-13.0.88-py3-none-manylinux_2_17_x86_64.whl";
-        let spec = wheel_binary_skeleton("nvidia-cuda-nvcc-cu13", "13.0.88", wheel, &release);
+        let spec = wheel_binary_skeleton(
+            "nvidia-cuda-nvcc-cu13",
+            "13.0.88",
+            wheel,
+            &release,
+            Some(false),
+        );
 
         assert!(spec.contains(&format!("Source0:        {wheel}")), "{spec}");
         assert!(
@@ -1253,11 +1270,25 @@ BuildRequires:  %{python_module cmake}
         assert!(spec.contains("%pyproject_install %{SOURCE0}"), "{spec}");
     }
 
+    /// NVIDIA's real shape: arch-specific tag, but `Root-Is-Purelib: true`.
+    /// Not noarch (it ships `.so`), exclusive to the wheel's arch, and
+    /// installed under sitelib — where pip actually puts it.
+    #[test]
+    fn a_manylinux_purelib_wheel_is_arch_specific_but_installs_to_sitelib() {
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let wheel = "nvidia_curand-10.4.0.35-py3-none-manylinux_2_27_x86_64.whl";
+        let spec = wheel_binary_skeleton("nvidia-curand", "10.4.0.35", wheel, &release, Some(true));
+        assert!(!spec.contains("BuildArch:      noarch"), "{spec}");
+        assert!(spec.contains("ExclusiveArch:  x86_64"), "{spec}");
+        assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");
+        assert!(!spec.contains("python_sitearch"), "{spec}");
+    }
+
     #[test]
     fn wheel_binary_skeleton_marks_pure_wheels_as_noarch() {
         let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
         let wheel = "somepkg-1.0-py3-none-any.whl";
-        let spec = wheel_binary_skeleton("somepkg", "1.0", wheel, &release);
+        let spec = wheel_binary_skeleton("somepkg", "1.0", wheel, &release, Some(true));
 
         assert!(spec.contains("BuildArch:      noarch"), "{spec}");
         assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");

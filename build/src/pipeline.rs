@@ -3945,9 +3945,10 @@ fn generate_wheel_binary_spec(
         wheel.filename,
     );
 
-    wheel
+    let wheel_path = wheel
         .fetch(checkout_dir)
         .map_err(|e| GenSpecError::Other(format!("wheel download failed: {e}")))?;
+    let root_is_purelib = ap_ecosystem::sdist::wheel_root_is_purelib(&wheel_path);
 
     let release = ap_ecosystem::pypi::parse_release_with_tarball(pypi_json, &wheel.filename)
         .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
@@ -3957,6 +3958,7 @@ fn generate_wheel_binary_spec(
         &config.version,
         &wheel.filename,
         &release,
+        root_is_purelib,
     );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
     std::fs::write(spec_path, &spec_text)

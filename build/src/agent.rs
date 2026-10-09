@@ -1860,9 +1860,11 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       and `%python<NNN>_fix_shebang` — the same macro the shared
       multi-flavor loop calls internally, just invoked once per flavor with
       a different argument instead of the same one N times.)
-   e. Everything else — License from `source/*.dist-info/`, arch vs. noarch
-      from each wheel's platform tag (NOT `Root-Is-Purelib`: a `manylinux_*`
-      wheel is arch-specific even when that says true), `%check` needing a real
+   e. Everything else — License from `source/*.dist-info/`, arch-specific
+      or not from each wheel's platform tag but the install DIRECTORY
+      (`%{python_sitelib}` vs `%{python_sitearch}`) from `Root-Is-Purelib` in
+      its `WHEEL` file (a `manylinux_*` wheel saying `true` installs to
+      sitelib), `%check` needing a real
       import/file check rather than a blind `%pytest_arch` if the actual
       test suite needs a GPU (Exception 2) — follows the
       `prebuilt-wheel-packaging` skill exactly as for a single wheel; load

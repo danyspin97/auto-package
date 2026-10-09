@@ -23,26 +23,42 @@ must account for. Do this before touching %files; never guess the layout.
 
 - `%install` is just `%pyproject_install %{SOURCE0}` — it accepts a
   pre-built wheel path directly, no `%pyproject_wheel` step first.
-- Arch vs. noarch is decided by the wheel FILENAME's platform tag, and the
-  generator already applied it: `-none-any.whl` → `BuildArch: noarch` and
-  `%{python_sitelib}`; anything else (`manylinux2014_x86_64`, `win_amd64`,
-  ...) → arch-specific and `%{python_sitearch}`. Do NOT change it because
-  `WHEEL` says `Root-Is-Purelib: true` — NVIDIA's CUDA wheels say that and
-  still ship `.so` files under a `py3-none-manylinux_*` tag; flipping them to
-  noarch/sitelib fails rpmlint (`arch-independent-package-contains-binary-or-object`)
-  and costs attempts (nvidia-cuda-runtime, nvidia-cuda-nvrtc, nvidia-curand
-  all did this). Only override the generator when the filename tag and the
-  contents truly disagree, and say which file proves it.
+  It already runs once per Python flavor. NEVER wrap it in `%python_expand`
+  (the nested expansion breaks the bytecode-compile step with an
+  `IndentationError` — seen on nvidia-cusparselt-cu13 and nvidia-nvjitlink)
+  and do not replace it with a hand-written `pip install --root`; neither
+  fixes anything. If `%check` fails to import the module after install, the
+  cause is almost always the site directory (see the next bullet), not the
+  install macro: read the "Installing collected packages" / unpackaged-files
+  lines in build.log to see where the files actually went.
+- Two separate decisions, and the generator already made both from the wheel:
+  * ARCH-SPECIFIC or not comes from the wheel FILENAME's platform tag:
+    `-none-any.whl` → `BuildArch: noarch`; anything else
+    (`manylinux2014_x86_64`, ...) → no `noarch`, plus `ExclusiveArch:  x86_64`
+    (or `aarch64`) for the architecture it was built for.
+  * WHICH DIRECTORY the files land in comes from `Root-Is-Purelib` in
+    `source/*.dist-info/WHEEL`, NOT from the tag: `true` → `%{python_sitelib}`,
+    `false` → `%{python_sitearch}`. NVIDIA's CUDA wheels (`...-py3-none-manylinux_*`)
+    say `Root-Is-Purelib: true`, so pip installs them under **sitelib** even
+    though they ship `.so` files and are arch-specific. Specs that switched
+    these to `%{python_sitearch}` packaged nothing and `%check` failed with
+    `ModuleNotFoundError: No module named 'nvidia'` (nvidia-cusparselt-cu13,
+    nvidia-nvjitlink, nvidia-cufile all burned attempts on this); the specs
+    that went green (nvidia-curand, nvidia-cuda-cupti) use `ExclusiveArch`
+    with `%{python_sitelib}`. Use ONE site macro consistently in `%fdupes`,
+    `%check` and `%files`, and do not flip it or add/remove `noarch` unless
+    the unpacked `source/` proves the generator wrong — read the `WHEEL`
+    file, don't guess.
 - `%check` for a wheel: there is no source tree, so check the installed
   files. Run any import from a fresh empty directory with
-  `PYTHONPATH=%{buildroot}%{$python_sitearch}` (or `sitelib` for noarch) —
+  `PYTHONPATH=%{buildroot}%{$python_sitelib}` (the same site macro the `%files` use) —
   from the build directory the buildroot is not on `sys.path` and the import
   fails with `ModuleNotFoundError` (six NVIDIA packages spent an attempt on
   exactly this). Many of these wheels are NAMESPACE or BINARY-ONLY: `nvidia/`
   has no `__init__.py` and the wheel holds only `lib*.so` and headers, so
   there is nothing to import (`nvidia-nvjitlink`, `nvidia-cufile`). Then
   assert the real payload exists instead, with a path taken from RECORD:
-    test -e %{buildroot}%{python_sitearch}/nvidia/cu13/lib/libnvJitLink.so.13
+    test -e %{buildroot}%{python_sitelib}/nvidia/cu13/lib/libnvJitLink.so.13
   Never `find %{buildroot}` blindly or rely on a macro inside a `%check`
   shell snippet that RPM has not expanded the way you expect.
 - Namespace package directories (`nvidia/`, `nvidia/cu13/`) shared with other
