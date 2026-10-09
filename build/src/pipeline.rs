@@ -176,15 +176,33 @@ fn hash_spec(content: &str) -> u64 {
 
 impl PkgState {
     pub fn load(ws: &Workspace) -> Self {
-        std::fs::read_to_string(ws.state_json())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let path = ws.state_json();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            // Keep the unreadable file: defaulting and then saving would
+            // otherwise erase the package's history without a trace.
+            let bad = path.with_extension("json.bad");
+            ap_core::diag!(
+                "  {} is corrupt ({e}); keeping it as {} and starting fresh",
+                path.display(),
+                bad.display()
+            );
+            let _ = std::fs::rename(&path, &bad);
+            Self::default()
+        })
     }
 
+    /// Written to a temporary file and renamed, so a crash mid-write leaves
+    /// the previous state rather than a truncated one.
     pub fn save(&self, ws: &Workspace) -> std::io::Result<()> {
-        let s = serde_json::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(ws.state_json(), s)
+        let s = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let path = ws.state_json();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, s)?;
+        std::fs::rename(&tmp, &path)
     }
 
     /// Does state.json record a GREEN build of this version?
@@ -354,9 +372,9 @@ pub fn select_target(
         // Join the fetches (likely already done while pip was resolving).
         (
             nodes,
-            own_handle.join().unwrap_or_default(),
-            linked_handle.join().unwrap_or_default(),
-            statuses_handle.join().unwrap_or_default(),
+            join_or_warn(own_handle, "own"),
+            join_or_warn(linked_handle, "linked"),
+            join_or_warn(statuses_handle, "statuses"),
         )
     });
     let nodes = nodes.map_err(|e| format!("resolve failed: {e}"))?;
@@ -664,6 +682,15 @@ fn dep_names_from_requires_dist(requires_dist: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Join a resolve-phase worker, reporting a panic instead of treating it as
+/// an empty (and therefore believable) answer.
+fn join_or_warn<T: Default>(h: std::thread::ScopedJoinHandle<'_, T>, what: &str) -> T {
+    h.join().unwrap_or_else(|_| {
+        ap_core::diag!("  the {what} lookup thread panicked; treating it as empty");
+        T::default()
+    })
 }
 
 // ── main pipeline ─────────────────────────────────────────────────────────────
@@ -2306,12 +2333,37 @@ fn agent_turn(
 /// The returned text is the roll-back point for the edit the agent is about to
 /// make, so the agent's own comment lines never accumulate across attempts.
 fn strip_and_rewrite(spec_path: &Path) -> String {
-    let before = std::fs::read_to_string(spec_path).unwrap_or_default();
+    let before = std::fs::read_to_string(spec_path).unwrap_or_else(|e| {
+        ap_core::diag!("  cannot read {}: {e}", spec_path.display());
+        String::new()
+    });
     let clean = crate::spec::strip_ap_fix_comments(&before);
     if clean != before {
         let _ = std::fs::write(spec_path, &clean);
     }
     clean
+}
+
+/// Put `before` back as the spec after a rejected agent edit.
+///
+/// An empty `before` means the roll-back point could not be read (see
+/// [`strip_and_rewrite`]); no real spec is empty, so writing it would
+/// destroy the file the agent edited instead of restoring it. A failed
+/// write is reported rather than dropped.
+fn restore_spec(spec_path: &Path, before: &str, step: &StepDir, reporter: &dyn Reporter) {
+    let problem = if before.trim().is_empty() {
+        Some("no readable roll-back point; leaving the spec as the agent left it".to_string())
+    } else {
+        std::fs::write(spec_path, before)
+            .err()
+            .map(|e| format!("writing the rolled-back spec failed: {e}"))
+    };
+    if let Some(message) = problem {
+        reporter.report(&Event::Warning {
+            step: Some(step.id),
+            message: format!("{}: {message}", spec_path.display()),
+        });
+    }
 }
 
 /// Point the durable workspace's `build.log` at this run's build log.
@@ -2562,7 +2614,7 @@ fn accept_or_restore_with_snapshot(
             },
             restored_from: spec_path.to_path_buf(),
         });
-        let _ = std::fs::write(spec_path, before);
+        restore_spec(spec_path, before, step, reporter);
         // When we have a full-checkout snapshot, roll back patches /
         // `.changes` / `_service` / etc. too — the agent's edits are an
         // atomic unit, and a half-reverted checkout is a worse state
@@ -2664,7 +2716,7 @@ fn apply_turn_outcome(
             if let Some(snap) = snapshot {
                 snap.restore(reporter, step);
             }
-            let _ = std::fs::write(spec_path, before);
+            restore_spec(spec_path, before, step, reporter);
             Err(format!("{label}: agent blocked: {why}"))
         }
         crate::agent::Action::NoChange => {
@@ -4030,9 +4082,17 @@ fn render_maturin_service_file(normalized_name: &str) -> String {
 }
 
 fn append_notes(notes_path: PathBuf, section: &str) {
-    let mut existing = std::fs::read_to_string(&notes_path).unwrap_or_default();
-    existing.push_str(section);
-    let _ = std::fs::write(notes_path, existing);
+    // Append, never read-modify-write: a failed read used to replace the
+    // whole journal with just this section.
+    use std::io::Write;
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&notes_path)
+        .and_then(|mut f| f.write_all(section.as_bytes()));
+    if let Err(e) = result {
+        ap_core::diag!("  cannot append to {}: {e}", notes_path.display());
+    }
 }
 
 /// Fix broken workspace definitions in a Cargo.toml inside a tarball.
@@ -4644,6 +4704,15 @@ fn verify_repo_exists(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_notes_appends_and_never_truncates() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("notes.md");
+        append_notes(p.clone(), "one\n");
+        append_notes(p.clone(), "two\n");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\n");
+    }
 
     /// The synthetic-release fallback for "project genuinely not on
     /// PyPI": fills in only what we know (name, version, local tarball
