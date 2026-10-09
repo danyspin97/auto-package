@@ -359,6 +359,18 @@ pub fn capture_with_timeout_env(
     })
 }
 
+pub struct Captured {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Captured {
+    pub fn success(&self) -> bool {
+        self.code == 0
+    }
+}
+
 #[cfg(test)]
 mod capture_timeout_tests {
     use super::*;
@@ -426,17 +438,5 @@ mod capture_timeout_tests {
         )
         .unwrap();
         assert_eq!(out.stdout.len(), 2_000_000);
-    }
-}
-
-pub struct Captured {
-    pub code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl Captured {
-    pub fn success(&self) -> bool {
-        self.code == 0
     }
 }

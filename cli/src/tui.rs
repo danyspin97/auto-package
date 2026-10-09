@@ -783,56 +783,6 @@ fn prompt_key(buf: &mut String, code: KeyCode) -> PromptAction {
     }
 }
 
-#[cfg(test)]
-mod prompt_tests {
-    use super::*;
-
-    fn type_str(buf: &mut String, s: &str) {
-        for c in s.chars() {
-            assert!(matches!(
-                prompt_key(buf, KeyCode::Char(c)),
-                PromptAction::Pending
-            ));
-        }
-    }
-
-    #[test]
-    fn typing_q_or_j_edits_the_buffer_not_the_ui() {
-        let mut b = String::new();
-        type_str(&mut b, "jq-cpp");
-        assert_eq!(b, "jq-cpp");
-    }
-
-    #[test]
-    fn enter_submits_the_trimmed_name() {
-        let mut b = String::new();
-        type_str(&mut b, "  oatpp ");
-        assert!(matches!(
-            prompt_key(&mut b, KeyCode::Enter),
-            PromptAction::Submit(n) if n == "oatpp"
-        ));
-    }
-
-    #[test]
-    fn enter_on_blank_and_esc_cancel_and_backspace_edits() {
-        let mut b = String::from("  ");
-        assert!(matches!(
-            prompt_key(&mut b, KeyCode::Enter),
-            PromptAction::Cancel
-        ));
-        let mut b = String::from("ab");
-        assert!(matches!(
-            prompt_key(&mut b, KeyCode::Backspace),
-            PromptAction::Pending
-        ));
-        assert_eq!(b, "a");
-        assert!(matches!(
-            prompt_key(&mut b, KeyCode::Esc),
-            PromptAction::Cancel
-        ));
-    }
-}
-
 fn select_next(selected: &mut Option<String>, state: &TuiState) {
     let visible = state.visible_order();
     if visible.is_empty() {
@@ -1046,4 +996,54 @@ fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rec
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     f.render_widget(footer, area);
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    fn type_str(buf: &mut String, s: &str) {
+        for c in s.chars() {
+            assert!(matches!(
+                prompt_key(buf, KeyCode::Char(c)),
+                PromptAction::Pending
+            ));
+        }
+    }
+
+    #[test]
+    fn typing_q_or_j_edits_the_buffer_not_the_ui() {
+        let mut b = String::new();
+        type_str(&mut b, "jq-cpp");
+        assert_eq!(b, "jq-cpp");
+    }
+
+    #[test]
+    fn enter_submits_the_trimmed_name() {
+        let mut b = String::new();
+        type_str(&mut b, "  oatpp ");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Enter),
+            PromptAction::Submit(n) if n == "oatpp"
+        ));
+    }
+
+    #[test]
+    fn enter_on_blank_and_esc_cancel_and_backspace_edits() {
+        let mut b = String::from("  ");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Enter),
+            PromptAction::Cancel
+        ));
+        let mut b = String::from("ab");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Backspace),
+            PromptAction::Pending
+        ));
+        assert_eq!(b, "a");
+        assert!(matches!(
+            prompt_key(&mut b, KeyCode::Esc),
+            PromptAction::Cancel
+        ));
+    }
 }
