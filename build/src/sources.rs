@@ -614,25 +614,29 @@ pub fn archive_name_version(file: &str) -> Option<(String, String)> {
 /// file name survives.
 pub fn parse_index_links(html: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = html;
-    while let Some(i) = rest.to_ascii_lowercase().find("href=") {
-        let after = &rest[i + 5..];
+    // Lowercased once: ASCII lowercasing keeps byte offsets, and doing it per
+    // link made a large listing quadratic.
+    let lower = html.to_ascii_lowercase();
+    let mut seen = std::collections::HashSet::new();
+    let mut pos = 0;
+    while let Some(i) = lower[pos..].find("href=") {
+        let after = &html[pos + i + 5..];
         let (quote, body) = match after.chars().next() {
             Some(q @ ('"' | '\'')) => (q, &after[1..]),
             _ => {
-                rest = after;
+                pos += i + 5;
                 continue;
             }
         };
         let Some(end) = body.find(quote) else { break };
         let target = &body[..end];
-        rest = &body[end..];
+        pos = html.len() - body.len() + end;
         let file = last_segment(target);
         if !file.is_empty()
             && !target.contains("..")
             && !target.starts_with('?')
             && !target.starts_with('#')
-            && !out.contains(&file.to_string())
+            && seen.insert(file.to_string())
         {
             out.push(file.to_string());
         }
@@ -645,7 +649,7 @@ pub fn parse_index_links(html: &str) -> Vec<String> {
 /// prefix of a longer one sorts first.
 fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let split = |v: &str| -> Vec<String> {
-        v.split(|c: char| c == '.' || c == '-' || c == '_')
+        v.split(['.', '-', '_'])
             .map(str::to_string)
             .collect()
     };
@@ -1384,6 +1388,16 @@ mod tests {
             parse_index_links(html),
             ["lzip-1.24.tar.gz", "lzip-1.24.tar.gz.sig"]
         );
+    }
+
+    #[test]
+    fn index_links_of_a_large_listing_parse_quickly() {
+        let html: String = (0..20_000)
+            .map(|i| format!("<a href=\"pkg-{i}.tar.gz\">pkg-{i}</a>\n"))
+            .collect();
+        let t = std::time::Instant::now();
+        assert_eq!(parse_index_links(&html).len(), 20_000);
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
