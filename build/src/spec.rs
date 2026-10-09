@@ -763,7 +763,11 @@ pub fn normalize_files_paths(spec: &str, pypi_name: &str) -> String {
     let mut out = String::with_capacity(spec.len());
 
     for line in spec.lines() {
-        let trimmed = line.trim();
+        // py2pack writes these entries with a trailing `/`; splitting at the
+        // last `/` of the untrimmed line made the "prefix" the whole path
+        // and doubled the directory (`x.dist-info/x.dist-info/`) in every
+        // generated spec.
+        let trimmed = line.trim().trim_end_matches('/');
         let rewritten = if trimmed.contains(".dist-info") {
             let prefix = trimmed.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
             format!("{prefix}/{normalized}-%{{version}}.dist-info/")
@@ -1277,6 +1281,21 @@ BuildRequires:  %{python_module cmake}
             out.contains("%{python_sitelib}/rich_toolkit-%{version}.dist-info/"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn trailing_slashes_do_not_double_the_dist_info_directory() {
+        let spec = "\
+%{python_sitelib}/accelerate/
+%{python_sitelib}/accelerate-%{version}.dist-info/
+";
+        let out = normalize_files_paths(spec, "accelerate");
+        assert_eq!(
+            out,
+            "%{python_sitelib}/accelerate/\n%{python_sitelib}/accelerate-%{version}.dist-info/\n"
+        );
+        // Idempotent: a second pass changes nothing.
+        assert_eq!(normalize_files_paths(&out, "accelerate"), out);
     }
 
     #[test]
