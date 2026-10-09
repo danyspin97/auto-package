@@ -227,3 +227,23 @@ the task specifically calls for it:
 - **udev rules**: install to `%{_udevrulesdir}` with
   `BuildRequires: pkgconfig(udev)` — only relevant for a library/daemon
   that talks to hardware directly.
+
+## Git submodules and network access in `%prep`/`%build`
+
+OBS builds have no network. GitHub's release archives also omit git
+submodules, so a CMake project that vendors dependencies as submodules
+(ctranslate2's `third_party/`, llama.cpp-style trees) arrives with those
+directories empty. Do NOT "fix" this with `git submodule update --init`,
+`git clone`, `git config user.email` or a `git commit` in `%prep` — there is
+nothing to fetch from and `python-ctranslate2` burned three attempts on exactly
+that (submodule init, then missing git identity, then the network). Instead,
+in order of preference:
+1. turn the vendored dependency off and use the distro's `-devel` package
+   (`-DWITH_MKL=OFF`, `-DOPENMP_RUNTIME=COMP`, `-DBUILD_CLI=OFF`,
+   `-DUSE_SYSTEM_<NAME>=ON` / `-DCMAKE_DISABLE_FIND_PACKAGE_...` — read the
+   project's CMake options), adding the matching `BuildRequires`;
+2. add the submodule's own release tarball as an extra `SourceN:` (declared
+   via `_service` `download_file`) and unpack it into the empty directory in
+   `%prep` with `tar -xf %{SOURCE1} --strip-components=1 -C third_party/<dir>`;
+3. if neither is possible, report the dependency in `unresolvable_packages`
+   (convention 27) rather than inventing a source.
