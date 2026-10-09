@@ -60,7 +60,14 @@ pub const KNOWN_HOSTS: &[&str] = &[
 
 /// Does `host` look like one of the known forges?
 pub fn is_known_host(host: &str) -> bool {
-    KNOWN_HOSTS.iter().any(|k| host == *k || host.contains(k))
+    KNOWN_HOSTS.iter().any(|k| {
+        if let Some(prefix) = k.strip_suffix('.') {
+            // Prefix rule (`gitlab.`): any `gitlab.<something>` host.
+            host.starts_with(*k) && host.len() > prefix.len() + 1
+        } else {
+            host == *k || host.strip_suffix(k).is_some_and(|h| h.ends_with('.'))
+        }
+    })
 }
 
 /// Parse any forge URL spelling into its parts, dropping sub-paths that
@@ -92,11 +99,14 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
     //   ssh://git@host/path
     //   git@host:owner/path.git  (scp-style, no scheme at all)
     let hostpath = if let Some((_, rest)) = trimmed.split_once("://") {
-        // Drop user@ prefix if present (ssh://git@host/...).
-        rest.split_once('@')
-            .map(|(_, r)| r)
-            .unwrap_or(rest)
-            .to_string()
+        // Drop user@ prefix if present (ssh://git@host/...), but only when
+        // the '@' sits in the authority — a later '@' (a `pkg@1.2.0` tag in
+        // the path) is not userinfo.
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        match rest[..authority_end].rfind('@') {
+            Some(i) => rest[i + 1..].to_string(),
+            None => rest.to_string(),
+        }
     } else if let Some((_user, rest)) = trimmed.split_once('@') {
         // scp-style: user@host:path  → host/path
         rest.replacen(':', "/", 1)
@@ -120,35 +130,20 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
         // GitHub (and anything shaped like it) uses literal sub-paths
         // directly after the repo. Trim at the first one we recognise.
         const GH_SUBPATHS: &[&str] = &[
-            "/archive/",
-            "/releases/",
-            "/releases",
-            "/tree/",
-            "/blob/",
-            "/commits/",
-            "/commit/",
-            "/issues/",
-            "/issues",
-            "/pulls/",
-            "/pulls",
-            "/pull/",
-            "/wiki/",
-            "/wiki",
-            "/raw/",
-            "/tags/",
-            "/tags",
-            "/branches/",
-            "/compare/",
-            "/graphs/",
-            "/settings",
-            "/actions",
-            "/security",
+            "archive", "releases", "tree", "blob", "commits", "commit", "issues", "pulls", "pull",
+            "wiki", "raw", "tags", "branches", "compare", "graphs", "settings", "actions",
+            "security",
         ];
+        // Match whole path segments only, and never the first two (owner
+        // and repo): `owner/actions-toolkit` or `owner/wiki` are repos.
         let mut cut = path.len();
-        for sp in GH_SUBPATHS {
-            if let Some(idx) = path.find(sp) {
-                cut = cut.min(idx);
+        let mut offset: usize = 0;
+        for (i, seg) in path.split('/').enumerate() {
+            if i >= 2 && GH_SUBPATHS.contains(&seg) {
+                cut = offset.saturating_sub(1);
+                break;
             }
+            offset += seg.len() + 1;
         }
         &path[..cut]
     };
@@ -280,6 +275,38 @@ mod tests {
         assert!(is_known_host("gitlab.freedesktop.org"));
         assert!(is_known_host("gitlab.gnome.org"));
         assert!(!is_known_host("example.com"));
+    }
+
+    #[test]
+    fn lookalike_hosts_are_not_known() {
+        assert!(is_known_host("github.com"));
+        assert!(is_known_host("www.github.com"));
+        assert!(!is_known_host("github.com.evil.net"));
+        assert!(!is_known_host("notgitlab.com"));
+    }
+
+    #[test]
+    fn at_sign_in_path_is_not_userinfo() {
+        let f = parse("https://github.com/o/r/releases/tag/pkg@1.2.0").unwrap();
+        assert_eq!(f.project_path, "o/r");
+        let f = parse("https://user@github.com/o/r").unwrap();
+        assert_eq!(f.host, "github.com");
+    }
+
+    #[test]
+    fn sub_paths_match_whole_segments_only() {
+        for name in [
+            "actions-toolkit",
+            "tags-x",
+            "wiki-js",
+            "security-tool",
+            "wiki",
+        ] {
+            let f = parse(&format!("https://github.com/owner/{name}")).unwrap();
+            assert_eq!(f.project_path, format!("owner/{name}"));
+        }
+        let f = parse("https://github.com/owner/wiki-js/issues").unwrap();
+        assert_eq!(f.project_path, "owner/wiki-js");
     }
 
     #[test]

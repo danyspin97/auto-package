@@ -19,6 +19,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -110,19 +111,45 @@ pub enum FetchError {
     Parse(#[from] Error),
 }
 
-/// Fetch and parse the latest release for `name` from PyPI's JSON API.
-pub fn fetch_latest_release(name: &str) -> Result<Release, FetchError> {
-    let url = format!("https://pypi.org/pypi/{name}/json");
+/// Whole-request timeout for the small JSON endpoints.
+const JSON_TIMEOUT: Duration = Duration::from_secs(120);
+/// Whole-request timeout for file downloads.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Download cap when the index didn't tell us the file size.
+const MAX_DOWNLOAD_BYTES: u64 = 2 << 30;
+
+fn agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build()
+        .into()
+}
+
+fn get_json(url: &str) -> Result<String, FetchError> {
     let to_http_err = |e| FetchError::Http {
-        url: url.clone(),
+        url: url.to_string(),
         source: Box::new(e),
     };
-    let json = ureq::get(&url)
+    agent(JSON_TIMEOUT)
+        .get(url)
         .call()
         .map_err(to_http_err)?
         .into_body()
         .read_to_string()
-        .map_err(to_http_err)?;
+        .map_err(to_http_err)
+}
+
+/// Reduce a JSON-supplied filename to a bare file name: no directories, no
+/// `..`, nothing absolute.
+fn safe_filename(filename: &str) -> Option<&str> {
+    let name = Path::new(filename).file_name()?.to_str()?;
+    (name == filename && name != ".." && name != ".").then_some(name)
+}
+
+/// Fetch and parse the latest release for `name` from PyPI's JSON API.
+pub fn fetch_latest_release(name: &str) -> Result<Release, FetchError> {
+    let url = format!("https://pypi.org/pypi/{}/json", urlencoding::encode(name));
+    let json = get_json(&url)?;
     Ok(parse_release(&json)?)
 }
 
@@ -136,17 +163,8 @@ pub fn fetch_latest_release(name: &str) -> Result<Release, FetchError> {
 /// that's trying to flag the bump. Reads `info.version` straight from the
 /// envelope and nothing else.
 pub fn fetch_latest_version(name: &str) -> Result<String, FetchError> {
-    let url = format!("https://pypi.org/pypi/{name}/json");
-    let to_http_err = |e| FetchError::Http {
-        url: url.clone(),
-        source: Box::new(e),
-    };
-    let json = ureq::get(&url)
-        .call()
-        .map_err(to_http_err)?
-        .into_body()
-        .read_to_string()
-        .map_err(to_http_err)?;
+    let url = format!("https://pypi.org/pypi/{}/json", urlencoding::encode(name));
+    let json = get_json(&url)?;
     parse_version_only(&json).map_err(FetchError::from)
 }
 
@@ -171,51 +189,96 @@ impl Sdist {
     /// Idempotent: if the file already exists and its hash matches, the
     /// download is skipped. A corrupted file (wrong hash) is overwritten.
     pub fn fetch(&self, dest_dir: &Path) -> Result<PathBuf, FetchError> {
-        let dest = dest_dir.join(&self.filename);
+        let Some(name) = safe_filename(&self.filename) else {
+            return Err(FetchError::Io {
+                path: PathBuf::from(&self.filename),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "filename is not a plain file name",
+                ),
+            });
+        };
+        let dest = dest_dir.join(name);
 
         if dest.exists() && sha256_of(&dest)? == self.sha256 {
             return Ok(dest);
         }
 
-        let resp = ureq::get(&self.url).call().map_err(|e| FetchError::Http {
-            url: self.url.clone(),
-            source: Box::new(e),
-        })?;
+        // Cap the body: the declared size (plus slack) when known, else a
+        // global ceiling.
+        let limit = if self.size > 0 {
+            self.size.saturating_add(self.size / 10 + 4096)
+        } else {
+            MAX_DOWNLOAD_BYTES
+        };
 
-        let mut hasher = Sha256::new();
-        let mut buf = [0u8; 65536];
-        let mut file = fs::File::create(&dest).map_err(|e| FetchError::Io {
-            path: dest.clone(),
-            source: e,
-        })?;
-        let mut body = resp.into_body().into_reader();
+        let resp = agent(DOWNLOAD_TIMEOUT)
+            .get(&self.url)
+            .call()
+            .map_err(|e| FetchError::Http {
+                url: self.url.clone(),
+                source: Box::new(e),
+            })?;
 
-        loop {
-            let n = body.read(&mut buf).map_err(|e| FetchError::Io {
+        // Download to a private temp name and rename into place, so parallel
+        // fetches of one file never read a half-written file or delete each
+        // other's result.
+        let part = dest_dir.join(format!(
+            "{name}.part-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let result = self.download_to(resp, &part, limit);
+        if let Err(e) = result {
+            let _ = fs::remove_file(&part);
+            return Err(e);
+        }
+        fs::rename(&part, &dest).map_err(|e| {
+            let _ = fs::remove_file(&part);
+            FetchError::Io {
                 path: dest.clone(),
                 source: e,
-            })?;
+            }
+        })?;
+        Ok(dest)
+    }
+
+    /// Stream `resp` into `part`, enforcing `limit` and the sha256.
+    fn download_to(
+        &self,
+        resp: ureq::http::Response<ureq::Body>,
+        part: &Path,
+        limit: u64,
+    ) -> Result<(), FetchError> {
+        let io_err = |e| FetchError::Io {
+            path: part.to_path_buf(),
+            source: e,
+        };
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 65536];
+        let mut file = fs::File::create(part).map_err(io_err)?;
+        let mut body = resp.into_body();
+        let mut reader = body.with_config().limit(limit).reader();
+
+        loop {
+            let n = reader.read(&mut buf).map_err(io_err)?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
-            file.write_all(&buf[..n]).map_err(|e| FetchError::Io {
-                path: dest.clone(),
-                source: e,
-            })?;
+            file.write_all(&buf[..n]).map_err(io_err)?;
         }
+        file.flush().map_err(io_err)?;
 
         let actual = hex::encode(hasher.finalize());
         if actual != self.sha256 {
-            let _ = fs::remove_file(&dest);
             return Err(FetchError::BadDigest {
                 filename: self.filename.clone(),
                 expected: self.sha256.clone(),
                 actual,
             });
         }
-
-        Ok(dest)
+        Ok(())
     }
 }
 
@@ -736,86 +799,6 @@ pub fn source_url_from_json(json: &str) -> Option<String> {
 #[inline]
 pub fn github_url_from_json(json: &str) -> Option<String> {
     source_url_from_json(json)
-}
-
-/// Extract package names from a `requires_dist` list, filtering out deps
-/// that are not relevant for an openSUSE Linux build.
-pub fn parse_dep_names(requires_dist: &[String]) -> Vec<String> {
-    requires_dist
-        .iter()
-        .filter_map(|req| {
-            let (spec, marker) = req
-                .split_once(';')
-                .map(|(s, m)| (s.trim(), Some(m.trim())))
-                .unwrap_or((req.as_str(), None));
-
-            if let Some(m) = marker {
-                // Skip extras-gated deps (optional).
-                if m.contains("extra ==") || m.contains("extra==") {
-                    return None;
-                }
-                // Skip Windows-only deps — but only when the marker is
-                // actually gated TO Windows, not when it is gated AWAY
-                // from Windows (`sys_platform != 'win32'` means
-                // "everywhere except Windows", which on Linux is a
-                // keep, not a drop). The pre-fix substring check
-                // `.contains("sys_platform") && .contains("win32")`
-                // ignored the operator and dropped both.
-                if marker_is_windows_only(m) {
-                    return None;
-                }
-            }
-
-            // Strip version constraints, extras brackets, and parentheses to
-            // get the bare package name.
-            let name = spec
-                .split(['>', '<', '=', '!', '~', '[', '(', ','])
-                .next()
-                .unwrap_or(spec)
-                .trim()
-                .to_lowercase();
-
-            if name.is_empty() { None } else { Some(name) }
-        })
-        .collect()
-}
-
-/// True iff a PEP 508 environment marker gates the dependency *to* Windows
-/// specifically — a strict equality to `sys_platform == 'win32'` or
-/// `platform_system == 'Windows'`.
-///
-/// Deliberately does NOT drop on inequality (`sys_platform != 'win32'`,
-/// which means "install everywhere except Windows", a keep for a Linux
-/// build) or on an equality to another platform (`sys_platform == 'linux'`,
-/// also a keep). The pre-fix check was a bare substring match on
-/// "sys_platform" + "win32" and dropped both; the earlier review reproduced
-/// a `sys_platform != 'win32'` dep being silently removed from a Linux dep
-/// list that way.
-///
-/// Known limitation: a boolean `or` combining windows and another
-/// platform-specific equality — e.g. `sys_platform == 'win32' or
-/// sys_platform == 'linux'` — would still be wrongly dropped by this
-/// substring-only check. Such markers do not appear in the current
-/// dependency corpus; a full PEP 508 evaluator belongs in `pep508_rs`,
-/// not this filter.
-pub(crate) fn marker_is_windows_only(m: &str) -> bool {
-    let n = normalize_marker(m);
-    n.contains("sys_platform=='win32'") || n.contains("platform_system=='Windows'")
-}
-
-/// Strip whitespace and unify quoting on a PEP 508 marker so a substring
-/// check can match `sys_platform == 'win32'` and `sys_platform=="win32"`
-/// identically.
-fn normalize_marker(m: &str) -> String {
-    let mut out = String::with_capacity(m.len());
-    for c in m.chars() {
-        match c {
-            '"' => out.push('\''),
-            c if c.is_whitespace() => {}
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 /// Extract the PyPI project name from a spec's `Source:` URL.
@@ -1433,65 +1416,6 @@ mod tests {
         assert!(pypi_name_from_versioned_tarball("something.tar.gz", "9.9.9").is_none());
     }
 
-    /// Earlier review probe: `sys_platform != 'win32'` was dropped by the
-    /// substring-only check. That marker means "install everywhere except
-    /// Windows", which on a Linux build is a KEEP, not a drop.
-    #[test]
-    fn marker_filter_keeps_a_sys_platform_not_equal_win32_dep() {
-        // The real shape of the bug — one top-level dep kept, one skipped.
-        let reqs = vec![
-            "requests; sys_platform != 'win32'".to_string(),
-            "pywin32; sys_platform == 'win32'".to_string(),
-        ];
-        assert_eq!(
-            parse_dep_names(&reqs),
-            vec!["requests"],
-            "the != 'win32' dep must survive; only the == 'win32' one is Windows-only"
-        );
-    }
-
-    #[test]
-    fn marker_filter_drops_both_equality_quote_styles() {
-        for src in [
-            "winreg; sys_platform == 'win32'",
-            "winreg; sys_platform==\"win32\"",
-            "pywintypes; platform_system == 'Windows'",
-        ] {
-            let reqs = vec![src.to_string()];
-            assert!(
-                parse_dep_names(&reqs).is_empty(),
-                "{src:?} is Windows-only; must be dropped"
-            );
-        }
-    }
-
-    #[test]
-    fn marker_filter_keeps_a_linux_only_dep_rather_than_dropping_it_as_if_windows_only() {
-        let reqs = vec!["evdev; sys_platform == 'linux'".to_string()];
-        assert_eq!(
-            parse_dep_names(&reqs),
-            vec!["evdev"],
-            "'linux' equality has nothing to do with Windows; must not be dropped"
-        );
-    }
-
-    #[test]
-    fn marker_filter_keeps_a_platform_system_not_equal_windows_dep() {
-        let reqs = vec!["posix_only; platform_system != 'Windows'".to_string()];
-        assert_eq!(parse_dep_names(&reqs), vec!["posix_only"]);
-    }
-
-    #[test]
-    fn marker_filter_drops_a_windows_only_marker_with_a_trailing_and_clause() {
-        // AND-connected: for the whole marker to be true on Linux, every
-        // conjunct must hold on Linux. `sys_platform == 'win32'` is false
-        // on Linux, so the whole marker is false, so the dep is Windows-
-        // only in effect. The substring check correctly catches this.
-        let reqs =
-            vec!["colorama; sys_platform == 'win32' and python_version >= '3.10'".to_string()];
-        assert!(parse_dep_names(&reqs).is_empty());
-    }
-
     /// A wheel-only release — NVIDIA's CUDA toolkit packages are the real
     /// case — has `info.version` but no sdist. `parse_release` refuses it,
     /// which is correct for the full sdist consumers; `parse_version_only`
@@ -1515,6 +1439,26 @@ mod tests {
         }
       ]
     }"#;
+
+    #[test]
+    fn safe_filename_rejects_anything_but_a_bare_name() {
+        assert_eq!(safe_filename("a-1.0.tar.gz"), Some("a-1.0.tar.gz"));
+        for bad in ["../x", "/etc/passwd", "a/b", "..", ".", ""] {
+            assert_eq!(safe_filename(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn fetch_refuses_a_traversing_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Sdist {
+            filename: "../evil".into(),
+            url: "http://127.0.0.1:1/x".into(),
+            sha256: String::new(),
+            size: 0,
+        };
+        assert!(matches!(s.fetch(dir.path()), Err(FetchError::Io { .. })));
+    }
 
     #[test]
     fn parse_version_only_works_on_wheel_only_release() {

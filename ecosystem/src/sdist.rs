@@ -166,11 +166,60 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[error("tarball entry traversal failed")]
+    #[error("tarball entry traversal failed: {0}")]
     Tar(#[source] std::io::Error),
+
+    #[error("archive exceeds extraction limit: {0}")]
+    LimitExceeded(String),
 
     #[error("pyproject.toml is not valid TOML: {0}")]
     Toml(#[from] toml::de::Error),
+}
+
+/// Extraction caps: a hostile or corrupt archive must not exhaust the disk
+/// or the inode table. Generous enough for any real sdist or CUDA wheel.
+const MAX_ENTRIES: usize = 200_000;
+const MAX_TOTAL_BYTES: u64 = 4 << 30;
+const MAX_FILE_BYTES: u64 = 2 << 30;
+/// Cap on a manifest read during inspection.
+const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+
+/// Running totals checked against the extraction caps.
+#[derive(Default)]
+struct Budget {
+    entries: usize,
+    bytes: u64,
+}
+
+impl Budget {
+    fn charge(&mut self, size: u64) -> Result<(), Error> {
+        self.entries += 1;
+        self.bytes = self.bytes.saturating_add(size);
+        if self.entries > MAX_ENTRIES {
+            return Err(Error::LimitExceeded(format!(
+                "more than {MAX_ENTRIES} entries"
+            )));
+        }
+        if size > MAX_FILE_BYTES {
+            return Err(Error::LimitExceeded(format!(
+                "entry of {size} bytes (limit {MAX_FILE_BYTES})"
+            )));
+        }
+        if self.bytes > MAX_TOTAL_BYTES {
+            return Err(Error::LimitExceeded(format!(
+                "more than {MAX_TOTAL_BYTES} uncompressed bytes"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Read up to [`MAX_MANIFEST_BYTES`] of `entry` as lossy UTF-8. `None` when
+/// the read fails — an unreadable nested manifest must not fail inspection.
+fn read_manifest(entry: &mut impl Read) -> Option<String> {
+    let mut buf = Vec::new();
+    entry.take(MAX_MANIFEST_BYTES).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Extract the sdist tarball into `dest`.
@@ -196,7 +245,17 @@ pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
     match kind {
         ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd => {
             let mut archive = open_tar(tarball, kind)?;
-            archive.unpack(dest).map_err(Error::Tar)?;
+            std::fs::create_dir_all(dest).map_err(|e| Error::Io {
+                path: dest.to_path_buf(),
+                source: e,
+            })?;
+            let mut budget = Budget::default();
+            // `unpack_in` keeps tar-rs's traversal and symlink protections.
+            for entry in archive.entries().map_err(Error::Tar)? {
+                let mut entry = entry.map_err(Error::Tar)?;
+                budget.charge(entry.size())?;
+                entry.unpack_in(dest).map_err(Error::Tar)?;
+            }
             Ok(())
         }
         ArchiveKind::Zip | ArchiveKind::Wheel => extract_zip(tarball, dest),
@@ -221,11 +280,13 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
         path: dest.to_path_buf(),
         source: e,
     })?;
+    let mut budget = Budget::default();
     for i in 0..zip_archive.len() {
         let mut entry = zip_archive.by_index(i).map_err(|e| Error::Io {
             path: archive.to_path_buf(),
             source: std::io::Error::other(e.to_string()),
         })?;
+        budget.charge(entry.size())?;
         // `enclosed_name` filters out absolute paths and `..` traversal — same
         // guard the tar reader applies — so a hostile wheel can't escape
         // `dest`.
@@ -246,14 +307,36 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
                 source: e,
             })?;
         }
+        // Never materialise a symlink entry: its "content" is the link
+        // target, and writing it as a file (or linking out of `dest`) is
+        // useless at best and a traversal vector at worst.
+        if entry.is_symlink() {
+            continue;
+        }
+        let mode = entry.unix_mode();
         let mut out_file = std::fs::File::create(&out_path).map_err(|e| Error::Io {
             path: out_path.clone(),
             source: e,
         })?;
-        std::io::copy(&mut entry, &mut out_file).map_err(|e| Error::Io {
-            path: out_path.clone(),
-            source: e,
+        // Bound by the declared size so a lying header can't overshoot.
+        std::io::copy(&mut (&mut entry).take(MAX_FILE_BYTES), &mut out_file).map_err(|e| {
+            Error::Io {
+                path: out_path.clone(),
+                source: e,
+            }
         })?;
+        drop(out_file);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            // Keep rwx bits only (drop setuid/setgid/sticky), and always
+            // owner-readable/writable so later steps can handle the file.
+            let perms = std::fs::Permissions::from_mode((mode & 0o777) | 0o600);
+            std::fs::set_permissions(&out_path, perms).map_err(|e| Error::Io {
+                path: out_path.clone(),
+                source: e,
+            })?;
+        }
     }
     Ok(())
 }
@@ -328,12 +411,7 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
         let is_dir = path_str.ends_with('/');
         let file_name = entry_path.file_name().and_then(|n| n.to_str());
         let contents = if matches!(file_name, Some("pyproject.toml" | "Cargo.toml")) {
-            let mut buf = String::new();
-            entry.read_to_string(&mut buf).map_err(|e| Error::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
-            Some(buf)
+            read_manifest(&mut entry)
         } else {
             None
         };
@@ -381,12 +459,7 @@ fn collect_zip_entries(path: &Path) -> Result<Vec<InspectEntry>, Error> {
             .map(str::to_string);
         let contents =
             if !is_dir && matches!(file_name.as_deref(), Some("pyproject.toml" | "Cargo.toml")) {
-                let mut buf = String::new();
-                entry.read_to_string(&mut buf).map_err(|e| Error::Io {
-                    path: path.to_path_buf(),
-                    source: e,
-                })?;
-                Some(buf)
+                read_manifest(&mut entry)
             } else {
                 None
             };
@@ -659,7 +732,9 @@ struct PyprojectToml {
     #[serde(rename = "build-system")]
     build_system: Option<RawBuildSystem>,
     project: Option<RawProject>,
-    tool: Option<RawTool>,
+    // Deliberately loose: one malformed `[tool.*]` field must not fail the
+    // whole parse. Only `tool.poetry.name` is read, and only if a string.
+    tool: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -667,17 +742,16 @@ struct RawProject {
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct RawTool {
-    poetry: Option<RawProject>,
-}
-
 impl PyprojectToml {
     /// `[project].name`, else the legacy `[tool.poetry].name`.
     fn declared_name(self) -> Option<String> {
-        self.project
-            .and_then(|p| p.name)
-            .or_else(|| self.tool.and_then(|t| t.poetry).and_then(|p| p.name))
+        self.project.and_then(|p| p.name).or_else(|| {
+            self.tool?
+                .get("poetry")?
+                .get("name")?
+                .as_str()
+                .map(str::to_string)
+        })
     }
 }
 
@@ -1217,5 +1291,79 @@ build-backend = "flit_core.buildapi"
         let info = inspect(&src).unwrap();
         assert_eq!(info.project_name.as_deref(), Some("thing"));
         assert!(info.python_packaging);
+    }
+
+    #[test]
+    fn non_utf8_manifest_does_not_fail_inspect() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.gz");
+        write_tar(
+            &src,
+            &[
+                (
+                    "thing-1.0/pyproject.toml",
+                    b"[project]\nname = \"thing\"\n# \xff\xfe\n".as_slice(),
+                ),
+                ("thing-1.0/vendor/Cargo.toml", b"\xff\xff".as_slice()),
+            ],
+        );
+        let info = inspect(&src).unwrap();
+        assert_eq!(info.project_name.as_deref(), Some("thing"));
+    }
+
+    #[test]
+    fn malformed_poetry_table_does_not_fail_parse() {
+        let raw = "[tool.poetry]\nname = 5\nversion = [1]\n[tool.other]\nx = 1\n";
+        let p: PyprojectToml = toml::from_str(raw).unwrap();
+        assert_eq!(p.declared_name(), None);
+        let raw = "[tool.poetry]\nname = \"pp\"\n";
+        let p: PyprojectToml = toml::from_str(raw).unwrap();
+        assert_eq!(p.declared_name().as_deref(), Some("pp"));
+    }
+
+    #[test]
+    fn budget_rejects_oversized_entries() {
+        let mut b = Budget::default();
+        assert!(b.charge(10).is_ok());
+        assert!(matches!(
+            b.charge(MAX_FILE_BYTES + 1),
+            Err(Error::LimitExceeded(_))
+        ));
+        let mut b = Budget {
+            entries: MAX_ENTRIES,
+            ..Default::default()
+        };
+        assert!(matches!(b.charge(1), Err(Error::LimitExceeded(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_extract_keeps_exec_bit_and_skips_symlinks() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let z = dir.path().join("a.zip");
+        let file = std::fs::File::create(&z).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        let o = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("run.sh", o.unix_permissions(0o755)).unwrap();
+        zw.write_all(b"#!/bin/sh\n").unwrap();
+        zw.add_symlink("link", "/etc/passwd", o).unwrap();
+        zw.finish().unwrap();
+        let dest = dir.path().join("out");
+        extract(&z, &dest).unwrap();
+        let mode = std::fs::metadata(dest.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+        assert!(std::fs::symlink_metadata(dest.join("link")).is_err());
+    }
+
+    #[test]
+    fn tar_error_display_includes_cause() {
+        let e = Error::Tar(std::io::Error::other("boom"));
+        assert!(e.to_string().contains("boom"));
     }
 }

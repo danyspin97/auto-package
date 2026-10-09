@@ -13,7 +13,10 @@
 //! Cross-flavor resolution (python311 vs python313) requires the actual
 //! interpreter binaries to be installed and a separate run per flavor.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -95,17 +98,60 @@ fn cache_path(name: &str, version: Option<&str>) -> std::path::PathBuf {
 /// runs on different Python majors or different arches must not share a
 /// cached result, so interpreter + platform go into the key as a short hash.
 pub(crate) fn cache_key(name: &str, version: Option<&str>, python: &str, platform: &str) -> String {
+    let norm_name = normalize_name(name);
     let mut hasher = Sha256::new();
     hasher.update(python.as_bytes());
     hasher.update([0u8]);
     hasher.update(platform.as_bytes());
+    // The raw name/version go into the hash too, so two inputs that
+    // sanitize to the same filename part still get distinct keys.
+    hasher.update([0u8]);
+    hasher.update(norm_name.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(version.unwrap_or("").as_bytes());
     let digest = hex::encode(hasher.finalize());
     let short = &digest[..12];
     let base = match version {
-        Some(v) => format!("{}-{}", name.to_lowercase(), v),
-        None => format!("{}-latest", name.to_lowercase()),
+        Some(v) => format!("{}-{}", filename_safe(&norm_name), filename_safe(v)),
+        None => format!("{}-latest", filename_safe(&norm_name)),
     };
     format!("{base}-{short}.json")
+}
+
+/// PEP 503 normalisation: runs of `-`, `_`, `.` become one `-`, lowercased.
+fn normalize_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut sep = false;
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            sep = true;
+            continue;
+        }
+        if sep {
+            out.push('-');
+            sep = false;
+        }
+        out.extend(c.to_lowercase());
+    }
+    if sep {
+        out.push('-');
+    }
+    out
+}
+
+/// Replace everything outside `[a-z0-9.+-]` with `_` so untrusted input can
+/// never contain a path separator (and `..` is defused by the hash suffix
+/// and the fixed `-`-joined shape: the result is only ever a filename part).
+fn filename_safe(s: &str) -> String {
+    let t: String = s
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' | '.' | '+' | '-' => c,
+            'A'..='Z' => c.to_ascii_lowercase(),
+            _ => '_',
+        })
+        .collect();
+    t.replace("..", "._")
 }
 
 /// Host Python interpreter identifier, from `python3 --version` (e.g.
@@ -113,6 +159,11 @@ pub(crate) fn cache_key(name: &str, version: Option<&str>, python: &str, platfor
 /// missing interpreter is a bigger problem than a slightly less specific cache
 /// key, and `resolve` itself will fail loudly on the subsequent `pip` call.
 fn host_python() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(probe_host_python).clone()
+}
+
+fn probe_host_python() -> String {
     Command::new("python3")
         .arg("--version")
         .output()
@@ -134,6 +185,11 @@ fn host_python() -> String {
 /// probe can't run — enough to keep an x86_64 cache from being reused on
 /// aarch64 even if `python3` is missing entirely.
 fn host_platform() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(probe_host_platform).clone()
+}
+
+fn probe_host_platform() -> String {
     let probed = Command::new("python3")
         .args(["-c", "import sysconfig; print(sysconfig.get_platform())"])
         .output()
@@ -164,6 +220,7 @@ fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
     let age = metadata.modified().ok()?.elapsed().ok()?.as_secs();
 
     if age > max_age_secs {
+        let _ = std::fs::remove_file(&path);
         ap_core::diag!(
             "  cache entry stale (age: {} days), re-resolving",
             age / 86400
@@ -172,8 +229,14 @@ fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
     }
 
     // Load and parse cache
-    let contents = std::fs::read_to_string(&path).ok()?;
-    let nodes: Vec<Node> = serde_json::from_str(&contents).ok()?;
+    let parsed = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<Vec<Node>>(&c).ok());
+    let Some(nodes) = parsed else {
+        // Corrupt or unreadable: drop it so the next run re-resolves cleanly.
+        let _ = std::fs::remove_file(&path);
+        return None;
+    };
 
     ap_core::diag!(
         "  ✓ loaded resolution from cache ({} packages)",
@@ -192,10 +255,15 @@ fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
     }
 
     // Serialize and save
-    if let Ok(json) = serde_json::to_string_pretty(nodes)
-        && std::fs::write(&path, json).is_ok()
-    {
-        ap_core::diag!("  cached resolution for future use");
+    // Write to a temp file in the same directory and rename into place, so
+    // a concurrent reader never sees a half-written cache file.
+    if let Ok(json) = serde_json::to_string_pretty(nodes) {
+        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+            ap_core::diag!("  cached resolution for future use");
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -243,26 +311,72 @@ const ALTERNATE_PYTHON_MINORS: [u32; 5] = [12, 11, 13, 10, 14];
 /// Run `pip install --dry-run --report -` through `program` (a pip command
 /// line prefix) and return its JSON report.
 fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, Error> {
-    let out = Command::new(program[0])
-        .args(&program[1..])
-        .args([
-            "install",
-            "--dry-run",
-            "--ignore-installed",
-            "--quiet",
-            "--disable-pip-version-check",
-            "--report",
-            "-",
-            spec,
-        ])
-        .output()
-        .map_err(Error::Launch)?;
+    let mut cmd = Command::new(program[0]);
+    cmd.args(&program[1..]).args([
+        "install",
+        "--dry-run",
+        "--ignore-installed",
+        "--quiet",
+        "--disable-pip-version-check",
+        "--report",
+        "-",
+        // End of options: a hostile `name` must not be parsed as a flag.
+        "--",
+        spec,
+    ]);
+    let out = run_with_timeout(cmd, PIP_TIMEOUT)?;
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         return Err(classify_failure(name, code, stderr));
     }
     Ok(out.stdout)
+}
+
+/// Wall-clock limit for one pip resolve.
+const PIP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// `Command::output` with a deadline: the child is killed on expiry.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process::Output, Error> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(Error::Launch)?;
+    // Drain both pipes on threads so a chatty child can't block on a full pipe.
+    fn drain(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = r.read_to_end(&mut buf);
+            buf
+        })
+    }
+    let out_t = child.stdout.take().map(drain);
+    let err_t = child.stderr.take().map(drain);
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().map_err(Error::Launch)? {
+            Some(st) => break st,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Failed {
+                    code: -1,
+                    stderr: format!("timed out after {}s and was killed", timeout.as_secs()),
+                });
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    let join = |t: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        t.and_then(|h| h.join().ok()).unwrap_or_default()
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: join(out_t),
+        stderr: join(err_t),
+    })
 }
 
 pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
@@ -284,17 +398,33 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
             // Requires-Python (open-webui needs <3.13 on a 3.13 system):
             // the project is fine, so resolve under another installed Python.
             let mut found = None;
+            let mut last_err: Option<Error> = None;
             for minor in ALTERNATE_PYTHON_MINORS {
                 let py = format!("python3.{minor}");
-                if let Ok(out) = run_pip_report(&[&py, "-m", "pip"], name, &spec) {
-                    ap_core::diag!(
-                        "  default pip's Python is incompatible with {name}; resolved with {py}"
-                    );
-                    found = Some(out);
-                    break;
+                match run_pip_report(&[&py, "-m", "pip"], name, &spec) {
+                    Ok(out) => {
+                        ap_core::diag!(
+                            "  default pip's Python is incompatible with {name}; resolved with {py}"
+                        );
+                        found = Some(out);
+                        break;
+                    }
+                    // A missing interpreter or another incompatibility says
+                    // nothing new; anything else is worth surfacing.
+                    Err(Error::Launch(_) | Error::IncompatiblePython { .. }) => {}
+                    Err(other) => last_err = Some(other),
                 }
             }
-            found.ok_or(e)?
+            match (found, last_err) {
+                (Some(out), _) => out,
+                (None, Some(other)) => {
+                    return Err(Error::Failed {
+                        code: -1,
+                        stderr: format!("{e}; alternate interpreters also failed: {other}"),
+                    });
+                }
+                (None, None) => return Err(e),
+            }
         }
         other => other?,
     };
@@ -564,6 +694,35 @@ mod tests {
         let pinned = cache_key("httpx", Some("0.28.1"), "p", "l");
         assert_ne!(latest, pinned);
         assert!(latest.contains("httpx-latest-"), "{latest}");
+    }
+
+    #[test]
+    fn cache_key_cannot_escape_the_cache_dir() {
+        let key = cache_key("../../etc/passwd", Some("1/../2"), "p", "l");
+        assert!(!key.contains('/'), "{key}");
+        assert!(!key.contains(".."), "{key}");
+        let a = cache_key("Foo_Bar.baz", Some("1.0"), "p", "l");
+        let b = cache_key("foo-bar-baz", Some("1.0"), "p", "l");
+        assert_eq!(a, b);
+        assert!(a.starts_with("foo-bar-baz-1.0-"), "{a}");
+    }
+
+    #[test]
+    fn run_with_timeout_kills_a_slow_child() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let t = Instant::now();
+        let err = run_with_timeout(cmd, Duration::from_millis(200)).unwrap_err();
+        assert!(matches!(err, Error::Failed { .. }), "{err}");
+        assert!(t.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn run_with_timeout_collects_output() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hi");
+        let out = run_with_timeout(cmd, Duration::from_secs(10)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
     }
 
     #[test]
