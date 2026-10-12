@@ -1987,6 +1987,41 @@ fn run_package_inner(
                     if let Ok((_, outcome)) = turn {
                         translated = outcome.unresolvable_packages;
                     }
+
+                    // A translated name that merely respells a bare name
+                    // already in this spec (`huggingface_hub` ->
+                    // `huggingface-hub` — same project, OBS's literal
+                    // requires-dist spelling vs. the dash form the
+                    // dependency actually gets packaged and published
+                    // under) leaves this package's own
+                    // `%{python_module ...}` line asking for a name
+                    // nothing will ever provide, even once the translated
+                    // dependency is built. Rewrite it now — see
+                    // `spec::rewrite_python_module_name`'s doc comment for
+                    // why nothing else ever revisits this.
+                    if !translated.is_empty() {
+                        let bare_names: Vec<String> = sorted_deps
+                            .iter()
+                            .map(|d| {
+                                osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string()
+                            })
+                            .collect();
+                        if let Ok(current) = std::fs::read_to_string(&spec_path) {
+                            let mut rewritten = current.clone();
+                            for t in &translated {
+                                if let Some(bare) = bare_names.iter().find(|b| {
+                                    osc::fuzzy_key(b) == osc::fuzzy_key(t) && *b != t
+                                }) {
+                                    rewritten =
+                                        crate::spec::rewrite_python_module_name(&rewritten, bare, t);
+                                }
+                            }
+                            if rewritten != current {
+                                let _ = std::fs::write(&spec_path, &rewritten);
+                            }
+                        }
+                    }
+
                     let mut state = PkgState::load(&ws);
                     state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
                     state.unresolvable_translated = translated.clone();

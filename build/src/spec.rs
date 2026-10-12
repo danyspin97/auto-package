@@ -105,7 +105,30 @@ const KNOWN_MIXED_CASE_PYPI_NAMES: &[(&str, &str)] = &[
     ("pymysql", "PyMySQL"),
     ("pynacl", "PyNaCl"),
     ("cython", "Cython"),
+    ("pypika", "PyPika"),
 ];
+
+/// Matches a `%{python_module ...}` token, capturing its inner text (the
+/// name plus any version constraint). Shared by every function in this file
+/// that needs to find or rewrite these tokens, so the pattern is defined
+/// exactly once.
+fn python_module_token_re() -> &'static regex::Regex {
+    use std::sync::LazyLock;
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"%\{python_module ([^}]+)\}").expect("static pattern")
+    });
+    &RE
+}
+
+/// Matches the leading package-name token of a `%{python_module <name>
+/// ...}` macro's inner text, stopping before any version-constraint
+/// operator or trailing whitespace. Shared with [`rewrite_python_module_name`].
+fn leading_name_re() -> &'static regex::Regex {
+    use std::sync::LazyLock;
+    static NAME: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+-]*").expect("static pattern"));
+    &NAME
+}
 
 /// Re-case the leading package name of a `%{python_module <name> ...}`
 /// token's inner text to its canonical PyPI spelling, when known. Leaves
@@ -113,10 +136,7 @@ const KNOWN_MIXED_CASE_PYPI_NAMES: &[(&str, &str)] = &[
 /// mismatches outside this list still rely on the agent catching them (see
 /// convention in `agent.rs`).
 fn recase_python_module_name(inner: &str) -> String {
-    use std::sync::LazyLock;
-    static NAME: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+-]*").expect("static pattern"));
-    let Some(m) = NAME.find(inner) else {
+    let Some(m) = leading_name_re().find(inner) else {
         return inner.to_string();
     };
     let name = m.as_str();
@@ -139,18 +159,52 @@ fn recase_python_module_name(inner: &str) -> String {
 /// lowercase (see [`recase_python_module_name`]).
 pub fn normalize_python_module_versions(spec: &str) -> String {
     use std::sync::LazyLock;
-    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        // Match %{python_module ...} and capture the content
-        regex::Regex::new(r"%\{python_module ([^}]+)\}").expect("static pattern")
-    });
     static OP: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"\s*(>=|<=|!=|==|>|<)\s*").expect("static pattern"));
 
-    RE.replace_all(spec, |caps: &regex::Captures| {
+    python_module_token_re().replace_all(spec, |caps: &regex::Captures| {
         let inner = &caps[1];
         let normalized = OP.replace_all(inner, " $1 ");
         let recased = recase_python_module_name(&normalized);
         format!("%{{python_module {}}}", recased)
+    })
+    .into_owned()
+}
+
+/// Rewrite the name inside every `%{python_module <name> ...}` token whose
+/// name matches `from` under [`crate::osc::fuzzy_key`] (separator- and
+/// case-insensitive) to `to`, keeping any version constraint untouched.
+///
+/// This closes a real stuck loop: OBS reports a dep by its PyPI
+/// `requires-dist` spelling verbatim (`huggingface_hub`), the one-off
+/// `TranslateUnresolvableDeps` turn correctly identifies the upstream
+/// project as `huggingface-hub` (the spelling the dependency actually gets
+/// packaged and published under — RPM package names use `-`, not `_`), and
+/// that translated name is queued and built successfully. But unless this
+/// package's own `%{python_module huggingface_hub}` line is rewritten to
+/// match, it keeps asking OBS for `python313-huggingface_hub` forever — a
+/// name nothing will ever provide — even though the dependency it actually
+/// needs now exists under a different spelling. `already_reviewed_unresolvable`
+/// then skips re-asking the agent, so without this rewrite nothing ever
+/// revisits the spec and the package is stuck until it hits the retry limit
+/// and gets marked permanently failed.
+pub fn rewrite_python_module_name(spec: &str, from: &str, to: &str) -> String {
+    if from == to {
+        return spec.to_string();
+    }
+    let from_key = crate::osc::fuzzy_key(from);
+
+    python_module_token_re().replace_all(spec, |caps: &regex::Captures| {
+        let inner = &caps[1];
+        let Some(m) = leading_name_re().find(inner) else {
+            return format!("%{{python_module {inner}}}");
+        };
+        let name = m.as_str();
+        if crate::osc::fuzzy_key(name) == from_key {
+            format!("%{{python_module {to}{}}}", &inner[m.end()..])
+        } else {
+            format!("%{{python_module {inner}}}")
+        }
     })
     .into_owned()
 }
@@ -566,6 +620,31 @@ Version:        3.0.3
             fixed.contains("%{python_module wheel}"),
             "bare name mangled"
         );
+    }
+
+    /// The faster-whisper case: OBS reports `python313-huggingface_hub` as
+    /// unresolvable, the translate-deps turn identifies the upstream project
+    /// as `huggingface-hub`, and that dependency gets built under that
+    /// spelling — but unless this rewrite runs, the spec keeps asking for
+    /// the underscore form forever.
+    #[test]
+    fn translated_dep_name_is_rewritten_in_python_module() {
+        let spec = "BuildRequires:  %{python_module huggingface_hub >= 0.21}\n\
+                    Requires:       %{python_module huggingface_hub >= 0.21}\n";
+        let fixed = rewrite_python_module_name(spec, "huggingface_hub", "huggingface-hub");
+        assert!(
+            fixed.contains("%{python_module huggingface-hub >= 0.21}"),
+            "{fixed}"
+        );
+        assert_eq!(fixed.matches("huggingface_hub").count(), 0, "{fixed}");
+    }
+
+    #[test]
+    fn rewrite_leaves_unrelated_python_module_lines_alone() {
+        let spec = "BuildRequires:  %{python_module huggingface_hub >= 0.21}\n\
+                    BuildRequires:  %{python_module numpy}\n";
+        let fixed = rewrite_python_module_name(spec, "huggingface_hub", "huggingface-hub");
+        assert!(fixed.contains("%{python_module numpy}"), "{fixed}");
     }
 
     /// `pyproject.toml`'s `[build-system] requires` is routinely lowercase

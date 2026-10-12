@@ -1497,6 +1497,16 @@ fn cmd_build(
                     keep
                 })
                 .filter(|dep| {
+                    // Must run before the `distro_provides` filter below,
+                    // not after: that filter can drop a dep for a reason
+                    // unrelated to "already attempted" (it's satisfied by
+                    // the distro, not built by us), and the no-progress
+                    // detection in the batch loop above (`new_deps`) relies
+                    // on every dep that ever passes through here ending up
+                    // in `attempted_deps` — regardless of which later filter
+                    // drops it — so a package that keeps re-reporting the
+                    // same distro-satisfied name is still recognized as
+                    // making no progress instead of retrying forever.
                     let fresh = attempted_deps.insert(ap_build::osc::fuzzy_key(dep));
                     if !fresh {
                         ap_core::diag!(
@@ -1506,6 +1516,30 @@ fn cmd_build(
                         );
                     }
                     fresh
+                })
+                .filter(|dep| {
+                    // A C library's openSUSE package name routinely embeds
+                    // its SONAME version (`libpng` -> `libpng16`), which the
+                    // own/linked-project checks below can never match by
+                    // name — they only compare source package name strings.
+                    // `distro_provides` checks the distro's actual
+                    // `Provides:` capabilities instead, so a dependency the
+                    // distro has shipped for years (observed: `libpng`,
+                    // `gcc`, `openssl` all reported "unresolvable" by an
+                    // agent that should have known better, but `libpng`
+                    // alone slipped past every other filter and got queued
+                    // for a redundant from-source build) is recognized
+                    // before falling through to "search GitHub and build it
+                    // from source".
+                    let keep = !ap_build::osc::distro_provides(dep);
+                    if !keep {
+                        ap_core::diag!(
+                            "dep queue: dropping {dep} (the distro already \
+                             provides it — see `zypper search --provides \
+                             --match-exact {dep}`)"
+                        );
+                    }
+                    keep
                 })
                 .filter(|dep| {
                     // Skip deps already resolvable in the project or any of
