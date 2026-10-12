@@ -422,6 +422,23 @@ fn resolve_dependency_config(
                 probe.project_name.clone().unwrap_or_else(|| cand.clone())
             };
             let dep_rpm = probe.ecosystem.rpm_name(&effective_name);
+            // A devel-wrapped dep (`libarrow-devel`) canonicalized to its
+            // umbrella project (`arrow`) can probe straight back to the
+            // package currently being built (pyarrow lives inside the
+            // apache/arrow monorepo, so `arrow` resolves to `python-pyarrow`
+            // again). Accepting that would overwrite this package's own
+            // in-flight version/config with the monorepo's git-tag version,
+            // which then fails spec generation and loops forever reselecting
+            // the same broken version. Skip and keep trying other
+            // candidates/repos instead.
+            if dep_rpm == config.rpm_name {
+                probe_failure_warnings.push(format!(
+                    "{repo_url}: resolved back to this package's own rpm_name \
+                     ({dep_rpm}) — likely the umbrella project of a devel-wrapped \
+                     dependency name; skipping"
+                ));
+                continue;
+            }
             ap_core::diag!(
                 "  queuing missing dependency: {dep_rpm} \
                  (source repository: {repo_url}, not on PyPI)"

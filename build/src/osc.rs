@@ -416,6 +416,53 @@ pub fn strip_rpm_prefix(rpm: &str) -> &str {
     rpm
 }
 
+/// Strip the openSUSE devel-package wrapping from a BuildRequires name so it
+/// names the upstream project, not the distro packaging convention around it
+/// — `libtrantor-devel` -> `trantor`, `libfoo-dev` -> `foo` (convention 27's
+/// examples). The agent is told to do this itself before reporting a C/C++
+/// dependency as missing, but doesn't always (the pyarrow case: a `NoChange`
+/// turn left `libarrow-devel` to fall back to OBS's raw name, which then
+/// canonicalized to the `arrow` monorepo and looped back onto pyarrow
+/// itself). Only strips when the `-devel`/`-dev` suffix is present — a bare
+/// `lib...` name with no such suffix is frequently the real upstream/runtime
+/// library name and must not be touched.
+pub fn strip_devel_wrapping(name: &str) -> &str {
+    let Some(stripped) = name.strip_suffix("-devel").or_else(|| name.strip_suffix("-dev")) else {
+        return name;
+    };
+    stripped.strip_prefix("lib").unwrap_or(stripped)
+}
+
+#[cfg(test)]
+mod strip_devel_wrapping_tests {
+    use super::*;
+
+    #[test]
+    fn strips_lib_prefix_and_devel_suffix() {
+        assert_eq!(strip_devel_wrapping("libtrantor-devel"), "trantor");
+    }
+
+    #[test]
+    fn strips_lib_prefix_and_dev_suffix() {
+        assert_eq!(strip_devel_wrapping("libfoo-dev"), "foo");
+    }
+
+    #[test]
+    fn strips_devel_suffix_without_lib_prefix() {
+        assert_eq!(strip_devel_wrapping("apache-arrow-devel"), "apache-arrow");
+    }
+
+    #[test]
+    fn leaves_a_bare_lib_name_without_devel_suffix_untouched() {
+        assert_eq!(strip_devel_wrapping("libyaml"), "libyaml");
+    }
+
+    #[test]
+    fn leaves_unrelated_names_untouched() {
+        assert_eq!(strip_devel_wrapping("numpy"), "numpy");
+    }
+}
+
 /// Return the `(project, repository)` pairs the OBS project's repositories
 /// build against.
 ///
@@ -1568,7 +1615,7 @@ pub fn obs_build(
     let reporter = emit.reporter;
     let step = emit.step;
     const POLL_INTERVAL: Duration = Duration::from_secs(15);
-    const MAX_WAIT: Duration = Duration::from_secs(1800);
+    const MAX_WAIT: Duration = Duration::from_secs(7200);
 
     let start = Instant::now();
     let mut prev_status = String::new();

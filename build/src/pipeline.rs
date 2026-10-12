@@ -1425,7 +1425,28 @@ fn run_package_inner(
                 checkout_dir: Some(&checkout_dir),
                 from_repo_archive,
                 resume: false,
-                context: None,
+                context: if !build_log_nonempty {
+                    // Same situation the Review turn's context covers above:
+                    // an empty build log here is not "nothing to fix", it's
+                    // OBS rejecting the build during dependency resolution
+                    // before compilation starts. Without this, the pyarrow
+                    // case showed the turn reading the empty log, seeing
+                    // nothing wrong, and returning `NoChange` instead of
+                    // checking BuildRequires names/casing and reporting the
+                    // real gap via `unresolvable_packages`.
+                    Some(
+                        "The build log is empty — OBS rejected the build during \
+                         dependency resolution before any compilation started. \
+                         The spec may reference a package that does not exist in \
+                         OBS yet, or a BuildRequires name may be wrong (wrong \
+                         case, or a devel-package name upstream doesn't use — \
+                         see convention 2 and convention 27). Do not return \
+                         `no_change` without checking every BuildRequires name \
+                         against its actual OBS spelling first.",
+                    )
+                } else {
+                    None
+                },
             },
             config,
             &ws,
@@ -1445,7 +1466,7 @@ fn run_package_inner(
                 let mut to_build: Vec<String> = outcome
                     .unresolvable_packages
                     .iter()
-                    .map(|d| osc::strip_rpm_prefix(d).to_string())
+                    .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
                     .collect();
                 to_build.sort_unstable();
                 to_build.dedup();
@@ -1982,7 +2003,7 @@ fn run_package_inner(
                 };
                 let mut to_build: Vec<String> = source_list
                     .iter()
-                    .map(|d| osc::strip_rpm_prefix(d).to_string())
+                    .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
                     .collect();
                 to_build.sort_unstable();
                 to_build.dedup();
@@ -2098,7 +2119,7 @@ fn run_package_inner(
                     let mut to_build: Vec<String> = outcome
                         .unresolvable_packages
                         .iter()
-                        .map(|d| osc::strip_rpm_prefix(d).to_string())
+                        .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
                         .collect();
                     to_build.sort_unstable();
                     to_build.dedup();

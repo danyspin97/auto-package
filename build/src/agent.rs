@@ -222,8 +222,13 @@ openSUSE spec conventions to keep in mind:
    (`https://pypi.org/project/<name>/` or `curl -s
    https://pypi.org/pypi/<name>/json | jq .info.name`) before writing it into
    BuildRequires/Requires. Known mixed-case names include Pillow, PyYAML,
-   MarkupSafe, PyJWT, PySide6, PyQt5, PyMySQL, PyNaCl — but don't rely on a
-   memorized list, verify each one.
+   MarkupSafe, PyJWT, PySide6, PyQt5, PyMySQL, PyNaCl, Cython, Brotli — but
+   don't rely on a memorized list, verify each one. Getting this wrong
+   produces a believable-looking but nonexistent BuildRequires (`python313-
+   cython`, `python313-brotli`) that OBS reports as unresolvable — which
+   looks exactly like a genuinely missing dependency, so don't jump to
+   reporting it in `unresolvable_packages` (convention 27) before checking
+   whether it's just a case mismatch against an already-packaged name.
 
 3. Architecture: a package is arch-specific only if it actually COMPILES an
    extension, not merely because C sources are present in the tarball. The
