@@ -76,6 +76,29 @@ impl std::fmt::Display for StepKind {
     }
 }
 
+impl StepKind {
+    /// Human-readable label for display to end users (TUI, human-formatted
+    /// logs). Unlike `Display` — which prints the bare variant name and is
+    /// relied on for terse/greppable output — this reads as prose.
+    pub fn label(&self) -> &'static str {
+        match self {
+            StepKind::Resolve => "Resolving dependencies",
+            StepKind::SelectTarget => "Selecting build target",
+            StepKind::Checkout => "Checking out package",
+            StepKind::Commit => "Committing changes",
+            StepKind::OscService => "Running OBS source service",
+            StepKind::FetchSdist => "Fetching sdist",
+            StepKind::InspectSdist => "Inspecting sdist",
+            StepKind::GenerateSpec => "Generating spec",
+            StepKind::ValidateSpec => "Validating spec",
+            StepKind::Build => "Building on OBS",
+            StepKind::ExtractFailure => "Extracting failure",
+            StepKind::AgentTurn => "Agent turn",
+            StepKind::ApplyAndValidate => "Applying fix & validating",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StepOutcome {
     Ok,
@@ -138,7 +161,13 @@ pub enum PackageOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Task {
     Review,
-    FixAfterBuild { attempt: u32, max_attempts: u32 },
+    FixAfterBuild {
+        attempt: u32,
+        max_attempts: u32,
+    },
+    /// One-off, read-only lookup of upstream names for OBS's unresolvable
+    /// dependency list — not counted against `FixAfterBuild`'s attempts.
+    TranslateUnresolvableDeps,
 }
 
 impl std::fmt::Display for Task {
@@ -151,6 +180,7 @@ impl std::fmt::Display for Task {
             } => {
                 write!(f, "fix {attempt}/{max_attempts}")
             }
+            Task::TranslateUnresolvableDeps => write!(f, "translate deps"),
         }
     }
 }

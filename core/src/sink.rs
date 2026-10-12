@@ -306,15 +306,12 @@ impl HumanSink {
                     version.if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
-            Event::StepStarted { step, kind } => Some(format!(
-                "  {} {}",
-                format!("{:02}", step.0 + 1).if_supports_color(Stderr, |t| t.dimmed()),
-                kind.if_supports_color(Stderr, |t| t.bold()),
+            Event::StepStarted { kind, .. } => Some(format!(
+                "  {}",
+                kind.label().if_supports_color(Stderr, |t| t.bold()),
             )),
             Event::StepFinished {
-                step,
-                outcome,
-                elapsed,
+                outcome, elapsed, ..
             } => {
                 let ms = elapsed.as_millis();
                 let (secs, frac) = (ms / 1000, ms % 1000);
@@ -330,8 +327,7 @@ impl HumanSink {
                     }
                 };
                 Some(format!(
-                    "  {} done  {}  {outcome_colored}",
-                    format!("{:02}", step.0 + 1).if_supports_color(Stderr, |t| t.dimmed()),
+                    "  done  {}  {outcome_colored}",
                     format!("{secs}.{frac:03}s").if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }

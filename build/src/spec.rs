@@ -105,7 +105,6 @@ const KNOWN_MIXED_CASE_PYPI_NAMES: &[(&str, &str)] = &[
     ("pymysql", "PyMySQL"),
     ("pynacl", "PyNaCl"),
     ("cython", "Cython"),
-    ("brotli", "Brotli"),
 ];
 
 /// Re-case the leading package name of a `%{python_module <name> ...}`

@@ -170,6 +170,10 @@ enum LogLevel {
     Warn,
     Error,
     Success,
+    /// A step boundary (`Event::StepStarted`) — styled apart from ordinary
+    /// log output so the event log reads as a sequence of named sections
+    /// instead of one undifferentiated stream of lines.
+    Step,
 }
 
 impl LogLevel {
@@ -179,6 +183,7 @@ impl LogLevel {
             LogLevel::Warn => Color::Yellow,
             LogLevel::Error => Color::Red,
             LogLevel::Success => Color::Green,
+            LogLevel::Step => Color::Cyan,
         }
     }
 }
@@ -187,6 +192,9 @@ impl LogLevel {
 struct LogLine {
     level: LogLevel,
     message: String,
+    /// Rendered bold — used for step-boundary headers so they stand out from
+    /// the regular log lines between them.
+    emphasis: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -255,7 +263,7 @@ struct ActivityEntry {
 struct PkgState {
     version: String,
     status: PkgStatus,
-    current_step: Option<(u32, StepKind)>,
+    current_step: Option<StepKind>,
     log_lines: Vec<LogLine>,
     agent_activity: Vec<ActivityEntry>,
     input_tokens: u64,
@@ -290,7 +298,25 @@ impl PkgState {
     }
 
     fn add_log(&mut self, level: LogLevel, message: String) {
-        self.log_lines.push(LogLine { level, message });
+        self.add_log_styled(level, message, false);
+    }
+
+    /// Push a step-boundary header: bold, and preceded by a blank spacer line
+    /// (skipped for the very first step) so steps are visually divided in
+    /// the event log instead of blending into the lines around them.
+    fn add_step_header(&mut self, message: String) {
+        if !self.log_lines.is_empty() {
+            self.add_log_styled(LogLevel::Info, String::new(), false);
+        }
+        self.add_log_styled(LogLevel::Step, message, true);
+    }
+
+    fn add_log_styled(&mut self, level: LogLevel, message: String, emphasis: bool) {
+        self.log_lines.push(LogLine {
+            level,
+            message,
+            emphasis,
+        });
         if self.log_lines.len() > MAX_LOG_LINES {
             self.log_lines.remove(0);
         }
@@ -339,7 +365,11 @@ impl TuiState {
     }
 
     fn add_global_log(&mut self, level: LogLevel, message: String) {
-        self.last_global_log = Some(LogLine { level, message });
+        self.last_global_log = Some(LogLine {
+            level,
+            message,
+            emphasis: false,
+        });
     }
 
     /// Packages still worth showing in the table: everything except ones that
@@ -468,33 +498,22 @@ impl TuiState {
     fn apply_pkg_event(&mut self, pkg: &str, event: &Event) {
         let state = self.pkg_mut(pkg);
         match event {
-            Event::StepStarted { step, kind } => {
+            Event::StepStarted { kind, .. } => {
                 state.status = PkgStatus::Running;
-                state.current_step = Some((step.0, kind.clone()));
-                state.add_log(LogLevel::Info, format!("Step {}: {kind}", step.0 + 1));
+                state.current_step = Some(kind.clone());
+                state.add_step_header(format!("▸ {}", kind.label()));
             }
             Event::StepFinished {
-                step,
-                outcome,
-                elapsed,
+                outcome, elapsed, ..
             } => {
-                let kind = state
-                    .current_step
-                    .as_ref()
-                    .map(|(_, k)| k.to_string())
-                    .unwrap_or_default();
-                let level = match outcome {
-                    StepOutcome::Ok => LogLevel::Success,
-                    StepOutcome::Failed => LogLevel::Error,
-                    StepOutcome::Skipped => LogLevel::Warn,
+                let (level, marker) = match outcome {
+                    StepOutcome::Ok => (LogLevel::Success, "✓"),
+                    StepOutcome::Failed => (LogLevel::Error, "✗"),
+                    StepOutcome::Skipped => (LogLevel::Warn, "⇥"),
                 };
                 state.add_log(
                     level,
-                    format!(
-                        "Step {} {outcome}: {kind} ({:.2}s)",
-                        step.0 + 1,
-                        elapsed.as_secs_f64()
-                    ),
+                    format!("  {marker} {outcome} in {:.2}s", elapsed.as_secs_f64()),
                 );
                 if matches!(outcome, StepOutcome::Ok | StepOutcome::Skipped) {
                     state.current_step = None;
@@ -502,6 +521,28 @@ impl TuiState {
             }
             Event::BuildFailed { classification, .. } => {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));
+            }
+            Event::ExtractResult { extract, .. } => {
+                let phase = extract.phase.as_deref().unwrap_or("unknown phase");
+                let mut msg = format!("  ↳ failure located in {phase}");
+                if let Some(genre) = &extract.genre {
+                    msg.push_str(&format!(" ({genre})"));
+                }
+                if !extract.has_signal {
+                    msg.push_str(" — no clear signal, showing log tail");
+                }
+                state.add_log(LogLevel::Warn, msg);
+            }
+            Event::CommandDone { code, elapsed, .. } => {
+                let level = if *code == 0 {
+                    LogLevel::Info
+                } else {
+                    LogLevel::Warn
+                };
+                state.add_log(
+                    level,
+                    format!("  = exit {code} ({:.2}s)", elapsed.as_secs_f64()),
+                );
             }
             Event::AgentPrompt { task, .. } => {
                 let task_str = match task {
@@ -514,6 +555,7 @@ impl TuiState {
                         state.max_tries = *max_attempts;
                         format!("Fixing spec (attempt {attempt}/{max_attempts})")
                     }
+                    Task::TranslateUnresolvableDeps => "Looking up dependency names".to_string(),
                 };
                 state.add_agent_activity(ActivityKind::Task, task_str.clone());
                 state.add_log(LogLevel::Info, format!("Agent: {task_str}"));
@@ -647,6 +689,11 @@ fn event_loop(
     // shrinks whenever a package finishes, which would otherwise shift every
     // later row up and silently hand the highlight to a different package.
     let mut selected: Option<String> = None;
+    // Lines scrolled up from the live tail in the selected package's Event
+    // Log; 0 means pinned to the latest line. Reset whenever the selection
+    // changes, since a scroll offset for one package's log is meaningless
+    // for another's.
+    let mut log_scroll: usize = 0;
     let tick_rate = Duration::from_millis(150);
     let mut finished_at: Option<Instant> = None;
     let mut senders_dropped = false;
@@ -668,11 +715,15 @@ fn event_loop(
 
         {
             let visible = state.visible_order();
+            let previous = selected.clone();
             if selected
                 .as_deref()
                 .is_none_or(|s| !visible.iter().any(|n| n.as_str() == s))
             {
                 selected = visible.first().map(|n| (*n).clone());
+            }
+            if selected != previous {
+                log_scroll = 0;
             }
             table_state.select(
                 selected
@@ -681,7 +732,7 @@ fn event_loop(
             );
         }
 
-        terminal.draw(|f| render(f, &state, &mut table_state, input.as_deref()))?;
+        terminal.draw(|f| render(f, &state, &mut table_state, input.as_deref(), log_scroll))?;
 
         if event::poll(tick_rate)?
             && let TermEvent::Key(key) = event::read()?
@@ -728,9 +779,22 @@ fn event_loop(
                     // shutdown as `q`/Esc above.
                     crate::handle_interrupt(true, memory);
                 }
-                KeyCode::Down | KeyCode::Char('j') => select_next(&mut selected, &state),
-                KeyCode::Up | KeyCode::Char('k') => select_prev(&mut selected, &state),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    select_next(&mut selected, &state);
+                    log_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    select_prev(&mut selected, &state);
+                    log_scroll = 0;
+                }
                 KeyCode::Char('a') => state.show_all = !state.show_all,
+                // Event Log scrollback: pin to the live tail by default (0),
+                // step back through history on demand without losing new
+                // lines arriving underneath — they just wait below the
+                // viewport until `End` jumps back to them.
+                KeyCode::PageUp => log_scroll = log_scroll.saturating_add(10),
+                KeyCode::PageDown => log_scroll = log_scroll.saturating_sub(10),
+                KeyCode::End => log_scroll = 0,
                 _ => {}
             }
         }
@@ -809,7 +873,13 @@ fn select_prev(selected: &mut Option<String>, state: &TuiState) {
     *selected = Some(visible[i.saturating_sub(1)].clone());
 }
 
-fn render(f: &mut Frame, state: &TuiState, table_state: &mut TableState, input: Option<&str>) {
+fn render(
+    f: &mut Frame,
+    state: &TuiState,
+    table_state: &mut TableState,
+    input: Option<&str>,
+    log_scroll: usize,
+) {
     let visible = state.visible_order();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -823,7 +893,14 @@ fn render(f: &mut Frame, state: &TuiState, table_state: &mut TableState, input: 
 
     render_summary(f, state, chunks[0]);
     render_table(f, state, &visible, chunks[1], table_state);
-    render_detail(f, state, &visible, chunks[2], table_state.selected());
+    render_detail(
+        f,
+        state,
+        &visible,
+        chunks[2],
+        table_state.selected(),
+        log_scroll,
+    );
     render_footer(f, state, input, chunks[3]);
 }
 
@@ -859,7 +936,7 @@ fn render_table(
             let step = pkg
                 .current_step
                 .as_ref()
-                .map(|(n, k)| format!("{}: {k}", n + 1))
+                .map(|k| k.label().to_string())
                 .unwrap_or_else(|| "-".to_string());
             let elapsed = pkg.started.elapsed().as_secs();
             let tries = if pkg.max_tries > 0 {
@@ -908,6 +985,7 @@ fn render_detail(
     visible: &[&String],
     area: Rect,
     selected: Option<usize>,
+    log_scroll: usize,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -932,15 +1010,28 @@ fn render_detail(
         return;
     };
 
-    let log_items: Vec<ListItem> = pkg
-        .log_lines
+    let viewport = chunks[0].height.saturating_sub(2) as usize;
+    let total = pkg.log_lines.len();
+    let max_scroll = total.saturating_sub(viewport);
+    let scroll = log_scroll.min(max_scroll);
+    let end = total - scroll;
+    let start = end.saturating_sub(viewport);
+    let log_items: Vec<ListItem> = pkg.log_lines[start..end]
         .iter()
-        .rev()
-        .take(chunks[0].height.saturating_sub(2) as usize)
-        .rev()
-        .map(|l| ListItem::new(l.message.clone()).style(Style::default().fg(l.level.color())))
+        .map(|l| {
+            let mut style = Style::default().fg(l.level.color());
+            if l.emphasis {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            ListItem::new(l.message.clone()).style(style)
+        })
         .collect();
-    let log = List::new(log_items).block(Block::default().borders(Borders::ALL).title("Event Log"));
+    let log_title = if scroll > 0 {
+        format!("Event Log — scrolled up {scroll} line(s), End to jump to latest")
+    } else {
+        "Event Log".to_string()
+    };
+    let log = List::new(log_items).block(Block::default().borders(Borders::ALL).title(log_title));
     f.render_widget(log, chunks[0]);
 
     let activity_items: Vec<ListItem> = pkg
@@ -986,7 +1077,7 @@ fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rec
         .unwrap_or_else(|| Span::raw(""));
     let hint = Span::styled(
         format!(
-            "  ↑/↓ select │ n add package │ a {} succeeded │ q/Esc quit",
+            "  ↑/↓ select │ PgUp/PgDn/End scroll log │ n add package │ a {} succeeded │ q/Esc quit",
             if state.show_all { "hide" } else { "show" }
         ),
         Style::default().fg(Color::DarkGray),

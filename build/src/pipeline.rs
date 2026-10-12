@@ -162,6 +162,29 @@ pub struct PkgState {
     /// an earlier run, start fresh' automatically.
     #[serde(default)]
     pub cumulative_spent_run_id: Option<String>,
+    /// Fix-attempt count within the `cumulative_spent_run_id` run, mirroring
+    /// `cumulative_spent_usd`'s scoping exactly (same field gates both —
+    /// there is no separate run_id for this one). Without this, a package
+    /// that returns to `run_package` again later in the SAME CLI run (e.g.
+    /// after a `MissingDeps` round trip once its dependencies are built)
+    /// restarted its local `attempts` counter at 0: `max_attempts` reset to
+    /// a fresh budget on top of whatever it already burned, and notes.md's
+    /// "Attempt N" headers (append-only, never truncated) collided with
+    /// attempt numbers already written by the earlier call.
+    #[serde(default)]
+    pub cumulative_attempts: usize,
+    /// Sorted+deduped OBS-reported unresolvable-dependency set for which the
+    /// one-off `TranslateUnresolvableDeps` agent turn already ran. Prevents
+    /// paying for another lookup if this exact package resurfaces with the
+    /// identical set of missing deps (e.g. a dependent is still being built
+    /// and this package gets requeued against the same gap).
+    #[serde(default)]
+    pub unresolvable_review_hash: Option<u64>,
+    /// Upstream names the agent returned for `unresolvable_review_hash`'s
+    /// set, if any. Reused instead of OBS's raw names the next time that
+    /// exact set recurs, since the agent isn't re-asked.
+    #[serde(default)]
+    pub unresolvable_translated: Vec<String>,
 }
 
 /// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
@@ -172,6 +195,13 @@ fn hash_spec(content: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Hash a sorted+deduped dependency-name list for
+/// [`PkgState::unresolvable_review_hash`]. `\0`-joined so e.g. `["a", "bc"]`
+/// and `["ab", "c"]` don't collide.
+fn hash_deps(sorted_deps: &[String]) -> u64 {
+    hash_spec(&sorted_deps.join("\0"))
 }
 
 impl PkgState {
@@ -224,6 +254,12 @@ impl PkgState {
     pub fn is_reviewed(&self, version: &str, spec_content: &str) -> bool {
         self.reviewed_version.as_deref() == Some(version)
             && self.reviewed_spec_hash == Some(hash_spec(spec_content))
+    }
+
+    /// Has the one-off dependency-name translation already run for exactly
+    /// this (sorted+deduped) set of unresolvable deps?
+    pub fn already_reviewed_unresolvable(&self, sorted_deps: &[String]) -> bool {
+        self.unresolvable_review_hash == Some(hash_deps(sorted_deps))
     }
 }
 
@@ -1278,28 +1314,38 @@ fn run_package_inner(
     }
 
     // ── Build + fix loop ──────────────────────────────────────────────────────
-    let mut attempts = 0usize;
-    // Resume cumulative spend from state.json ONLY for an outer-loop
-    // retry inside the current CLI run (same run_id), so the budget cap
-    // is enforced across the retries of one package during one
-    // invocation. A fresh CLI invocation (different run_id) starts the
-    // package at $0 — the user asked for the restart-reset explicitly,
-    // and it matches the mental model that a new command is a new
-    // budget. See `PkgState::cumulative_spent_run_id`.
+    // Resume cumulative spend AND the fix-attempt count from state.json ONLY
+    // for an outer-loop retry inside the current CLI run (same run_id), so
+    // both the dollar budget and `max_attempts` are enforced across the
+    // retries of one package during one invocation — a package that comes
+    // back through `run_package` again later in the same run (e.g. after a
+    // `MissingDeps` round trip) must not get a completely fresh attempt
+    // budget on top of what it already burned. A fresh CLI invocation
+    // (different run_id) starts the package at $0/0 attempts — the user
+    // asked for the restart-reset explicitly, and it matches the mental
+    // model that a new command is a new budget. See
+    // `PkgState::cumulative_spent_run_id`.
     let prior = PkgState::load(&ws);
-    let mut spent_usd = if prior.cumulative_spent_run_id.as_deref() == Some(config.run_id.as_str())
-    {
+    let resuming_this_run =
+        prior.cumulative_spent_run_id.as_deref() == Some(config.run_id.as_str());
+    let mut attempts: usize = if resuming_this_run {
+        prior.cumulative_attempts
+    } else {
+        0
+    };
+    let mut spent_usd = if resuming_this_run {
         prior.cumulative_spent_usd
     } else {
         0.0
     };
-    if spent_usd > 0.0 {
+    if spent_usd > 0.0 || attempts > 0 {
         reporter.report(&Event::Progress {
             step: None,
             message: format!(
-                "{rpm_name}: resuming with ${spent_usd:.4} already spent on this \
-                 package in this CLI run (budget cap ${:.4})",
-                config.budget_usd
+                "{rpm_name}: resuming with ${spent_usd:.4} spent and {attempts} fix \
+                 attempt(s) already used on this package in this CLI run (budget cap \
+                 ${:.4}, max {} attempts)",
+                config.budget_usd, config.max_attempts
             ),
         });
     }
@@ -1499,6 +1545,7 @@ fn run_package_inner(
             };
             if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
                 attempts += 1;
+                persist_attempts(&ws, &config.run_id, attempts);
             }
         }
     }
@@ -1590,6 +1637,7 @@ fn run_package_inner(
                     // would spend a whole remote build just to report `File ...
                     // SOURCES/...: No such file or directory` (convention 13).
                     attempts += 1;
+                    persist_attempts(&ws, &config.run_id, attempts);
                     let clean = strip_and_rewrite(&spec_path);
                     let context = format!(
                         "`rpmspec --parse` succeeded, but the spec references source \
@@ -1701,6 +1749,7 @@ fn run_package_inner(
                 // whole remote build to tell us what rpmspec just said. Fix it
                 // here and re-validate on the next pass of the loop.
                 attempts += 1;
+                persist_attempts(&ws, &config.run_id, attempts);
                 let clean = strip_and_rewrite(&spec_path);
                 let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                 let turn = agent_turn(
@@ -1842,7 +1891,7 @@ fn run_package_inner(
             }
             Err(osc::Error::UnresolvableDeps {
                 names: deps,
-                detail: _,
+                detail,
             }) => {
                 reporter.report(&Event::StepFinished {
                     step: build_step.id,
@@ -1866,6 +1915,7 @@ fn run_package_inner(
                     // retry. Count the round anyway — if OBS keeps saying
                     // unresolvable we would otherwise spin here forever.
                     attempts += 1;
+                    persist_attempts(&ws, &config.run_id, attempts);
                     if attempts > config.max_attempts {
                         return PipelineResult::Failed {
                             rpm_name,
@@ -1880,66 +1930,51 @@ fn run_package_inner(
                     continue;
                 }
 
-                // Give the agent a chance to fix the spec before giving up —
-                // the dep name or version constraint may be wrong (e.g. requires
-                // cython >= 3.0 but only Cython0 is available).
-                let mut agent_edited = false;
-                let mut agent_unresolvable: Vec<String> = Vec::new();
-                let mut agent_step_id: Option<_> = None;
-                if !config.no_agent
-                    && attempts < config.max_attempts
-                    && spent_usd < config.budget_usd
-                {
-                    attempts += 1;
-                    link_build_log(&ws, &build_log);
+                // Unresolvable deps cannot be fixed by spec edits — they
+                // name a package that genuinely doesn't exist yet, not a
+                // wrong constraint in this spec. Skip the FixAfterBuild
+                // spec-fix loop and queue them for packaging directly, but
+                // give the agent one single, read-only, cheap-model lookup
+                // first to translate OBS's RPM-wrapped names
+                // (`libtrantor-devel`) into the real upstream project name
+                // (`trantor`) — mechanical lib/-devel stripping alone misses
+                // cases like that one. "Once" is enforced by
+                // `unresolvable_review_hash`: a later invocation of this
+                // package that hits the exact same dep set reuses the cached
+                // translation instead of asking again.
+                reporter.report(&Event::BuildFailed {
+                    step: build_step.id,
+                    classification: ap_core::event::BuildFailure::UnresolvableDeps {
+                        packages: unresolvable_deps.clone(),
+                    },
+                    log: build_log.clone(),
+                });
 
-                    let extract = extract_build_log(
-                        &build_log,
-                        &sdist_top_level,
-                        reporter,
-                        Some(build_step.id),
-                    );
-                    // We already know this failure's shape — OBS reported
-                    // Unresolvable with a concrete missing-package list — so
-                    // classify directly instead of running the generic
-                    // `classify_failure` over an empty build log and watching
-                    // it fall through to `Unclassified` (the drogon /
-                    // `trantor-devel` case from notes.md: dependency
-                    // resolution fails before any scriptlet runs, so the log
-                    // never contains an rpm `error:` line for the heuristic
-                    // extractor to key off).
-                    reporter.report(&Event::BuildFailed {
-                        step: build_step.id,
-                        classification: ap_core::event::BuildFailure::UnresolvableDeps {
-                            packages: unresolvable_deps.clone(),
-                        },
-                        log: build_log.clone(),
-                    });
+                let mut sorted_deps = unresolvable_deps.clone();
+                sorted_deps.sort_unstable();
+                sorted_deps.dedup();
 
-                    let clean = strip_and_rewrite(&spec_path);
-                    let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
+                let prior_state = PkgState::load(&ws);
+                let already_reviewed = prior_state.already_reviewed_unresolvable(&sorted_deps);
+                let mut translated = if already_reviewed {
+                    prior_state.unresolvable_translated.clone()
+                } else {
+                    Vec::new()
+                };
+
+                if !already_reviewed && !config.no_agent && spent_usd < config.budget_usd {
                     let turn = agent_turn(
                         TurnCtx {
-                            label: "agent",
-                            task: crate::agent::Task::FixAfterBuild,
-                            event_task: ap_core::event::Task::FixAfterBuild {
-                                attempt: attempts as u32,
-                                max_attempts: config.max_attempts as u32,
-                            },
-                            attempt: attempts,
-                            hint: Some(&extract),
-                            // Don't prime the agent with OBS's extracted dep
-                            // names — the extract hint already includes the
-                            // relevant log excerpt, and feeding RPM-wrapped
-                            // names (`python314-trantor-devel`) back as
-                            // "missing" encourages the agent to echo them into
-                            // `unresolvable_packages` instead of looking the
-                            // real upstream project (`trantor`) up itself.
-                            unresolvable_deps: &[],
-                            unresolvable_detail: &[],
-                            checkout_dir: Some(&checkout_dir),
+                            label: "translate-deps",
+                            task: crate::agent::Task::TranslateUnresolvableDeps,
+                            event_task: ap_core::event::Task::TranslateUnresolvableDeps,
+                            attempt: 0,
+                            hint: None,
+                            unresolvable_deps: &sorted_deps,
+                            unresolvable_detail: &detail,
+                            checkout_dir: None,
                             from_repo_archive,
-                            resume: true,
+                            resume: false,
                             context: None,
                         },
                         config,
@@ -1949,79 +1984,26 @@ fn run_package_inner(
                         &mut spent_usd,
                         &mut session_id,
                     );
-
-                    if let Ok((agent_step, outcome)) = turn {
-                        agent_unresolvable = outcome.unresolvable_packages.clone();
-                        agent_step_id = Some(agent_step.id);
-                        // Queuing the agent's reported unresolvable_packages
-                        // takes precedence over its action. `Action::Blocked`
-                        // with a non-empty unresolvable_packages list is the
-                        // *normal* shape of "I can't fix the spec; package
-                        // these first and come back" (drogon reporting
-                        // `trantor`/`jsoncpp`/`libbrotli`/`yaml-cpp` is a real
-                        // case). Running apply_turn_and_reset first would turn
-                        // the Blocked verdict into a hard `PipelineResult::Failed`
-                        // and discard the whole list. The ordering here mirrors
-                        // the PreFix and generic FixAfterBuild arms, which
-                        // already check unresolvable_packages first.
-                        if !agent_unresolvable.is_empty() {
-                            // Fall through to the shared queuing block below.
-                        } else {
-                            let effect = match apply_turn_and_reset(
-                                ApplyTurnCtx {
-                                    config,
-                                    checkout_dir: &checkout_dir,
-                                    spec_path: &spec_path,
-                                    step: &agent_step,
-                                    before: &clean,
-                                    rpm_name: &rpm_name,
-                                    label: "unresolvable BuildRequires",
-                                    attempt: attempts,
-                                    notes_path: ws.notes(),
-                                    snapshot: Some(&checkout_snapshot),
-                                },
-                                &outcome,
-                                reporter,
-                                &mut sdist_top_level,
-                                &mut from_repo_archive,
-                            ) {
-                                Ok(effect) => effect,
-                                Err(reason) => return PipelineResult::Failed { rpm_name, reason },
-                            };
-                            if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
-                                agent_edited = true;
-                            }
-                        }
+                    if let Ok((_, outcome)) = turn {
+                        translated = outcome.unresolvable_packages;
                     }
+                    let mut state = PkgState::load(&ws);
+                    state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
+                    state.unresolvable_translated = translated.clone();
+                    save_state(&state, &ws, reporter);
                 }
 
-                if agent_edited {
-                    // Agent fixed the spec (wrong dep name/version) — rebuild.
-                    continue;
-                }
-
-                // Unresolvable deps cannot be fixed by spec edits — queue the
-                // dependencies for packaging. Prefer the agent's
-                // `unresolvable_packages` list when it provided one: OBS
-                // complains in BuildRequires-string form (`libtrantor-devel`),
-                // but the upstream project the resolver has to find on PyPI/
-                // GitHub is `trantor` — only the agent can map one to the
-                // other, and if the pipeline passes OBS's wrapped name along
-                // untouched the lookup misses and the dep gets permanently
-                // marked unbuildable instead of built. Fall back to OBS's
-                // names only if the agent didn't rename anything (equivalent
-                // to the old behaviour).
-                if !agent_unresolvable.is_empty() {
+                if !translated.is_empty() {
                     reporter.report(&Event::MissingPackages {
-                        step: agent_step_id.unwrap_or(build_step.id),
-                        names: agent_unresolvable.clone(),
+                        step: build_step.id,
+                        names: translated.clone(),
                         source: ap_core::event::MissingSource::Agent,
                     });
                 }
-                let source_list = if agent_unresolvable.is_empty() {
+                let source_list = if translated.is_empty() {
                     &unresolvable_deps
                 } else {
-                    &agent_unresolvable
+                    &translated
                 };
                 let mut to_build: Vec<String> = source_list
                     .iter()
@@ -2060,6 +2042,7 @@ fn run_package_inner(
                 }
 
                 attempts += 1;
+                persist_attempts(&ws, &config.run_id, attempts);
                 if attempts > config.max_attempts || spent_usd >= config.budget_usd {
                     let why = if spent_usd >= config.budget_usd {
                         format!(
@@ -3918,6 +3901,17 @@ fn save_state(state: &PkgState, ws: &Workspace, reporter: &dyn Reporter) {
     warn_if_err(reporter, "saving state.json", state.save(ws));
 }
 
+/// Persist the fix-attempt count after every increment, the same way
+/// `agent_turn` persists `spent_usd` after every turn — so a crash or a
+/// `MissingDeps` round trip mid-pipeline resumes with the right count
+/// instead of restarting `attempts` at 0 (see `PkgState::cumulative_attempts`).
+fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
+    let mut st = PkgState::load(ws);
+    st.cumulative_attempts = attempts;
+    st.cumulative_spent_run_id = Some(run_id.to_string());
+    let _ = st.save(ws);
+}
+
 /// Report a failed bookkeeping step (state file, convenience symlinks the
 /// agent reads) as a warning instead of dropping it.
 fn warn_if_err<T, E: std::fmt::Display>(reporter: &dyn Reporter, what: &str, result: Result<T, E>) {
@@ -5617,6 +5611,7 @@ mod tests {
             reviewed_spec_hash: None,
             cumulative_spent_usd: 1.75,
             cumulative_spent_run_id: Some("20260107-120000-abcdef".into()),
+            ..Default::default()
         };
         // Serde round-trip to confirm persistence.
         let json = serde_json::to_string(&old).unwrap();
@@ -5681,6 +5676,7 @@ mod tests {
             reviewed_spec_hash: None,
             cumulative_spent_usd: 0.0,
             cumulative_spent_run_id: None,
+            ..Default::default()
         };
         assert!(
             !state.is_built("1.2.3"),
@@ -5698,6 +5694,7 @@ mod tests {
             reviewed_spec_hash: None,
             cumulative_spent_usd: 0.0,
             cumulative_spent_run_id: None,
+            ..Default::default()
         };
         assert!(make("success").is_built("1.0"));
         assert!(!make("failed").is_built("1.0"));
@@ -5722,6 +5719,7 @@ mod tests {
             reviewed_spec_hash: None,
             cumulative_spent_usd: 0.0,
             cumulative_spent_run_id: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&fresh).unwrap();
         let back: PkgState = serde_json::from_str(&json).unwrap();

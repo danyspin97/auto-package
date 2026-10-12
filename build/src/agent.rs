@@ -2594,6 +2594,10 @@ pub enum Task {
     FixAfterBuild,
     /// Fix the spec after a failed `rpmspec --parse`.
     FixAfterValidation,
+    /// Translate OBS's RPM-wrapped unresolvable dependency names (e.g.
+    /// `libtrantor-devel`) into real upstream project names, read-only — no
+    /// spec edit is attempted or possible (see `allowed_tools`).
+    TranslateUnresolvableDeps,
 }
 
 /// Per-turn tool-call and token budget.
@@ -2935,7 +2939,12 @@ struct StreamUsage {
 pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
-    let allowed_tools = if req.checkout_dir.is_some() {
+    let allowed_tools = if req.task == Task::TranslateUnresolvableDeps {
+        // Read-only by construction, not just by prompt instruction: this
+        // task only reports upstream names for `unresolvable_packages`, it
+        // must not be able to touch the spec or checkout either way.
+        "Bash(curl -s https://pypi.org/*),WebSearch"
+    } else if req.checkout_dir.is_some() {
         "Read,Grep,Edit,Write,Skill,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),Bash(osc status),Bash(osc vc *),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch"
     } else {
         "Read,Grep,Edit,Write,Skill,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch"
@@ -3589,6 +3598,20 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              editing to confirm the fix. `rpmspec.txt` holds the stderr from the \
              failure that triggered this turn."
         }
+        Task::TranslateUnresolvableDeps => {
+            "OBS could not resolve the dependencies listed below (see \"Missing \
+             dependencies\"). Your ONLY job this turn is to report, for each one, \
+             the real upstream project name in `unresolvable_packages` — e.g. \
+             OBS's `libtrantor-devel` is the upstream project `trantor` — so the \
+             pipeline queues the right package instead of a mechanically \
+             rpm-prefix/-devel-stripped guess that may not resolve. You have no \
+             file-editing tools this turn: do not attempt to fix the spec. Set \
+             `action` to `no_change` and list every name you were given in \
+             `unresolvable_packages`, using whichever name you believe actually \
+             identifies the upstream project (unchanged if you have no better \
+             name for it). Use WebSearch or PyPI only to disambiguate a name \
+             you are not confident about; do not spend the turn on anything else."
+        }
     };
 
     // State the budget that is actually enforced — the turn is launched with
@@ -3598,6 +3621,11 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "Pre-build review. ${remaining:.2} of model budget left for this package.",
             remaining = (req.budget_usd - req.spent_usd).max(0.0),
         ),
+        Task::TranslateUnresolvableDeps => {
+            "One-off dependency-name review — not counted against this package's \
+             fix attempts."
+                .to_string()
+        }
         _ => format!(
             "Fix attempt {attempt} of {max}. ${spent:.2} spent on this package so far, \
              ${remaining:.2} left. Investigate as much as you need within that.",
