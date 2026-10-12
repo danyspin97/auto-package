@@ -239,6 +239,16 @@ pub struct WheelLayout {
     /// Shortest path (relative to site-packages) of a shared library in the
     /// wheel, for a file-existence check when there is nothing to import.
     pub first_shared_lib: Option<String>,
+    /// Directories (relative to site-packages, no trailing slash) containing
+    /// a bundled C/C++ header (`.h`/`.hpp`) outside `.dist-info`/`.data` —
+    /// a prebuilt binary wheel shipping its own public API headers
+    /// alongside the library (NVIDIA's CUDA wheels all do this: `nccl.h`,
+    /// `cublas_v2.h`, …), not stray third-party content. rpmlint's
+    /// `devel-file-in-non-devel-package` fires on every one of these in a
+    /// package that — being a prebuilt-wheel repackage, convention 27 —
+    /// never gets a `-devel` split, since nothing in this build environment
+    /// ever compiles against them. Sorted and deduplicated.
+    pub header_dirs: Vec<String>,
 }
 
 /// Inspect a wheel's file list. `None` when it cannot be read as a zip.
@@ -273,9 +283,41 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         })
         .min_by_key(|n| n.len())
         .cloned();
+    let header_dirs: Vec<String> = {
+        let mut dirs: Vec<String> = names
+            .iter()
+            .filter(|n| {
+                let file = n.rsplit('/').next().unwrap_or("");
+                !skip(&top_of(n)) && (file.ends_with(".h") || file.ends_with(".hpp"))
+            })
+            .filter_map(|n| n.rsplit_once('/').map(|(dir, _)| dir.to_string()))
+            .collect();
+        dirs.sort_unstable();
+        dirs.dedup();
+        // Collapse to the shallowest covering set: a real header tree (NCCL's
+        // `include/nccl_device/gin/gdaki/...`) nests many directories under
+        // one top-level `include/`, and rpmlint's `addFilter` is an
+        // unanchored substring match — a filter for the parent already
+        // matches every path under it, so emitting one per nested
+        // subdirectory too would just be redundant noise. Sorting first
+        // guarantees a parent directory always sorts immediately before its
+        // descendants (it's a string prefix of each one), so checking only
+        // the most recently kept entry is enough to drop every descendant.
+        let mut kept: Vec<String> = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            let is_nested_under_kept = kept.last().is_some_and(|parent: &String| {
+                dir.starts_with(parent.as_str()) && dir.as_bytes().get(parent.len()) == Some(&b'/')
+            });
+            if !is_nested_under_kept {
+                kept.push(dir);
+            }
+        }
+        kept
+    };
     Some(WheelLayout {
         importable,
         first_shared_lib,
+        header_dirs,
     })
 }
 
@@ -964,10 +1006,7 @@ mod tests {
                 // A nested test-looking file elsewhere must not win over the
                 // real top-level tests/ dir, nor substitute for it when the
                 // real one is absent.
-                (
-                    "thing-1.0/thing/scripts/test_fixture.py",
-                    b"".as_slice(),
-                ),
+                ("thing-1.0/thing/scripts/test_fixture.py", b"".as_slice()),
             ],
         );
         let info = inspect(&tarball).unwrap();
@@ -981,10 +1020,7 @@ mod tests {
                     "thing-1.0/pyproject.toml",
                     b"[project]\nname = \"thing\"\n".as_slice(),
                 ),
-                (
-                    "thing-1.0/thing/scripts/test_fixture.py",
-                    b"".as_slice(),
-                ),
+                ("thing-1.0/thing/scripts/test_fixture.py", b"".as_slice()),
             ],
         );
         let info2 = inspect(&tarball2).unwrap();
@@ -1563,6 +1599,56 @@ build-backend = "flit_core.buildapi"
             l.first_shared_lib.as_deref(),
             Some("nvidia/cu13/lib/libnvJitLink.so.13")
         );
+        assert_eq!(l.header_dirs, vec!["nvidia/cu13/include".to_string()]);
+    }
+
+    /// Multiple headers in the same directory collapse to one entry;
+    /// headers in distinct directories (and a `.hpp` alongside a `.h`) each
+    /// get their own, sorted. A `.dist-info` header (unlikely, but
+    /// hypothetically possible metadata) must not count.
+    #[test]
+    fn wheel_layout_dedupes_and_sorts_header_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("h.whl");
+        write_wheel(
+            &w,
+            &[
+                "nvidia/nccl/include/nccl.h",
+                "nvidia/nccl/include/nccl_device.h",
+                "nvidia/cublas/include/cublas_v2.hpp",
+                "nvidia_nccl-1.0.dist-info/licenses/some.h",
+            ],
+        );
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(
+            l.header_dirs,
+            vec![
+                "nvidia/cublas/include".to_string(),
+                "nvidia/nccl/include".to_string(),
+            ]
+        );
+    }
+
+    /// The real nvidia-nccl-cu13 shape: headers nested many levels under one
+    /// top-level `include/` (`include/nccl_device/gin/gdaki/...`). Only the
+    /// shallowest directory should be kept — rpmlint's `addFilter` is an
+    /// unanchored substring match, so a filter on the parent already covers
+    /// every descendant, and one redundant filter per nested directory would
+    /// just be noise.
+    #[test]
+    fn wheel_layout_collapses_nested_header_dirs_to_the_shallowest_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("nested.whl");
+        write_wheel(
+            &w,
+            &[
+                "nvidia/nccl/include/nccl.h",
+                "nvidia/nccl/include/nccl_device/comm.h",
+                "nvidia/nccl/include/nccl_device/gin/gdaki/common.h",
+            ],
+        );
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(l.header_dirs, vec!["nvidia/nccl/include".to_string()]);
     }
 
     #[test]

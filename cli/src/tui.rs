@@ -205,6 +205,11 @@ enum PkgStatus {
     AlreadyBuilt,
     MissingDeps,
     Failed,
+    /// `Failed` whose build log signature matched [`looks_like_disk_full`] —
+    /// split out from plain `Failed` so it's visually distinct in the table
+    /// (nothing about the spec is wrong; there's nothing to fix but disk
+    /// space) and so the `r` keybinding knows which row it applies to.
+    NoSpace,
 }
 
 impl PkgStatus {
@@ -216,6 +221,7 @@ impl PkgStatus {
             PkgStatus::AlreadyBuilt => "cached",
             PkgStatus::MissingDeps => "needs deps",
             PkgStatus::Failed => "failed",
+            PkgStatus::NoSpace => "no space",
         }
     }
 
@@ -226,8 +232,19 @@ impl PkgStatus {
             PkgStatus::Succeeded | PkgStatus::AlreadyBuilt => Color::Green,
             PkgStatus::MissingDeps => Color::Magenta,
             PkgStatus::Failed => Color::Red,
+            PkgStatus::NoSpace => Color::LightRed,
         }
     }
+}
+
+/// Whether `text` names the classic ENOSPC condition — glibc's `strerror`
+/// text for it, verbatim, is what `tar`, `cp`, and `rpmbuild` all actually
+/// print, so this is the literal signature to look for rather than an errno
+/// number that never reaches the log as such. Matched case-insensitively:
+/// seen both as `No space left on device` and, inside some tools' own
+/// wrapping, lowercased.
+fn looks_like_disk_full(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("no space left on device")
 }
 
 /// What kind of thing an [`ActivityEntry`] records — lets the Agent Activity
@@ -277,6 +294,13 @@ struct PkgState {
     /// first try, or still on its initial build, never needed one.
     tries: u32,
     max_tries: u32,
+    /// Set once this package's build log has shown [`looks_like_disk_full`]'s
+    /// signature. Sticky for the rest of the run: an `ExtractResult` only
+    /// arrives for the attempt that just failed, but the eventual
+    /// `PackageFinished` that turns this into a visible `PkgStatus::NoSpace`
+    /// arrives later, after the agent's (likely futile) fix attempt — so
+    /// this has to survive until then rather than being read inline.
+    disk_full_detected: bool,
 }
 
 impl PkgState {
@@ -294,6 +318,7 @@ impl PkgState {
             finished: false,
             tries: 0,
             max_tries: 0,
+            disk_full_detected: false,
         }
     }
 
@@ -342,6 +367,13 @@ struct TuiState {
     /// Toggled with `a` — show every package, including ones `visible_order`
     /// would otherwise hide once they succeed.
     show_all: bool,
+    /// Full pip-closure size from the most recent `ResolveFinished` — there
+    /// is no live equivalent (see that event's handler), so this is kept as
+    /// a point-in-time value rather than derived every frame like `built`.
+    resolve_total: Option<usize>,
+    /// Same snapshot caveat as `resolve_total`: how many of the closure the
+    /// distro already satisfies, as of the last resolve pass.
+    resolve_in_distro: Option<usize>,
 }
 
 impl TuiState {
@@ -351,6 +383,8 @@ impl TuiState {
             packages: HashMap::new(),
             last_global_log: None,
             run_outcome: None,
+            resolve_total: None,
+            resolve_in_distro: None,
             run_start: None,
             show_all: false,
         }
@@ -440,6 +474,21 @@ impl TuiState {
                 in_distro,
                 remaining,
             } => {
+                // `built`/`remaining` here are a snapshot for this one
+                // resolve pass only — re-resolving the pip closure is rare
+                // (only the current batch's root re-runs `select_target`;
+                // the far more frequent ad hoc dependency builds spawned
+                // from `UnresolvableDeps`/`MissingDeps` never do), so the
+                // header's own `built` figure is computed live from
+                // `self.packages` instead (see `render_summary`) rather
+                // than trusted from this message — otherwise it reads as
+                // stuck at whatever this first snapshot said for most of a
+                // long run, long after packages have visibly succeeded in
+                // the table. `total`/`in_distro` have no live equivalent
+                // (a distro-satisfied dependency is never selected as a
+                // target, so it never gets a row here at all) and are kept.
+                self.resolve_total = Some(*total);
+                self.resolve_in_distro = Some(*in_distro);
                 self.add_global_log(
                     LogLevel::Info,
                     format!(
@@ -452,6 +501,11 @@ impl TuiState {
                 state.version = version.clone();
                 state.status = PkgStatus::Queued;
                 state.started = Instant::now();
+                // A fresh attempt — the condition that caused last time's
+                // `NoSpace` may already be gone (that's the whole point of
+                // the `r` retry keybinding), so don't carry the flag over
+                // and have it immediately reclassify a *new* failure.
+                state.disk_full_detected = false;
             }
             Event::PackageFinished {
                 pkg,
@@ -467,7 +521,13 @@ impl TuiState {
                     PackageOutcome::Built => PkgStatus::Succeeded,
                     PackageOutcome::AlreadyBuilt => PkgStatus::AlreadyBuilt,
                     PackageOutcome::MissingDeps { .. } => PkgStatus::MissingDeps,
-                    PackageOutcome::Failed { .. } => PkgStatus::Failed,
+                    PackageOutcome::Failed { reason } => {
+                        if state.disk_full_detected || looks_like_disk_full(reason) {
+                            PkgStatus::NoSpace
+                        } else {
+                            PkgStatus::Failed
+                        }
+                    }
                 };
                 let msg = match outcome {
                     PackageOutcome::Built => "built".to_string(),
@@ -523,6 +583,11 @@ impl TuiState {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));
             }
             Event::ExtractResult { extract, .. } => {
+                if extract.error_lines.iter().any(|l| looks_like_disk_full(l))
+                    || looks_like_disk_full(&extract.excerpt)
+                {
+                    state.disk_full_detected = true;
+                }
                 let phase = extract.phase.as_deref().unwrap_or("unknown phase");
                 let mut msg = format!("  ↳ failure located in {phase}");
                 if let Some(genre) = &extract.genre {
@@ -788,6 +853,33 @@ fn event_loop(
                     log_scroll = 0;
                 }
                 KeyCode::Char('a') => state.show_all = !state.show_all,
+                // Retry a package that failed with "No space left on
+                // device" (`PkgStatus::NoSpace`) once the user has freed
+                // some — re-sent through the same channel as the `n` add
+                // prompt, since from the build loop's side a retry and a
+                // freshly typed package name are the same request. Any
+                // other status is a no-op: there is nothing a disk cleanup
+                // would fix for a real spec defect.
+                KeyCode::Char('r') => {
+                    if let Some(name) = selected.as_ref()
+                        && state.packages.get(name.as_str()).map(|p| &p.status)
+                            == Some(&PkgStatus::NoSpace)
+                    {
+                        if add_tx.send(name.clone()).is_ok() {
+                            state.add_global_log(
+                                LogLevel::Info,
+                                format!("Retrying {name} (no space left on device)"),
+                            );
+                        } else {
+                            state.add_global_log(
+                                LogLevel::Error,
+                                format!(
+                                    "Cannot retry {name}: the run is no longer accepting packages"
+                                ),
+                            );
+                        }
+                    }
+                }
                 // Event Log scrollback: pin to the live tail by default (0),
                 // step back through history on demand without losing new
                 // lines arriving underneath — they just wait below the
@@ -901,17 +993,40 @@ fn render(
         table_state.selected(),
         log_scroll,
     );
-    render_footer(f, state, input, chunks[3]);
+    let retryable = table_state
+        .selected()
+        .and_then(|i| visible.get(i))
+        .and_then(|name| state.packages.get(name.as_str()))
+        .is_some_and(|p| p.status == PkgStatus::NoSpace);
+    render_footer(f, state, input, chunks[3], retryable);
 }
 
 fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     let done = state.packages.values().filter(|p| p.finished).count();
     let total = state.order.len();
+    // Live, not the `ResolveFinished` snapshot: that event only fires once
+    // per batch re-resolution of a root's own pip closure, which the far
+    // more frequent ad hoc dependency builds never trigger — trusting it
+    // here left this reading "0 built" for most of a long run even as
+    // packages visibly succeeded in the table below. `in_distro` has no
+    // live equivalent (a distro-satisfied dependency never becomes a row
+    // here at all), so that one is still the last snapshot.
+    let built = state
+        .packages
+        .values()
+        .filter(|p| matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt))
+        .count();
     let elapsed = state.run_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-    let title = format!(
-        " Auto-Package — {done}/{total} packages done │ elapsed {elapsed}s │ cost ${:.4} ",
-        state.total_cost_usd()
-    );
+    let title = match (state.resolve_total, state.resolve_in_distro) {
+        (Some(closure_total), Some(in_distro)) => format!(
+            " Auto-Package — {done}/{total} packages done ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${:.4} ",
+            state.total_cost_usd()
+        ),
+        _ => format!(
+            " Auto-Package — {done}/{total} packages done ({built} built) │ elapsed {elapsed}s │ cost ${:.4} ",
+            state.total_cost_usd()
+        ),
+    };
     let header = Paragraph::new(title)
         .style(
             Style::default()
@@ -1050,7 +1165,7 @@ fn render_detail(
     f.render_widget(activity, chunks[1]);
 }
 
-fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rect) {
+fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rect, retryable: bool) {
     if let Some(buf) = input {
         let line = Line::from(vec![
             Span::styled(
@@ -1077,7 +1192,8 @@ fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rec
         .unwrap_or_else(|| Span::raw(""));
     let hint = Span::styled(
         format!(
-            "  ↑/↓ select │ PgUp/PgDn/End scroll log │ n add package │ a {} succeeded │ q/Esc quit",
+            "  ↑/↓ select │ PgUp/PgDn/End scroll log │ n add package{} │ a {} succeeded │ q/Esc quit",
+            if retryable { " │ r retry (no space left)" } else { "" },
             if state.show_all { "hide" } else { "show" }
         ),
         Style::default().fg(Color::DarkGray),
@@ -1087,6 +1203,30 @@ fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rec
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     f.render_widget(footer, area);
+}
+
+#[cfg(test)]
+mod disk_full_tests {
+    use super::*;
+
+    #[test]
+    fn matches_the_literal_strerror_text() {
+        assert!(looks_like_disk_full(
+            "error: Bad exit status: cpio: write: No space left on device"
+        ));
+    }
+
+    #[test]
+    fn matches_case_insensitively() {
+        assert!(looks_like_disk_full("NO SPACE LEFT ON DEVICE"));
+    }
+
+    #[test]
+    fn an_unrelated_failure_does_not_match() {
+        assert!(!looks_like_disk_full(
+            "CMake Error: The LOCATION property may not be read from target \"png\""
+        ));
+    }
 }
 
 #[cfg(test)]

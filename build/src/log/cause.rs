@@ -797,7 +797,9 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            lines.push(format!("FAILED tests/test_cli.py::Tester::test_{i} - {tail}"));
+            lines.push(format!(
+                "FAILED tests/test_cli.py::Tester::test_{i} - {tail}"
+            ));
         }
         lines.push("FAILED tests/test_cli.py::Tester::test_net - httpx2.ConnectEr...".into());
         lines.push("error: Bad exit status from /var/tmp/rpm-tmp.abc (%check)".into());

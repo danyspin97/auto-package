@@ -527,8 +527,14 @@ pub fn select_target(
         .collect();
 
     let resolvable: Vec<bool> = resolution.iter().map(|r| *r != Resolution::No).collect();
-    let in_distro_count = resolution.iter().filter(|r| **r == Resolution::Distro).count();
-    let built_count = resolution.iter().filter(|r| **r == Resolution::Built).count();
+    let in_distro_count = resolution
+        .iter()
+        .filter(|r| **r == Resolution::Distro)
+        .count();
+    let built_count = resolution
+        .iter()
+        .filter(|r| **r == Resolution::Built)
+        .count();
     let remaining = total - in_distro_count - built_count;
 
     reporter.report(&Event::ResolveFinished {
@@ -2009,11 +2015,13 @@ fn run_package_inner(
                         if let Ok(current) = std::fs::read_to_string(&spec_path) {
                             let mut rewritten = current.clone();
                             for t in &translated {
-                                if let Some(bare) = bare_names.iter().find(|b| {
-                                    osc::fuzzy_key(b) == osc::fuzzy_key(t) && *b != t
-                                }) {
-                                    rewritten =
-                                        crate::spec::rewrite_python_module_name(&rewritten, bare, t);
+                                if let Some(bare) = bare_names
+                                    .iter()
+                                    .find(|b| osc::fuzzy_key(b) == osc::fuzzy_key(t) && *b != t)
+                                {
+                                    rewritten = crate::spec::rewrite_python_module_name(
+                                        &rewritten, bare, t,
+                                    );
                                 }
                             }
                             if rewritten != current {
@@ -4404,7 +4412,14 @@ fn generate_multi_flavor_wheel_spec(
                 "python-{}.rpmlintrc",
                 config.pkg_name.to_lowercase()
             ));
-            let _ = std::fs::write(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
+            let header_dirs = layout
+                .as_ref()
+                .map(|l| l.header_dirs.as_slice())
+                .unwrap_or(&[]);
+            let _ = std::fs::write(
+                &rpmlintrc_path,
+                crate::spec::prebuilt_wheel_rpmlintrc(header_dirs),
+            );
         }
         Ok((
             GenSpecResult {
@@ -4463,7 +4478,14 @@ fn generate_wheel_binary_spec(
             "python-{}.rpmlintrc",
             config.pkg_name.to_lowercase()
         ));
-        let _ = std::fs::write(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
+        let header_dirs = layout
+            .as_ref()
+            .map(|l| l.header_dirs.as_slice())
+            .unwrap_or(&[]);
+        let _ = std::fs::write(
+            &rpmlintrc_path,
+            crate::spec::prebuilt_wheel_rpmlintrc(header_dirs),
+        );
     }
 
     Ok(GenSpecResult {
@@ -4730,12 +4752,13 @@ fn is_cargo_workspace_member(root_cargo_toml: &Path, manifest_rel: &str) -> bool
     if excluded {
         return false;
     }
-    members.iter().filter_map(|m| m.as_str()).any(|pattern| {
-        match pattern.strip_suffix("/*") {
+    members
+        .iter()
+        .filter_map(|m| m.as_str())
+        .any(|pattern| match pattern.strip_suffix("/*") {
             Some(prefix) => member_dir.parent() == Some(Path::new(prefix)),
             None => Path::new(pattern) == member_dir,
-        }
-    })
+        })
 }
 
 fn append_notes(notes_path: PathBuf, section: &str) {
@@ -6068,7 +6091,11 @@ Patch0:         0001-fix.patch
     #[test]
     fn sync_quilt_series_rewrites_to_match_the_specs_current_patches() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("series"), b"0001-old.patch\n0002-old.patch\n").unwrap();
+        std::fs::write(
+            dir.path().join("series"),
+            b"0001-old.patch\n0002-old.patch\n",
+        )
+        .unwrap();
 
         let spec = "Name: foo\nPatch0: 0001-new.patch\n";
         sync_quilt_series(spec, dir.path());

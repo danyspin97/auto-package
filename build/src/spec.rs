@@ -114,9 +114,8 @@ const KNOWN_MIXED_CASE_PYPI_NAMES: &[(&str, &str)] = &[
 /// exactly once.
 fn python_module_token_re() -> &'static regex::Regex {
     use std::sync::LazyLock;
-    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"%\{python_module ([^}]+)\}").expect("static pattern")
-    });
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"%\{python_module ([^}]+)\}").expect("static pattern"));
     &RE
 }
 
@@ -125,8 +124,9 @@ fn python_module_token_re() -> &'static regex::Regex {
 /// operator or trailing whitespace. Shared with [`rewrite_python_module_name`].
 fn leading_name_re() -> &'static regex::Regex {
     use std::sync::LazyLock;
-    static NAME: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+-]*").expect("static pattern"));
+    static NAME: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+-]*").expect("static pattern")
+    });
     &NAME
 }
 
@@ -162,13 +162,14 @@ pub fn normalize_python_module_versions(spec: &str) -> String {
     static OP: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"\s*(>=|<=|!=|==|>|<)\s*").expect("static pattern"));
 
-    python_module_token_re().replace_all(spec, |caps: &regex::Captures| {
-        let inner = &caps[1];
-        let normalized = OP.replace_all(inner, " $1 ");
-        let recased = recase_python_module_name(&normalized);
-        format!("%{{python_module {}}}", recased)
-    })
-    .into_owned()
+    python_module_token_re()
+        .replace_all(spec, |caps: &regex::Captures| {
+            let inner = &caps[1];
+            let normalized = OP.replace_all(inner, " $1 ");
+            let recased = recase_python_module_name(&normalized);
+            format!("%{{python_module {}}}", recased)
+        })
+        .into_owned()
 }
 
 /// Rewrite the name inside every `%{python_module <name> ...}` token whose
@@ -194,19 +195,20 @@ pub fn rewrite_python_module_name(spec: &str, from: &str, to: &str) -> String {
     }
     let from_key = crate::osc::fuzzy_key(from);
 
-    python_module_token_re().replace_all(spec, |caps: &regex::Captures| {
-        let inner = &caps[1];
-        let Some(m) = leading_name_re().find(inner) else {
-            return format!("%{{python_module {inner}}}");
-        };
-        let name = m.as_str();
-        if crate::osc::fuzzy_key(name) == from_key {
-            format!("%{{python_module {to}{}}}", &inner[m.end()..])
-        } else {
-            format!("%{{python_module {inner}}}")
-        }
-    })
-    .into_owned()
+    python_module_token_re()
+        .replace_all(spec, |caps: &regex::Captures| {
+            let inner = &caps[1];
+            let Some(m) = leading_name_re().find(inner) else {
+                return format!("%{{python_module {inner}}}");
+            };
+            let name = m.as_str();
+            if crate::osc::fuzzy_key(name) == from_key {
+                format!("%{{python_module {to}{}}}", &inner[m.end()..])
+            } else {
+                format!("%{{python_module {inner}}}")
+            }
+        })
+        .into_owned()
 }
 
 /// Fix architecture-related lines when a package has C extensions.
@@ -257,7 +259,9 @@ pub fn fix_stray_dollar_macros(spec: &str) -> String {
         .lines()
         .map(|line| {
             let trimmed = line.trim_start();
-            if trimmed.starts_with('#') || trimmed.contains("%python_expand") || !trimmed.contains("%{$")
+            if trimmed.starts_with('#')
+                || trimmed.contains("%python_expand")
+                || !trimmed.contains("%{$")
             {
                 return line.to_string();
             }
@@ -686,7 +690,9 @@ chmod +x %{buildroot}%{$python_sitelib}/nvidia/cu13/lib/libfoo.so.1
 ";
         let fixed = fix_stray_dollar_macros(spec);
         assert!(
-            fixed.contains("%python_expand chmod +x %{buildroot}%{$python_sitelib}/nvidia/cu13/lib/libfoo.so.1"),
+            fixed.contains(
+                "%python_expand chmod +x %{buildroot}%{$python_sitelib}/nvidia/cu13/lib/libfoo.so.1"
+            ),
             "{fixed}"
         );
         assert!(
@@ -714,8 +720,14 @@ BuildRequires:  %{python_module pip}
 %python_install_alternative proton
 ";
         let fixed = fix_missing_alternatives_requires(spec);
-        assert!(fixed.contains("Requires(post):   update-alternatives\n"), "{fixed}");
-        assert!(fixed.contains("Requires(postun): update-alternatives\n"), "{fixed}");
+        assert!(
+            fixed.contains("Requires(post):   update-alternatives\n"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("Requires(postun): update-alternatives\n"),
+            "{fixed}"
+        );
         // Requires lines must land before %python_subpackages.
         let post_pos = fixed.find("Requires(post)").unwrap();
         let subpkg_pos = fixed.find("%python_subpackages").unwrap();
@@ -1287,12 +1299,32 @@ pub(crate) fn is_prebuilt_binary_wheel(
 /// nvidia-cuda-runtime, nvidia-nccl-cu13, and nvidia-nvtx. Pre-seeding this
 /// at spec-generation time saves the agent from re-deriving it from a failed
 /// build every single time this wheel shape recurs.
-pub fn prebuilt_wheel_rpmlintrc() -> &'static str {
-    "addFilter(\"missing-hash-section\")\n\
-     addFilter(\"shared-library-not-executable\")\n\
-     addFilter(\"library-without-ldconfig-postin\")\n\
-     addFilter(\"library-without-ldconfig-postun\")\n\
-     addFilter(\"no-dependency-on python-base\")\n"
+///
+/// `header_dirs` (from [`ap_ecosystem::sdist::WheelLayout::header_dirs`], the
+/// same already-unpacked wheel this function's caller already has on disk)
+/// adds one `devel-file-in-non-devel-package` filter per directory of
+/// bundled C/C++ headers — the sixth finding this shape produces, previously
+/// only ever caught by an agent turn re-deriving it from a failed build
+/// (observed on nvidia-nccl-cu13: 100 rpmlint errors for `nccl.h` and
+/// friends under `nvidia/nccl/include/`) and written as prose in the agent's
+/// own prompt instead of pre-seeded here like the other five. Every CUDA
+/// wheel bundling its own public API headers (cublas, cudnn, cufft, …) hits
+/// this the same way, so it belongs here, not in a prompt an agent has to
+/// remember to apply.
+pub fn prebuilt_wheel_rpmlintrc(header_dirs: &[String]) -> String {
+    let mut out = String::from(
+        "addFilter(\"missing-hash-section\")\n\
+         addFilter(\"shared-library-not-executable\")\n\
+         addFilter(\"library-without-ldconfig-postin\")\n\
+         addFilter(\"library-without-ldconfig-postun\")\n\
+         addFilter(\"no-dependency-on python-base\")\n",
+    );
+    for dir in header_dirs {
+        out.push_str(&format!(
+            "addFilter(\"devel-file-in-non-devel-package.*/usr/lib/python.*/site-packages/{dir}/\")\n"
+        ));
+    }
+    out
 }
 
 pub fn wheel_binary_skeleton(
@@ -1755,6 +1787,7 @@ BuildRequires:  %{python_module pip}
         let importable = WheelLayout {
             importable: Some("pkg".into()),
             first_shared_lib: None,
+            ..Default::default()
         };
         let spec =
             wheel_binary_skeleton("pkg", "1.0", wheel, &release, Some(true), Some(&importable));
@@ -1769,6 +1802,7 @@ BuildRequires:  %{python_module pip}
         let binary_only = WheelLayout {
             importable: None,
             first_shared_lib: Some("nvidia/cu13/lib/libnvJitLink.so.13".into()),
+            ..Default::default()
         };
         let spec = wheel_binary_skeleton(
             "nvidia-nvjitlink",
@@ -1811,6 +1845,7 @@ BuildRequires:  %{python_module pip}
         let binary_only = WheelLayout {
             importable: None,
             first_shared_lib: Some("nvidia/cu13/lib/libfoo.so.1".into()),
+            ..Default::default()
         };
         let spec = wheel_binary_skeleton(
             "nvidia-foo",
@@ -1829,6 +1864,7 @@ BuildRequires:  %{python_module pip}
         let importable = WheelLayout {
             importable: Some("pkg".into()),
             first_shared_lib: None,
+            ..Default::default()
         };
         let spec = wheel_binary_skeleton(
             "pkg",
@@ -1839,6 +1875,27 @@ BuildRequires:  %{python_module pip}
             Some(&importable),
         );
         assert!(!spec.contains("Source99"), "{spec}");
+    }
+
+    /// The nvidia-nccl-cu13 case: bundled C headers under the wheel's own
+    /// `include/` get a `devel-file-in-non-devel-package` filter pre-seeded
+    /// at generation time, so the agent doesn't have to re-derive it from
+    /// 100 rpmlint errors on the first real build.
+    #[test]
+    fn bundled_headers_get_a_pre_seeded_devel_file_filter() {
+        let rc = prebuilt_wheel_rpmlintrc(&["nvidia/nccl/include".to_string()]);
+        assert!(
+            rc.contains(
+                "addFilter(\"devel-file-in-non-devel-package.*/usr/lib/python.*/site-packages/nvidia/nccl/include/\")"
+            ),
+            "{rc}"
+        );
+        // The five baseline filters are still there regardless.
+        assert!(rc.contains("addFilter(\"missing-hash-section\")"), "{rc}");
+
+        // No bundled headers: no sixth filter, baseline unchanged.
+        let rc = prebuilt_wheel_rpmlintrc(&[]);
+        assert!(!rc.contains("devel-file-in-non-devel-package"), "{rc}");
     }
 
     #[test]

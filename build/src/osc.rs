@@ -427,7 +427,10 @@ pub fn strip_rpm_prefix(rpm: &str) -> &str {
 /// `lib...` name with no such suffix is frequently the real upstream/runtime
 /// library name and must not be touched.
 pub fn strip_devel_wrapping(name: &str) -> &str {
-    let Some(stripped) = name.strip_suffix("-devel").or_else(|| name.strip_suffix("-dev")) else {
+    let Some(stripped) = name
+        .strip_suffix("-devel")
+        .or_else(|| name.strip_suffix("-dev"))
+    else {
         return name;
     };
     stripped.strip_prefix("lib").unwrap_or(stripped)
@@ -1413,7 +1416,24 @@ pub fn get_build_status(
     if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch) {
         return Ok(status);
     }
+    get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
+}
 
+/// The `osc results` human-table path only — no XML, no staleness
+/// resolution via job history. Used by [`get_build_status`] as its fallback
+/// when the XML `_result` document is unreadable, and by [`obs_build`] as an
+/// independent second opinion when the XML path's answer has stopped
+/// changing for a long time: the two paths hit different OBS code (an XML
+/// API document vs. a human-table-rendering endpoint), so if one of them is
+/// silently serving a stale/cached snapshot, the other is the cheapest way
+/// to notice without guessing at why.
+fn get_build_status_from_results_table(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    emit: Emit<'_>,
+) -> Result<BuildStatus, Error> {
     let out = proc::capture_with_timeout(
         "osc",
         &["results", "-r", repo, "-a", arch, project, pkg_name],
@@ -1888,6 +1908,22 @@ pub fn obs_build(
     const STALE_PATIENCE: Duration = Duration::from_secs(600);
     let mut stale_since: Option<Instant> = None;
 
+    // The previous mechanism only ever broke silence for one specific case
+    // (an `Unknown("stale: ...")` verdict). A plain non-terminal status
+    // (`building`, `scheduled`, ...) that simply never changes again —
+    // because the XML `_result` document this reads is serving a stale
+    // snapshot while OBS has actually moved on — produced no `Progress`
+    // event (nothing to report: the string didn't change) and no `Warning`
+    // either, so the wait looked indistinguishable from a healthy long
+    // build for up to the full `MAX_WAIT`. Reported live: the TUI sat on an
+    // unchanging "building" for 1000+ seconds while OBS itself showed
+    // nothing in progress.
+    const NO_PROGRESS_WARNING: Duration = Duration::from_secs(120);
+    const NO_PROGRESS_RECHECK: Duration = Duration::from_secs(300);
+    let mut last_change = Instant::now();
+    let mut last_warning = Instant::now();
+    let mut rechecked_since_change = false;
+
     let status = loop {
         if start.elapsed() >= MAX_WAIT {
             return Err(Error::OscFailed {
@@ -1927,12 +1963,66 @@ pub fn obs_build(
         };
         let status_str = status.to_string();
 
+        let mut status = status;
         if status_str != prev_status {
             reporter.report(&Event::Progress {
                 step,
                 message: format!("OBS build status: {status_str}"),
             });
             prev_status = status_str;
+            last_change = Instant::now();
+            last_warning = Instant::now();
+            rechecked_since_change = false;
+        } else if !status.is_terminal() {
+            // Non-terminal and unchanged: make sure the user can always
+            // tell this is still alive and polling, not silently wedged.
+            if last_warning.elapsed() >= NO_PROGRESS_WARNING {
+                reporter.report(&Event::Warning {
+                    step,
+                    message: format!(
+                        "OBS build status still {status_str} after {}s with no change",
+                        last_change.elapsed().as_secs()
+                    ),
+                });
+                last_warning = Instant::now();
+            }
+            // One independent cross-check per stuck period, via a
+            // different OBS endpoint than whichever one produced `status`
+            // (see `get_build_status_from_results_table`'s doc comment) —
+            // catches one of them silently serving a stale snapshot while
+            // the other has already moved on.
+            if !rechecked_since_change && last_change.elapsed() >= NO_PROGRESS_RECHECK {
+                rechecked_since_change = true;
+                if let Ok(table_status) = get_build_status_from_results_table(
+                    project,
+                    pkg_name,
+                    repo,
+                    arch,
+                    Emit::quiet(),
+                ) {
+                    let table_str = table_status.to_string();
+                    if table_str != status_str {
+                        reporter.report(&Event::Warning {
+                            step,
+                            message: format!(
+                                "OBS status disagreement after {}s of no change: the API \
+                                 document says {status_str}, but `osc results` says \
+                                 {table_str} — trusting the independent read",
+                                last_change.elapsed().as_secs()
+                            ),
+                        });
+                        reporter.report(&Event::Progress {
+                            step,
+                            message: format!("OBS build status: {table_str}"),
+                        });
+                        prev_status = table_str;
+                        last_change = Instant::now();
+                        last_warning = Instant::now();
+                        rechecked_since_change = false;
+                        status = table_status;
+                    }
+                }
+            }
         }
 
         if status.is_terminal() {
