@@ -512,8 +512,7 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(
             std::io::stdout(),
-            crossterm::terminal::LeaveAlternateScreen,
-            crossterm::event::DisableMouseCapture
+            crossterm::terminal::LeaveAlternateScreen
         );
     }
     let usage = memory
@@ -694,11 +693,10 @@ fn main() -> color_eyre::Result<()> {
             // thread) and after the render thread's own in-thread teardown
             // had its chance to run. The render thread is detached: on
             // process exit Rust kills it before its own teardown can
-            // complete, leaving mouse capture engaged and breaking native
-            // terminal selection in the user's shell. This main-thread
-            // guard runs on every exit path (normal return, `?` early
-            // return, panic unwinding) and the extra teardown is
-            // idempotent.
+            // complete, leaving raw mode and the alternate screen stuck on
+            // in the user's shell. This main-thread guard runs on every
+            // exit path (normal return, `?` early return, panic unwinding)
+            // and the extra teardown is idempotent.
             let _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
 
             // The TUI takes over the terminal, so text output is dropped in
@@ -974,9 +972,9 @@ fn main() -> color_eyre::Result<()> {
             let memory = std::sync::Arc::new(MemorySink::new());
             // See the matching guard in `Commands::Build` for the rationale
             // (short version: the TUI render thread is detached, process
-            // exit kills it before its own terminal teardown runs, and
-            // leftover mouse capture breaks shell selection). Declared
-            // BEFORE `tui_ctrl` so it drops LAST.
+            // exit kills it before its own terminal teardown runs, leaving
+            // raw mode and the alternate screen stuck on). Declared BEFORE
+            // `tui_ctrl` so it drops LAST.
             let _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
             let tui_ctrl = if enable_tui {
                 Some(tui::TuiController::new(memory.clone())?)

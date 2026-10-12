@@ -83,10 +83,61 @@ pub fn fix_autosetup_dir(spec: &str, actual_top_level: &str) -> Option<String> {
     })
 }
 
-/// Normalize version constraints inside `%{python_module ...}`.
+/// PyPI project names whose canonical (display) spelling is mixed-case, but
+/// whose `[build-system] requires` entry upstream — and so, verbatim, the
+/// generator's `%{python_module ...}` output — is routinely written all
+/// lowercase. RPM expands `%{python_module <name>}` per-flavor by literal
+/// string concatenation (`python313-<name>`), so the lowercase spelling
+/// names a package that does not exist (`python313-cython` instead of
+/// `python313-Cython`) and OBS reports it "nothing provides" — which looks
+/// exactly like a genuinely missing dependency. Keys are lowercase; checked
+/// case-insensitively against the name written in the spec.
+///
+/// This list isn't exhaustive — it's the set observed so far (see convention
+/// in `agent.rs`). Extend it as new mismatches are found.
+const KNOWN_MIXED_CASE_PYPI_NAMES: &[(&str, &str)] = &[
+    ("pillow", "Pillow"),
+    ("pyyaml", "PyYAML"),
+    ("markupsafe", "MarkupSafe"),
+    ("pyjwt", "PyJWT"),
+    ("pyside6", "PySide6"),
+    ("pyqt5", "PyQt5"),
+    ("pymysql", "PyMySQL"),
+    ("pynacl", "PyNaCl"),
+    ("cython", "Cython"),
+    ("brotli", "Brotli"),
+];
+
+/// Re-case the leading package name of a `%{python_module <name> ...}`
+/// token's inner text to its canonical PyPI spelling, when known. Leaves
+/// anything not in [`KNOWN_MIXED_CASE_PYPI_NAMES`] untouched — case
+/// mismatches outside this list still rely on the agent catching them (see
+/// convention in `agent.rs`).
+fn recase_python_module_name(inner: &str) -> String {
+    use std::sync::LazyLock;
+    static NAME: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+-]*").expect("static pattern"));
+    let Some(m) = NAME.find(inner) else {
+        return inner.to_string();
+    };
+    let name = m.as_str();
+    match KNOWN_MIXED_CASE_PYPI_NAMES
+        .iter()
+        .find(|(lower, _)| name.eq_ignore_ascii_case(lower))
+    {
+        Some((_, canonical)) if *canonical != name => {
+            format!("{canonical}{}", &inner[m.end()..])
+        }
+        _ => inner.to_string(),
+    }
+}
+
+/// Normalize `%{python_module ...}` tokens.
 ///
 /// Adds spaces around `>=`, `<=`, `>`, `<`, `==`, `!=` that are missing them,
-/// e.g. `setuptools>=77` → `setuptools >= 77`.
+/// e.g. `setuptools>=77` → `setuptools >= 77`, and re-cases the package name
+/// to its canonical PyPI spelling when it's a known mixed-case name written
+/// lowercase (see [`recase_python_module_name`]).
 pub fn normalize_python_module_versions(spec: &str) -> String {
     use std::sync::LazyLock;
     static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -99,7 +150,8 @@ pub fn normalize_python_module_versions(spec: &str) -> String {
     RE.replace_all(spec, |caps: &regex::Captures| {
         let inner = &caps[1];
         let normalized = OP.replace_all(inner, " $1 ");
-        format!("%{{python_module {}}}", normalized)
+        let recased = recase_python_module_name(&normalized);
+        format!("%{{python_module {}}}", recased)
     })
     .into_owned()
 }
@@ -134,6 +186,71 @@ pub fn fix_c_extension_arch(spec: &str) -> String {
         out.insert(pos, r#"export CFLAGS="%{optflags}""#.to_string());
     }
 
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// Prefix a bare `%{$python...}` dynamic-macro reference with
+/// `%python_expand` when it's missing one.
+///
+/// `%{$python_sitelib}`/`%{$python_sitearch}` only resolve correctly inside
+/// a `%python_expand` block, which binds `$python` per flavor — outside one
+/// they silently expand to `%{}` instead of failing loudly, so the bug only
+/// surfaces at actual install/build time (observed on python-nvidia-nvtx: a
+/// bare `chmod %{$python_sitelib}/...` line). Every real usage in this
+/// ecosystem's specs is single-line (`%python_expand <command...>`), so
+/// prefixing the whole line is sufficient; comment lines are left alone.
+pub fn fix_stray_dollar_macros(spec: &str) -> String {
+    let out: Vec<String> = spec
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') || trimmed.contains("%python_expand") || !trimmed.contains("%{$")
+            {
+                return line.to_string();
+            }
+            let indent = &line[..line.len() - trimmed.len()];
+            format!("{indent}%python_expand {trimmed}")
+        })
+        .collect();
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// Add `Requires(post)`/`Requires(postun): update-alternatives` when the
+/// spec registers an alternative but doesn't already declare them.
+///
+/// `%python_install_alternative`/`%python_uninstall_alternative` expand into
+/// `update-alternatives` calls inside `%post`/`%postun` — `update-alternatives`
+/// must already be installed for those scriptlets to run, which RPM only
+/// guarantees via an explicit `Requires(post)`/`Requires(postun)`. Missing
+/// either is silent at generation and review time and only surfaces as
+/// `update-alternatives: command not found` once the scriptlets actually run
+/// (observed on python-triton). Inserted right before `%python_subpackages`,
+/// matching where a correctly-written spec of this shape already puts them.
+pub fn fix_missing_alternatives_requires(spec: &str) -> String {
+    let needs_it = spec.contains("%python_install_alternative")
+        || spec.contains("%python_uninstall_alternative");
+    if !needs_it {
+        return spec.to_string();
+    }
+    let has_post = spec.contains("Requires(post):") && spec.contains("update-alternatives");
+    let has_postun = spec.contains("Requires(postun):") && spec.contains("update-alternatives");
+    if has_post && has_postun {
+        return spec.to_string();
+    }
+    let Some(pos) = spec.lines().position(|l| l.trim() == "%python_subpackages") else {
+        return spec.to_string();
+    };
+    let mut out: Vec<&str> = spec.lines().collect();
+    let mut insert = Vec::new();
+    if !has_post {
+        insert.push("Requires(post):   update-alternatives");
+    }
+    if !has_postun {
+        insert.push("Requires(postun): update-alternatives");
+    }
+    for (i, line) in insert.into_iter().enumerate() {
+        out.insert(pos + i, line);
+    }
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
 }
 
@@ -451,6 +568,89 @@ Version:        3.0.3
             "bare name mangled"
         );
     }
+
+    /// `pyproject.toml`'s `[build-system] requires` is routinely lowercase
+    /// upstream (`cython>=3`); copied verbatim into the python_module macro
+    /// it RPM-expands to the nonexistent `python313-cython` instead of the
+    /// real `python313-Cython`, which made OBS report python-pyarrow as
+    /// missing a dependency on every run.
+    #[test]
+    fn a_known_mixed_case_pypi_name_gets_recased() {
+        let spec = "BuildRequires:  %{python_module cython >= 3}\n\
+                    BuildRequires:  %{python_module Cython >= 3.1.1}\n\
+                    BuildRequires:  %{python_module numpy >= 1.21.6}\n";
+        let fixed = normalize_python_module_versions(spec);
+        assert!(
+            fixed.contains("%{python_module Cython >= 3}"),
+            "lowercase name not recased: {fixed}"
+        );
+        assert!(
+            fixed.contains("%{python_module Cython >= 3.1.1}"),
+            "already-correct casing changed: {fixed}"
+        );
+        assert!(
+            fixed.contains("%{python_module numpy >= 1.21.6}"),
+            "unrelated name touched: {fixed}"
+        );
+    }
+
+    /// `%{$python_sitelib}` only resolves inside `%python_expand` — a bare
+    /// line reproduces the python-nvidia-nvtx bug where it silently expands
+    /// to `%{}` instead of failing loudly.
+    #[test]
+    fn a_bare_dollar_macro_line_gets_python_expand_prefixed() {
+        let spec = "\
+%install
+%pyproject_install
+chmod +x %{buildroot}%{$python_sitelib}/nvidia/cu13/lib/libfoo.so.1
+%python_expand %fdupes %{buildroot}%{$python_sitelib}
+# %{$python_sitelib} mentioned only in a comment, must not be touched
+";
+        let fixed = fix_stray_dollar_macros(spec);
+        assert!(
+            fixed.contains("%python_expand chmod +x %{buildroot}%{$python_sitelib}/nvidia/cu13/lib/libfoo.so.1"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("%python_expand %fdupes %{buildroot}%{$python_sitelib}\n"),
+            "already-wrapped line got double-wrapped: {fixed}"
+        );
+        assert!(
+            fixed.contains("# %{$python_sitelib} mentioned only in a comment, must not be touched"),
+            "comment line was touched: {fixed}"
+        );
+    }
+
+    /// `%python_install_alternative` registers an update-alternatives slave
+    /// in `%post`; without `Requires(post/postun): update-alternatives` the
+    /// scriptlet fails at install/removal time with "command not found"
+    /// (observed on python-triton).
+    #[test]
+    fn alternatives_without_requires_post_get_them_added() {
+        let spec = "\
+BuildRequires:  python-rpm-macros
+BuildRequires:  %{python_module pip}
+%python_subpackages
+
+%install
+%python_install_alternative proton
+";
+        let fixed = fix_missing_alternatives_requires(spec);
+        assert!(fixed.contains("Requires(post):   update-alternatives\n"), "{fixed}");
+        assert!(fixed.contains("Requires(postun): update-alternatives\n"), "{fixed}");
+        // Requires lines must land before %python_subpackages.
+        let post_pos = fixed.find("Requires(post)").unwrap();
+        let subpkg_pos = fixed.find("%python_subpackages").unwrap();
+        assert!(post_pos < subpkg_pos, "{fixed}");
+
+        // Already-correct spec and one with no alternatives at all are left alone.
+        assert_eq!(fix_missing_alternatives_requires(&fixed), fixed);
+        let no_alternatives = "BuildRequires:  %{python_module pip}\n%python_subpackages\n";
+        assert_eq!(
+            fix_missing_alternatives_requires(no_alternatives),
+            no_alternatives
+        );
+    }
 }
 
 /// Strip all `# ap: fix` comment lines from a spec.
@@ -559,10 +759,12 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
 }
 
 /// What the sdist tells us that PyPI metadata cannot.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SdistFacts {
     pub has_tests: bool,
     pub has_c_extensions: bool,
+    /// See `ap_ecosystem::sdist::SdistInfo::top_level_tests_dir`.
+    pub top_level_tests_dir: Option<String>,
 }
 
 /// Re-run post-processing once the tarball has been inspected.
@@ -655,9 +857,17 @@ fn post_process(
             continue;
         }
 
-        // Inject %check before %changelog when tests exist.
+        // Inject %check before %changelog when tests exist. Scoped to the
+        // top-level tests/ directory when there is one — otherwise pytest
+        // collects from the whole source tree, including anything merely
+        // named test_*.py elsewhere (fixture helpers, scripts) as if it
+        // were a real test (observed on python-accelerate: 58 spurious
+        // failures from src/accelerate/test_utils/scripts/).
         if line.starts_with("%changelog") && has_tests && !has_check {
-            out.push_str("\n%check\n%pytest\n\n");
+            match &facts.top_level_tests_dir {
+                Some(dir) => out.push_str(&format!("\n%check\n%pytest {dir}/\n\n")),
+                None => out.push_str("\n%check\n%pytest\n\n"),
+            }
         }
 
         out.push_str(line);
@@ -977,6 +1187,36 @@ pub fn monorepo_skeleton(
 /// `%pyproject_install`, which accepts a pre-built wheel path instead of a
 /// dist it just built. See convention 24 Exception 3 for when this is the
 /// right call versus a workaround to avoid.
+/// Whether a repackaged wheel is the shape that reliably trips the same
+/// handful of rpmlint false positives on an unmodified vendor binary: an
+/// arch-specific wheel (not `-none-any.whl`) whose payload is a shared
+/// library rather than importable Python. rpmlint judges these as if they
+/// were a from-source build — a detached hash section, an executable bit on
+/// the `.so`, `ldconfig` scriptlets, a runtime dependency on `python-base` —
+/// none of which apply to a vendor `.so` dropped unmodified under
+/// site-packages. See [`prebuilt_wheel_rpmlintrc`].
+pub(crate) fn is_prebuilt_binary_wheel(
+    wheel_filename: &str,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+) -> bool {
+    let is_pure = wheel_filename.ends_with("-none-any.whl");
+    !is_pure && layout.is_some_and(|l| l.first_shared_lib.is_some())
+}
+
+/// Baseline `addFilter` set for a prebuilt/vendor-binary wheel (see
+/// [`is_prebuilt_binary_wheel`]) — the same five rpmlint findings observed
+/// independently, by separate build attempts, on nvidia-cublas,
+/// nvidia-cuda-runtime, nvidia-nccl-cu13, and nvidia-nvtx. Pre-seeding this
+/// at spec-generation time saves the agent from re-deriving it from a failed
+/// build every single time this wheel shape recurs.
+pub fn prebuilt_wheel_rpmlintrc() -> &'static str {
+    "addFilter(\"missing-hash-section\")\n\
+     addFilter(\"shared-library-not-executable\")\n\
+     addFilter(\"library-without-ldconfig-postin\")\n\
+     addFilter(\"library-without-ldconfig-postun\")\n\
+     addFilter(\"no-dependency-on python-base\")\n"
+}
+
 pub fn wheel_binary_skeleton(
     pkg_name: &str,
     version: &str,
@@ -1016,6 +1256,11 @@ pub fn wheel_binary_skeleton(
         "python_sitelib"
     } else {
         "python_sitearch"
+    };
+    let source99_line = if is_prebuilt_binary_wheel(wheel_filename, layout) {
+        format!("Source99:       python-{name}.rpmlintrc\n")
+    } else {
+        String::new()
     };
     // A `%check` that works the first time. There is no source tree to test, so
     // either import the top-level package, or — for namespace-only/binary-only
@@ -1063,6 +1308,7 @@ pub fn wheel_binary_skeleton(
          License:        {license}\n\
          URL:            {url}\n\
          Source0:        {wheel_filename}\n\
+         {source99_line}\
          {arch_line}\
          BuildRequires:  python-rpm-macros\n\
          BuildRequires:  %{{python_module pip}}\n\
@@ -1279,6 +1525,44 @@ BuildRequires:  %{python_module cmake}
         assert_eq!(dedupe_build_requires(spec), spec);
     }
 
+    /// A top-level `tests/` directory scopes the default `%pytest`
+    /// invocation; without one, the old unscoped `%pytest` is kept.
+    #[test]
+    fn default_check_scopes_pytest_to_a_top_level_tests_dir() {
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let build_system = BuildSystem {
+            requires: vec![],
+            backend: None,
+        };
+        let spec = "\
+BuildRequires:  %{python_module pip}
+%changelog
+";
+        let scoped = post_process_with_sdist(
+            spec,
+            &release,
+            &build_system,
+            SdistFacts {
+                has_tests: true,
+                has_c_extensions: false,
+                top_level_tests_dir: Some("tests".to_string()),
+            },
+        );
+        assert!(scoped.contains("%check\n%pytest tests/\n"), "{scoped}");
+
+        let unscoped = post_process_with_sdist(
+            spec,
+            &release,
+            &build_system,
+            SdistFacts {
+                has_tests: true,
+                has_c_extensions: false,
+                top_level_tests_dir: None,
+            },
+        );
+        assert!(unscoped.contains("%check\n%pytest\n"), "{unscoped}");
+    }
+
     fn dummy_release(homepage: &str, license: License) -> Release {
         Release {
             name: "pkg".to_string(),
@@ -1436,6 +1720,47 @@ BuildRequires:  %{python_module cmake}
 
         assert!(spec.contains("BuildArch:      noarch"), "{spec}");
         assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");
+    }
+
+    /// A prebuilt vendor `.so` wheel (nvidia-cublas's real shape) gets a
+    /// pre-seeded `Source99:`/rpmlintrc baseline instead of making the agent
+    /// re-derive the same five rpmlint false positives from a failed build —
+    /// see `is_prebuilt_binary_wheel`/`prebuilt_wheel_rpmlintrc`.
+    #[test]
+    fn a_binary_wheel_with_a_shared_lib_gets_a_pre_seeded_rpmlintrc() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let binary_only = WheelLayout {
+            importable: None,
+            first_shared_lib: Some("nvidia/cu13/lib/libfoo.so.1".into()),
+        };
+        let spec = wheel_binary_skeleton(
+            "nvidia-foo",
+            "1.0",
+            "nvidia_foo-1.0-py3-none-manylinux_2_27_x86_64.whl",
+            &release,
+            Some(true),
+            Some(&binary_only),
+        );
+        assert!(
+            spec.contains("Source99:       python-nvidia-foo.rpmlintrc\n"),
+            "{spec}"
+        );
+
+        // A pure wheel, or one with no shared library, gets neither.
+        let importable = WheelLayout {
+            importable: Some("pkg".into()),
+            first_shared_lib: None,
+        };
+        let spec = wheel_binary_skeleton(
+            "pkg",
+            "1.0",
+            "pkg-1.0-py3-none-any.whl",
+            &release,
+            Some(true),
+            Some(&importable),
+        );
+        assert!(!spec.contains("Source99"), "{spec}");
     }
 
     #[test]

@@ -1512,6 +1512,26 @@ fn run_package_inner(
             kind: StepKind::ValidateSpec,
         });
 
+        // Deterministic and idempotent, so safe to re-apply on every visit —
+        // including a spec that already existed on disk and was never run
+        // through `post_process` this invocation (`need_spec` was false).
+        // Without this, each of these mistakes persists on every future run
+        // (nothing else ever revisits an unchanged spec to fix it) and either
+        // looks like a genuinely missing dependency (mixed-case PyPI name
+        // written lowercase — `%{python_module cython >= 3}` RPM-expands to
+        // the nonexistent `python313-cython`) or only surfaces as a runtime
+        // failure well after a wasted build (a bare `%{$python_sitelib}`
+        // outside `%python_expand`; `%python_install_alternative` without
+        // its `Requires(post/postun): update-alternatives`).
+        if let Ok(current) = std::fs::read_to_string(&spec_path) {
+            let fixed = crate::spec::normalize_python_module_versions(&current);
+            let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
+            let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
+            if fixed != current {
+                let _ = std::fs::write(&spec_path, &fixed);
+            }
+        }
+
         match osc::rpmspec_check(&spec_path, Emit::new(reporter, validate_step.id)) {
             Ok(expanded) => {
                 // The fully expanded spec is the single most useful artifact
@@ -1523,6 +1543,8 @@ fn run_package_inner(
                     name: "rpmspec.stdout".to_string(),
                     path: artifact,
                 });
+
+                sync_quilt_series(&expanded, &checkout_dir);
 
                 let mut missing = missing_source_files(&expanded, &checkout_dir);
                 // A `_service` (`download_files`, the one installed here) is how a Source
@@ -2608,6 +2630,53 @@ fn missing_source_files(expanded_spec: &str, checkout_dir: &Path) -> Vec<String>
     missing
 }
 
+/// Keep `checkout_dir/series` in sync with the spec's current `PatchN:`
+/// lines. `QUILT_PATCHES` points `quilt new`/`quilt add`/`quilt refresh`
+/// (see `agent::TurnCtx::checkout_dir`'s doc comment) at `checkout_dir`
+/// directly, so a patch removed from the spec — by hand, by `--regen`, or
+/// by an earlier agent turn — otherwise leaves its filename behind in
+/// `series` forever: `%autosetup -p1`'s quilt backend chokes trying to
+/// apply a patch the current spec no longer declares, which looks like a
+/// spurious, unexplained `%prep` failure on a spec that presently declares
+/// zero patches (observed on python-python-docx). Idempotent and run on
+/// every `ValidateSpec` visit, like `missing_source_files`.
+fn sync_quilt_series(expanded_spec: &str, checkout_dir: &Path) {
+    let mut patches = Vec::new();
+    for line in expanded_spec.lines() {
+        let line = line.trim();
+        if !line.starts_with("Patch") {
+            continue;
+        }
+        let Some(rest) = line["Patch".len()..]
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .strip_prefix(':')
+        else {
+            continue;
+        };
+        let value = rest.trim();
+        if value.is_empty() || value.contains('%') {
+            continue;
+        }
+        patches.push(value.rsplit('/').next().unwrap_or(value).to_string());
+    }
+
+    let wanted = if patches.is_empty() {
+        String::new()
+    } else {
+        patches.join("\n") + "\n"
+    };
+    let series_path = checkout_dir.join("series");
+    let current = std::fs::read_to_string(&series_path).unwrap_or_default();
+    if current == wanted {
+        return;
+    }
+    if wanted.is_empty() {
+        let _ = std::fs::remove_file(&series_path);
+    } else {
+        let _ = std::fs::write(&series_path, &wanted);
+    }
+}
+
 /// Run the extractor over a build log, warning when the sdist root never matched.
 ///
 /// The whole log is handed to [`crate::log::extract`] — it segments the phases
@@ -3557,6 +3626,7 @@ fn generate_spec(
         crate::spec::SdistFacts {
             has_tests: sdist_info.has_tests,
             has_c_extensions: sdist_info.has_c_extensions,
+            top_level_tests_dir: sdist_info.top_level_tests_dir.clone(),
         },
     );
 
@@ -4020,6 +4090,7 @@ fn generate_repo_python_spec(
         crate::spec::SdistFacts {
             has_tests: sdist_info.has_tests,
             has_c_extensions: sdist_info.has_c_extensions,
+            top_level_tests_dir: sdist_info.top_level_tests_dir.clone(),
         },
     );
 
@@ -4299,6 +4370,13 @@ fn generate_multi_flavor_wheel_spec(
         std::fs::write(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+        if crate::spec::is_prebuilt_binary_wheel(&wheels[0].1, layout.as_ref()) {
+            let rpmlintrc_path = checkout_dir.join(format!(
+                "python-{}.rpmlintrc",
+                config.pkg_name.to_lowercase()
+            ));
+            let _ = std::fs::write(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
+        }
         Ok((
             GenSpecResult {
                 sdist_top_level: String::new(),
@@ -4334,6 +4412,7 @@ fn generate_wheel_binary_spec(
         .fetch(checkout_dir)
         .map_err(|e| GenSpecError::Other(format!("wheel download failed: {e}")))?;
     let root_is_purelib = ap_ecosystem::sdist::wheel_root_is_purelib(&wheel_path);
+    let layout = ap_ecosystem::sdist::wheel_layout(&wheel_path);
 
     let release = ap_ecosystem::pypi::parse_release_with_tarball(pypi_json, &wheel.filename)
         .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
@@ -4344,12 +4423,19 @@ fn generate_wheel_binary_spec(
         &wheel.filename,
         &release,
         root_is_purelib,
-        ap_ecosystem::sdist::wheel_layout(&wheel_path).as_ref(),
+        layout.as_ref(),
     );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
     std::fs::write(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+    if crate::spec::is_prebuilt_binary_wheel(&wheel.filename, layout.as_ref()) {
+        let rpmlintrc_path = checkout_dir.join(format!(
+            "python-{}.rpmlintrc",
+            config.pkg_name.to_lowercase()
+        ));
+        let _ = std::fs::write(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
+    }
 
     Ok(GenSpecResult {
         // A wheel unpacks flat — no wrapping top-level directory.
@@ -4549,7 +4635,13 @@ fn render_maturin_service_file(normalized_name: &str, extra_manifests: &[String]
 
 /// The `[tool.maturin] manifest-path` of an sdist's root `pyproject.toml`,
 /// relative to the archive root, when it names a manifest other than the root
-/// `Cargo.toml`. `None` when absent, default, or the archive cannot be read.
+/// `Cargo.toml`. `None` when absent, default, the archive cannot be read, or
+/// the manifest is itself a member of the root `Cargo.toml`'s workspace: the
+/// root manifest's own `cargotoml` param already vendors every workspace
+/// member through their one shared lockfile, and `obs-service-cargo` errors
+/// out (bare `NotFound`, os error 2) when told to additionally vendor a
+/// member path, since it looks for a lockfile next to that manifest instead
+/// of at the workspace root.
 fn maturin_manifest_path(tarball: &Path) -> Option<String> {
     let scratch = tempfile::tempdir().ok()?;
     ap_ecosystem::sdist::extract(tarball, scratch.path()).ok()?;
@@ -4570,7 +4662,51 @@ fn maturin_manifest_path(tarball: &Path) -> Option<String> {
         .as_str()?
         .trim_start_matches("./")
         .to_string();
-    (path != "Cargo.toml" && !path.starts_with('/') && !path.contains("..")).then_some(path)
+    if path == "Cargo.toml" || path.starts_with('/') || path.contains("..") {
+        return None;
+    }
+    if is_cargo_workspace_member(&root.join("Cargo.toml"), &path) {
+        return None;
+    }
+    Some(path)
+}
+
+/// Whether `manifest_rel` (relative to the archive root) names a path listed
+/// in `root_cargo_toml`'s `[workspace] members` (plain entries and simple
+/// `dir/*` globs — the forms Cargo itself supports for member lists).
+fn is_cargo_workspace_member(root_cargo_toml: &Path, manifest_rel: &str) -> bool {
+    let Some(member_dir) = Path::new(manifest_rel).parent() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(root_cargo_toml) else {
+        return false;
+    };
+    let Ok(doc) = toml::from_str::<toml::Value>(&text) else {
+        return false;
+    };
+    let Some(workspace) = doc.get("workspace") else {
+        return false;
+    };
+    let Some(members) = workspace.get("members").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    let excluded = workspace
+        .get("exclude")
+        .and_then(|e| e.as_array())
+        .is_some_and(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .any(|p| Path::new(p) == member_dir)
+        });
+    if excluded {
+        return false;
+    }
+    members.iter().filter_map(|m| m.as_str()).any(|pattern| {
+        match pattern.strip_suffix("/*") {
+            Some(prefix) => member_dir.parent() == Some(Path::new(prefix)),
+            None => Path::new(pattern) == member_dir,
+        }
+    })
 }
 
 fn append_notes(notes_path: PathBuf, section: &str) {
@@ -5312,6 +5448,41 @@ mod tests {
         );
     }
 
+    /// `chromadb`'s `pyproject.toml` points maturin at `rust/python_bindings/Cargo.toml`,
+    /// but that crate is a member of the workspace rooted at the archive's own
+    /// `Cargo.toml` — vendoring it as a second, separate `cargotoml` param makes
+    /// `obs-service-cargo` fail with a bare `NotFound` looking for a lockfile
+    /// next to the member instead of at the workspace root it actually lives in.
+    #[test]
+    fn maturin_manifest_path_skips_a_root_workspace_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("chromadb-1.5.9.tar.gz");
+        {
+            let enc = flate2::write::GzEncoder::new(
+                std::fs::File::create(&tarball).unwrap(),
+                flate2::Compression::default(),
+            );
+            let mut tb = tar::Builder::new(enc);
+            let mut add = |name: &str, data: &[u8]| {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(data.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                tb.append_data(&mut h, name, data).unwrap();
+            };
+            add(
+                "chromadb-1.5.9/pyproject.toml",
+                b"[build-system]\nrequires=[\"maturin\"]\nbuild-backend=\"maturin\"\n[tool.maturin]\nmanifest-path = \"rust/python_bindings/Cargo.toml\"\n",
+            );
+            add(
+                "chromadb-1.5.9/Cargo.toml",
+                b"[workspace]\nmembers = [\"rust/python_bindings\", \"rust/types\"]\n",
+            );
+            tb.into_inner().unwrap().finish().unwrap();
+        }
+        assert_eq!(maturin_manifest_path(&tarball), None);
+    }
+
     #[test]
     fn a_malformed_hand_written_patch_is_caught_before_the_build() {
         use std::io::Write;
@@ -5842,6 +6013,45 @@ Patch0:         0001-fix.patch
 
         let spec = "Source: https://example.com/foo-1.0.tar.gz\n";
         assert!(missing_source_files(spec, dir.path()).is_empty());
+    }
+
+    /// Reproduces the python-python-docx bug: a `series` file left over from
+    /// an earlier quilt session names a patch the current spec no longer
+    /// declares. `%autosetup -p1` then chokes trying to apply it during
+    /// `%prep` even though the spec currently has zero `Patch:` lines.
+    #[test]
+    fn sync_quilt_series_drops_a_patch_the_spec_no_longer_declares() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("series"), b"0001-orphaned.patch\n").unwrap();
+
+        sync_quilt_series("Name: foo\n", dir.path());
+
+        assert!(
+            !dir.path().join("series").exists(),
+            "stale series file must be removed when the spec declares no patches"
+        );
+    }
+
+    #[test]
+    fn sync_quilt_series_rewrites_to_match_the_specs_current_patches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("series"), b"0001-old.patch\n0002-old.patch\n").unwrap();
+
+        let spec = "Name: foo\nPatch0: 0001-new.patch\n";
+        sync_quilt_series(spec, dir.path());
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("series")).unwrap(),
+            "0001-new.patch\n"
+        );
+    }
+
+    #[test]
+    fn sync_quilt_series_is_a_no_op_when_already_in_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        // No series file, no patches declared — must not create one.
+        sync_quilt_series("Name: foo\n", dir.path());
+        assert!(!dir.path().join("series").exists());
     }
 
     /// Earlier review probe: a fake `python-foo-0.1-1.1.x86_64.rpm`

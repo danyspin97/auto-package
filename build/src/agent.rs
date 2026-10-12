@@ -794,6 +794,21 @@ openSUSE spec conventions to keep in mind:
    error lists every file it found, which is exactly the set %files must
    account for.
 
+   **A `%license` file living inside the dist-info directory overlaps the
+   dist-info glob — exclude it there first.** PEP 639 wheels (newer
+   setuptools/hatchling) ship their license at
+   `<pkg>-%{version}.dist-info/licenses/LICENSE` instead of a top-level
+   `LICENSE` file. That path is already claimed once by the directory-wide
+   `%{python_sitelib}/package_name-%{version}.dist-info/` line; adding a
+   second `%license <same path>` line claims it again and rpm reports
+   'File listed twice'. Exclude it from the directory glob, then tag it:
+     %exclude %{python_sitelib}/package_name-%{version}.dist-info/licenses/LICENSE
+     %{python_sitelib}/package_name-%{version}.dist-info/
+     %license %{python_sitelib}/package_name-%{version}.dist-info/licenses/LICENSE
+   Check `source/*.dist-info/licenses/` (or `source/*.dist-info/LICENSE*`
+   for older metadata) before assuming a top-level `LICENSE` file is what
+   `%license` should point at.
+
    **A bare `<name>.py` file is a different shape from a package directory —
    check which one you actually have before writing %files.** A project
    using `py_modules = ["<name>"]` (setup.py/setup.cfg) or an equivalent
@@ -2098,6 +2113,13 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      %{python_sitearch}/<pkg>/includes/*.h
    Real example: `python-lxml` ships `lxml.etree.h` /
    `lxml.etree_api.h` for extensions building against lxml's C API.
+
+   **Exception: NVIDIA's CUDA wheels.** Their bundled `include/*.h` look
+   like this same shape (a C API's own headers) but are not — convention
+   24 already covers them: delete `include/` in `%install` instead of
+   splitting it into a `-devel` subpackage, since a package that needs
+   CUDA to build is repackaged from its wheel (convention 27), so no
+   build in this repo ever compiles against them.
 
 54. **Metapackage subpackage: pulls in a cluster of runtime deps, ships no
    files of its own.** For a feature that lives entirely in *other*

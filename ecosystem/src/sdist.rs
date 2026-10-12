@@ -110,6 +110,12 @@ pub struct SdistInfo {
     pub top_level_dir: Option<String>,
     pub has_c_extensions: bool,
     pub has_tests: bool,
+    /// Name of a test directory sitting directly under the top-level
+    /// directory (`tests` or `test`), when there is one — lets the default
+    /// `%check` scope `%pytest` to it instead of the whole source tree,
+    /// which otherwise also collects anything merely named `test_*.py`
+    /// elsewhere (fixture helpers, scripts) as if it were a real test.
+    pub top_level_tests_dir: Option<String>,
     /// The name the project declares for itself — `[project] name` in
     /// pyproject.toml, or `[package] name` in Cargo.toml. This is the
     /// authoritative name; a repository directory name is only a guess at it.
@@ -577,6 +583,7 @@ fn inspect_from_entries(
     let mut autotools_manifest = false;
     let mut has_c = false;
     let mut has_tests = false;
+    let mut top_level_tests_dir: Option<String> = None;
     let mut files: Vec<String> = Vec::new();
 
     for entry in entries {
@@ -658,6 +665,14 @@ fn inspect_from_entries(
                     .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py")))
         {
             has_tests = true;
+        }
+
+        if top_level_tests_dir.is_none()
+            && components.len() >= 3
+            && let Some(name) = components[1].as_os_str().to_str()
+            && matches!(name, "tests" | "test")
+        {
+            top_level_tests_dir = Some(name.to_string());
         }
     }
 
@@ -762,6 +777,7 @@ fn inspect_from_entries(
         top_level_dir,
         has_c_extensions: has_c,
         has_tests,
+        top_level_tests_dir,
         project_name,
         project_dir,
         python_packaging: python_depth.is_some(),
@@ -931,6 +947,48 @@ mod tests {
         let info = inspect(&tarball).unwrap();
         assert!(info.cmake_manifest);
         assert!(!info.autotools_manifest);
+    }
+
+    #[test]
+    fn top_level_tests_dir_is_found_but_a_nested_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                (
+                    "thing-1.0/pyproject.toml",
+                    b"[project]\nname = \"thing\"\n".as_slice(),
+                ),
+                ("thing-1.0/tests/test_thing.py", b"".as_slice()),
+                // A nested test-looking file elsewhere must not win over the
+                // real top-level tests/ dir, nor substitute for it when the
+                // real one is absent.
+                (
+                    "thing-1.0/thing/scripts/test_fixture.py",
+                    b"".as_slice(),
+                ),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert_eq!(info.top_level_tests_dir.as_deref(), Some("tests"));
+
+        let tarball2 = dir.path().join("src2.tar.gz");
+        write_tar(
+            &tarball2,
+            &[
+                (
+                    "thing-1.0/pyproject.toml",
+                    b"[project]\nname = \"thing\"\n".as_slice(),
+                ),
+                (
+                    "thing-1.0/thing/scripts/test_fixture.py",
+                    b"".as_slice(),
+                ),
+            ],
+        );
+        let info2 = inspect(&tarball2).unwrap();
+        assert_eq!(info2.top_level_tests_dir, None);
     }
 
     #[test]

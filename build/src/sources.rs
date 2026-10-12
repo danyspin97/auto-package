@@ -1328,6 +1328,7 @@ mod tests {
             autotools_at_root: false,
             has_c_extensions: false,
             has_tests: false,
+            top_level_tests_dir: None,
             files: Vec::new(),
         }
     }

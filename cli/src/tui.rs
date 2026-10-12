@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode},
+    event::{self, Event as TermEvent, KeyCode},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -58,10 +58,8 @@ pub struct TuiController {
 /// The TUI's own render thread also tears the terminal down (see [`run`]'s
 /// internal guard), but it runs detached — if `main` returns while that
 /// thread is still rendering, Rust terminates the thread before its teardown
-/// executes. Mouse capture (enabled for the TUI's own click handling) then
-/// stays on in the user's shell, which among other things disables native
-/// click-drag selection in the terminal emulator for the rest of the
-/// session.
+/// executes, leaving raw mode and the alternate screen stuck on in the
+/// user's shell.
 ///
 /// Install one of these in `main` immediately after constructing a
 /// [`TuiController`], and declare it BEFORE the controller so Rust's
@@ -81,7 +79,7 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }
 }
 
@@ -609,19 +607,16 @@ fn run(
     let _terminal_guard = TerminalGuard::new();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
 
     // However the event loop ends — clean exit, a render/input error, or a
-    // panic unwinding through here — raw mode, the alternate screen, and
-    // mouse capture must be torn down. Left engaged, every line printed
-    // afterwards (including the error itself) lands inside the broken
-    // terminal state instead of the user's normal screen, and mouse capture
-    // in particular keeps hijacking click-drag selection in the user's
-    // shell after this process has exited. The guard restores all three on
-    // ANY exit path from this function. (Ctrl-C is the one exit path that
-    // does NOT come back through here at all — `crate::handle_interrupt`
-    // does its own equivalent teardown and then ends the process on the
-    // spot.)
+    // panic unwinding through here — raw mode and the alternate screen must
+    // be torn down. Left engaged, every line printed afterwards (including
+    // the error itself) lands inside the broken terminal state instead of
+    // the user's normal screen. The guard restores both on ANY exit path
+    // from this function. (Ctrl-C is the one exit path that does NOT come
+    // back through here at all — `crate::handle_interrupt` does its own
+    // equivalent teardown and then ends the process on the spot.)
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     // Without this, the alternate screen keeps whatever happened to be in its
