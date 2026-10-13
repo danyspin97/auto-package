@@ -120,3 +120,48 @@ i. "no matching package named `X` found" during the offline build — the
      by the workspace-member fix noted in `cargo-workspace-fix.txt`, can
      change resolution), and only then report it as blocked, naming the
      crate and the service step that must be re-run.
+
+j. `Could not find \`protoc\`` during the Rust compile — a crate's `build.rs`
+   generates code from `.proto` files at build time (prost-build, tonic-build
+   and similar). Add `BuildRequires: protobuf-devel` (convention 10: a
+   missing build-time tool, not a missing package) — do not report it as an
+   unresolvable dependency.
+
+k. `error: queries overflow the depth limit!` from rustc — a crate's generic/
+   async code needs a higher `#![recursion_limit = "N"]` (rustc's own error
+   suggests the value; 256 is a safe default when it doesn't). Add it via a
+   PATCH-FIX-OPENSUSE source patch (convention 14) to the named crate's
+   `lib.rs`. This almost never stops at one crate: fixing it in crate A just
+   lets the build progress far enough to hit the identical error in every
+   OTHER workspace crate that transitively depends on A's generic code. Once
+   you see it the first time, `grep` every crate's `Cargo.toml` in the
+   workspace for ones that depend on the crate that just needed the fix (and
+   check whether any crates upstream already carry the attribute, which
+   tells you how widely upstream has already hit this) and patch all of them
+   in one combined patch — one round trip instead of N.
+
+l. A crate's `build.rs` downloads an external asset over the network at
+   build time (`swagger-ui`-style bundled web assets are the common case) —
+   this always fails offline on OBS. Fix: add the asset as its own `Source`,
+   extract/reference it in `%prep`, and point whatever env var the crate
+   reads for an override at the local copy. Before guessing the right value
+   for that var, read the actual vendored `build.rs` (from the cached
+   registry/vendor tarball, not the crate's docs) to confirm whether it
+   expects a bare file path, a `file://` URL, or an already-extracted
+   directory — guessing wrong (e.g. pointing a `file://`-parsing override at
+   a directory when the code does `ZipArchive::new()` on it directly) is a
+   second, textually-similar failure that looks like the first fix didn't
+   work.
+
+m. When patching a vendored crate's `Cargo.toml` to fix its code against the
+   registry's actual version of one of ITS dependencies (`[patch.crates-io]`
+   redirecting to a locally-sed-patched copy), also tighten that dependency's
+   version requirement to the exact version you verified the patch against,
+   not a loose bound like `>=2.6`. Cargo unifies every consumer of the same
+   dependency name across the whole workspace to one resolved version *and
+   the union of every consumer's activated features* — a loose bound lets
+   your patched crate get silently re-resolved onto whatever stricter
+   version some unrelated crate elsewhere in the workspace also depends on,
+   inheriting that other crate's feature set (and whatever extra transitive
+   dependencies, possibly uncached, those features pull in) instead of the
+   version/features you actually tested the patch against.

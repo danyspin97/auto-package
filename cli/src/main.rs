@@ -217,6 +217,32 @@ fn is_rate_limit_failure(reason: &str) -> bool {
     reason.contains("rate limit (429)")
 }
 
+/// Whether a package gave up because it already spent its *entire*
+/// per-package budget or attempt allowance on this one round (the exact
+/// message `run_package_inner` constructs: `"gave up after {N} attempt(s):
+/// budget exhausted ..."` or `"... attempt limit {N} reached"`), as opposed
+/// to a single transient failure (a flaky `osc` call, a one-off agent
+/// mistake) that a fresh round might plausibly do better on.
+///
+/// This matters because `max_target_retries` reuses `max_attempts` (the
+/// per-round fix-attempt cap) as the number of *whole rounds* to retry a
+/// failed target before giving up on it for good — so without this check, a
+/// package that already burned its full budget without success gets
+/// re-selected and given an entirely fresh budget up to `max_target_retries`
+/// times over. Observed on python-chromadb: 5+ rounds, each spending its
+/// full ~$14 (over the nominal $10 budget — the check only triggers
+/// mid-attempt, after the costly agent turn that pushed it over already
+/// ran), before `max_target_retries` would even have kicked in — the kind
+/// of repeat-the-same-$10-mistake loop that looks like the whole run being
+/// stuck even though other packages keep progressing around it. A budget/
+/// attempt exhaustion on attempt N is strong evidence attempt N+1 (with a
+/// brand new budget, repeating the exact same fix loop from scratch) won't
+/// fare differently, so it gives up immediately instead of waiting for
+/// `max_target_retries` identical rounds to confirm that.
+fn is_budget_or_attempt_exhausted(reason: &str) -> bool {
+    reason.contains("budget exhausted (") || reason.contains("attempt limit ")
+}
+
 fn repo_package_name(url: &str) -> String {
     // A direct tarball URL names the project in its file name, not as the last
     // path segment (`…/hello-2.12.tar.gz` is `hello`, not the file).
@@ -1985,6 +2011,7 @@ fn cmd_build(
                 PipelineResult::Failed { reason, .. } => {
                     batch_failures.push((rpm_name.clone(), reason.clone()));
                     let rate_limited = is_rate_limit_failure(&reason);
+                    let exhausted = is_budget_or_attempt_exhausted(&reason);
                     let count = if rate_limited {
                         rate_limited_counts.entry(rpm_name.clone()).or_insert(0)
                     } else {
@@ -1996,15 +2023,25 @@ fn cmd_build(
                     } else {
                         max_target_retries
                     };
-                    if *count >= limit {
+                    if exhausted || *count >= limit {
                         permanently_failed.insert(rpm_name.clone());
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
-                            message: format!(
-                                "giving up on {rpm_name} after {count} failed attempts \
-                                 ({reason}); anything depending on it stays blocked, but the \
-                                 rest of the closure keeps going"
-                            ),
+                            message: if exhausted {
+                                format!(
+                                    "giving up on {rpm_name}: it already spent its full \
+                                     budget/attempt allowance this round without succeeding \
+                                     ({reason}) — another round would just repeat the same \
+                                     fix loop with a fresh budget; anything depending on it \
+                                     stays blocked, but the rest of the closure keeps going"
+                                )
+                            } else {
+                                format!(
+                                    "giving up on {rpm_name} after {count} failed attempts \
+                                     ({reason}); anything depending on it stays blocked, but \
+                                     the rest of the closure keeps going"
+                                )
+                            },
                         });
                     } else {
                         pkg_reporter(&rpm_name).report(&Event::Warning {
@@ -2287,6 +2324,26 @@ mod tests {
         assert!(!is_rate_limit_failure("claude exited 1"));
         assert!(!is_rate_limit_failure(
             "budget exhausted ($4.00 spent of $4.00)"
+        ));
+    }
+
+    /// The python-chromadb case: `run_package_inner`'s exact two
+    /// "gave up" message shapes must be recognized so a package that
+    /// already burned its full budget/attempt allowance doesn't get
+    /// re-selected for `max_target_retries` more full-budget rounds.
+    #[test]
+    fn budget_or_attempt_exhaustion_is_recognised_by_the_pipelines_message() {
+        assert!(is_budget_or_attempt_exhausted(
+            "gave up after 12 attempt(s): budget exhausted ($13.94 spent of $10.00); log: x"
+        ));
+        assert!(is_budget_or_attempt_exhausted(
+            "gave up after 10 attempt(s): attempt limit 10 reached; log: x"
+        ));
+        assert!(!is_budget_or_attempt_exhausted(
+            "build failed; log: x/build.log"
+        ));
+        assert!(!is_budget_or_attempt_exhausted(
+            "the model API rejected the turn with a quota/rate limit (429): API Error"
         ));
     }
 

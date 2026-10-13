@@ -117,10 +117,20 @@ pub enum PipelineResult {
 pub struct PkgState {
     pub last_built_version: Option<String>,
     pub last_outcome: Option<String>,
-    /// One-line reason recorded when `last_outcome == "failed"`, so the next
-    /// run can show WHY the previous attempt failed without re-opening the
+    /// One-line reason recorded for the most recent unsuccessful outcome
+    /// (`last_outcome` is `"failed"` or `"missing_deps"`), so the next run —
+    /// or a human reading state.json — can see WHY without re-opening the
     /// run.jsonl stream. Preserved across runs the same way `last_outcome`
     /// is; cleared when the package next succeeds.
+    ///
+    /// Updated on every unsuccessful [`PipelineResult`], not just `Failed`:
+    /// before this covered `MissingDeps` too, a round that reported a
+    /// missing dependency left whatever `Failed` reason happened to be here
+    /// from an earlier, unrelated round untouched — observed on
+    /// python-accelerate, where this field kept describing a long-resolved
+    /// version-mismatch bug through several later `MissingDeps` rounds and a
+    /// `%check` fix attempt, misleadingly implying that old bug was still
+    /// the live blocker.
     #[serde(default)]
     pub last_failure_reason: Option<String>,
     /// Version for which the pre-build Review turn was already run and
@@ -860,15 +870,28 @@ pub fn run_package(
     // last attempt ended, instead of only "last_outcome: null" on anything
     // that didn't successfully build. Success paths already set
     // `last_outcome` to "success"/"wheel-only" inline — this covers every
-    // failure path, which otherwise left state.json untouched and made a
-    // mid-run crash indistinguishable from "never attempted".
-    if let PipelineResult::Failed { reason, .. } = &result
+    // unsuccessful path, which otherwise left state.json untouched and made
+    // a mid-run crash indistinguishable from "never attempted".
+    //
+    // `MissingDeps` is covered here too, not just `Failed` — see
+    // `PkgState::last_failure_reason`'s doc comment for the stale-reason bug
+    // this closes (a `MissingDeps` round used to leave an older, unrelated
+    // `Failed` reason sitting in state.json untouched).
+    let outcome = match &result {
+        PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
+        PipelineResult::MissingDeps { deps, .. } => Some((
+            "missing_deps",
+            format!("waiting on dependencies: {}", deps.join(", ")),
+        )),
+        PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => None,
+    };
+    if let Some((outcome, reason)) = outcome
         && let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name)
     {
         let mut state = PkgState::load(&ws);
         state.last_built_version = Some(config.version.clone());
-        state.last_outcome = Some("failed".to_string());
-        state.last_failure_reason = Some(reason.clone());
+        state.last_outcome = Some(outcome.to_string());
+        state.last_failure_reason = Some(reason);
         save_state(&state, &ws, reporter);
     }
     result
