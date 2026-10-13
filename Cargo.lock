@@ -132,6 +132,7 @@ name = "ap-core"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "libc",
  "owo-colors",
  "serde",
  "serde_json",

@@ -548,9 +548,6 @@ fn resolve_dependency_config(
 /// rendering — the pipeline's package-build threads keep running otherwise,
 /// unaffected by whatever the TUI's own event loop does.
 fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
-    if let Some(lock) = HELD_LOCK.get() {
-        let _ = std::fs::remove_file(lock);
-    }
     // The TUI leaves the terminal in raw mode + the alternate screen;
     // without restoring it first, this message and the shell prompt after
     // exit both land inside that broken state instead of the user's normal
@@ -603,100 +600,31 @@ fn reject_symlink_project_dir(dir: &Path) -> color_eyre::Result<()> {
     Ok(())
 }
 
-/// Advisory per-project lock: a file holding the owner's pid and process start
-/// time, created exclusively. No locking crate is a dependency, so the
-/// recorded pid (and that it still names the same process) is what tells a live
-/// owner from a stale file left by a crash.
+/// Advisory per-project lock: an `flock(2)` on a file in the project
+/// directory, held for as long as `file` stays open. The kernel releases it
+/// when the process exits or is killed, so no stale lock can block a later run.
 struct ProjectLock {
-    path: PathBuf,
-}
-
-/// What a lock file records: the owner's pid and, where `/proc` can tell, its
-/// start time. The start time distinguishes the owner from an unrelated
-/// process that was later given the same pid.
-fn parse_lock(text: &str) -> Option<(u32, Option<u64>)> {
-    let mut it = text.split_whitespace();
-    let pid = it.next()?.parse().ok()?;
-    Some((pid, it.next().and_then(|t| t.parse().ok())))
+    _file: std::fs::File,
 }
 
 impl ProjectLock {
     fn acquire(project_dir: &Path) -> color_eyre::Result<Self> {
         let path = project_dir.join(PROJECT_LOCK_NAME);
-        let me = std::process::id();
-        // The pid is written before the lock becomes visible: a file created
-        // empty and filled afterwards can be read by a second run in between,
-        // which would take it for stale. Linking a complete file is atomic.
-        let staging = project_dir.join(format!("{PROJECT_LOCK_NAME}.{me}.tmp"));
-        let start = ap_core::proc_lock::process_start(me)
-            .map(|s| format!(" {s}"))
-            .unwrap_or_default();
-        std::fs::write(&staging, format!("{me}{start}\n"))?;
-        let result = (0..5).find_map(|attempt| match std::fs::hard_link(&staging, &path) {
-            Ok(()) => Some(Ok(())),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let held_by = |text: &str| {
-                    parse_lock(text)
-                        .filter(|&(pid, start)| ap_core::proc_lock::owner_is_running(pid, start))
-                };
-                let busy = |pid: u32| {
-                    color_eyre::eyre::eyre!(
-                        "another auto-package run (pid {pid}) is using {}; \
-                         wait for it to finish. If that process is not an \
-                         auto-package run, delete {}.",
-                        project_dir.display(),
-                        path.display(),
-                    )
-                };
-                let text = std::fs::read_to_string(&path).unwrap_or_default();
-                if let Some((pid, _)) = held_by(&text) {
-                    return Some(Err(busy(pid)));
-                }
-                // Stale (owner gone) or unreadable. Two runs can reach this
-                // point together, and remove-then-recreate would let both
-                // win. A rename is atomic, so only one run moves the stale
-                // file away; the other finds it gone and retries.
-                let moved = project_dir.join(format!("{PROJECT_LOCK_NAME}.stale.{me}.{attempt}"));
-                match std::fs::rename(&path, &moved) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-                    Err(e) => return Some(Err(e.into())),
-                }
-                // The file may have been replaced by a live run's fresh lock
-                // between the read above and the rename; check what was
-                // actually moved, and put a live lock back.
-                let moved_text = std::fs::read_to_string(&moved).unwrap_or_default();
-                let live = held_by(&moved_text);
-                if live.is_some() {
-                    let _ = std::fs::hard_link(&moved, &path);
-                }
-                let _ = std::fs::remove_file(&moved);
-                live.map(|(pid, _)| Err(busy(pid)))
+        match ap_core::proc_lock::try_lock(&path) {
+            Ok(file) => Ok(Self { _file: file }),
+            Err(ap_core::proc_lock::LockError::Held(pid)) => {
+                let who = pid.map_or(String::from("another process"), |p| format!("pid {p}"));
+                Err(color_eyre::eyre::eyre!(
+                    "another auto-package run ({who}) is using {}; \
+                     wait for it to finish.",
+                    project_dir.display(),
+                ))
             }
-            Err(e) => Some(Err(e.into())),
-        });
-        let _ = std::fs::remove_file(&staging);
-        match result {
-            Some(Ok(())) => {
-                let _ = HELD_LOCK.set(path.clone());
-                Ok(Self { path })
-            }
-            Some(Err(e)) => Err(e),
-            None => Err(color_eyre::eyre::eyre!(
-                "could not take the project lock {}",
+            Err(ap_core::proc_lock::LockError::Io(e)) => Err(color_eyre::eyre::eyre!(
+                "could not take the project lock {}: {e}",
                 path.display()
             )),
         }
-    }
-}
-
-/// The lock this process holds, so an interrupt can release it: `exit` skips
-/// `Drop`, and a lock left behind blocks the next run until its pid is reused.
-static HELD_LOCK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-impl Drop for ProjectLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 

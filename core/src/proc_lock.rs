@@ -1,29 +1,69 @@
-//! Process identity helpers shared by the pid-based lock files.
+//! Advisory `flock(2)` lock files shared by the notes and project locks.
+//!
+//! The kernel drops the lock when the owning process exits, however it exits,
+//! so a crashed run never leaves a lock that needs taking over, and two runs
+//! can never both believe they hold it.
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
-/// Start time of `pid` in clock ticks since boot (field 22 of
-/// `/proc/<pid>/stat`), or `None` when it cannot be read. Recorded in a lock
-/// so one whose pid was reused by an unrelated process is not mistaken for a
-/// live one.
-pub fn process_start(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name is parenthesised and may contain spaces or parens, so
-    // count fields from the last `)`: the next one is field 3 (state).
-    let rest = &stat[stat.rfind(')')? + 1..];
-    rest.split_whitespace().nth(19)?.parse().ok()
+/// Why a lock could not be taken.
+#[derive(Debug)]
+pub enum LockError {
+    /// Another open file description holds it. Carries the pid that holder
+    /// wrote, when it has written one yet.
+    Held(Option<u32>),
+    Io(io::Error),
 }
 
-/// Whether the process that wrote a lock is still running. `start` is the
-/// start time it recorded; a different one means the pid was reused. Without
-/// `/proc` this cannot be told, so it answers yes: refusing to start is safer
-/// than clobbering a live run.
-pub fn owner_is_running(pid: u32, start: Option<u64>) -> bool {
-    if pid == std::process::id() || !Path::new("/proc/self").exists() {
-        return true;
+/// Take an exclusive, non-blocking lock on `path`, creating it if needed. The
+/// returned file must be kept open for as long as the lock should be held;
+/// closing it releases the lock.
+///
+/// The file is never deleted by its owner: unlinking a locked file lets a
+/// second run lock the new file at the same path while the first still holds
+/// the old one.
+pub fn try_lock(path: &Path) -> Result<File, LockError> {
+    // No truncation on open: that would wipe the holder's pid before we know
+    // whether we got the lock.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(LockError::Io)?;
+    // SAFETY: `file` owns a valid descriptor for the duration of the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::WouldBlock {
+            let mut text = String::new();
+            let _ = file.read_to_string(&mut text);
+            return Err(LockError::Held(text.trim().parse().ok()));
+        }
+        return Err(LockError::Io(err));
     }
-    match process_start(pid) {
-        None => false,
-        Some(now) => start.is_none_or(|recorded| recorded == now),
+    file.set_len(0).map_err(LockError::Io)?;
+    write!(file, "{}", std::process::id()).map_err(LockError::Io)?;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_lock_in_the_same_process_is_refused_and_names_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.lock");
+        let first = try_lock(&path).unwrap();
+        match try_lock(&path) {
+            Err(LockError::Held(pid)) => assert_eq!(pid, Some(std::process::id())),
+            other => panic!("expected Held, got {other:?}"),
+        }
+        drop(first);
+        try_lock(&path).unwrap();
     }
 }

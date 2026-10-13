@@ -58,22 +58,12 @@ const LOCK_POLL: Duration = Duration::from_millis(250);
 
 /// Exclusive lock on one package's notes, so two builds cannot both read the
 /// same notes and have the later writer silently discard the earlier update.
-/// Held as a `<rpm-name>.md.lock` file holding the owner's pid and start time,
-/// created by linking a complete file into place (no locking crate is a
-/// dependency). Removed on drop, including on the error path.
+/// An `flock(2)` on `<rpm-name>.md.lock`, held while the file stays open; the
+/// kernel releases it if the build dies, so a crash leaves nothing to clear.
+/// The file itself stays behind: deleting a locked file would let a second
+/// build lock a fresh one at the same path.
 struct NotesLock {
-    path: PathBuf,
-}
-
-/// Whether the owner recorded in a lock file is still running. Without `/proc`
-/// this cannot be told, so it answers yes rather than clobber a live build.
-fn lock_text_is_held(text: &str) -> bool {
-    let mut it = text.split_whitespace();
-    let Some(pid) = it.next().and_then(|t| t.parse::<u32>().ok()) else {
-        return false;
-    };
-    let recorded = it.next().and_then(|t| t.parse::<u64>().ok());
-    ap_core::proc_lock::owner_is_running(pid, recorded)
+    _file: std::fs::File,
 }
 
 impl NotesLock {
@@ -82,56 +72,25 @@ impl NotesLock {
     }
 
     fn acquire_for(notes_file: &Path, wait: Duration) -> Result<Self, String> {
+        use ap_core::proc_lock::{LockError, try_lock};
         let path = PathBuf::from(format!("{}.lock", notes_file.display()));
-        let me = std::process::id();
-        let start = ap_core::proc_lock::process_start(me)
-            .map(|s| format!(" {s}"))
-            .unwrap_or_default();
-        // Written in full before it becomes visible, so a second build never
-        // reads a half-written lock and takes it for stale.
-        let staging = PathBuf::from(format!("{}.{me}.tmp", path.display()));
-        std::fs::write(&staging, format!("{me}{start}\n"))
-            .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
         let deadline = std::time::Instant::now() + wait;
-        let result = loop {
-            match std::fs::hard_link(&staging, &path) {
-                Ok(()) => break Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    if !lock_text_is_held(&text) {
-                        // Stale. The rename is atomic, so of several builds
-                        // clearing the same stale lock only one succeeds.
-                        let moved = PathBuf::from(format!("{}.stale.{me}", path.display()));
-                        if std::fs::rename(&path, &moved).is_ok() {
-                            let _ = std::fs::remove_file(&moved);
-                        }
-                        continue;
-                    }
+        loop {
+            match try_lock(&path) {
+                Ok(file) => return Ok(Self { _file: file }),
+                Err(LockError::Held(_)) => {
                     if std::time::Instant::now() >= deadline {
-                        break Err(format!(
-                            "timed out waiting for {}: another build is updating these \
-                             notes; delete the file if no build is running",
+                        return Err(format!(
+                            "timed out waiting for {}: another build is updating these notes",
                             path.display()
                         ));
                     }
                     std::thread::sleep(LOCK_POLL.min(wait));
                 }
-                Err(e) => break Err(format!("cannot create {}: {e}", path.display())),
+                Err(LockError::Io(e)) => {
+                    return Err(format!("cannot create {}: {e}", path.display()));
+                }
             }
-        };
-        let _ = std::fs::remove_file(&staging);
-        result.map(|()| Self { path })
-    }
-}
-
-impl Drop for NotesLock {
-    fn drop(&mut self) {
-        // Remove the lock only if it still names this process: a takeover by
-        // another run must not be deleted by the old owner.
-        let ours = std::fs::read_to_string(&self.path)
-            .is_ok_and(|t| t.split_whitespace().next() == Some(&std::process::id().to_string()));
-        if ours {
-            let _ = std::fs::remove_file(&self.path);
         }
     }
 }
@@ -180,9 +139,15 @@ pub struct NotesRun {
     pub result: Result<(), String>,
 }
 
-pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> NotesRun {
+pub fn update_after_build(
+    ws: &Workspace,
+    rpm_name: &str,
+    version: &str,
+    project: &str,
+    distro: &str,
+) -> NotesRun {
     let mut usage = Usage::default();
-    let result = update_inner(ws, rpm_name, version, &mut usage);
+    let result = update_inner(ws, rpm_name, version, project, distro, &mut usage);
     NotesRun { usage, result }
 }
 
@@ -190,6 +155,8 @@ fn update_inner(
     ws: &Workspace,
     rpm_name: &str,
     version: &str,
+    project: &str,
+    distro: &str,
     usage: &mut Usage,
 ) -> Result<(), String> {
     let Some(notes_file) = path_for(rpm_name) else {
@@ -226,15 +193,47 @@ fn update_inner(
         })?;
     std::fs::write(scratch.path(), before.as_deref().unwrap_or_default())
         .map_err(|e| format!("cannot seed {}: {e}", scratch.path().display()))?;
+    // The agent may only write its scratch file, and read the notes directory
+    // (the journal is under the working directory, which is readable anyway).
+    // `//` marks an absolute path in a permission rule.
+    let abs = |p: &Path| {
+        let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        format!("/{}", p.display())
+    };
+    let tools = format!(
+        "Read({dir}/**),Write({scratch}),Edit({scratch})",
+        dir = abs(dir),
+        scratch = abs(scratch.path()),
+    );
     let out = claude_print_json(
         NOTES_MODEL,
-        "Read,Write,Edit",
+        &tools,
         NOTES_BUDGET_USD,
-        &notes_prompt(rpm_name, version, &ws.notes(), scratch.path()),
+        &notes_prompt(
+            rpm_name,
+            version,
+            project,
+            distro,
+            &ws.notes(),
+            scratch.path(),
+        ),
         ws.dir(),
         NOTES_TIMEOUT,
     )
-    .map_err(|e| format!("could not run claude: {e}"))?;
+    .map_err(|e| match e {
+        // Nothing ran, so nothing was spent.
+        crate::proc::ProcessError::Launch { .. } => format!("could not run claude: {e}"),
+        // The process ran and its reply, with the real cost, was lost. The
+        // turn can have spent up to its cap, so charge that as an upper bound
+        // rather than let a timed-out turn read as free.
+        _ => {
+            usage.cost_usd = NOTES_BUDGET_USD.parse().unwrap_or(0.0);
+            format!(
+                "could not run claude: {e}; cost counted as the ${NOTES_BUDGET_USD} \
+                 turn cap, an estimate"
+            )
+        }
+    })?;
     *usage = usage_from_output(&out.stdout);
     if out.code != 0 {
         return Err(format!(
@@ -272,10 +271,18 @@ pub fn read(rpm_name: &str) -> String {
         .unwrap_or_default()
 }
 
-fn notes_prompt(rpm_name: &str, version: &str, journal: &Path, notes_file: &Path) -> String {
+fn notes_prompt(
+    rpm_name: &str,
+    version: &str,
+    project: &str,
+    distro: &str,
+    journal: &Path,
+    notes_file: &Path,
+) -> String {
     format!(
         "You are keeping the notes for the openSUSE package {rpm_name} \
-         (version {version}), which just built successfully.\n\n\
+         (version {version}), which just built successfully in project \
+         {project} for {distro}.\n\n\
          Read the attempt journal at `{journal}`: it is the build agent's own \
          record of this package. Read `{notes_file}` too if it exists: it is this \
          package's memory from earlier builds. Then update `{notes_file}` in place \
@@ -289,6 +296,11 @@ fn notes_prompt(rpm_name: &str, version: &str, journal: &Path, notes_file: &Path
            the reason for each.\n\
          - **Failure history**: each failure that was fixed, one line each, \
            with the fix.\n\n\
+         The notes are shared by every project and distro this package is built \
+         for. When a finding only applies to one target, name the project and \
+         distro next to it (for example \"on openSUSE:Leap:16.0 only\"); leave \
+         general findings unlabelled. Findings from earlier builds that name a \
+         different target are not evidence about {project} / {distro}.\n\n\
          Keep it factual and under 60 lines. Do not copy the journal verbatim. \
          Do not touch any other file, and do not run commands.",
         journal = journal.display(),
@@ -315,14 +327,14 @@ mod tests {
         let notes = dir.path().join("p.md");
         let first = NotesLock::acquire_for(&notes, Duration::from_millis(100)).unwrap();
         let started = std::time::Instant::now();
-        // This process is alive, so its own lock counts as held.
+        // flock conflicts across open file descriptions, so this process's
+        // own lock counts as held.
         let err = NotesLock::acquire_for(&notes, Duration::from_millis(300))
             .err()
             .expect("lock is held");
         assert!(started.elapsed() >= Duration::from_millis(300));
         assert!(err.contains("p.md.lock"), "{err}");
         drop(first);
-        assert!(!dir.path().join("p.md.lock").exists());
         NotesLock::acquire_for(&notes, Duration::from_millis(100)).unwrap();
     }
 
@@ -374,11 +386,15 @@ mod tests {
         let p = notes_prompt(
             "python-foo",
             "1.2.3",
+            "home:me",
+            "openSUSE_Leap_16.0",
             Path::new("/w/notes.md"),
             Path::new("/n/python-foo.md"),
         );
         assert!(p.contains("python-foo"));
         assert!(p.contains("1.2.3"));
+        assert!(p.contains("home:me"));
+        assert!(p.contains("openSUSE_Leap_16.0"));
         assert!(p.contains("/w/notes.md"));
         assert!(p.contains("/n/python-foo.md"));
     }
