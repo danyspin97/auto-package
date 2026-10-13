@@ -8,6 +8,7 @@ pub mod http;
 pub mod log;
 pub mod obs_status;
 pub mod osc;
+pub mod package_notes;
 pub mod pipeline;
 pub mod proc;
 pub mod sources;

@@ -885,6 +885,15 @@ pub fn run_package(
         )),
         PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => None,
     };
+    if let PipelineResult::Built { .. } = &result
+        && let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name)
+    {
+        warn_if_err(
+            reporter,
+            "updating package notes",
+            crate::package_notes::update_after_build(&ws, &config.rpm_name, &config.version),
+        );
+    }
     if let Some((outcome, reason)) = outcome
         && let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name)
     {
