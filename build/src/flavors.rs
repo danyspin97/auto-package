@@ -23,6 +23,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// Limit for the `rpmspec` macro query: it only expands a macro, so this is
+/// generous.
+const RPMSPEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PythonFlavors {
     #[serde(default)]
@@ -57,22 +61,45 @@ impl PythonFlavors {
     /// `%{pythons}` (what the target distro builds for; the review agent reads
     /// it the same way). Empty when neither is known.
     pub fn effective(&self) -> Vec<String> {
+        self.try_effective().unwrap_or_default()
+    }
+
+    /// [`Self::effective`], but a hung or unlaunchable `rpmspec` is an error
+    /// the caller can report instead of reading as "no flavors known".
+    /// There is no spec path here (`rpmspec -E` expands a macro), so the
+    /// message names the macro query instead.
+    pub fn try_effective(&self) -> Result<Vec<String>, String> {
+        use crate::proc::{Emit, ProcessError, capture_with_timeout_env};
         if !self.flavors.is_empty() {
-            return self.flavors.clone();
+            return Ok(self.flavors.clone());
         }
-        std::process::Command::new("rpmspec")
-            .args(["-E", "%{pythons}"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .split_whitespace()
-                    .filter(|f| abi_tag_for_flavor(f).is_some())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
+        // In its own process group and bounded: a wedged rpmspec must not
+        // hang the run.
+        let out = match capture_with_timeout_env(
+            "rpmspec",
+            &["-E", "%{pythons}"],
+            Path::new("/"),
+            Emit::quiet(),
+            RPMSPEC_TIMEOUT,
+            None,
+        ) {
+            Ok(out) => out,
+            Err(ProcessError::Timeout { secs, .. }) => {
+                return Err(format!(
+                    "`rpmspec -E %{{pythons}}` did not finish within {secs}s"
+                ));
+            }
+            Err(e) => return Err(format!("`rpmspec -E %{{pythons}}`: {e}")),
+        };
+        if !out.success() {
+            return Ok(Vec::new());
+        }
+        Ok(out
+            .stdout
+            .split_whitespace()
+            .filter(|f| abi_tag_for_flavor(f).is_some())
+            .map(str::to_string)
+            .collect())
     }
 
     /// The single flavor this project is configured to build for, when it is

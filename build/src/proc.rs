@@ -25,6 +25,13 @@ pub enum ProcessError {
     Io(#[from] io::Error),
     #[error("{program} did not finish within {secs}s and was killed")]
     Timeout { program: String, secs: u64 },
+    /// A stream could not be read to its end, so an empty or short capture
+    /// would be indistinguishable from real output.
+    #[error("output of {program} could not be read completely ({stream})")]
+    OutputLost {
+        program: String,
+        stream: &'static str,
+    },
 }
 
 /// Where a subprocess reports the fact that it ran.
@@ -89,12 +96,14 @@ impl<'a> Emit<'a> {
 pub struct ProcessOutput {
     pub code: i32,
     pub log_path: PathBuf,
-    /// Total bytes written (stdout+stderr merged).
+    /// Bytes kept in `combined` (stdout+stderr merged); at most the last
+    /// 64 MiB, so it can be smaller than the log file.
     pub stdout_bytes: u64,
     /// Always 0 — stderr is merged into stdout_bytes.
     pub stderr_bytes: u64,
     pub elapsed: Duration,
-    /// Combined stdout+stderr content (same bytes as log_path).
+    /// Tail of the combined stdout+stderr: the last 64 MiB of `log_path`
+    /// (all of it when smaller). Read the file for the full log.
     pub combined: Vec<u8>,
 }
 
@@ -168,7 +177,17 @@ pub fn run(
     })?;
     let _group = track_group(child.id());
     let status = loop {
-        match child.try_wait()? {
+        let polled = match child.try_wait() {
+            Ok(polled) => polled,
+            Err(e) => {
+                // Don't leave the child (and its descendants) running.
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+        };
+        match polled {
             Some(status) => break status,
             None if start.elapsed() >= RUN_TIMEOUT => {
                 kill_process_group(child.id());
@@ -183,6 +202,9 @@ pub fn run(
             None => std::thread::sleep(Duration::from_millis(100)),
         }
     };
+    // Same as `capture`: a descendant the child left behind must not outlive
+    // the step (it could keep writing to the log or holding resources).
+    kill_process_group(child.id());
     let elapsed = start.elapsed();
 
     let combined = read_tail(log_path, MAX_CAPTURE_BYTES);
@@ -343,21 +365,31 @@ pub fn capture_with_timeout_env(
     // pipe buffer and deadlock against our `try_wait` polling. Each keeps at
     // most MAX_CAPTURE_BYTES and discards the rest, and reports back over a
     // channel so the join below can have a deadline.
-    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    // The bool is true when a read failed, i.e. the bytes are incomplete.
+    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::sync::mpsc::Receiver<(Vec<u8>, bool)> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
+            let mut cut_short = false;
             if let Some(mut r) = r {
                 let mut chunk = [0u8; 16 * 1024];
-                while let Ok(n) = r.read(&mut chunk) {
-                    if n == 0 {
-                        break;
+                loop {
+                    match r.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let room = (MAX_CAPTURE_BYTES as usize).saturating_sub(buf.len());
+                            buf.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                        // A signal is not the end of the stream.
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(_) => {
+                            cut_short = true;
+                            break;
+                        }
                     }
-                    let room = (MAX_CAPTURE_BYTES as usize).saturating_sub(buf.len());
-                    buf.extend_from_slice(&chunk[..n.min(room)]);
                 }
             }
-            let _ = tx.send(buf);
+            let _ = tx.send((buf, cut_short));
         });
         rx
     }
@@ -365,7 +397,17 @@ pub fn capture_with_timeout_env(
     let err_rx = drain(child.stderr.take());
 
     let status = loop {
-        match child.try_wait()? {
+        let polled = match child.try_wait() {
+            Ok(polled) => polled,
+            Err(e) => {
+                // Don't leave the child (and its descendants) running.
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+        };
+        match polled {
             Some(status) => break Some(status),
             None if start.elapsed() >= timeout => {
                 kill_process_group(child.id());
@@ -379,15 +421,21 @@ pub fn capture_with_timeout_env(
     // The child is gone, but a descendant it left behind can still hold the
     // pipes open: reap the group, then wait only briefly for the readers.
     kill_process_group(child.id());
-    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
-        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
+    // `None` when the reader never reported back or its read failed: empty
+    // output then means "unknown", not "the child printed nothing".
+    let collect = |rx: std::sync::mpsc::Receiver<(Vec<u8>, bool)>| match rx
+        .recv_timeout(Duration::from_secs(5))
+    {
+        Ok((buf, false)) => Some(buf),
+        _ => None,
     };
     let stdout = collect(out_rx);
     let stderr = collect(err_rx);
     let elapsed = start.elapsed();
+    let len = |o: &Option<Vec<u8>>| o.as_ref().map_or(0, |b| b.len() as u64);
 
     let code = status.map_or(-1, |s| s.code().unwrap_or(-1));
-    emit.done(code, elapsed, stdout.len() as u64, stderr.len() as u64);
+    emit.done(code, elapsed, len(&stdout), len(&stderr));
 
     if status.is_none() {
         return Err(ProcessError::Timeout {
@@ -395,10 +443,17 @@ pub fn capture_with_timeout_env(
             secs: timeout.as_secs(),
         });
     }
+    let lost = |stream| ProcessError::OutputLost {
+        program: program.to_string(),
+        stream,
+    };
+    let (Some(stdout), Some(stderr)) = (stdout.as_ref(), stderr.as_ref()) else {
+        return Err(lost(if stdout.is_none() { "stdout" } else { "stderr" }));
+    };
     Ok(Captured {
         code,
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout: String::from_utf8_lossy(stdout).into_owned(),
+        stderr: String::from_utf8_lossy(stderr).into_owned(),
     })
 }
 
@@ -468,6 +523,22 @@ mod capture_timeout_tests {
         .expect("must time out");
         assert!(matches!(err, ProcessError::Timeout { .. }));
         assert!(t.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn unreadable_output_is_an_error_not_an_empty_success() {
+        // The child exits at once but a background descendant in another
+        // process group keeps the pipe open, so the readers never finish.
+        let err = capture_with_timeout(
+            "sh",
+            &["-c", "setsid sleep 8 & exit 0"],
+            Path::new("/"),
+            quiet(),
+            Duration::from_secs(20),
+        )
+        .err()
+        .expect("must not be Ok");
+        assert!(matches!(err, ProcessError::OutputLost { .. }));
     }
 
     #[test]

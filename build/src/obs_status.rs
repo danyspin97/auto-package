@@ -81,16 +81,20 @@ fn parse_attrs(mut s: &str) -> Vec<(String, String)> {
 }
 
 /// Next tag at or after `from`, skipping text, comments, `<?...?>` and
-/// `<!...>`. `None` at end of input or on a truncated tag.
-fn next_tag(xml: &str, mut from: usize) -> Option<Tag> {
+/// `<!...>`. `Ok(None)` at a clean end of input; `Err(())` when the input
+/// ends inside a tag or comment (a cut-off document).
+fn scan_tag(xml: &str, mut from: usize) -> Result<Option<Tag>, ()> {
     loop {
-        let open = from + xml.get(from..)?.find('<')?;
+        let Some(off) = xml.get(from..).and_then(|r| r.find('<')) else {
+            return Ok(None);
+        };
+        let open = from + off;
         let rest = &xml[open..];
         if rest.starts_with("<!--") {
-            from = open + rest.find("-->")? + 3;
+            from = open + rest.find("-->").ok_or(())? + 3;
             continue;
         }
-        let close = open + rest.find('>')?;
+        let close = open + rest.find('>').ok_or(())?;
         let inner = &xml[open + 1..close];
         if inner.starts_with('?') || inner.starts_with('!') {
             from = close + 1;
@@ -103,14 +107,19 @@ fn next_tag(xml: &str, mut from: usize) -> Option<Tag> {
             Some(i) => (&inner[..i], parse_attrs(&inner[i..])),
             None => (inner, Vec::new()),
         };
-        return Some(Tag {
+        return Ok(Some(Tag {
             name: name.to_string(),
             attrs,
             closing,
             self_closing,
             end: close + 1,
-        });
+        }));
     }
+}
+
+/// [`scan_tag`] for the lenient parsers: a truncated tag reads as the end.
+fn next_tag(xml: &str, from: usize) -> Option<Tag> {
+    scan_tag(xml, from).ok().flatten()
 }
 
 /// Text between `from` and the next `<`, entity-decoded and trimmed.
@@ -120,13 +129,45 @@ fn text_after(xml: &str, from: usize) -> String {
 }
 
 /// Every package status in a `_result` document, across repositories/arches.
+/// A cut-off document yields only the prefix; use [`try_parse_results`] when
+/// the caller must not mistake that for the whole list.
 pub fn parse_results(xml: &str) -> Vec<ResultEntry> {
+    parse_results_inner(xml).0
+}
+
+/// [`parse_results`], but a truncated document is an error: otherwise every
+/// package after the cut silently disappears and reads as "not built".
+pub fn try_parse_results(xml: &str) -> Result<Vec<ResultEntry>, String> {
+    match parse_results_inner(xml) {
+        (entries, false) => Ok(entries),
+        (entries, true) => Err(format!(
+            "truncated _result document (kept {} entries before the cut)",
+            entries.len()
+        )),
+    }
+}
+
+/// The entries read, and whether the document ended mid-tag or inside an
+/// open `<result>`.
+fn parse_results_inner(xml: &str) -> (Vec<ResultEntry>, bool) {
     let mut entries: Vec<ResultEntry> = Vec::new();
     let (mut repo, mut arch, mut dirty) = (String::new(), String::new(), false);
     let mut in_result = false;
     let mut open_status: Option<usize> = None;
     let mut pos = 0;
-    while let Some(tag) = next_tag(xml, pos) {
+    let truncated;
+    loop {
+        let tag = match scan_tag(xml, pos) {
+            Ok(Some(tag)) => tag,
+            Ok(None) => {
+                truncated = in_result;
+                break;
+            }
+            Err(()) => {
+                truncated = true;
+                break;
+            }
+        };
         pos = tag.end;
         match (tag.name.as_str(), tag.closing) {
             ("result", false) => {
@@ -165,7 +206,7 @@ pub fn parse_results(xml: &str) -> Vec<ResultEntry> {
             _ => {}
         }
     }
-    entries
+    (entries, truncated)
 }
 
 /// File names of the `.rpm` binaries in a `/build/<prj>/<repo>/<arch>/<pkg>`
@@ -393,6 +434,17 @@ mod tests {
         let other = find_entry(REAL, "openSUSE_Tumbleweed", "x86_64", "other").unwrap();
         assert_eq!(other.details.as_deref(), Some("waiting for 1 compiles"));
         assert!(find_entry(REAL, "openSUSE_Tumbleweed", "x86_64", "nope").is_none());
+    }
+
+    #[test]
+    fn a_cut_off_document_is_an_error() {
+        let cut = &REAL[..REAL.find("package=\"other\"").unwrap() + 5];
+        assert!(try_parse_results(cut).is_err());
+        // Cut between tags, inside an open <result>.
+        let cut = &REAL[..REAL.find("<status package=\"other\"").unwrap()];
+        assert!(try_parse_results(cut).is_err());
+        assert_eq!(try_parse_results(REAL).unwrap().len(), 3);
+        assert!(try_parse_results("").unwrap().is_empty());
     }
 
     #[test]

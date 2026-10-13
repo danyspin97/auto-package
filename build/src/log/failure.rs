@@ -104,7 +104,7 @@ static POST_BUILD_PROBLEM: LazyLock<Regex> = LazyLock::new(|| {
       | directories\ not\ owned\ by\ a\ package
       | Installed\ \(but\ unpackaged\)\ file
       | File\ not\ found
-      | ERROR
+      | \bERROR\b
       ",
     )
     .expect("static")
@@ -378,6 +378,12 @@ fn finish(kept: Vec<&str>, elided: usize, genre: Genre, phase: Phase, located_by
 mod tests {
     use super::super::phase::segment;
     use super::*;
+
+    #[test]
+    fn error_count_summary_is_not_a_post_build_problem() {
+        assert!(!POST_BUILD_PROBLEM.is_match("Summary: 0 ERRORS, 2 warnings"));
+        assert!(POST_BUILD_PROBLEM.is_match("ERROR: broken"));
+    }
 
     fn mapper() -> PathMapper {
         PathMapper::with_sdist_root("glances-4.3.0")
