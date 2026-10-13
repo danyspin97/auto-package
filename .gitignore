@@ -5,3 +5,7 @@
 # is the scratch that produced its evidence; neither is tracked.
 /PLAN.md
 /spike/
+
+# Lock and scratch files the notes update creates while it runs.
+/notes/packages/*.lock
+/notes/packages/.scratch-*
