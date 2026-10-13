@@ -319,6 +319,10 @@ struct PkgState {
     /// arrives later, after the agent's (likely futile) fix attempt — so
     /// this has to survive until then rather than being read inline.
     disk_full_detected: bool,
+    /// The user pressed `r` and the root request was sent; further presses
+    /// are ignored until the package's status changes, so holding or
+    /// repeating the key doesn't queue duplicate builds.
+    retry_requested: bool,
 }
 
 impl PkgState {
@@ -338,6 +342,7 @@ impl PkgState {
             tries: 0,
             max_tries: 0,
             disk_full_detected: false,
+            retry_requested: false,
         }
     }
 
@@ -564,6 +569,13 @@ impl TuiState {
                 // the `r` retry keybinding), so don't carry the flag over
                 // and have it immediately reclassify a *new* failure.
                 state.disk_full_detected = false;
+                // The retry (if that's what this is) has been picked up, and
+                // the package is running again: it must not count as done in
+                // the header or show the previous attempt's tries.
+                state.retry_requested = false;
+                state.finished = false;
+                state.tries = 0;
+                state.max_tries = 0;
             }
             Event::PackageFinished {
                 pkg,
@@ -575,6 +587,7 @@ impl TuiState {
                     state.version = version.clone();
                 }
                 state.finished = true;
+                state.retry_requested = false;
                 state.status = match outcome {
                     PackageOutcome::Built => PkgStatus::Succeeded,
                     PackageOutcome::AlreadyBuilt => PkgStatus::AlreadyBuilt,
@@ -635,6 +648,13 @@ impl TuiState {
         let state = self.pkg_mut(pkg);
         match event {
             Event::StepStarted { kind, .. } => {
+                // The flag belongs to the failure that hit ENOSPC. Only the
+                // failure-analysis and agent steps that follow that build
+                // may still report it; any other step starts new work whose
+                // failure must not be blamed on the disk.
+                if !matches!(kind, StepKind::ExtractFailure | StepKind::AgentTurn) {
+                    state.disk_full_detected = false;
+                }
                 state.status = PkgStatus::Running;
                 state.step = Some(StepInfo {
                     kind: kind.clone(),
@@ -659,6 +679,13 @@ impl TuiState {
                 // the step stays on screen with its final time.
                 if let Some(step) = state.step.as_mut() {
                     step.done = Some((outcome.clone(), *elapsed));
+                    // A failed agent turn is a different failure than the
+                    // ENOSPC build that preceded it.
+                    if matches!(step.kind, StepKind::AgentTurn)
+                        && matches!(outcome, StepOutcome::Failed)
+                    {
+                        state.disk_full_detected = false;
+                    }
                 }
                 state.status = PkgStatus::Between;
             }
@@ -885,7 +912,13 @@ fn event_loop(
             );
         }
 
-        terminal.draw(|f| render(f, &state, &mut table_state, input.as_deref(), log_scroll))?;
+        let mut max_scroll = 0;
+        terminal.draw(|f| {
+            max_scroll = render(f, &state, &mut table_state, input.as_deref(), log_scroll);
+        })?;
+        // Keep the offset within what rendering can show, or PageDown
+        // appears dead after holding PageUp at the top.
+        log_scroll = log_scroll.min(max_scroll);
 
         if event::poll(tick_rate)?
             && let TermEvent::Key(key) = event::read()?
@@ -924,8 +957,18 @@ fn event_loop(
                 // builds), not just the UI. Detaching used to leave the
                 // pipeline running headless with nothing on screen and no
                 // way to stop it short of `kill`.
-                KeyCode::Char('q') | KeyCode::Esc => crate::handle_interrupt(true, memory),
+                // After a successful run there is nothing to interrupt: leave
+                // normally so the process exits 0.
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    if matches!(state.run_outcome, Some(RunOutcome::Success)) {
+                        break;
+                    }
+                    crate::handle_interrupt(true, memory)
+                }
                 KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    if matches!(state.run_outcome, Some(RunOutcome::Success)) {
+                        break;
+                    }
                     // Raw mode disables signal generation entirely, so the OS
                     // never delivers a real SIGINT while the TUI is running —
                     // this keypress IS the only place Ctrl-C shows up. Same
@@ -950,10 +993,15 @@ fn event_loop(
                 // would fix for a real spec defect.
                 KeyCode::Char('r') => {
                     if let Some(name) = selected.as_ref()
-                        && state.packages.get(name.as_str()).map(|p| &p.status)
-                            == Some(&PkgStatus::NoSpace)
+                        && state
+                            .packages
+                            .get(name.as_str())
+                            .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested)
                     {
                         if add_tx.send(name.clone()).is_ok() {
+                            if let Some(p) = state.packages.get_mut(name.as_str()) {
+                                p.retry_requested = true;
+                            }
                             state.add_global_log(
                                 LogLevel::Info,
                                 format!("Retrying {name} (no space left on device)"),
@@ -972,7 +1020,7 @@ fn event_loop(
                 // step back through history on demand without losing new
                 // lines arriving underneath — they just wait below the
                 // viewport until `End` jumps back to them.
-                KeyCode::PageUp => log_scroll = log_scroll.saturating_add(10),
+                KeyCode::PageUp => log_scroll = log_scroll.saturating_add(10).min(max_scroll),
                 KeyCode::PageDown => log_scroll = log_scroll.saturating_sub(10),
                 KeyCode::End => log_scroll = 0,
                 _ => {}
@@ -1059,7 +1107,7 @@ fn render(
     table_state: &mut TableState,
     input: Option<&str>,
     log_scroll: usize,
-) {
+) -> usize {
     let visible = state.visible_order();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1073,7 +1121,7 @@ fn render(
 
     render_summary(f, state, chunks[0]);
     render_table(f, state, &visible, chunks[1], table_state);
-    render_detail(
+    let max_scroll = render_detail(
         f,
         state,
         &visible,
@@ -1085,8 +1133,9 @@ fn render(
         .selected()
         .and_then(|i| visible.get(i))
         .and_then(|name| state.packages.get(name.as_str()))
-        .is_some_and(|p| p.status == PkgStatus::NoSpace);
+        .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
     render_footer(f, state, input, chunks[3], retryable);
+    max_scroll
 }
 
 fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
@@ -1185,7 +1234,7 @@ fn render_detail(
     area: Rect,
     selected: Option<usize>,
     log_scroll: usize,
-) {
+) -> usize {
     let pkg = selected
         .and_then(|i| visible.get(i))
         .and_then(|n| state.packages.get(n.as_str()));
@@ -1230,7 +1279,7 @@ fn render_detail(
                 .title("Agent Activity"),
             chunks[1],
         );
-        return;
+        return 0;
     };
 
     let viewport = chunks[0].height.saturating_sub(2) as usize;
@@ -1271,6 +1320,7 @@ fn render_detail(
             pkg.input_tokens, pkg.output_tokens
         )));
     f.render_widget(activity, chunks[1]);
+    max_scroll
 }
 
 fn render_footer(
@@ -1500,5 +1550,62 @@ mod step_state_tests {
         let pkg = &state.packages["foo"];
         assert!(pkg.step.is_none());
         assert!(pkg.fail_reason.is_none());
+    }
+
+    fn target_selected() -> Msg {
+        Msg {
+            pkg: None,
+            event: Event::TargetSelected {
+                pkg: "foo".to_string(),
+                version: "1.0".to_string(),
+                reason: SelectionReason::RequestedRoot,
+                blocked_by: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_retry_resets_finished_and_tries() {
+        let mut state = TuiState::new();
+        state.apply(msg(
+            "foo",
+            Event::AgentPrompt {
+                step: StepId(0),
+                task: Task::FixAfterBuild {
+                    attempt: 2,
+                    max_attempts: 3,
+                },
+                prompt: String::new(),
+                artifact: std::path::PathBuf::new(),
+            },
+        ));
+        state.apply(Msg {
+            pkg: None,
+            event: package_finished(PackageOutcome::Failed {
+                reason: "boom".to_string(),
+            }),
+        });
+        assert!(state.packages["foo"].finished);
+        state.apply(target_selected());
+        let pkg = &state.packages["foo"];
+        assert!(!pkg.finished);
+        assert_eq!((pkg.tries, pkg.max_tries), (0, 0));
+    }
+
+    #[test]
+    fn disk_full_only_classifies_the_failure_that_hit_it() {
+        let mut state = TuiState::new();
+        state
+            .packages
+            .insert("foo".into(), PkgState::new("1.0".into()));
+        state.packages.get_mut("foo").unwrap().disk_full_detected = true;
+        state.apply(msg("foo", started(StepKind::ApplyAndValidate)));
+        state.apply(Msg {
+            pkg: None,
+            event: package_finished(PackageOutcome::Failed {
+                reason: "boom".to_string(),
+            }),
+        });
+        assert!(state.packages["foo"].status == PkgStatus::Failed);
     }
 }
