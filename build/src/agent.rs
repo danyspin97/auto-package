@@ -166,15 +166,11 @@ const MAX_AGENT_STREAM_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TOOL_INPUT_BYTES: usize = 256 * 1024;
 
 /// Models the agent runs on, cheapest first. Each has its own API quota.
-const AGENT_MODELS: [&str; 3] = [
-    "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-5",
-    "claude-sonnet-5",
-];
+const AGENT_MODELS: [&str; 3] = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 
 /// The model for an attempt: escalate with the attempt number (the first 2
-/// attempts on Haiku 4.5, the next 3 on Sonnet 4.5, from attempt 6 on — the
-/// packages the cheaper tiers already failed — on Sonnet 5), then move
+/// attempts on Haiku 5.5, the next 3 on Sonnet 5.5, from attempt 6 on — the
+/// packages the cheaper tiers already failed — on Opus 5.5), then move
 /// `rotation` places along the list (wrapping) to dodge a model whose quota is
 /// exhausted.
 pub(crate) fn model_for_attempt(attempt: usize, rotation: usize) -> &'static str {
@@ -2950,9 +2946,9 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         "Read,Grep,Edit,Write,Skill,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch"
     };
 
-    // Escalate with the attempt number: the first 2 attempts go to Haiku 4.5
-    // (cheapest), the next 3 to Sonnet 4.5, and everything from attempt 6 on —
-    // the packages the cheaper tiers already failed on — to Sonnet 5.
+    // Escalate with the attempt number: the first 2 attempts go to Haiku 5.5
+    // (cheapest), the next 3 to Sonnet 5.5, and everything from attempt 6 on —
+    // the packages the cheaper tiers already failed on — to Opus 5.5.
     let model = model_for_attempt(req.attempt, req.model_rotation);
 
     // Cap this turn at whatever is left of the package budget, so one runaway
@@ -4013,13 +4009,13 @@ mod tests {
 
     #[test]
     fn models_escalate_with_the_attempt_and_rotate_on_demand() {
-        assert_eq!(model_for_attempt(1, 0), "claude-haiku-4-5-20251001");
-        assert_eq!(model_for_attempt(3, 0), "claude-sonnet-4-5");
-        assert_eq!(model_for_attempt(6, 0), "claude-sonnet-5");
+        assert_eq!(model_for_attempt(1, 0), "claude-haiku-5-5");
+        assert_eq!(model_for_attempt(3, 0), "claude-sonnet-5-5");
+        assert_eq!(model_for_attempt(6, 0), "claude-opus-5-5");
         // after a 429 the same turn moves to the next model, wrapping around
-        assert_eq!(model_for_attempt(1, 1), "claude-sonnet-4-5");
-        assert_eq!(model_for_attempt(1, 2), "claude-sonnet-5");
-        assert_eq!(model_for_attempt(6, 1), "claude-haiku-4-5-20251001");
+        assert_eq!(model_for_attempt(1, 1), "claude-sonnet-5-5");
+        assert_eq!(model_for_attempt(1, 2), "claude-opus-5-5");
+        assert_eq!(model_for_attempt(6, 1), "claude-haiku-5-5");
         // every rotation of one attempt yields a distinct model until it wraps
         let seen: std::collections::HashSet<_> = (0..3).map(|r| model_for_attempt(4, r)).collect();
         assert_eq!(seen.len(), 3);

@@ -496,7 +496,7 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
 }
 
 /// Models tried in order for a lookup.
-const AGENT_LOOKUP_MODELS: &[&str] = &["claude-sonnet-4-5", "claude-sonnet-5"];
+const AGENT_LOOKUP_MODELS: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
 
 /// Whether the CLI's output reports an HTTP 429 (quota / rate limit).
 pub fn is_rate_limited(stdout: &str) -> bool {
