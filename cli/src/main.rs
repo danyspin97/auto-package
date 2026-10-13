@@ -632,6 +632,7 @@ fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
+    let mut summary: Option<String> = None;
     match cli.command {
         Commands::Build {
             name,
@@ -1045,7 +1046,9 @@ fn main() -> color_eyre::Result<()> {
                 elapsed: start.elapsed(),
                 usage: total_usage,
             });
-            print_run_summary(&memory, &project, &distro, &arch);
+            // Built as text now and printed after the arm, once the TUI has
+            // restored the terminal; printed here it would be wiped.
+            summary = Some(print_run_summary(&memory, &project, &distro, &arch));
 
             result?;
             if !added_failures.is_empty() {
@@ -1230,10 +1233,15 @@ fn main() -> color_eyre::Result<()> {
                 elapsed: start.elapsed(),
                 usage: total_usage,
             });
-            print_run_summary(&memory, &project, &distro, &arch);
+            // Built as text now and printed after the arm, once the TUI has
+            // restored the terminal; printed here it would be wiped.
+            summary = Some(print_run_summary(&memory, &project, &distro, &arch));
 
             result?;
         }
+    }
+    if let Some(text) = summary {
+        print!("{text}");
     }
 
     Ok(())
@@ -1334,7 +1342,9 @@ fn package_outcome(result: &PipelineResult) -> PackageOutcome {
 /// Lists what this run built, what is queued and what the project already has
 /// built for this distro and arch, so the outcome is readable without
 /// scrolling the log.
-fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &str) {
+fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     // Latest outcome per package, so a package that later built is not also
     // reported as queued, and a package listed twice is listed once.
     let mut latest: std::collections::BTreeMap<String, (String, PackageOutcome)> =
@@ -1355,9 +1365,9 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         .filter(|(_, (_, outcome))| matches!(outcome, PackageOutcome::Built))
         .map(|(pkg, _)| pkg)
         .collect();
-    println!("\nBuilt this run ({}):", built.len());
+    let _ = writeln!(out, "\nBuilt this run ({}):", built.len());
     for pkg in &built {
-        println!("  {pkg} {}", latest[*pkg].0);
+        let _ = writeln!(out, "  {pkg} {}", latest[*pkg].0);
     }
 
     let mut queued: Vec<(&String, Vec<String>)> = latest
@@ -1373,12 +1383,12 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         })
         .collect();
     queued.retain(|(pkg, _)| !built.contains(pkg));
-    println!("\nQueued, waiting on dependencies ({}):", queued.len());
+    let _ = writeln!(out, "\nQueued, waiting on dependencies ({}):", queued.len());
     for (pkg, deps) in queued {
         if deps.is_empty() {
-            println!("  {pkg}");
+            let _ = writeln!(out, "  {pkg}");
         } else {
-            println!("  {pkg} <- {}", deps.join(", "));
+            let _ = writeln!(out, "  {pkg} <- {}", deps.join(", "));
         }
     }
 
@@ -1400,10 +1410,11 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         .map(|(name, _)| name)
         .collect();
     cached.sort();
-    println!("\nAlready built in {project} ({}):", cached.len());
+    let _ = writeln!(out, "\nAlready built in {project} ({}):", cached.len());
     for name in cached {
-        println!("  {name}");
+        let _ = writeln!(out, "  {name}");
     }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
