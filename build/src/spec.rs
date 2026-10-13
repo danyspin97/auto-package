@@ -400,7 +400,11 @@ pub(crate) fn expand_simple_defines(
 
 fn expand_once(s: &str, macros: &std::collections::HashMap<String, String>) -> String {
     let mut out = s.to_string();
-    for (name, value) in macros {
+    // Longest name first: replacing `%rel` before `%release` turns `%release`
+    // into `1ease`, and HashMap order would make that differ from run to run.
+    let mut by_length: Vec<_> = macros.iter().collect();
+    by_length.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(b.0)));
+    for (name, value) in by_length {
         out = out
             .replace(&format!("%{{{name}}}"), value)
             .replace(&format!("%{name}"), value);
@@ -2022,5 +2026,21 @@ BuildRequires:  %{python_module pip}
         let spec = "%files %{python_files}\n%{python_sitearch}/MarkupSafe\n";
         let out = normalize_files_paths(spec, "MarkupSafe");
         assert!(out.contains("%{python_sitearch}/markupsafe/"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod expand_order_tests {
+    use super::expand_once;
+    use std::collections::HashMap;
+
+    #[test]
+    fn longer_macro_names_win_over_their_prefixes() {
+        let macros: HashMap<String, String> = [("rel", "1"), ("release", "2")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(expand_once("%release", &macros), "2");
+        assert_eq!(expand_once("%rel", &macros), "1");
     }
 }

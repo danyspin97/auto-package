@@ -352,20 +352,26 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
         })
         .as_ref()?;
 
-    let out = std::process::Command::new(gh)
-        .arg("api")
+    // Bounded like the raw HTTP path: a hung `gh` must not stall the run. A
+    // timeout returns None, and the caller falls back to raw HTTP.
+    let out = crate::proc::capture_with_timeout_env(
+        gh.to_str()?,
         // Pass the path verbatim including any query string — gh accepts
         // `repos/owner/repo/tags?per_page=1` directly.
-        .arg(path)
-        .output()
-        .ok()?;
+        &["api", path],
+        &std::env::temp_dir(),
+        crate::proc::Emit::quiet(),
+        std::time::Duration::from_secs(60),
+        None,
+    )
+    .ok()?;
 
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if out.code != 0 {
+        let stderr = out.stderr.trim().to_string();
         return Some(Err(format!(
             "gh api {path}: {}{}",
             if stderr.is_empty() {
-                format!("exit {}", out.status.code().unwrap_or(-1))
+                format!("exit {}", out.code)
             } else {
                 stderr.trim().to_string()
             },
@@ -382,8 +388,7 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
         )));
     }
 
-    let body = String::from_utf8_lossy(&out.stdout).into_owned();
-    Some(Ok(body))
+    Some(Ok(out.stdout))
 }
 
 /// Fall-back auth for raw HTTP: a bearer token for GitHub, a PRIVATE-
