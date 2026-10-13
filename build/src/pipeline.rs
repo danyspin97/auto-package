@@ -2358,6 +2358,7 @@ fn agent_turn(
     }
 
     let notes = std::fs::read_to_string(ws.notes()).unwrap_or_default();
+    let package_notes = std::fs::read_to_string(ws.package_notes()).unwrap_or_default();
     let on_tool_use = |tool: &str, input: &str| {
         reporter.report(&Event::AgentToolUse {
             step: step.id,
@@ -2388,6 +2389,7 @@ fn agent_turn(
         budget_usd: config.budget_usd,
         hint: ctx.hint,
         notes: &notes,
+        package_notes: &package_notes,
         budget: crate::agent::TurnBudget::default(),
         from_repo_archive: ctx.from_repo_archive,
         subprojects: &config.subprojects,

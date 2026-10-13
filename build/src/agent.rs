@@ -2654,6 +2654,10 @@ pub struct TurnRequest<'a> {
     pub budget_usd: f64,
     pub hint: Option<&'a ExtractedLog>,
     pub notes: &'a str,
+    /// Durable per-package memory (`package-notes.md`): what the package needs
+    /// to build and test, and the workarounds already in place. Inlined into
+    /// the prompt so a new attempt does not rediscover them.
+    pub package_notes: &'a str,
     pub budget: TurnBudget,
     /// The tarball is a repository archive rather than a PyPI sdist.
     pub from_repo_archive: bool,
@@ -3686,6 +3690,11 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             false,
         ),
         ("notes.md", "attempt journal — also inlined below", false),
+        (
+            "package-notes.md",
+            "package memory — also inlined below",
+            false,
+        ),
     ] {
         let path = ws.join(name);
         if *always || path.exists() {
@@ -3777,6 +3786,18 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 .map(|(dir, name)| format!("  - {dir}/  (declares itself `{name}`)"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+        )
+    };
+
+    let package_notes_section = if req.package_notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Package memory (package-notes.md)\n\n{}\n\n\
+             This is what earlier successful builds of this package established. \
+             Treat its build requirements, test changes and workarounds as settled \
+             unless this run's build.log shows them wrong.\n\n",
+            req.package_notes
         )
     };
 
@@ -3948,6 +3969,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          \n\
          {spec_section}\
          {subprojects}\
+         {package_notes}\
          {notes}\
          {unresolvable}\
          {failed}\
@@ -3962,6 +3984,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         source_note = source_note,
         subprojects = subproject_section,
         spec_section = spec_section,
+        package_notes = package_notes_section,
         notes = notes_section,
         unresolvable = unresolvable_section,
         failed = failed_section,
@@ -4011,6 +4034,7 @@ mod tests {
             budget_usd: 2.0,
             hint: None,
             notes: "",
+            package_notes: "",
             budget: TurnBudget::default(),
             from_repo_archive: true,
             subprojects,
