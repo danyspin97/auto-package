@@ -175,7 +175,14 @@ pub fn run(
         program: program.to_string(),
         source: e,
     })?;
-    let _group = track_group(child.id());
+    let _group = match track_group(child.id()) {
+        Ok(g) => g,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.into());
+        }
+    };
     let status = loop {
         let polled = match child.try_wait() {
             Ok(polled) => polled,
@@ -260,13 +267,30 @@ static ACTIVE_GROUPS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
 /// Registration of a running child's group; removed on drop.
 pub(crate) struct GroupGuard(u32);
 
+/// Set once [`kill_all_groups`] runs. A child spawned just before Ctrl-C but
+/// not yet registered is missed by that sweep, and being in its own group it
+/// would be orphaned; `track_group` checks this flag so it is killed on
+/// registration instead.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Record `pid` (spawned with `process_group(0)`) as running until the guard drops.
-pub(crate) fn track_group(pid: u32) -> GroupGuard {
-    ACTIVE_GROUPS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(pid);
-    GroupGuard(pid)
+///
+/// When shutdown has begun the group is killed at once and an error returned,
+/// so the caller must reap the child and give up.
+pub(crate) fn track_group(pid: u32) -> io::Result<GroupGuard> {
+    // The flag is checked under the lock that `kill_all_groups` takes after
+    // setting it: either the sweep sees this pid, or this sees the flag.
+    let mut groups = ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner());
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+        drop(groups);
+        kill_process_group(pid);
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "shutting down; child killed",
+        ));
+    }
+    groups.insert(pid);
+    Ok(GroupGuard(pid))
 }
 
 impl Drop for GroupGuard {
@@ -280,6 +304,7 @@ impl Drop for GroupGuard {
 
 /// SIGKILL every child still running. For process shutdown (Ctrl-C, quit).
 pub fn kill_all_groups() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
     let pids: Vec<u32> = ACTIVE_GROUPS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -359,7 +384,14 @@ pub fn capture_with_timeout_env(
             program: program.to_string(),
             source: e,
         })?;
-    let _group = track_group(child.id());
+    let _group = match track_group(child.id()) {
+        Ok(g) => g,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.into());
+        }
+    };
 
     // Drain both pipes on their own threads so a chatty child can't fill a
     // pipe buffer and deadlock against our `try_wait` polling. Each keeps at
