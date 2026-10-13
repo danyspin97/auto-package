@@ -1325,19 +1325,6 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     })
 }
 
-/// NVIDIA proprietary runtime bindings that this project does not package.
-/// Matched on the normalised name, so `cuda-bindings`, `cuda_bindings` and
-/// `nvidia-cuda-runtime` all count.
-fn is_proprietary_runtime(dep: &str) -> bool {
-    let key = dep.to_ascii_lowercase().replace('_', "-");
-    key == "cuda-bindings"
-        || key == "cuda-python"
-        || key.starts_with("nvidia-cuda-")
-        || key.starts_with("nvidia-cudnn")
-        || key.starts_with("nvidia-nccl")
-        || key.starts_with("nvidia-cublas")
-}
-
 /// The outcome a finished package reports, shared by every build path.
 fn package_outcome(result: &PipelineResult) -> PackageOutcome {
     match result {
@@ -1757,21 +1744,6 @@ fn cmd_build(
                             "dep queue: dropping {dep} (redistributes a \
                              system package of the same name — see \
                              SYSTEM_TOOL_ALIASES)"
-                        );
-                    }
-                    keep
-                })
-                .filter(|dep| {
-                    // The CUDA runtime bindings and the NVIDIA runtime pip packages
-                    // wrap NVIDIA's proprietary driver and toolkit libraries. We do
-                    // not package those, so queueing them for a source build can
-                    // only fail. A dependent package keeps the requirement as a
-                    // Requires in its spec instead.
-                    let keep = !is_proprietary_runtime(dep);
-                    if !keep {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (proprietary NVIDIA runtime; \
-                             not packaged, kept as a runtime Requires only)"
                         );
                     }
                     keep

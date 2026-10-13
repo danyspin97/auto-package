@@ -2306,6 +2306,21 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    Record what you found, with the wheel name, the NEEDED list and the
    decision, in your reasoning so the package notes keep it.
 
+61. **A missing dependency is often a package we already build: check the exact
+   requirement before reporting it.** Read the dependency line in the source
+   (`pyproject.toml`, `setup.cfg`, `requirements*.txt`, the `Requires-Dist`
+   metadata) and compare the version bound with the version the project
+   already builds (the `python-<name>` package in this project or the distro).
+   A bound that our build does not meet, such as `cuda-bindings>=12.8` against
+   an older build, is a version problem to fix, not a package to skip. A
+   dependency that is a binding to a system or vendor library (for example
+   `cuda-bindings`, which wraps the CUDA driver API) is still a normal Python
+   dependency here: keep it as `Requires` and `BuildRequires` as far as it is
+   needed to build and import the package.
+   Split a subpackage only when a part of the package needs something the rest
+   does not, such as an optional GPU backend (see convention 53). Do not split
+   a package just because one dependency is hard to satisfy.
+
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
 A standalone Rust package (binary/library built entirely with Cargo — a
