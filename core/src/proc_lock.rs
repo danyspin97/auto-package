@@ -18,6 +18,20 @@ pub enum LockError {
     Io(io::Error),
 }
 
+/// Like [`try_lock`], but keeps retrying for up to `wait` while another holder
+/// has the lock. The poll interval is short so a short hold costs little.
+pub fn lock_with_wait(path: &Path, wait: std::time::Duration) -> Result<File, LockError> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match try_lock(path) {
+            Err(LockError::Held(_)) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Take an exclusive, non-blocking lock on `path`, creating it if needed. The
 /// returned file must be kept open for as long as the lock should be held;
 /// closing it releases the lock.

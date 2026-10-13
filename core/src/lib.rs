@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod event;
+pub mod fsx;
 pub mod proc_lock;
 pub mod run;
 pub mod sink;
