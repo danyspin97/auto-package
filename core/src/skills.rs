@@ -184,16 +184,21 @@ mod tests {
         let installed = prefix.join("share").join("auto-package").join("skills");
         fs::create_dir_all(&installed).unwrap();
         // Simulate a sibling packaging-skills two levels up too.
+        // Only remove what this test created: the parent of the temp dir is
+        // shared, so a pre-existing `packaging-skills` there must survive.
         let dev = tmp
             .path()
             .parent()
             .map(|p| p.join("packaging-skills"))
             .unwrap_or_else(|| PathBuf::from("/tmp/packaging-skills"));
+        let created_dev = !dev.exists();
         let _ = fs::create_dir_all(&dev);
 
         let got = resolve_skills_dir(None, Some(&exe), Path::new("/nope"));
         assert_eq!(got.as_deref(), Some(installed.as_path()));
 
-        let _ = fs::remove_dir_all(&dev);
+        if created_dev {
+            let _ = fs::remove_dir_all(&dev);
+        }
     }
 }
