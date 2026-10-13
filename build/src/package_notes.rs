@@ -44,19 +44,8 @@ pub fn path_for(rpm_name: &str) -> Option<PathBuf> {
         .map(|dir| dir.join(format!("{rpm_name}.md")))
 }
 
-/// Write `contents` to `path` via a temporary file in the same directory and a
-/// rename, so a concurrent build never sees (or leaves) half-written notes.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    std::io::Write::write_all(&mut tmp, contents.as_bytes())?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
-}
-
 /// How long a build waits for another build's update of the same notes.
 const LOCK_WAIT: Duration = Duration::from_secs(60);
-const LOCK_POLL: Duration = Duration::from_millis(250);
 
 /// Exclusive lock on one package's notes, so two builds cannot both read the
 /// same notes and have the later writer silently discard the earlier update.
@@ -74,25 +63,15 @@ impl NotesLock {
     }
 
     fn acquire_for(notes_file: &Path, wait: Duration) -> Result<Self, String> {
-        use ap_core::proc_lock::{LockError, try_lock};
+        use ap_core::proc_lock::{LockError, lock_with_wait};
         let path = PathBuf::from(format!("{}.lock", notes_file.display()));
-        let deadline = std::time::Instant::now() + wait;
-        loop {
-            match try_lock(&path) {
-                Ok(file) => return Ok(Self { _file: file }),
-                Err(LockError::Held(_)) => {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(format!(
-                            "timed out waiting for {}: another build is updating these notes",
-                            path.display()
-                        ));
-                    }
-                    std::thread::sleep(LOCK_POLL.min(wait));
-                }
-                Err(LockError::Io(e)) => {
-                    return Err(format!("cannot create {}: {e}", path.display()));
-                }
-            }
+        match lock_with_wait(&path, wait) {
+            Ok(file) => Ok(Self { _file: file }),
+            Err(LockError::Held(_)) => Err(format!(
+                "timed out waiting for {}: another build is updating these notes",
+                path.display()
+            )),
+            Err(LockError::Io(e)) => Err(format!("cannot create {}: {e}", path.display())),
         }
     }
 }
@@ -189,11 +168,8 @@ fn update_inner(
     let _lock = NotesLock::acquire(&notes_file)?;
     // Missing is the normal first-build case; any other read error means the
     // existing notes would be overwritten from scratch, so stop instead.
-    let before = match std::fs::read_to_string(&notes_file) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("cannot read {}: {e}", notes_file.display())),
-    };
+    let before = read_or_empty(&notes_file)
+        .map_err(|e| format!("cannot read {}: {e}", notes_file.display()))?;
     // The agent edits a private copy and the result is renamed into place, so
     // a failed or concurrent build never leaves the shared notes half-written.
     let dir = notes_file.parent().unwrap_or_else(|| Path::new("."));
@@ -209,7 +185,7 @@ fn update_inner(
                 dir.display()
             )
         })?;
-    std::fs::write(scratch.path(), before.as_deref().unwrap_or_default())
+    std::fs::write(scratch.path(), &before)
         .map_err(|e| format!("cannot seed {}: {e}", scratch.path().display()))?;
     // The agent may only write its scratch file, and read the notes directory
     // (the journal is under the working directory, which is readable anyway).
@@ -278,10 +254,10 @@ fn update_inner(
     // A notes file left by an earlier build is not an update from this one.
     let after = std::fs::read_to_string(scratch.path())
         .map_err(|e| format!("cannot read {}: {e}", scratch.path().display()))?;
-    if after.trim().is_empty() || Some(&after) == before.as_ref() {
+    if after.trim().is_empty() || after == before {
         return Err(format!("the agent did not update {}", notes_file.display()));
     }
-    write_atomic(&notes_file, &after)
+    ap_core::fsx::write_atomic(&notes_file, &after)
         .map_err(|e| format!("cannot write {}: {e}", notes_file.display()))?;
     // The notes are already saved; a failed commit must not fail the update.
     if let Err(e) = commit_notes(dir, &notes_file, rpm_name, version) {
@@ -297,7 +273,14 @@ fn commit_message(rpm_name: &str, version: &str) -> String {
 
 /// Commit `file` when `dir` is a git repository of its own, so the notes can
 /// be shared and versioned as a git module. Never pushes. The repository is
-/// the user's to create: without a `.git` entry this does nothing.
+/// the user's to create: without a `.git` entry (a directory, or the file a
+/// submodule or worktree has) directly in `dir` this does nothing. A notes
+/// directory that merely sits inside another repository, such as the project's
+/// own checkout, is deliberately left alone rather than adding commits there.
+///
+/// Only `file` is committed (`commit -- <file>`), so if `git add` or `git
+/// commit` fails, whatever else is staged in that repository is never swept
+/// into a later notes commit; the file stays staged and the next update retries.
 fn commit_notes(dir: &Path, file: &Path, rpm_name: &str, version: &str) -> Result<(), String> {
     if !dir.join(".git").exists() {
         return Ok(());
@@ -361,11 +344,33 @@ fn usage_from_output(stdout: &str) -> Usage {
     }
 }
 
-/// The package's notes as they stand, empty when there are none yet.
+/// Read a notes or journal file, treating a missing file as empty. Any other
+/// error is returned: an unreadable file must not look like "no notes", or the
+/// next update would overwrite it from scratch.
+pub fn read_or_empty(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The package's notes as they stand: `Ok("")` when there are none yet (or no
+/// notes directory is set), an error when the file exists but cannot be read.
+pub fn read_checked(rpm_name: &str) -> std::io::Result<String> {
+    match path_for(rpm_name) {
+        Some(p) => read_or_empty(&p),
+        None => Ok(String::new()),
+    }
+}
+
+/// [`read_checked`] for prompt building: a read error is reported on the
+/// diagnostic stream and the prompt goes without notes, never silently.
 pub fn read(rpm_name: &str) -> String {
-    path_for(rpm_name)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default()
+    read_checked(rpm_name).unwrap_or_else(|e| {
+        ap_core::diag!("  cannot read package notes for {rpm_name}: {e}");
+        String::new()
+    })
 }
 
 fn notes_prompt(
@@ -449,7 +454,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("p.md");
         std::fs::write(&f, "old").unwrap();
-        write_atomic(&f, "new").unwrap();
+        ap_core::fsx::write_atomic(&f, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
@@ -461,13 +466,24 @@ mod tests {
         let f = dir.path().join("p.md");
         std::fs::write(&f, "old").unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-        let res = write_atomic(&f, "new");
+        let res = ap_core::fsx::write_atomic(&f, "new");
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         // Root ignores directory permissions, so the write cannot be made to fail.
         if res.is_ok() {
             return;
         }
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
+    }
+
+    #[test]
+    fn missing_file_reads_as_empty_but_other_errors_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_or_empty(&dir.path().join("none.md")).unwrap(), "");
+        let f = dir.path().join("p.md");
+        std::fs::write(&f, "text").unwrap();
+        assert_eq!(read_or_empty(&f).unwrap(), "text");
+        // A directory where a file is expected fails with a non-NotFound error.
+        assert!(read_or_empty(dir.path()).is_err());
     }
 
     #[test]

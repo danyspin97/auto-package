@@ -54,13 +54,11 @@ impl Workspace {
     }
 
     /// Create or refresh the `spec` symlink pointing at `spec_path` (absolute).
+    /// The link is swapped in one rename, so a reader never sees it missing and
+    /// a failure leaves the previous link in place.
     #[cfg(unix)]
     pub fn link_spec(&self, spec_path: &Path) -> std::io::Result<()> {
-        let link = self.dir.join("spec");
-        if link.symlink_metadata().is_ok() {
-            fs::remove_file(&link)?;
-        }
-        std::os::unix::fs::symlink(spec_path, &link)
+        ap_core::fsx::replace_symlink(spec_path, &self.dir.join("spec"))
     }
 
     /// True when sdist_dir exists and is non-empty.
@@ -72,13 +70,10 @@ impl Workspace {
                 .unwrap_or(false)
     }
 
-    /// Update `latest` symlink to point at a per-run package directory.
+    /// Update `latest` symlink to point at a per-run package directory, in one
+    /// rename so a failure leaves the previous link in place.
     #[cfg(unix)]
     pub fn link_latest(&self, run_pkg_dir: &Path) -> std::io::Result<()> {
-        let link = self.dir.join("latest");
-        if link.symlink_metadata().is_ok() {
-            fs::remove_file(&link)?;
-        }
-        std::os::unix::fs::symlink(run_pkg_dir, &link)
+        ap_core::fsx::replace_symlink(run_pkg_dir, &self.dir.join("latest"))
     }
 }
