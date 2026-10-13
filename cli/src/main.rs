@@ -1045,6 +1045,7 @@ fn main() -> color_eyre::Result<()> {
                 elapsed: start.elapsed(),
                 usage: total_usage,
             });
+            print_run_summary(&memory, &project, &distro, &arch);
 
             result?;
             if !added_failures.is_empty() {
@@ -1229,6 +1230,7 @@ fn main() -> color_eyre::Result<()> {
                 elapsed: start.elapsed(),
                 usage: total_usage,
             });
+            print_run_summary(&memory, &project, &distro, &arch);
 
             result?;
         }
@@ -1316,6 +1318,44 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Lists what this run built and what the project already has built for this
+/// distro and arch, so the outcome is readable without scrolling the log.
+fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &str) {
+    let built: Vec<String> = memory
+        .events()
+        .iter()
+        .filter_map(|ev| match ev {
+            Event::PackageFinished {
+                pkg,
+                version,
+                outcome: PackageOutcome::Built,
+            } => Some(format!("{pkg} {version}")),
+            _ => None,
+        })
+        .collect();
+    println!("\nBuilt this run ({}):", built.len());
+    for line in &built {
+        println!("  {line}");
+    }
+
+    let statuses = ap_build::osc::get_project_build_statuses(
+        project,
+        distro,
+        arch,
+        ap_build::proc::Emit::quiet(),
+    );
+    let mut cached: Vec<&String> = statuses
+        .iter()
+        .filter(|(_, s)| matches!(s, ap_build::osc::BuildStatus::Succeeded))
+        .map(|(name, _)| name)
+        .collect();
+    cached.sort();
+    println!("\nAlready built in {project} ({}):", cached.len());
+    for name in cached {
+        println!("  {name}");
+    }
+}
+
 fn cmd_build(
     name: &str,
     version: Option<&str>,
