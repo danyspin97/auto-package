@@ -896,6 +896,34 @@ pub fn get_available_packages(
 static PROJECT_PACKAGES_CACHE: OnceLock<Mutex<HashMap<String, std::collections::HashSet<String>>>> =
     OnceLock::new();
 
+/// Per-project count of invalidations. A fetch that started before an
+/// invalidation holds a listing that may predate the package just committed;
+/// the reader compares the generation it saw before fetching and drops the
+/// result if it moved, instead of caching the stale set for the whole run.
+static PROJECT_PACKAGES_GENERATION: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+fn project_generation(project: &str) -> u64 {
+    PROJECT_PACKAGES_GENERATION
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(project)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Insert `pkgs` for `project` unless it was invalidated since `generation`
+/// was read. The generation is checked under the cache lock, and
+/// invalidation bumps it before taking that lock, so no interleaving lets a
+/// stale set land after the removal.
+fn insert_if_current(project: &str, generation: u64, pkgs: &std::collections::HashSet<String>) {
+    let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if project_generation(project) == generation {
+        guard.insert(project.to_owned(), pkgs.clone());
+    }
+}
+
 /// Return the set of package names that exist in `project`.
 ///
 /// The result is cached per project name so repeated calls within a process
@@ -926,16 +954,14 @@ pub fn try_list_project_packages(
         }
     }
 
+    let generation = project_generation(project);
     // A failed listing must not be cached: an empty set would make every
     // package look absent from OBS for the rest of the run. Retry once, then
     // report the error so the next call tries again.
     let pkgs = fetch_project_packages(project, emit)
         .or_else(|_| fetch_project_packages(project, Emit::quiet()))
         .map_err(|e| format!("could not list packages of {project}: {e}"))?;
-    cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(project.to_owned(), pkgs.clone());
+    insert_if_current(project, generation, &pkgs);
     Ok(pkgs)
 }
 
@@ -964,6 +990,14 @@ pub fn list_project_packages(
 /// why skipping this silently breaks every later availability check for the
 /// rest of the run, not just the one for the package just built.
 pub fn invalidate_project_packages_cache(project: &str) {
+    // Bump first: a fetch in flight must see the change even if it reaches
+    // `insert_if_current` before the removal below.
+    *PROJECT_PACKAGES_GENERATION
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(project.to_owned())
+        .or_insert(0) += 1;
     if let Some(cache) = PROJECT_PACKAGES_CACHE.get() {
         cache
             .lock()
@@ -994,6 +1028,23 @@ mod project_packages_cache_tests {
         invalidate_project_packages_cache(project);
 
         assert!(!cache.lock().unwrap().contains_key(project));
+    }
+
+    /// A worker that read the listing before an invalidation must not put its
+    /// stale set back afterwards.
+    #[test]
+    fn invalidation_between_fetch_and_insert_is_not_overwritten() {
+        let project = "ap-test-cache-stale-insert-project";
+        let generation = project_generation(project);
+        // ...fetch happens here, then another worker commits and invalidates...
+        invalidate_project_packages_cache(project);
+        insert_if_current(project, generation, &std::collections::HashSet::new());
+        let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        assert!(!cache.lock().unwrap().contains_key(project));
+
+        // A fetch that started after the invalidation is cached normally.
+        insert_if_current(project, project_generation(project), &Default::default());
+        assert!(cache.lock().unwrap().contains_key(project));
     }
 
     /// A project this call never touched must not be affected — invalidation
