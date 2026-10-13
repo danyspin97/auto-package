@@ -546,10 +546,7 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     ap_build::proc::kill_all_groups();
     if tui_active {
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::LeaveAlternateScreen
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
     }
     let usage = memory
         .events()
@@ -677,10 +674,14 @@ fn main() -> color_eyre::Result<()> {
                 }
                 std::fs::remove_dir_all(&project_dir)?;
             }
+            // Only a directory this run creates is ours to mark. Marking one that
+            // already existed would let a later --cleanup delete the user's files.
+            let created_now = !project_dir.exists();
             std::fs::create_dir_all(&project_dir)?;
-            // Write (idempotent, non-fatal) the ownership marker so later
-            // --cleanup runs can tell this directory was created by us.
-            let _ = std::fs::write(project_dir.join(OWNERSHIP_MARKER), b"");
+            if created_now {
+                // Non-fatal: without the marker, --cleanup just refuses later.
+                let _ = std::fs::write(project_dir.join(OWNERSHIP_MARKER), b"");
+            }
 
             // Canonicalize so no relative path can reach a subprocess whose
             // cwd is the osc checkout.
@@ -943,7 +944,9 @@ fn main() -> color_eyre::Result<()> {
                     .events()
                     .iter()
                     .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } = ev {
+                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } =
+                            ev
+                        {
                             acc.input_tokens += usage.input_tokens;
                             acc.output_tokens += usage.output_tokens;
                             acc.cost_usd += usage.cost_usd;
@@ -1107,7 +1110,9 @@ fn main() -> color_eyre::Result<()> {
                     .events()
                     .iter()
                     .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } = ev {
+                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } =
+                            ev
+                        {
                             acc.input_tokens += usage.input_tokens;
                             acc.output_tokens += usage.output_tokens;
                             acc.cost_usd += usage.cost_usd;

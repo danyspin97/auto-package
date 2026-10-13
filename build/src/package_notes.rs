@@ -48,6 +48,7 @@ pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Resu
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
+    let before = std::fs::read_to_string(&notes_file).ok();
     let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
     let out = crate::proc::capture_with_timeout_env(
         "claude",
@@ -77,8 +78,9 @@ pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Resu
             out.stderr.trim()
         ));
     }
-    if !notes_file.exists() {
-        return Err(format!("the agent did not write {}", notes_file.display()));
+    // A notes file left by an earlier build is not an update from this one.
+    if std::fs::read_to_string(&notes_file).ok() == before {
+        return Err(format!("the agent did not update {}", notes_file.display()));
     }
     Ok(usage_from_output(&out.stdout))
 }
