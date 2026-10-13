@@ -421,6 +421,10 @@ struct PkgState {
     /// are ignored until the package's status changes, so holding or
     /// repeating the key doesn't queue duplicate builds.
     retry_requested: bool,
+    /// Dependencies named by the last `PackageOutcome::MissingDeps`, sorted
+    /// and deduplicated; empty once the package is retried or finishes any
+    /// other way. Kept apart from the log so the Queued list can show it.
+    waiting_on: Vec<String>,
 }
 
 impl PkgState {
@@ -444,6 +448,7 @@ impl PkgState {
             max_tries: 0,
             disk_full_detected: false,
             retry_requested: false,
+            waiting_on: Vec::new(),
         }
     }
 
@@ -684,6 +689,9 @@ impl TuiState {
                 state.finished = false;
                 state.tries = 0;
                 state.max_tries = 0;
+                // The package is running again, so it no longer waits on
+                // what the previous attempt reported.
+                state.waiting_on.clear();
             }
             Event::PackageFinished {
                 pkg,
@@ -696,6 +704,15 @@ impl TuiState {
                 }
                 state.finished = true;
                 state.retry_requested = false;
+                state.waiting_on = match outcome {
+                    PackageOutcome::MissingDeps { deps } => {
+                        let mut deps = deps.clone();
+                        deps.sort();
+                        deps.dedup();
+                        deps
+                    }
+                    _ => Vec::new(),
+                };
                 state.status = match outcome {
                     PackageOutcome::Built => PkgStatus::Succeeded,
                     PackageOutcome::AlreadyBuilt => PkgStatus::AlreadyBuilt,
@@ -1170,6 +1187,28 @@ fn event_loop(
                     select_prev(&mut selected, &state)
                 }
                 KeyCode::Char('a') => state.show_all = !state.show_all,
+                // Works in every focus: the lists replace the detail panes
+                // wholesale, so there is no pane the key could belong to.
+                KeyCode::Char('l') => browse.show_lists = !browse.show_lists,
+                // The lists have no cursor, so they scroll from the top like
+                // the expanded activity text, on the keys the log pane uses.
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Char('j')
+                | KeyCode::Char('k')
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                    if browse.show_lists && browse.focus == Focus::Log =>
+                {
+                    browse.lists_off = text_scroll_key(
+                        key.code,
+                        browse.lists_off,
+                        feedback.lists_total,
+                        feedback.lists_viewport,
+                    );
+                }
                 // Retry a package that failed with "No space left on
                 // device" (`PkgStatus::NoSpace`) once the user has freed
                 // some — re-sent through the same channel as the `n` add
@@ -1361,6 +1400,10 @@ struct BrowseState {
     filter: Option<String>,
     /// The `/` prompt while it is open, with the text typed so far.
     filter_input: Option<String>,
+    /// `l` replaces the detail panes with the Queued and Built lists.
+    show_lists: bool,
+    /// First line shown of the lists, shared by both so they scroll together.
+    lists_off: usize,
 }
 
 impl BrowseState {
@@ -1394,6 +1437,9 @@ struct RenderFeedback {
     detail_total: usize,
     detail_viewport: usize,
     detail_off: usize,
+    /// Longest of the two lists and how many lines fit, for scrolling them.
+    lists_total: usize,
+    lists_viewport: usize,
 }
 
 /// The pane after (or, with `back`, before) `f`, wrapping around.
@@ -1703,6 +1749,9 @@ fn render_detail(
     selected: Option<usize>,
     browse: &BrowseState,
 ) -> RenderFeedback {
+    if browse.show_lists {
+        return render_lists(f, state, area, browse);
+    }
     let pkg = selected
         .and_then(|i| visible.get(i))
         .and_then(|n| state.packages.get(n.as_str()));
@@ -1867,6 +1916,73 @@ fn render_detail(
     feedback
 }
 
+/// `name <- dep1, dep2` for each package waiting on dependencies, in table
+/// order; just `name` when the outcome named none.
+fn queued_lines(state: &TuiState) -> Vec<String> {
+    state
+        .order
+        .iter()
+        .filter_map(|n| state.packages.get(n.as_str()).map(|p| (n, p)))
+        .filter(|(_, p)| p.status == PkgStatus::MissingDeps)
+        .map(|(n, p)| {
+            if p.waiting_on.is_empty() {
+                n.clone()
+            } else {
+                format!("{n} <- {}", p.waiting_on.join(", "))
+            }
+        })
+        .collect()
+}
+
+/// `name version` for each package that is built, in table order.
+fn built_lines(state: &TuiState) -> Vec<String> {
+    state
+        .order
+        .iter()
+        .filter_map(|n| state.packages.get(n.as_str()).map(|p| (n, p)))
+        .filter(|(_, p)| matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt))
+        .map(|(n, p)| format!("{n} {}", p.version).trim_end().to_string())
+        .collect()
+}
+
+/// The Queued and Built lists side by side in place of the detail panes. One
+/// offset scrolls both, clamped to the longer, so they stay aligned.
+fn render_lists(
+    f: &mut Frame,
+    state: &TuiState,
+    area: Rect,
+    browse: &BrowseState,
+) -> RenderFeedback {
+    let queued = queued_lines(state);
+    let built = built_lines(state);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let viewport = viewport_height(area.height);
+    let total = queued.len().max(built.len());
+    let off = clamp_offset(browse.lists_off, total, viewport);
+    for (lines, title, col) in [
+        (&queued, format!("Queued ({})", queued.len()), cols[0]),
+        (&built, format!("Built ({})", built.len()), cols[1]),
+    ] {
+        let end = (off + viewport).min(lines.len());
+        let items: Vec<ListItem> = lines[off.min(end)..end]
+            .iter()
+            .map(|l| ListItem::new(l.as_str()))
+            .collect();
+        f.render_widget(
+            List::new(items).block(pane(&title, browse.focus == Focus::Log)),
+            col,
+        );
+    }
+    RenderFeedback {
+        lists_total: total,
+        lists_viewport: viewport,
+        ..RenderFeedback::default()
+    }
+}
+
 /// One line of a text prompt: label, the text typed so far with a cursor, and
 /// the keys that finish or cancel it.
 fn prompt_line(label: &str, buf: &str, keys: &str) -> Line<'static> {
@@ -1926,7 +2042,7 @@ fn render_footer(
     };
     let hint = Span::styled(
         format!(
-            "  {nav} │ Tab focus │ n add package{} │ a {} succeeded │ {quit}",
+            "  {nav} │ Tab focus │ l lists │ n add package{} │ a {} succeeded │ {quit}",
             if retryable {
                 " │ r retry (no space left)"
             } else {
@@ -2091,6 +2207,38 @@ mod step_state_tests {
             version: "1.0".to_string(),
             outcome,
         }
+    }
+
+    #[test]
+    fn missing_deps_sets_waiting_on_and_a_later_build_clears_it() {
+        let mut state = TuiState::new();
+        let deps = ["b", "a", "b"].map(String::from).to_vec();
+        state.apply(msg(
+            "foo",
+            package_finished(PackageOutcome::MissingDeps { deps }),
+        ));
+        assert_eq!(state.packages["foo"].waiting_on, ["a", "b"]);
+        state.apply(msg("foo", package_finished(PackageOutcome::Built)));
+        assert!(state.packages["foo"].waiting_on.is_empty());
+    }
+
+    #[test]
+    fn queued_and_built_lines_follow_table_order() {
+        let mut state = TuiState::new();
+        let fin = |pkg: &str, outcome| Event::PackageFinished {
+            pkg: pkg.to_string(),
+            version: "2.0".to_string(),
+            outcome,
+        };
+        let missing = |deps: &[&str]| PackageOutcome::MissingDeps {
+            deps: deps.iter().map(|d| d.to_string()).collect(),
+        };
+        state.apply(msg("w", fin("w", missing(&["y", "x"]))));
+        state.apply(msg("v", fin("v", PackageOutcome::Built)));
+        state.apply(msg("u", fin("u", missing(&[]))));
+        state.apply(msg("t", fin("t", PackageOutcome::AlreadyBuilt)));
+        assert_eq!(queued_lines(&state), ["w <- x, y", "u"]);
+        assert_eq!(built_lines(&state), ["v 2.0", "t 2.0"]);
     }
 
     #[test]
