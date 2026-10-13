@@ -971,6 +971,7 @@ fn package_notes_step(
         &config.version,
         &config.project,
         &config.distro,
+        &config.arch,
     );
     // Charged before the result is looked at: a failed notes turn still cost
     // money, and that spend must reach the run total and the package's state.

@@ -161,9 +161,10 @@ pub fn update_after_build(
     version: &str,
     project: &str,
     distro: &str,
+    arch: &str,
 ) -> NotesRun {
     let mut usage = Usage::default();
-    let result = update_inner(ws, rpm_name, version, project, distro, &mut usage);
+    let result = update_inner(ws, rpm_name, version, project, distro, arch, &mut usage);
     NotesRun { usage, result }
 }
 
@@ -173,6 +174,7 @@ fn update_inner(
     version: &str,
     project: &str,
     distro: &str,
+    arch: &str,
     usage: &mut Usage,
 ) -> Result<(), String> {
     let Some(notes_file) = path_for(rpm_name) else {
@@ -233,6 +235,7 @@ fn update_inner(
             version,
             project,
             distro,
+            arch,
             &ws.notes(),
             scratch.path(),
         ),
@@ -370,6 +373,7 @@ fn notes_prompt(
     version: &str,
     project: &str,
     distro: &str,
+    arch: &str,
     journal: &Path,
     notes_file: &Path,
 ) -> String {
@@ -390,11 +394,14 @@ fn notes_prompt(
            the reason for each.\n\
          - **Failure history**: each failure that was fixed, one line each, \
            with the fix.\n\n\
-         The notes are shared by every project and distro this package is built \
-         for. When a finding only applies to one target, name the project and \
-         distro next to it (for example \"on openSUSE:Leap:16.0 only\"); leave \
-         general findings unlabelled. Findings from earlier builds that name a \
-         different target are not evidence about {project} / {distro}.\n\n\
+         The notes are shared by every project, distro and architecture this \
+         package is built for, so write each finding to hold on all of them. \
+         Describe the rule, not one architecture's file: say \"the upstream wheel \
+         for the build architecture\", not a wheel name or hash for x86_64. When a \
+         finding only applies to one target, label it (for example \"on \
+         openSUSE:Leap:16.0 only\" or \"on x86_64 only\"); leave general findings \
+         unlabelled. This build is {project} / {distro} / {arch}; findings from \
+         earlier builds that name a different target are not evidence about it.\n\n\
          Keep it factual and under 60 lines. Do not copy the journal verbatim. \
          Do not touch any other file, and do not run commands.",
         journal = journal.display(),
@@ -487,6 +494,7 @@ mod tests {
             "1.2.3",
             "home:me",
             "openSUSE_Leap_16.0",
+            "x86_64",
             Path::new("/w/notes.md"),
             Path::new("/n/python-foo.md"),
         );
