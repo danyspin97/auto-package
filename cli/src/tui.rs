@@ -607,6 +607,16 @@ impl TuiState {
             .collect()
     }
 
+    /// Packages still to build: rows that are neither finished nor parked on
+    /// missing deps after a failure. Derived on every call, like `done`, so it
+    /// cannot drift from the rows the way a stored counter could.
+    fn pending_count(&self) -> usize {
+        self.packages
+            .values()
+            .filter(|p| !p.finished && p.status != PkgStatus::MissingDeps)
+            .count()
+    }
+
     fn pkg_mut(&mut self, name: &str) -> &mut PkgState {
         if !self.packages.contains_key(name) {
             self.order.push(name.to_string());
@@ -1209,10 +1219,18 @@ fn event_loop(
                 | KeyCode::End
                     if browse.show_lists && browse.focus == Focus::Log =>
                 {
-                    browse.lists_off = text_scroll_key(
+                    // Each list clamps against its own length, so the shorter
+                    // one stops at its end while the longer keeps scrolling.
+                    browse.queued_off = text_scroll_key(
                         key.code,
-                        browse.lists_off,
-                        feedback.lists_total,
+                        browse.queued_off,
+                        feedback.queued_total,
+                        feedback.lists_viewport,
+                    );
+                    browse.built_off = text_scroll_key(
+                        key.code,
+                        browse.built_off,
+                        feedback.built_total,
                         feedback.lists_viewport,
                     );
                 }
@@ -1409,8 +1427,10 @@ struct BrowseState {
     filter_input: Option<String>,
     /// `l` replaces the detail panes with the Queued and Built lists.
     show_lists: bool,
-    /// First line shown of the lists, shared by both so they scroll together.
-    lists_off: usize,
+    /// First line shown of each list; separate because the lists differ in
+    /// length and a shared offset would end the shorter one early.
+    queued_off: usize,
+    built_off: usize,
 }
 
 impl BrowseState {
@@ -1444,8 +1464,9 @@ struct RenderFeedback {
     detail_total: usize,
     detail_viewport: usize,
     detail_off: usize,
-    /// Longest of the two lists and how many lines fit, for scrolling them.
-    lists_total: usize,
+    /// Length of each list and how many lines fit, for scrolling them.
+    queued_total: usize,
+    built_total: usize,
     lists_viewport: usize,
 }
 
@@ -1661,6 +1682,7 @@ fn pane(title: &str, focused: bool) -> Block<'static> {
 fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     let done = state.packages.values().filter(|p| p.finished).count();
     let total = state.order.len();
+    let pending = state.pending_count();
     // Live, not the `ResolveFinished` snapshot: that event only fires once
     // per batch re-resolution of a root's own pip closure, which the far
     // more frequent ad hoc dependency builds never trigger — trusting it
@@ -1676,11 +1698,11 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     let elapsed = state.run_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
     let title = match (state.resolve_total, state.resolve_in_distro) {
         (Some(closure_total), Some(in_distro)) => format!(
-            " Auto-Package — {done}/{total} packages done ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${:.4} ",
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${:.4} ",
             state.total_cost_usd()
         ),
         _ => format!(
-            " Auto-Package — {done}/{total} packages done ({built} built) │ elapsed {elapsed}s │ cost ${:.4} ",
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built) │ elapsed {elapsed}s │ cost ${:.4} ",
             state.total_cost_usd()
         ),
     };
@@ -1953,7 +1975,7 @@ fn built_lines(state: &TuiState) -> Vec<String> {
 }
 
 /// The Queued and Built lists side by side in place of the detail panes. One
-/// offset scrolls both, clamped to the longer, so they stay aligned.
+/// offset is kept per list and clamped to that list's own length.
 fn render_lists(
     f: &mut Frame,
     state: &TuiState,
@@ -1967,11 +1989,19 @@ fn render_lists(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
     let viewport = viewport_height(area.height);
-    let total = queued.len().max(built.len());
-    let off = clamp_offset(browse.lists_off, total, viewport);
-    for (lines, title, col) in [
-        (&queued, format!("Queued ({})", queued.len()), cols[0]),
-        (&built, format!("Built ({})", built.len()), cols[1]),
+    for (lines, title, col, off) in [
+        (
+            &queued,
+            format!("Queued ({})", queued.len()),
+            cols[0],
+            clamp_offset(browse.queued_off, queued.len(), viewport),
+        ),
+        (
+            &built,
+            format!("Built ({})", built.len()),
+            cols[1],
+            clamp_offset(browse.built_off, built.len(), viewport),
+        ),
     ] {
         let end = (off + viewport).min(lines.len());
         let items: Vec<ListItem> = lines[off.min(end)..end]
@@ -1984,7 +2014,8 @@ fn render_lists(
         );
     }
     RenderFeedback {
-        lists_total: total,
+        queued_total: queued.len(),
+        built_total: built.len(),
         lists_viewport: viewport,
         ..RenderFeedback::default()
     }
@@ -2227,6 +2258,36 @@ mod step_state_tests {
         assert_eq!(state.packages["foo"].waiting_on, ["a", "b"]);
         state.apply(msg("foo", package_finished(PackageOutcome::Built)));
         assert!(state.packages["foo"].waiting_on.is_empty());
+    }
+
+    #[test]
+    fn pending_counts_only_rows_still_to_build() {
+        let mut state = TuiState::new();
+        state.pkg_mut("running");
+        state.pkg_mut("built");
+        state.pkg_mut("parked");
+        state.pkg_mut("failed");
+        assert_eq!(state.pending_count(), 4);
+        let fin = |pkg: &str, outcome| Event::PackageFinished {
+            pkg: pkg.to_string(),
+            version: "1".to_string(),
+            outcome,
+        };
+        state.apply(msg("built", fin("built", PackageOutcome::Built)));
+        state.apply(msg(
+            "parked",
+            fin("parked", PackageOutcome::MissingDeps { deps: vec![] }),
+        ));
+        state.apply(msg(
+            "failed",
+            fin(
+                "failed",
+                PackageOutcome::Failed {
+                    reason: "x".to_string(),
+                },
+            ),
+        ));
+        assert_eq!(state.pending_count(), 1);
     }
 
     #[test]

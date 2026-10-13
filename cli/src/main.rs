@@ -633,6 +633,17 @@ fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
 
     let mut summary: Option<String> = None;
+    let result = run(cli, &mut summary);
+    // Printed after `run` returns so the TUI has restored the terminal, and
+    // whether or not the run failed: a failed run is the one where the list of
+    // what was built and what is still queued matters most.
+    if let Some(text) = summary {
+        print!("{text}");
+    }
+    result
+}
+
+fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
     match cli.command {
         Commands::Build {
             name,
@@ -1046,9 +1057,9 @@ fn main() -> color_eyre::Result<()> {
                 elapsed: start.elapsed(),
                 usage: total_usage,
             });
-            // Built as text now and printed after the arm, once the TUI has
+            // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
-            summary = Some(print_run_summary(&memory, &project, &distro, &arch));
+            *summary = Some(print_run_summary(&memory, &project, &distro, &arch));
 
             result?;
             if !added_failures.is_empty() {
@@ -1233,15 +1244,12 @@ fn main() -> color_eyre::Result<()> {
                 elapsed: start.elapsed(),
                 usage: total_usage,
             });
-            // Built as text now and printed after the arm, once the TUI has
+            // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
-            summary = Some(print_run_summary(&memory, &project, &distro, &arch));
+            *summary = Some(print_run_summary(&memory, &project, &distro, &arch));
 
             result?;
         }
-    }
-    if let Some(text) = summary {
-        print!("{text}");
     }
 
     Ok(())
@@ -1327,6 +1335,12 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
 
 /// The version a package was last built at here, when its last outcome was a
 /// success. Read from its state file, so it does not depend on OBS indexing.
+///
+/// This is the only place that parses state.json for the queue. It reads the
+/// two fields as loose JSON instead of going through `PkgState` because
+/// `PkgState::load` needs a `Workspace` for one exact directory, while the
+/// directory here is found by fuzzy name, and `load` also rewrites a corrupt
+/// file aside, which a read-only queue check must not do.
 fn built_locally(state_root: &Path, rpm_name: &str) -> Option<String> {
     // The RPM spelling of a PyPI name is only a guess (`_` may or may not become
     // `-`), so match the real state directories by fuzzy key instead of building
