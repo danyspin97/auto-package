@@ -21,9 +21,30 @@ pub struct SourceMap {
     urls: BTreeMap<String, String>,
 }
 
-/// Normalize a PyPI name for lookup: lowercase, `-`/`.` → `_`.
+/// PEP 503 normalisation: lowercase, and every run of `-`, `_` and `.`
+/// becomes a single `-`. Shared so every lookup treats `Foo_Bar`, `foo.bar`
+/// and `foo--bar` alike.
+pub fn normalize_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut in_sep = false;
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !in_sep {
+                out.push('-');
+            }
+            in_sep = true;
+        } else {
+            in_sep = false;
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
+/// Map key for a package. Spelled with `_` rather than `-` so entries already
+/// persisted in `sources.toml` keep matching.
 fn key(name: &str) -> String {
-    name.to_lowercase().replace(['-', '.'], "_")
+    normalize_name(name).replace('-', "_")
 }
 
 impl SourceMap {
@@ -508,12 +529,7 @@ fn http_get_text(url: &str) -> Result<String, String> {
         if (300..400).contains(&status)
             && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
         {
-            current = if loc.starts_with("http") {
-                loc.to_string()
-            } else {
-                let host = crate::http::host_of(&current).unwrap_or_default();
-                format!("https://{host}{loc}")
-            };
+            current = redirect_target(&current, loc).map_err(|e| format!("{url}: {e}"))?;
             continue;
         }
         if status >= 400 {
@@ -525,6 +541,24 @@ fn http_get_text(url: &str) -> Result<String, String> {
         return crate::http::read_text(resp).map_err(|e| format!("{url}: {e}"));
     }
     Err(format!("{url}: too many redirects"))
+}
+
+/// Where a redirect from `current` to `loc` leads. An https URL may not be
+/// redirected to plain http: that would send the request (and any token) in
+/// the clear, and a network attacker could forge the answer.
+fn redirect_target(current: &str, loc: &str) -> Result<String, String> {
+    let lower = loc.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(loc.to_string());
+    }
+    if lower.starts_with("http://") {
+        if current.to_ascii_lowercase().starts_with("https://") {
+            return Err(format!("refusing redirect from https to insecure {loc}"));
+        }
+        return Ok(loc.to_string());
+    }
+    let host = crate::http::host_of(current).unwrap_or_default();
+    Ok(format!("https://{host}{loc}"))
 }
 
 /// The first `tag_name` (or `name`, for a bare tag list) in a forge response,
@@ -612,15 +646,19 @@ fn is_any_archive(file: &str) -> bool {
 
 /// Classify a source URL. See the section comment above.
 pub fn source_kind(url: &str) -> SourceKind {
+    // Forge URLs first: `github.com/o/r/archive/v1.0.tar.gz` ends in an
+    // archive extension but is a forge URL, not a standalone tarball.
+    if let Some(forge) = ap_ecosystem::forge::parse(url)
+        && ap_ecosystem::forge::is_known_host(&forge.host)
+    {
+        return SourceKind::Forge;
+    }
     if is_any_archive(last_segment(url)) {
         return SourceKind::DirectArchive;
     }
     let Some(forge) = ap_ecosystem::forge::parse(url) else {
         return SourceKind::Forge;
     };
-    if ap_ecosystem::forge::is_known_host(&forge.host) {
-        return SourceKind::Forge;
-    }
     let indexish = forge
         .project_path
         .split('/')
@@ -793,6 +831,17 @@ fn latest_release_non_forge(url: &str, kind: SourceKind) -> Result<String, Strin
 
 fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<String> {
     if kind == SourceKind::DirectArchive {
+        // A fixed URL cannot serve another version: packaging 3.1.4 as 3.2.0
+        // would be silently wrong. Only a name without a version is trusted.
+        if let Some((_, v)) = archive_name_version(last_segment(url))
+            && v != version
+        {
+            ap_core::diag!(
+                "  {url} is version {v}, not the requested {version}; \
+                 a direct archive URL cannot provide another version"
+            );
+            return Vec::new();
+        }
         return vec![url.to_string()];
     }
     let dir = index_dir(url);
@@ -879,7 +928,11 @@ pub fn version_from_tag(tag: &str, repo: &str) -> String {
         "release-".to_string(),
         "release/".to_string(),
     ] {
-        if v.len() > prefix.len() && v[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+        // `get` rather than slicing: the cut may fall inside a multi-byte char.
+        if v.len() > prefix.len()
+            && let Some(head) = v.get(..prefix.len())
+            && head.eq_ignore_ascii_case(&prefix)
+        {
             v = &v[prefix.len()..];
             break;
         }
@@ -1074,6 +1127,59 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn name_normalisation_is_pep_503() {
+        for n in ["foo.bar", "foo--bar", "Foo_Bar", "FOO-._bar"] {
+            assert_eq!(super::normalize_name(n), "foo-bar", "{n}");
+        }
+        let mut m = super::SourceMap::default();
+        m.insert("Foo_Bar", "https://github.com/o/r");
+        assert!(m.get("foo.bar").is_some() && m.get("foo--bar").is_some());
+    }
+
+    #[test]
+    fn version_from_tag_survives_non_ascii_tags() {
+        assert_eq!(super::version_from_tag("réléase-1", "foo"), "réléase-1");
+        assert_eq!(super::version_from_tag("fé", "foo"), "fé");
+        assert_eq!(super::version_from_tag("foo-v1.2", "foo"), "1.2");
+    }
+
+    #[test]
+    fn forge_archive_urls_are_forge_not_direct() {
+        assert_eq!(
+            super::source_kind("https://github.com/o/r/archive/v1.0.tar.gz"),
+            super::SourceKind::Forge
+        );
+    }
+
+    #[test]
+    fn direct_archive_must_match_requested_version() {
+        let url = "https://example.org/dl/foo-3.1.4.tar.gz";
+        let kind = super::SourceKind::DirectArchive;
+        assert!(super::archive_urls_non_forge(url, kind, "3.2.0").is_empty());
+        assert_eq!(super::archive_urls_non_forge(url, kind, "3.1.4"), vec![url]);
+        let bare = "https://example.org/dl/latest.tar.gz";
+        assert_eq!(
+            super::archive_urls_non_forge(bare, kind, "3.2.0"),
+            vec![bare]
+        );
+    }
+
+    #[test]
+    fn redirects_may_not_downgrade_to_http() {
+        let from = "https://api.example.org/x";
+        assert!(super::redirect_target(from, "http://evil.example/x").is_err());
+        assert!(super::redirect_target(from, "HTTP://evil.example/x").is_err());
+        assert_eq!(
+            super::redirect_target(from, "https://b.example/y").unwrap(),
+            "https://b.example/y"
+        );
+        assert_eq!(
+            super::redirect_target(from, "/z").unwrap(),
+            "https://api.example.org/z"
+        );
+    }
+
     use super::*;
 
     /// Tests that touch the process environment must not run concurrently.

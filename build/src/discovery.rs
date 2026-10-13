@@ -33,7 +33,7 @@ pub fn is_repository_url(url: &str) -> bool {
 }
 
 fn normalize(name: &str) -> String {
-    name.replace('_', "-").to_lowercase()
+    crate::sources::normalize_name(name)
 }
 
 /// Order `(repo name, url)` hits so exact name matches come first, then close
@@ -357,8 +357,10 @@ fn reachable(url: &str) -> bool {
 pub fn validate_found_url(url: &str) -> Result<String, String> {
     use crate::sources::{SourceKind, latest_release, source_kind};
     let url = url.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(format!("{url} is not an http(s) URL"));
+    // https only: the agent's answer is fetched and packaged, and plain http
+    // lets anyone on the path swap the source.
+    if !url.to_ascii_lowercase().starts_with("https://") {
+        return Err(format!("{url} is not an https URL"));
     }
     match source_kind(url) {
         SourceKind::Forge => {
@@ -460,6 +462,10 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
     // Quotas are per model: when one answers 429, the next may still have room.
     let mut found = None;
+    // Only a model actually answering is definitive. A rate limit, timeout or
+    // spawn failure says nothing about the package, so it must not be cached
+    // as "no source" for the rest of the process.
+    let mut answered = false;
     for model in AGENT_LOOKUP_MODELS {
         let out = match crate::proc::capture_with_timeout_env(
             "claude",
@@ -492,7 +498,11 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
             continue;
         }
         found = interpret_agent_output(&out.stdout, out.code, &out.stderr);
+        answered = true;
         break;
+    }
+    if !answered {
+        return found;
     }
     cache_agent_answer(&key, found)
 }
@@ -579,6 +589,19 @@ pub fn interpret_agent_output(stdout: &str, code: i32, stderr: &str) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalize_is_pep_503() {
+        for n in ["foo.bar", "foo--bar", "Foo_Bar"] {
+            assert_eq!(super::normalize(n), "foo-bar", "{n}");
+        }
+    }
+
+    #[test]
+    fn found_url_must_be_https() {
+        let e = super::validate_found_url("http://github.com/o/r").unwrap_err();
+        assert!(e.contains("https"), "{e}");
+    }
+
     use super::*;
     use serde_json::json;
 
