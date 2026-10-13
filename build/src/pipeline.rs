@@ -116,11 +116,12 @@ pub enum PipelineResult {
 
 // ── durable package state ─────────────────────────────────────────────────────
 
-/// The policy the pipeline enforces (conventions, proprietary-dependency rules,
-/// package-notes rules). Bump it when a policy changes: every package whose
-/// recorded policy is older is checked again on its next run, even if it built
-/// successfully before.
-pub const POLICY_VERSION: u32 = 1;
+/// The policy the pipeline enforces. Bump it only for a large change, such as
+/// switching a family of packages from source builds to upstream wheels: every
+/// package whose recorded policy is older is checked again on its next run,
+/// even if it built successfully before. Small convention changes do not bump
+/// it. Still 0: no re-check has been needed yet.
+pub const POLICY_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PkgState {
@@ -7082,15 +7083,14 @@ mod policy_tests {
     use super::*;
 
     #[test]
-    fn a_success_under_an_older_policy_is_not_built() {
-        let mut st = PkgState {
+    fn a_success_under_the_current_policy_is_built() {
+        let st = PkgState {
             last_built_version: Some("1.0".into()),
             last_outcome: Some("success".into()),
-            policy_version: POLICY_VERSION - 1,
+            policy_version: POLICY_VERSION,
             ..Default::default()
         };
-        assert!(!st.is_built("1.0"), "stale policy must not count as built");
-        st.policy_version = POLICY_VERSION;
+        assert!(st.policy_current());
         assert!(st.is_built("1.0"));
     }
 }
