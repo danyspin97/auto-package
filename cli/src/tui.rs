@@ -205,6 +205,9 @@ enum PkgStatus {
     AlreadyBuilt,
     MissingDeps,
     Failed,
+    /// Live, but no step is executing right now: the last step has finished
+    /// and the agent turn (or `PackageFinished`) has not yet come in.
+    Between,
     /// `Failed` whose build log signature matched [`looks_like_disk_full`] —
     /// split out from plain `Failed` so it's visually distinct in the table
     /// (nothing about the spec is wrong; there's nothing to fix but disk
@@ -217,6 +220,7 @@ impl PkgStatus {
         match self {
             PkgStatus::Queued => "queued",
             PkgStatus::Running => "running",
+            PkgStatus::Between => "working",
             PkgStatus::Succeeded => "done",
             PkgStatus::AlreadyBuilt => "cached",
             PkgStatus::MissingDeps => "needs deps",
@@ -228,7 +232,7 @@ impl PkgStatus {
     fn color(&self) -> Color {
         match self {
             PkgStatus::Queued => Color::DarkGray,
-            PkgStatus::Running => Color::Yellow,
+            PkgStatus::Running | PkgStatus::Between => Color::Yellow,
             PkgStatus::Succeeded | PkgStatus::AlreadyBuilt => Color::Green,
             PkgStatus::MissingDeps => Color::Magenta,
             PkgStatus::Failed => Color::Red,
@@ -277,10 +281,23 @@ struct ActivityEntry {
     text: String,
 }
 
+/// One step of a package's build, from `StepStarted` until it is finished.
+struct StepInfo {
+    kind: StepKind,
+    started: Instant,
+    /// Outcome and the event's own elapsed time, set by `StepFinished` (or by
+    /// `PackageFinished` if the worker died with the step still open).
+    done: Option<(StepOutcome, Duration)>,
+}
+
 struct PkgState {
     version: String,
     status: PkgStatus,
-    current_step: Option<StepKind>,
+    /// The last step seen, never cleared between steps; cleared only for a
+    /// fresh attempt and for packages that finished without failing.
+    step: Option<StepInfo>,
+    /// Reason from `PackageOutcome::Failed`, shown in the detail pane.
+    fail_reason: Option<String>,
     log_lines: Vec<LogLine>,
     agent_activity: Vec<ActivityEntry>,
     input_tokens: u64,
@@ -308,7 +325,8 @@ impl PkgState {
         Self {
             version,
             status: PkgStatus::Queued,
-            current_step: None,
+            step: None,
+            fail_reason: None,
             log_lines: Vec::new(),
             agent_activity: Vec::new(),
             input_tokens: 0,
@@ -352,6 +370,43 @@ impl PkgState {
         if self.agent_activity.len() > MAX_AGENT_ACTIVITY {
             self.agent_activity.remove(0);
         }
+    }
+
+    /// The Step column text: what the last step is doing or did, with its
+    /// time — live while running, frozen once finished.
+    fn step_text(&self) -> String {
+        let Some(step) = &self.step else {
+            return "-".to_string();
+        };
+        let label = step.kind.label();
+        match (&self.status, &step.done) {
+            (PkgStatus::Running, _) | (PkgStatus::Between, None) => {
+                format!("{label} {}", fmt_dur(step.started.elapsed()))
+            }
+            (PkgStatus::Failed | PkgStatus::NoSpace, done) => {
+                let elapsed = done.as_ref().map_or(step.started.elapsed(), |d| d.1);
+                format!("✗ {label} {}", fmt_dur(elapsed))
+            }
+            (PkgStatus::Between, Some((outcome, elapsed))) => {
+                let marker = match outcome {
+                    StepOutcome::Ok => "✓",
+                    StepOutcome::Failed => "✗",
+                    StepOutcome::Skipped => "⇥",
+                };
+                format!("{marker} {label} {}", fmt_dur(*elapsed))
+            }
+            _ => "-".to_string(),
+        }
+    }
+}
+
+/// Compact duration for the Step column: `42s`, `1m23s`.
+fn fmt_dur(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
     }
 }
 
@@ -501,6 +556,8 @@ impl TuiState {
                 state.version = version.clone();
                 state.status = PkgStatus::Queued;
                 state.started = Instant::now();
+                state.step = None;
+                state.fail_reason = None;
                 // A fresh attempt — the condition that caused last time's
                 // `NoSpace` may already be gone (that's the whole point of
                 // the `r` retry keybinding), so don't carry the flag over
@@ -529,6 +586,24 @@ impl TuiState {
                         }
                     }
                 };
+                match outcome {
+                    PackageOutcome::Failed { reason } => {
+                        // Keep the failed step so the Step column can name it.
+                        // A worker that died mid-step never sent `StepFinished`,
+                        // so close the step here.
+                        if let Some(step) = state.step.as_mut().filter(|s| s.done.is_none()) {
+                            let elapsed = step.started.elapsed();
+                            step.done = Some((StepOutcome::Failed, elapsed));
+                        }
+                        state.fail_reason = Some(reason.clone());
+                    }
+                    PackageOutcome::Built
+                    | PackageOutcome::AlreadyBuilt
+                    | PackageOutcome::MissingDeps { .. } => {
+                        state.step = None;
+                        state.fail_reason = None;
+                    }
+                }
                 let msg = match outcome {
                     PackageOutcome::Built => "built".to_string(),
                     PackageOutcome::AlreadyBuilt => "already built".to_string(),
@@ -560,7 +635,11 @@ impl TuiState {
         match event {
             Event::StepStarted { kind, .. } => {
                 state.status = PkgStatus::Running;
-                state.current_step = Some(kind.clone());
+                state.step = Some(StepInfo {
+                    kind: kind.clone(),
+                    started: Instant::now(),
+                    done: None,
+                });
                 state.add_step_header(format!("▸ {}", kind.label()));
             }
             Event::StepFinished {
@@ -575,9 +654,12 @@ impl TuiState {
                     level,
                     format!("  {marker} {outcome} in {:.2}s", elapsed.as_secs_f64()),
                 );
-                if matches!(outcome, StepOutcome::Ok | StepOutcome::Skipped) {
-                    state.current_step = None;
+                // Between steps (or before the agent turn / PackageFinished):
+                // the step stays on screen with its final time.
+                if let Some(step) = state.step.as_mut() {
+                    step.done = Some((outcome.clone(), *elapsed));
                 }
+                state.status = PkgStatus::Between;
             }
             Event::BuildFailed { classification, .. } => {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));
@@ -624,6 +706,11 @@ impl TuiState {
                 };
                 state.add_agent_activity(ActivityKind::Task, task_str.clone());
                 state.add_log(LogLevel::Info, format!("Agent: {task_str}"));
+            }
+            Event::NotesUsage { usage, .. } => {
+                state.input_tokens += usage.input_tokens;
+                state.output_tokens += usage.output_tokens;
+                state.cost_usd += usage.cost_usd;
             }
             Event::AgentReply {
                 response, usage, ..
@@ -1048,11 +1135,7 @@ fn render_table(
         .iter()
         .map(|name| {
             let pkg = &state.packages[*name];
-            let step = pkg
-                .current_step
-                .as_ref()
-                .map(|k| k.label().to_string())
-                .unwrap_or_else(|| "-".to_string());
+            let step = pkg.step_text();
             let elapsed = pkg.started.elapsed().as_secs();
             let tries = if pkg.max_tries > 0 {
                 format!("{}/{}", pkg.tries, pkg.max_tries)
@@ -1102,15 +1185,39 @@ fn render_detail(
     selected: Option<usize>,
     log_scroll: usize,
 ) {
+    let pkg = selected
+        .and_then(|i| visible.get(i))
+        .and_then(|n| state.packages.get(n.as_str()));
+
+    // A failure reason gets its own strip above the logs; without one the
+    // panes take the whole area, as before.
+    let body = match pkg.and_then(|p| p.fail_reason.as_ref().map(|r| (p, r))) {
+        Some((pkg, reason)) => {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(4), Constraint::Min(0)])
+                .split(area);
+            let title = match pkg.step.as_ref() {
+                Some(step) => format!("Failed at {}", step.kind.label()),
+                None => "Failed".to_string(),
+            };
+            f.render_widget(
+                Paragraph::new(reason.as_str())
+                    .style(Style::default().fg(Color::Red))
+                    .wrap(Wrap { trim: true })
+                    .block(Block::default().borders(Borders::ALL).title(title)),
+                rows[0],
+            );
+            rows[1]
+        }
+        None => area,
+    };
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(area);
+        .split(body);
 
-    let Some(pkg) = selected
-        .and_then(|i| visible.get(i))
-        .and_then(|n| state.packages.get(n.as_str()))
-    else {
+    let Some(pkg) = pkg else {
         f.render_widget(
             Paragraph::new("No package selected yet")
                 .block(Block::default().borders(Borders::ALL).title("Event Log")),
@@ -1276,5 +1383,111 @@ mod prompt_tests {
             prompt_key(&mut b, KeyCode::Esc),
             PromptAction::Cancel
         ));
+    }
+}
+
+#[cfg(test)]
+mod step_state_tests {
+    use super::*;
+    use ap_core::event::{SelectionReason, StepId};
+
+    fn msg(pkg: &str, event: Event) -> Msg {
+        Msg {
+            pkg: Some(pkg.to_string()),
+            event,
+        }
+    }
+
+    fn started(kind: StepKind) -> Event {
+        Event::StepStarted {
+            step: StepId(0),
+            kind,
+        }
+    }
+
+    fn finished(outcome: StepOutcome, secs: u64) -> Event {
+        Event::StepFinished {
+            step: StepId(0),
+            outcome,
+            elapsed: Duration::from_secs(secs),
+        }
+    }
+
+    fn package_finished(outcome: PackageOutcome) -> Event {
+        Event::PackageFinished {
+            pkg: "foo".to_string(),
+            version: "1.0".to_string(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn a_finished_step_between_steps_shows_its_label_not_a_dash() {
+        let mut state = TuiState::new();
+        state.apply(msg("foo", started(StepKind::Checkout)));
+        state.apply(msg("foo", finished(StepOutcome::Ok, 2)));
+        let pkg = &state.packages["foo"];
+        assert!(pkg.status == PkgStatus::Between);
+        let text = pkg.step_text();
+        assert!(text.contains(StepKind::Checkout.label()));
+        assert_ne!(text, "-");
+    }
+
+    #[test]
+    fn a_failed_step_then_failed_package_keeps_the_step_and_reason() {
+        let mut state = TuiState::new();
+        state.apply(msg("foo", started(StepKind::Checkout)));
+        state.apply(msg("foo", finished(StepOutcome::Failed, 2)));
+        state.apply(Msg {
+            pkg: None,
+            event: package_finished(PackageOutcome::Failed {
+                reason: "boom".to_string(),
+            }),
+        });
+        let pkg = &state.packages["foo"];
+        assert!(pkg.status == PkgStatus::Failed);
+        let text = pkg.step_text();
+        assert!(text.starts_with('✗'));
+        assert!(text.contains(StepKind::Checkout.label()));
+        assert_eq!(pkg.fail_reason.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn a_built_package_has_no_step() {
+        let mut state = TuiState::new();
+        state.apply(msg("foo", started(StepKind::Checkout)));
+        state.apply(msg("foo", finished(StepOutcome::Ok, 2)));
+        state.apply(Msg {
+            pkg: None,
+            event: package_finished(PackageOutcome::Built),
+        });
+        let pkg = &state.packages["foo"];
+        assert!(pkg.step.is_none());
+        assert_eq!(pkg.step_text(), "-");
+    }
+
+    #[test]
+    fn a_new_attempt_clears_the_previous_failure() {
+        let mut state = TuiState::new();
+        state.apply(msg("foo", started(StepKind::Checkout)));
+        state.apply(msg("foo", finished(StepOutcome::Failed, 2)));
+        state.apply(Msg {
+            pkg: None,
+            event: package_finished(PackageOutcome::Failed {
+                reason: "boom".to_string(),
+            }),
+        });
+        state.apply(Msg {
+            pkg: None,
+            event: Event::TargetSelected {
+                pkg: "foo".to_string(),
+                version: "1.0".to_string(),
+                reason: SelectionReason::RequestedRoot,
+                blocked_by: Vec::new(),
+            },
+        });
+        let pkg = &state.packages["foo"];
+        assert!(pkg.step.is_none());
+        assert!(pkg.fail_reason.is_none());
     }
 }
