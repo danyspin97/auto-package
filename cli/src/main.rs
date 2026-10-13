@@ -2075,12 +2075,21 @@ fn cmd_build(
                     // Only queue deps we haven't tried yet; if every dep was
                     // already attempted we cannot make progress. Compared by
                     // `fuzzy_key`, not the raw string — see its doc comment.
-                    let new_deps: Vec<String> = deps
+                    // A dep attempted earlier may have been built locally since;
+                    // it is available now, so drop it before judging progress.
+                    let remaining: Vec<String> = deps
+                        .iter()
+                        .filter(|d| {
+                            built_locally(&config.state_root, &ap_build::osc::rpm_name(d)).is_none()
+                        })
+                        .cloned()
+                        .collect();
+                    let new_deps: Vec<String> = remaining
                         .iter()
                         .filter(|d| !attempted_deps.contains(&ap_build::osc::fuzzy_key(d)))
                         .cloned()
                         .collect();
-                    if new_deps.is_empty() {
+                    if new_deps.is_empty() && !remaining.is_empty() {
                         // Previously fell through to `return Ok(())` here,
                         // which the drogon-shaped case (keeps surfacing
                         // the SAME unresolvable deps because the agent
@@ -2164,53 +2173,58 @@ fn cmd_build(
         }
 
         // Spawn one thread per frontier package; OBS builds run concurrently.
-        let handles: Vec<_> = targets
-            .into_iter()
-            .map(|target_info| -> color_eyre::Result<_> {
-                let rpm_name = ap_build::osc::rpm_name(&target_info.name);
-                let pkg_config = PipelineConfig {
-                    pkg_name: target_info.name.clone(),
-                    rpm_name: rpm_name.clone(),
-                    version: target_info.version.clone(),
-                    ..config.clone()
-                };
-                let pkg_run = run_dir.pkg(&rpm_name);
-                pkg_run.ensure().map_err(|e| {
-                    color_eyre::eyre::eyre!(
-                        "cannot create the package run directory {}: {e}",
-                        pkg_run.path.display()
-                    )
-                })?;
-                let r = pkg_reporter(&rpm_name);
-                let sem2 = sem.clone();
-                let handle = std::thread::spawn(move || {
-                    let _permit = Permit::acquire(&sem2);
-                    run_package(&pkg_config, &pkg_run, r.as_ref())
+        let mut handles: Vec<(String, String, std::thread::JoinHandle<PipelineResult>)> =
+            Vec::new();
+        let mut spawn_error: Option<color_eyre::Report> = None;
+        for target_info in targets {
+            let rpm_name = ap_build::osc::rpm_name(&target_info.name);
+            let pkg_config = PipelineConfig {
+                pkg_name: target_info.name.clone(),
+                rpm_name: rpm_name.clone(),
+                version: target_info.version.clone(),
+                ..config.clone()
+            };
+            let pkg_run = run_dir.pkg(&rpm_name);
+            if let Err(e) = pkg_run.ensure() {
+                spawn_error = Some(color_eyre::eyre::eyre!(
+                    "cannot create the package run directory {}: {e}",
+                    pkg_run.path.display()
+                ));
+                break;
+            }
+            let r = pkg_reporter(&rpm_name);
+            let sem2 = sem.clone();
+            let finished_name = rpm_name.clone();
+            let finished_version = target_info.version.clone();
+            let handle = std::thread::spawn(move || {
+                let _permit = Permit::acquire(&sem2);
+                let result = run_package(&pkg_config, &pkg_run, r.as_ref());
+                // Reported as soon as this package is done. Reporting in join
+                // order let a slower sibling hold back every package finished
+                // after it, so their rows stayed on their last step.
+                r.report(&Event::PackageFinished {
+                    pkg: finished_name,
+                    version: finished_version,
+                    outcome: package_outcome(&result),
                 });
-                Ok((rpm_name, target_info.version, handle))
-            })
-            .collect::<color_eyre::Result<_>>()?;
+                result
+            });
+            handles.push((rpm_name, target_info.version, handle));
+        }
+        if let Some(e) = spawn_error {
+            // Join the workers already spawned so none is left running
+            // unobserved once we return.
+            for (rpm_name, _version, handle) in handles {
+                join_package(handle, &rpm_name);
+            }
+            return Err(e);
+        }
 
         let mut batch_pending: Vec<String> = Vec::new();
         let mut batch_failures: Vec<(String, String)> = Vec::new();
 
         for (rpm_name, version, handle) in handles {
             let result = join_package(handle, &rpm_name);
-            let outcome = match &result {
-                PipelineResult::Built { .. } => PackageOutcome::Built,
-                PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
-                PipelineResult::MissingDeps { deps, .. } => {
-                    PackageOutcome::MissingDeps { deps: deps.clone() }
-                }
-                PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
-                    reason: reason.clone(),
-                },
-            };
-            pkg_reporter(&rpm_name).report(&Event::PackageFinished {
-                pkg: rpm_name.clone(),
-                version: version.clone(),
-                outcome,
-            });
             match result {
                 PipelineResult::Built { .. } => {
                     ap_core::diag!("built {rpm_name} {version}");
@@ -2238,11 +2252,21 @@ fn cmd_build(
                     // `fail_counts`, and after `max_target_retries` of
                     // genuinely-no-new-deps rounds, mark the package
                     // permanently_failed and let the frontier move on.
-                    let new_deps: Vec<&String> = deps
+                    //
+                    // A dep attempted earlier may have been built locally since
+                    // (by a sibling in this round, say); it is available now, so
+                    // it counts as progress, not as an exhausted dependency.
+                    let remaining: Vec<&String> = deps
+                        .iter()
+                        .filter(|d| {
+                            built_locally(&config.state_root, &ap_build::osc::rpm_name(d)).is_none()
+                        })
+                        .collect();
+                    let new_deps: Vec<&&String> = remaining
                         .iter()
                         .filter(|d| !attempted_deps.contains(&ap_build::osc::fuzzy_key(d)))
                         .collect();
-                    if new_deps.is_empty() && !deps.is_empty() {
+                    if new_deps.is_empty() && !remaining.is_empty() {
                         // Repeating this package cannot help: every dependency it
                         // names was already attempted and dropped by the dep queue,
                         // and attempted names are never queued again. Give up on the
