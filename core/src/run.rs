@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,7 +40,14 @@ pub fn sanitize_name(name: &str) -> String {
     sanitized
 }
 
-/// Generate a run ID: `YYYYMMDD-HHMMSS-<6hexchars>`.
+/// Distinguishes IDs minted in the same nanosecond (or on a coarse clock)
+/// by one process.
+static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a run ID: `YYYYMMDD-HHMMSS-<9 hex nanos>-<pid hex>-<counter hex>`.
+///
+/// The full sub-second nanosecond value, the process id and a per-process
+/// counter keep two runs (even concurrent ones) from sharing an ID.
 pub fn new_run_id() -> RunId {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -51,8 +58,12 @@ pub fn new_run_id() -> RunId {
     let h = (secs / 3600) % 24;
     let days = secs / 86400;
     let (y, mo, d) = days_to_ymd(days);
-    let sub = now.subsec_nanos() & 0x00FF_FFFF;
-    RunId(format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}-{sub:06x}"))
+    let sub = now.subsec_nanos();
+    let pid = std::process::id();
+    let n = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    RunId(format!(
+        "{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}-{sub:08x}-{pid:x}-{n:x}"
+    ))
 }
 
 fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
@@ -111,14 +122,29 @@ pub struct RunDir {
 impl RunDir {
     /// Allocate a new, empty run directory.
     pub fn allocate(work_dir: &Path) -> io::Result<Self> {
-        let run_id = new_run_id();
-        let path = work_dir.join("runs").join(&run_id.0);
-        fs::create_dir_all(&path)?;
-        Ok(Self {
-            path,
-            run_id,
-            pkg_counters: Mutex::new(HashMap::new()),
-        })
+        let runs = work_dir.join("runs");
+        fs::create_dir_all(&runs)?;
+        // `create_dir` (not `create_dir_all`) so an ID that is already taken
+        // is an error to retry, never a silently shared run directory.
+        for _ in 0..16 {
+            let run_id = new_run_id();
+            let path = runs.join(&run_id.0);
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        run_id,
+                        pkg_counters: Mutex::new(HashMap::new()),
+                    });
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique run directory",
+        ))
     }
 
     pub fn jsonl(&self) -> PathBuf {
@@ -208,6 +234,15 @@ impl StepDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consecutive_allocations_get_distinct_ids_and_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = RunDir::allocate(tmp.path()).unwrap();
+        let b = RunDir::allocate(tmp.path()).unwrap();
+        assert_ne!(a.run_id.0, b.run_id.0);
+        assert_ne!(a.path, b.path);
+    }
 
     /// Earlier review probe: `..` survived sanitization because the pre-fix
     /// character filter allowed `.` and had no post-filter check against
