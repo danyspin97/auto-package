@@ -965,24 +965,26 @@ fn package_notes_step(
     ) else {
         return;
     };
-    let outcome =
-        match crate::package_notes::update_after_build(ws, &config.rpm_name, &config.version) {
-            Ok(usage) => {
-                reporter.report(&Event::NotesUsage {
-                    step: step.id,
-                    usage: usage.clone(),
-                });
-                add_run_spend(ws, &config.run_id, usage.cost_usd);
-                StepOutcome::Ok
-            }
-            Err(e) => {
-                reporter.report(&Event::Warning {
-                    step: Some(step.id),
-                    message: format!("package notes not updated: {e}"),
-                });
-                StepOutcome::Skipped
-            }
-        };
+    let run = crate::package_notes::update_after_build(ws, &config.rpm_name, &config.version);
+    // Charged before the result is looked at: a failed notes turn still cost
+    // money, and that spend must reach the run total and the package's state.
+    if run.usage.cost_usd > 0.0 || run.usage.input_tokens + run.usage.output_tokens > 0 {
+        reporter.report(&Event::NotesUsage {
+            step: step.id,
+            usage: run.usage.clone(),
+        });
+        add_run_spend(ws, &config.run_id, run.usage.cost_usd);
+    }
+    let outcome = match run.result {
+        Ok(()) => StepOutcome::Ok,
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: Some(step.id),
+                message: format!("package notes not updated: {e}"),
+            });
+            StepOutcome::Skipped
+        }
+    };
     step.finish(outcome);
 }
 

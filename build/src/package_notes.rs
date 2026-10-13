@@ -151,9 +151,27 @@ impl Drop for NotesLock {
 ///
 /// Errors are returned rather than panicking, so the caller can warn and let
 /// the build stay successful.
-pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Result<Usage, String> {
+/// What one notes turn did. The usage is kept even when the update fails: the
+/// model call was paid for either way, and it counts toward the package.
+pub struct NotesRun {
+    pub usage: Usage,
+    pub result: Result<(), String>,
+}
+
+pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> NotesRun {
+    let mut usage = Usage::default();
+    let result = update_inner(ws, rpm_name, version, &mut usage);
+    NotesRun { usage, result }
+}
+
+fn update_inner(
+    ws: &Workspace,
+    rpm_name: &str,
+    version: &str,
+    usage: &mut Usage,
+) -> Result<(), String> {
     let Some(notes_file) = path_for(rpm_name) else {
-        return Ok(Usage::default());
+        return Ok(());
     };
     if let Some(dir) = notes_file.parent() {
         std::fs::create_dir_all(dir)
@@ -202,6 +220,7 @@ pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Resu
         Some(&env),
     )
     .map_err(|e| format!("could not run claude: {e}"))?;
+    *usage = usage_from_output(&out.stdout);
     if out.code != 0 {
         return Err(format!(
             "claude exited with {}: {}",
@@ -217,7 +236,7 @@ pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Resu
     }
     write_atomic(&notes_file, &after)
         .map_err(|e| format!("cannot write {}: {e}", notes_file.display()))?;
-    Ok(usage_from_output(&out.stdout))
+    Ok(())
 }
 
 /// Token counts and cost from `claude --output-format json`. A reply that does
