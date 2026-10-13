@@ -965,7 +965,13 @@ fn package_notes_step(
     ) else {
         return;
     };
-    let run = crate::package_notes::update_after_build(ws, &config.rpm_name, &config.version);
+    let run = crate::package_notes::update_after_build(
+        ws,
+        &config.rpm_name,
+        &config.version,
+        &config.project,
+        &config.distro,
+    );
     // Charged before the result is looked at: a failed notes turn still cost
     // money, and that spend must reach the run total and the package's state.
     if run.usage.cost_usd > 0.0 || run.usage.input_tokens + run.usage.output_tokens > 0 {
@@ -1003,37 +1009,177 @@ fn validate_path_component(label: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What every stage of one package run reads: configuration, the run
+/// directory, the reporter, the workspace and the paths derived from the name.
+struct RunCtx<'a> {
+    config: &'a PipelineConfig,
+    pkg_run: &'a PkgRunDir,
+    reporter: &'a dyn Reporter,
+    ws: Workspace,
+    rpm_name: String,
+    checkout_dir: PathBuf,
+    spec_path: PathBuf,
+}
+
+impl RunCtx<'_> {
+    fn failed(&self, reason: String) -> PipelineResult {
+        PipelineResult::Failed {
+            rpm_name: self.rpm_name.clone(),
+            reason,
+        }
+    }
+
+    fn turn_env(&self) -> TurnEnv<'_> {
+        TurnEnv {
+            config: self.config,
+            ws: &self.ws,
+            pkg_run: self.pkg_run,
+            reporter: self.reporter,
+        }
+    }
+}
+
+/// The state that stages mutate as the run proceeds.
+struct RunState {
+    step_attempts: Attempts,
+    sdist_top_level: String,
+    from_repo_archive: bool,
+    /// Fix attempts used so far (persisted for outer-loop retries).
+    attempts: usize,
+    spent_usd: f64,
+    session_id: Option<String>,
+}
+
+/// What `generate_spec_stage` learned about the package.
+struct SpecInfo {
+    need_spec: bool,
+    is_maturin: bool,
+    is_rust: bool,
+}
+
+/// Whether a round of the validate/build loop moves on or goes around again.
+enum Flow {
+    Proceed,
+    Retry,
+}
+
+/// How a build round ended: another round is needed, or the package is done.
+enum RoundEnd {
+    Retry,
+    Finished(PipelineResult),
+}
+
 fn run_package_inner(
     config: &PipelineConfig,
     pkg_run: &PkgRunDir,
     reporter: &dyn Reporter,
 ) -> PipelineResult {
+    match run_stages(config, pkg_run, reporter) {
+        Ok(result) | Err(result) => result,
+    }
+}
+
+fn run_stages(
+    config: &PipelineConfig,
+    pkg_run: &PkgRunDir,
+    reporter: &dyn Reporter,
+) -> Result<PipelineResult, PipelineResult> {
+    let ctx = preflight(config, pkg_run, reporter)?;
+    let mut st = RunState {
+        step_attempts: Attempts::default(),
+        sdist_top_level: String::new(),
+        from_repo_archive: false,
+        attempts: 0,
+        spent_usd: 0.0,
+        session_id: None,
+    };
+
+    let obs_status = checkout_stage(&ctx, &mut st)?;
+    let spec = generate_spec_stage(&ctx, &mut st)?;
+    osc_service_stage(&ctx, &mut st, &spec)?;
+    fetch_sdist_stage(&ctx, &mut st)?;
+    resume_budget(&ctx, &mut st);
+
+    let build_log_nonempty = ctx
+        .ws
+        .build_log()
+        .metadata()
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
+    review_stage(&ctx, &mut st, &spec, build_log_nonempty)?;
+    prefix_stage(&ctx, &mut st, &spec, &obs_status, build_log_nonempty)?;
+
+    loop {
+        st.step_attempts.round += 1;
+        if let Flow::Retry = validate_round(&ctx, &mut st)? {
+            continue;
+        }
+        commit_step(&ctx, &mut st)?;
+        match build_round(&ctx, &mut st)? {
+            RoundEnd::Retry => continue,
+            RoundEnd::Finished(result) => return Ok(result),
+        }
+    }
+}
+
+/// Name checks and the local-state fast path; opens the workspace.
+fn preflight<'a>(
+    config: &'a PipelineConfig,
+    pkg_run: &'a PkgRunDir,
+    reporter: &'a dyn Reporter,
+) -> Result<RunCtx<'a>, PipelineResult> {
     let rpm_name = config.rpm_name.clone();
     if let Err(reason) = validate_path_component("package name", &rpm_name)
         .and_then(|()| validate_path_component("project", &config.project))
     {
-        return PipelineResult::Failed { rpm_name, reason };
+        return Err(PipelineResult::Failed { rpm_name, reason });
     }
     let ws = match Workspace::open(&config.state_root, &rpm_name) {
         Ok(w) => w,
         Err(e) => {
-            return PipelineResult::Failed {
+            return Err(PipelineResult::Failed {
                 rpm_name,
                 reason: e.to_string(),
-            };
+            });
         }
     };
 
     if !config.force && PkgState::load(&ws).is_built(&config.version) {
-        return PipelineResult::AlreadyBuilt { rpm_name };
+        return Err(PipelineResult::AlreadyBuilt { rpm_name });
     }
 
-    let mut step_attempts = Attempts::default();
     let checkout_dir = config.work_dir.join(&config.project).join(&rpm_name);
     let spec_name = format!("{rpm_name}.spec");
     let spec_path = checkout_dir.join(&spec_name);
+    Ok(RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+    })
+}
 
-    // ── Step: Checkout ───────────────────────────────────────────────────────
+/// Step: Checkout, then the OBS-already-built fast path. Returns the package's
+/// OBS build status for the later stages.
+fn checkout_stage(
+    ctx: &RunCtx,
+    st: &mut RunState,
+) -> Result<Option<osc::BuildStatus>, PipelineResult> {
+    let RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+    } = ctx;
+    let reporter = *reporter;
+    let step_attempts = &mut st.step_attempts;
+
     let obs_status: Option<osc::BuildStatus>;
     let has_local_changes: bool;
     {
@@ -1042,8 +1188,8 @@ fn run_package_inner(
             reporter,
             StepKind::Checkout,
             None,
-            &mut step_attempts,
-            rpm_name
+            step_attempts,
+            rpm_name.clone()
         );
 
         let emit = Emit::new(reporter, step.id);
@@ -1053,9 +1199,9 @@ fn run_package_inner(
         // previous flow also ran `osc::pull` right after, which is a
         // second `osc up` on the same directory — the server round-trip
         // was doubled on every single build. Removed.
-        let result = osc::ensure_package(&config.project, &rpm_name, &config.work_dir, emit)
+        let result = osc::ensure_package(&config.project, rpm_name, &config.work_dir, emit)
             .and_then(|()| {
-                osc::checkout(&config.project, &rpm_name, &config.work_dir, emit).map(|_| ())
+                osc::checkout(&config.project, rpm_name, &config.work_dir, emit).map(|_| ())
             });
 
         if let Err(e) = result {
@@ -1065,10 +1211,7 @@ fn run_package_inner(
                 step: Some(id),
                 message: e.to_string(),
             });
-            return PipelineResult::Failed {
-                rpm_name,
-                reason: e.to_string(),
-            };
+            return Err(ctx.failed(e.to_string()));
         }
         step.finish(StepOutcome::Ok);
         // Keep spec symlink fresh.
@@ -1082,14 +1225,14 @@ fn run_package_inner(
         // previous, interrupted run already bumped to a new version but
         // never `osc commit`-ed would otherwise make the AlreadyBuilt check
         // below believe OBS built a version it never actually saw.
-        has_local_changes = osc::has_local_changes(&checkout_dir, emit);
+        has_local_changes = osc::has_local_changes(checkout_dir, emit);
 
         // Fetch this package's current OBS build status once; reused below both
         // to grab the build log on failure and to skip the rest of the
         // pipeline when it already succeeded and nothing would change.
         obs_status = osc::get_build_status(
             &config.project,
-            &rpm_name,
+            rpm_name,
             &config.distro,
             &config.arch,
             emit,
@@ -1112,7 +1255,7 @@ fn run_package_inner(
                 "fetching the failed build log",
                 osc::fetch_buildlog(
                     &config.project,
-                    &rpm_name,
+                    rpm_name,
                     &config.distro,
                     &config.arch,
                     &log_path,
@@ -1131,41 +1274,59 @@ fn run_package_inner(
         && !config.regen
         && spec_path.exists()
         && !has_local_changes
-        && !spec_version_differs(&spec_path, &config.version)
+        && !spec_version_differs(spec_path, &config.version)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
     {
-        let mut state = PkgState::load(&ws);
+        let mut state = PkgState::load(ws);
         state.last_built_version = Some(config.version.clone());
         state.last_outcome = Some("success".to_string());
         state.last_failure_reason = None;
-        save_state(&state, &ws, reporter);
+        save_state(&state, ws, reporter);
         // This process may have cached `config.project`'s package listing
         // before learning (just now, via the fresh — not cached —
         // `get_build_status` call above) that OBS already has this one.
         osc::invalidate_project_packages_cache(&config.project);
-        return PipelineResult::AlreadyBuilt { rpm_name };
+        return Err(PipelineResult::AlreadyBuilt {
+            rpm_name: rpm_name.clone(),
+        });
     }
+    Ok(obs_status)
+}
 
-    // ── Step: GenerateSpec (if needed) ───────────────────────────────────────
+/// Step: GenerateSpec (if needed). Sets `sdist_top_level` and
+/// `from_repo_archive` on the state.
+fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, PipelineResult> {
+    let RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+    } = ctx;
+    let reporter = *reporter;
+    let step_attempts = &mut st.step_attempts;
+
     // Captured before generation can overwrite the spec: "did this package
     // already have a spec" must reflect what was checked out, not what we
     // are about to write.
     let spec_existed_before_generation = spec_path.exists();
     let need_spec = config.regen
         || !spec_existed_before_generation
-        || spec_version_differs(&spec_path, &config.version);
+        || spec_version_differs(spec_path, &config.version);
 
-    let (mut sdist_top_level, is_maturin, mut from_repo_archive, is_rust) = if need_spec {
+    let (sdist_top_level, is_maturin, from_repo_archive, is_rust) = if need_spec {
         let step = begin_or_fail!(
             pkg_run,
             reporter,
             StepKind::GenerateSpec,
             None,
-            &mut step_attempts,
-            rpm_name
+            step_attempts,
+            rpm_name.clone()
         );
 
-        match generate_spec(config, &checkout_dir, &spec_path, &step) {
+        match generate_spec(config, checkout_dir, spec_path, &step) {
             Ok(res) => {
                 let step = step.finish(StepOutcome::Ok);
                 // "Initial packaging" is only true for a package that had no
@@ -1179,8 +1340,8 @@ fn run_package_inner(
                         reporter,
                         "creating the initial .changes entry",
                         osc::create_initial_changes(
-                            &checkout_dir,
-                            &rpm_name,
+                            checkout_dir,
+                            rpm_name,
                             Emit::new(reporter, step.id),
                         ),
                     );
@@ -1252,22 +1413,19 @@ fn run_package_inner(
 
                 // TODO: Call agent to validate candidates and find repository
                 // For now, mark as wheel-only and skip
-                let mut state = PkgState::load(&ws);
+                let mut state = PkgState::load(ws);
                 state.last_built_version = Some(version);
                 state.last_outcome = Some("wheel-only".to_string());
                 state.last_failure_reason = None;
-                save_state(&state, &ws, reporter);
-                return PipelineResult::Failed {
-                    rpm_name,
-                    reason: format!(
-                        "wheel-only package - candidates: {}",
-                        if !candidates.is_empty() {
-                            candidates.join(", ")
-                        } else {
-                            "none found, needs WebSearch".to_string()
-                        }
-                    ),
-                };
+                save_state(&state, ws, reporter);
+                return Err(ctx.failed(format!(
+                    "wheel-only package - candidates: {}",
+                    if !candidates.is_empty() {
+                        candidates.join(", ")
+                    } else {
+                        "none found, needs WebSearch".to_string()
+                    }
+                )));
             }
             Err(GenSpecError::Other(e) | GenSpecError::NoReleaseArchive(e)) => {
                 let step = step.finish(StepOutcome::Failed);
@@ -1275,22 +1433,49 @@ fn run_package_inner(
                     step: Some(step.id),
                     message: e.clone(),
                 });
-                return PipelineResult::Failed {
-                    rpm_name,
-                    reason: e,
-                };
+                return Err(ctx.failed(e));
             }
         }
     } else {
         // Sdist may already be extracted; find top-level dir name from the tarball
         // in the checkout dir (or fall back to a reasonable guess).
-        let top = find_sdist_top_level(&checkout_dir, &config.pkg_name, &config.version);
+        let top = find_sdist_top_level(checkout_dir, &config.pkg_name, &config.version);
         step_attempts.skip(reporter, StepKind::GenerateSpec, SkipReason::SpecExists);
-        let spec_text = std::fs::read_to_string(&spec_path).unwrap_or_default();
+        let spec_text = std::fs::read_to_string(spec_path).unwrap_or_default();
         let is_maturin = spec_text.contains("maturin");
         let is_rust = spec_text.contains("cargo_build");
         (top, is_maturin, false, is_rust)
     };
+    st.sdist_top_level = sdist_top_level;
+    st.from_repo_archive = from_repo_archive;
+    Ok(SpecInfo {
+        need_spec,
+        is_maturin,
+        is_rust,
+    })
+}
+
+/// Steps: OscService for Rust crates and for maturin packages.
+fn osc_service_stage(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    spec: &SpecInfo,
+) -> Result<(), PipelineResult> {
+    let RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        rpm_name,
+        checkout_dir,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    let step_attempts = &mut st.step_attempts;
+    let SpecInfo {
+        need_spec,
+        is_maturin,
+        is_rust,
+    } = *spec;
 
     // ── Step: OscService (Rust crates) ───────────────────────────────────────
     // `tar_scm` fetches the tag and `cargo_vendor` produces vendor.tar.zst, the
@@ -1304,20 +1489,20 @@ fn run_package_inner(
                 reporter,
                 StepKind::OscService,
                 None,
-                &mut step_attempts,
-                rpm_name
+                step_attempts,
+                rpm_name.clone()
             );
 
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
                 .and_then(|()| {
-                    osc::run_service(&checkout_dir, Emit::new(reporter, step.id))
+                    osc::run_service(checkout_dir, Emit::new(reporter, step.id))
                         .map_err(|e| e.to_string())
                 });
 
             if let Err(reason) = result {
-                return PipelineResult::Failed { rpm_name, reason };
+                return Err(ctx.failed(reason));
             }
             step.finish(StepOutcome::Ok);
         } else {
@@ -1340,7 +1525,7 @@ fn run_package_inner(
         // workspace that EXCLUDES hf_xet/, whose own Cargo.lock holds `pprof`).
         // Vendoring only the root manifest leaves the registry short of the
         // build's crates: "no matching package named `pprof` found".
-        let extra_manifests = find_tarball(&checkout_dir)
+        let extra_manifests = find_tarball(checkout_dir)
             .and_then(|t| maturin_manifest_path(&t))
             .into_iter()
             .collect::<Vec<_>>();
@@ -1355,12 +1540,12 @@ fn run_package_inner(
                 reporter,
                 StepKind::OscService,
                 None,
-                &mut step_attempts,
-                rpm_name
+                step_attempts,
+                rpm_name.clone()
             );
 
             // Fix any broken workspace definitions in the tarball before vendoring
-            if let Some(tarball) = find_tarball(&checkout_dir) {
+            if let Some(tarball) = find_tarball(checkout_dir) {
                 warn_if_err(
                     reporter,
                     "fixing the cargo workspace in the tarball",
@@ -1373,12 +1558,12 @@ fn run_package_inner(
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
                 .and_then(|()| {
-                    osc::run_service(&checkout_dir, Emit::new(reporter, step.id))
+                    osc::run_service(checkout_dir, Emit::new(reporter, step.id))
                         .map_err(|e| e.to_string())
                 });
 
             if let Err(reason) = result {
-                return PipelineResult::Failed { rpm_name, reason };
+                return Err(ctx.failed(reason));
             }
             step.finish(StepOutcome::Ok);
         } else {
@@ -1388,6 +1573,21 @@ fn run_package_inner(
     if !is_rust && !is_maturin {
         step_attempts.skip(reporter, StepKind::OscService, SkipReason::NotRust);
     }
+    Ok(())
+}
+
+/// Step: FetchSdist, then the quilt `source/` symlink.
+fn fetch_sdist_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
+    let RunCtx {
+        pkg_run,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    let step_attempts = &mut st.step_attempts;
 
     // ── Step: FetchSdist (extract for log analysis, if not done) ─────────────
     if !ws.sdist_extracted() {
@@ -1396,13 +1596,13 @@ fn run_package_inner(
             reporter,
             StepKind::FetchSdist,
             None,
-            &mut step_attempts,
-            rpm_name
+            step_attempts,
+            rpm_name.clone()
         );
 
         // Find tarball in checkout and extract to ws.sdist_dir()
         let mut outcome = StepOutcome::Ok;
-        if let Some(tarball) = find_tarball(&checkout_dir) {
+        if let Some(tarball) = find_tarball(checkout_dir) {
             let sdist_dir = ws.sdist_dir();
             let _ = std::fs::create_dir_all(&sdist_dir);
             if let Err(e) = ap_ecosystem::sdist::extract(&tarball, &sdist_dir) {
@@ -1440,7 +1640,7 @@ fn run_package_inner(
         if source_link.symlink_metadata().is_ok() {
             let _ = std::fs::remove_file(&source_link);
         }
-        let source_target = ws.sdist_dir().join(&sdist_top_level);
+        let source_target = ws.sdist_dir().join(&st.sdist_top_level);
         if source_target.exists() {
             warn_if_err(
                 reporter,
@@ -1449,34 +1649,38 @@ fn run_package_inner(
             );
         }
     }
+    Ok(())
+}
 
-    // ── Build + fix loop ──────────────────────────────────────────────────────
-    // Resume cumulative spend AND the fix-attempt count from state.json ONLY
-    // for an outer-loop retry inside the current CLI run (same run_id), so
-    // both the dollar budget and `max_attempts` are enforced across the
-    // retries of one package during one invocation — a package that comes
-    // back through `run_package` again later in the same run (e.g. after a
-    // `MissingDeps` round trip) must not get a completely fresh attempt
-    // budget on top of what it already burned. A fresh CLI invocation
-    // (different run_id) starts the package at $0/0 attempts — the user
-    // asked for the restart-reset explicitly, and it matches the mental
-    // model that a new command is a new budget. See
-    // `PkgState::cumulative_spent_run_id`.
-    let prior = PkgState::load(&ws);
+/// Resume cumulative spend AND the fix-attempt count from state.json ONLY
+/// for an outer-loop retry inside the current CLI run (same run_id), so
+/// both the dollar budget and `max_attempts` are enforced across the
+/// retries of one package during one invocation — a package that comes
+/// back through `run_package` again later in the same run (e.g. after a
+/// `MissingDeps` round trip) must not get a completely fresh attempt
+/// budget on top of what it already burned. A fresh CLI invocation
+/// (different run_id) starts the package at $0/0 attempts — the user
+/// asked for the restart-reset explicitly, and it matches the mental
+/// model that a new command is a new budget. See
+/// `PkgState::cumulative_spent_run_id`.
+fn resume_budget(ctx: &RunCtx, st: &mut RunState) {
+    let config = ctx.config;
+    let prior = PkgState::load(&ctx.ws);
     let resuming_this_run =
         prior.cumulative_spent_run_id.as_deref() == Some(config.run_id.as_str());
-    let mut attempts: usize = if resuming_this_run {
+    st.attempts = if resuming_this_run {
         prior.cumulative_attempts
     } else {
         0
     };
-    let mut spent_usd = if resuming_this_run {
+    st.spent_usd = if resuming_this_run {
         prior.cumulative_spent_usd
     } else {
         0.0
     };
+    let (spent_usd, attempts, rpm_name) = (st.spent_usd, st.attempts, &ctx.rpm_name);
     if spent_usd > 0.0 || attempts > 0 {
-        reporter.report(&Event::Progress {
+        ctx.reporter.report(&Event::Progress {
             step: None,
             message: format!(
                 "{rpm_name}: resuming with ${spent_usd:.4} spent and {attempts} fix \
@@ -1486,13 +1690,26 @@ fn run_package_inner(
             ),
         });
     }
-    let mut session_id: Option<String> = None;
+}
 
-    let build_log_nonempty = ws
-        .build_log()
-        .metadata()
-        .map(|m| m.len() > 0)
-        .unwrap_or(false);
+/// Step: Review (freshly generated specs, or existing spec with no prior build).
+fn review_stage(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    spec: &SpecInfo,
+    build_log_nonempty: bool,
+) -> Result<(), PipelineResult> {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    let need_spec = spec.need_spec;
 
     // A prior run may have reviewed-and-accepted this exact spec version and
     // then died (crash, kill) before ever attempting a build — e.g. mid
@@ -1500,22 +1717,22 @@ fn run_package_inner(
     // should go straight to validate/commit, not pay for a second review
     // turn on a spec that hasn't changed since the first one accepted it.
     let already_reviewed = !need_spec
-        && PkgState::load(&ws).is_reviewed(
+        && PkgState::load(ws).is_reviewed(
             &config.version,
-            &std::fs::read_to_string(&spec_path).unwrap_or_default(),
+            &std::fs::read_to_string(spec_path).unwrap_or_default(),
         );
 
-    // ── Step: Review (freshly generated specs, or existing spec with no prior build) ──
     if config.no_agent {
-        step_attempts.skip(reporter, StepKind::AgentTurn, SkipReason::NoAgent);
+        st.step_attempts
+            .skip(reporter, StepKind::AgentTurn, SkipReason::NoAgent);
     }
     if !config.no_agent && (need_spec || !build_log_nonempty) && !already_reviewed {
-        let spec_before = std::fs::read_to_string(&spec_path).unwrap_or_default();
+        let spec_before = std::fs::read_to_string(spec_path).unwrap_or_default();
         // Full-checkout snapshot taken BEFORE the agent runs so a reject /
         // blocked / no-change outcome can roll back every top-level
         // checkout edit, not just the spec. See `CheckoutSnapshot` and
         // `apply_turn_outcome`'s Blocked / NoChange arms.
-        let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
+        let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
 
         let turn = agent_turn(
             TurnCtx {
@@ -1526,8 +1743,8 @@ fn run_package_inner(
                 hint: None,
                 unresolvable_deps: &[],
                 unresolvable_detail: &[],
-                checkout_dir: Some(&checkout_dir),
-                from_repo_archive,
+                checkout_dir: Some(checkout_dir),
+                from_repo_archive: st.from_repo_archive,
                 resume: false,
                 context: if !need_spec {
                     Some(
@@ -1540,15 +1757,10 @@ fn run_package_inner(
                     None
                 },
             },
-            TurnEnv {
-                config,
-                ws: &ws,
-                pkg_run,
-                reporter,
-            },
-            &mut spent_usd,
-            &mut session_id,
-            &mut step_attempts,
+            ctx.turn_env(),
+            &mut st.spent_usd,
+            &mut st.session_id,
+            &mut st.step_attempts,
         );
 
         if let Ok((review_step, outcome)) = turn {
@@ -1559,11 +1771,11 @@ fn run_package_inner(
             if let Err(reason) = apply_turn_and_reset(
                 ApplyTurnCtx {
                     config,
-                    checkout_dir: &checkout_dir,
-                    spec_path: &spec_path,
+                    checkout_dir,
+                    spec_path,
                     step: &review_step,
                     before: &spec_before,
-                    rpm_name: &rpm_name,
+                    rpm_name,
                     label: "Review — pre-build",
                     attempt: 0,
                     notes_path: ws.notes(),
@@ -1571,33 +1783,57 @@ fn run_package_inner(
                 },
                 &outcome,
                 reporter,
-                &mut sdist_top_level,
-                &mut from_repo_archive,
+                &mut st.sdist_top_level,
+                &mut st.from_repo_archive,
             ) {
-                return PipelineResult::Failed { rpm_name, reason };
+                return Err(ctx.failed(reason));
             }
-            let mut state = PkgState::load(&ws);
+            let mut state = PkgState::load(ws);
             state.reviewed_version = Some(config.version.clone());
             state.reviewed_spec_hash = Some(hash_spec(
-                &std::fs::read_to_string(&spec_path).unwrap_or_default(),
+                &std::fs::read_to_string(spec_path).unwrap_or_default(),
             ));
-            save_state(&state, &ws, reporter);
+            save_state(&state, ws, reporter);
         }
     }
+    Ok(())
+}
 
-    // ── Step: PreFix (restart with previous build log) ───────────────────────
-    // When this is a restart (spec was not regenerated) and a previous non-empty
-    // build log exists, run an agent turn to fix the spec before a new OBS build.
-    // Also runs when OBS already reports the package Unresolvable — that failure
-    // mode often never produces a real build log at all, but the agent can
-    // still inspect the spec and report what's missing via `unresolvable_packages`.
-    if !need_spec
+/// Step: PreFix (restart with previous build log).
+/// When this is a restart (spec was not regenerated) and a previous non-empty
+/// build log exists, run an agent turn to fix the spec before a new OBS build.
+/// Also runs when OBS already reports the package Unresolvable — that failure
+/// mode often never produces a real build log at all, but the agent can
+/// still inspect the spec and report what's missing via `unresolvable_packages`.
+fn prefix_stage(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    spec: &SpecInfo,
+    obs_status: &Option<osc::BuildStatus>,
+    build_log_nonempty: bool,
+) -> Result<(), PipelineResult> {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    // Gated like every other fix turn: this path also bumps the attempt count,
+    // so without the limit a package could run past --max-attempts (13/10).
+    if !spec.need_spec
         && !config.no_agent
+        && st.attempts < config.max_attempts
+        && st.spent_usd < config.budget_usd
         && (build_log_nonempty || matches!(obs_status, Some(osc::BuildStatus::Unresolvable)))
     {
-        let clean = strip_and_rewrite(&spec_path);
-        let extract = extract_build_log(&ws.build_log(), &sdist_top_level, reporter, None);
-        let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
+        let attempts = st.attempts;
+        let clean = strip_and_rewrite(spec_path);
+        let extract = extract_build_log(&ws.build_log(), &st.sdist_top_level, reporter, None);
+        let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
 
         let turn = agent_turn(
             TurnCtx {
@@ -1611,8 +1847,8 @@ fn run_package_inner(
                 hint: Some(&extract),
                 unresolvable_deps: &[],
                 unresolvable_detail: &[],
-                checkout_dir: Some(&checkout_dir),
-                from_repo_archive,
+                checkout_dir: Some(checkout_dir),
+                from_repo_archive: st.from_repo_archive,
                 resume: false,
                 context: if !build_log_nonempty {
                     // Same situation the Review turn's context covers above:
@@ -1637,15 +1873,10 @@ fn run_package_inner(
                     None
                 },
             },
-            TurnEnv {
-                config,
-                ws: &ws,
-                pkg_run,
-                reporter,
-            },
-            &mut spent_usd,
-            &mut session_id,
-            &mut step_attempts,
+            ctx.turn_env(),
+            &mut st.spent_usd,
+            &mut st.session_id,
+            &mut st.step_attempts,
         );
 
         if let Ok((prefix_step, outcome)) = turn {
@@ -1662,20 +1893,20 @@ fn run_package_inner(
                     .collect();
                 to_build.sort_unstable();
                 to_build.dedup();
-                return PipelineResult::MissingDeps {
-                    rpm_name,
+                return Err(PipelineResult::MissingDeps {
+                    rpm_name: rpm_name.clone(),
                     deps: to_build,
-                };
+                });
             }
 
             let effect = match apply_turn_and_reset(
                 ApplyTurnCtx {
                     config,
-                    checkout_dir: &checkout_dir,
-                    spec_path: &spec_path,
+                    checkout_dir,
+                    spec_path,
                     step: &prefix_step,
                     before: &clean,
-                    rpm_name: &rpm_name,
+                    rpm_name,
                     label: "PreFix — restart from previous log",
                     attempt: attempts + 1,
                     notes_path: ws.notes(),
@@ -1683,667 +1914,702 @@ fn run_package_inner(
                 },
                 &outcome,
                 reporter,
-                &mut sdist_top_level,
-                &mut from_repo_archive,
+                &mut st.sdist_top_level,
+                &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => return PipelineResult::Failed { rpm_name, reason },
+                Err(reason) => return Err(ctx.failed(reason)),
             };
             if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
-                attempts += 1;
-                persist_attempts(&ws, &config.run_id, attempts);
+                st.attempts += 1;
+                persist_attempts(ws, &config.run_id, st.attempts);
             }
         }
     }
+    Ok(())
+}
 
-    loop {
-        step_attempts.round += 1;
-        // Step: ValidateSpec
-        let validate_step = begin_or_fail!(
-            pkg_run,
-            reporter,
-            StepKind::ValidateSpec,
-            None,
-            &mut step_attempts,
-            rpm_name
-        );
+/// One fix-after-validation agent turn: counts the attempt, runs the turn and
+/// applies its outcome. `apply_label` names the apply step and
+/// `agent_failed_prefix` starts the error text when the turn itself fails.
+fn fix_after_validation(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    context: Option<&str>,
+    apply_label: &str,
+    agent_failed_prefix: &str,
+) -> Result<(), PipelineResult> {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+        ..
+    } = ctx;
+    // Never commit a spec that is not sound — OBS would spend a whole remote
+    // build to tell us what the local check already said.
+    st.attempts += 1;
+    persist_attempts(ws, &config.run_id, st.attempts);
+    let attempts = st.attempts;
+    let clean = strip_and_rewrite(spec_path);
+    let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
+    let turn = agent_turn(
+        TurnCtx {
+            label: "fix-after-validation",
+            task: crate::agent::Task::FixAfterValidation,
+            event_task: ap_core::event::Task::FixAfterBuild {
+                attempt: attempts as u32,
+                max_attempts: config.max_attempts as u32,
+            },
+            attempt: attempts,
+            hint: None,
+            unresolvable_deps: &[],
+            unresolvable_detail: &[],
+            checkout_dir: Some(checkout_dir),
+            from_repo_archive: st.from_repo_archive,
+            resume: true,
+            context,
+        },
+        ctx.turn_env(),
+        &mut st.spent_usd,
+        &mut st.session_id,
+        &mut st.step_attempts,
+    );
 
-        // Deterministic and idempotent, so safe to re-apply on every visit —
-        // including a spec that already existed on disk and was never run
-        // through `post_process` this invocation (`need_spec` was false).
-        // Without this, each of these mistakes persists on every future run
-        // (nothing else ever revisits an unchanged spec to fix it) and either
-        // looks like a genuinely missing dependency (mixed-case PyPI name
-        // written lowercase — `%{python_module cython >= 3}` RPM-expands to
-        // the nonexistent `python313-cython`) or only surfaces as a runtime
-        // failure well after a wasted build (a bare `%{$python_sitelib}`
-        // outside `%python_expand`; `%python_install_alternative` without
-        // its `Requires(post/postun): update-alternatives`).
-        if let Ok(current) = std::fs::read_to_string(&spec_path) {
-            let fixed = crate::spec::normalize_python_module_versions(&current);
-            let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
-            let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
-            if fixed != current {
-                write_or_warn(&spec_path, &fixed);
+    match turn {
+        Ok((agent_step, outcome)) => {
+            if let Err(reason) = apply_turn_and_reset(
+                ApplyTurnCtx {
+                    config,
+                    checkout_dir,
+                    spec_path,
+                    step: &agent_step,
+                    before: &clean,
+                    rpm_name,
+                    label: apply_label,
+                    attempt: attempts,
+                    notes_path: ws.notes(),
+                    snapshot: Some(&checkout_snapshot),
+                },
+                &outcome,
+                *reporter,
+                &mut st.sdist_top_level,
+                &mut st.from_repo_archive,
+            ) {
+                return Err(ctx.failed(reason));
             }
+            Ok(())
         }
+        Err(e) => Err(ctx.failed(format!("{agent_failed_prefix}{e}"))),
+    }
+}
 
-        match osc::rpmspec_check(&spec_path, Emit::new(reporter, validate_step.id)) {
-            Ok(expanded) => {
-                // The fully expanded spec is the single most useful artifact
-                // for diagnosing a spec problem — keep it rather than drop it.
-                let artifact = validate_step.file("rpmspec.stdout");
-                write_or_warn(&artifact, &expanded);
-                reporter.report(&Event::Artifact {
-                    step: validate_step.id,
-                    name: "rpmspec.stdout".to_string(),
-                    path: artifact,
-                });
+/// Step: ValidateSpec. A rejected spec runs a fix turn and asks for another
+/// round.
+fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResult> {
+    let RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+    } = ctx;
+    let reporter = *reporter;
 
-                sync_quilt_series(&expanded, &checkout_dir);
+    let validate_step = begin_or_fail!(
+        pkg_run,
+        reporter,
+        StepKind::ValidateSpec,
+        None,
+        &mut st.step_attempts,
+        rpm_name.clone()
+    );
 
-                let mut missing = missing_source_files(&expanded, &checkout_dir);
-                // A `_service` (`download_files`, the one installed here) is how a Source
-                // that is a URL gets onto disk — and the agent cannot run it.
-                // Run it before calling the files missing, and keep its error
-                // so the agent sees why a download did not happen.
-                let mut service_error = None;
-                if !missing.is_empty() && checkout_dir.join("_service").is_file() {
-                    match osc::run_service(&checkout_dir, Emit::new(reporter, validate_step.id)) {
-                        Ok(()) => missing = missing_source_files(&expanded, &checkout_dir),
-                        Err(e) => service_error = Some(e.to_string()),
-                    }
+    // Deterministic and idempotent, so safe to re-apply on every visit —
+    // including a spec that already existed on disk and was never run
+    // through `post_process` this invocation (`need_spec` was false).
+    // Without this, each of these mistakes persists on every future run
+    // (nothing else ever revisits an unchanged spec to fix it) and either
+    // looks like a genuinely missing dependency (mixed-case PyPI name
+    // written lowercase — `%{python_module cython >= 3}` RPM-expands to
+    // the nonexistent `python313-cython`) or only surfaces as a runtime
+    // failure well after a wasted build (a bare `%{$python_sitelib}`
+    // outside `%python_expand`; `%python_install_alternative` without
+    // its `Requires(post/postun): update-alternatives`).
+    if let Ok(current) = std::fs::read_to_string(spec_path) {
+        let fixed = crate::spec::normalize_python_module_versions(&current);
+        let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
+        let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
+        if fixed != current {
+            write_or_warn(spec_path, &fixed);
+        }
+    }
+
+    match osc::rpmspec_check(spec_path, Emit::new(reporter, validate_step.id)) {
+        Ok(expanded) => {
+            // The fully expanded spec is the single most useful artifact
+            // for diagnosing a spec problem — keep it rather than drop it.
+            let artifact = validate_step.file("rpmspec.stdout");
+            write_or_warn(&artifact, &expanded);
+            reporter.report(&Event::Artifact {
+                step: validate_step.id,
+                name: "rpmspec.stdout".to_string(),
+                path: artifact,
+            });
+
+            sync_quilt_series(&expanded, checkout_dir);
+
+            let mut missing = missing_source_files(&expanded, checkout_dir);
+            // A `_service` (`download_files`, the one installed here) is how a Source
+            // that is a URL gets onto disk — and the agent cannot run it.
+            // Run it before calling the files missing, and keep its error
+            // so the agent sees why a download did not happen.
+            let mut service_error = None;
+            if !missing.is_empty() && checkout_dir.join("_service").is_file() {
+                match osc::run_service(checkout_dir, Emit::new(reporter, validate_step.id)) {
+                    Ok(()) => missing = missing_source_files(&expanded, checkout_dir),
+                    Err(e) => service_error = Some(e.to_string()),
                 }
-                if !missing.is_empty() {
-                    let validate_step = validate_step.finish(StepOutcome::Failed);
-                    reporter.report(&Event::SpecRejected {
-                        step: validate_step.id,
-                        reason: ap_core::event::SpecRejection::MissingSourceFiles {
-                            names: missing.clone(),
-                        },
-                        restored_from: spec_path.clone(),
-                    });
-
-                    if config.no_agent
-                        || attempts >= config.max_attempts
-                        || spent_usd >= config.budget_usd
-                    {
-                        skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
-                        return PipelineResult::Failed {
-                            rpm_name,
-                            reason: format!(
-                                "spec references source file(s) not present in the \
-                                 checkout: {}",
-                                missing.join(", ")
-                            ),
-                        };
-                    }
-
-                    // Never commit a spec whose Source/Patch files don't exist — OBS
-                    // would spend a whole remote build just to report `File ...
-                    // SOURCES/...: No such file or directory` (convention 13).
-                    attempts += 1;
-                    persist_attempts(&ws, &config.run_id, attempts);
-                    let clean = strip_and_rewrite(&spec_path);
-                    let context = format!(
-                        "`rpmspec --parse` succeeded, but the spec references source \
-                         file(s) that do not exist in the checkout directory: {}. Either \
-                         the file was never fetched/written, or a Source/Patch line's \
-                         name doesn't match what's actually on disk (typo, wrong \
-                         extension, stale reference after a rename). Fix the spec to \
-                         reference the real file, or create/restore the missing file if \
-                         it should exist — see \"Source Files and Cleanup\" below.{}",
-                        missing.join(", "),
-                        service_error
-                            .map(|e| format!(
-                                " The checkout's `_service` was run (`osc service ra`) to \
-                                 fetch it and failed: {e}"
-                            ))
-                            .unwrap_or_default()
-                    );
-                    let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
-                    let turn = agent_turn(
-                        TurnCtx {
-                            label: "fix-after-validation",
-                            task: crate::agent::Task::FixAfterValidation,
-                            event_task: ap_core::event::Task::FixAfterBuild {
-                                attempt: attempts as u32,
-                                max_attempts: config.max_attempts as u32,
-                            },
-                            attempt: attempts,
-                            hint: None,
-                            unresolvable_deps: &[],
-                            unresolvable_detail: &[],
-                            checkout_dir: Some(&checkout_dir),
-                            from_repo_archive,
-                            resume: true,
-                            context: Some(&context),
-                        },
-                        TurnEnv {
-                            config,
-                            ws: &ws,
-                            pkg_run,
-                            reporter,
-                        },
-                        &mut spent_usd,
-                        &mut session_id,
-                        &mut step_attempts,
-                    );
-
-                    match turn {
-                        Ok((agent_step, outcome)) => {
-                            if let Err(reason) = apply_turn_and_reset(
-                                ApplyTurnCtx {
-                                    config,
-                                    checkout_dir: &checkout_dir,
-                                    spec_path: &spec_path,
-                                    step: &agent_step,
-                                    before: &clean,
-                                    rpm_name: &rpm_name,
-                                    label: "missing source files",
-                                    attempt: attempts,
-                                    notes_path: ws.notes(),
-                                    snapshot: Some(&checkout_snapshot),
-                                },
-                                &outcome,
-                                reporter,
-                                &mut sdist_top_level,
-                                &mut from_repo_archive,
-                            ) {
-                                return PipelineResult::Failed { rpm_name, reason };
-                            }
-                        }
-                        Err(e) => {
-                            return PipelineResult::Failed {
-                                rpm_name,
-                                reason: format!("missing source files and agent failed: {e}"),
-                            };
-                        }
-                    }
-                    continue;
-                }
-
-                validate_step.finish(StepOutcome::Ok);
             }
-            Err(e) => {
+            if !missing.is_empty() {
                 let validate_step = validate_step.finish(StepOutcome::Failed);
-                write_or_warn(validate_step.file("rpmspec.stderr"), e.to_string());
-                write_or_warn(ws.rpmspec_log(), e.to_string());
                 reporter.report(&Event::SpecRejected {
                     step: validate_step.id,
-                    reason: ap_core::event::SpecRejection::RpmspecParseFailed {
-                        stderr: e.to_string(),
+                    reason: ap_core::event::SpecRejection::MissingSourceFiles {
+                        names: missing.clone(),
                     },
                     restored_from: spec_path.clone(),
                 });
+
                 if config.no_agent
-                    || attempts >= config.max_attempts
-                    || spent_usd >= config.budget_usd
+                    || st.attempts >= config.max_attempts
+                    || st.spent_usd >= config.budget_usd
                 {
-                    skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
-                    return PipelineResult::Failed {
-                        rpm_name,
-                        reason: format!("spec invalid: {e}"),
-                    };
-                }
-
-                // Never commit a spec rpm cannot parse — OBS would spend a
-                // whole remote build to tell us what rpmspec just said. Fix it
-                // here and re-validate on the next pass of the loop.
-                attempts += 1;
-                persist_attempts(&ws, &config.run_id, attempts);
-                let clean = strip_and_rewrite(&spec_path);
-                let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
-                let turn = agent_turn(
-                    TurnCtx {
-                        label: "fix-after-validation",
-                        task: crate::agent::Task::FixAfterValidation,
-                        event_task: ap_core::event::Task::FixAfterBuild {
-                            attempt: attempts as u32,
-                            max_attempts: config.max_attempts as u32,
-                        },
-                        attempt: attempts,
-                        hint: None,
-                        unresolvable_deps: &[],
-                        unresolvable_detail: &[],
-                        checkout_dir: Some(&checkout_dir),
-                        from_repo_archive,
-                        resume: true,
-                        context: None,
-                    },
-                    TurnEnv {
-                        config,
-                        ws: &ws,
-                        pkg_run,
+                    skip_agent(
                         reporter,
-                    },
-                    &mut spent_usd,
-                    &mut session_id,
-                    &mut step_attempts,
-                );
-
-                match turn {
-                    Ok((agent_step, outcome)) => {
-                        if let Err(reason) = apply_turn_and_reset(
-                            ApplyTurnCtx {
-                                config,
-                                checkout_dir: &checkout_dir,
-                                spec_path: &spec_path,
-                                step: &agent_step,
-                                before: &clean,
-                                rpm_name: &rpm_name,
-                                label: "FixAfterValidation",
-                                attempt: attempts,
-                                notes_path: ws.notes(),
-                                snapshot: Some(&checkout_snapshot),
-                            },
-                            &outcome,
-                            reporter,
-                            &mut sdist_top_level,
-                            &mut from_repo_archive,
-                        ) {
-                            return PipelineResult::Failed { rpm_name, reason };
-                        }
-                    }
-                    Err(e) => {
-                        return PipelineResult::Failed {
-                            rpm_name,
-                            reason: format!("spec invalid and agent failed: {e}"),
-                        };
-                    }
-                }
-                continue;
-            }
-        }
-
-        // Step: Commit
-        {
-            let commit_step = begin_or_fail!(
-                pkg_run,
-                reporter,
-                StepKind::Commit,
-                None,
-                &mut step_attempts,
-                rpm_name
-            );
-            if let Err(e) = osc::commit(
-                &checkout_dir,
-                "Automated packaging",
-                Emit::new(reporter, commit_step.id),
-            ) {
-                return PipelineResult::Failed {
-                    rpm_name,
-                    reason: e.to_string(),
-                };
-            }
-            commit_step.finish(StepOutcome::Ok);
-        }
-
-        // Step: Build (wait for OBS remote build, fetch log, download RPMs)
-        let build_step = begin_or_fail!(
-            pkg_run,
-            reporter,
-            StepKind::Build,
-            None,
-            &mut step_attempts,
-            rpm_name
-        );
-        let build_log = build_step.file("build.log");
-
-        let build_result = osc::obs_build(
-            &config.project,
-            &rpm_name,
-            &config.distro,
-            &config.arch,
-            &build_log,
-            &config.rpms_dir,
-            Emit::new(reporter, build_step.id),
-        );
-
-        match build_result {
-            Ok(()) => {
-                let build_step = build_step.finish(StepOutcome::Ok);
-                step_attempts.skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
-                let mut state = PkgState::load(&ws);
-                state.last_built_version = Some(config.version.clone());
-                state.last_outcome = Some("success".to_string());
-                state.last_failure_reason = None;
-                save_state(&state, &ws, reporter);
-                warn_if_err(
-                    reporter,
-                    "updating the latest-build link",
-                    ws.link_latest(&build_step.path),
-                );
-                // `config.project` now has one more package than whatever
-                // this process last cached — see `list_project_packages`'s
-                // doc comment. Without this, every package built from here
-                // on stays invisible to every dependent package's
-                // availability check for the rest of the run.
-                osc::invalidate_project_packages_cache(&config.project);
-                return PipelineResult::Built { rpm_name };
-            }
-            Err(osc::Error::UnresolvableDeps {
-                names: deps,
-                detail,
-            }) => {
-                let build_step = build_step.finish(StepOutcome::Failed);
-                reporter.report(&Event::MissingPackages {
-                    step: build_step.id,
-                    names: deps.clone(),
-                    source: ap_core::event::MissingSource::BuildLog,
-                });
-                // Filter out deps already satisfied by an RPM in rpms_dir so the
-                // agent only sees packages that are genuinely not available yet.
-                let unresolvable_deps: Vec<String> = deps
-                    .into_iter()
-                    .filter(|dep| !rpm_satisfies_dep(&config.rpms_dir, dep))
-                    .collect();
-
-                if unresolvable_deps.is_empty() {
-                    // Every dep has a local RPM, so OBS should pick them up on
-                    // retry. Count the round anyway — if OBS keeps saying
-                    // unresolvable we would otherwise spin here forever.
-                    attempts += 1;
-                    persist_attempts(&ws, &config.run_id, attempts);
-                    if attempts > config.max_attempts {
-                        return PipelineResult::Failed {
-                            rpm_name,
-                            reason: format!(
-                                "OBS keeps reporting unresolvable dependencies after \
-                                 {attempts} attempt(s) even though every one has a local \
-                                 RPM; log: {}",
-                                build_log.display()
-                            ),
-                        };
-                    }
-                    continue;
-                }
-
-                // Unresolvable deps cannot be fixed by spec edits — they
-                // name a package that genuinely doesn't exist yet, not a
-                // wrong constraint in this spec. Skip the FixAfterBuild
-                // spec-fix loop and queue them for packaging directly, but
-                // give the agent one single, read-only, cheap-model lookup
-                // first to translate OBS's RPM-wrapped names
-                // (`libtrantor-devel`) into the real upstream project name
-                // (`trantor`) — mechanical lib/-devel stripping alone misses
-                // cases like that one. "Once" is enforced by
-                // `unresolvable_review_hash`: a later invocation of this
-                // package that hits the exact same dep set reuses the cached
-                // translation instead of asking again.
-                reporter.report(&Event::BuildFailed {
-                    step: build_step.id,
-                    classification: ap_core::event::BuildFailure::UnresolvableDeps {
-                        packages: unresolvable_deps.clone(),
-                    },
-                    log: build_log.clone(),
-                });
-
-                let mut sorted_deps = unresolvable_deps.clone();
-                sorted_deps.sort_unstable();
-                sorted_deps.dedup();
-
-                let prior_state = PkgState::load(&ws);
-                let already_reviewed = prior_state.already_reviewed_unresolvable(&sorted_deps);
-                let mut translated = if already_reviewed {
-                    prior_state.unresolvable_translated.clone()
-                } else {
-                    Vec::new()
-                };
-
-                if !already_reviewed && !config.no_agent && spent_usd < config.budget_usd {
-                    let turn = agent_turn(
-                        TurnCtx {
-                            label: "translate-deps",
-                            task: crate::agent::Task::TranslateUnresolvableDeps,
-                            event_task: ap_core::event::Task::TranslateUnresolvableDeps,
-                            attempt: 0,
-                            hint: None,
-                            unresolvable_deps: &sorted_deps,
-                            unresolvable_detail: &detail,
-                            checkout_dir: None,
-                            from_repo_archive,
-                            resume: false,
-                            context: None,
-                        },
-                        TurnEnv {
-                            config,
-                            ws: &ws,
-                            pkg_run,
-                            reporter,
-                        },
-                        &mut spent_usd,
-                        &mut session_id,
-                        &mut step_attempts,
+                        &mut st.step_attempts,
+                        config,
+                        st.attempts,
+                        st.spent_usd,
                     );
-                    if let Ok((_, outcome)) = turn {
-                        translated = outcome.unresolvable_packages;
-                    }
-
-                    // A translated name that merely respells a bare name
-                    // already in this spec (`huggingface_hub` ->
-                    // `huggingface-hub` — same project, OBS's literal
-                    // requires-dist spelling vs. the dash form the
-                    // dependency actually gets packaged and published
-                    // under) leaves this package's own
-                    // `%{python_module ...}` line asking for a name
-                    // nothing will ever provide, even once the translated
-                    // dependency is built. Rewrite it now — see
-                    // `spec::rewrite_python_module_name`'s doc comment for
-                    // why nothing else ever revisits this.
-                    if !translated.is_empty() {
-                        let bare_names: Vec<String> = sorted_deps
-                            .iter()
-                            .map(|d| {
-                                osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string()
-                            })
-                            .collect();
-                        if let Ok(current) = std::fs::read_to_string(&spec_path) {
-                            let mut rewritten = current.clone();
-                            for t in &translated {
-                                if let Some(bare) = bare_names
-                                    .iter()
-                                    .find(|b| osc::fuzzy_key(b) == osc::fuzzy_key(t) && *b != t)
-                                {
-                                    rewritten = crate::spec::rewrite_python_module_name(
-                                        &rewritten, bare, t,
-                                    );
-                                }
-                            }
-                            if rewritten != current {
-                                write_or_warn(&spec_path, &rewritten);
-                            }
-                        }
-                    }
-
-                    let mut state = PkgState::load(&ws);
-                    state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
-                    state.unresolvable_translated = translated.clone();
-                    save_state(&state, &ws, reporter);
+                    return Err(ctx.failed(format!(
+                        "spec references source file(s) not present in the \
+                         checkout: {}",
+                        missing.join(", ")
+                    )));
                 }
 
-                if !translated.is_empty() {
-                    reporter.report(&Event::MissingPackages {
-                        step: build_step.id,
-                        names: translated.clone(),
-                        source: ap_core::event::MissingSource::Agent,
-                    });
-                }
-                let source_list = if translated.is_empty() {
-                    &unresolvable_deps
-                } else {
-                    &translated
-                };
-                let mut to_build: Vec<String> = source_list
-                    .iter()
-                    .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
-                    .collect();
-                to_build.sort_unstable();
-                to_build.dedup();
-                return PipelineResult::MissingDeps {
-                    rpm_name,
-                    deps: to_build,
-                };
-            }
-            Err(osc::Error::NotActionable(msg)) => {
-                build_step.finish(StepOutcome::Failed);
-                return PipelineResult::Failed {
-                    rpm_name,
-                    reason: msg,
-                };
-            }
-            Err(_) => {
-                let build_step = build_step.finish(StepOutcome::Failed);
-
-                if config.no_agent {
-                    skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
-                    return PipelineResult::Failed {
-                        rpm_name,
-                        reason: format!("build failed; log: {}", build_log.display()),
-                    };
-                }
-
-                attempts += 1;
-                persist_attempts(&ws, &config.run_id, attempts);
-                if attempts > config.max_attempts || spent_usd >= config.budget_usd {
-                    skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
-                    let why = if spent_usd >= config.budget_usd {
-                        format!(
-                            "budget exhausted (${:.2} spent of ${:.2})",
-                            spent_usd, config.budget_usd
-                        )
-                    } else {
-                        format!("attempt limit {} reached", config.max_attempts)
-                    };
-                    return PipelineResult::Failed {
-                        rpm_name,
-                        reason: format!(
-                            "gave up after {} attempt(s): {}; log: {}",
-                            attempts,
-                            why,
-                            build_log.display()
-                        ),
-                    };
-                }
-
-                link_build_log(&ws, &build_log);
-
-                let extract = extract_failure_step(
-                    pkg_run,
-                    reporter,
-                    &mut step_attempts,
-                    &build_log,
-                    &sdist_top_level,
-                    build_step.id,
+                // Never commit a spec whose Source/Patch files don't exist — OBS
+                // would spend a whole remote build just to report `File ...
+                // SOURCES/...: No such file or directory` (convention 13).
+                let context = format!(
+                    "`rpmspec --parse` succeeded, but the spec references source \
+                     file(s) that do not exist in the checkout directory: {}. Either \
+                     the file was never fetched/written, or a Source/Patch line's \
+                     name doesn't match what's actually on disk (typo, wrong \
+                     extension, stale reference after a rename). Fix the spec to \
+                     reference the real file, or create/restore the missing file if \
+                     it should exist — see \"Source Files and Cleanup\" below.{}",
+                    missing.join(", "),
+                    service_error
+                        .map(|e| format!(
+                            " The checkout's `_service` was run (`osc service ra`) to \
+                             fetch it and failed: {e}"
+                        ))
+                        .unwrap_or_default()
                 );
-                reporter.report(&Event::BuildFailed {
-                    step: build_step.id,
-                    classification: classify_failure(&extract),
-                    log: build_log.clone(),
-                });
-
-                let clean = strip_and_rewrite(&spec_path);
-                let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
-                let turn = agent_turn(
-                    TurnCtx {
-                        label: "fix-after-build",
-                        task: crate::agent::Task::FixAfterBuild,
-                        event_task: ap_core::event::Task::FixAfterBuild {
-                            attempt: attempts as u32,
-                            max_attempts: config.max_attempts as u32,
-                        },
-                        attempt: attempts,
-                        hint: Some(&extract),
-                        unresolvable_deps: &[],
-                        unresolvable_detail: &[],
-                        checkout_dir: Some(&checkout_dir),
-                        from_repo_archive,
-                        resume: true,
-                        context: None,
-                    },
-                    TurnEnv {
-                        config,
-                        ws: &ws,
-                        pkg_run,
-                        reporter,
-                    },
-                    &mut spent_usd,
-                    &mut session_id,
-                    &mut step_attempts,
-                );
-
-                let (agent_step, outcome) = match turn {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // `agent_turn` already routed the Error through
-                        // `friendly_agent_error`, so this is a
-                        // user-ready message (budget-exhausted hint
-                        // included); pass it through verbatim.
-                        return PipelineResult::Failed {
-                            rpm_name,
-                            reason: e,
-                        };
-                    }
-                };
-
-                if !outcome.unresolvable_packages.is_empty() {
-                    reporter.report(&Event::MissingPackages {
-                        step: agent_step.id,
-                        names: outcome.unresolvable_packages.clone(),
-                        source: ap_core::event::MissingSource::Agent,
-                    });
-                    // Strip python<ver>- prefix so the caller gets PyPI names.
-                    let mut to_build: Vec<String> = outcome
-                        .unresolvable_packages
-                        .iter()
-                        .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
-                        .collect();
-                    to_build.sort_unstable();
-                    to_build.dedup();
-                    return PipelineResult::MissingDeps {
-                        rpm_name,
-                        deps: to_build,
-                    };
-                }
-
-                if let Err(reason) = apply_turn_and_reset(
-                    ApplyTurnCtx {
-                        config,
-                        checkout_dir: &checkout_dir,
-                        spec_path: &spec_path,
-                        step: &agent_step,
-                        before: &clean,
-                        rpm_name: &rpm_name,
-                        label: "FixAfterBuild",
-                        attempt: attempts,
-                        notes_path: ws.notes(),
-                        snapshot: Some(&checkout_snapshot),
-                    },
-                    &outcome,
-                    reporter,
-                    &mut sdist_top_level,
-                    &mut from_repo_archive,
-                ) {
-                    return PipelineResult::Failed { rpm_name, reason };
-                }
+                fix_after_validation(
+                    ctx,
+                    st,
+                    Some(&context),
+                    "missing source files",
+                    "missing source files and agent failed: ",
+                )?;
+                return Ok(Flow::Retry);
             }
+
+            validate_step.finish(StepOutcome::Ok);
+            Ok(Flow::Proceed)
+        }
+        Err(e) => {
+            let validate_step = validate_step.finish(StepOutcome::Failed);
+            write_or_warn(validate_step.file("rpmspec.stderr"), e.to_string());
+            write_or_warn(ws.rpmspec_log(), e.to_string());
+            reporter.report(&Event::SpecRejected {
+                step: validate_step.id,
+                reason: ap_core::event::SpecRejection::RpmspecParseFailed {
+                    stderr: e.to_string(),
+                },
+                restored_from: spec_path.clone(),
+            });
+            if config.no_agent
+                || st.attempts >= config.max_attempts
+                || st.spent_usd >= config.budget_usd
+            {
+                skip_agent(
+                    reporter,
+                    &mut st.step_attempts,
+                    config,
+                    st.attempts,
+                    st.spent_usd,
+                );
+                return Err(ctx.failed(format!("spec invalid: {e}")));
+            }
+
+            // Never commit a spec rpm cannot parse — OBS would spend a
+            // whole remote build to tell us what rpmspec just said. Fix it
+            // here and re-validate on the next pass of the loop.
+            fix_after_validation(
+                ctx,
+                st,
+                None,
+                "FixAfterValidation",
+                "spec invalid and agent failed: ",
+            )?;
+            Ok(Flow::Retry)
         }
     }
 }
 
+/// Step: Commit.
+fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
+    let commit_step = begin_or_fail!(
+        ctx.pkg_run,
+        ctx.reporter,
+        StepKind::Commit,
+        None,
+        &mut st.step_attempts,
+        ctx.rpm_name.clone()
+    );
+    if let Err(e) = osc::commit(
+        &ctx.checkout_dir,
+        "Automated packaging",
+        Emit::new(ctx.reporter, commit_step.id),
+    ) {
+        return Err(ctx.failed(e.to_string()));
+    }
+    commit_step.finish(StepOutcome::Ok);
+    Ok(())
+}
+
+/// Step: Build (wait for OBS remote build, fetch log, download RPMs), then
+/// route its outcome: success finishes the package, unresolvable dependencies
+/// end it with `MissingDeps`, and an ordinary failure runs a fix turn.
+fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResult> {
+    let RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        rpm_name,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    let build_step = begin_or_fail!(
+        pkg_run,
+        reporter,
+        StepKind::Build,
+        None,
+        &mut st.step_attempts,
+        rpm_name.clone()
+    );
+    let build_log = build_step.file("build.log");
+
+    let build_result = osc::obs_build(
+        &config.project,
+        rpm_name,
+        &config.distro,
+        &config.arch,
+        &build_log,
+        &config.rpms_dir,
+        Emit::new(reporter, build_step.id),
+    );
+
+    match build_result {
+        Ok(()) => Ok(RoundEnd::Finished(build_succeeded(ctx, st, build_step))),
+        Err(osc::Error::UnresolvableDeps {
+            names: deps,
+            detail,
+        }) => {
+            let build_step = build_step.finish(StepOutcome::Failed);
+            unresolvable_deps_round(ctx, st, &build_step, &build_log, deps, detail)
+        }
+        Err(osc::Error::NotActionable(msg)) => {
+            build_step.finish(StepOutcome::Failed);
+            Err(ctx.failed(msg))
+        }
+        Err(_) => {
+            let build_step = build_step.finish(StepOutcome::Failed);
+            fix_after_build(ctx, st, &build_step, &build_log)
+        }
+    }
+}
+
+/// A successful OBS build: record it and report the package as built.
+fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -> PipelineResult {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        rpm_name,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    let build_step = build_step.finish(StepOutcome::Ok);
+    st.step_attempts
+        .skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
+    let mut state = PkgState::load(ws);
+    state.last_built_version = Some(config.version.clone());
+    state.last_outcome = Some("success".to_string());
+    state.last_failure_reason = None;
+    save_state(&state, ws, reporter);
+    warn_if_err(
+        reporter,
+        "updating the latest-build link",
+        ws.link_latest(&build_step.path),
+    );
+    // `config.project` now has one more package than whatever
+    // this process last cached — see `list_project_packages`'s
+    // doc comment. Without this, every package built from here
+    // on stays invisible to every dependent package's
+    // availability check for the rest of the run.
+    osc::invalidate_project_packages_cache(&config.project);
+    PipelineResult::Built {
+        rpm_name: rpm_name.clone(),
+    }
+}
+
+/// OBS reported unresolvable dependencies for the build.
+fn unresolvable_deps_round(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    build_step: &StepDir,
+    build_log: &Path,
+    deps: Vec<String>,
+    detail: Vec<String>,
+) -> Result<RoundEnd, PipelineResult> {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        rpm_name,
+        spec_path,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    reporter.report(&Event::MissingPackages {
+        step: build_step.id,
+        names: deps.clone(),
+        source: ap_core::event::MissingSource::BuildLog,
+    });
+    // Filter out deps already satisfied by an RPM in rpms_dir so the
+    // agent only sees packages that are genuinely not available yet.
+    let unresolvable_deps: Vec<String> = deps
+        .into_iter()
+        .filter(|dep| !rpm_satisfies_dep(&config.rpms_dir, dep))
+        .collect();
+
+    if unresolvable_deps.is_empty() {
+        // Every dep has a local RPM, so OBS should pick them up on
+        // retry. Count the round anyway — if OBS keeps saying
+        // unresolvable we would otherwise spin here forever.
+        st.attempts += 1;
+        persist_attempts(ws, &config.run_id, st.attempts);
+        if st.attempts > config.max_attempts {
+            return Err(ctx.failed(format!(
+                "OBS keeps reporting unresolvable dependencies after \
+                 {} attempt(s) even though every one has a local \
+                 RPM; log: {}",
+                st.attempts,
+                build_log.display()
+            )));
+        }
+        return Ok(RoundEnd::Retry);
+    }
+
+    // Unresolvable deps cannot be fixed by spec edits — they
+    // name a package that genuinely doesn't exist yet, not a
+    // wrong constraint in this spec. Skip the FixAfterBuild
+    // spec-fix loop and queue them for packaging directly, but
+    // give the agent one single, read-only, cheap-model lookup
+    // first to translate OBS's RPM-wrapped names
+    // (`libtrantor-devel`) into the real upstream project name
+    // (`trantor`) — mechanical lib/-devel stripping alone misses
+    // cases like that one. "Once" is enforced by
+    // `unresolvable_review_hash`: a later invocation of this
+    // package that hits the exact same dep set reuses the cached
+    // translation instead of asking again.
+    reporter.report(&Event::BuildFailed {
+        step: build_step.id,
+        classification: ap_core::event::BuildFailure::UnresolvableDeps {
+            packages: unresolvable_deps.clone(),
+        },
+        log: build_log.to_path_buf(),
+    });
+
+    let mut sorted_deps = unresolvable_deps.clone();
+    sorted_deps.sort_unstable();
+    sorted_deps.dedup();
+
+    let prior_state = PkgState::load(ws);
+    let already_reviewed = prior_state.already_reviewed_unresolvable(&sorted_deps);
+    let mut translated = if already_reviewed {
+        prior_state.unresolvable_translated.clone()
+    } else {
+        Vec::new()
+    };
+
+    if !already_reviewed && !config.no_agent && st.spent_usd < config.budget_usd {
+        let turn = agent_turn(
+            TurnCtx {
+                label: "translate-deps",
+                task: crate::agent::Task::TranslateUnresolvableDeps,
+                event_task: ap_core::event::Task::TranslateUnresolvableDeps,
+                attempt: 0,
+                hint: None,
+                unresolvable_deps: &sorted_deps,
+                unresolvable_detail: &detail,
+                checkout_dir: None,
+                from_repo_archive: st.from_repo_archive,
+                resume: false,
+                context: None,
+            },
+            ctx.turn_env(),
+            &mut st.spent_usd,
+            &mut st.session_id,
+            &mut st.step_attempts,
+        );
+        if let Ok((_, outcome)) = turn {
+            translated = outcome.unresolvable_packages;
+        }
+
+        // A translated name that merely respells a bare name
+        // already in this spec (`huggingface_hub` ->
+        // `huggingface-hub` — same project, OBS's literal
+        // requires-dist spelling vs. the dash form the
+        // dependency actually gets packaged and published
+        // under) leaves this package's own
+        // `%{python_module ...}` line asking for a name
+        // nothing will ever provide, even once the translated
+        // dependency is built. Rewrite it now — see
+        // `spec::rewrite_python_module_name`'s doc comment for
+        // why nothing else ever revisits this.
+        if !translated.is_empty() {
+            let bare_names: Vec<String> = sorted_deps
+                .iter()
+                .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
+                .collect();
+            if let Ok(current) = std::fs::read_to_string(spec_path) {
+                let mut rewritten = current.clone();
+                for t in &translated {
+                    if let Some(bare) = bare_names
+                        .iter()
+                        .find(|b| osc::fuzzy_key(b) == osc::fuzzy_key(t) && *b != t)
+                    {
+                        rewritten = crate::spec::rewrite_python_module_name(&rewritten, bare, t);
+                    }
+                }
+                if rewritten != current {
+                    write_or_warn(spec_path, &rewritten);
+                }
+            }
+        }
+
+        let mut state = PkgState::load(ws);
+        state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
+        state.unresolvable_translated = translated.clone();
+        save_state(&state, ws, reporter);
+    }
+
+    if !translated.is_empty() {
+        reporter.report(&Event::MissingPackages {
+            step: build_step.id,
+            names: translated.clone(),
+            source: ap_core::event::MissingSource::Agent,
+        });
+    }
+    let source_list = if translated.is_empty() {
+        &unresolvable_deps
+    } else {
+        &translated
+    };
+    let mut to_build: Vec<String> = source_list
+        .iter()
+        .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
+        .collect();
+    to_build.sort_unstable();
+    to_build.dedup();
+    Err(PipelineResult::MissingDeps {
+        rpm_name: rpm_name.clone(),
+        deps: to_build,
+    })
+}
+
+/// An ordinary build failure: check the attempt/budget limits, then run a
+/// fix-after-build turn and apply it.
+fn fix_after_build(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    build_step: &StepDir,
+    build_log: &Path,
+) -> Result<RoundEnd, PipelineResult> {
+    let RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+    } = ctx;
+    let reporter = *reporter;
+
+    if config.no_agent {
+        skip_agent(
+            reporter,
+            &mut st.step_attempts,
+            config,
+            st.attempts,
+            st.spent_usd,
+        );
+        return Err(ctx.failed(format!("build failed; log: {}", build_log.display())));
+    }
+
+    st.attempts += 1;
+    persist_attempts(ws, &config.run_id, st.attempts);
+    let attempts = st.attempts;
+    if attempts > config.max_attempts || st.spent_usd >= config.budget_usd {
+        skip_agent(
+            reporter,
+            &mut st.step_attempts,
+            config,
+            attempts,
+            st.spent_usd,
+        );
+        let why = if st.spent_usd >= config.budget_usd {
+            format!(
+                "budget exhausted (${:.2} spent of ${:.2})",
+                st.spent_usd, config.budget_usd
+            )
+        } else {
+            format!("attempt limit {} reached", config.max_attempts)
+        };
+        return Err(ctx.failed(format!(
+            "gave up after {} attempt(s): {}; log: {}",
+            attempts,
+            why,
+            build_log.display()
+        )));
+    }
+
+    link_build_log(ws, build_log);
+
+    let extract = extract_failure_step(
+        pkg_run,
+        reporter,
+        &mut st.step_attempts,
+        build_log,
+        &st.sdist_top_level,
+        build_step.id,
+    );
+    reporter.report(&Event::BuildFailed {
+        step: build_step.id,
+        classification: classify_failure(&extract),
+        log: build_log.to_path_buf(),
+    });
+
+    let clean = strip_and_rewrite(spec_path);
+    let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
+    let turn = agent_turn(
+        TurnCtx {
+            label: "fix-after-build",
+            task: crate::agent::Task::FixAfterBuild,
+            event_task: ap_core::event::Task::FixAfterBuild {
+                attempt: attempts as u32,
+                max_attempts: config.max_attempts as u32,
+            },
+            attempt: attempts,
+            hint: Some(&extract),
+            unresolvable_deps: &[],
+            unresolvable_detail: &[],
+            checkout_dir: Some(checkout_dir),
+            from_repo_archive: st.from_repo_archive,
+            resume: true,
+            context: None,
+        },
+        ctx.turn_env(),
+        &mut st.spent_usd,
+        &mut st.session_id,
+        &mut st.step_attempts,
+    );
+
+    let (agent_step, outcome) = match turn {
+        Ok(v) => v,
+        // `agent_turn` already routed the Error through
+        // `friendly_agent_error`, so this is a user-ready message
+        // (budget-exhausted hint included); pass it through verbatim.
+        Err(e) => return Err(ctx.failed(e)),
+    };
+
+    if !outcome.unresolvable_packages.is_empty() {
+        reporter.report(&Event::MissingPackages {
+            step: agent_step.id,
+            names: outcome.unresolvable_packages.clone(),
+            source: ap_core::event::MissingSource::Agent,
+        });
+        // Strip python<ver>- prefix so the caller gets PyPI names.
+        let mut to_build: Vec<String> = outcome
+            .unresolvable_packages
+            .iter()
+            .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
+            .collect();
+        to_build.sort_unstable();
+        to_build.dedup();
+        return Err(PipelineResult::MissingDeps {
+            rpm_name: rpm_name.clone(),
+            deps: to_build,
+        });
+    }
+
+    if let Err(reason) = apply_turn_and_reset(
+        ApplyTurnCtx {
+            config,
+            checkout_dir,
+            spec_path,
+            step: &agent_step,
+            before: &clean,
+            rpm_name,
+            label: "FixAfterBuild",
+            attempt: attempts,
+            notes_path: ws.notes(),
+            snapshot: Some(&checkout_snapshot),
+        },
+        &outcome,
+        reporter,
+        &mut st.sdist_top_level,
+        &mut st.from_repo_archive,
+    ) {
+        return Err(ctx.failed(reason));
+    }
+    Ok(RoundEnd::Retry)
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// `StepGuard::begin` for `run_package_inner`: a step directory that cannot be
-/// created fails the package.
+/// `StepGuard::begin` for the pipeline stages: a step directory that cannot be
+/// created fails the package (an `Err(PipelineResult)` from the stage).
 macro_rules! begin_or_fail {
     ($pkg_run:expr, $reporter:expr, $kind:expr, $detail:expr, $attempts:expr, $rpm_name:expr) => {
         match StepGuard::begin($pkg_run, $reporter, $kind, $detail, $attempts) {
             Ok(s) => s,
             Err(e) => {
-                return PipelineResult::Failed {
+                return Err(PipelineResult::Failed {
                     rpm_name: $rpm_name,
                     reason: e.to_string(),
-                };
+                });
             }
         }
     };
