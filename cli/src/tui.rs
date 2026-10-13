@@ -30,7 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use ap_core::event::{Event, PackageOutcome, RunOutcome, StepKind, StepOutcome, Task};
+use ap_core::event::{Event, PackageOutcome, RunOutcome, SkipReason, StepKind, StepOutcome, Task};
 use ap_core::sink::{MemorySink, Reporter};
 
 const MAX_LOG_LINES: usize = 300;
@@ -285,6 +285,10 @@ struct ActivityEntry {
 /// One step of a package's build, from `StepStarted` until it is finished.
 struct StepInfo {
     kind: StepKind,
+    /// 1-based start count of this kind; a retry shows as `#2`.
+    attempt: u32,
+    /// Iteration of the validate/build loop the step ran in.
+    round: u32,
     started: Instant,
     /// Outcome and the event's own elapsed time, set by `StepFinished` (or by
     /// `PackageFinished` if the worker died with the step still open).
@@ -299,6 +303,8 @@ struct PkgState {
     step: Option<StepInfo>,
     /// Reason from `PackageOutcome::Failed`, shown in the detail pane.
     fail_reason: Option<String>,
+    /// Conditional steps that did not run, in the order they were skipped.
+    skipped: Vec<(StepKind, SkipReason)>,
     log_lines: Vec<LogLine>,
     agent_activity: Vec<ActivityEntry>,
     input_tokens: u64,
@@ -332,6 +338,7 @@ impl PkgState {
             status: PkgStatus::Queued,
             step: None,
             fail_reason: None,
+            skipped: Vec::new(),
             log_lines: Vec::new(),
             agent_activity: Vec::new(),
             input_tokens: 0,
@@ -384,7 +391,11 @@ impl PkgState {
         let Some(step) = &self.step else {
             return "-".to_string();
         };
-        let label = step.kind.label();
+        let label = if step.attempt > 1 {
+            format!("{} #{}", step.kind.label(), step.attempt)
+        } else {
+            step.kind.label().to_string()
+        };
         match (&self.status, &step.done) {
             (PkgStatus::Running, _) | (PkgStatus::Between, None) => {
                 format!("{label} {}", fmt_dur(step.started.elapsed()))
@@ -564,6 +575,7 @@ impl TuiState {
                 state.started = Instant::now();
                 state.step = None;
                 state.fail_reason = None;
+                state.skipped.clear();
                 // A fresh attempt — the condition that caused last time's
                 // `NoSpace` may already be gone (that's the whole point of
                 // the `r` retry keybinding), so don't carry the flag over
@@ -647,21 +659,41 @@ impl TuiState {
     fn apply_pkg_event(&mut self, pkg: &str, event: &Event) {
         let state = self.pkg_mut(pkg);
         match event {
-            Event::StepStarted { kind, .. } => {
+            Event::StepStarted {
+                kind,
+                attempt,
+                round,
+                ..
+            } => {
                 // The flag belongs to the failure that hit ENOSPC. Only the
                 // failure-analysis and agent steps that follow that build
                 // may still report it; any other step starts new work whose
                 // failure must not be blamed on the disk.
-                if !matches!(kind, StepKind::ExtractFailure | StepKind::AgentTurn) {
+                if !kind.spec().keeps_disk_flag {
                     state.disk_full_detected = false;
                 }
                 state.status = PkgStatus::Running;
                 state.step = Some(StepInfo {
-                    kind: kind.clone(),
+                    kind: *kind,
+                    attempt: *attempt,
+                    round: *round,
                     started: Instant::now(),
                     done: None,
                 });
-                state.add_step_header(format!("▸ {}", kind.label()));
+                let header = if *attempt > 1 {
+                    format!("▸ {} #{attempt}", kind.label())
+                } else {
+                    format!("▸ {}", kind.label())
+                };
+                state.add_step_header(header);
+            }
+            // Never a step of its own: the current step stays on screen.
+            Event::StepSkipped { kind, reason } => {
+                state.skipped.push((*kind, reason.clone()));
+                state.add_log(
+                    LogLevel::Warn,
+                    format!("⇥ Skipped {}: {reason}", kind.label()),
+                );
             }
             Event::StepFinished {
                 outcome, elapsed, ..
@@ -681,9 +713,7 @@ impl TuiState {
                     step.done = Some((outcome.clone(), *elapsed));
                     // A failed agent turn is a different failure than the
                     // ENOSPC build that preceded it.
-                    if matches!(step.kind, StepKind::AgentTurn)
-                        && matches!(outcome, StepOutcome::Failed)
-                    {
+                    if step.kind.spec().keeps_disk_flag && matches!(outcome, StepOutcome::Failed) {
                         state.disk_full_detected = false;
                     }
                 }
@@ -1248,6 +1278,9 @@ fn render_detail(
                 .constraints([Constraint::Length(4), Constraint::Min(0)])
                 .split(area);
             let title = match pkg.step.as_ref() {
+                Some(step) if step.round > 1 => {
+                    format!("Failed at {} (round {})", step.kind.label(), step.round)
+                }
                 Some(step) => format!("Failed at {}", step.kind.label()),
                 None => "Failed".to_string(),
             };
@@ -1298,11 +1331,15 @@ fn render_detail(
             ListItem::new(l.message.clone()).style(style)
         })
         .collect();
-    let log_title = if scroll > 0 {
+    let mut log_title = if scroll > 0 {
         format!("Event Log — scrolled up {scroll} line(s), End to jump to latest")
     } else {
         "Event Log".to_string()
     };
+    if !pkg.skipped.is_empty() {
+        let labels: Vec<&str> = pkg.skipped.iter().map(|(k, _)| k.label()).collect();
+        log_title.push_str(&format!(" (skipped: {})", labels.join(", ")));
+    }
     let log = List::new(log_items).block(Block::default().borders(Borders::ALL).title(log_title));
     f.render_widget(log, chunks[0]);
 
@@ -1463,6 +1500,9 @@ mod step_state_tests {
         Event::StepStarted {
             step: StepId(0),
             kind,
+            attempt: 1,
+            round: 0,
+            detail: None,
         }
     }
 
@@ -1599,7 +1639,7 @@ mod step_state_tests {
             .packages
             .insert("foo".into(), PkgState::new("1.0".into()));
         state.packages.get_mut("foo").unwrap().disk_full_detected = true;
-        state.apply(msg("foo", started(StepKind::ApplyAndValidate)));
+        state.apply(msg("foo", started(StepKind::Build)));
         state.apply(Msg {
             pkg: None,
             event: package_finished(PackageOutcome::Failed {
@@ -1607,5 +1647,38 @@ mod step_state_tests {
             }),
         });
         assert!(state.packages["foo"].status == PkgStatus::Failed);
+    }
+
+    #[test]
+    fn a_repeated_step_shows_its_attempt_number() {
+        let mut state = TuiState::new();
+        state.apply(msg(
+            "foo",
+            Event::StepStarted {
+                step: StepId(1),
+                kind: StepKind::Build,
+                attempt: 2,
+                round: 2,
+                detail: None,
+            },
+        ));
+        let text = state.packages["foo"].step_text();
+        assert!(text.contains("#2"), "got {text:?}");
+    }
+
+    #[test]
+    fn a_skipped_step_is_recorded_without_replacing_the_current_step() {
+        let mut state = TuiState::new();
+        state.apply(msg("foo", started(StepKind::Checkout)));
+        state.apply(msg(
+            "foo",
+            Event::StepSkipped {
+                kind: StepKind::OscService,
+                reason: SkipReason::NotRust,
+            },
+        ));
+        let pkg = &state.packages["foo"];
+        assert_eq!(pkg.skipped, [(StepKind::OscService, SkipReason::NotRust)]);
+        assert_eq!(pkg.step.as_ref().unwrap().kind, StepKind::Checkout);
     }
 }

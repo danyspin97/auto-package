@@ -13,5 +13,6 @@ pub mod pipeline;
 pub mod proc;
 pub mod sources;
 pub mod spec;
+pub mod step;
 pub mod update;
 pub mod workspace;

@@ -194,6 +194,7 @@ impl HumanSink {
             | Event::TargetSelected { .. }
             | Event::StepStarted { .. }
             | Event::StepFinished { .. }
+            | Event::StepSkipped { .. }
             | Event::SpecChanged { .. }
             | Event::PackageFinished { .. }
             | Event::NotesUsage { .. }
@@ -310,6 +311,11 @@ impl HumanSink {
             Event::StepStarted { kind, .. } => Some(format!(
                 "  {}",
                 kind.label().if_supports_color(Stderr, |t| t.bold()),
+            )),
+            Event::StepSkipped { kind, reason } => Some(format!(
+                "  {}",
+                format!("skipped {}: {reason}", kind.label())
+                    .if_supports_color(Stderr, |t| t.yellow()),
             )),
             Event::StepFinished {
                 outcome, elapsed, ..
@@ -644,6 +650,9 @@ mod tests {
         tagged.report(&Event::StepStarted {
             step: StepId(0),
             kind: StepKind::Build,
+            attempt: 1,
+            round: 0,
+            detail: None,
         });
 
         // After the call, the thread-local must be restored.
@@ -716,6 +725,9 @@ mod tests {
                         r.report(&Event::StepStarted {
                             step: StepId(0),
                             kind: StepKind::Build,
+                            attempt: 1,
+                            round: 0,
+                            detail: None,
                         });
                     }
                 })

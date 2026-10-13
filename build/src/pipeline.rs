@@ -1,16 +1,19 @@
 //! Single-package build pipeline (REDESIGN §2.4, §3.2).
 //!
-//! Loop: Checkout → FetchSdist → GenerateSpec → ValidateSpec →
-//!       (Build → ExtractFailure → AgentTurn → ApplyAndValidate)* → Done
+//! Loop: Checkout → GenerateSpec → FetchSdist → ValidateSpec →
+//!       (Commit → Build → AgentTurn)* → Done
+//!
+//! Every step is a [`StepGuard`](crate::step::StepGuard); the step kinds, their
+//! labels and directory names are the table `ap_core::step::STEPS`.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
-use ap_core::event::{Event, SelectionReason, StepKind, StepOutcome};
+use ap_core::event::{Event, SelectionReason, SkipReason, StepKind, StepOutcome};
 use ap_core::run::{PkgRunDir, StepDir};
 use ap_core::sink::Reporter;
 
 use crate::proc::Emit;
+use crate::step::{Attempts, StepGuard, skip};
 
 use crate::osc;
 use crate::workspace::Workspace;
@@ -950,14 +953,15 @@ fn package_notes_step(
     ws: &Workspace,
     reporter: &dyn Reporter,
 ) {
-    let Ok(step) = pkg_run.step("package-notes") else {
+    let Ok(step) = StepGuard::begin(
+        pkg_run,
+        reporter,
+        StepKind::PackageNotes,
+        None,
+        &mut Attempts::default(),
+    ) else {
         return;
     };
-    let t = Instant::now();
-    reporter.report(&Event::StepStarted {
-        step: step.id,
-        kind: StepKind::PackageNotes,
-    });
     let outcome =
         match crate::package_notes::update_after_build(ws, &config.rpm_name, &config.version) {
             Ok(usage) => {
@@ -976,11 +980,7 @@ fn package_notes_step(
                 StepOutcome::Skipped
             }
         };
-    reporter.report(&Event::StepFinished {
-        step: step.id,
-        outcome,
-        elapsed: t.elapsed(),
-    });
+    step.finish(outcome);
 }
 
 /// Reject a name that is about to be joined into a filesystem path as a single
@@ -1023,6 +1023,7 @@ fn run_package_inner(
         return PipelineResult::AlreadyBuilt { rpm_name };
     }
 
+    let mut step_attempts = Attempts::default();
     let checkout_dir = config.work_dir.join(&config.project).join(&rpm_name);
     let spec_name = format!("{rpm_name}.spec");
     let spec_path = checkout_dir.join(&spec_name);
@@ -1031,12 +1032,14 @@ fn run_package_inner(
     let obs_status: Option<osc::BuildStatus>;
     let has_local_changes: bool;
     {
-        let step = step_or_fail!(pkg_run, "checkout", rpm_name);
-        let t = Instant::now();
-        reporter.report(&Event::StepStarted {
-            step: step.id,
-            kind: StepKind::Checkout,
-        });
+        let step = begin_or_fail!(
+            pkg_run,
+            reporter,
+            StepKind::Checkout,
+            None,
+            &mut step_attempts,
+            rpm_name
+        );
 
         let emit = Emit::new(reporter, step.id);
         // `osc::checkout` already runs `osc up` when the checkout dir
@@ -1050,30 +1053,19 @@ fn run_package_inner(
                 osc::checkout(&config.project, &rpm_name, &config.work_dir, emit).map(|_| ())
             });
 
-        match result {
-            Ok(()) => {
-                reporter.report(&Event::StepFinished {
-                    step: step.id,
-                    outcome: StepOutcome::Ok,
-                    elapsed: t.elapsed(),
-                });
-            }
-            Err(e) => {
-                reporter.report(&Event::StepFinished {
-                    step: step.id,
-                    outcome: StepOutcome::Failed,
-                    elapsed: t.elapsed(),
-                });
-                reporter.report(&Event::Warning {
-                    step: Some(step.id),
-                    message: e.to_string(),
-                });
-                return PipelineResult::Failed {
-                    rpm_name,
-                    reason: e.to_string(),
-                };
-            }
+        if let Err(e) = result {
+            let id = step.id;
+            step.finish(StepOutcome::Failed);
+            reporter.report(&Event::Warning {
+                step: Some(id),
+                message: e.to_string(),
+            });
+            return PipelineResult::Failed {
+                rpm_name,
+                reason: e.to_string(),
+            };
         }
+        step.finish(StepOutcome::Ok);
         // Keep spec symlink fresh.
         let abs = spec_path
             .canonicalize()
@@ -1159,20 +1151,18 @@ fn run_package_inner(
         || spec_version_differs(&spec_path, &config.version);
 
     let (mut sdist_top_level, is_maturin, mut from_repo_archive, is_rust) = if need_spec {
-        let step = step_or_fail!(pkg_run, "spec", rpm_name);
-        let t = Instant::now();
-        reporter.report(&Event::StepStarted {
-            step: step.id,
-            kind: StepKind::GenerateSpec,
-        });
+        let step = begin_or_fail!(
+            pkg_run,
+            reporter,
+            StepKind::GenerateSpec,
+            None,
+            &mut step_attempts,
+            rpm_name
+        );
 
         match generate_spec(config, &checkout_dir, &spec_path, &step) {
             Ok(res) => {
-                reporter.report(&Event::StepFinished {
-                    step: step.id,
-                    outcome: StepOutcome::Ok,
-                    elapsed: t.elapsed(),
-                });
+                let step = step.finish(StepOutcome::Ok);
                 // "Initial packaging" is only true for a package that had no
                 // spec before this run generated one — a version bump or
                 // --regen on an already-packaged package must not be
@@ -1216,11 +1206,7 @@ fn run_package_inner(
                 version,
                 candidates,
             }) => {
-                reporter.report(&Event::StepFinished {
-                    step: step.id,
-                    outcome: StepOutcome::Ok,
-                    elapsed: t.elapsed(),
-                });
+                let step = step.finish(StepOutcome::Ok);
 
                 let mut message = format!(
                     "{pkg_name} {version} is published on PyPI as wheels only and its \
@@ -1278,11 +1264,7 @@ fn run_package_inner(
                 };
             }
             Err(GenSpecError::Other(e) | GenSpecError::NoReleaseArchive(e)) => {
-                reporter.report(&Event::StepFinished {
-                    step: step.id,
-                    outcome: StepOutcome::Failed,
-                    elapsed: t.elapsed(),
-                });
+                let step = step.finish(StepOutcome::Failed);
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
                     message: e.clone(),
@@ -1297,6 +1279,7 @@ fn run_package_inner(
         // Sdist may already be extracted; find top-level dir name from the tarball
         // in the checkout dir (or fall back to a reasonable guess).
         let top = find_sdist_top_level(&checkout_dir, &config.pkg_name, &config.version);
+        skip(reporter, StepKind::GenerateSpec, SkipReason::SpecExists);
         let spec_text = std::fs::read_to_string(&spec_path).unwrap_or_default();
         let is_maturin = spec_text.contains("maturin");
         let is_rust = spec_text.contains("cargo_build");
@@ -1310,12 +1293,14 @@ fn run_package_inner(
     if is_rust && let Some(ref repo_url) = config.source_repo {
         let need_service = need_spec || !checkout_dir.join("_service").exists();
         if need_service {
-            let step = step_or_fail!(pkg_run, "service", rpm_name);
-            let t = Instant::now();
-            reporter.report(&Event::StepStarted {
-                step: step.id,
-                kind: StepKind::OscService,
-            });
+            let step = begin_or_fail!(
+                pkg_run,
+                reporter,
+                StepKind::OscService,
+                None,
+                &mut step_attempts,
+                rpm_name
+            );
 
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
@@ -1325,24 +1310,12 @@ fn run_package_inner(
                         .map_err(|e| e.to_string())
                 });
 
-            match result {
-                Ok(()) => reporter.report(&Event::StepFinished {
-                    step: step.id,
-                    outcome: StepOutcome::Ok,
-                    elapsed: t.elapsed(),
-                }),
-                Err(e) => {
-                    reporter.report(&Event::StepFinished {
-                        step: step.id,
-                        outcome: StepOutcome::Failed,
-                        elapsed: t.elapsed(),
-                    });
-                    return PipelineResult::Failed {
-                        rpm_name,
-                        reason: e,
-                    };
-                }
+            if let Err(reason) = result {
+                return PipelineResult::Failed { rpm_name, reason };
             }
+            step.finish(StepOutcome::Ok);
+        } else {
+            skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
         }
     }
 
@@ -1363,12 +1336,14 @@ fn run_package_inner(
         let need_service =
             need_spec || !checkout_dir.join("registry.tar.zst").exists() || service_lacks_manifest;
         if need_service {
-            let step = step_or_fail!(pkg_run, "service", rpm_name);
-            let t = Instant::now();
-            reporter.report(&Event::StepStarted {
-                step: step.id,
-                kind: StepKind::OscService,
-            });
+            let step = begin_or_fail!(
+                pkg_run,
+                reporter,
+                StepKind::OscService,
+                None,
+                &mut step_attempts,
+                rpm_name
+            );
 
             // Fix any broken workspace definitions in the tarball before vendoring
             if let Some(tarball) = find_tarball(&checkout_dir) {
@@ -1388,37 +1363,28 @@ fn run_package_inner(
                         .map_err(|e| e.to_string())
                 });
 
-            match result {
-                Ok(()) => {
-                    reporter.report(&Event::StepFinished {
-                        step: step.id,
-                        outcome: StepOutcome::Ok,
-                        elapsed: t.elapsed(),
-                    });
-                }
-                Err(e) => {
-                    reporter.report(&Event::StepFinished {
-                        step: step.id,
-                        outcome: StepOutcome::Failed,
-                        elapsed: t.elapsed(),
-                    });
-                    return PipelineResult::Failed {
-                        rpm_name,
-                        reason: e,
-                    };
-                }
+            if let Err(reason) = result {
+                return PipelineResult::Failed { rpm_name, reason };
             }
+            step.finish(StepOutcome::Ok);
+        } else {
+            skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
         }
+    }
+    if !is_rust && !is_maturin {
+        skip(reporter, StepKind::OscService, SkipReason::NotRust);
     }
 
     // ── Step: FetchSdist (extract for log analysis, if not done) ─────────────
     if !ws.sdist_extracted() {
-        let sdist_step = step_or_fail!(pkg_run, "sdist", rpm_name);
-        let t = Instant::now();
-        reporter.report(&Event::StepStarted {
-            step: sdist_step.id,
-            kind: StepKind::FetchSdist,
-        });
+        let sdist_step = begin_or_fail!(
+            pkg_run,
+            reporter,
+            StepKind::FetchSdist,
+            None,
+            &mut step_attempts,
+            rpm_name
+        );
 
         // Find tarball in checkout and extract to ws.sdist_dir()
         if let Some(tarball) = find_tarball(&checkout_dir) {
@@ -1434,11 +1400,13 @@ fn run_package_inner(
             }
         }
 
-        reporter.report(&Event::StepFinished {
-            step: sdist_step.id,
-            outcome: StepOutcome::Ok,
-            elapsed: t.elapsed(),
-        });
+        sdist_step.finish(StepOutcome::Ok);
+    } else {
+        skip(
+            reporter,
+            StepKind::FetchSdist,
+            SkipReason::Other("sdist already extracted".to_string()),
+        );
     }
 
     // ── Quilt setup: create source/ symlink ───────────────────────────────────
@@ -1516,6 +1484,9 @@ fn run_package_inner(
         );
 
     // ── Step: Review (freshly generated specs, or existing spec with no prior build) ──
+    if config.no_agent {
+        skip(reporter, StepKind::AgentTurn, SkipReason::NoAgent);
+    }
     if !config.no_agent && (need_spec || !build_log_nonempty) && !already_reviewed {
         let spec_before = std::fs::read_to_string(&spec_path).unwrap_or_default();
         // Full-checkout snapshot taken BEFORE the agent runs so a reject /
@@ -1553,6 +1524,7 @@ fn run_package_inner(
             reporter,
             &mut spent_usd,
             &mut session_id,
+            &mut step_attempts,
         );
 
         if let Ok((review_step, outcome)) = turn {
@@ -1647,6 +1619,7 @@ fn run_package_inner(
             reporter,
             &mut spent_usd,
             &mut session_id,
+            &mut step_attempts,
         );
 
         if let Ok((prefix_step, outcome)) = turn {
@@ -1698,13 +1671,16 @@ fn run_package_inner(
     }
 
     loop {
+        step_attempts.round += 1;
         // Step: ValidateSpec
-        let validate_step = step_or_fail!(pkg_run, "validate", rpm_name);
-        let t = Instant::now();
-        reporter.report(&Event::StepStarted {
-            step: validate_step.id,
-            kind: StepKind::ValidateSpec,
-        });
+        let validate_step = begin_or_fail!(
+            pkg_run,
+            reporter,
+            StepKind::ValidateSpec,
+            None,
+            &mut step_attempts,
+            rpm_name
+        );
 
         // Deterministic and idempotent, so safe to re-apply on every visit —
         // including a spec that already existed on disk and was never run
@@ -1753,11 +1729,7 @@ fn run_package_inner(
                     }
                 }
                 if !missing.is_empty() {
-                    reporter.report(&Event::StepFinished {
-                        step: validate_step.id,
-                        outcome: StepOutcome::Failed,
-                        elapsed: t.elapsed(),
-                    });
+                    let validate_step = validate_step.finish(StepOutcome::Failed);
                     reporter.report(&Event::SpecRejected {
                         step: validate_step.id,
                         reason: ap_core::event::SpecRejection::MissingSourceFiles {
@@ -1770,6 +1742,7 @@ fn run_package_inner(
                         || attempts >= config.max_attempts
                         || spent_usd >= config.budget_usd
                     {
+                        skip_agent(reporter, config, attempts, spent_usd);
                         return PipelineResult::Failed {
                             rpm_name,
                             reason: format!(
@@ -1805,7 +1778,7 @@ fn run_package_inner(
                     let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                     let turn = agent_turn(
                         TurnCtx {
-                            label: "agent",
+                            label: "fix-after-validation",
                             task: crate::agent::Task::FixAfterValidation,
                             event_task: ap_core::event::Task::FixAfterBuild {
                                 attempt: attempts as u32,
@@ -1826,6 +1799,7 @@ fn run_package_inner(
                         reporter,
                         &mut spent_usd,
                         &mut session_id,
+                        &mut step_attempts,
                     );
 
                     match turn {
@@ -1861,18 +1835,10 @@ fn run_package_inner(
                     continue;
                 }
 
-                reporter.report(&Event::StepFinished {
-                    step: validate_step.id,
-                    outcome: StepOutcome::Ok,
-                    elapsed: t.elapsed(),
-                });
+                validate_step.finish(StepOutcome::Ok);
             }
             Err(e) => {
-                reporter.report(&Event::StepFinished {
-                    step: validate_step.id,
-                    outcome: StepOutcome::Failed,
-                    elapsed: t.elapsed(),
-                });
+                let validate_step = validate_step.finish(StepOutcome::Failed);
                 write_or_warn(validate_step.file("rpmspec.stderr"), e.to_string());
                 write_or_warn(ws.rpmspec_log(), e.to_string());
                 reporter.report(&Event::SpecRejected {
@@ -1886,6 +1852,7 @@ fn run_package_inner(
                     || attempts >= config.max_attempts
                     || spent_usd >= config.budget_usd
                 {
+                    skip_agent(reporter, config, attempts, spent_usd);
                     return PipelineResult::Failed {
                         rpm_name,
                         reason: format!("spec invalid: {e}"),
@@ -1901,7 +1868,7 @@ fn run_package_inner(
                 let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                 let turn = agent_turn(
                     TurnCtx {
-                        label: "agent",
+                        label: "fix-after-validation",
                         task: crate::agent::Task::FixAfterValidation,
                         event_task: ap_core::event::Task::FixAfterBuild {
                             attempt: attempts as u32,
@@ -1922,6 +1889,7 @@ fn run_package_inner(
                     reporter,
                     &mut spent_usd,
                     &mut session_id,
+                    &mut step_attempts,
                 );
 
                 match turn {
@@ -1960,46 +1928,37 @@ fn run_package_inner(
 
         // Step: Commit
         {
-            let commit_step = step_or_fail!(pkg_run, "commit", rpm_name);
-            let t = Instant::now();
-            reporter.report(&Event::StepStarted {
-                step: commit_step.id,
-                kind: StepKind::Commit,
-            });
-            match osc::commit(
+            let commit_step = begin_or_fail!(
+                pkg_run,
+                reporter,
+                StepKind::Commit,
+                None,
+                &mut step_attempts,
+                rpm_name
+            );
+            if let Err(e) = osc::commit(
                 &checkout_dir,
                 "Automated packaging",
                 Emit::new(reporter, commit_step.id),
             ) {
-                Ok(()) => {
-                    reporter.report(&Event::StepFinished {
-                        step: commit_step.id,
-                        outcome: StepOutcome::Ok,
-                        elapsed: t.elapsed(),
-                    });
-                }
-                Err(e) => {
-                    reporter.report(&Event::StepFinished {
-                        step: commit_step.id,
-                        outcome: StepOutcome::Failed,
-                        elapsed: t.elapsed(),
-                    });
-                    return PipelineResult::Failed {
-                        rpm_name,
-                        reason: e.to_string(),
-                    };
-                }
+                return PipelineResult::Failed {
+                    rpm_name,
+                    reason: e.to_string(),
+                };
             }
+            commit_step.finish(StepOutcome::Ok);
         }
 
         // Step: Build (wait for OBS remote build, fetch log, download RPMs)
-        let build_step = step_or_fail!(pkg_run, "build", rpm_name);
+        let build_step = begin_or_fail!(
+            pkg_run,
+            reporter,
+            StepKind::Build,
+            None,
+            &mut step_attempts,
+            rpm_name
+        );
         let build_log = build_step.file("build.log");
-        let t = Instant::now();
-        reporter.report(&Event::StepStarted {
-            step: build_step.id,
-            kind: StepKind::Build,
-        });
 
         let build_result = osc::obs_build(
             &config.project,
@@ -2013,11 +1972,7 @@ fn run_package_inner(
 
         match build_result {
             Ok(()) => {
-                reporter.report(&Event::StepFinished {
-                    step: build_step.id,
-                    outcome: StepOutcome::Ok,
-                    elapsed: t.elapsed(),
-                });
+                let build_step = build_step.finish(StepOutcome::Ok);
                 let mut state = PkgState::load(&ws);
                 state.last_built_version = Some(config.version.clone());
                 state.last_outcome = Some("success".to_string());
@@ -2040,11 +1995,7 @@ fn run_package_inner(
                 names: deps,
                 detail,
             }) => {
-                reporter.report(&Event::StepFinished {
-                    step: build_step.id,
-                    outcome: StepOutcome::Failed,
-                    elapsed: t.elapsed(),
-                });
+                let build_step = build_step.finish(StepOutcome::Failed);
                 reporter.report(&Event::MissingPackages {
                     step: build_step.id,
                     names: deps.clone(),
@@ -2130,6 +2081,7 @@ fn run_package_inner(
                         reporter,
                         &mut spent_usd,
                         &mut session_id,
+                        &mut step_attempts,
                     );
                     if let Ok((_, outcome)) = turn {
                         translated = outcome.unresolvable_packages;
@@ -2201,24 +2153,17 @@ fn run_package_inner(
                 };
             }
             Err(osc::Error::NotActionable(msg)) => {
-                reporter.report(&Event::StepFinished {
-                    step: build_step.id,
-                    outcome: StepOutcome::Failed,
-                    elapsed: t.elapsed(),
-                });
+                build_step.finish(StepOutcome::Failed);
                 return PipelineResult::Failed {
                     rpm_name,
                     reason: msg,
                 };
             }
             Err(_) => {
-                reporter.report(&Event::StepFinished {
-                    step: build_step.id,
-                    outcome: StepOutcome::Failed,
-                    elapsed: t.elapsed(),
-                });
+                let build_step = build_step.finish(StepOutcome::Failed);
 
                 if config.no_agent {
+                    skip_agent(reporter, config, attempts, spent_usd);
                     return PipelineResult::Failed {
                         rpm_name,
                         reason: format!("build failed; log: {}", build_log.display()),
@@ -2228,6 +2173,7 @@ fn run_package_inner(
                 attempts += 1;
                 persist_attempts(&ws, &config.run_id, attempts);
                 if attempts > config.max_attempts || spent_usd >= config.budget_usd {
+                    skip_agent(reporter, config, attempts, spent_usd);
                     let why = if spent_usd >= config.budget_usd {
                         format!(
                             "budget exhausted (${:.2} spent of ${:.2})",
@@ -2261,7 +2207,7 @@ fn run_package_inner(
                 let checkout_snapshot = CheckoutSnapshot::take(&checkout_dir);
                 let turn = agent_turn(
                     TurnCtx {
-                        label: "agent",
+                        label: "fix-after-build",
                         task: crate::agent::Task::FixAfterBuild,
                         event_task: ap_core::event::Task::FixAfterBuild {
                             attempt: attempts as u32,
@@ -2282,6 +2228,7 @@ fn run_package_inner(
                     reporter,
                     &mut spent_usd,
                     &mut session_id,
+                    &mut step_attempts,
                 );
 
                 let (agent_step, outcome) = match turn {
@@ -2345,24 +2292,27 @@ fn run_package_inner(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-macro_rules! step_or_fail {
-    ($pkg_run:expr, $label:expr, $rpm_name:expr) => {
-        match $pkg_run.step($label) {
+/// `StepGuard::begin` for `run_package_inner`: a step directory that cannot be
+/// created fails the package.
+macro_rules! begin_or_fail {
+    ($pkg_run:expr, $reporter:expr, $kind:expr, $detail:expr, $attempts:expr, $rpm_name:expr) => {
+        match StepGuard::begin($pkg_run, $reporter, $kind, $detail, $attempts) {
             Ok(s) => s,
             Err(e) => {
                 return PipelineResult::Failed {
                     rpm_name: $rpm_name,
                     reason: e.to_string(),
-                }
+                };
             }
         }
     };
 }
-use step_or_fail;
+use begin_or_fail;
 
 /// What one agent turn needs beyond [`PipelineConfig`].
 struct TurnCtx<'a> {
-    /// Step-directory label, e.g. `"review"` or `"agent"`.
+    /// Names the turn: the step directory is `NN-agent-<label>` and the label
+    /// is the `StepStarted` detail, e.g. `"review"` or `"fix-after-build"`.
     label: &'a str,
     task: crate::agent::Task,
     event_task: ap_core::event::Task,
@@ -2430,6 +2380,21 @@ fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64) -> String {
     format!("agent error: {e}")
 }
 
+/// Report why no further agent turn will run for this package.
+fn skip_agent(reporter: &dyn Reporter, config: &PipelineConfig, attempts: usize, spent_usd: f64) {
+    let reason = if config.no_agent {
+        SkipReason::NoAgent
+    } else if spent_usd >= config.budget_usd {
+        SkipReason::BudgetExhausted
+    } else {
+        SkipReason::Other(format!(
+            "attempt limit reached ({attempts} of {})",
+            config.max_attempts
+        ))
+    };
+    skip(reporter, StepKind::AgentTurn, reason);
+}
+
 /// Run one agent turn and emit every event it produces.
 ///
 /// Allocates the step directory, writes `prompt.md`, `output.md`,
@@ -2445,13 +2410,16 @@ fn agent_turn(
     reporter: &dyn Reporter,
     spent_usd: &mut f64,
     session_id: &mut Option<String>,
+    step_attempts: &mut Attempts,
 ) -> Result<(StepDir, crate::agent::TurnOutcome), String> {
-    let step = pkg_run.step(ctx.label).map_err(|e| e.to_string())?;
-    let t = Instant::now();
-    reporter.report(&Event::StepStarted {
-        step: step.id,
-        kind: StepKind::AgentTurn,
-    });
+    let step = StepGuard::begin(
+        pkg_run,
+        reporter,
+        StepKind::AgentTurn,
+        Some(ctx.label),
+        step_attempts,
+    )
+    .map_err(|e| e.to_string())?;
 
     if let Some(hint) = ctx.hint {
         let extract = hint.to_event_extract();
@@ -2600,11 +2568,7 @@ fn agent_turn(
                     });
                 }
             }
-            reporter.report(&Event::StepFinished {
-                step: step.id,
-                outcome: StepOutcome::Failed,
-                elapsed: t.elapsed(),
-            });
+            let step = step.finish(StepOutcome::Failed);
             let message = friendly_agent_error(&e, config.budget_usd);
             reporter.report(&Event::Warning {
                 step: Some(step.id),
@@ -2694,11 +2658,7 @@ fn agent_turn(
         artifact: response_path,
     });
 
-    reporter.report(&Event::StepFinished {
-        step: step.id,
-        outcome: StepOutcome::Ok,
-        elapsed: t.elapsed(),
-    });
+    let step = step.finish(StepOutcome::Ok);
 
     Ok((step, outcome))
 }
@@ -6551,5 +6511,77 @@ Patch0:         0001-fix.patch
 Sourceforge is not a tag\n\
 Source:         %{undefined_macro}\n";
         assert!(missing_source_files(spec, dir.path()).is_empty());
+    }
+
+    /// Records every event so a test can pair `StepStarted` with `StepFinished`.
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<Event>>);
+
+    impl Reporter for Recorder {
+        fn report(&self, event: &Event) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    /// Every started step must end, whichever path leaves the pipeline.
+    fn assert_steps_balanced(events: &[Event]) {
+        let mut open = std::collections::HashSet::new();
+        for event in events {
+            match event {
+                Event::StepStarted { step, .. } => assert!(open.insert(step.0)),
+                Event::StepFinished { step, .. } => assert!(open.remove(&step.0)),
+                _ => {}
+            }
+        }
+        assert!(open.is_empty(), "steps never finished: {open:?}");
+    }
+
+    #[test]
+    fn a_failed_checkout_still_finishes_its_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work_dir = tmp.path().to_path_buf();
+        // A space is not a valid OBS name, so `osc::ensure_package` refuses it
+        // before running anything.
+        let config = PipelineConfig {
+            pkg_name: "foo".into(),
+            rpm_name: "python-foo".into(),
+            version: "1.0".into(),
+            project: "bad project".into(),
+            work_dir: work_dir.clone(),
+            state_root: work_dir.join("state"),
+            rpms_dir: work_dir.join("rpms"),
+            distro: "openSUSE_Tumbleweed".into(),
+            arch: "x86_64".into(),
+            max_attempts: 1,
+            budget_usd: 1.0,
+            agent_backend: AgentBackend::Cli,
+            no_agent: true,
+            force: false,
+            regen: false,
+            source_repo: None,
+            subprojects: Vec::new(),
+            failed_deps: Vec::new(),
+            unbuildable_deps: Vec::new(),
+            run_id: "test".into(),
+            source_urls: Default::default(),
+            python_flavors: Default::default(),
+        };
+        let run = ap_core::run::RunDir::allocate(&work_dir).unwrap();
+        let pkg_run = run.pkg("python-foo");
+        let recorder = Recorder::default();
+
+        let result = run_package_inner(&config, &pkg_run, &recorder);
+
+        assert!(matches!(result, PipelineResult::Failed { .. }));
+        let events = recorder.0.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::StepStarted {
+                kind: StepKind::Checkout,
+                attempt: 1,
+                ..
+            }
+        )));
+        assert_steps_balanced(&events);
     }
 }

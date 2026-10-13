@@ -38,66 +38,62 @@ pub struct Usage {
     pub cost_usd: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Variants are in canonical pipeline order; `STEPS` in `step.rs` is indexed
+/// by discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StepKind {
-    Resolve,
-    SelectTarget,
     Checkout,
-    Commit,
     OscService,
-    FetchSdist,
-    InspectSdist,
     GenerateSpec,
+    FetchSdist,
     ValidateSpec,
+    Commit,
     Build,
     ExtractFailure,
     AgentTurn,
-    ApplyAndValidate,
     PackageNotes,
 }
 
 impl std::fmt::Display for StepKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            StepKind::Resolve => "Resolve",
-            StepKind::SelectTarget => "SelectTarget",
-            StepKind::Checkout => "Checkout",
-            StepKind::Commit => "Commit",
-            StepKind::OscService => "OscService",
-            StepKind::FetchSdist => "FetchSdist",
-            StepKind::InspectSdist => "InspectSdist",
-            StepKind::GenerateSpec => "GenerateSpec",
-            StepKind::ValidateSpec => "ValidateSpec",
-            StepKind::Build => "Build",
-            StepKind::ExtractFailure => "ExtractFailure",
-            StepKind::AgentTurn => "AgentTurn",
-            StepKind::ApplyAndValidate => "ApplyAndValidate",
-            StepKind::PackageNotes => "PackageNotes",
-        };
-        write!(f, "{s}")
+        f.write_str(self.spec().label)
     }
 }
 
 impl StepKind {
-    /// Human-readable label for display to end users (TUI, human-formatted
-    /// logs). Unlike `Display` — which prints the bare variant name and is
-    /// relied on for terse/greppable output — this reads as prose.
+    /// Human-readable label for display to end users (TUI, text logs).
     pub fn label(&self) -> &'static str {
+        self.spec().label
+    }
+}
+
+fn default_attempt() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkipReason {
+    NotRust,
+    ServiceUpToDate,
+    SpecExists,
+    NoFailure,
+    NoAgent,
+    BudgetExhausted,
+    Disabled,
+    Other(String),
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StepKind::Resolve => "Resolving dependencies",
-            StepKind::SelectTarget => "Selecting build target",
-            StepKind::Checkout => "Checking out package",
-            StepKind::Commit => "Committing changes",
-            StepKind::OscService => "Running OBS source service",
-            StepKind::FetchSdist => "Fetching sdist",
-            StepKind::InspectSdist => "Inspecting sdist",
-            StepKind::GenerateSpec => "Generating spec",
-            StepKind::ValidateSpec => "Validating spec",
-            StepKind::Build => "Building on OBS",
-            StepKind::ExtractFailure => "Extracting failure",
-            StepKind::AgentTurn => "Agent turn",
-            StepKind::ApplyAndValidate => "Applying fix & validating",
-            StepKind::PackageNotes => "Updating package notes",
+            SkipReason::NotRust => f.write_str("not a Rust package"),
+            SkipReason::ServiceUpToDate => f.write_str("source service output is up to date"),
+            SkipReason::SpecExists => f.write_str("spec already exists"),
+            SkipReason::NoFailure => f.write_str("no failure to analyze"),
+            SkipReason::NoAgent => f.write_str("agent disabled (--no-agent)"),
+            SkipReason::BudgetExhausted => f.write_str("budget exhausted"),
+            SkipReason::Disabled => f.write_str("disabled"),
+            SkipReason::Other(why) => f.write_str(why),
         }
     }
 }
@@ -253,6 +249,20 @@ pub enum Event {
     StepStarted {
         step: StepId,
         kind: StepKind,
+        /// 1-based count of this kind's starts within the package run.
+        #[serde(default = "default_attempt")]
+        attempt: u32,
+        /// Iteration of the outer validate/build loop.
+        #[serde(default)]
+        round: u32,
+        /// Per-call qualifier, e.g. which agent task a turn is for.
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    /// A conditional step that did not start, so there is no `StepId`.
+    StepSkipped {
+        kind: StepKind,
+        reason: SkipReason,
     },
     StepFinished {
         step: StepId,
