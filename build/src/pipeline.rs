@@ -116,8 +116,17 @@ pub enum PipelineResult {
 
 // ── durable package state ─────────────────────────────────────────────────────
 
+/// The policy the pipeline enforces (conventions, proprietary-dependency rules,
+/// package-notes rules). Bump it when a policy changes: every package whose
+/// recorded policy is older is checked again on its next run, even if it built
+/// successfully before.
+pub const POLICY_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PkgState {
+    /// The `POLICY_VERSION` the last successful build was checked against.
+    #[serde(default)]
+    pub policy_version: u32,
     pub last_built_version: Option<String>,
     pub last_outcome: Option<String>,
     /// One-line reason recorded for the most recent unsuccessful outcome
@@ -277,6 +286,12 @@ impl PkgState {
     pub fn is_built(&self, version: &str) -> bool {
         self.last_built_version.as_deref() == Some(version)
             && self.last_outcome.as_deref() == Some("success")
+            && self.policy_current()
+    }
+
+    /// Whether the last success was checked against the current policy.
+    pub fn policy_current(&self) -> bool {
+        self.policy_version >= POLICY_VERSION
     }
 
     pub fn is_reviewed(&self, version: &str, spec_content: &str) -> bool {
@@ -1145,8 +1160,15 @@ fn preflight<'a>(
         }
     };
 
-    if !config.force && PkgState::load(&ws).is_built(&config.version) {
+    let prior = PkgState::load(&ws);
+    if !config.force && prior.is_built(&config.version) {
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
+    }
+    if prior.last_outcome.as_deref() == Some("success") && !prior.policy_current() {
+        let mut stale = prior;
+        stale.reviewed_version = None;
+        stale.reviewed_spec_hash = None;
+        save_state(&stale, &ws, reporter);
     }
 
     let checkout_dir = config.work_dir.join(&config.project).join(&rpm_name);
@@ -1277,8 +1299,10 @@ fn checkout_stage(
         && !has_local_changes
         && !spec_version_differs(spec_path, &config.version)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
+        && PkgState::load(ws).policy_current()
     {
         let mut state = PkgState::load(ws);
+        state.policy_version = POLICY_VERSION;
         state.last_built_version = Some(config.version.clone());
         state.last_outcome = Some("success".to_string());
         state.last_failure_reason = None;
@@ -2263,6 +2287,7 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
     st.step_attempts
         .skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
     let mut state = PkgState::load(ws);
+    state.policy_version = POLICY_VERSION;
     state.last_built_version = Some(config.version.clone());
     state.last_outcome = Some("success".to_string());
     state.last_failure_reason = None;
@@ -6366,6 +6391,7 @@ mod tests {
     #[test]
     fn only_success_is_a_built_state() {
         let make = |outcome: &str| PkgState {
+            policy_version: POLICY_VERSION,
             last_built_version: Some("1.0".into()),
             last_outcome: Some(outcome.into()),
             last_failure_reason: None,
@@ -7048,5 +7074,23 @@ mod prompt_notes_tests {
         assert!(cut.starts_with("(earlier entries omitted)\n"));
         assert!(cut.trim_end().ends_with("line 3999"));
         assert!(!cut.contains("line 0\n"));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn a_success_under_an_older_policy_is_not_built() {
+        let mut st = PkgState {
+            last_built_version: Some("1.0".into()),
+            last_outcome: Some("success".into()),
+            policy_version: POLICY_VERSION - 1,
+            ..Default::default()
+        };
+        assert!(!st.is_built("1.0"), "stale policy must not count as built");
+        st.policy_version = POLICY_VERSION;
+        assert!(st.is_built("1.0"));
     }
 }
