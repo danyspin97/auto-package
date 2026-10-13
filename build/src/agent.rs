@@ -2504,6 +2504,9 @@ pub enum Error {
         message: String,
         stdout: String,
         prompt: String,
+        /// What the cut-off turn still cost. The budget cap is only enforced if
+        /// the caller charges this, so it is kept rather than dropped.
+        usage: Usage,
     },
 
     #[error("unexpected response: {message}")]
@@ -2550,6 +2553,15 @@ impl Error {
     pub fn ended_early_subtype(&self) -> Option<&str> {
         match self {
             Error::EndedEarly { subtype, .. } => Some(subtype),
+            _ => None,
+        }
+    }
+
+    /// What an ended-early turn cost before it was cut off, so the caller can
+    /// charge it against the package budget.
+    pub fn usage(&self) -> Option<&Usage> {
+        match self {
+            Error::EndedEarly { usage, .. } => Some(usage),
             _ => None,
         }
     }
@@ -3253,6 +3265,12 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     message: signal.message,
                     stdout: stdout_raw,
                     prompt: prompt.clone(),
+                    usage: Usage {
+                        input_tokens: result_event.usage.input_tokens,
+                        output_tokens: result_event.usage.output_tokens,
+                        cli_cost_usd: result_event.total_cost_usd,
+                        ..Usage::default()
+                    },
                 });
             }
             return Err(if !status.success() {
@@ -4470,6 +4488,7 @@ mod tests {
             message: "Reached maximum budget ($0.03)".to_string(),
             stdout: String::new(),
             prompt: String::new(),
+            usage: Usage::default(),
         };
         assert!(e.is_budget_exhausted());
         assert_eq!(e.ended_early_subtype(), Some("error_max_budget_usd"));
@@ -4483,6 +4502,7 @@ mod tests {
             message: "rate limited".to_string(),
             stdout: String::new(),
             prompt: String::new(),
+            usage: Usage::default(),
         };
         assert!(!not_budget.is_budget_exhausted());
 

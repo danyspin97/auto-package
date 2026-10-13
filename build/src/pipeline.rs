@@ -2497,10 +2497,10 @@ fn agent_turn(
         on_tool_use: Some(&on_tool_use),
     };
 
-    // A 429 is the provider's quota, not this package's fault, and it clears
-    // on its own: wait it out (30s, 1m, 2m, 4m) before spending one of the
-    // package's attempts — failing here made a burst of parallel packages all
-    // give up at once and get permanently excluded.
+    // A 429 is the provider's quota, not this package's fault. Re-issue the
+    // turn on the next model in the rotation (each model has its own quota)
+    // before spending one of the package's attempts, so a burst of parallel
+    // packages does not all give up at once.
     let mut rate_limit_retries = 0u32;
     let turn_result = loop {
         // The quota is shared by every package running in parallel: when any
@@ -2553,6 +2553,9 @@ fn agent_turn(
     let outcome = match turn_result {
         Ok(o) => o,
         Err(e) => {
+            if let Some(usage) = e.usage() {
+                *spent_usd += usage.cost_usd();
+            }
             // Any of these failing is otherwise a dead end: nothing below
             // this point runs, so without this the prompt, stdout and stderr
             // all vanish the moment this process exits and the failure
