@@ -4559,7 +4559,10 @@ fn generate_multi_flavor_wheel_spec(
     spec_path: &Path,
     step: &StepDir,
 ) -> Option<Result<(GenSpecResult, ap_ecosystem::pypi::WheelFile), GenSpecError>> {
-    let flavors = config.python_flavors.effective();
+    let flavors = match config.python_flavors.try_effective() {
+        Ok(flavors) => flavors,
+        Err(e) => return Some(Err(GenSpecError::Other(e))),
+    };
     if flavors.len() < 2 {
         return None;
     }

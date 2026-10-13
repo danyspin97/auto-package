@@ -1754,11 +1754,18 @@ pub fn get_project_build_statuses(
         enc(repo),
         enc(arch)
     )) {
-        let statuses: HashMap<String, BuildStatus> = obs_status::parse_results(&xml)
-            .into_iter()
-            .filter(|e| e.repo == repo && e.arch == arch)
-            .map(|e| (e.pkg.to_lowercase(), obs_status::resolve_lenient(&e)))
-            .collect();
+        let statuses: HashMap<String, BuildStatus> = match obs_status::try_parse_results(&xml) {
+            Ok(entries) => entries
+                .into_iter()
+                .filter(|e| e.repo == repo && e.arch == arch)
+                .map(|e| (e.pkg.to_lowercase(), obs_status::resolve_lenient(&e)))
+                .collect(),
+            Err(e) => {
+                // A cut-off listing must not read as a partial set of statuses.
+                ap_core::diag!("  cannot read the OBS results listing: {e}");
+                HashMap::new()
+            }
+        };
         if !statuses.is_empty() {
             return statuses;
         }
