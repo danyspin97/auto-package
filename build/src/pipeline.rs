@@ -983,12 +983,32 @@ fn package_notes_step(
     });
 }
 
+/// Reject a name that is about to be joined into a filesystem path as a single
+/// component: it must be non-empty, must not contain `/` or `..`, and must not
+/// start with `.` (which covers `.` and hidden directories).
+fn validate_path_component(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if value.contains('/') || value.contains("..") || value.starts_with('.') {
+        return Err(format!(
+            "{label} {value:?} is not a safe path component (no '/', '..', or leading '.')"
+        ));
+    }
+    Ok(())
+}
+
 fn run_package_inner(
     config: &PipelineConfig,
     pkg_run: &PkgRunDir,
     reporter: &dyn Reporter,
 ) -> PipelineResult {
     let rpm_name = config.rpm_name.clone();
+    if let Err(reason) = validate_path_component("package name", &rpm_name)
+        .and_then(|()| validate_path_component("project", &config.project))
+    {
+        return PipelineResult::Failed { rpm_name, reason };
+    }
     let ws = match Workspace::open(&config.state_root, &rpm_name) {
         Ok(w) => w,
         Err(e) => {
@@ -4112,6 +4132,11 @@ fn add_notes_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
 fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
     let mut st = PkgState::load(ws);
     st.cumulative_attempts = attempts;
+    // Stamping this run's id onto a spend recorded under another run would
+    // make that run's dollars count against this one. Reset it first.
+    if st.cumulative_spent_run_id.as_deref() != Some(run_id) {
+        st.cumulative_spent_usd = 0.0;
+    }
     st.cumulative_spent_run_id = Some(run_id.to_string());
     if let Err(e) = st.save(ws) {
         ap_core::diag!("  cannot save the attempt count: {e}");
@@ -5573,6 +5598,22 @@ fn verify_repo_exists(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_path_component_rejects_unsafe_names() {
+        for bad in ["", ".", "..", "a/b", "../etc", ".hidden", "x..y", "/abs"] {
+            assert!(
+                validate_path_component("name", bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        for good in ["python-requests", "openSUSE:Factory", "home:user_1.2"] {
+            assert!(
+                validate_path_component("name", good).is_ok(),
+                "{good:?} should be accepted"
+            );
+        }
+    }
 
     #[test]
     fn pkg_state_survives_a_round_trip_and_leaves_no_temp_file() {
