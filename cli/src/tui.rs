@@ -248,7 +248,8 @@ impl PkgStatus {
 /// seen both as `No space left on device` and, inside some tools' own
 /// wrapping, lowercased.
 fn looks_like_disk_full(text: &str) -> bool {
-    text.to_ascii_lowercase().contains("no space left on device")
+    text.to_ascii_lowercase()
+        .contains("no space left on device")
 }
 
 /// What kind of thing an [`ActivityEntry`] records — lets the Agent Activity
@@ -1272,7 +1273,13 @@ fn render_detail(
     f.render_widget(activity, chunks[1]);
 }
 
-fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rect, retryable: bool) {
+fn render_footer(
+    f: &mut Frame,
+    state: &TuiState,
+    input: Option<&str>,
+    area: Rect,
+    retryable: bool,
+) {
     if let Some(buf) = input {
         let line = Line::from(vec![
             Span::styled(
@@ -1300,7 +1307,11 @@ fn render_footer(f: &mut Frame, state: &TuiState, input: Option<&str>, area: Rec
     let hint = Span::styled(
         format!(
             "  ↑/↓ select │ PgUp/PgDn/End scroll log │ n add package{} │ a {} succeeded │ q/Esc quit",
-            if retryable { " │ r retry (no space left)" } else { "" },
+            if retryable {
+                " │ r retry (no space left)"
+            } else {
+                ""
+            },
             if state.show_all { "hide" } else { "show" }
         ),
         Style::default().fg(Color::DarkGray),
