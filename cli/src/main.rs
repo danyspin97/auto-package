@@ -1325,6 +1325,20 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     })
 }
 
+/// The version a package was last built at here, when its last outcome was a
+/// success. Read from its state file, so it does not depend on OBS indexing.
+fn built_locally(state_root: &Path, rpm_name: &str) -> Option<String> {
+    let path = state_root
+        .join(ap_core::run::sanitize_name(rpm_name))
+        .join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    if state["last_outcome"].as_str() != Some("success") {
+        return None;
+    }
+    state["last_built_version"].as_str().map(str::to_string)
+}
+
 /// The outcome a finished package reports, shared by every build path.
 fn package_outcome(result: &PipelineResult) -> PackageOutcome {
     match result {
@@ -1730,6 +1744,20 @@ fn cmd_build(
                         .strip_prefix("python-")
                         .unwrap_or(&rpm_name)
                         .to_string()
+                })
+                .filter(|dep| {
+                    // A dependency we already built here is available, even while
+                    // OBS has not indexed it yet. Its version is logged so a bound
+                    // it does not meet is still visible.
+                    match built_locally(state_root, &ap_build::osc::rpm_name(dep)) {
+                        Some(version) => {
+                            ap_core::diag!(
+                                "dep queue: dropping {dep} (already built locally at {version})"
+                            );
+                            false
+                        }
+                        None => true,
+                    }
                 })
                 .filter(|dep| {
                     // Some PyPI packages (`ninja`, reported by an agent per
@@ -2702,5 +2730,33 @@ mod tests {
             repo_package_name("https://gitlab.com/group/sub/thing"),
             "thing"
         );
+    }
+}
+
+#[cfg(test)]
+mod built_locally_tests {
+    use super::built_locally;
+
+    #[test]
+    fn only_a_successful_local_build_counts_as_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("python-cuda-bindings");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("state.json"),
+            r#"{"last_outcome":"success","last_built_version":"13.4.3"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            built_locally(dir.path(), "python-cuda-bindings").as_deref(),
+            Some("13.4.3")
+        );
+        assert_eq!(built_locally(dir.path(), "python-missing"), None);
+        std::fs::write(
+            pkg.join("state.json"),
+            r#"{"last_outcome":"missing_deps","last_built_version":"13.4.3"}"#,
+        )
+        .unwrap();
+        assert_eq!(built_locally(dir.path(), "python-cuda-bindings"), None);
     }
 }

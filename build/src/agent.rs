@@ -2317,6 +2317,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `cuda-bindings`, which wraps the CUDA driver API) is still a normal Python
    dependency here: keep it as `Requires` and `BuildRequires` as far as it is
    needed to build and import the package.
+   Before you report a dependency as missing, check whether this project
+   already builds it: the `python-<name>` package with a successful build in
+   the work directory's state is available even if the distro repository has
+   not indexed it yet. Report only a version that is wrong, and say which.
    Split a subpackage only when a part of the package needs something the rest
    does not, such as an optional GPU backend (see convention 53). Do not split
    a package just because one dependency is hard to satisfy.
