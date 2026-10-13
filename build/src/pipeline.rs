@@ -444,7 +444,7 @@ pub fn select_target(
             join_or_warn(statuses_handle, "statuses"),
         )
     });
-    let nodes = nodes.map_err(|e| format!("resolve failed: {e}"))?;
+    let nodes = nodes.map_err(|e| format!("resolve failed for {name}: {e}"))?;
 
     let total = nodes.len();
 
@@ -937,11 +937,11 @@ pub fn run_package(
     if let Some((outcome, reason)) = outcome
         && let Some(ws) = &ws
     {
-        let mut state = PkgState::load(&ws);
+        let mut state = PkgState::load(ws);
         state.last_built_version = Some(config.version.clone());
         state.last_outcome = Some(outcome.to_string());
         state.last_failure_reason = Some(reason);
-        save_state(&state, &ws, reporter);
+        save_state(&state, ws, reporter);
     }
     result
 }
@@ -1310,7 +1310,7 @@ fn run_package_inner(
 
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
-                .map_err(|e| format!("writing _service failed: {e}"))
+                .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
                 .and_then(|()| {
                     osc::run_service(&checkout_dir, Emit::new(reporter, step.id))
                         .map_err(|e| e.to_string())
@@ -1364,14 +1364,14 @@ fn run_package_inner(
                 warn_if_err(
                     reporter,
                     "fixing the cargo workspace in the tarball",
-                    fix_cargo_workspace_in_tarball(&tarball),
+                    fix_cargo_workspace_in_tarball(&tarball, &config.pkg_name),
                 );
             }
 
             let normalized = config.pkg_name.replace('-', "_").to_lowercase();
             let service_xml = render_maturin_service_file(&normalized, &extra_manifests);
             let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
-                .map_err(|e| format!("writing _service failed: {e}"))
+                .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
                 .and_then(|()| {
                     osc::run_service(&checkout_dir, Emit::new(reporter, step.id))
                         .map_err(|e| e.to_string())
@@ -1540,10 +1540,12 @@ fn run_package_inner(
                     None
                 },
             },
-            config,
-            &ws,
-            pkg_run,
-            reporter,
+            TurnEnv {
+                config,
+                ws: &ws,
+                pkg_run,
+                reporter,
+            },
             &mut spent_usd,
             &mut session_id,
             &mut step_attempts,
@@ -1635,10 +1637,12 @@ fn run_package_inner(
                     None
                 },
             },
-            config,
-            &ws,
-            pkg_run,
-            reporter,
+            TurnEnv {
+                config,
+                ws: &ws,
+                pkg_run,
+                reporter,
+            },
             &mut spent_usd,
             &mut session_id,
             &mut step_attempts,
@@ -1815,10 +1819,12 @@ fn run_package_inner(
                             resume: true,
                             context: Some(&context),
                         },
-                        config,
-                        &ws,
-                        pkg_run,
-                        reporter,
+                        TurnEnv {
+                            config,
+                            ws: &ws,
+                            pkg_run,
+                            reporter,
+                        },
                         &mut spent_usd,
                         &mut session_id,
                         &mut step_attempts,
@@ -1905,10 +1911,12 @@ fn run_package_inner(
                         resume: true,
                         context: None,
                     },
-                    config,
-                    &ws,
-                    pkg_run,
-                    reporter,
+                    TurnEnv {
+                        config,
+                        ws: &ws,
+                        pkg_run,
+                        reporter,
+                    },
                     &mut spent_usd,
                     &mut session_id,
                     &mut step_attempts,
@@ -2098,10 +2106,12 @@ fn run_package_inner(
                             resume: false,
                             context: None,
                         },
-                        config,
-                        &ws,
-                        pkg_run,
-                        reporter,
+                        TurnEnv {
+                            config,
+                            ws: &ws,
+                            pkg_run,
+                            reporter,
+                        },
                         &mut spent_usd,
                         &mut session_id,
                         &mut step_attempts,
@@ -2251,10 +2261,12 @@ fn run_package_inner(
                         resume: true,
                         context: None,
                     },
-                    config,
-                    &ws,
-                    pkg_run,
-                    reporter,
+                    TurnEnv {
+                        config,
+                        ws: &ws,
+                        pkg_run,
+                        reporter,
+                    },
                     &mut spent_usd,
                     &mut session_id,
                     &mut step_attempts,
@@ -2338,6 +2350,14 @@ macro_rules! begin_or_fail {
 }
 use begin_or_fail;
 
+/// The shared run environment an agent turn works in.
+struct TurnEnv<'a> {
+    config: &'a PipelineConfig,
+    ws: &'a Workspace,
+    pkg_run: &'a PkgRunDir,
+    reporter: &'a dyn Reporter,
+}
+
 /// What one agent turn needs beyond [`PipelineConfig`].
 struct TurnCtx<'a> {
     /// Names the turn: the step directory is `NN-agent-<label>` and the label
@@ -2379,7 +2399,7 @@ struct TurnCtx<'a> {
 /// ended turn with error_max_budget_usd: Reached maximum budget ($0.03))"`
 /// — two different dollar figures with no indication that $2.00 is the
 /// per-package cap and $0.03 is the per-turn remainder.
-fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64) -> String {
+fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64, pkg_name: &str) -> String {
     if e.is_budget_exhausted() {
         let detail = e.ended_early_message().unwrap_or("budget exhausted");
         return format!(
@@ -2406,7 +2426,7 @@ fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64) -> String {
              step dir (crash-prompt.md, crash-stdout.log)."
         );
     }
-    format!("agent error: {e}")
+    format!("agent error for {pkg_name}: {e}")
 }
 
 /// Report why no further agent turn will run for this package.
@@ -2439,14 +2459,17 @@ fn skip_agent(
 /// failed and the error returned; the caller decides whether that is fatal.
 fn agent_turn(
     ctx: TurnCtx<'_>,
-    config: &PipelineConfig,
-    ws: &Workspace,
-    pkg_run: &PkgRunDir,
-    reporter: &dyn Reporter,
+    env: TurnEnv<'_>,
     spent_usd: &mut f64,
     session_id: &mut Option<String>,
     step_attempts: &mut Attempts,
 ) -> Result<(StepDir, crate::agent::TurnOutcome), String> {
+    let TurnEnv {
+        config,
+        ws,
+        pkg_run,
+        reporter,
+    } = env;
     let step = StepGuard::begin(
         pkg_run,
         reporter,
@@ -2607,7 +2630,7 @@ fn agent_turn(
                 }
             }
             let step = step.finish(StepOutcome::Failed);
-            let message = friendly_agent_error(&e, config.budget_usd);
+            let message = friendly_agent_error(&e, config.budget_usd, &config.pkg_name);
             reporter.report(&Event::Warning {
                 step: Some(step.id),
                 message: message.clone(),
@@ -3605,7 +3628,10 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
             .current_dir(&root)
             .stdin(std::process::Stdio::null())
             .output()
-            .map_err(|e| format!("could not run patch: {e}"))?;
+            .map_err(|e| {
+                let spec = spec_path.file_name().unwrap_or_default().to_string_lossy();
+                format!("could not run patch for {name} ({spec}): {e}")
+            })?;
         if !out.status.success() {
             let detail = String::from_utf8_lossy(&out.stdout).to_string()
                 + &String::from_utf8_lossy(&out.stderr);
@@ -3712,12 +3738,18 @@ fn generate_spec(
     use ap_ecosystem::sdist;
 
     let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
-    let json = crate::http::read_text(
-        crate::http::get(&pypi_url)
-            .call()
-            .map_err(|e| GenSpecError::Other(format!("PyPI fetch failed: {e}")))?,
-    )
-    .map_err(|e| GenSpecError::Other(format!("PyPI read failed: {e}")))?;
+    let json = crate::http::read_text(crate::http::get(&pypi_url).call().map_err(|e| {
+        GenSpecError::Other(format!(
+            "PyPI fetch failed for {} {}: {e}",
+            config.pkg_name, config.version
+        ))
+    })?)
+    .map_err(|e| {
+        GenSpecError::Other(format!(
+            "PyPI read failed for {} {}: {e}",
+            config.pkg_name, config.version
+        ))
+    })?;
     let release = match pypi::parse_release(&json) {
         Ok(r) => r,
         Err(pypi::Error::NoSdist { .. }) => {
@@ -3801,10 +3833,12 @@ fn generate_spec(
     };
 
     // Download tarball to checkout dir.
-    let tarball = release
-        .sdist
-        .fetch(checkout_dir)
-        .map_err(|e| GenSpecError::Other(format!("tarball download failed: {e}")))?;
+    let tarball = release.sdist.fetch(checkout_dir).map_err(|e| {
+        GenSpecError::Other(format!(
+            "tarball download failed for {}: {e}",
+            release.sdist.url
+        ))
+    })?;
 
     // Inspect sdist for build system info and top-level dir.
     let sdist_info = sdist::inspect(&tarball)
@@ -4429,12 +4463,18 @@ fn try_wheel_fallback(
     step: &StepDir,
 ) -> Result<ap_ecosystem::pypi::WheelFile, String> {
     let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
-    let json = crate::http::read_text(
-        crate::http::get(&pypi_url)
-            .call()
-            .map_err(|e| format!("PyPI fetch failed: {e}"))?,
-    )
-    .map_err(|e| format!("PyPI read failed: {e}"))?;
+    let json = crate::http::read_text(crate::http::get(&pypi_url).call().map_err(|e| {
+        format!(
+            "PyPI fetch failed for {} {}: {e}",
+            config.pkg_name, config.version
+        )
+    })?)
+    .map_err(|e| {
+        format!(
+            "PyPI read failed for {} {}: {e}",
+            config.pkg_name, config.version
+        )
+    })?;
     let wheel = match ap_ecosystem::pypi::pick_wheel_from_json(
         &json,
         &config.arch,
@@ -4682,6 +4722,12 @@ fn generate_multi_flavor_wheel_spec(
                 crate::spec::prebuilt_wheel_rpmlintrc(header_dirs),
             );
         }
+        let first_wheel = picked.into_iter().next().map(|(_, w)| w).ok_or_else(|| {
+            GenSpecError::Other(format!(
+                "no wheel picked for any flavor of {}",
+                config.pkg_name
+            ))
+        })?;
         Ok((
             GenSpecResult {
                 sdist_top_level: String::new(),
@@ -4689,11 +4735,7 @@ fn generate_multi_flavor_wheel_spec(
                 is_rust: false,
                 from_repo_archive: false,
             },
-            picked
-                .into_iter()
-                .next()
-                .map(|(_, w)| w)
-                .expect("two flavors"),
+            first_wheel,
         ))
     })())
 }
@@ -5060,7 +5102,7 @@ fn append_notes(notes_path: PathBuf, section: &str) {
 /// * **Audit trail**. When any member is removed, a `cargo-workspace-fix.
 ///   txt` is written alongside the tarball naming each removed member;
 ///   that file lands in the OBS commit so the reviewer sees what changed.
-fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), String> {
+fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> Result<(), String> {
     // Extract to temp directory
     let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let extract_dir = temp_dir.path();
@@ -5116,7 +5158,12 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
         // `vendor/foo-*`); `member_resolves` understands both so a glob
         // whose parent dir has at least one match stays in instead of
         // being stripped as if the literal path `crates/*` were missing.
-        let base_dir = cargo_toml_path.parent().unwrap();
+        let base_dir = cargo_toml_path.parent().ok_or_else(|| {
+            format!(
+                "Cargo.toml in the {pkg_name} tarball has no parent directory: {}",
+                cargo_toml_path.display()
+            )
+        })?;
         let mut existing_members = Vec::new();
         let mut removed_members = Vec::new();
 

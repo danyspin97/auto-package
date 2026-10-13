@@ -458,11 +458,7 @@ fn escaping_link<R: Read>(entry: &tar::Entry<'_, R>) -> Option<String> {
         for c in parent.components() {
             match c {
                 Component::Normal(p) => parts.push(p),
-                Component::ParentDir => {
-                    if parts.pop().is_none() {
-                        return refuse();
-                    }
-                }
+                Component::ParentDir if parts.pop().is_none() => return refuse(),
                 _ => {}
             }
         }

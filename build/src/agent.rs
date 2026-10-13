@@ -2479,6 +2479,18 @@ impl Usage {
     }
 }
 
+/// Payload of `Error::EndedEarly`, boxed so `Error` stays small.
+#[derive(Debug)]
+pub struct EndedEarlyError {
+    pub subtype: String,
+    pub message: String,
+    pub stdout: String,
+    pub prompt: String,
+    /// What the cut-off turn still cost. The budget cap is only enforced if
+    /// the caller charges this, so it is kept rather than dropped.
+    pub usage: Usage,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("could not run claude: {0}")]
@@ -2498,16 +2510,8 @@ pub enum Error {
     /// `error_rate_limited`, …) so the caller can both show the user a
     /// specific actionable message AND decide whether to retry at the
     /// outer loop (budget: no; rate-limit: maybe later; etc.).
-    #[error("claude ended turn with {subtype}: {message}")]
-    EndedEarly {
-        subtype: String,
-        message: String,
-        stdout: String,
-        prompt: String,
-        /// What the cut-off turn still cost. The budget cap is only enforced if
-        /// the caller charges this, so it is kept rather than dropped.
-        usage: Usage,
-    },
+    #[error("claude ended turn with {}: {}", .0.subtype, .0.message)]
+    EndedEarly(Box<EndedEarlyError>),
 
     #[error("unexpected response: {message}")]
     Parse {
@@ -2526,7 +2530,7 @@ impl Error {
     /// a 'raise --budget-usd' hint and does NOT keep retrying since
     /// every retry will hit the same cap.
     pub fn is_budget_exhausted(&self) -> bool {
-        matches!(self, Error::EndedEarly { subtype, .. } if subtype.starts_with("error_max_budget"))
+        matches!(self, Error::EndedEarly(e) if e.subtype.starts_with("error_max_budget"))
     }
 
     /// For `EndedEarly`, the human-readable message the claude CLI
@@ -2537,22 +2541,22 @@ impl Error {
     /// in a way that reads like two different budgets.
     pub fn ended_early_message(&self) -> Option<&str> {
         match self {
-            Error::EndedEarly { message, .. } => Some(message),
+            Error::EndedEarly(e) => Some(&e.message),
             _ => None,
         }
     }
 
     /// Was this turn rejected by the API for quota/rate limiting (HTTP 429)?
     pub fn is_rate_limited(&self) -> bool {
-        matches!(self, Error::EndedEarly { subtype, .. }
-            if subtype == "api_error_429" || subtype == "error_rate_limited")
+        matches!(self, Error::EndedEarly(e)
+            if e.subtype == "api_error_429" || e.subtype == "error_rate_limited")
     }
 
     /// For `EndedEarly`, the subtype slug (`error_max_budget_usd`,
     /// `error_rate_limited`, …) exactly as the claude CLI emitted it.
     pub fn ended_early_subtype(&self) -> Option<&str> {
         match self {
-            Error::EndedEarly { subtype, .. } => Some(subtype),
+            Error::EndedEarly(e) => Some(&e.subtype),
             _ => None,
         }
     }
@@ -2561,7 +2565,7 @@ impl Error {
     /// charge it against the package budget.
     pub fn usage(&self) -> Option<&Usage> {
         match self {
-            Error::EndedEarly { usage, .. } => Some(usage),
+            Error::EndedEarly(e) => Some(&e.usage),
             _ => None,
         }
     }
@@ -2572,9 +2576,8 @@ impl Error {
     /// to show.
     pub fn prompt(&self) -> Option<&str> {
         match self {
-            Error::Failed { prompt, .. }
-            | Error::Parse { prompt, .. }
-            | Error::EndedEarly { prompt, .. } => Some(prompt),
+            Error::Failed { prompt, .. } | Error::Parse { prompt, .. } => Some(prompt),
+            Error::EndedEarly(e) => Some(&e.prompt),
             Error::Launch(_) | Error::Io(_) => None,
         }
     }
@@ -2585,9 +2588,8 @@ impl Error {
     /// process exits (see `turn`'s `stdout_raw` doc comment).
     pub fn stdout(&self) -> Option<&str> {
         match self {
-            Error::Failed { stdout, .. }
-            | Error::Parse { stdout, .. }
-            | Error::EndedEarly { stdout, .. } => Some(stdout),
+            Error::Failed { stdout, .. } | Error::Parse { stdout, .. } => Some(stdout),
+            Error::EndedEarly(e) => Some(&e.stdout),
             Error::Launch(_) | Error::Io(_) => None,
         }
     }
@@ -2596,9 +2598,7 @@ impl Error {
     pub fn stderr(&self) -> Option<&str> {
         match self {
             Error::Failed { stderr, .. } => Some(stderr),
-            Error::Parse { .. } | Error::EndedEarly { .. } | Error::Launch(_) | Error::Io(_) => {
-                None
-            }
+            Error::Parse { .. } | Error::EndedEarly(_) | Error::Launch(_) | Error::Io(_) => None,
         }
     }
 }
@@ -3260,7 +3260,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
             // "claude exited 1" with empty stderr — nothing in that
             // output told the user to raise --budget-usd.
             if let Some(signal) = ended_early {
-                return Err(Error::EndedEarly {
+                return Err(Error::EndedEarly(Box::new(EndedEarlyError {
                     subtype: signal.subtype,
                     message: signal.message,
                     stdout: stdout_raw,
@@ -3271,7 +3271,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                         cli_cost_usd: result_event.total_cost_usd,
                         ..Usage::default()
                     },
-                });
+                })));
             }
             return Err(if !status.success() {
                 Error::Failed {
@@ -4483,13 +4483,13 @@ mod tests {
 
     #[test]
     fn is_budget_exhausted_recognises_the_subtype_the_claude_cli_emits() {
-        let e = Error::EndedEarly {
+        let e = Error::EndedEarly(Box::new(EndedEarlyError {
             subtype: "error_max_budget_usd".to_string(),
             message: "Reached maximum budget ($0.03)".to_string(),
             stdout: String::new(),
             prompt: String::new(),
             usage: Usage::default(),
-        };
+        }));
         assert!(e.is_budget_exhausted());
         assert_eq!(e.ended_early_subtype(), Some("error_max_budget_usd"));
         assert_eq!(
@@ -4497,13 +4497,13 @@ mod tests {
             Some("Reached maximum budget ($0.03)")
         );
 
-        let not_budget = Error::EndedEarly {
+        let not_budget = Error::EndedEarly(Box::new(EndedEarlyError {
             subtype: "error_rate_limited".to_string(),
             message: "rate limited".to_string(),
             stdout: String::new(),
             prompt: String::new(),
             usage: Usage::default(),
-        };
+        }));
         assert!(!not_budget.is_budget_exhausted());
 
         let generic = Error::Failed {
