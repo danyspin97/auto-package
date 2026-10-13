@@ -118,14 +118,15 @@ struct FileGroup {
 /// survives as `FileN...` or shorter. A plain substring check misses those;
 /// this also accepts `msg` (minus the ellipsis) as a prefix of `needle`,
 /// with a minimum length so a stray fragment like `res...` can't match.
-/// The prefix must be one whole token (no spaces) of at least 8 characters:
-/// shorter ones are ambiguous across needles.
+/// The prefix must be one whole token (no spaces) of at least 4 characters:
+/// `filen...` is real, but a 3-letter fragment like `res` is also the start
+/// of unrelated words and would be ambiguous across needles.
 fn truncated_match(msg: &str, needle: &str) -> bool {
     if msg.contains(needle) {
         return true;
     }
     match msg.strip_suffix("...") {
-        Some(prefix) if prefix.len() >= 8 && !prefix.contains(char::is_whitespace) => {
+        Some(prefix) if prefix.len() >= 4 && !prefix.contains(char::is_whitespace) => {
             needle.starts_with(prefix)
         }
         _ => false,
@@ -592,7 +593,7 @@ mod tests {
     use crate::log::PathMapper;
 
     #[test]
-    fn truncated_match_needs_a_long_token_prefix() {
+    fn truncated_match_rejects_short_fragments() {
         assert!(truncated_match("connectione...", "connectionerror"));
         assert!(!truncated_match("res...", "resolutionimpossible"));
         assert!(
@@ -797,14 +798,14 @@ mod tests {
     }
 
     /// pytest truncates its one-line failure summary to terminal width, so a
-    /// long exception name often arrives as `FileNotF...` rather than in full.
+    /// long exception name often arrives as `FileN...` rather than in full.
     #[test]
     fn truncated_exception_names_still_classify() {
         let mut lines =
             vec!["Executing(%check): /usr/bin/bash -e /var/tmp/rpm-tmp.abc".to_string()];
         for (i, tail) in [
-            "FileNotF...",
-            "FileNotFo...",
+            "FileN...",
+            "FileNo...",
             "FileNotFoun...",
             "FileNotFoundErro...",
         ]

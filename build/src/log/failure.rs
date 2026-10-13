@@ -104,7 +104,10 @@ static POST_BUILD_PROBLEM: LazyLock<Regex> = LazyLock::new(|| {
       | directories\ not\ owned\ by\ a\ package
       | Installed\ \(but\ unpackaged\)\ file
       | File\ not\ found
-      | \bERROR\b
+      | \bERROR(?:[^A-Za-z]|$)
+      # `ERRORS` only as a line's first word: mid-line it is a count
+      # (`0 ERRORS`), which is not a problem.
+      | ^ERRORS
       ",
     )
     .expect("static")
@@ -383,6 +386,10 @@ mod tests {
     fn error_count_summary_is_not_a_post_build_problem() {
         assert!(!POST_BUILD_PROBLEM.is_match("Summary: 0 ERRORS, 2 warnings"));
         assert!(POST_BUILD_PROBLEM.is_match("ERROR: broken"));
+        assert!(POST_BUILD_PROBLEM.is_match("ERROR: boom"));
+        assert!(POST_BUILD_PROBLEM.is_match("ERROR_FOO happened"));
+        assert!(POST_BUILD_PROBLEM.is_match("ERRORS"));
+        assert!(!POST_BUILD_PROBLEM.is_match("0 ERRORS"));
     }
 
     fn mapper() -> PathMapper {

@@ -516,19 +516,28 @@ fn expand_once(s: &str, macros: &std::collections::HashMap<String, String>) -> S
 }
 
 /// Replace `version` in a directory name with `%{version}`, but only where it
-/// is a whole `-`/`_`-delimited component. A plain substring replace turned
-/// `sqlite3-3` with version `3` into `sqlite%{version}-%{version}`.
+/// is not embedded in a longer alphanumeric run. A plain substring replace
+/// turned `sqlite3-3` with version `3` into `sqlite%{version}-%{version}`.
+///
+/// After the version a letter or digit blocks the match (`1.2.33`), while `.`
+/// or `-` allow it (`foo-1.2.3.post1`). Before it, a letter is tolerated only
+/// for a dotted version (`foo1.2.3`, `foo-v1.2.3`): a bare `3` right after
+/// letters is as likely part of a name as a version. A digit never precedes.
 fn replace_version_component(dir: &str, version: &str) -> String {
     if version.is_empty() {
         return dir.to_string();
     }
+    let bytes = dir.as_bytes();
+    let dotted = version.contains('.');
     let mut out = String::with_capacity(dir.len());
     let mut i = 0;
     while i < dir.len() {
-        let at_start = i == 0 || matches!(dir.as_bytes()[i - 1], b'-' | b'_');
         let end = i + version.len();
-        let at_end = end == dir.len() || matches!(dir.as_bytes()[end], b'-' | b'_');
-        if at_start && dir[i..].starts_with(version) && at_end {
+        let at_start = i == 0
+            || !bytes[i - 1].is_ascii_alphanumeric()
+            || (dotted && bytes[i - 1].is_ascii_alphabetic());
+        let at_end = end >= dir.len() || !bytes[end].is_ascii_alphanumeric();
+        if dir[i..].starts_with(version) && at_start && at_end {
             out.push_str("%{version}");
             i = end;
         } else {
@@ -563,6 +572,17 @@ pub fn autosetup_expected_dir(spec: &str, name: &str, version: &str) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_is_replaced_in_dir_names_but_not_inside_other_tokens() {
+        let r = replace_version_component;
+        assert_eq!(r("foo-v1.2.3", "1.2.3"), "foo-v%{version}");
+        assert_eq!(r("foo1.2.3", "1.2.3"), "foo%{version}");
+        assert_eq!(r("foo.1.2.3", "1.2.3"), "foo.%{version}");
+        assert_eq!(r("foo-1.2.3.post1", "1.2.3"), "foo-%{version}.post1");
+        assert_eq!(r("sqlite3-3", "3"), "sqlite3-%{version}");
+        assert_eq!(r("foo-1.2.33", "1.2.3"), "foo-1.2.33");
+    }
 
     const SPEC_WITH_N: &str = "\
 Name:           python-MarkupSafe

@@ -47,6 +47,13 @@ fn key(name: &str) -> String {
     normalize_name(name).replace('-', "_")
 }
 
+/// The key earlier versions stored: lowercase, `-`/`.` → `_`, with runs of
+/// separators left alone. Entries in an existing `sources.toml` for names such
+/// as `foo--bar` live under `foo__bar`, and collapsing runs would orphan them.
+fn legacy_key(name: &str) -> String {
+    name.to_lowercase().replace(['-', '.'], "_")
+}
+
 impl SourceMap {
     pub fn path(work_dir: &Path) -> PathBuf {
         work_dir.join("sources.toml")
@@ -75,12 +82,22 @@ impl SourceMap {
     }
 
     pub fn get(&self, pkg: &str) -> Option<&str> {
-        self.urls.get(&key(pkg)).map(String::as_str)
+        self.urls
+            .get(&legacy_key(pkg))
+            .or_else(|| self.urls.get(&key(pkg)))
+            .map(String::as_str)
     }
 
     pub fn insert(&mut self, pkg: &str, url: &str) {
+        // Overwrite an entry stored under the old spelling rather than
+        // leaving a stale duplicate that `get` would still find first.
+        let k = if self.urls.contains_key(&legacy_key(pkg)) {
+            legacy_key(pkg)
+        } else {
+            key(pkg)
+        };
         self.urls
-            .insert(key(pkg), url.trim().trim_end_matches('/').to_string());
+            .insert(k, url.trim().trim_end_matches('/').to_string());
     }
 
     pub fn is_empty(&self) -> bool {
@@ -646,8 +663,17 @@ fn is_any_archive(file: &str) -> bool {
 
 /// Classify a source URL. See the section comment above.
 pub fn source_kind(url: &str) -> SourceKind {
-    // Forge URLs first: `github.com/o/r/archive/v1.0.tar.gz` ends in an
-    // archive extension but is a forge URL, not a standalone tarball.
+    // A file under `/releases/download/` or `/archive/` is a fixed asset: the
+    // forge-first rule below would turn it into a lookup of the latest tag and
+    // package a different version than the URL names.
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    if (path.contains("/releases/download/") || path.contains("/archive/"))
+        && is_any_archive(last_segment(url))
+    {
+        return SourceKind::DirectArchive;
+    }
+    // Other forge URLs (repositories, tags) before archive extensions, so a
+    // tag URL is still resolved through the forge.
     if let Some(forge) = ap_ecosystem::forge::parse(url)
         && ap_ecosystem::forge::is_known_host(&forge.host)
     {
@@ -829,12 +855,25 @@ fn latest_release_non_forge(url: &str, kind: SourceKind) -> Result<String, Strin
         })
 }
 
+/// Version equality that ignores a leading `v` and trailing `.0` components,
+/// so `1.0` matches `1.0.0` and `v1.0` matches `1.0`.
+fn same_version(a: &str, b: &str) -> bool {
+    fn canon(v: &str) -> &str {
+        let mut v = v.strip_prefix(['v', 'V']).unwrap_or(v);
+        while let Some(rest) = v.strip_suffix(".0") {
+            v = rest;
+        }
+        v
+    }
+    canon(a) == canon(b)
+}
+
 fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<String> {
     if kind == SourceKind::DirectArchive {
         // A fixed URL cannot serve another version: packaging 3.1.4 as 3.2.0
         // would be silently wrong. Only a name without a version is trusted.
         if let Some((_, v)) = archive_name_version(last_segment(url))
-            && v != version
+            && !same_version(&v, version)
         {
             ap_core::diag!(
                 "  {url} is version {v}, not the requested {version}; \
@@ -848,7 +887,7 @@ fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<Str
     match fetch_index(&dir) {
         Ok(links) => index_archives(&links, last_segment(url))
             .into_iter()
-            .filter(|(_, v)| v == version)
+            .filter(|(_, v)| same_version(v, version))
             .map(|(f, _)| format!("{dir}{f}"))
             .collect(),
         Err(e) => {
@@ -1146,8 +1185,14 @@ mod tests {
 
     #[test]
     fn forge_archive_urls_are_forge_not_direct() {
+        // A fixed archive file is what the URL names; only repository and tag
+        // URLs go through the forge.
         assert_eq!(
             super::source_kind("https://github.com/o/r/archive/v1.0.tar.gz"),
+            super::SourceKind::DirectArchive
+        );
+        assert_eq!(
+            super::source_kind("https://github.com/o/r/tree/v1.0"),
             super::SourceKind::Forge
         );
     }
@@ -1547,6 +1592,51 @@ mod tests {
             source_kind("https://example.org/dl/foo-1.0.tar.xz?x=1"),
             DirectArchive
         );
+    }
+
+    #[test]
+    fn fixed_release_assets_are_direct_archives_but_tag_urls_stay_forge() {
+        use SourceKind::*;
+        assert_eq!(
+            source_kind("https://github.com/o/r/releases/download/v1/foo-1.tar.gz"),
+            DirectArchive
+        );
+        assert_eq!(
+            source_kind("https://github.com/o/r/archive/refs/tags/v1.0.tar.gz"),
+            DirectArchive
+        );
+        assert_eq!(source_kind("https://github.com/o/r/releases/tag/v1"), Forge);
+        assert_eq!(source_kind("https://github.com/o/r"), Forge);
+    }
+
+    #[test]
+    fn versions_compare_ignoring_v_prefix_and_trailing_zero_components() {
+        assert!(same_version("1.0", "1.0.0"));
+        assert!(same_version("v1.0", "1.0"));
+        assert!(same_version("1.2.3", "1.2.3"));
+        assert!(!same_version("1.0", "1.0.1"));
+        assert!(!same_version("1.10", "1.1"));
+        assert_eq!(
+            archive_urls_non_forge(
+                "https://x.org/foo-1.0.tar.gz",
+                SourceKind::DirectArchive,
+                "1.0.0"
+            ),
+            vec!["https://x.org/foo-1.0.tar.gz".to_string()]
+        );
+    }
+
+    #[test]
+    fn double_separator_names_keep_matching_their_stored_entry() {
+        let m: SourceMap = toml::from_str("[source]\nfoo__bar = \"https://x.org/a\"\n").unwrap();
+        assert_eq!(m.get("foo--bar"), Some("https://x.org/a"));
+        assert_eq!(m.get("foo__bar"), Some("https://x.org/a"));
+        let mut m = m;
+        m.insert("foo--bar", "https://x.org/b");
+        assert_eq!(m.urls.len(), 1);
+        // A name with no stored entry still uses the collapsed key.
+        m.insert("baz..qux", "https://x.org/c");
+        assert_eq!(m.get("Baz-Qux"), Some("https://x.org/c"));
     }
 
     #[test]

@@ -423,8 +423,11 @@ pub fn capture_with_timeout_env(
     kill_process_group(child.id());
     // `None` when the reader never reported back or its read failed: empty
     // output then means "unknown", not "the child printed nothing".
+    // One shared deadline: a second full wait would let a slow descendant
+    // turn a stream that was unknown at 5s into a known one at 10s.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let collect = |rx: std::sync::mpsc::Receiver<(Vec<u8>, bool)>| match rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
     {
         Ok((buf, false)) => Some(buf),
         _ => None,
@@ -447,8 +450,14 @@ pub fn capture_with_timeout_env(
         program: program.to_string(),
         stream,
     };
-    let (Some(stdout), Some(stderr)) = (stdout.as_ref(), stderr.as_ref()) else {
-        return Err(lost(if stdout.is_none() { "stdout" } else { "stderr" }));
+    let (stdout, stderr) = match (stdout.as_ref(), stderr.as_ref()) {
+        (Some(o), Some(e)) => (o, e),
+        // A clean exit with one stream read to EOF: the other pipe is held by
+        // a descendant that escaped the group (another session), not lost
+        // data from the child. Discarding the complete stream would be worse.
+        (Some(o), None) if code == 0 => (o, &Vec::new()),
+        (None, Some(e)) if code == 0 => (&Vec::new(), e),
+        _ => return Err(lost(if stdout.is_none() { "stdout" } else { "stderr" })),
     };
     Ok(Captured {
         code,
@@ -528,7 +537,7 @@ mod capture_timeout_tests {
     #[test]
     fn unreadable_output_is_an_error_not_an_empty_success() {
         // The child exits at once but a background descendant in another
-        // process group keeps the pipe open, so the readers never finish.
+        // session keeps both pipes open, so neither stream is ever known.
         let err = capture_with_timeout(
             "sh",
             &["-c", "setsid sleep 8 & exit 0"],
@@ -539,6 +548,22 @@ mod capture_timeout_tests {
         .err()
         .expect("must not be Ok");
         assert!(matches!(err, ProcessError::OutputLost { .. }));
+    }
+
+    #[test]
+    fn clean_exit_keeps_a_stream_that_was_read_in_full() {
+        // stdout reaches EOF; only stderr is held open by the escaped sleep.
+        // (the shell's own stdout pipe closes on exit, sleep's goes to null)
+        let out = capture_with_timeout(
+            "sh",
+            &["-c", "echo hi; setsid sleep 8 >/dev/null & exit 0"],
+            Path::new("/"),
+            quiet(),
+            Duration::from_secs(20),
+        )
+        .expect("complete stdout of a clean exit is returned");
+        assert_eq!(out.code, 0);
+        assert_eq!(out.stdout, "hi\n");
     }
 
     #[test]
