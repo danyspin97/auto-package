@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::time::{Duration, Instant};
@@ -27,7 +28,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{
+        Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+    },
 };
 
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SkipReason, StepKind, StepOutcome, Task};
@@ -285,6 +288,48 @@ fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
     }
 }
 
+/// Greedy word wrap to `width` display columns. Newlines in `text` stay line
+/// breaks and blank lines stay blank. A word wider than `width` is broken
+/// where it must be, and a glyph wider than the whole line still gets a line.
+/// Returns the wrapped lines, so their count is what a viewport scrolls over.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut current = String::new();
+        let mut current_w = 0;
+        for word in paragraph.split_whitespace() {
+            let word_w = word.width();
+            if current_w > 0 && current_w + 1 + word_w <= width {
+                current.push(' ');
+                current.push_str(word);
+                current_w += 1 + word_w;
+                continue;
+            }
+            if current_w > 0 {
+                lines.push(std::mem::take(&mut current));
+            }
+            let mut rest = word;
+            while rest.width() > width {
+                let mut head = prefix_within_width(rest, width);
+                if head.is_empty() {
+                    head = &rest[..rest.chars().next().map_or(0, char::len_utf8)];
+                }
+                lines.push(head.to_string());
+                rest = &rest[head.len()..];
+            }
+            current.push_str(rest);
+            current_w = rest.width();
+        }
+        // A paragraph whose last glyph was broken off whole leaves nothing
+        // behind; only a blank paragraph should still produce its empty line.
+        if !current.is_empty() || paragraph.trim().is_empty() {
+            lines.push(current);
+        }
+    }
+    lines
+}
+
 /// What kind of thing an [`ActivityEntry`] records — lets the Agent Activity
 /// pane style each kind differently instead of a single uniform color, since
 /// a turn's start, its tool calls, and its final decision read very
@@ -300,6 +345,14 @@ enum ActivityKind {
 }
 
 impl ActivityKind {
+    fn label(self) -> &'static str {
+        match self {
+            ActivityKind::Task => "Task",
+            ActivityKind::ToolUse => "Tool",
+            ActivityKind::Reply => "Reply",
+        }
+    }
+
     fn color(self) -> Color {
         match self {
             ActivityKind::Task => Color::Cyan,
@@ -339,7 +392,13 @@ struct PkgState {
     /// Conditional steps that did not run, in the order they were skipped.
     skipped: Vec<(StepKind, SkipReason)>,
     log_lines: Vec<LogLine>,
+    /// Lines ever added, including ones since evicted from `log_lines`. Only
+    /// grows, so a view can count arrivals even once the cap is hit.
+    log_seq: u64,
     agent_activity: Vec<ActivityEntry>,
+    /// Same as `log_seq`, for `agent_activity`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    activity_seq: u64,
     input_tokens: u64,
     output_tokens: u64,
     cost_usd: f64,
@@ -373,7 +432,9 @@ impl PkgState {
             fail_reason: None,
             skipped: Vec::new(),
             log_lines: Vec::new(),
+            log_seq: 0,
             agent_activity: Vec::new(),
+            activity_seq: 0,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: 0.0,
@@ -406,6 +467,7 @@ impl PkgState {
             message,
             emphasis,
         });
+        self.log_seq += 1;
         if self.log_lines.len() > MAX_LOG_LINES {
             self.log_lines.remove(0);
         }
@@ -413,6 +475,7 @@ impl PkgState {
 
     fn add_agent_activity(&mut self, kind: ActivityKind, text: String) {
         self.agent_activity.push(ActivityEntry { kind, text });
+        self.activity_seq += 1;
         if self.agent_activity.len() > MAX_AGENT_ACTIVITY {
             self.agent_activity.remove(0);
         }
@@ -756,7 +819,19 @@ impl TuiState {
                         state.disk_full_detected = false;
                     }
                 }
-                state.status = PkgStatus::Between;
+                // The notes turn is the last thing a successful package does: once it
+                // ends, the row is done and must not keep showing the notes step
+                // (a missing PackageFinished would otherwise leave that text).
+                if state
+                    .step
+                    .as_ref()
+                    .is_some_and(|s| s.kind == StepKind::PackageNotes)
+                {
+                    state.step = None;
+                    state.status = PkgStatus::Succeeded;
+                } else {
+                    state.status = PkgStatus::Between;
+                }
             }
             Event::BuildFailed { classification, .. } => {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));
@@ -815,13 +890,17 @@ impl TuiState {
                 state.input_tokens += usage.input_tokens;
                 state.output_tokens += usage.output_tokens;
                 state.cost_usd += usage.cost_usd;
+                // The reasoning goes in the entry too, after a line break, so
+                // Enter can show the whole decision; the list shows only the
+                // first line.
                 state.add_agent_activity(
                     ActivityKind::Reply,
                     format!(
-                        "{} (confidence: {}, ${:.4})",
+                        "{} (confidence: {}, ${:.4})\n{}",
                         response.action,
                         response.confidence.as_deref().unwrap_or("?"),
-                        usage.cost_usd
+                        usage.cost_usd,
+                        response.reasoning
                     ),
                 );
                 let reasoning = truncate_with_ellipsis(&response.reasoning, 80);
@@ -831,8 +910,7 @@ impl TuiState {
                 );
             }
             Event::AgentToolUse { tool, input, .. } => {
-                let input_short = prefix_within_width(input, 60);
-                state.add_agent_activity(ActivityKind::ToolUse, format!("→ {tool} {input_short}"));
+                state.add_agent_activity(ActivityKind::ToolUse, format!("→ {tool} {input}"));
             }
             Event::Progress { message, .. } => {
                 state.add_log(LogLevel::Info, message.clone());
@@ -927,11 +1005,12 @@ fn event_loop(
     // shrinks whenever a package finishes, which would otherwise shift every
     // later row up and silently hand the highlight to a different package.
     let mut selected: Option<String> = None;
-    // Lines scrolled up from the live tail in the selected package's Event
-    // Log; 0 means pinned to the latest line. Reset whenever the selection
-    // changes, since a scroll offset for one package's log is meaningless
-    // for another's.
-    let mut log_scroll: usize = 0;
+    // Scroll state for the selected package. It belongs to `browse_for`, the
+    // package it was last synced to: a key press can change `selected` before
+    // the next frame, so comparing against the previous frame's selection
+    // would miss the change.
+    let mut browse = BrowseState::default();
+    let mut browse_for: Option<String> = None;
     let tick_rate = Duration::from_millis(150);
     let mut finished_at: Option<Instant> = None;
     let mut senders_dropped = false;
@@ -953,15 +1032,11 @@ fn event_loop(
 
         {
             let visible = state.visible_order();
-            let previous = selected.clone();
             if selected
                 .as_deref()
                 .is_none_or(|s| !visible.iter().any(|n| n.as_str() == s))
             {
                 selected = visible.first().map(|n| (*n).clone());
-            }
-            if selected != previous {
-                log_scroll = 0;
             }
             table_state.select(
                 selected
@@ -969,14 +1044,29 @@ fn event_loop(
                     .and_then(|s| visible.iter().position(|n| n.as_str() == s)),
             );
         }
+        // Lines that arrived since the last frame push a scrolled view up so
+        // it keeps showing the same content; a view at the tail follows.
+        let log_seq = selected
+            .as_deref()
+            .and_then(|s| state.packages.get(s))
+            .map_or(0, |p| p.log_seq);
+        if selected != browse_for {
+            browse.reset_for_package(log_seq);
+            browse_for = selected.clone();
+        } else {
+            browse.log_off = follow_adjust(browse.log_off, log_seq, browse.log_seen);
+            browse.log_seen = log_seq;
+        }
 
-        let mut max_scroll = 0;
+        let mut feedback = RenderFeedback::default();
         terminal.draw(|f| {
-            max_scroll = render(f, &state, &mut table_state, input.as_deref(), log_scroll);
+            feedback = render(f, &state, &mut table_state, input.as_deref(), &browse);
         })?;
         // Keep the offset within what rendering can show, or PageDown
         // appears dead after holding PageUp at the top.
-        log_scroll = log_scroll.min(max_scroll);
+        browse.log_off = feedback.log_off;
+        browse.act_top = feedback.act_top;
+        browse.detail_off = feedback.detail_off;
 
         if event::poll(tick_rate)?
             && let TermEvent::Key(key) = event::read()?
@@ -1009,8 +1099,44 @@ fn event_loop(
                 }
                 continue;
             }
+            // The `/` prompt captures keys the same way the add prompt does.
+            if let Some(buf) = browse.filter_input.as_mut()
+                && !(key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(event::KeyModifiers::CONTROL))
+            {
+                match prompt_key(buf, key.code) {
+                    PromptAction::Pending => {}
+                    PromptAction::Submit(text) => {
+                        browse.filter_input = None;
+                        browse.filter = Some(text);
+                        browse.log_off = 0;
+                    }
+                    PromptAction::Cancel => {
+                        browse.filter_input = None;
+                        // A blank Enter clears the filter; Esc leaves it be.
+                        if key.code == KeyCode::Enter {
+                            browse.filter = None;
+                            browse.log_off = 0;
+                        }
+                    }
+                }
+                continue;
+            }
             match key.code {
                 KeyCode::Char('n') | KeyCode::Char('+') => input = Some(String::new()),
+                KeyCode::Char('/') if browse.focus == Focus::Log => {
+                    browse.filter_input = Some(browse.filter.clone().unwrap_or_default());
+                }
+                KeyCode::Esc if esc_action(&browse) != EscAction::Quit => match esc_action(&browse)
+                {
+                    EscAction::ClosePrompt => browse.filter_input = None,
+                    EscAction::ClearFilter => {
+                        browse.filter = None;
+                        browse.log_off = 0;
+                    }
+                    EscAction::Collapse => browse.act_expanded = false,
+                    EscAction::Quit => {}
+                },
                 // Quit means quit: end the whole process (killing the running
                 // builds), not just the UI. Detaching used to leave the
                 // pipeline running headless with nothing on screen and no
@@ -1033,13 +1159,15 @@ fn event_loop(
                     // shutdown as `q`/Esc above.
                     crate::handle_interrupt(true, memory);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    select_next(&mut selected, &state);
-                    log_scroll = 0;
+                KeyCode::Tab => browse.focus = cycle_focus(browse.focus, false),
+                KeyCode::BackTab => browse.focus = cycle_focus(browse.focus, true),
+                // In the table, the arrows move the package selection; in the
+                // log pane they scroll it. The Activity pane has no keys yet.
+                KeyCode::Down | KeyCode::Char('j') if browse.focus == Focus::Table => {
+                    select_next(&mut selected, &state)
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    select_prev(&mut selected, &state);
-                    log_scroll = 0;
+                KeyCode::Up | KeyCode::Char('k') if browse.focus == Focus::Table => {
+                    select_prev(&mut selected, &state)
                 }
                 KeyCode::Char('a') => state.show_all = !state.show_all,
                 // Retry a package that failed with "No space left on
@@ -1078,9 +1206,51 @@ fn event_loop(
                 // step back through history on demand without losing new
                 // lines arriving underneath — they just wait below the
                 // viewport until `End` jumps back to them.
-                KeyCode::PageUp => log_scroll = log_scroll.saturating_add(10).min(max_scroll),
-                KeyCode::PageDown => log_scroll = log_scroll.saturating_sub(10),
-                KeyCode::End => log_scroll = 0,
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Char('j')
+                | KeyCode::Char('k')
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                    if browse.focus == Focus::Activity =>
+                {
+                    if browse.act_expanded {
+                        browse.detail_off = text_scroll_key(
+                            key.code,
+                            browse.detail_off,
+                            feedback.detail_total,
+                            feedback.detail_viewport,
+                        );
+                    } else {
+                        let sel = browse.act_sel.min(feedback.act_len.saturating_sub(1));
+                        browse.act_sel =
+                            activity_move(sel, feedback.act_len, key.code, feedback.act_viewport);
+                    }
+                }
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Char('j')
+                | KeyCode::Char('k')
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End => {
+                    browse.log_off = scroll_key(
+                        key.code,
+                        browse.log_off,
+                        feedback.log_total,
+                        feedback.log_viewport,
+                    );
+                }
+                KeyCode::Enter if browse.focus == Focus::Activity && feedback.act_len > 0 => {
+                    // Freeze the selection on the entry being read: while it
+                    // follows the newest entry, the text would change underneath.
+                    browse.act_sel = browse.act_sel.min(feedback.act_len - 1);
+                    browse.act_expanded = !browse.act_expanded;
+                    browse.detail_off = 0;
+                }
                 _ => {}
             }
         }
@@ -1159,13 +1329,232 @@ fn select_prev(selected: &mut Option<String>, state: &TuiState) {
     *selected = Some(visible[i.saturating_sub(1)].clone());
 }
 
+/// Which pane the arrow keys and paging act on. Tab cycles it.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum Focus {
+    #[default]
+    Table,
+    Log,
+    Activity,
+}
+
+/// Scroll state for the selected package's panes, kept by the event loop
+/// across frames. Offsets are clamped against the previous frame's sizes.
+#[derive(Default)]
+struct BrowseState {
+    focus: Focus,
+    /// Lines above the tail of the Event Log; 0 follows the newest line.
+    log_off: usize,
+    /// `PkgState::log_seq` at the last frame, to count the lines that arrived.
+    log_seen: u64,
+    /// Selected Agent Activity entry, an index into the package's list.
+    /// `usize::MAX` means the newest entry, so the selection keeps following
+    /// as entries arrive until the user moves it.
+    act_sel: usize,
+    /// First Agent Activity entry shown in the list.
+    act_top: usize,
+    /// Enter shows the selected entry's full text in place of the Event Log.
+    act_expanded: bool,
+    /// First wrapped line shown of the expanded text.
+    detail_off: usize,
+    /// Applied Event Log filter: only lines containing it are shown.
+    filter: Option<String>,
+    /// The `/` prompt while it is open, with the text typed so far.
+    filter_input: Option<String>,
+}
+
+impl BrowseState {
+    /// Start over for a newly selected package: another package's offsets
+    /// mean nothing here.
+    fn reset_for_package(&mut self, log_seq: u64) {
+        self.log_off = 0;
+        self.log_seen = log_seq;
+        self.act_sel = usize::MAX;
+        self.act_top = 0;
+        self.act_expanded = false;
+        self.detail_off = 0;
+        self.filter = None;
+        self.filter_input = None;
+    }
+}
+
+/// What one frame learned about the pane sizes, handed back to the event loop
+/// so key handling clamps against what is actually on screen.
+#[derive(Default, Clone, Copy)]
+struct RenderFeedback {
+    log_total: usize,
+    log_viewport: usize,
+    /// The log offset after clamping to this frame's sizes.
+    log_off: usize,
+    act_len: usize,
+    act_viewport: usize,
+    /// The Agent Activity top after keeping the selection on screen.
+    act_top: usize,
+    /// Wrapped lines of the expanded text, and how many of them fit.
+    detail_total: usize,
+    detail_viewport: usize,
+    detail_off: usize,
+}
+
+/// The pane after (or, with `back`, before) `f`, wrapping around.
+fn cycle_focus(f: Focus, back: bool) -> Focus {
+    match (f, back) {
+        (Focus::Table, false) | (Focus::Activity, true) => Focus::Log,
+        (Focus::Log, false) | (Focus::Table, true) => Focus::Activity,
+        (Focus::Activity, false) | (Focus::Log, true) => Focus::Table,
+    }
+}
+
+/// Rows inside a bordered pane; the top and bottom border take two.
+fn viewport_height(area_h: u16) -> usize {
+    area_h.saturating_sub(2) as usize
+}
+
+/// How far a view can scroll back from the tail before its top is reached.
+fn max_offset(total: usize, viewport: usize) -> usize {
+    total.saturating_sub(viewport)
+}
+
+fn clamp_offset(off: usize, total: usize, viewport: usize) -> usize {
+    off.min(max_offset(total, viewport))
+}
+
+/// The lines a view shows when it is `from_bottom` lines above the tail.
+/// The offset is clamped first, so content shrinking under it cannot make
+/// the range underflow.
+fn window(total: usize, viewport: usize, from_bottom: usize) -> Range<usize> {
+    let off = clamp_offset(from_bottom, total, viewport);
+    let end = total - off;
+    let start = end.saturating_sub(viewport);
+    start..end
+}
+
+/// New scroll offset for a log view counted from the tail (0 = following).
+/// Paging moves by one screen less a line, so the last line stays in view.
+fn scroll_key(code: KeyCode, off: usize, total: usize, viewport: usize) -> usize {
+    let page = viewport.saturating_sub(1).max(1);
+    let next = match code {
+        KeyCode::Up | KeyCode::Char('k') => off.saturating_add(1),
+        KeyCode::Down | KeyCode::Char('j') => off.saturating_sub(1),
+        KeyCode::PageUp => off.saturating_add(page),
+        KeyCode::PageDown => off.saturating_sub(page),
+        KeyCode::Home => max_offset(total, viewport),
+        KeyCode::End => 0,
+        _ => off,
+    };
+    clamp_offset(next, total, viewport)
+}
+
+/// Keeps a tail-relative view still while lines arrive. A view at the tail
+/// keeps following; a scrolled one moves up by the number of new lines so it
+/// shows the same content. Eviction from the front is handled by the caller's
+/// clamp.
+fn follow_adjust(off: usize, new_seq: u64, old_seq: u64) -> usize {
+    if off == 0 {
+        return 0;
+    }
+    let arrived = usize::try_from(new_seq.saturating_sub(old_seq)).unwrap_or(usize::MAX);
+    off.saturating_add(arrived)
+}
+
+/// Case-insensitive substring match. An empty needle matches everything.
+#[cfg_attr(not(test), allow(dead_code))]
+fn filter_matches(line: &str, needle: &str) -> bool {
+    needle.is_empty() || line.to_lowercase().contains(&needle.to_lowercase())
+}
+
+/// Indices of the log lines that pass `filter_matches`, in order.
+#[cfg_attr(not(test), allow(dead_code))]
+fn filtered_indices(lines: &[LogLine], needle: &str) -> Vec<usize> {
+    (0..lines.len())
+        .filter(|&i| filter_matches(&lines[i].message, needle))
+        .collect()
+}
+
+/// New selection in the Agent Activity list (index into the entries, 0 = oldest).
+fn activity_move(sel: usize, total: usize, code: KeyCode, viewport: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let last = total - 1;
+    let sel = sel.min(last);
+    let page = viewport.saturating_sub(1).max(1);
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => sel.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => (sel + 1).min(last),
+        KeyCode::PageUp => sel.saturating_sub(page),
+        KeyCode::PageDown => (sel + page).min(last),
+        KeyCode::Home => 0,
+        KeyCode::End => last,
+        _ => sel,
+    }
+}
+
+/// First visible entry after keeping `sel` on screen with the smallest scroll
+/// that does it.
+fn activity_top(sel: usize, top: usize, total: usize, viewport: usize) -> usize {
+    if total == 0 || viewport == 0 {
+        return 0;
+    }
+    let sel = sel.min(total - 1);
+    let top = clamp_offset(top, total, viewport);
+    let top = if sel < top {
+        sel
+    } else if sel >= top + viewport {
+        sel + 1 - viewport
+    } else {
+        top
+    };
+    clamp_offset(top, total, viewport)
+}
+
+/// Like `scroll_key`, but for text read from the top: `off` is the first
+/// visible line, so Down moves towards the end.
+fn text_scroll_key(code: KeyCode, off: usize, total: usize, viewport: usize) -> usize {
+    let page = viewport.saturating_sub(1).max(1);
+    let next = match code {
+        KeyCode::Up | KeyCode::Char('k') => off.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => off.saturating_add(1),
+        KeyCode::PageUp => off.saturating_sub(page),
+        KeyCode::PageDown => off.saturating_add(page),
+        KeyCode::Home => 0,
+        KeyCode::End => max_offset(total, viewport),
+        _ => off,
+    };
+    clamp_offset(next, total, viewport)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EscAction {
+    /// Cancel the `/` prompt, keeping any applied filter.
+    ClosePrompt,
+    ClearFilter,
+    /// Close the expanded entry.
+    Collapse,
+    Quit,
+}
+
+/// What Esc does. Transient UI is dismissed before anything quits, in this
+/// order, so Esc only ends the run once nothing else is open.
+fn esc_action(browse: &BrowseState) -> EscAction {
+    if browse.filter_input.is_some() {
+        EscAction::ClosePrompt
+    } else if browse.filter.is_some() {
+        EscAction::ClearFilter
+    } else if browse.act_expanded {
+        EscAction::Collapse
+    } else {
+        EscAction::Quit
+    }
+}
+
 fn render(
     f: &mut Frame,
     state: &TuiState,
     table_state: &mut TableState,
     input: Option<&str>,
-    log_scroll: usize,
-) -> usize {
+    browse: &BrowseState,
+) -> RenderFeedback {
     let visible = state.visible_order();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1178,22 +1567,42 @@ fn render(
         .split(f.area());
 
     render_summary(f, state, chunks[0]);
-    render_table(f, state, &visible, chunks[1], table_state);
-    let max_scroll = render_detail(
+    render_table(
+        f,
+        state,
+        &visible,
+        chunks[1],
+        table_state,
+        browse.focus == Focus::Table,
+    );
+    let feedback = render_detail(
         f,
         state,
         &visible,
         chunks[2],
         table_state.selected(),
-        log_scroll,
+        browse,
     );
     let retryable = table_state
         .selected()
         .and_then(|i| visible.get(i))
         .and_then(|name| state.packages.get(name.as_str()))
         .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
-    render_footer(f, state, input, chunks[3], retryable);
-    max_scroll
+    render_footer(f, state, input, browse, chunks[3], retryable);
+    feedback
+}
+
+/// A bordered pane. The focused one gets a yellow border and a `▶` in its
+/// title, so focus still shows without colour.
+fn pane(title: &str, focused: bool) -> Block<'static> {
+    let block = Block::default().borders(Borders::ALL);
+    if focused {
+        block
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(format!("▶ {title}"))
+    } else {
+        block.title(title.to_string())
+    }
 }
 
 fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
@@ -1238,6 +1647,7 @@ fn render_table(
     visible: &[&String],
     area: Rect,
     table_state: &mut TableState,
+    focused: bool,
 ) {
     let rows: Vec<Row> = visible
         .iter()
@@ -1280,7 +1690,7 @@ fn render_table(
             .style(Style::default().add_modifier(Modifier::BOLD)),
         )
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .block(Block::default().borders(Borders::ALL).title("Packages"));
+        .block(pane("Packages", focused));
 
     f.render_stateful_widget(table, area, table_state);
 }
@@ -1291,8 +1701,8 @@ fn render_detail(
     visible: &[&String],
     area: Rect,
     selected: Option<usize>,
-    log_scroll: usize,
-) -> usize {
+    browse: &BrowseState,
+) -> RenderFeedback {
     let pkg = selected
         .and_then(|i| visible.get(i))
         .and_then(|n| state.packages.get(n.as_str()));
@@ -1331,7 +1741,7 @@ fn render_detail(
     let Some(pkg) = pkg else {
         f.render_widget(
             Paragraph::new("No package selected yet")
-                .block(Block::default().borders(Borders::ALL).title("Event Log")),
+                .block(pane("Event Log", browse.focus == Focus::Log)),
             chunks[0],
         );
         f.render_widget(
@@ -1340,17 +1750,21 @@ fn render_detail(
                 .title("Agent Activity"),
             chunks[1],
         );
-        return 0;
+        return RenderFeedback::default();
     };
 
-    let viewport = chunks[0].height.saturating_sub(2) as usize;
-    let total = pkg.log_lines.len();
-    let max_scroll = total.saturating_sub(viewport);
-    let scroll = log_scroll.min(max_scroll);
-    let end = total - scroll;
-    let start = end.saturating_sub(viewport);
-    let log_items: Vec<ListItem> = pkg.log_lines[start..end]
+    let log_viewport = viewport_height(chunks[0].height);
+    // The filter narrows the log before windowing, so the offset and the
+    // "more below" count are in filtered lines.
+    let shown: Vec<usize> = match browse.filter.as_deref() {
+        Some(needle) => filtered_indices(&pkg.log_lines, needle),
+        None => (0..pkg.log_lines.len()).collect(),
+    };
+    let total = shown.len();
+    let scroll = clamp_offset(browse.log_off, total, log_viewport);
+    let log_items: Vec<ListItem> = shown[window(total, log_viewport, scroll)]
         .iter()
+        .map(|&i| &pkg.log_lines[i])
         .map(|l| {
             let mut style = Style::default().fg(l.level.color());
             if l.emphasis {
@@ -1359,55 +1773,133 @@ fn render_detail(
             ListItem::new(l.message.clone()).style(style)
         })
         .collect();
+    let filter_note = browse
+        .filter
+        .as_deref()
+        .map(|needle| format!(" [filter: {needle}]"))
+        .unwrap_or_default();
     let mut log_title = if scroll > 0 {
-        format!("Event Log — scrolled up {scroll} line(s), End to jump to latest")
+        format!("Event Log{filter_note} — {scroll} more below, End to follow")
     } else {
-        "Event Log".to_string()
+        format!("Event Log{filter_note}")
     };
     if !pkg.skipped.is_empty() {
         let labels: Vec<&str> = pkg.skipped.iter().map(|(k, _)| k.label()).collect();
         log_title.push_str(&format!(" (skipped: {})", labels.join(", ")));
     }
-    let log = List::new(log_items).block(Block::default().borders(Borders::ALL).title(log_title));
-    f.render_widget(log, chunks[0]);
+    let log = List::new(log_items).block(pane(&log_title, browse.focus == Focus::Log));
 
-    let activity_items: Vec<ListItem> = pkg
-        .agent_activity
+    let act_viewport = viewport_height(chunks[1].height);
+    let act_len = pkg.agent_activity.len();
+    let act_sel = browse.act_sel.min(act_len.saturating_sub(1));
+    let act_top = activity_top(act_sel, browse.act_top, act_len, act_viewport);
+    let mut feedback = RenderFeedback {
+        log_total: total,
+        log_viewport,
+        log_off: scroll,
+        act_len,
+        act_viewport,
+        act_top,
+        ..RenderFeedback::default()
+    };
+
+    // An expanded entry takes the Event Log's place, so its full text can be
+    // read in the wider pane.
+    let expanded = if browse.act_expanded {
+        pkg.agent_activity.get(act_sel)
+    } else {
+        None
+    };
+    if let Some(entry) = expanded {
+        let text_viewport = viewport_height(chunks[0].height);
+        let text = wrap_text(&entry.text, chunks[0].width.saturating_sub(2) as usize);
+        let off = clamp_offset(browse.detail_off, text.len(), text_viewport);
+        let end = (off + text_viewport).min(text.len());
+        let lines: Vec<Line> = text[off..end]
+            .iter()
+            .map(|l| Line::styled(l.as_str(), Style::default().fg(entry.kind.color())))
+            .collect();
+        let title = format!("{} — Esc close, ↑/↓ scroll", entry.kind.label());
+        f.render_widget(
+            Paragraph::new(lines).block(pane(&title, browse.focus == Focus::Activity)),
+            chunks[0],
+        );
+        feedback.detail_total = text.len();
+        feedback.detail_viewport = text_viewport;
+        feedback.detail_off = off;
+    } else {
+        f.render_widget(log, chunks[0]);
+    }
+
+    let inner_w = chunks[1].width.saturating_sub(2) as usize;
+    let activity_items: Vec<ListItem> = pkg.agent_activity
+        [act_top..(act_top + act_viewport).min(act_len)]
         .iter()
-        .rev()
-        .take(chunks[1].height.saturating_sub(2) as usize)
-        .rev()
-        .map(|a| ListItem::new(a.text.clone()).style(Style::default().fg(a.kind.color())))
+        .map(|a| {
+            // Entries can span lines; the list shows the first one, and the
+            // full text is one Enter away.
+            let first = a.text.lines().next().unwrap_or("");
+            ListItem::new(truncate_with_ellipsis(first, inner_w))
+                .style(Style::default().fg(a.kind.color()))
+        })
         .collect();
-    let activity =
-        List::new(activity_items).block(Block::default().borders(Borders::ALL).title(format!(
+    let mut list_state = ListState::default();
+    if browse.focus == Focus::Activity && act_len > 0 {
+        list_state.select(Some(act_sel - act_top));
+    }
+    let activity_title = if act_len > 0 {
+        format!(
+            "Agent Activity {}/{act_len} — {} in / {} out",
+            act_sel + 1,
+            pkg.input_tokens,
+            pkg.output_tokens
+        )
+    } else {
+        format!(
             "Agent Activity — {} in / {} out",
             pkg.input_tokens, pkg.output_tokens
-        )));
-    f.render_widget(activity, chunks[1]);
-    max_scroll
+        )
+    };
+    let activity = List::new(activity_items)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(pane(&activity_title, browse.focus == Focus::Activity));
+    f.render_stateful_widget(activity, chunks[1], &mut list_state);
+    feedback
+}
+
+/// One line of a text prompt: label, the text typed so far with a cursor, and
+/// the keys that finish or cancel it.
+fn prompt_line(label: &str, buf: &str, keys: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label.to_string(), Style::default().fg(Color::Cyan)),
+        Span::raw(buf.to_string()),
+        Span::styled("█", Style::default().fg(Color::Cyan)),
+        Span::styled(keys.to_string(), Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 fn render_footer(
     f: &mut Frame,
     state: &TuiState,
     input: Option<&str>,
+    browse: &BrowseState,
     area: Rect,
     retryable: bool,
 ) {
-    if let Some(buf) = input {
-        let line = Line::from(vec![
-            Span::styled(
-                "add package (name or repo URL): ",
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::raw(buf.to_string()),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                "   Enter queue │ Esc cancel",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
+    let prompt = match (input, browse.filter_input.as_deref()) {
+        (Some(buf), _) => Some(prompt_line(
+            "add package (name or repo URL): ",
+            buf,
+            "   Enter queue │ Esc cancel",
+        )),
+        (None, Some(buf)) => Some(prompt_line(
+            "filter log: ",
+            buf,
+            "   Enter apply │ Esc cancel",
+        )),
+        (None, None) => None,
+    };
+    if let Some(line) = prompt {
         f.render_widget(
             Paragraph::new(line).block(Block::default().borders(Borders::ALL)),
             area,
@@ -1419,9 +1911,22 @@ fn render_footer(
         .as_ref()
         .map(|l| Span::styled(l.message.clone(), Style::default().fg(l.level.color())))
         .unwrap_or_else(|| Span::raw(""));
+    let nav = match browse.focus {
+        Focus::Table => "↑/↓ select │ PgUp/PgDn/Home/End scroll log",
+        Focus::Log => "↑/↓ PgUp/PgDn/Home/End scroll log │ / filter",
+        Focus::Activity if browse.act_expanded => "↑/↓ PgUp/PgDn/Home/End scroll text",
+        Focus::Activity => "↑/↓ PgUp/PgDn/Home/End move │ Enter expand",
+    };
+    // Esc does the first thing still open, so say what it does now.
+    let quit = match esc_action(browse) {
+        EscAction::ClosePrompt => "Esc cancel",
+        EscAction::ClearFilter => "Esc clear filter │ q quit",
+        EscAction::Collapse => "Esc close │ q quit",
+        EscAction::Quit => "q/Esc quit",
+    };
     let hint = Span::styled(
         format!(
-            "  ↑/↓ select │ PgUp/PgDn/End scroll log │ n add package{} │ a {} succeeded │ q/Esc quit",
+            "  {nav} │ Tab focus │ n add package{} │ a {} succeeded │ {quit}",
             if retryable {
                 " │ r retry (no space left)"
             } else {
@@ -1746,5 +2251,349 @@ mod step_state_tests {
         let pkg = &state.packages["foo"];
         assert_eq!(pkg.skipped, [(StepKind::OscService, SkipReason::NotRust)]);
         assert_eq!(pkg.step.as_ref().unwrap().kind, StepKind::Checkout);
+    }
+}
+
+#[cfg(test)]
+mod browse_tests {
+    use super::*;
+
+    fn line(message: &str) -> LogLine {
+        LogLine {
+            level: LogLevel::Info,
+            message: message.to_string(),
+            emphasis: false,
+        }
+    }
+
+    #[test]
+    fn window_of_an_empty_log_is_empty() {
+        assert_eq!(window(0, 5, 0), 0..0);
+        assert_eq!(window(0, 5, 3), 0..0);
+    }
+
+    #[test]
+    fn window_shorter_than_the_viewport_shows_everything() {
+        assert_eq!(window(3, 5, 0), 0..3);
+        assert_eq!(window(3, 5, 2), 0..3);
+    }
+
+    #[test]
+    fn window_equal_to_the_viewport_shows_everything() {
+        assert_eq!(window(5, 5, 0), 0..5);
+        assert_eq!(window(5, 5, 1), 0..5);
+    }
+
+    #[test]
+    fn window_offset_past_the_top_is_clamped() {
+        assert_eq!(window(10, 4, 100), 0..4);
+        assert_eq!(window(10, 4, 6), 0..4);
+        assert_eq!(window(10, 4, 0), 6..10);
+        assert_eq!(window(10, 4, 2), 4..8);
+    }
+
+    #[test]
+    fn window_with_zero_viewport_is_empty_and_never_underflows() {
+        assert_eq!(window(5, 0, 2), 3..3);
+    }
+
+    #[test]
+    fn scroll_up_at_the_top_stays_and_down_at_the_tail_stays() {
+        assert_eq!(scroll_key(KeyCode::Up, 6, 10, 4), 6);
+        assert_eq!(scroll_key(KeyCode::Down, 0, 10, 4), 0);
+        assert_eq!(scroll_key(KeyCode::Char('k'), 0, 10, 4), 1);
+        assert_eq!(scroll_key(KeyCode::Char('j'), 3, 10, 4), 2);
+    }
+
+    #[test]
+    fn paging_moves_by_viewport_minus_one_with_a_floor_of_one() {
+        assert_eq!(scroll_key(KeyCode::PageUp, 0, 10, 5), 4);
+        assert_eq!(scroll_key(KeyCode::PageDown, 4, 10, 5), 0);
+        assert_eq!(scroll_key(KeyCode::PageUp, 0, 10, 1), 1);
+        assert_eq!(scroll_key(KeyCode::PageUp, 0, 10, 0), 1);
+        assert_eq!(scroll_key(KeyCode::PageDown, 0, 10, 0), 0);
+    }
+
+    #[test]
+    fn home_is_the_oldest_line_and_end_is_the_tail() {
+        assert_eq!(scroll_key(KeyCode::Home, 0, 10, 4), 6);
+        assert_eq!(scroll_key(KeyCode::End, 6, 10, 4), 0);
+        assert_eq!(scroll_key(KeyCode::Home, 0, 0, 4), 0);
+    }
+
+    #[test]
+    fn scroll_offset_is_clamped_when_content_shrinks() {
+        assert_eq!(scroll_key(KeyCode::PageUp, 50, 10, 4), 6);
+        assert_eq!(scroll_key(KeyCode::Up, 50, 10, 4), 6);
+    }
+
+    #[test]
+    fn a_view_at_the_tail_keeps_following() {
+        assert_eq!(follow_adjust(0, 10, 4), 0);
+    }
+
+    #[test]
+    fn a_scrolled_view_moves_up_by_the_lines_that_arrived() {
+        assert_eq!(follow_adjust(5, 3, 0), 8);
+        assert_eq!(follow_adjust(5, 7, 7), 5);
+    }
+
+    #[test]
+    fn eviction_after_arrivals_is_left_to_the_clamp() {
+        let adjusted = follow_adjust(8, 3, 0);
+        assert_eq!(adjusted, 11);
+        assert_eq!(clamp_offset(adjusted, 10, 4), 6);
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_substring() {
+        assert!(filter_matches("Building jq-cpp", "JQ"));
+        assert!(filter_matches("über cool", "ÜBER"));
+        assert!(!filter_matches("nothing here", "xyz"));
+    }
+
+    #[test]
+    fn empty_filter_matches_every_line() {
+        assert!(filter_matches("", ""));
+        assert!(filter_matches("anything", ""));
+    }
+
+    #[test]
+    fn filtered_indices_keep_log_order() {
+        let lines = [line("a"), line("B a"), line("c")];
+        assert_eq!(filtered_indices(&lines, "a"), vec![0, 1]);
+        assert_eq!(filtered_indices(&lines, ""), vec![0, 1, 2]);
+        assert!(filtered_indices(&lines, "zzz").is_empty());
+    }
+
+    #[test]
+    fn focus_cycles_both_ways_and_wraps() {
+        assert_eq!(cycle_focus(Focus::Table, false), Focus::Log);
+        assert_eq!(cycle_focus(Focus::Log, false), Focus::Activity);
+        assert_eq!(cycle_focus(Focus::Activity, false), Focus::Table);
+        assert_eq!(cycle_focus(Focus::Table, true), Focus::Activity);
+        assert_eq!(cycle_focus(Focus::Activity, true), Focus::Log);
+        assert_eq!(cycle_focus(Focus::Log, true), Focus::Table);
+    }
+
+    #[test]
+    fn activity_selection_stays_inside_an_empty_or_short_list() {
+        assert_eq!(activity_move(0, 0, KeyCode::Down, 5), 0);
+        assert_eq!(activity_move(4, 2, KeyCode::Down, 5), 1);
+        assert_eq!(activity_move(9, 3, KeyCode::Up, 5), 1);
+    }
+
+    #[test]
+    fn activity_selection_moves_and_jumps() {
+        assert_eq!(activity_move(1, 10, KeyCode::Down, 5), 2);
+        assert_eq!(activity_move(0, 10, KeyCode::Up, 5), 0);
+        assert_eq!(activity_move(0, 10, KeyCode::PageDown, 3), 2);
+        assert_eq!(activity_move(5, 10, KeyCode::Home, 3), 0);
+        assert_eq!(activity_move(5, 10, KeyCode::End, 3), 9);
+        assert_eq!(activity_move(9, 10, KeyCode::Down, 3), 9);
+    }
+
+    #[test]
+    fn activity_top_is_zero_for_an_empty_list() {
+        assert_eq!(activity_top(0, 3, 0, 5), 0);
+    }
+
+    #[test]
+    fn activity_top_scrolls_the_minimum_to_show_the_selection() {
+        assert_eq!(activity_top(7, 0, 17, 5), 3);
+        assert_eq!(activity_top(1, 4, 17, 5), 1);
+        assert_eq!(activity_top(5, 3, 17, 5), 3);
+        assert_eq!(activity_top(16, 0, 17, 5), 12);
+    }
+
+    #[test]
+    fn activity_selection_stays_visible_after_the_viewport_shrinks() {
+        let top = activity_top(7, 5, 17, 2);
+        assert!((top..top + 2).contains(&7));
+    }
+}
+
+#[cfg(test)]
+mod seq_tests {
+    use super::*;
+
+    #[test]
+    fn log_seq_keeps_counting_after_eviction_caps_the_log() {
+        let mut pkg = PkgState::new(String::new());
+        for i in 0..MAX_LOG_LINES + 5 {
+            pkg.add_log(LogLevel::Info, i.to_string());
+        }
+        assert_eq!(pkg.log_lines.len(), MAX_LOG_LINES);
+        assert_eq!(pkg.log_seq, (MAX_LOG_LINES + 5) as u64);
+    }
+
+    #[test]
+    fn activity_seq_keeps_counting_after_eviction_caps_the_list() {
+        let mut pkg = PkgState::new(String::new());
+        for i in 0..MAX_AGENT_ACTIVITY + 3 {
+            pkg.add_agent_activity(ActivityKind::Task, i.to_string());
+        }
+        assert_eq!(pkg.agent_activity.len(), MAX_AGENT_ACTIVITY);
+        assert_eq!(pkg.activity_seq, (MAX_AGENT_ACTIVITY + 3) as u64);
+    }
+}
+
+#[cfg(test)]
+mod expand_tests {
+    use super::*;
+
+    #[test]
+    fn wrap_breaks_between_words() {
+        assert_eq!(wrap_text("one two three", 7), ["one two", "three"]);
+        assert_eq!(wrap_text("one two three", 5), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn wrap_breaks_a_word_longer_than_the_line() {
+        assert_eq!(wrap_text("abcdefgh", 3), ["abc", "def", "gh"]);
+    }
+
+    #[test]
+    fn wrap_keeps_newlines_and_blank_lines() {
+        assert_eq!(wrap_text("a\n\nb", 10), ["a", "", "b"]);
+    }
+
+    #[test]
+    fn wrap_of_empty_text_has_no_lines() {
+        assert!(wrap_text("", 10).is_empty());
+    }
+
+    #[test]
+    fn wrap_counts_wide_characters_as_two_columns() {
+        assert_eq!(wrap_text("日本語", 4), ["日本", "語"]);
+    }
+
+    #[test]
+    fn wrap_gives_a_glyph_wider_than_the_line_its_own_line() {
+        assert_eq!(wrap_text("日", 1), ["日"]);
+    }
+
+    #[test]
+    fn text_scroll_stays_inside_the_text() {
+        assert_eq!(text_scroll_key(KeyCode::Up, 0, 10, 4), 0);
+        assert_eq!(text_scroll_key(KeyCode::Down, 0, 10, 4), 1);
+        assert_eq!(text_scroll_key(KeyCode::Down, 6, 10, 4), 6);
+        assert_eq!(text_scroll_key(KeyCode::PageDown, 0, 10, 4), 3);
+        assert_eq!(text_scroll_key(KeyCode::End, 0, 10, 4), 6);
+        assert_eq!(text_scroll_key(KeyCode::Home, 6, 10, 4), 0);
+    }
+
+    #[test]
+    fn esc_closes_an_open_entry_before_quitting() {
+        let mut browse = BrowseState::default();
+        assert_eq!(esc_action(&browse), EscAction::Quit);
+        browse.act_expanded = true;
+        assert_eq!(esc_action(&browse), EscAction::Collapse);
+    }
+}
+
+#[cfg(test)]
+mod filter_esc_tests {
+    use super::*;
+
+    #[test]
+    fn esc_dismisses_the_prompt_then_the_filter_then_the_entry_then_quits() {
+        let mut browse = BrowseState::default();
+        browse.act_expanded = true;
+        browse.filter = Some("jq".to_string());
+        browse.filter_input = Some(String::new());
+        assert_eq!(esc_action(&browse), EscAction::ClosePrompt);
+        browse.filter_input = None;
+        assert_eq!(esc_action(&browse), EscAction::ClearFilter);
+        browse.filter = None;
+        assert_eq!(esc_action(&browse), EscAction::Collapse);
+        browse.act_expanded = false;
+        assert_eq!(esc_action(&browse), EscAction::Quit);
+    }
+
+    #[test]
+    fn selecting_another_package_drops_its_filter() {
+        let mut browse = BrowseState::default();
+        browse.filter = Some("jq".to_string());
+        browse.filter_input = Some("j".to_string());
+        browse.reset_for_package(0);
+        assert!(browse.filter.is_none());
+        assert!(browse.filter_input.is_none());
+    }
+}
+
+#[cfg(test)]
+mod render_smoke_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn state_with_history() -> TuiState {
+        let mut state = TuiState::new();
+        let pkg = state.pkg_mut("foo");
+        for i in 0..50 {
+            pkg.add_log(LogLevel::Info, format!("log line {i} with some text"));
+        }
+        for i in 0..30 {
+            pkg.add_agent_activity(ActivityKind::ToolUse, format!("→ Read {i}\nsecond line"));
+        }
+        pkg.add_agent_activity(
+            ActivityKind::Reply,
+            format!("done (confidence: high)\n{}", "long reasoning ".repeat(40)),
+        );
+        state
+    }
+
+    #[test]
+    fn every_focus_and_size_renders_without_panicking() {
+        let state = state_with_history();
+        for (w, h) in [(80u16, 30u16), (20, 8), (3, 3)] {
+            for focus in [Focus::Table, Focus::Log, Focus::Activity] {
+                for expanded in [false, true] {
+                    for filter in [None, Some("line 4".to_string())] {
+                        for act_sel in [0, usize::MAX] {
+                            for log_off in [0, 1000] {
+                                for input in [None, Some("abc")] {
+                                    let browse = BrowseState {
+                                        focus,
+                                        act_expanded: expanded,
+                                        filter: filter.clone(),
+                                        act_sel,
+                                        log_off,
+                                        ..BrowseState::default()
+                                    };
+                                    let mut table_state = TableState::default();
+                                    table_state.select(Some(0));
+                                    let mut terminal =
+                                        Terminal::new(TestBackend::new(w, h)).unwrap();
+                                    terminal
+                                        .draw(|f| {
+                                            render(f, &state, &mut table_state, input, &browse);
+                                        })
+                                        .unwrap();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_run_renders_without_panicking() {
+        let state = TuiState::new();
+        let browse = BrowseState {
+            focus: Focus::Activity,
+            act_expanded: true,
+            act_sel: usize::MAX,
+            ..BrowseState::default()
+        };
+        let mut table_state = TableState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(f, &state, &mut table_state, None, &browse);
+            })
+            .unwrap();
     }
 }
