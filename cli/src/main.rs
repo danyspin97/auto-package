@@ -1317,6 +1317,20 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     })
 }
 
+/// The outcome a finished package reports, shared by every build path.
+fn package_outcome(result: &PipelineResult) -> PackageOutcome {
+    match result {
+        PipelineResult::Built { .. } => PackageOutcome::Built,
+        PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
+        PipelineResult::MissingDeps { deps, .. } => {
+            PackageOutcome::MissingDeps { deps: deps.clone() }
+        }
+        PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
+            reason: reason.clone(),
+        },
+    }
+}
+
 /// Lists what this run built, what is queued and what the project already has
 /// built for this distro and arch, so the outcome is readable without
 /// scrolling the log.
@@ -1925,9 +1939,20 @@ fn cmd_build(
                     let dep_version = dep_config.version.clone();
                     let r = pkg_reporter(&dep_rpm);
                     let sem2 = sem.clone();
+                    let finished_name = dep_rpm.clone();
+                    let finished_version = dep_version.clone();
                     let handle = std::thread::spawn(move || {
                         let _permit = Permit::acquire(&sem2);
-                        run_package(&dep_config, &dep_pkg_run, r.as_ref())
+                        let result = run_package(&dep_config, &dep_pkg_run, r.as_ref());
+                        // Reported as soon as this package is done. Reporting in
+                        // join order let a slower sibling hold back every package
+                        // finished after it, so their rows stayed on their last step.
+                        r.report(&Event::PackageFinished {
+                            pkg: finished_name,
+                            version: finished_version,
+                            outcome: package_outcome(&result),
+                        });
+                        result
                     });
                     Some((dep_rpm, dep_version, handle))
                 })
@@ -1939,23 +1964,8 @@ fn cmd_build(
                 }
             }
 
-            for (dep_rpm, version, handle) in handles {
+            for (dep_rpm, _version, handle) in handles {
                 let result = join_package(handle, &dep_rpm);
-                let outcome = match &result {
-                    PipelineResult::Built { .. } => PackageOutcome::Built,
-                    PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
-                    PipelineResult::MissingDeps { deps, .. } => {
-                        PackageOutcome::MissingDeps { deps: deps.clone() }
-                    }
-                    PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
-                        reason: reason.clone(),
-                    },
-                };
-                pkg_reporter(&dep_rpm).report(&Event::PackageFinished {
-                    pkg: dep_rpm.clone(),
-                    version,
-                    outcome,
-                });
                 match result {
                     PipelineResult::Built { .. } => {
                         ap_core::diag!("built dep {dep_rpm}");
