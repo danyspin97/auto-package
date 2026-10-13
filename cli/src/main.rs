@@ -210,6 +210,17 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         regen: bool,
     },
+
+    /// Print what auto-package has learned about a package: the build
+    /// requirements, test changes and workarounds kept in its notes.
+    Notes {
+        /// RPM package name, e.g. python-requests.
+        name: String,
+
+        /// Directory the notes are kept in (the same one builds use).
+        #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
+        notes_dir: PathBuf,
+    },
 }
 
 /// Whether a positional target is a repository URL rather than a package name.
@@ -960,6 +971,15 @@ fn main() -> color_eyre::Result<()> {
             });
 
             result?;
+        }
+        Commands::Notes { name, notes_dir } => {
+            ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
+            let text = ap_build::package_notes::read(&name);
+            if text.is_empty() {
+                println!("no notes for {name} yet in {}", notes_dir.display());
+            } else {
+                print!("{text}");
+            }
         }
         Commands::Update {
             name: only,
