@@ -597,41 +597,73 @@ fn reject_symlink_project_dir(dir: &Path) -> color_eyre::Result<()> {
     Ok(())
 }
 
-/// Advisory per-project lock: a file holding the owner's pid, created
-/// exclusively. No locking crate is a dependency, so liveness of the recorded
-/// pid is what tells a live owner from a stale file left by a crash.
+/// Advisory per-project lock: a file holding the owner's pid and process start
+/// time, created exclusively. No locking crate is a dependency, so the
+/// recorded pid (and that it still names the same process) is what tells a live
+/// owner from a stale file left by a crash.
 struct ProjectLock {
     path: PathBuf,
+}
+
+/// What a lock file records: the owner's pid and, where `/proc` can tell, its
+/// start time. The start time distinguishes the owner from an unrelated
+/// process that was later given the same pid.
+fn parse_lock(text: &str) -> Option<(u32, Option<u64>)> {
+    let mut it = text.split_whitespace();
+    let pid = it.next()?.parse().ok()?;
+    Some((pid, it.next().and_then(|t| t.parse().ok())))
 }
 
 impl ProjectLock {
     fn acquire(project_dir: &Path) -> color_eyre::Result<Self> {
         let path = project_dir.join(PROJECT_LOCK_NAME);
+        let me = std::process::id();
         // The pid is written before the lock becomes visible: a file created
         // empty and filled afterwards can be read by a second run in between,
         // which would take it for stale. Linking a complete file is atomic.
-        let staging = project_dir.join(format!("{PROJECT_LOCK_NAME}.{}.tmp", std::process::id()));
-        std::fs::write(&staging, format!("{}\n", std::process::id()))?;
-        let result = (0..3).find_map(|_| match std::fs::hard_link(&staging, &path) {
+        let staging = project_dir.join(format!("{PROJECT_LOCK_NAME}.{me}.tmp"));
+        let start = process_start(me)
+            .map(|s| format!(" {s}"))
+            .unwrap_or_default();
+        std::fs::write(&staging, format!("{me}{start}\n"))?;
+        let result = (0..5).find_map(|attempt| match std::fs::hard_link(&staging, &path) {
             Ok(()) => Some(Ok(())),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let pid = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|t| t.trim().parse::<u32>().ok());
-                if let Some(pid) = pid
-                    && pid_is_alive(pid)
-                {
-                    return Some(Err(color_eyre::eyre::eyre!(
+                let held_by =
+                    |text: &str| parse_lock(text).filter(|&(pid, start)| lock_is_held(pid, start));
+                let busy = |pid: u32| {
+                    color_eyre::eyre::eyre!(
                         "another auto-package run (pid {pid}) is using {}; \
                          wait for it to finish. If that process is not an \
                          auto-package run, delete {}.",
                         project_dir.display(),
                         path.display(),
-                    )));
+                    )
+                };
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                if let Some((pid, _)) = held_by(&text) {
+                    return Some(Err(busy(pid)));
                 }
-                // Stale (owner gone) or unreadable: take it over and retry.
-                let _ = std::fs::remove_file(&path);
-                None
+                // Stale (owner gone) or unreadable. Two runs can reach this
+                // point together, and remove-then-recreate would let both
+                // win. A rename is atomic, so only one run moves the stale
+                // file away; the other finds it gone and retries.
+                let moved = project_dir.join(format!("{PROJECT_LOCK_NAME}.stale.{me}.{attempt}"));
+                match std::fs::rename(&path, &moved) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+                    Err(e) => return Some(Err(e.into())),
+                }
+                // The file may have been replaced by a live run's fresh lock
+                // between the read above and the rename; check what was
+                // actually moved, and put a live lock back.
+                let moved_text = std::fs::read_to_string(&moved).unwrap_or_default();
+                let live = held_by(&moved_text);
+                if live.is_some() {
+                    let _ = std::fs::hard_link(&moved, &path);
+                }
+                let _ = std::fs::remove_file(&moved);
+                live.map(|(pid, _)| Err(busy(pid)))
             }
             Err(e) => Some(Err(e.into())),
         });
@@ -660,16 +692,31 @@ impl Drop for ProjectLock {
     }
 }
 
-/// Whether `pid` is a running process. Without `/proc` this cannot be told,
-/// so it answers yes: refusing to start is safer than clobbering a live run.
-fn pid_is_alive(pid: u32) -> bool {
+/// Start time of `pid` in clock ticks since boot (field 22 of
+/// `/proc/<pid>/stat`), or `None` when it cannot be read.
+fn process_start(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is parenthesised and may contain spaces or parens, so
+    // count fields from the last `)`: the next one is field 3 (state).
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Whether the process that wrote a lock is still running. `start` is the
+/// start time it recorded; a different one means the pid was reused. Without
+/// `/proc` this cannot be told, so it answers yes: refusing to start is safer
+/// than clobbering a live run.
+fn lock_is_held(pid: u32, start: Option<u64>) -> bool {
     if pid == std::process::id() {
         return true;
     }
     if !Path::new("/proc/self").exists() {
         return true;
     }
-    Path::new(&format!("/proc/{pid}")).exists()
+    match process_start(pid) {
+        None => false,
+        Some(now) => start.is_none_or(|recorded| recorded == now),
+    }
 }
 
 fn main() -> color_eyre::Result<()> {
@@ -1786,7 +1833,9 @@ fn cmd_build(
 
                     // Own-project packages: index by fuzzy key so a
                     // separator mismatch can't false-miss.
-                    let own = ap_build::osc::list_project_packages(project, emit);
+                    // A failed listing is already warned about by osc.
+                    let own =
+                        ap_build::osc::list_project_packages(project, emit).unwrap_or_default();
                     let own_match = own.iter().find(|p| {
                         let k = ap_build::osc::fuzzy_key(p);
                         k == rpm_key || k == bare_key
@@ -1826,7 +1875,8 @@ fn cmd_build(
                     for (path_project, _repo) in
                         ap_build::osc::get_project_repo_paths(project, emit)
                     {
-                        let linked = ap_build::osc::list_project_packages(&path_project, emit);
+                        let linked = ap_build::osc::list_project_packages(&path_project, emit)
+                            .unwrap_or_default();
                         if let Some(match_name) = linked.iter().find(|p| {
                             let k = ap_build::osc::fuzzy_key(p);
                             k == rpm_key || k == bare_key

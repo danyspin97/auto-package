@@ -410,12 +410,76 @@ pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
             for entry in archive.entries().map_err(Error::Tar)? {
                 let mut entry = entry.map_err(Error::Tar)?;
                 budget.charge(entry.size())?;
+                if let Some(reason) = escaping_link(&entry) {
+                    tracing::warn!("skipping tar entry: {reason}");
+                    continue;
+                }
                 entry.unpack_in(dest).map_err(Error::Tar)?;
             }
             Ok(())
         }
         ArchiveKind::Zip | ArchiveKind::Wheel => extract_zip(tarball, dest),
     }
+}
+
+/// Why a symlink or hard-link entry must not be materialised, or `None` when
+/// it is not a link or stays inside the extraction root.
+///
+/// tar-rs creates the link with whatever target the archive names, so an
+/// absolute or `../` target would leave a link in the build tree that points
+/// outside it, and later steps that follow it would read or write there.
+/// The check is lexical: it cannot follow links that do not exist yet.
+fn escaping_link<R: Read>(entry: &tar::Entry<'_, R>) -> Option<String> {
+    use std::path::Component;
+    let kind = entry.header().entry_type();
+    if !kind.is_symlink() && !kind.is_hard_link() {
+        return None;
+    }
+    let name = entry.path().ok()?.into_owned();
+    let target = match entry.link_name() {
+        Ok(Some(t)) => t.into_owned(),
+        _ => return Some(format!("link {} has no readable target", name.display())),
+    };
+    let refuse = || {
+        Some(format!(
+            "link {} -> {} points outside the extraction root",
+            name.display(),
+            target.display()
+        ))
+    };
+    if target.is_absolute() {
+        return refuse();
+    }
+    // A symlink target is relative to the link's directory; a hard-link
+    // target is relative to the archive root.
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    if kind.is_symlink() {
+        let parent = name.parent().unwrap_or(Path::new(""));
+        for c in parent.components() {
+            match c {
+                Component::Normal(p) => parts.push(p),
+                Component::ParentDir => {
+                    if parts.pop().is_none() {
+                        return refuse();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for c in target.components() {
+        match c {
+            Component::Normal(p) => parts.push(p),
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return refuse();
+                }
+            }
+            Component::CurDir => {}
+            _ => return refuse(),
+        }
+    }
+    None
 }
 
 /// Extract a zip-shaped archive (`.whl` or `.zip`) using the `zip` crate.
@@ -1428,6 +1492,41 @@ build-backend = "flit_core.buildapi"
         let out = dir.path().join("out");
         extract(&src, &out).unwrap();
         assert_extracted(&out);
+    }
+
+    #[test]
+    fn extract_skips_links_that_leave_the_root() {
+        let mut buf = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut buf);
+            for (name, target) in [
+                ("pkg/abs", "/etc/passwd"),
+                ("pkg/up", "../../outside"),
+                ("pkg/ok", "file"),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Symlink);
+                h.set_size(0);
+                h.set_mode(0o777);
+                ar.append_link(&mut h, name, target).unwrap();
+            }
+            let mut h = tar::Header::new_gnu();
+            h.set_size(1);
+            h.set_mode(0o644);
+            h.set_cksum();
+            ar.append_data(&mut h, "pkg/file", b"x".as_slice()).unwrap();
+            ar.finish().unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tgz = dir.path().join("a.tar.gz");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &buf).unwrap();
+        std::fs::write(&tgz, enc.finish().unwrap()).unwrap();
+        let dest = dir.path().join("out");
+        extract(&tgz, &dest).unwrap();
+        assert!(std::fs::symlink_metadata(dest.join("pkg/abs")).is_err());
+        assert!(std::fs::symlink_metadata(dest.join("pkg/up")).is_err());
+        assert!(std::fs::symlink_metadata(dest.join("pkg/ok")).is_ok());
     }
 
     #[test]
