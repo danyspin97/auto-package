@@ -160,6 +160,11 @@ fn matches_credential_pattern(name: &str) -> bool {
 
 /// Wall-clock limit for one `claude` turn.
 const AGENT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45 * 60);
+/// A turn that prints nothing for this long is stalled (a dead connection, a
+/// tool waiting on input), so it is killed well before the wall-clock limit.
+const AGENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// How often the watchdog checks for idleness.
+const AGENT_WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 /// Most stdout/stderr text kept from one turn for post-mortem files.
 const MAX_AGENT_STREAM_BYTES: u64 = 32 * 1024 * 1024;
 /// Most bytes kept of one tool call's input.
@@ -3109,16 +3114,31 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // only checked between turns. Kill the whole group after the deadline.
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    // Milliseconds since `started` at the last line of output. The watchdog
+    // reads it; the stdout loop below writes it.
+    let started = std::time::Instant::now();
+    let last_output = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     {
         let pid = child.id();
         let timed_out = timed_out.clone();
+        let last_output = last_output.clone();
         std::thread::spawn(move || {
-            if matches!(
-                done_rx.recv_timeout(AGENT_TURN_TIMEOUT),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ) {
-                timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
-                crate::proc::kill_process_group(pid);
+            use std::sync::atomic::Ordering;
+            loop {
+                match done_rx.recv_timeout(AGENT_WATCHDOG_TICK) {
+                    // Finished normally, or the turn's sender was dropped.
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let elapsed = started.elapsed();
+                let idle = elapsed.saturating_sub(std::time::Duration::from_millis(
+                    last_output.load(Ordering::SeqCst),
+                ));
+                if elapsed >= AGENT_TURN_TIMEOUT || idle >= AGENT_IDLE_TIMEOUT {
+                    timed_out.store(true, Ordering::SeqCst);
+                    crate::proc::kill_process_group(pid);
+                    return;
+                }
             }
         });
     }
@@ -3175,6 +3195,10 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     break;
                 }
             };
+            last_output.store(
+                started.elapsed().as_millis() as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
             // Keep a bounded copy: a long turn streams every Edit/Write input,
             // and the raw copy is only for post-mortem reading.
             if (stdout_raw.len() as u64) < MAX_AGENT_STREAM_BYTES {
@@ -3247,7 +3271,8 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         .unwrap_or_default();
     if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
         stderr_content = format!(
-            "claude turn timed out after {} minutes and was killed\n{stderr_content}",
+            "claude turn was killed: no output for {} minutes, or over {} minutes in total\n{stderr_content}",
+            AGENT_IDLE_TIMEOUT.as_secs() / 60,
             AGENT_TURN_TIMEOUT.as_secs() / 60
         );
     }
