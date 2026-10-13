@@ -3530,6 +3530,11 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
     };
     for name in patches {
         let name = name.replace("%{version}", "");
+        // Patch names come from spec text. Only a bare file name is a patch in
+        // this checkout; `/etc/x` or `../x` would read outside it.
+        if Path::new(&name).file_name() != Some(name.as_ref()) {
+            continue;
+        }
         let patch_file = checkout.join(&name);
         if !patch_file.is_file() {
             // A missing patch file is reported by the missing-source check.
