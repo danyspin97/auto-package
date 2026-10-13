@@ -39,8 +39,9 @@ enum Commands {
         #[arg(long, default_value = "ap-work")]
         work_dir: PathBuf,
 
-        /// Where per-package notes are kept. Outside work_dir, so they survive cleanup.
-        #[arg(long, default_value = "notes/packages")]
+        /// Directory for per-package notes, shared across projects. Kept outside
+        /// work_dir so they survive cleanup.
+        #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
         notes_dir: PathBuf,
 
         #[arg(long, default_value = "openSUSE_Tumbleweed")]
@@ -153,8 +154,9 @@ enum Commands {
         #[arg(long, default_value = "ap-work")]
         work_dir: PathBuf,
 
-        /// Where per-package notes are kept. Outside work_dir, so they survive cleanup.
-        #[arg(long, default_value = "notes/packages")]
+        /// Directory for per-package notes, shared across projects. Kept outside
+        /// work_dir so they survive cleanup.
+        #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
         notes_dir: PathBuf,
 
         #[arg(long, default_value = "openSUSE_Tumbleweed")]
