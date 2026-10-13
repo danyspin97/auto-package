@@ -269,10 +269,11 @@ fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
 /// package and one git-forge API call per repo-sourced one. Returned in
 /// sorted RPM-name order so `--check` output is stable across runs.
 pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate> {
-    let packages = osc::list_project_packages(project, emit);
+    // A failed listing is already reported by osc; it plans nothing.
+    let packages = osc::list_project_packages(project, emit).unwrap_or_default();
     let mut names: Vec<String> = packages
         .into_iter()
-        .filter(|n| only.is_none_or(|o| o == n))
+        .filter(|n| only.is_none_or(|o| o == n.as_str()))
         .collect();
     names.sort();
 

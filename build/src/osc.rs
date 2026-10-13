@@ -879,12 +879,18 @@ fn extract_xml_attr(tag: &str, attr: &str) -> Option<String> {
 /// This is the correct set to check for resolvability: a package is available
 /// for building if it exists in the user's own project OR in any project that
 /// the user's project is configured to build against.
-pub fn get_available_packages(project: &str, emit: Emit<'_>) -> std::collections::HashSet<String> {
-    let mut all = list_project_packages(project, emit);
+///
+/// Fails when any listing fails: a partial union would make packages that
+/// do exist look absent.
+pub fn get_available_packages(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut all = try_list_project_packages(project, emit)?;
     for (path_project, _repo) in get_project_repo_paths(project, emit) {
-        all.extend(list_project_packages(&path_project, emit));
+        all.extend(try_list_project_packages(&path_project, emit)?);
     }
-    all
+    Ok(all)
 }
 
 static PROJECT_PACKAGES_CACHE: OnceLock<Mutex<HashMap<String, std::collections::HashSet<String>>>> =
@@ -904,33 +910,52 @@ static PROJECT_PACKAGES_CACHE: OnceLock<Mutex<HashMap<String, std::collections::
 /// process — every package built after it would look like it still doesn't
 /// exist to every dependent package's availability check, for the entire
 /// remainder of the run, no matter how many more succeed.
-pub fn list_project_packages(project: &str, emit: Emit<'_>) -> std::collections::HashSet<String> {
+///
+/// Errors when the listing cannot be fetched, so a caller cannot mistake
+/// "OBS did not answer" for "the package is absent".
+pub fn try_list_project_packages(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<std::collections::HashSet<String>, String> {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     {
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pkgs) = guard.get(project) {
-            return pkgs.clone();
+            return Ok(pkgs.clone());
         }
     }
 
     // A failed listing must not be cached: an empty set would make every
     // package look absent from OBS for the rest of the run. Retry once, then
-    // answer empty for this call only so the next call tries again.
-    let pkgs = match fetch_project_packages(project, emit)
+    // report the error so the next call tries again.
+    let pkgs = fetch_project_packages(project, emit)
         .or_else(|_| fetch_project_packages(project, Emit::quiet()))
-    {
-        Ok(pkgs) => pkgs,
-        Err(e) => {
-            ap_core::diag!("  could not list packages of {project}: {e}");
-            return Default::default();
-        }
-    };
+        .map_err(|e| format!("could not list packages of {project}: {e}"))?;
     cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(project.to_owned(), pkgs.clone());
-    pkgs
+    Ok(pkgs)
+}
+
+/// [`try_list_project_packages`] for callers that can only act on a known
+/// answer: warns and returns `None` on failure, which they must not treat as
+/// "the package is absent".
+pub fn list_project_packages(
+    project: &str,
+    emit: Emit<'_>,
+) -> Option<std::collections::HashSet<String>> {
+    match try_list_project_packages(project, emit) {
+        Ok(pkgs) => Some(pkgs),
+        Err(e) => {
+            emit.reporter.report(&Event::Warning {
+                step: emit.step,
+                message: e,
+            });
+            None
+        }
+    }
 }
 
 /// Drop `project`'s cached package listing so the next [`list_project_packages`]
@@ -1211,11 +1236,12 @@ pub fn checkout(
     static CHECKOUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = CHECKOUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let out = proc::capture(
+    let out = proc::capture_with_timeout(
         "osc",
         &["co", &format!("{project}/{pkg_name}")],
         into_dir,
         emit,
+        OSC_TRANSFER_TIMEOUT,
     )
     .map_err(during(format!("co {project}/{pkg_name}")))?;
 
@@ -1240,10 +1266,8 @@ pub fn pull(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
         // 404 means `ensure_package`'s meta push hasn't propagated to this
         // checkout's view of the server yet — the directory is valid,
         // nothing to pull.
-        let benign = ["nothing to update", "At revision", "Skipping"];
-        if !benign
-            .iter()
-            .any(|b| out.stdout.contains(b) || out.stderr.contains(b))
+        if !is_benign_up_output(&out.stdout)
+            && !is_benign_up_output(&out.stderr)
             && !is_not_found(&out.stdout)
             && !is_not_found(&out.stderr)
         {
@@ -1255,6 +1279,25 @@ pub fn pull(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Whether `text` is osc's own "nothing to do" report from `osc up`: a whole
+/// line that is `nothing to update` or `At revision <n>.`. Matching a line
+/// rather than a substring keeps a real failure that merely quotes those
+/// words (a path, a package name, a traceback) an error.
+fn is_benign_up_output(text: &str) -> bool {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .peekable();
+    lines.peek().is_some()
+        && lines.all(|l| {
+            l == "nothing to update"
+                || l.strip_prefix("At revision ")
+                    .and_then(|r| r.strip_suffix('.'))
+                    .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// Run `osc up` in `checkout_dir`, recovering in-place from the two known
@@ -1275,7 +1318,7 @@ pub fn pull(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 /// whether 404 is a non-error) in its own, different way.
 fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Error> {
     let up = || {
-        proc::capture("osc", &["up"], checkout_dir, emit)
+        proc::capture_with_timeout("osc", &["up"], checkout_dir, emit, OSC_TRANSFER_TIMEOUT)
             .map_err(during(format!("up in {}", checkout_dir.display())))
     };
     let out = up()?;
@@ -1503,8 +1546,14 @@ pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), 
         Ok(_) => {}
     }
 
-    let out = proc::capture("osc", &["ci", "-m", message], checkout_dir, emit)
-        .map_err(during(format!("ci in {}", checkout_dir.display())))?;
+    let out = proc::capture_with_timeout(
+        "osc",
+        &["ci", "-m", message],
+        checkout_dir,
+        emit,
+        OSC_TRANSFER_TIMEOUT,
+    )
+    .map_err(during(format!("ci in {}", checkout_dir.display())))?;
 
     if !out.success() {
         // "nothing to do" means files are already committed — not an error.
@@ -1584,6 +1633,13 @@ fn get_build_status_from_results_table(
 /// polling. Generous for a healthy OBS, but finite: see
 /// [`proc::capture_with_timeout`].
 const OSC_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bound for `osc co`, `up` and `ci`, which move a package's sources.
+const OSC_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Bound for `osc buildlog` and `getbinaries`, which move whole logs and RPM
+/// sets and so run longer than a source transfer.
+const OSC_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Run a short network-bound `osc` query in the current directory. A launch
 /// failure or timeout is reported and yields `None`, for callers that treat a
@@ -1773,11 +1829,12 @@ pub fn get_project_build_statuses(
 
     // An empty map reads as "no package has a status", so a failed listing
     // is reported here instead of passing silently.
-    let out = match proc::capture(
+    let out = match proc::capture_with_timeout(
         "osc",
         &["results", "-r", repo, "-a", arch, project],
         &anywhere(),
         emit,
+        OSC_ARTIFACT_TIMEOUT,
     ) {
         Ok(out) if out.success() => out,
         Ok(out) => {
@@ -1863,11 +1920,12 @@ pub fn fetch_buildlog(
     log_path: &Path,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
-    let out = proc::capture(
+    let out = proc::capture_with_timeout(
         "osc",
         &["buildlog", project, pkg_name, repo, arch],
         &anywhere(),
         emit,
+        OSC_ARTIFACT_TIMEOUT,
     )
     .map_err(during(format!(
         "buildlog {project} {pkg_name} {repo} {arch}"
@@ -1948,9 +2006,9 @@ pub fn get_binaries(
     dest_dir: &Path,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
-    let _ = fs::create_dir_all(dest_dir);
+    fs::create_dir_all(dest_dir)?;
     let dest = dest_dir.to_string_lossy();
-    let out = proc::capture(
+    let out = proc::capture_with_timeout(
         "osc",
         &[
             "getbinaries",
@@ -1962,6 +2020,7 @@ pub fn get_binaries(
         ],
         &anywhere(),
         emit,
+        OSC_ARTIFACT_TIMEOUT,
     )
     .map_err(during(format!(
         "getbinaries {project} {pkg_name} {repo} {arch}"
@@ -2062,23 +2121,6 @@ pub fn obs_build(
 
     let start = Instant::now();
     let mut prev_status = String::new();
-
-    reporter.report(&Event::Command {
-        step,
-        program: "osc".to_string(),
-        argv: vec![
-            "results".to_string(),
-            "--watch".to_string(),
-            "-r".to_string(),
-            repo.to_string(),
-            "-a".to_string(),
-            arch.to_string(),
-            project.to_string(),
-            pkg_name.to_string(),
-        ],
-        cwd: anywhere(),
-        log: Some(log_path.to_path_buf()),
-    });
 
     // A single `osc` hiccup (network blip, OBS 5xx, rate limit) during a
     // build that can run for many minutes must not abort the wait and throw
@@ -2245,6 +2287,21 @@ pub fn obs_build(
 
     // Fetch the log regardless of outcome — partial logs help diagnose failures.
     // A missing or stale log leaves the failure without its cause, so say so.
+    // Announce the command that really writes `log_path`; the polling above
+    // goes through the API and runs no `osc results --watch`.
+    reporter.report(&Event::Command {
+        step,
+        program: "osc".to_string(),
+        argv: vec![
+            "buildlog".to_string(),
+            project.to_string(),
+            pkg_name.to_string(),
+            repo.to_string(),
+            arch.to_string(),
+        ],
+        cwd: anywhere(),
+        log: Some(log_path.to_path_buf()),
+    });
     if let Err(e) = fetch_buildlog(project, pkg_name, repo, arch, log_path, Emit::quiet()) {
         reporter.report(&Event::Warning {
             step,
@@ -2361,6 +2418,27 @@ pub fn obs_build(
 #[cfg(test)]
 mod package_listing_tests {
     use super::*;
+
+    #[test]
+    fn only_oscs_own_up_to_date_lines_are_benign() {
+        assert!(is_benign_up_output("At revision 12.\n"));
+        assert!(is_benign_up_output("nothing to update"));
+        assert!(!is_benign_up_output(""));
+        assert!(!is_benign_up_output("Skipping foo: conflict"));
+        assert!(!is_benign_up_output("Error: At revision 3. failed\n"));
+        assert!(!is_benign_up_output("At revision 12.\nTraceback: boom"));
+    }
+
+    #[test]
+    fn get_binaries_reports_an_uncreatable_destination() {
+        // A regular file in the path makes `create_dir_all` fail before any
+        // `osc` call, which used to be ignored.
+        let file = std::env::temp_dir().join(format!("ap-osc-notdir-{}", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        let r = get_binaries("p", "pkg", "r", "a", &file.join("rpms"), Emit::quiet());
+        std::fs::remove_file(&file).ok();
+        assert!(r.is_err());
+    }
 
     #[test]
     fn a_python_multibuild_flavor_counts_as_an_available_package() {
