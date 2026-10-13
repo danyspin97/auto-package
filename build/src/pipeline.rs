@@ -960,7 +960,14 @@ fn package_notes_step(
     });
     let outcome =
         match crate::package_notes::update_after_build(ws, &config.rpm_name, &config.version) {
-            Ok(()) => StepOutcome::Ok,
+            Ok(usage) => {
+                reporter.report(&Event::NotesUsage {
+                    step: step.id,
+                    usage: usage.clone(),
+                });
+                add_notes_spend(ws, &config.run_id, usage.cost_usd);
+                StepOutcome::Ok
+            }
             Err(e) => {
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
@@ -4077,6 +4084,23 @@ fn save_state(state: &PkgState, ws: &Workspace, reporter: &dyn Reporter) {
 /// `agent_turn` persists `spent_usd` after every turn — so a crash or a
 /// `MissingDeps` round trip mid-pipeline resumes with the right count
 /// instead of restarting `attempts` at 0 (see `PkgState::cumulative_attempts`).
+/// Add the notes turn's cost to the package's spend for this run, so the
+/// package's recorded cost includes it. Spend from an earlier run is not
+/// carried over (see `PkgState::cumulative_spent_run_id`).
+fn add_notes_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
+    let mut st = PkgState::load(ws);
+    let base = if st.cumulative_spent_run_id.as_deref() == Some(run_id) {
+        st.cumulative_spent_usd
+    } else {
+        0.0
+    };
+    st.cumulative_spent_usd = base + cost_usd;
+    st.cumulative_spent_run_id = Some(run_id.to_string());
+    if let Err(e) = st.save(ws) {
+        ap_core::diag!("  cannot save the notes cost: {e}");
+    }
+}
+
 fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
     let mut st = PkgState::load(ws);
     st.cumulative_attempts = attempts;

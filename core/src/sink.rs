@@ -196,6 +196,7 @@ impl HumanSink {
             | Event::StepFinished { .. }
             | Event::SpecChanged { .. }
             | Event::PackageFinished { .. }
+            | Event::NotesUsage { .. }
             | Event::Progress { .. } => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }

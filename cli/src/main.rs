@@ -555,7 +555,7 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
         .events()
         .iter()
         .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-            if let Event::AgentReply { usage, .. } = ev {
+            if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } = ev {
                 acc.input_tokens += usage.input_tokens;
                 acc.output_tokens += usage.output_tokens;
                 acc.cost_usd += usage.cost_usd;
@@ -943,7 +943,7 @@ fn main() -> color_eyre::Result<()> {
                     .events()
                     .iter()
                     .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } = ev {
+                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } = ev {
                             acc.input_tokens += usage.input_tokens;
                             acc.output_tokens += usage.output_tokens;
                             acc.cost_usd += usage.cost_usd;
@@ -1107,7 +1107,7 @@ fn main() -> color_eyre::Result<()> {
                     .events()
                     .iter()
                     .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } = ev {
+                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } = ev {
                             acc.input_tokens += usage.input_tokens;
                             acc.output_tokens += usage.output_tokens;
                             acc.cost_usd += usage.cost_usd;

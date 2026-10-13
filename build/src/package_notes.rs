@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use ap_core::event::Usage;
+
 use crate::workspace::Workspace;
 
 /// Haiku is enough for summarising a journal, and it is the cheapest tier.
@@ -38,9 +40,9 @@ pub fn path_for(rpm_name: &str) -> Option<PathBuf> {
 ///
 /// Errors are returned rather than panicking, so the caller can warn and let
 /// the build stay successful.
-pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Result<(), String> {
+pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Result<Usage, String> {
     let Some(notes_file) = path_for(rpm_name) else {
-        return Ok(());
+        return Ok(Usage::default());
     };
     if let Some(dir) = notes_file.parent() {
         std::fs::create_dir_all(dir)
@@ -78,7 +80,18 @@ pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Resu
     if !notes_file.exists() {
         return Err(format!("the agent did not write {}", notes_file.display()));
     }
-    Ok(())
+    Ok(usage_from_output(&out.stdout))
+}
+
+/// Token counts and cost from `claude --output-format json`. A reply that does
+/// not parse counts as free rather than failing the notes update.
+fn usage_from_output(stdout: &str) -> Usage {
+    let v: serde_json::Value = serde_json::from_str(stdout).unwrap_or_default();
+    Usage {
+        input_tokens: v["usage"]["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
+        cost_usd: v["total_cost_usd"].as_f64().unwrap_or(0.0),
+    }
 }
 
 /// The package's notes as they stand, empty when there are none yet.
@@ -115,6 +128,23 @@ fn notes_prompt(rpm_name: &str, version: &str, journal: &Path, notes_file: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_is_read_from_the_cli_json_reply() {
+        let u = usage_from_output(
+            r#"{"result":"ok","total_cost_usd":0.0123,"usage":{"input_tokens":12,"output_tokens":34}}"#,
+        );
+        assert_eq!(u.input_tokens, 12);
+        assert_eq!(u.output_tokens, 34);
+        assert!((u.cost_usd - 0.0123).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unparseable_reply_is_free() {
+        let u = usage_from_output("not json");
+        assert_eq!(u.input_tokens + u.output_tokens, 0);
+        assert_eq!(u.cost_usd, 0.0);
+    }
 
     #[test]
     fn prompt_names_both_files_and_the_package() {

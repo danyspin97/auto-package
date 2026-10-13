@@ -297,6 +297,12 @@ pub enum Event {
         prompt: String,
         artifact: PathBuf,
     },
+    /// Package-notes turn completed. Its cost counts toward the package and run
+    /// totals, but it is not an agent reply, so it has its own event.
+    NotesUsage {
+        step: StepId,
+        usage: Usage,
+    },
     /// Agent turn completed. Named AgentReply to avoid collision with AgentResponseData.
     AgentReply {
         step: StepId,
