@@ -45,6 +45,14 @@ pub enum Error {
     #[error(transparent)]
     Process(#[from] proc::ProcessError),
 
+    /// A launch failure or timeout, named after the osc subcommand it was for.
+    #[error("{source} (during osc {cmd})")]
+    Command {
+        cmd: String,
+        #[source]
+        source: proc::ProcessError,
+    },
+
     #[error("osc {cmd} failed (exit {code}):\n{stderr}")]
     OscFailed {
         cmd: String,
@@ -392,6 +400,32 @@ pub fn is_valid_obs_name(s: &str) -> bool {
         && !s.contains("..")
 }
 
+/// Attach the osc subcommand to a launch failure or timeout, which
+/// `ProcessError` reports without saying which `osc` call it was.
+fn during(cmd: impl Into<String>) -> impl FnOnce(proc::ProcessError) -> Error {
+    move |source| Error::Command {
+        cmd: cmd.into(),
+        source,
+    }
+}
+
+/// First non-empty line of a command's output, for one-line diagnostics.
+fn first_line(s: &str) -> &str {
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+}
+
+/// Whether `osc` reported a missing project, package or file on the server.
+/// A bare `404` would also match unrelated digits, so the HTTP wording is
+/// required; `osc` goes through urllib, which prints `HTTP Error 404: Not Found`.
+fn is_not_found(text: &str) -> bool {
+    text.contains("HTTP Error 404")
+        || text.contains("404 Client Error")
+        || text.contains("Not Found")
+}
+
 fn check_obs_name(what: &str, name: &str) -> Result<(), Error> {
     if is_valid_obs_name(name) {
         Ok(())
@@ -626,8 +660,10 @@ pub fn distro_provides(capability: &str) -> bool {
         .filter(|(_, url)| is_base_distro_repo(url))
         .map(|(alias, _)| alias)
         .collect();
+    // `None` means the query itself failed (timeout, launch, ...): that is
+    // not an answer, so it is neither cached nor allowed to stick for the run.
     let provided = if trusted_aliases.is_empty() {
-        false
+        Some(false)
     } else {
         // `--repo` is a `search` subcommand option, not a global one — it
         // must come after `search`, not before it (zypper rejects it
@@ -644,17 +680,34 @@ pub fn distro_provides(capability: &str) -> bool {
         args.push("--provides".into());
         args.push("--match-exact".into());
         args.push(capability.to_string());
-        proc::capture_with_timeout(
+        match proc::capture_with_timeout(
             "zypper",
             &args,
             &anywhere(),
             Emit::quiet(),
             ZYPPER_QUERY_TIMEOUT,
-        )
-        .map(|out| out.success())
-        .unwrap_or(false)
+        ) {
+            Ok(out) if out.success() => Some(true),
+            // zypper's "capability not found" exit: a real answer, cacheable.
+            Ok(out) if out.code == ZYPPER_CAPABILITY_NOT_FOUND => Some(false),
+            Ok(out) => {
+                ap_core::diag!(
+                    "  zypper search for {capability}: exit {}: {}",
+                    out.code,
+                    first_line(&out.stderr)
+                );
+                None
+            }
+            Err(e) => {
+                ap_core::diag!("  zypper search for {capability}: {e}");
+                None
+            }
+        }
     };
 
+    let Some(provided) = provided else {
+        return false;
+    };
     DISTRO_PROVIDES_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -662,6 +715,9 @@ pub fn distro_provides(capability: &str) -> bool {
         .insert(capability.to_string(), provided);
     provided
 }
+
+/// zypper's exit code for "capability not found" (`ZYPPER_EXIT_INF_CAP_NOT_FOUND`).
+const ZYPPER_CAPABILITY_NOT_FOUND: i32 = 104;
 
 #[cfg(test)]
 mod distro_provides_tests {
@@ -727,12 +783,29 @@ mod distro_provides_tests {
 /// would need a per-repo build-status query in addition to this one; nothing
 /// does that today.
 pub fn get_project_repo_paths(project: &str, emit: Emit<'_>) -> Vec<(String, String)> {
-    let Ok(out) = proc::capture("osc", &["meta", "prj", project], &anywhere(), emit) else {
-        return vec![];
+    let out = match proc::capture_with_timeout(
+        "osc",
+        &["meta", "prj", project],
+        &anywhere(),
+        emit,
+        OSC_QUERY_TIMEOUT,
+    ) {
+        Ok(out) if out.success() => out,
+        // Empty means "no build paths", which widens the set of packages
+        // reported missing — say so rather than letting it pass silently.
+        Ok(out) => {
+            ap_core::diag!(
+                "  osc meta prj {project}: exit {}: {}",
+                out.code,
+                first_line(&out.stderr)
+            );
+            return vec![];
+        }
+        Err(e) => {
+            ap_core::diag!("  osc meta prj {project}: {e}");
+            return vec![];
+        }
     };
-    if !out.success() {
-        return vec![];
-    }
 
     parse_project_repo_paths(&out.stdout)
 }
@@ -767,7 +840,14 @@ fn parse_project_repo_paths(xml: &str) -> Vec<(String, String)> {
 /// `Ok(false)` when the project meta loaded but has none, and `Err` when the
 /// `osc meta prj` call itself failed (project doesn't exist, auth broken, ...).
 pub fn project_has_repositories(project: &str, emit: Emit<'_>) -> Result<bool, Error> {
-    let out = proc::capture("osc", &["meta", "prj", project], &anywhere(), emit)?;
+    let out = proc::capture_with_timeout(
+        "osc",
+        &["meta", "prj", project],
+        &anywhere(),
+        emit,
+        OSC_QUERY_TIMEOUT,
+    )
+    .map_err(during(format!("meta prj {project}")))?;
     if !out.success() {
         return Err(Error::OscFailed {
             cmd: format!("meta prj {project}"),
@@ -915,7 +995,7 @@ mod project_packages_cache_tests {
 /// to the OBS package name. The guess silently missed every one of these
 /// before (Oct 6 review finding #3).
 pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Vec<String>> {
-    let out = proc::capture("osc", &["ls", project, pkg], &anywhere(), emit).ok()?;
+    let out = osc_query(&["ls", project, pkg], emit, &format!("ls {project}/{pkg}"))?;
     if !out.success() {
         return None;
     }
@@ -934,7 +1014,11 @@ pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Ve
 /// `osc cat` otherwise fails — the update sweep uses that `None` to skip the
 /// package instead of blowing up the whole run on a stray missing spec.
 pub fn cat_file(project: &str, pkg: &str, filename: &str, emit: Emit<'_>) -> Option<String> {
-    let out = proc::capture("osc", &["cat", project, pkg, filename], &anywhere(), emit).ok()?;
+    let out = osc_query(
+        &["cat", project, pkg, filename],
+        emit,
+        &format!("cat {project}/{pkg} {filename}"),
+    )?;
     if !out.success() {
         return None;
     }
@@ -998,10 +1082,11 @@ pub fn create_initial_changes(
         &["vc", "-m", "Initial packaging"],
         checkout_dir,
         emit,
-    )?;
+    )
+    .map_err(during(format!("vc in {}", checkout_dir.display())))?;
     if !out.success() {
         return Err(Error::OscFailed {
-            cmd: "vc -m \"Initial packaging\"".to_string(),
+            cmd: format!("vc -m \"Initial packaging\" in {}", checkout_dir.display()),
             code: out.code,
             stderr: out.stderr,
         });
@@ -1029,12 +1114,14 @@ pub fn ensure_package(
     check_obs_name("project", project)?;
     check_obs_name("package", pkg_name)?;
     // `osc ls project/pkg` exits non-zero when the package does not exist.
-    let check = proc::capture(
+    let check = proc::capture_with_timeout(
         "osc",
         &["ls", &format!("{project}/{pkg_name}")],
         work_dir,
         emit,
-    )?;
+        OSC_QUERY_TIMEOUT,
+    )
+    .map_err(during(format!("ls {project}/{pkg_name}")))?;
 
     if check.success() {
         return Ok(());
@@ -1053,7 +1140,7 @@ pub fn ensure_package(
         stderr: e.to_string(),
     })?;
 
-    let out = proc::capture(
+    let out = proc::capture_with_timeout(
         "osc",
         &[
             "meta",
@@ -1065,9 +1152,10 @@ pub fn ensure_package(
         ],
         work_dir,
         emit,
+        OSC_QUERY_TIMEOUT,
     );
     let _ = fs::remove_file(&meta_file);
-    let out = out?;
+    let out = out.map_err(during(format!("meta pkg {project} {pkg_name}")))?;
 
     if !out.success() {
         return Err(Error::OscFailed {
@@ -1102,11 +1190,11 @@ pub fn checkout(
             // 404 means `ensure_package`'s meta push hasn't propagated to
             // this checkout's view of the server yet — use the directory
             // as-is rather than failing on a lag that resolves itself.
-            if out.stderr.contains("404") || out.stderr.contains("Not Found") {
+            if is_not_found(&out.stderr) {
                 return Ok(checkout_dir);
             }
             return Err(Error::OscFailed {
-                cmd: "up".into(),
+                cmd: format!("up {project}/{pkg_name} in {}", checkout_dir.display()),
                 code: out.code,
                 stderr: out.stderr,
             });
@@ -1128,7 +1216,8 @@ pub fn checkout(
         &["co", &format!("{project}/{pkg_name}")],
         into_dir,
         emit,
-    )?;
+    )
+    .map_err(during(format!("co {project}/{pkg_name}")))?;
 
     if !out.success() {
         return Err(Error::OscFailed {
@@ -1151,19 +1240,15 @@ pub fn pull(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
         // 404 means `ensure_package`'s meta push hasn't propagated to this
         // checkout's view of the server yet — the directory is valid,
         // nothing to pull.
-        let benign = [
-            "nothing to update",
-            "At revision",
-            "Skipping",
-            "404",
-            "Not Found",
-        ];
+        let benign = ["nothing to update", "At revision", "Skipping"];
         if !benign
             .iter()
             .any(|b| out.stdout.contains(b) || out.stderr.contains(b))
+            && !is_not_found(&out.stdout)
+            && !is_not_found(&out.stderr)
         {
             return Err(Error::OscFailed {
-                cmd: "up".to_string(),
+                cmd: format!("up in {}", checkout_dir.display()),
                 code: out.code,
                 stderr: out.stderr,
             });
@@ -1189,14 +1274,18 @@ pub fn pull(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 /// caller can keep interpreting failure (which stderr patterns are benign,
 /// whether 404 is a non-error) in its own, different way.
 fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Error> {
-    let out = proc::capture("osc", &["up"], checkout_dir, emit)?;
+    let up = || {
+        proc::capture("osc", &["up"], checkout_dir, emit)
+            .map_err(during(format!("up in {}", checkout_dir.display())))
+    };
+    let out = up()?;
     if out.success() {
         return Ok(out);
     }
 
     if is_inconsistent_wc_error(&out.stderr) {
         repair_wc(checkout_dir, emit)?;
-        return Ok(proc::capture("osc", &["up"], checkout_dir, emit)?);
+        return up();
     }
 
     if let Some(name) = changes_conflict_file(&out.stderr)
@@ -1223,7 +1312,12 @@ fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Er
             n += 1;
             backup = checkout_dir.join(format!("{name}.preexisting.{n}"));
         }
-        let _ = std::fs::rename(&conflicting, &backup);
+        if let Err(e) = std::fs::rename(&conflicting, &backup) {
+            ap_core::diag!(
+                "  could not move '{name}' aside in {}: {e}",
+                checkout_dir.display()
+            );
+        }
         let backup_name = backup.file_name().map(|n| n.to_string_lossy().into_owned());
         emit.reporter.report(&Event::Warning {
             step: emit.step,
@@ -1233,7 +1327,7 @@ fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Er
                 backup_name.as_deref().unwrap_or("<unknown>")
             ),
         });
-        return Ok(proc::capture("osc", &["up"], checkout_dir, emit)?);
+        return up();
     }
 
     Ok(out)
@@ -1268,6 +1362,23 @@ mod changes_conflict_tests {
     #[test]
     fn returns_none_for_unrelated_errors() {
         assert_eq!(changes_conflict_file("404 Not Found"), None);
+    }
+}
+
+#[cfg(test)]
+mod not_found_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_osc_http_not_found_wording() {
+        assert!(is_not_found("urllib: HTTP Error 404: Not Found\n"));
+        assert!(is_not_found("404 Client Error: Not Found for url"));
+    }
+
+    #[test]
+    fn a_bare_number_containing_404_is_not_a_missing_resource() {
+        assert!(!is_not_found("request id 1404 timed out"));
+        assert!(!is_not_found("Skipping foo: conflict"));
     }
 }
 
@@ -1311,10 +1422,11 @@ fn is_inconsistent_wc_error(stderr: &str) -> bool {
 /// files from `.osc/` — exactly what `osc`'s own error message warns about —
 /// so it is only ever called after that specific error, not speculatively.
 pub fn repair_wc(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
-    let out = proc::capture("osc", &["repairwc", "."], checkout_dir, emit)?;
+    let out = proc::capture("osc", &["repairwc", "."], checkout_dir, emit)
+        .map_err(during(format!("repairwc in {}", checkout_dir.display())))?;
     if !out.success() {
         return Err(Error::OscFailed {
-            cmd: "repairwc".to_string(),
+            cmd: format!("repairwc in {}", checkout_dir.display()),
             code: out.code,
             stderr: out.stderr,
         });
@@ -1324,10 +1436,11 @@ pub fn repair_wc(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 
 /// Run `osc service ra` from `checkout_dir` to fetch sources and vendor Cargo deps.
 pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
-    let out = proc::capture("osc", &["service", "ra"], checkout_dir, emit)?;
+    let out = proc::capture("osc", &["service", "ra"], checkout_dir, emit)
+        .map_err(during(format!("service ra in {}", checkout_dir.display())))?;
     if !out.success() {
         return Err(Error::OscFailed {
-            cmd: "service ra".to_string(),
+            cmd: format!("service ra in {}", checkout_dir.display()),
             code: out.code,
             stderr: out.stderr,
         });
@@ -1376,10 +1489,22 @@ pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> 
 /// Runs `osc addremove` first to track any new or deleted files, then
 /// `osc ci` to push the changes to OBS.
 pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), Error> {
-    // Sync tracked files with directory contents (ignore errors — may be a new pkg).
-    let _ = proc::capture("osc", &["addremove"], checkout_dir, emit);
+    // Sync tracked files with directory contents. A failure is not fatal (a
+    // new package may have nothing to add), but `ci` then commits without
+    // them, so say so.
+    match proc::capture("osc", &["addremove"], checkout_dir, emit) {
+        Ok(out) if !out.success() => ap_core::diag!(
+            "  osc addremove in {}: exit {}: {}",
+            checkout_dir.display(),
+            out.code,
+            first_line(&out.stderr)
+        ),
+        Err(e) => ap_core::diag!("  osc addremove in {}: {e}", checkout_dir.display()),
+        Ok(_) => {}
+    }
 
-    let out = proc::capture("osc", &["ci", "-m", message], checkout_dir, emit)?;
+    let out = proc::capture("osc", &["ci", "-m", message], checkout_dir, emit)
+        .map_err(during(format!("ci in {}", checkout_dir.display())))?;
 
     if !out.success() {
         // "nothing to do" means files are already committed — not an error.
@@ -1387,7 +1512,7 @@ pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), 
             return Ok(());
         }
         return Err(Error::OscFailed {
-            cmd: format!("ci -m {message:?}"),
+            cmd: format!("ci -m {message:?} in {}", checkout_dir.display()),
             code: out.code,
             stderr: out.stderr,
         });
@@ -1434,29 +1559,40 @@ fn get_build_status_from_results_table(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
+    let cmd = format!("results -r {repo} -a {arch} {project} {pkg_name}");
     let out = proc::capture_with_timeout(
         "osc",
         &["results", "-r", repo, "-a", arch, project, pkg_name],
         &anywhere(),
         emit,
         OSC_QUERY_TIMEOUT,
-    )?;
+    )
+    .map_err(during(cmd.clone()))?;
 
     if !out.success() {
         return Err(Error::OscFailed {
-            cmd: format!("results -r {repo} -a {arch} {project} {pkg_name}"),
+            cmd,
             code: out.code,
             stderr: out.stderr,
         });
     }
 
-    Ok(parse_single_build_status(&out.stdout))
+    Ok(parse_single_build_status(&out.stdout, arch))
 }
 
 /// Per-call limit for the short, network-bound `osc` queries used while
 /// polling. Generous for a healthy OBS, but finite: see
 /// [`proc::capture_with_timeout`].
 const OSC_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run a short network-bound `osc` query in the current directory. A launch
+/// failure or timeout is reported and yields `None`, for callers that treat a
+/// failed query as "no answer" rather than as an error.
+fn osc_query(args: &[&str], emit: Emit<'_>, what: &str) -> Option<Captured> {
+    proc::capture_with_timeout("osc", args, &anywhere(), emit, OSC_QUERY_TIMEOUT)
+        .map_err(|e| ap_core::diag!("  osc {what}: {e}"))
+        .ok()
+}
 
 /// `osc api <path>` stdout, or `None` on any failure or timeout.
 fn osc_api(path: &str) -> Option<String> {
@@ -1523,10 +1659,13 @@ fn get_build_status_xml(
 
 /// Parsing half of [`get_build_status`], split out so it is testable without
 /// shelling out to `osc`.
-fn parse_single_build_status(stdout: &str) -> BuildStatus {
+fn parse_single_build_status(stdout: &str, arch: &str) -> BuildStatus {
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
+        // A result line is `<pkg> <repo> <arch> <status>`. Anything else (an
+        // error message that happens to contain words) must not be read as a
+        // status word.
+        if parts.len() >= 3 && parts[parts.len() - 2] == arch {
             let raw = parts[parts.len() - 1];
             let word = raw.trim_end_matches('*');
             // OBS suffixes the status word with `*` when this result is for
@@ -1562,7 +1701,7 @@ mod single_build_status_tests {
         // before OBS had even started rebuilding the new one.
         let stdout = "python-foo  openSUSE_Tumbleweed  x86_64  succeeded*\n";
         assert_eq!(
-            parse_single_build_status(stdout),
+            parse_single_build_status(stdout, "x86_64"),
             BuildStatus::Unknown("stale: succeeded".to_string())
         );
     }
@@ -1570,7 +1709,20 @@ mod single_build_status_tests {
     #[test]
     fn an_unstarred_status_is_read_normally() {
         let stdout = "python-foo  openSUSE_Tumbleweed  x86_64  succeeded\n";
-        assert_eq!(parse_single_build_status(stdout), BuildStatus::Succeeded);
+        assert_eq!(
+            parse_single_build_status(stdout, "x86_64"),
+            BuildStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn a_line_for_another_arch_or_a_message_is_not_a_status() {
+        let stdout = "python-foo  openSUSE_Tumbleweed  aarch64  failed\n\
+                      osc: E001: package not found here\n";
+        assert_eq!(
+            parse_single_build_status(stdout, "x86_64"),
+            BuildStatus::Unknown("no results".to_string())
+        );
     }
 }
 
@@ -1612,17 +1764,28 @@ pub fn get_project_build_statuses(
         }
     }
 
-    let Ok(out) = proc::capture(
+    // An empty map reads as "no package has a status", so a failed listing
+    // is reported here instead of passing silently.
+    let out = match proc::capture(
         "osc",
         &["results", "-r", repo, "-a", arch, project],
         &anywhere(),
         emit,
-    ) else {
-        return HashMap::new();
+    ) {
+        Ok(out) if out.success() => out,
+        Ok(out) => {
+            ap_core::diag!(
+                "  osc results -r {repo} -a {arch} {project}: exit {}: {}",
+                out.code,
+                first_line(&out.stderr)
+            );
+            return HashMap::new();
+        }
+        Err(e) => {
+            ap_core::diag!("  osc results -r {repo} -a {arch} {project}: {e}");
+            return HashMap::new();
+        }
     };
-    if !out.success() {
-        return HashMap::new();
-    }
 
     parse_project_build_statuses(&out.stdout, repo, arch)
 }
@@ -1698,7 +1861,10 @@ pub fn fetch_buildlog(
         &["buildlog", project, pkg_name, repo, arch],
         &anywhere(),
         emit,
-    )?;
+    )
+    .map_err(during(format!(
+        "buildlog {project} {pkg_name} {repo} {arch}"
+    )))?;
 
     std::fs::write(log_path, &out.stdout)?;
 
@@ -1789,7 +1955,10 @@ pub fn get_binaries(
         ],
         &anywhere(),
         emit,
-    )?;
+    )
+    .map_err(during(format!(
+        "getbinaries {project} {pkg_name} {repo} {arch}"
+    )))?;
 
     if !out.success() {
         return Err(Error::OscFailed {
@@ -1812,7 +1981,7 @@ fn get_unresolvable_from_results(
     arch: &str,
     emit: Emit<'_>,
 ) -> (Vec<String>, Vec<String>) {
-    let Ok(out) = proc::capture(
+    let out = match proc::capture(
         "osc",
         &[
             "results",
@@ -1826,8 +1995,12 @@ fn get_unresolvable_from_results(
         ],
         &anywhere(),
         emit,
-    ) else {
-        return (vec![], vec![]);
+    ) {
+        Ok(out) => out,
+        Err(e) => {
+            ap_core::diag!("  osc results --verbose {project}/{pkg_name}: {e}");
+            return (vec![], vec![]);
+        }
     };
     (
         extract_unresolvable(&out.stdout),
@@ -1949,7 +2122,13 @@ pub fn obs_build(
             Err(e) => {
                 poll_errors += 1;
                 if poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
-                    return Err(e);
+                    return Err(Error::OscFailed {
+                        cmd: format!("wait {project}/{pkg_name} ({repo}/{arch})"),
+                        code: -1,
+                        stderr: format!(
+                            "gave up after {poll_errors} consecutive failed status polls; last error: {e}"
+                        ),
+                    });
                 }
                 reporter.report(&Event::Warning {
                     step,
@@ -2058,7 +2237,13 @@ pub fn obs_build(
     };
 
     // Fetch the log regardless of outcome — partial logs help diagnose failures.
-    let _ = fetch_buildlog(project, pkg_name, repo, arch, log_path, Emit::quiet());
+    // A missing or stale log leaves the failure without its cause, so say so.
+    if let Err(e) = fetch_buildlog(project, pkg_name, repo, arch, log_path, Emit::quiet()) {
+        reporter.report(&Event::Warning {
+            step,
+            message: format!("could not fetch the OBS build log for {pkg_name}: {e}"),
+        });
+    }
     let log_bytes = log_path.metadata().map(|m| m.len()).unwrap_or(0);
     let elapsed = start.elapsed();
 
