@@ -443,6 +443,10 @@ openSUSE spec conventions to keep in mind:
    - `FileNotFoundError: 'git'` → add `BuildRequires: git-core`
    - `FileNotFoundError: 'hg'` → add `BuildRequires: mercurial`
    - `FileNotFoundError: 'svn'` → add `BuildRequires: subversion`
+   - `FileNotFoundError: 'openssl'` raised from inside torch inductor (or any
+     library that shells out to a binary at runtime) → add `BuildRequires: openssl`
+   For any other program name, find the package that ships it with
+   `zypper what-provides /usr/bin/<name>` and add that package the same way.
    These are system packages, NOT Python packages — never use %{python_module}.
    (Same tool, different symptom: if `git-core` is already present and the
    failure is instead "no repository found," that's not a missing tool at
@@ -741,6 +745,13 @@ openSUSE spec conventions to keep in mind:
    Read the packaging file (pyproject.toml [project.optional-dependencies] /
    setup.cfg [options.extras_require]) to identify all test deps and add
    them as `BuildRequires: %{python_module <dep>}`.
+
+   A `Requires:` line does NOT install anything into the %check interpreter.
+   %check runs against %{buildroot} with only the BuildRequires present, so when
+   %check imports the package itself, mirror its runtime Requires into
+   BuildRequires as well. python-chromadb's `import chromadb` failed on
+   python314 with `No module named 'typing_extensions'` even though
+   typing_extensions was a Requires.
 
    **Step A — schedule the dep (first time you see it missing):**
    If the package is not yet in OBS, add its
@@ -1740,6 +1751,14 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      (`tests/async/files` missing, so `test_static_file_routing` and
      related tests are deselected), `python-simple-websocket` (`helpers.py`
      missing from the release tarball).
+     When the missing path is a directory of several fixture files (e.g.
+     `tests/test_samples/`) rather than one file, fetch the upstream tag archive
+     as one SourceN and extract only that directory in %prep, pinned to the tag:
+       Source1: https://github.com/<org>/<repo>/archive/refs/tags/v%{version}.tar.gz
+       tar -xzf %{SOURCE1} --wildcards --strip-components=1 -C . '*/tests/test_samples/*'
+     Use the tag prefix and the directory the failing test actually opens.
+     (This is the python-accelerate `TpuConfigTester` case: the sdist lacks
+     `tests/test_samples/`, and the tag archive has it.)
    - **An unrecognized trove classifier breaks the build backend's own
      metadata validation**, before your code or tests ever run. A
      `pyproject.toml` `classifiers` list containing a very recently added
