@@ -20,6 +20,8 @@ use crate::workspace::Workspace;
 const NOTES_MODEL: &str = "claude-haiku-5-5";
 const NOTES_BUDGET_USD: &str = "0.20";
 const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
+/// Local git operations on the notes repository; they never touch a network.
+const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 static NOTES_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -105,22 +107,36 @@ pub fn claude_print_json(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
+    claude_print_json_with(model, tools, budget_usd, prompt, cwd, timeout, &[])
+}
+
+/// [`claude_print_json`] with extra CLI flags placed before the prompt.
+fn claude_print_json_with(
+    model: &str,
+    tools: &str,
+    budget_usd: &str,
+    prompt: &str,
+    cwd: &Path,
+    timeout: Duration,
+    extra_args: &[&str],
+) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
     let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
+    let mut args = vec![
+        "--print",
+        "--output-format",
+        "json",
+        "--model",
+        model,
+        "--allowed-tools",
+        tools,
+        "--max-budget-usd",
+        budget_usd,
+    ];
+    args.extend_from_slice(extra_args);
+    args.extend(["-p", prompt]);
     crate::proc::capture_with_timeout_env(
         "claude",
-        &[
-            "--print",
-            "--output-format",
-            "json",
-            "--model",
-            model,
-            "--allowed-tools",
-            tools,
-            "--max-budget-usd",
-            budget_usd,
-            "-p",
-            prompt,
-        ],
+        &args,
         cwd,
         crate::proc::Emit::quiet(),
         timeout,
@@ -205,7 +221,10 @@ fn update_inner(
         dir = abs(dir),
         scratch = abs(scratch.path()),
     );
-    let out = claude_print_json(
+    // Path rules in `--allowed-tools` are only enforced in the default
+    // permission mode with project-only settings; user settings could
+    // otherwise widen what the agent may write.
+    let out = claude_print_json_with(
         NOTES_MODEL,
         &tools,
         NOTES_BUDGET_USD,
@@ -219,6 +238,12 @@ fn update_inner(
         ),
         ws.dir(),
         NOTES_TIMEOUT,
+        &[
+            "--permission-mode",
+            "default",
+            "--setting-sources",
+            "project",
+        ],
     )
     .map_err(|e| match e {
         // Nothing ran, so nothing was spent.
@@ -255,6 +280,70 @@ fn update_inner(
     }
     write_atomic(&notes_file, &after)
         .map_err(|e| format!("cannot write {}: {e}", notes_file.display()))?;
+    // The notes are already saved; a failed commit must not fail the update.
+    if let Err(e) = commit_notes(dir, &notes_file, rpm_name, version) {
+        ap_core::diag!("  notes for {rpm_name} saved but not committed: {e}");
+    }
+    Ok(())
+}
+
+/// The commit message for an updated notes file.
+fn commit_message(rpm_name: &str, version: &str) -> String {
+    format!("notes: {rpm_name} {version}")
+}
+
+/// Commit `file` when `dir` is a git repository of its own, so the notes can
+/// be shared and versioned as a git module. Never pushes. The repository is
+/// the user's to create: without a `.git` entry this does nothing.
+fn commit_notes(dir: &Path, file: &Path, rpm_name: &str, version: &str) -> Result<(), String> {
+    if !dir.join(".git").exists() {
+        return Ok(());
+    }
+    let git = |args: &[&str]| {
+        let mut full: Vec<String> = vec!["-C".into(), dir.display().to_string()];
+        full.extend(args.iter().map(|a| a.to_string()));
+        crate::proc::capture_with_timeout_env(
+            "git",
+            &full,
+            dir,
+            crate::proc::Emit::quiet(),
+            GIT_TIMEOUT,
+            None,
+        )
+        .map_err(|e| format!("git {}: {e}", args.first().unwrap_or(&"")))
+    };
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("notes file name is not UTF-8")?;
+    let add = git(&["add", "--", name])?;
+    if add.code != 0 {
+        return Err(format!("git add failed: {}", add.stderr.trim()));
+    }
+    // Nothing to commit when the file already matches HEAD.
+    let status = git(&["status", "--porcelain", "--", name])?;
+    if status.code == 0 && status.stdout.trim().is_empty() {
+        return Ok(());
+    }
+    let message = commit_message(rpm_name, version);
+    // The environment's identity wins; the placeholder only keeps the commit
+    // from failing where git has no identity configured.
+    let has_identity = std::env::var_os("GIT_AUTHOR_EMAIL").is_some()
+        || git(&["config", "user.email"]).is_ok_and(|o| !o.stdout.trim().is_empty());
+    let mut args = Vec::new();
+    if !has_identity {
+        args.extend([
+            "-c",
+            "user.name=auto-package",
+            "-c",
+            "user.email=auto-package@localhost",
+        ]);
+    }
+    args.extend(["commit", "-m", &message, "--", name]);
+    let commit = git(&args)?;
+    if commit.code != 0 {
+        return Err(format!("git commit failed: {}", commit.stderr.trim()));
+    }
     Ok(())
 }
 
@@ -316,6 +405,11 @@ fn notes_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_message_names_package_and_version() {
+        assert_eq!(commit_message("python-foo", "1.2"), "notes: python-foo 1.2");
+    }
 
     #[test]
     fn path_for_refuses_names_the_sanitiser_changes() {
