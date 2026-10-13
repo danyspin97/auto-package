@@ -2285,6 +2285,27 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    OLDEST ABI it supports (`oldest-supported-numpy`) — the distro's current
    numpy is correct there.
 
+60. **A "pure Python" wheel or sdist can still ship compiled code: check before
+   choosing noarch.** Do not decide `BuildArch: noarch` from the metadata alone.
+   Open the wheel (or list the sdist's sources) and look for `.so` files and
+   CUDA sources or headers (`.cu`, `.cuh`, `.ptx`, `.cubin`, `.fatbin`).
+   Then read what they link against: `readelf -d <file.so> | grep NEEDED`.
+   - `libcuda.so.1` is the NVIDIA DRIVER API, supplied at runtime by the
+     driver (not the CUDA toolkit), so a package that links only against it
+     can use the upstream wheel here. Do not add `cuda-devel`/`cuda-runtime`
+     or any CUDA toolkit BuildRequires for it.
+   - Compiled code in the wheel means the spec must be per-architecture
+     (`ExclusiveArch` for the arches the wheel covers, or the matching
+     `%ifarch`), not noarch.
+   - A `cpXY-abi3` wheel covers every CPython from its minimum version up, so
+     one install serves all flavors. A `cpXY-cpXY` wheel is one per flavor,
+     like the per-CPython wheels in convention 49.
+   - Runtime CUDA libraries that the wheel loads through pip packages
+     (`nvidia-*`, `cuda-bindings`) belong in Requires, as the package's own
+     metadata declares them.
+   Record what you found, with the wheel name, the NEEDED list and the
+   decision, in your reasoning so the package notes keep it.
+
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
 A standalone Rust package (binary/library built entirely with Cargo — a
