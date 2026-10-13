@@ -147,12 +147,19 @@ struct Tapped {
 impl Reporter for Tapped {
     fn report(&self, event: &Event) {
         self.base.report(event);
-        // Never block a reporter on a slow render thread: if the queue is
-        // full the TUI misses this event (jsonl/memory already have it).
-        match self.tx.try_send(Msg {
+        let msg = Msg {
             pkg: self.pkg.clone(),
             event: event.clone(),
-        }) {
+        };
+        // Lifecycle events move a row to its next state. Dropping one leaves the
+        // row stale for the rest of the run, so they wait for room. Progress
+        // events may be dropped: the run log has them all.
+        if ap_core::sink::is_lifecycle(event) {
+            let _ = self.tx.send(msg);
+            return;
+        }
+        // Never block a reporter on a slow render thread for progress events.
+        match self.tx.try_send(msg) {
             Err(TrySendError::Full(_)) => {
                 if self.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
                     self.base.report(&Event::Warning {

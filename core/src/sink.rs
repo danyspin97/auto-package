@@ -60,6 +60,23 @@ impl std::str::FromStr for LogLevel {
     }
 }
 
+/// Events a view must not miss: each one flips a row to a final or
+/// next-stage state, so a drop leaves it stale for the rest of the run
+/// (a package stuck "building" after it finished). Queue-backed views
+/// (the TUI) must block until there is room for these, and may drop everything
+/// else (progress ticks, command and agent chatter) under load since later
+/// events supersede them.
+pub fn is_lifecycle(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::StepStarted { .. }
+            | Event::StepFinished { .. }
+            | Event::PackageFinished { .. }
+            | Event::TargetSelected { .. }
+            | Event::RunFinished { .. }
+    )
+}
+
 pub trait Reporter: Send + Sync {
     fn report(&self, event: &Event);
 }
