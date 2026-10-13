@@ -2326,6 +2326,11 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    already builds it: the `python-<name>` package with a successful build in
    the work directory's state is available even if the distro repository has
    not indexed it yet. Report only a version that is wrong, and say which.
+   When an import check fails although the dependency is installed, the
+   module name is the likely mistake: a binding's top-level import often
+   differs from its distribution name, and the real module names are in the
+   installed package's file list (`rpm -ql` or the wheel's contents). Fix the
+   import in `%check`, and do not report the dependency as missing.
    Split a subpackage only when a part of the package needs something the rest
    does not, such as an optional GPU backend (see convention 53). Do not split
    a package just because one dependency is hard to satisfy.
