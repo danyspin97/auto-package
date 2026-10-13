@@ -53,6 +53,7 @@ pub enum StepKind {
     ExtractFailure,
     AgentTurn,
     ApplyAndValidate,
+    PackageNotes,
 }
 
 impl std::fmt::Display for StepKind {
@@ -71,6 +72,7 @@ impl std::fmt::Display for StepKind {
             StepKind::ExtractFailure => "ExtractFailure",
             StepKind::AgentTurn => "AgentTurn",
             StepKind::ApplyAndValidate => "ApplyAndValidate",
+            StepKind::PackageNotes => "PackageNotes",
         };
         write!(f, "{s}")
     }
@@ -95,6 +97,7 @@ impl StepKind {
             StepKind::ExtractFailure => "Extracting failure",
             StepKind::AgentTurn => "Agent turn",
             StepKind::ApplyAndValidate => "Applying fix & validating",
+            StepKind::PackageNotes => "Updating package notes",
         }
     }
 }

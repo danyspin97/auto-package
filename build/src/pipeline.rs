@@ -885,17 +885,12 @@ pub fn run_package(
         )),
         PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => None,
     };
-    if let PipelineResult::Built { .. } = &result
-        && let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name)
-    {
-        warn_if_err(
-            reporter,
-            "updating package notes",
-            crate::package_notes::update_after_build(&ws, &config.rpm_name, &config.version),
-        );
+    let ws = Workspace::open(&config.state_root, &config.rpm_name).ok();
+    if let (PipelineResult::Built { .. }, Some(ws)) = (&result, &ws) {
+        package_notes_step(config, pkg_run, ws, reporter);
     }
     if let Some((outcome, reason)) = outcome
-        && let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name)
+        && let Some(ws) = &ws
     {
         let mut state = PkgState::load(&ws);
         state.last_built_version = Some(config.version.clone());
@@ -904,6 +899,42 @@ pub fn run_package(
         save_state(&state, &ws, reporter);
     }
     result
+}
+
+/// Refresh the package's notes as a visible step. It runs after the build has
+/// succeeded but before `PackageFinished`, so the TUI must show it: otherwise
+/// the package reads as "running" with no step for as long as the model takes.
+/// A failure only warns; the package stays built.
+fn package_notes_step(
+    config: &PipelineConfig,
+    pkg_run: &PkgRunDir,
+    ws: &Workspace,
+    reporter: &dyn Reporter,
+) {
+    let Ok(step) = pkg_run.step("package-notes") else {
+        return;
+    };
+    let t = Instant::now();
+    reporter.report(&Event::StepStarted {
+        step: step.id,
+        kind: StepKind::PackageNotes,
+    });
+    let outcome =
+        match crate::package_notes::update_after_build(ws, &config.rpm_name, &config.version) {
+            Ok(()) => StepOutcome::Ok,
+            Err(e) => {
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message: format!("package notes not updated: {e}"),
+                });
+                StepOutcome::Skipped
+            }
+        };
+    reporter.report(&Event::StepFinished {
+        step: step.id,
+        outcome,
+        elapsed: t.elapsed(),
+    });
 }
 
 fn run_package_inner(

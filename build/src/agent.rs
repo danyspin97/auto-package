@@ -3690,11 +3690,6 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             false,
         ),
         ("notes.md", "attempt journal — also inlined below", false),
-        (
-            "package-notes.md",
-            "package memory — also inlined below",
-            false,
-        ),
     ] {
         let path = ws.join(name);
         if *always || path.exists() {
