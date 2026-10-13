@@ -1328,11 +1328,16 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
 /// The version a package was last built at here, when its last outcome was a
 /// success. Read from its state file, so it does not depend on OBS indexing.
 fn built_locally(state_root: &Path, rpm_name: &str) -> Option<String> {
-    let path = state_root
-        .join(ap_core::run::sanitize_name(rpm_name))
-        .join("state.json");
+    // The RPM spelling of a PyPI name is only a guess (`_` may or may not become
+    // `-`), so match the real state directories by fuzzy key instead of building
+    // one path from the guess.
+    let wanted = ap_build::osc::fuzzy_key(rpm_name);
+    let dir = std::fs::read_dir(state_root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .find(|e| ap_build::osc::fuzzy_key(&e.file_name().to_string_lossy()) == wanted)?;
     let state: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).ok()?).ok()?;
     if state["last_outcome"].as_str() != Some("success") {
         return None;
     }
@@ -2752,6 +2757,19 @@ mod built_locally_tests {
             Some("13.4.3")
         );
         assert_eq!(built_locally(dir.path(), "python-missing"), None);
+        // The guessed spelling must not matter: `_` and `-` are the same project.
+        std::fs::create_dir_all(dir.path().join("python-typing_extensions")).unwrap();
+        std::fs::write(
+            dir.path()
+                .join("python-typing_extensions")
+                .join("state.json"),
+            r#"{"last_outcome":"success","last_built_version":"4.15.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            built_locally(dir.path(), "python-typing-extensions").as_deref(),
+            Some("4.15.0")
+        );
         std::fs::write(
             pkg.join("state.json"),
             r#"{"last_outcome":"missing_deps","last_built_version":"13.4.3"}"#,
