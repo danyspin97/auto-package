@@ -218,7 +218,9 @@ pub fn distro_info(pkg: &str) -> DistroInfo {
 }
 
 fn get_json(url: &str) -> Option<Value> {
-    crate::sources::get_json_for_search(url).ok()
+    crate::sources::get_json_for_search(url)
+        .inspect_err(|e| ap_core::diag!("  search request failed: {e}"))
+        .ok()
 }
 
 pub fn search_gitlab(pkg: &str) -> Vec<String> {

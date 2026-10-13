@@ -217,8 +217,16 @@ fn hash_deps(sorted_deps: &[String]) -> u64 {
 impl PkgState {
     pub fn load(ws: &Workspace) -> Self {
         let path = ws.state_json();
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Self::default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                ap_core::diag!(
+                    "  cannot read {} ({e}); starting from empty state",
+                    path.display()
+                );
+                return Self::default();
+            }
         };
         serde_json::from_str(&text).unwrap_or_else(|e| {
             // Keep the unreadable file: defaulting and then saving would
@@ -229,20 +237,27 @@ impl PkgState {
                 path.display(),
                 bad.display()
             );
-            let _ = std::fs::rename(&path, &bad);
+            if let Err(re) = std::fs::rename(&path, &bad) {
+                ap_core::diag!(
+                    "  cannot move {} aside ({re}); the next save will overwrite it",
+                    path.display()
+                );
+            }
             Self::default()
         })
     }
 
     /// Written to a temporary file and renamed, so a crash mid-write leaves
-    /// the previous state rather than a truncated one.
+    /// the previous state rather than a truncated one. Errors name the file.
     pub fn save(&self, ws: &Workspace) -> std::io::Result<()> {
         let s = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let path = ws.state_json();
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, s)?;
-        std::fs::rename(&tmp, &path)
+        let with_path =
+            |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        std::fs::write(&tmp, s).map_err(with_path)?;
+        std::fs::rename(&tmp, &path).map_err(with_path)
     }
 
     /// Does state.json record a GREEN build of this version?
@@ -523,11 +538,28 @@ pub fn select_target(
             // Check local workspace state.
             let ws_name = ap_core::run::sanitize_name(&rpm);
             let state_path = config.state_root.join(ws_name).join("state.json");
-            let built = std::fs::read_to_string(&state_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<PkgState>(&s).ok())
-                .map(|st| st.is_built(&n.version))
-                .unwrap_or(false);
+            let built = match std::fs::read_to_string(&state_path) {
+                Ok(s) => match serde_json::from_str::<PkgState>(&s) {
+                    Ok(st) => st.is_built(&n.version),
+                    Err(e) => {
+                        ap_core::diag!(
+                            "  {} is unreadable ({e}); treating {} as not built",
+                            state_path.display(),
+                            n.name
+                        );
+                        false
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    ap_core::diag!(
+                        "  cannot read {} ({e}); treating {} as not built",
+                        state_path.display(),
+                        n.name
+                    );
+                    false
+                }
+            };
             if built {
                 Resolution::Built
             } else {
@@ -885,7 +917,14 @@ pub fn run_package(
         )),
         PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => None,
     };
-    let ws = Workspace::open(&config.state_root, &config.rpm_name).ok();
+    let ws = Workspace::open(&config.state_root, &config.rpm_name)
+        .inspect_err(|e| {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!("opening the package workspace failed: {e}"),
+            });
+        })
+        .ok();
     if let (PipelineResult::Built { .. }, Some(ws)) = (&result, &ws) {
         package_notes_step(config, pkg_run, ws, reporter);
     }
@@ -1044,13 +1083,17 @@ fn run_package_inner(
             Some(osc::BuildStatus::Failed | osc::BuildStatus::Unresolvable)
         ) {
             let log_path = ws.build_log();
-            let _ = osc::fetch_buildlog(
-                &config.project,
-                &rpm_name,
-                &config.distro,
-                &config.arch,
-                &log_path,
-                emit,
+            warn_if_err(
+                reporter,
+                "fetching the failed build log",
+                osc::fetch_buildlog(
+                    &config.project,
+                    &rpm_name,
+                    &config.distro,
+                    &config.arch,
+                    &log_path,
+                    emit,
+                ),
             );
         }
     }
@@ -1110,10 +1153,14 @@ fn run_package_inner(
                 // itself also skips if a `.changes` file already exists, so
                 // either signal of "not actually new" is enough to skip.
                 if !spec_existed_before_generation {
-                    let _ = osc::create_initial_changes(
-                        &checkout_dir,
-                        &rpm_name,
-                        Emit::new(reporter, step.id),
+                    warn_if_err(
+                        reporter,
+                        "creating the initial .changes entry",
+                        osc::create_initial_changes(
+                            &checkout_dir,
+                            &rpm_name,
+                            Emit::new(reporter, step.id),
+                        ),
                     );
                 }
                 // Link spec.generated into the workspace so the review agent can compare.
@@ -1298,7 +1345,11 @@ fn run_package_inner(
 
             // Fix any broken workspace definitions in the tarball before vendoring
             if let Some(tarball) = find_tarball(&checkout_dir) {
-                let _ = fix_cargo_workspace_in_tarball(&tarball);
+                warn_if_err(
+                    reporter,
+                    "fixing the cargo workspace in the tarball",
+                    fix_cargo_workspace_in_tarball(&tarball),
+                );
             }
 
             let normalized = config.pkg_name.replace('-', "_").to_lowercase();
@@ -1644,7 +1695,7 @@ fn run_package_inner(
             let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
             let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
             if fixed != current {
-                let _ = std::fs::write(&spec_path, &fixed);
+                write_or_warn(&spec_path, &fixed);
             }
         }
 
@@ -1653,7 +1704,7 @@ fn run_package_inner(
                 // The fully expanded spec is the single most useful artifact
                 // for diagnosing a spec problem — keep it rather than drop it.
                 let artifact = validate_step.file("rpmspec.stdout");
-                let _ = std::fs::write(&artifact, &expanded);
+                write_or_warn(&artifact, &expanded);
                 reporter.report(&Event::Artifact {
                     step: validate_step.id,
                     name: "rpmspec.stdout".to_string(),
@@ -1795,8 +1846,8 @@ fn run_package_inner(
                     outcome: StepOutcome::Failed,
                     elapsed: t.elapsed(),
                 });
-                let _ = std::fs::write(validate_step.file("rpmspec.stderr"), e.to_string());
-                let _ = std::fs::write(ws.rpmspec_log(), e.to_string());
+                write_or_warn(validate_step.file("rpmspec.stderr"), e.to_string());
+                write_or_warn(ws.rpmspec_log(), e.to_string());
                 reporter.report(&Event::SpecRejected {
                     step: validate_step.id,
                     reason: ap_core::event::SpecRejection::RpmspecParseFailed {
@@ -2088,7 +2139,7 @@ fn run_package_inner(
                                 }
                             }
                             if rewritten != current {
-                                let _ = std::fs::write(&spec_path, &rewritten);
+                                write_or_warn(&spec_path, &rewritten);
                             }
                         }
                     }
@@ -2379,7 +2430,7 @@ fn agent_turn(
         let extract = hint.to_event_extract();
         let artifact = step.file("extract.json");
         if let Ok(json) = serde_json::to_string_pretty(&extract) {
-            let _ = std::fs::write(&artifact, json);
+            write_or_warn(&artifact, json);
         }
         reporter.report(&Event::ExtractResult {
             step: step.id,
@@ -2577,12 +2628,12 @@ fn agent_turn(
         let mut st = PkgState::load(&ws);
         st.cumulative_spent_usd = *spent_usd;
         st.cumulative_spent_run_id = Some(config.run_id.clone());
-        let _ = st.save(&ws);
+        warn_if_err(reporter, "saving state.json", st.save(&ws));
     }
 
     let prompt_path = step.file("prompt.md");
-    let _ = std::fs::write(&prompt_path, &outcome.prompt);
-    let _ = std::fs::write(step.file("output.md"), &outcome.output);
+    write_or_warn(&prompt_path, &outcome.prompt);
+    write_or_warn(step.file("output.md"), &outcome.output);
 
     reporter.report(&Event::AgentPrompt {
         step: step.id,
@@ -2599,7 +2650,7 @@ fn agent_turn(
     };
     let response_path = step.file("response.json");
     if let Ok(json) = serde_json::to_string_pretty(&response) {
-        let _ = std::fs::write(&response_path, json);
+        write_or_warn(&response_path, json);
     }
     reporter.report(&Event::AgentReply {
         step: step.id,
@@ -2633,7 +2684,7 @@ fn strip_and_rewrite(spec_path: &Path) -> String {
     });
     let clean = crate::spec::strip_ap_fix_comments(&before);
     if clean != before {
-        let _ = std::fs::write(spec_path, &clean);
+        write_or_warn(spec_path, &clean);
     }
     clean
 }
@@ -2677,11 +2728,20 @@ fn restore_spec(spec_path: &Path, before: &str, step: &StepDir, reporter: &dyn R
 /// covers that at the cost of duplicating the bytes.
 fn link_build_log(ws: &Workspace, build_log: &Path) {
     let link = ws.build_log();
-    if link.symlink_metadata().is_ok() {
-        let _ = std::fs::remove_file(&link);
+    if link.symlink_metadata().is_ok()
+        && let Err(e) = std::fs::remove_file(&link)
+    {
+        ap_core::diag!("  cannot replace {}: {e}", link.display());
+        return;
     }
-    if std::fs::hard_link(build_log, &link).is_err() {
-        let _ = std::fs::copy(build_log, &link);
+    if let Err(e) = std::fs::hard_link(build_log, &link)
+        .or_else(|_| std::fs::copy(build_log, &link).map(|_| ()))
+    {
+        ap_core::diag!(
+            "  cannot link {} to {}: {e}",
+            link.display(),
+            build_log.display()
+        );
     }
 }
 
@@ -2762,9 +2822,13 @@ fn sync_quilt_series(expanded_spec: &str, checkout_dir: &Path) {
         return;
     }
     if wanted.is_empty() {
-        let _ = std::fs::remove_file(&series_path);
+        if let Err(e) = std::fs::remove_file(&series_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            ap_core::diag!("  cannot remove {}: {e}", series_path.display());
+        }
     } else {
-        let _ = std::fs::write(&series_path, &wanted);
+        write_or_warn(&series_path, &wanted);
     }
 }
 
@@ -2996,7 +3060,7 @@ fn accept_or_restore_with_snapshot(
     let diff = unified_diff(before, &after);
     let (added, removed) = diff_counts(&diff);
     let diff_path = step.file("spec.diff");
-    let _ = std::fs::write(&diff_path, &diff);
+    write_or_warn(&diff_path, &diff);
     reporter.report(&Event::SpecChanged {
         step: step.id,
         diff,
@@ -3693,7 +3757,7 @@ fn generate_spec(
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
         std::fs::write(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
-        let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+        write_or_warn(step.file("spec.generated"), &spec_text);
         let sdist_top_level = sdist_info
             .top_level_dir
             .unwrap_or_else(|| format!("{}-{}", config.pkg_name.to_lowercase(), config.version));
@@ -3736,7 +3800,7 @@ fn generate_spec(
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
 
     // Save artifact copy.
-    let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+    write_or_warn(step.file("spec.generated"), &spec_text);
 
     let sdist_top_level = sdist_info
         .top_level_dir
@@ -3906,7 +3970,7 @@ fn generate_from_repo(
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
         std::fs::write(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
-        let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+        write_or_warn(step.file("spec.generated"), &spec_text);
         return Ok(GenSpecResult {
             sdist_top_level: top_level,
             is_maturin: false,
@@ -4017,7 +4081,18 @@ fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
     let mut st = PkgState::load(ws);
     st.cumulative_attempts = attempts;
     st.cumulative_spent_run_id = Some(run_id.to_string());
-    let _ = st.save(ws);
+    if let Err(e) = st.save(ws) {
+        ap_core::diag!("  cannot save the attempt count: {e}");
+    }
+}
+
+/// Write an artifact or spec copy, warning with the path when it fails so the
+/// run does not go on as if the file had been written.
+fn write_or_warn(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
+    let path = path.as_ref();
+    if let Err(e) = std::fs::write(path, contents) {
+        ap_core::diag!("  cannot write {}: {e}", path.display());
+    }
 }
 
 /// Report a failed bookkeeping step (state file, convenience symlinks the
@@ -4091,7 +4166,7 @@ fn generate_rust_spec(
 
     std::fs::write(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
-    let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+    write_or_warn(step.file("spec.generated"), &spec_text);
 
     Ok(GenSpecResult {
         sdist_top_level: format!("{name}-{version}"),
@@ -4143,7 +4218,7 @@ fn generate_repo_python_spec(
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
         std::fs::write(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
-        let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+        write_or_warn(step.file("spec.generated"), &spec_text);
         return Ok(GenSpecResult {
             sdist_top_level,
             is_maturin: sdist_info.build_system.is_maturin(),
@@ -4210,7 +4285,7 @@ fn generate_repo_python_spec(
 
     std::fs::write(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
-    let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+    write_or_warn(step.file("spec.generated"), &spec_text);
 
     Ok(GenSpecResult {
         sdist_top_level,
@@ -4435,7 +4510,16 @@ fn generate_multi_flavor_wheel_spec(
         .iter()
         .filter_map(|f| crate::flavors::abi_tag_for_flavor(f))
         .collect();
-    let picked = ap_ecosystem::pypi::pick_wheels_per_flavor(json, &config.arch, &abis).ok()?;
+    let picked = match ap_ecosystem::pypi::pick_wheels_per_flavor(json, &config.arch, &abis) {
+        Ok(picked) => picked,
+        Err(e) => {
+            ap_core::diag!(
+                "  cannot pick per-flavor wheels for {}: {e}",
+                config.pkg_name
+            );
+            return None;
+        }
+    };
     ap_core::diag!(
         "info: {} {}'s wheels are each locked to one CPython — repackaging one wheel per flavor ({})",
         config.pkg_name,
@@ -4471,7 +4555,7 @@ fn generate_multi_flavor_wheel_spec(
             ));
         std::fs::write(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
-        let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+        write_or_warn(step.file("spec.generated"), &spec_text);
         if crate::spec::is_prebuilt_binary_wheel(&wheels[0].1, layout.as_ref()) {
             let rpmlintrc_path = checkout_dir.join(format!(
                 "python-{}.rpmlintrc",
@@ -4481,7 +4565,7 @@ fn generate_multi_flavor_wheel_spec(
                 .as_ref()
                 .map(|l| l.header_dirs.as_slice())
                 .unwrap_or(&[]);
-            let _ = std::fs::write(
+            write_or_warn(
                 &rpmlintrc_path,
                 crate::spec::prebuilt_wheel_rpmlintrc(header_dirs),
             );
@@ -4537,7 +4621,7 @@ fn generate_wheel_binary_spec(
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
     std::fs::write(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
-    let _ = std::fs::write(step.file("spec.generated"), &spec_text);
+    write_or_warn(step.file("spec.generated"), &spec_text);
     if crate::spec::is_prebuilt_binary_wheel(&wheel.filename, layout.as_ref()) {
         let rpmlintrc_path = checkout_dir.join(format!(
             "python-{}.rpmlintrc",
@@ -4547,7 +4631,7 @@ fn generate_wheel_binary_spec(
             .as_ref()
             .map(|l| l.header_dirs.as_slice())
             .unwrap_or(&[]);
-        let _ = std::fs::write(
+        write_or_warn(
             &rpmlintrc_path,
             crate::spec::prebuilt_wheel_rpmlintrc(header_dirs),
         );
@@ -5007,7 +5091,7 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path) -> Result<(), Strin
         s
     };
     let audit_path = tarball.with_file_name("cargo-workspace-fix.txt");
-    let _ = std::fs::write(&audit_path, audit);
+    write_or_warn(&audit_path, audit);
 
     // Re-pack the tarball
     ap_core::diag!("  re-packing fixed tarball");
@@ -5395,7 +5479,13 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
     // the user's `gh auth login` auth and gh's own rate-limit backoff
     // both apply) and only falls back to raw ureq + GITHUB_TOKEN when
     // `gh` isn't installed. See `sources::try_gh_api`'s doc comment.
-    let json = crate::sources::get_json_for_search(&search_url).ok()?;
+    let json = match crate::sources::get_json_for_search(&search_url) {
+        Ok(json) => json,
+        Err(e) => {
+            ap_core::diag!("  GitHub search for {normalized} failed: {e}");
+            return None;
+        }
+    };
 
     let items = json.get("items")?.as_array()?;
 
@@ -5479,6 +5569,30 @@ mod tests {
         assert!(loaded.last_built_version.is_none());
         let kept = ws.state_json().with_extension("json.bad");
         assert!(std::fs::read_to_string(kept).unwrap().contains("1.0"));
+    }
+
+    /// A state.json that cannot be read (here: it is a directory) is not a
+    /// corrupt file. It must not be moved aside as if it were, and the load
+    /// still falls back to the default instead of failing the run.
+    #[test]
+    fn an_unreadable_state_file_is_left_in_place() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        std::fs::create_dir(ws.state_json()).unwrap();
+        let loaded = PkgState::load(&ws);
+        assert!(loaded.last_built_version.is_none());
+        assert!(ws.state_json().is_dir());
+        assert!(!ws.state_json().with_extension("json.bad").exists());
+    }
+
+    /// A failed save must say which file it could not write.
+    #[test]
+    fn a_failed_state_save_names_the_file() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        std::fs::remove_dir_all(ws.dir()).unwrap();
+        let err = PkgState::default().save(&ws).unwrap_err();
+        assert!(err.to_string().contains("state.json"), "{err}");
     }
 
     #[test]
