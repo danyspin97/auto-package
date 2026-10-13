@@ -665,7 +665,7 @@ impl TuiState {
                 self.add_global_log(
                     LogLevel::Info,
                     format!(
-                        "Resolved: {total} total, {built} built, {in_distro} in the distro, {remaining} remaining"
+                        "Resolved: {total} total, {built} built, {in_distro} in the distro; {remaining} were still to build when resolved"
                     ),
                 );
             }
