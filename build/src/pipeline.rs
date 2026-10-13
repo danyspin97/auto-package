@@ -282,6 +282,40 @@ impl PkgState {
         std::fs::rename(&tmp, &path).map_err(with_path)
     }
 
+    /// Read-modify-write of state.json under an exclusive lock, so two workers
+    /// (or two processes sharing a state root) cannot both start from the same
+    /// version and have the later save erase the earlier one's change. Returns
+    /// the state as stored.
+    pub fn update(ws: &Workspace, f: impl FnOnce(&mut PkgState)) -> std::io::Result<PkgState> {
+        use std::os::fd::AsRawFd;
+        let path = ws.state_json();
+        let lock_path = path.with_extension("json.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", lock_path.display())))?;
+        // Retry on EINTR; the lock is released when `lock` is dropped.
+        loop {
+            // SAFETY: the fd is open and owned by `lock` for this whole call.
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                break;
+            }
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", lock_path.display()),
+                ));
+            }
+        }
+        let mut state = Self::load(ws);
+        f(&mut state);
+        state.save(ws)?;
+        Ok(state)
+    }
+
     /// Does state.json record a GREEN build of this version?
     ///
     /// Only `success` qualifies. `wheel-only` previously counted too, but
@@ -977,11 +1011,11 @@ pub fn run_package(
     if let Some((outcome, reason)) = outcome
         && let Some(ws) = &ws
     {
-        let mut state = PkgState::load(ws);
-        state.last_built_version = Some(config.version.clone());
-        state.last_outcome = Some(outcome.to_string());
-        state.last_failure_reason = Some(reason);
-        save_state(&state, ws, reporter);
+        update_state(ws, reporter, |state| {
+            state.last_built_version = Some(config.version.clone());
+            state.last_outcome = Some(outcome.to_string());
+            state.last_failure_reason = Some(reason);
+        });
     }
     result
 }
@@ -1190,10 +1224,10 @@ fn preflight<'a>(
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
     }
     if prior.last_outcome.as_deref() == Some("success") && !prior.policy_current() {
-        let mut stale = prior;
-        stale.reviewed_version = None;
-        stale.reviewed_spec_hash = None;
-        save_state(&stale, &ws, reporter);
+        update_state(&ws, reporter, |stale| {
+            stale.reviewed_version = None;
+            stale.reviewed_spec_hash = None;
+        });
     }
 
     let checkout_dir = config.work_dir.join(&config.project).join(&rpm_name);
@@ -1326,12 +1360,12 @@ fn checkout_stage(
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
         && PkgState::load(ws).policy_current()
     {
-        let mut state = PkgState::load(ws);
-        state.policy_version = POLICY_VERSION;
-        state.last_built_version = Some(config.version.clone());
-        state.last_outcome = Some("success".to_string());
-        state.last_failure_reason = None;
-        save_state(&state, ws, reporter);
+        update_state(ws, reporter, |state| {
+            state.policy_version = POLICY_VERSION;
+            state.last_built_version = Some(config.version.clone());
+            state.last_outcome = Some("success".to_string());
+            state.last_failure_reason = None;
+        });
         // This process may have cached `config.project`'s package listing
         // before learning (just now, via the fresh — not cached —
         // `get_build_status` call above) that OBS already has this one.
@@ -1463,11 +1497,11 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
 
                 // TODO: Call agent to validate candidates and find repository
                 // For now, mark as wheel-only and skip
-                let mut state = PkgState::load(ws);
-                state.last_built_version = Some(version);
-                state.last_outcome = Some("wheel-only".to_string());
-                state.last_failure_reason = None;
-                save_state(&state, ws, reporter);
+                update_state(ws, reporter, |state| {
+                    state.last_built_version = Some(version);
+                    state.last_outcome = Some("wheel-only".to_string());
+                    state.last_failure_reason = None;
+                });
                 return Err(ctx.failed(format!(
                     "wheel-only package - candidates: {}",
                     if !candidates.is_empty() {
@@ -1838,12 +1872,11 @@ fn review_stage(
             ) {
                 return Err(ctx.failed(reason));
             }
-            let mut state = PkgState::load(ws);
-            state.reviewed_version = Some(config.version.clone());
-            state.reviewed_spec_hash = Some(hash_spec(
-                &std::fs::read_to_string(spec_path).unwrap_or_default(),
-            ));
-            save_state(&state, ws, reporter);
+            let spec_hash = hash_spec(&std::fs::read_to_string(spec_path).unwrap_or_default());
+            update_state(ws, reporter, |state| {
+                state.reviewed_version = Some(config.version.clone());
+                state.reviewed_spec_hash = Some(spec_hash);
+            });
         }
     }
     Ok(())
@@ -2311,12 +2344,12 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
     let build_step = build_step.finish(StepOutcome::Ok);
     st.step_attempts
         .skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
-    let mut state = PkgState::load(ws);
-    state.policy_version = POLICY_VERSION;
-    state.last_built_version = Some(config.version.clone());
-    state.last_outcome = Some("success".to_string());
-    state.last_failure_reason = None;
-    save_state(&state, ws, reporter);
+    update_state(ws, reporter, |state| {
+        state.policy_version = POLICY_VERSION;
+        state.last_built_version = Some(config.version.clone());
+        state.last_outcome = Some("success".to_string());
+        state.last_failure_reason = None;
+    });
     warn_if_err(
         reporter,
         "updating the latest-build link",
@@ -2469,10 +2502,10 @@ fn unresolvable_deps_round(
             }
         }
 
-        let mut state = PkgState::load(ws);
-        state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
-        state.unresolvable_translated = translated.clone();
-        save_state(&state, ws, reporter);
+        update_state(ws, reporter, |state| {
+            state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
+            state.unresolvable_translated = translated.clone();
+        });
     }
 
     if !translated.is_empty() {
@@ -2997,10 +3030,12 @@ fn agent_turn(
     // mismatch and starts the package at $0 — the user asked for that
     // restart-reset. See `PkgState::cumulative_spent_run_id`.
     if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
-        let mut st = PkgState::load(&ws);
-        st.cumulative_spent_usd = *spent_usd;
-        st.cumulative_spent_run_id = Some(config.run_id.clone());
-        warn_if_err(reporter, "saving state.json", st.save(&ws));
+        // Only the spend fields: the in-memory total is the truth for them,
+        // while everything else in the file may have moved under another writer.
+        update_state(&ws, reporter, |st| {
+            st.cumulative_spent_usd = *spent_usd;
+            st.cumulative_spent_run_id = Some(config.run_id.clone());
+        });
     }
 
     let prompt_path = step.file("prompt.md");
@@ -4487,23 +4522,26 @@ fn fetch_pypi_json(name: &str, version: &str) -> Result<Option<String>, String> 
 
 /// A component of a file name built from untrusted text (package name, tag):
 /// anything but `[A-Za-z0-9._+-]` becomes `_`, and `..` cannot survive.
-fn save_state(state: &PkgState, ws: &Workspace, reporter: &dyn Reporter) {
-    warn_if_err(reporter, "saving state.json", state.save(ws));
+fn update_state(ws: &Workspace, reporter: &dyn Reporter, f: impl FnOnce(&mut PkgState)) {
+    warn_if_err(reporter, "saving state.json", PkgState::update(ws, f));
 }
 
 /// Add a turn's cost to the package's spend for this run, so state.json keeps
 /// it even when the pipeline stops before the next successful turn. Spend from
 /// an earlier run is not carried over (see `PkgState::cumulative_spent_run_id`).
 fn add_run_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
-    let mut st = PkgState::load(ws);
-    let base = if st.cumulative_spent_run_id.as_deref() == Some(run_id) {
-        st.cumulative_spent_usd
-    } else {
-        0.0
-    };
-    st.cumulative_spent_usd = base + cost_usd;
-    st.cumulative_spent_run_id = Some(run_id.to_string());
-    if let Err(e) = st.save(ws) {
+    // A read-modify-write under the state lock: `base` must come from the
+    // file as it is now, not from a copy another writer has since replaced.
+    let saved = PkgState::update(ws, |st| {
+        let base = if st.cumulative_spent_run_id.as_deref() == Some(run_id) {
+            st.cumulative_spent_usd
+        } else {
+            0.0
+        };
+        st.cumulative_spent_usd = base + cost_usd;
+        st.cumulative_spent_run_id = Some(run_id.to_string());
+    });
+    if let Err(e) = saved {
         ap_core::diag!("  cannot save the notes cost: {e}");
     }
 }
@@ -4533,15 +4571,16 @@ fn tail_for_prompt(text: &str) -> String {
 /// `MissingDeps` round trip mid-pipeline resumes with the right count
 /// instead of restarting `attempts` at 0 (see `PkgState::cumulative_attempts`).
 fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
-    let mut st = PkgState::load(ws);
-    st.cumulative_attempts = attempts;
-    // Stamping this run's id onto a spend recorded under another run would
-    // make that run's dollars count against this one. Reset it first.
-    if st.cumulative_spent_run_id.as_deref() != Some(run_id) {
-        st.cumulative_spent_usd = 0.0;
-    }
-    st.cumulative_spent_run_id = Some(run_id.to_string());
-    if let Err(e) = st.save(ws) {
+    let saved = PkgState::update(ws, |st| {
+        st.cumulative_attempts = attempts;
+        // Stamping this run's id onto a spend recorded under another run would
+        // make that run's dollars count against this one. Reset it first.
+        if st.cumulative_spent_run_id.as_deref() != Some(run_id) {
+            st.cumulative_spent_usd = 0.0;
+        }
+        st.cumulative_spent_run_id = Some(run_id.to_string());
+    });
+    if let Err(e) = saved {
         ap_core::diag!("  cannot save the attempt count: {e}");
     }
 }
@@ -6047,6 +6086,29 @@ mod tests {
         let loaded = PkgState::load(&ws);
         assert_eq!(loaded.last_built_version.as_deref(), Some("1.2.3"));
         assert!(!ws.state_json().with_extension("json.tmp").exists());
+    }
+
+    /// Two writers each doing 50 read-modify-writes must not lose any: without
+    /// the lock, both load the same count and the later save erases the other.
+    #[test]
+    fn concurrent_updates_do_not_lose_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = root.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let ws = Workspace::open(&path, "python-foo").unwrap();
+                    for _ in 0..50 {
+                        PkgState::update(&ws, |st| st.cumulative_attempts += 1).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        assert_eq!(PkgState::load(&ws).cumulative_attempts, 100);
     }
 
     /// A truncated/corrupt state.json used to be silently replaced by the
