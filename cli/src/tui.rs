@@ -32,6 +32,7 @@ use ratatui::{
 
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SkipReason, StepKind, StepOutcome, Task};
 use ap_core::sink::{MemorySink, Reporter};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MAX_LOG_LINES: usize = 300;
 const MAX_AGENT_ACTIVITY: usize = 100;
@@ -250,6 +251,38 @@ impl PkgStatus {
 fn looks_like_disk_full(text: &str) -> bool {
     text.to_ascii_lowercase()
         .contains("no space left on device")
+}
+
+/// Longest prefix of `s` whose display width fits in `max_width` columns.
+/// Zero-width characters (combining marks, variation selectors) and the
+/// character after a zero-width joiner stay with the character before them,
+/// so the cut never splits such a cluster.
+fn prefix_within_width(s: &str, max_width: usize) -> &str {
+    let mut used = 0;
+    let mut end = 0;
+    let mut after_zwj = false;
+    for (idx, c) in s.char_indices() {
+        let width = c.width().unwrap_or(0);
+        if width > 0 && !after_zwj {
+            // `idx` starts a new cluster, so `s[..idx]` is a candidate cut.
+            if used > max_width {
+                return &s[..end];
+            }
+            end = idx;
+        }
+        used += width;
+        after_zwj = c == '\u{200d}';
+    }
+    if used <= max_width { s } else { &s[..end] }
+}
+
+/// Shortens `s` to at most `max_width` display columns, ending in "..." when cut.
+fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        s.to_string()
+    } else {
+        format!("{}...", prefix_within_width(s, max_width.saturating_sub(3)))
+    }
 }
 
 /// What kind of thing an [`ActivityEntry`] records — lets the Agent Activity
@@ -785,21 +818,14 @@ impl TuiState {
                         usage.cost_usd
                     ),
                 );
-                let reasoning = if response.reasoning.chars().count() > 80 {
-                    format!(
-                        "{}...",
-                        response.reasoning.chars().take(77).collect::<String>()
-                    )
-                } else {
-                    response.reasoning.clone()
-                };
+                let reasoning = truncate_with_ellipsis(&response.reasoning, 80);
                 state.add_log(
                     LogLevel::Info,
                     format!("Agent {}: {reasoning}", response.action),
                 );
             }
             Event::AgentToolUse { tool, input, .. } => {
-                let input_short: String = input.chars().take(60).collect();
+                let input_short = prefix_within_width(input, 60);
                 state.add_agent_activity(ActivityKind::ToolUse, format!("→ {tool} {input_short}"));
             }
             Event::Progress { message, .. } => {
@@ -831,14 +857,10 @@ impl TuiState {
             }
             Event::Command { program, argv, .. } => {
                 let cmd = format!("{program} {}", argv.join(" "));
-                if cmd.chars().count() > 100 {
-                    state.add_log(
-                        LogLevel::Info,
-                        format!("$ {}...", cmd.chars().take(97).collect::<String>()),
-                    );
-                } else {
-                    state.add_log(LogLevel::Info, format!("$ {cmd}"));
-                }
+                state.add_log(
+                    LogLevel::Info,
+                    format!("$ {}", truncate_with_ellipsis(&cmd, 100)),
+                );
             }
             Event::Artifact { name, .. } => {
                 state.add_log(LogLevel::Success, format!("Artifact: {name}"));
@@ -1431,6 +1453,44 @@ mod disk_full_tests {
         assert!(!looks_like_disk_full(
             "CMake Error: The LOCATION property may not be read from target \"png\""
         ));
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::*;
+
+    #[test]
+    fn short_text_is_returned_unchanged() {
+        assert_eq!(truncate_with_ellipsis("cargo build", 80), "cargo build");
+    }
+
+    #[test]
+    fn wide_characters_count_as_two_columns() {
+        // Nine columns: six for the content, three for "...".
+        let s = "日本語テキスト";
+        let out = truncate_with_ellipsis(s, 9);
+        assert_eq!(out, "日本語...");
+        assert!(out.width() <= 9);
+    }
+
+    #[test]
+    fn a_wide_character_that_does_not_fit_is_dropped_whole() {
+        assert_eq!(prefix_within_width("ab日本", 3), "ab");
+    }
+
+    #[test]
+    fn zero_width_joiner_sequences_are_not_split() {
+        // Woman + ZWJ + man + ZWJ + girl: one cluster, six columns wide.
+        let family = "👩\u{200d}👨\u{200d}👧";
+        assert_eq!(prefix_within_width(family, 6), family);
+        assert_eq!(prefix_within_width(family, 5), "");
+    }
+
+    #[test]
+    fn combining_marks_stay_with_their_base() {
+        let s = "e\u{301}x";
+        assert_eq!(prefix_within_width(s, 1), "e\u{301}");
     }
 }
 
