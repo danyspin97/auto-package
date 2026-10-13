@@ -123,6 +123,9 @@ pub enum PipelineResult {
 /// it. Still 0: no re-check has been needed yet.
 pub const POLICY_VERSION: u32 = 0;
 
+/// Distinguishes the temp files of concurrent saves within one process.
+static STATE_SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PkgState {
     /// The `POLICY_VERSION` the last successful build was checked against.
@@ -266,7 +269,13 @@ impl PkgState {
         let s = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let path = ws.state_json();
-        let tmp = path.with_extension("json.tmp");
+        // A temp name unique to this save: two writers sharing one name could
+        // interleave their bytes, and the rename would publish a torn file.
+        let tmp = path.with_extension(format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            STATE_SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let with_path =
             |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", path.display()));
         std::fs::write(&tmp, s).map_err(with_path)?;
