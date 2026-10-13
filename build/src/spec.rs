@@ -40,7 +40,7 @@ pub fn fix_autosetup_dir(spec: &str, actual_top_level: &str) -> Option<String> {
 
     // Replace the version in the actual dir with %{version} so the spec
     // stays correct across version bumps. e.g. markupsafe-3.0.3 → markupsafe-%{version}
-    let macro_n = actual.replace(version, "%{version}");
+    let macro_n = replace_version_component(actual, version);
 
     // Replace -n <wrong> with -n <macro_n> on the %autosetup line.
     // If there is no -n, append one.
@@ -363,8 +363,56 @@ pub fn parse_header(spec: &str) -> Option<Header> {
 /// a header reader, not an rpm interpreter.
 fn collect_simple_defines(spec: &str) -> std::collections::HashMap<String, String> {
     let mut macros = std::collections::HashMap::new();
+    // One frame per open `%if`. A define is only recorded when every frame's
+    // current branch is known to be taken: recording from an unevaluable
+    // branch could silently pick the wrong value.
+    let mut stack: Vec<CondFrame> = Vec::new();
     for line in spec.lines() {
         let trimmed = line.trim_start();
+        if let Some(cond) = trimmed
+            .strip_prefix("%if ")
+            .or_else(|| trimmed.strip_prefix("%if\t"))
+        {
+            let state = eval_condition(cond, &macros);
+            stack.push(CondFrame::new(state));
+            continue;
+        }
+        if trimmed.starts_with("%ifarch")
+            || trimmed.starts_with("%ifnarch")
+            || trimmed.starts_with("%ifos")
+            || trimmed.starts_with("%ifnos")
+        {
+            stack.push(CondFrame::new(None));
+            continue;
+        }
+        if let Some(cond) = trimmed.strip_prefix("%elif ") {
+            if let Some(frame) = stack.last_mut() {
+                frame.advance();
+                frame.state = match frame.prior {
+                    Taken::No => eval_condition(cond, &macros),
+                    _ => None,
+                };
+            }
+            continue;
+        }
+        if trimmed == "%else" {
+            if let Some(frame) = stack.last_mut() {
+                frame.advance();
+                frame.state = match frame.prior {
+                    Taken::Yes => Some(false),
+                    Taken::Maybe => None,
+                    Taken::No => Some(true),
+                };
+            }
+            continue;
+        }
+        if trimmed == "%endif" {
+            stack.pop();
+            continue;
+        }
+        if stack.iter().any(|f| f.state != Some(true)) {
+            continue;
+        }
         let rest = trimmed
             .strip_prefix("%define ")
             .or_else(|| trimmed.strip_prefix("%global "));
@@ -388,6 +436,61 @@ fn collect_simple_defines(spec: &str) -> std::collections::HashMap<String, Strin
     macros
 }
 
+/// Whether an earlier branch of the current `%if` chain was taken.
+#[derive(Clone, Copy, PartialEq)]
+enum Taken {
+    Yes,
+    No,
+    Maybe,
+}
+
+struct CondFrame {
+    /// `Some(true)` taken, `Some(false)` skipped, `None` cannot be evaluated.
+    state: Option<bool>,
+    prior: Taken,
+}
+
+impl CondFrame {
+    fn new(state: Option<bool>) -> Self {
+        CondFrame {
+            state,
+            prior: Taken::No,
+        }
+    }
+
+    /// Fold the branch just left into `prior` before moving to the next one.
+    fn advance(&mut self) {
+        self.prior = match (self.prior, self.state) {
+            (Taken::Yes, _) | (_, Some(true)) => Taken::Yes,
+            (Taken::Maybe, _) | (_, None) => Taken::Maybe,
+            _ => Taken::No,
+        };
+    }
+}
+
+/// Evaluate the simple `%if` shapes: an integer literal, optionally with a
+/// `%{?name}` expansion (`0%{?name}`). A macro the spec itself never defined
+/// is unknown, not false — rpm's own config may define it.
+fn eval_condition(cond: &str, macros: &std::collections::HashMap<String, String>) -> Option<bool> {
+    let cond = cond.trim();
+    let mut expanded = String::new();
+    let mut rest = cond;
+    while let Some(pos) = rest.find("%{?") {
+        expanded.push_str(&rest[..pos]);
+        let after = &rest[pos + 3..];
+        let end = after.find('}')?;
+        let name = &after[..end];
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        expanded.push_str(macros.get(name)?);
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    let n: i64 = expanded.trim().parse().ok()?;
+    Some(n != 0)
+}
+
 /// Replace every `%{name}` or `%name` reference by its collected `%define`/
 /// `%global` value. Unknown macros are left alone so the caller still sees
 /// which ones didn't resolve.
@@ -408,6 +511,31 @@ fn expand_once(s: &str, macros: &std::collections::HashMap<String, String>) -> S
         out = out
             .replace(&format!("%{{{name}}}"), value)
             .replace(&format!("%{name}"), value);
+    }
+    out
+}
+
+/// Replace `version` in a directory name with `%{version}`, but only where it
+/// is a whole `-`/`_`-delimited component. A plain substring replace turned
+/// `sqlite3-3` with version `3` into `sqlite%{version}-%{version}`.
+fn replace_version_component(dir: &str, version: &str) -> String {
+    if version.is_empty() {
+        return dir.to_string();
+    }
+    let mut out = String::with_capacity(dir.len());
+    let mut i = 0;
+    while i < dir.len() {
+        let at_start = i == 0 || matches!(dir.as_bytes()[i - 1], b'-' | b'_');
+        let end = i + version.len();
+        let at_end = end == dir.len() || matches!(dir.as_bytes()[end], b'-' | b'_');
+        if at_start && dir[i..].starts_with(version) && at_end {
+            out.push_str("%{version}");
+            i = end;
+        } else {
+            let ch = dir[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
     }
     out
 }
@@ -1119,8 +1247,15 @@ pub fn normalize_files_paths(spec: &str, pypi_name: &str) -> String {
         // generated spec.
         let trimmed = line.trim().trim_end_matches('/');
         let rewritten = if trimmed.contains(".dist-info") {
-            let prefix = trimmed.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-            format!("{prefix}/{normalized}-%{{version}}.dist-info/")
+            // Split at the `/` ending the dist-info component so a trailing
+            // file (`.dist-info/LICENSE`) survives the rewrite.
+            let idx = trimmed.find(".dist-info").unwrap();
+            let dir_start = trimmed[..idx].rfind('/').map(|i| i + 1).unwrap_or(0);
+            let after = &trimmed[idx + ".dist-info".len()..];
+            let prefix = &trimmed[..dir_start];
+            // Directory entries lost their `/` to the trim above.
+            let tail = if after.is_empty() { "/" } else { after };
+            format!("{prefix}{normalized}-%{{version}}.dist-info{tail}")
         } else if let Some((prefix, last)) = trimmed.rsplit_once('/')
             && trimmed.starts_with('%')
             && last.trim_end_matches('/').eq_ignore_ascii_case(pypi_name)
@@ -1587,17 +1722,46 @@ pub fn c_project_skeleton(
     )
 }
 
+/// SPDX id for an OSI classifier name, if it is one we know for certain.
+fn classifier_spdx(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "MIT License" => "MIT",
+        "Apache Software License" => "Apache-2.0",
+        "BSD License" => return None, // 2- vs 3-clause is not recoverable
+        "ISC License (ISCL)" => "ISC",
+        "Mozilla Public License 2.0 (MPL 2.0)" => "MPL-2.0",
+        "GNU General Public License v2 (GPLv2)" => "GPL-2.0-only",
+        "GNU General Public License v2 or later (GPLv2+)" => "GPL-2.0-or-later",
+        "GNU General Public License v3 (GPLv3)" => "GPL-3.0-only",
+        "GNU General Public License v3 or later (GPLv3+)" => "GPL-3.0-or-later",
+        "GNU Lesser General Public License v3 (LGPLv3)" => "LGPL-3.0-only",
+        "GNU Lesser General Public License v3 or later (LGPLv3+)" => "LGPL-3.0-or-later",
+        "GNU Affero General Public License v3" => "AGPL-3.0-only",
+        "Python Software Foundation License" => "PSF-2.0",
+        "The Unlicense (Unlicense)" => "Unlicense",
+        _ => return None,
+    })
+}
+
 fn license_tag(license: &License) -> String {
     match license {
         License::Spdx(expr) => expr.clone(),
         License::FreeText(text) => text.clone(),
         License::Classifiers(classifiers) => {
-            // Best-effort: strip the classifier prefix and join.
-            classifiers
+            // Only classifiers with a known SPDX id are emitted: OSI display
+            // names ("MIT License") are not valid in `License:`. When nothing
+            // maps, `FIXME` is what the spec validator and agent already flag,
+            // rather than an empty tag that looks like a finished spec.
+            let ids: Vec<&str> = classifiers
                 .iter()
                 .filter_map(|c| c.strip_prefix("License :: OSI Approved :: "))
-                .collect::<Vec<_>>()
-                .join(" AND ")
+                .filter_map(classifier_spdx)
+                .collect();
+            if ids.is_empty() {
+                "FIXME".to_string()
+            } else {
+                ids.join(" AND ")
+            }
         }
         License::Unknown => "FIXME".to_string(),
     }
@@ -2042,5 +2206,66 @@ mod expand_order_tests {
             .collect();
         assert_eq!(expand_once("%release", &macros), "2");
         assert_eq!(expand_once("%rel", &macros), "1");
+    }
+}
+
+#[cfg(test)]
+mod review_fix_tests {
+    use super::*;
+
+    fn pkgver(spec: &str) -> Option<String> {
+        collect_simple_defines(spec).get("pkgver").cloned()
+    }
+
+    #[test]
+    fn define_follows_the_evaluable_branch() {
+        let tmpl = |flag: &str| {
+            format!(
+                "%define flag {flag}\n%if 0%{{?flag}}\n%define pkgver 2.0\n%else\n%define pkgver 1.0\n%endif\n"
+            )
+        };
+        assert_eq!(pkgver(&tmpl("1")).as_deref(), Some("2.0"));
+        assert_eq!(pkgver(&tmpl("0")).as_deref(), Some("1.0"));
+    }
+
+    #[test]
+    fn define_in_unevaluable_branch_is_not_recorded() {
+        let spec = "%if 0%{?suse_version}\n%define pkgver 2.0\n%else\n%define pkgver 1.0\n%endif\n";
+        assert_eq!(pkgver(spec), None);
+        let spec = "%ifarch x86_64\n%define pkgver 2.0\n%endif\n";
+        assert_eq!(pkgver(spec), None);
+        assert_eq!(
+            pkgver("%if 1\n%define pkgver 3.0\n%endif\n").as_deref(),
+            Some("3.0")
+        );
+    }
+
+    #[test]
+    fn autosetup_fix_only_replaces_whole_version_component() {
+        let spec = "Name: sqlite3\nVersion: 3\n%autosetup -n wrong\n";
+        let out = fix_autosetup_dir(spec, "sqlite3-3").unwrap();
+        assert!(out.contains("-n sqlite3-%{version}"), "{out}");
+        let spec = "Name: markupsafe\nVersion: 3.0.3\n%autosetup -n wrong\n";
+        let out = fix_autosetup_dir(spec, "MarkupSafe-3.0.3").unwrap();
+        assert!(out.contains("-n MarkupSafe-%{version}"), "{out}");
+    }
+
+    #[test]
+    fn dist_info_rewrite_keeps_the_trailing_file() {
+        let out = normalize_files_paths(
+            "%license %{python_sitelib}/foo-%{version}.dist-info/LICENSE\n",
+            "foo",
+        );
+        assert_eq!(
+            out,
+            "%license %{python_sitelib}/foo-%{version}.dist-info/LICENSE\n"
+        );
+    }
+
+    #[test]
+    fn non_spdx_classifiers_do_not_produce_an_empty_or_osi_name() {
+        let l = |c: &str| license_tag(&License::Classifiers(vec![c.to_string()]));
+        assert_eq!(l("License :: Other/Proprietary License"), "FIXME");
+        assert_eq!(l("License :: OSI Approved :: MIT License"), "MIT");
     }
 }
