@@ -5,8 +5,11 @@
 //! format v1) and contains each node's name, version, sha256, and
 //! `requires_dist` with markers unevaluated.
 //!
-//! We run in default wheel mode. No code from any sdist executes during
-//! resolution.
+//! We run in default wheel mode, which prefers wheels. For a release that
+//! ships only an sdist, `pip install --dry-run` still has to build the
+//! package's metadata, so that sdist's build backend (and any `setup.py`)
+//! does run during resolution. Run this inside a sandbox, not on trusted
+//! ground.
 //!
 //! Known limitation: `--python-version` is ignored by pip when a real
 //! interpreter is running — marker evaluation uses the host interpreter.

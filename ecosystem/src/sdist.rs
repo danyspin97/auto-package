@@ -218,6 +218,38 @@ impl Budget {
         }
         Ok(())
     }
+
+    /// Copy one entry's content to `out`, bounded by what the budget still
+    /// allows rather than by the (attacker-controlled) declared size.
+    ///
+    /// `declared` is what [`Budget::charge`] already took for this entry. A
+    /// header that understates the real size would otherwise let one entry
+    /// expand to the per-file cap and sidestep the total cap; here the bytes
+    /// actually written are what count.
+    fn copy_entry(
+        &mut self,
+        declared: u64,
+        input: &mut impl Read,
+        out: &mut impl std::io::Write,
+    ) -> Result<(), Error> {
+        let before = self.bytes.saturating_sub(declared);
+        let allowed = MAX_FILE_BYTES.min(MAX_TOTAL_BYTES.saturating_sub(before));
+        // Read one byte past the allowance so overshoot is detectable.
+        let written =
+            std::io::copy(&mut input.take(allowed.saturating_add(1)), out).map_err(|e| {
+                Error::Io {
+                    path: std::path::PathBuf::new(),
+                    source: e,
+                }
+            })?;
+        if written > allowed {
+            return Err(Error::LimitExceeded(format!(
+                "entry expands past its declared {declared} bytes beyond the extraction limit"
+            )));
+        }
+        self.bytes = before.saturating_add(written.max(declared));
+        Ok(())
+    }
 }
 
 /// Read up to [`MAX_MANIFEST_BYTES`] of `entry` as lossy UTF-8. `None` when
@@ -442,13 +474,16 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
             path: out_path.clone(),
             source: e,
         })?;
-        // Bound by the declared size so a lying header can't overshoot.
-        std::io::copy(&mut (&mut entry).take(MAX_FILE_BYTES), &mut out_file).map_err(|e| {
-            Error::Io {
-                path: out_path.clone(),
-                source: e,
-            }
-        })?;
+        let declared = entry.size();
+        budget
+            .copy_entry(declared, &mut entry, &mut out_file)
+            .map_err(|e| match e {
+                Error::Io { source, .. } => Error::Io {
+                    path: out_path.clone(),
+                    source,
+                },
+                other => other,
+            })?;
         drop(out_file);
         #[cfg(unix)]
         if let Some(mode) = mode {
@@ -521,8 +556,12 @@ struct InspectEntry {
 fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntry>, Error> {
     let mut archive = open_tar(path, kind)?;
     let mut out = Vec::new();
+    // Same caps as extraction: inspect must not be the cheaper way to make a
+    // hostile archive burn memory (the entry list) or time.
+    let mut budget = Budget::default();
     for entry in archive.entries().map_err(Error::Tar)? {
         let mut entry = entry.map_err(Error::Tar)?;
+        budget.charge(entry.size())?;
         let entry_path = entry.path().map_err(Error::Tar)?.into_owned();
         if entry_path.is_absolute()
             || entry_path
@@ -562,11 +601,13 @@ fn collect_zip_entries(path: &Path) -> Result<Vec<InspectEntry>, Error> {
         source: std::io::Error::other(e.to_string()),
     })?;
     let mut out = Vec::new();
+    let mut budget = Budget::default();
     for i in 0..zip_archive.len() {
         let mut entry = zip_archive.by_index(i).map_err(|e| Error::Io {
             path: path.to_path_buf(),
             source: std::io::Error::other(e.to_string()),
         })?;
+        budget.charge(entry.size())?;
         let name = entry.name().to_string();
         // Mirror the tar guard: skip absolute paths and `..` traversal.
         if std::path::Path::new(&name).is_absolute()
@@ -629,8 +670,13 @@ fn inspect_from_entries(
     let mut files: Vec<String> = Vec::new();
 
     for entry in entries {
-        let entry_path = std::path::PathBuf::from(&entry.path_str);
-        let path_str = &entry.path_str;
+        // `./thing-1.0/x` is the same entry as `thing-1.0/x`; left alone its
+        // first component is `.` and the top-level directory comes out as ".".
+        let path_str = &entry.path_str.trim_start_matches("./").to_string();
+        if path_str.is_empty() {
+            continue;
+        }
+        let entry_path = std::path::PathBuf::from(path_str);
 
         if !entry.is_dir {
             files.push(path_str.clone());
@@ -720,6 +766,19 @@ fn inspect_from_entries(
 
     files.sort();
 
+    // A root CMake/autotools project that vendors or binds other languages in
+    // subdirectories (`bindings/python/setup.py`, `third_party/x/Cargo.toml`)
+    // is still a CMake/autotools project: only a root-level manifest of these
+    // kinds may compete with it.
+    if cmake_manifest || autotools_manifest {
+        if setup_py_depth.is_some_and(|d| d > 0) {
+            setup_py_depth = None;
+        }
+        if cargo.as_ref().is_some_and(|((d, _), _)| *d > 0) {
+            cargo = None;
+        }
+    }
+
     // Shallowest wins; among equals, the one that was asked for.
     let declared_name = |src: &str| {
         toml::from_str::<PyprojectToml>(src)
@@ -741,14 +800,23 @@ fn inspect_from_entries(
     let build_system = match &pyproject {
         None => BuildSystem::setuptools_default(),
         Some((_, _, src)) => {
-            let mut doc: PyprojectToml = toml::from_str(src)?;
-            let build_system = doc
-                .build_system
-                .take()
-                .map(BuildSystem::from)
-                .unwrap_or_else(BuildSystem::setuptools_default);
-            project_name = doc.declared_name();
-            build_system
+            // One broken pyproject.toml must not abort the whole inspect: a
+            // setup.py alongside it still describes a buildable project.
+            match toml::from_str::<PyprojectToml>(src) {
+                Ok(mut doc) => {
+                    let build_system = doc
+                        .build_system
+                        .take()
+                        .map(BuildSystem::from)
+                        .unwrap_or_else(BuildSystem::setuptools_default);
+                    project_name = doc.declared_name();
+                    build_system
+                }
+                Err(e) => {
+                    tracing::warn!("ignoring pyproject.toml metadata: invalid TOML: {e}");
+                    BuildSystem::setuptools_default()
+                }
+            }
         }
     };
 
@@ -1489,6 +1557,100 @@ build-backend = "flit_core.buildapi"
         let raw = "[tool.poetry]\nname = \"pp\"\n";
         let p: PyprojectToml = toml::from_str(raw).unwrap();
         assert_eq!(p.declared_name().as_deref(), Some("pp"));
+    }
+
+    #[test]
+    fn copy_entry_is_bounded_by_budget_not_declared_size() {
+        // The header claims 5 bytes but the stream holds 100, with only 10
+        // bytes of total budget left: the copy must stop and fail.
+        let mut b = Budget {
+            bytes: MAX_TOTAL_BYTES - 10,
+            ..Default::default()
+        };
+        b.charge(5).unwrap();
+        let mut sink = Vec::new();
+        let err = b
+            .copy_entry(5, &mut std::io::repeat(b'x').take(100), &mut sink)
+            .unwrap_err();
+        assert!(matches!(err, Error::LimitExceeded(_)));
+        assert!(sink.len() <= 11);
+        // An honest entry is charged once, not twice.
+        let mut b = Budget::default();
+        b.charge(5).unwrap();
+        b.copy_entry(5, &mut std::io::repeat(b'x').take(5), &mut Vec::new())
+            .unwrap();
+        assert_eq!(b.bytes, 5);
+    }
+
+    #[test]
+    fn inspect_enforces_entry_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("many.zip");
+        let names: Vec<String> = (0..=MAX_ENTRIES).map(|i| format!("t-1/f{i}")).collect();
+        let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b""[..])).collect();
+        write_zip(&src, &entries);
+        assert!(matches!(inspect(&src), Err(Error::LimitExceeded(_))));
+    }
+
+    #[test]
+    fn root_cmake_beats_nested_setup_py() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.gz");
+        write_tar(
+            &src,
+            &[
+                ("lib-1.0/CMakeLists.txt", b"project(lib)\n"),
+                (
+                    "lib-1.0/bindings/python/setup.py",
+                    b"from setuptools import setup\n",
+                ),
+                (
+                    "lib-1.0/vendor/dep/Cargo.toml",
+                    b"[package]\nname = \"dep\"\n",
+                ),
+            ],
+        );
+        let info = inspect(&src).unwrap();
+        assert!(info.cmake_manifest);
+        assert!(!info.python_packaging);
+        assert!(!info.cargo_manifest);
+    }
+
+    #[test]
+    fn invalid_pyproject_does_not_fail_inspect() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.gz");
+        write_tar(
+            &src,
+            &[
+                ("thing-1.0/pyproject.toml", b"[project\nname = = \n"),
+                ("thing-1.0/setup.py", b"from setuptools import setup\n"),
+            ],
+        );
+        let info = inspect(&src).unwrap();
+        assert!(info.python_packaging);
+        assert_eq!(info.project_name, None);
+        assert_eq!(
+            info.build_system.backend.as_deref(),
+            Some("setuptools.build_meta")
+        );
+    }
+
+    #[test]
+    fn dot_slash_prefix_does_not_become_top_level_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.zip");
+        write_zip(
+            &src,
+            &[(
+                "./thing-1.0/pyproject.toml",
+                b"[project]\nname = \"thing\"\n",
+            )],
+        );
+        let info = inspect(&src).unwrap();
+        assert_eq!(info.top_level_dir.as_deref(), Some("thing-1.0"));
+        assert_eq!(info.files, vec!["thing-1.0/pyproject.toml".to_string()]);
+        assert_eq!(info.project_name.as_deref(), Some("thing"));
     }
 
     #[test]

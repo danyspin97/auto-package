@@ -114,6 +114,9 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
         return None;
     };
 
+    // A query string or fragment is not part of the path (`?tab=readme`,
+    // `#installation`); left in, it ends up in the repo name.
+    let hostpath = hostpath.split(['?', '#']).next().unwrap_or_default();
     let hostpath = hostpath.trim_end_matches('/');
     let mut parts = hostpath.splitn(2, '/');
     let host = parts.next()?.to_string();
@@ -188,6 +191,20 @@ mod tests {
         assert_eq!(f.project_path, "NVIDIA/cuda-python");
         assert_eq!(f.repo_name, "cuda-python");
         assert_eq!(f.canonical_https(), "https://github.com/NVIDIA/cuda-python");
+    }
+
+    #[test]
+    fn query_and_fragment_stripped() {
+        for url in [
+            "https://github.com/owner/repo?tab=readme",
+            "https://github.com/owner/repo#readme",
+            "https://github.com/owner/repo.git?a=b#c",
+            "https://github.com/owner/repo/?tab=readme",
+        ] {
+            let f = parse(url).unwrap();
+            assert_eq!(f.project_path, "owner/repo", "{url}");
+            assert_eq!(f.repo_name, "repo", "{url}");
+        }
     }
 
     #[test]

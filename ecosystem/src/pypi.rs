@@ -115,6 +115,8 @@ pub enum FetchError {
 const JSON_TIMEOUT: Duration = Duration::from_secs(120);
 /// Whole-request timeout for file downloads.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Cap on a JSON response body.
+const MAX_JSON_BYTES: u64 = 64 << 20;
 /// Download cap when the index didn't tell us the file size.
 const MAX_DOWNLOAD_BYTES: u64 = 2 << 30;
 
@@ -130,11 +132,16 @@ fn get_json(url: &str) -> Result<String, FetchError> {
         url: url.to_string(),
         source: Box::new(e),
     };
+    // `read_to_string` stops at 10 MiB, which a project with thousands of
+    // releases exceeds. Raise the limit explicitly; ureq errors out when it is
+    // hit instead of returning a truncated body.
     agent(JSON_TIMEOUT)
         .get(url)
         .call()
         .map_err(to_http_err)?
         .into_body()
+        .with_config()
+        .limit(MAX_JSON_BYTES)
         .read_to_string()
         .map_err(to_http_err)
 }
