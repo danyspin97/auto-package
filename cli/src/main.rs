@@ -1317,36 +1317,72 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Lists what this run built and what the project already has built for this
-/// distro and arch, so the outcome is readable without scrolling the log.
+/// Lists what this run built, what is queued and what the project already has
+/// built for this distro and arch, so the outcome is readable without
+/// scrolling the log.
 fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &str) {
-    let built: Vec<String> = memory
-        .events()
+    // Latest outcome per package, so a package that later built is not also
+    // reported as queued, and a package listed twice is listed once.
+    let mut latest: std::collections::BTreeMap<String, (String, PackageOutcome)> =
+        Default::default();
+    for ev in memory.events() {
+        if let Event::PackageFinished {
+            pkg,
+            version,
+            outcome,
+        } = ev
+        {
+            latest.insert(pkg, (version, outcome));
+        }
+    }
+
+    let built: Vec<&String> = latest
         .iter()
-        .filter_map(|ev| match ev {
-            Event::PackageFinished {
-                pkg,
-                version,
-                outcome: PackageOutcome::Built,
-            } => Some(format!("{pkg} {version}")),
+        .filter(|(_, (_, outcome))| matches!(outcome, PackageOutcome::Built))
+        .map(|(pkg, _)| pkg)
+        .collect();
+    println!("\nBuilt this run ({}):", built.len());
+    for pkg in &built {
+        println!("  {pkg} {}", latest[*pkg].0);
+    }
+
+    let mut queued: Vec<(&String, Vec<String>)> = latest
+        .iter()
+        .filter_map(|(pkg, (_, outcome))| match outcome {
+            PackageOutcome::MissingDeps { deps } => {
+                let mut deps = deps.clone();
+                deps.sort();
+                deps.dedup();
+                Some((pkg, deps))
+            }
             _ => None,
         })
         .collect();
-    println!("\nBuilt this run ({}):", built.len());
-    for line in &built {
-        println!("  {line}");
+    queued.retain(|(pkg, _)| !built.contains(pkg));
+    println!("\nQueued, waiting on dependencies ({}):", queued.len());
+    for (pkg, deps) in queued {
+        if deps.is_empty() {
+            println!("  {pkg}");
+        } else {
+            println!("  {pkg} <- {}", deps.join(", "));
+        }
     }
 
+    // OBS reports names in lower case, and this run's packages are already in
+    // the built list above, so they are not repeated here.
     let statuses = ap_build::osc::get_project_build_statuses(
         project,
         distro,
         arch,
         ap_build::proc::Emit::quiet(),
     );
+    let built_lower: Vec<String> = built.iter().map(|p| p.to_lowercase()).collect();
     let mut cached: Vec<&String> = statuses
         .iter()
-        .filter(|(_, s)| matches!(s, ap_build::osc::BuildStatus::Succeeded))
+        .filter(|(name, s)| {
+            matches!(s, ap_build::osc::BuildStatus::Succeeded)
+                && !built_lower.contains(&name.to_lowercase())
+        })
         .map(|(name, _)| name)
         .collect();
     cached.sort();
@@ -1356,6 +1392,7 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_build(
     name: &str,
     version: Option<&str>,

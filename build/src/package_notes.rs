@@ -235,6 +235,11 @@ fn update_inner(
         }
     })?;
     *usage = usage_from_output(&out.stdout);
+    // A nonzero exit with no usage report (killed, or crashed before printing)
+    // may still have spent money: charge the cap as an upper bound.
+    if out.code != 0 && usage.cost_usd == 0.0 {
+        usage.cost_usd = NOTES_BUDGET_USD.parse().unwrap_or(0.0);
+    }
     if out.code != 0 {
         return Err(format!(
             "claude exited with {}: {}",
