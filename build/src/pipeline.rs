@@ -13,7 +13,7 @@ use ap_core::run::{PkgRunDir, StepDir};
 use ap_core::sink::Reporter;
 
 use crate::proc::Emit;
-use crate::step::{Attempts, StepGuard, skip};
+use crate::step::{Attempts, StepGuard};
 
 use crate::osc;
 use crate::workspace::Workspace;
@@ -410,17 +410,20 @@ pub fn select_target(
     // below).
     let obs_project = config.project.clone();
     let (nodes, own_packages, linked_packages, build_statuses) = std::thread::scope(|scope| {
-        let own_handle =
-            scope.spawn(|| osc::list_project_packages(&obs_project, Emit::run(reporter)));
+        let own_handle = scope.spawn(|| {
+            osc::list_project_packages(&obs_project, Emit::run(reporter)).unwrap_or_default()
+        });
         let linked_handle = scope.spawn(|| {
             let mut linked = std::collections::HashSet::new();
             for (path_project, _repo) in
                 osc::get_project_repo_paths(&obs_project, Emit::run(reporter))
             {
-                linked.extend(osc::list_project_packages(
-                    &path_project,
-                    Emit::run(reporter),
-                ));
+                // `list_project_packages` already warned on failure; a project
+                // we could not list contributes nothing.
+                linked.extend(
+                    osc::list_project_packages(&path_project, Emit::run(reporter))
+                        .unwrap_or_default(),
+                );
             }
             linked
         });
@@ -1206,7 +1209,8 @@ fn run_package_inner(
                 version,
                 candidates,
             }) => {
-                let step = step.finish(StepOutcome::Ok);
+                // The pipeline stops here, so the step did not produce a spec.
+                let step = step.finish(StepOutcome::Failed);
 
                 let mut message = format!(
                     "{pkg_name} {version} is published on PyPI as wheels only and its \
@@ -1279,7 +1283,7 @@ fn run_package_inner(
         // Sdist may already be extracted; find top-level dir name from the tarball
         // in the checkout dir (or fall back to a reasonable guess).
         let top = find_sdist_top_level(&checkout_dir, &config.pkg_name, &config.version);
-        skip(reporter, StepKind::GenerateSpec, SkipReason::SpecExists);
+        step_attempts.skip(reporter, StepKind::GenerateSpec, SkipReason::SpecExists);
         let spec_text = std::fs::read_to_string(&spec_path).unwrap_or_default();
         let is_maturin = spec_text.contains("maturin");
         let is_rust = spec_text.contains("cargo_build");
@@ -1315,8 +1319,16 @@ fn run_package_inner(
             }
             step.finish(StepOutcome::Ok);
         } else {
-            skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
+            step_attempts.skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
         }
+    } else if is_rust && !is_maturin {
+        // Without a repository there is nothing for `tar_scm` to fetch; say so
+        // rather than leave the step silently absent.
+        step_attempts.skip(
+            reporter,
+            StepKind::OscService,
+            SkipReason::Other("package has no source repository".to_string()),
+        );
     }
 
     // ── Step: OscService (maturin packages) ──────────────────────────────────
@@ -1368,11 +1380,11 @@ fn run_package_inner(
             }
             step.finish(StepOutcome::Ok);
         } else {
-            skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
+            step_attempts.skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
         }
     }
     if !is_rust && !is_maturin {
-        skip(reporter, StepKind::OscService, SkipReason::NotRust);
+        step_attempts.skip(reporter, StepKind::OscService, SkipReason::NotRust);
     }
 
     // ── Step: FetchSdist (extract for log analysis, if not done) ─────────────
@@ -1387,6 +1399,7 @@ fn run_package_inner(
         );
 
         // Find tarball in checkout and extract to ws.sdist_dir()
+        let mut outcome = StepOutcome::Ok;
         if let Some(tarball) = find_tarball(&checkout_dir) {
             let sdist_dir = ws.sdist_dir();
             let _ = std::fs::create_dir_all(&sdist_dir);
@@ -1397,12 +1410,19 @@ fn run_package_inner(
                     step: Some(sdist_step.id),
                     message: format!("extracting {} failed: {e}", tarball.display()),
                 });
+                outcome = StepOutcome::Failed;
             }
+        } else {
+            reporter.report(&Event::Warning {
+                step: Some(sdist_step.id),
+                message: "no source tarball found in the checkout".to_string(),
+            });
+            outcome = StepOutcome::Failed;
         }
 
-        sdist_step.finish(StepOutcome::Ok);
+        sdist_step.finish(outcome);
     } else {
-        skip(
+        step_attempts.skip(
             reporter,
             StepKind::FetchSdist,
             SkipReason::Other("sdist already extracted".to_string()),
@@ -1485,7 +1505,7 @@ fn run_package_inner(
 
     // ── Step: Review (freshly generated specs, or existing spec with no prior build) ──
     if config.no_agent {
-        skip(reporter, StepKind::AgentTurn, SkipReason::NoAgent);
+        step_attempts.skip(reporter, StepKind::AgentTurn, SkipReason::NoAgent);
     }
     if !config.no_agent && (need_spec || !build_log_nonempty) && !already_reviewed {
         let spec_before = std::fs::read_to_string(&spec_path).unwrap_or_default();
@@ -1742,7 +1762,7 @@ fn run_package_inner(
                         || attempts >= config.max_attempts
                         || spent_usd >= config.budget_usd
                     {
-                        skip_agent(reporter, config, attempts, spent_usd);
+                        skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
                         return PipelineResult::Failed {
                             rpm_name,
                             reason: format!(
@@ -1852,7 +1872,7 @@ fn run_package_inner(
                     || attempts >= config.max_attempts
                     || spent_usd >= config.budget_usd
                 {
-                    skip_agent(reporter, config, attempts, spent_usd);
+                    skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
                     return PipelineResult::Failed {
                         rpm_name,
                         reason: format!("spec invalid: {e}"),
@@ -1973,6 +1993,7 @@ fn run_package_inner(
         match build_result {
             Ok(()) => {
                 let build_step = build_step.finish(StepOutcome::Ok);
+                step_attempts.skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
                 let mut state = PkgState::load(&ws);
                 state.last_built_version = Some(config.version.clone());
                 state.last_outcome = Some("success".to_string());
@@ -2163,7 +2184,7 @@ fn run_package_inner(
                 let build_step = build_step.finish(StepOutcome::Failed);
 
                 if config.no_agent {
-                    skip_agent(reporter, config, attempts, spent_usd);
+                    skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
                     return PipelineResult::Failed {
                         rpm_name,
                         reason: format!("build failed; log: {}", build_log.display()),
@@ -2173,7 +2194,7 @@ fn run_package_inner(
                 attempts += 1;
                 persist_attempts(&ws, &config.run_id, attempts);
                 if attempts > config.max_attempts || spent_usd >= config.budget_usd {
-                    skip_agent(reporter, config, attempts, spent_usd);
+                    skip_agent(reporter, &mut step_attempts, config, attempts, spent_usd);
                     let why = if spent_usd >= config.budget_usd {
                         format!(
                             "budget exhausted (${:.2} spent of ${:.2})",
@@ -2195,8 +2216,14 @@ fn run_package_inner(
 
                 link_build_log(&ws, &build_log);
 
-                let extract =
-                    extract_build_log(&build_log, &sdist_top_level, reporter, Some(build_step.id));
+                let extract = extract_failure_step(
+                    pkg_run,
+                    reporter,
+                    &mut step_attempts,
+                    &build_log,
+                    &sdist_top_level,
+                    build_step.id,
+                );
                 reporter.report(&Event::BuildFailed {
                     step: build_step.id,
                     classification: classify_failure(&extract),
@@ -2381,7 +2408,13 @@ fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64) -> String {
 }
 
 /// Report why no further agent turn will run for this package.
-fn skip_agent(reporter: &dyn Reporter, config: &PipelineConfig, attempts: usize, spent_usd: f64) {
+fn skip_agent(
+    reporter: &dyn Reporter,
+    step_attempts: &mut Attempts,
+    config: &PipelineConfig,
+    attempts: usize,
+    spent_usd: f64,
+) {
     let reason = if config.no_agent {
         SkipReason::NoAgent
     } else if spent_usd >= config.budget_usd {
@@ -2392,7 +2425,7 @@ fn skip_agent(reporter: &dyn Reporter, config: &PipelineConfig, attempts: usize,
             config.max_attempts
         ))
     };
-    skip(reporter, StepKind::AgentTurn, reason);
+    step_attempts.skip(reporter, StepKind::AgentTurn, reason);
 }
 
 /// Run one agent turn and emit every event it produces.
@@ -2854,6 +2887,40 @@ fn extract_build_log(
     // slightly less accurate anchoring. Removed to reduce noise.
 
     extracted
+}
+
+/// Analyse a failed build log inside its own `ExtractFailure` step.
+///
+/// A step directory that cannot be created only loses the step's report, not
+/// the analysis the agent needs, so it falls back to extracting unreported.
+fn extract_failure_step(
+    pkg_run: &PkgRunDir,
+    reporter: &dyn Reporter,
+    step_attempts: &mut Attempts,
+    build_log: &Path,
+    sdist_top_level: &str,
+    build_step: ap_core::event::StepId,
+) -> crate::log::ExtractedLog {
+    match StepGuard::begin(
+        pkg_run,
+        reporter,
+        StepKind::ExtractFailure,
+        None,
+        step_attempts,
+    ) {
+        Ok(step) => {
+            let extract = extract_build_log(build_log, sdist_top_level, reporter, Some(step.id));
+            step.finish(StepOutcome::Ok);
+            extract
+        }
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: Some(build_step),
+                message: format!("could not report the failure analysis step: {e}"),
+            });
+            extract_build_log(build_log, sdist_top_level, reporter, Some(build_step))
+        }
+    }
 }
 
 /// Validate an agent's spec edit, keep it or restore `before`, and report.
@@ -6586,5 +6653,48 @@ Source:         %{undefined_macro}\n";
             }
         )));
         assert_steps_balanced(&events);
+    }
+
+    #[test]
+    fn no_agent_reports_the_agent_skip_only_once() {
+        let mut config = PipelineConfig {
+            pkg_name: "foo".into(),
+            rpm_name: "python-foo".into(),
+            version: "1.0".into(),
+            project: "p".into(),
+            work_dir: PathBuf::new(),
+            state_root: PathBuf::new(),
+            rpms_dir: PathBuf::new(),
+            distro: "openSUSE_Tumbleweed".into(),
+            arch: "x86_64".into(),
+            max_attempts: 1,
+            budget_usd: 1.0,
+            agent_backend: AgentBackend::Cli,
+            no_agent: true,
+            force: false,
+            regen: false,
+            source_repo: None,
+            subprojects: Vec::new(),
+            failed_deps: Vec::new(),
+            unbuildable_deps: Vec::new(),
+            run_id: "test".into(),
+            source_urls: Default::default(),
+            python_flavors: Default::default(),
+        };
+        config.no_agent = true;
+        let recorder = Recorder::default();
+        let mut step_attempts = Attempts::default();
+
+        // The review gate announces the skip up front, and a later failure
+        // path reports it again through `skip_agent`.
+        step_attempts.skip(&recorder, StepKind::AgentTurn, SkipReason::NoAgent);
+        skip_agent(&recorder, &mut step_attempts, &config, 0, 0.0);
+
+        let events = recorder.0.lock().unwrap();
+        let skips = events
+            .iter()
+            .filter(|e| matches!(e, Event::StepSkipped { .. }))
+            .count();
+        assert_eq!(skips, 1);
     }
 }

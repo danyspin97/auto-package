@@ -4,7 +4,7 @@
 //! `StepFinished` pair, so an early `return` or `?` between the two can no
 //! longer leave a started step unfinished.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Deref;
 use std::time::Instant;
@@ -18,22 +18,31 @@ use ap_core::sink::Reporter;
 #[derive(Debug, Default)]
 pub struct Attempts {
     counts: HashMap<StepKind, u32>,
+    /// Kinds whose skip was already reported since their last start.
+    skipped: HashSet<StepKind>,
     pub round: u32,
 }
 
 impl Attempts {
     /// Count a start of `kind` and return its 1-based attempt number.
     fn next(&mut self, kind: StepKind) -> u32 {
+        // A new attempt may be skipped again; only repeats within one attempt
+        // are duplicates.
+        self.skipped.remove(&kind);
         let n = self.counts.entry(kind).or_insert(0);
         *n += 1;
         *n
     }
-}
 
-/// Report that a conditional step did not run, so the event stream and the
-/// TUI show why rather than just a gap.
-pub fn skip(reporter: &dyn Reporter, kind: StepKind, reason: SkipReason) {
-    reporter.report(&Event::StepSkipped { kind, reason });
+    /// Report that a conditional step did not run, so the event stream and the
+    /// TUI show why rather than just a gap. At most one skip is reported per
+    /// attempt: several code paths can each decide the same step is skipped,
+    /// and the first reason is the one that applied.
+    pub fn skip(&mut self, reporter: &dyn Reporter, kind: StepKind, reason: SkipReason) {
+        if self.skipped.insert(kind) {
+            reporter.report(&Event::StepSkipped { kind, reason });
+        }
+    }
 }
 
 pub struct StepGuard<'a> {
@@ -186,5 +195,42 @@ mod tests {
             ]
         );
         assert_eq!(events.len(), 6);
+    }
+
+    #[test]
+    fn a_step_is_skipped_at_most_once_per_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_run = RunDir::allocate(tmp.path()).unwrap().pkg("foo");
+        let recorder = Recorder::default();
+        let mut attempts = Attempts::default();
+
+        attempts.skip(&recorder, StepKind::OscService, SkipReason::ServiceUpToDate);
+        attempts.skip(&recorder, StepKind::OscService, SkipReason::NotRust);
+        attempts.skip(&recorder, StepKind::AgentTurn, SkipReason::NoAgent);
+        // Starting the step opens a new attempt, which may be skipped again.
+        StepGuard::begin(
+            &pkg_run,
+            &recorder,
+            StepKind::OscService,
+            None,
+            &mut attempts,
+        )
+        .unwrap()
+        .finish(StepOutcome::Ok);
+        attempts.skip(&recorder, StepKind::OscService, SkipReason::NotRust);
+
+        let events = recorder.0.lock().unwrap();
+        let skipped: Vec<(StepKind, String)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::StepSkipped { kind, reason } => Some((*kind, reason.to_string())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(skipped.len(), 3);
+        assert_eq!(skipped[0].0, StepKind::OscService);
+        assert_eq!(skipped[0].1, SkipReason::ServiceUpToDate.to_string());
+        assert_eq!(skipped[1].0, StepKind::AgentTurn);
+        assert_eq!(skipped[2].1, SkipReason::NotRust.to_string());
     }
 }
