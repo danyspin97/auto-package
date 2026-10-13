@@ -374,7 +374,22 @@ pub fn status_is_resolvable(status: Option<&osc::BuildStatus>) -> bool {
                 | osc::BuildStatus::Building
                 | osc::BuildStatus::Scheduled
         )
-    )
+    ) || matches!(status, Some(osc::BuildStatus::Unknown(code)) if code == "finished")
+}
+
+#[cfg(test)]
+mod resolvable_tests {
+    use super::*;
+
+    #[test]
+    fn a_finished_build_without_a_result_is_still_in_flight() {
+        let finished = osc::BuildStatus::Unknown("finished".to_string());
+        assert!(status_is_resolvable(Some(&finished)));
+        assert!(!status_is_resolvable(Some(&osc::BuildStatus::Failed)));
+        assert!(!status_is_resolvable(Some(&osc::BuildStatus::Unknown(
+            "weird".into()
+        ))));
+    }
 }
 
 /// Resolve the dependency closure and return all currently buildable targets

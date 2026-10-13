@@ -331,7 +331,9 @@ fn revision_dependent(s: &BuildStatus) -> bool {
 
 fn word_status(word: &str) -> BuildStatus {
     match word {
-        "dispatching" | "signing" => BuildStatus::Building,
+        // Transitional: the binary is still being published, so a dependent must
+        // wait for it rather than schedule a second build of the same package.
+        "dispatching" | "signing" | "publishing" | "unpublished" => BuildStatus::Building,
         other => BuildStatus::from(other),
     }
 }
