@@ -705,7 +705,13 @@ impl TuiState {
                 if !kind.spec().keeps_disk_flag {
                     state.disk_full_detected = false;
                 }
-                state.status = PkgStatus::Running;
+                // The notes turn only runs after a successful build, so the package
+                // is already done; showing it as running would hide that.
+                state.status = if *kind == StepKind::PackageNotes {
+                    PkgStatus::Succeeded
+                } else {
+                    PkgStatus::Running
+                };
                 state.step = Some(StepInfo {
                     kind: *kind,
                     attempt: *attempt,
