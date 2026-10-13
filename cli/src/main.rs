@@ -3,7 +3,7 @@
 mod tui;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ap_build::pipeline::{
@@ -577,6 +577,90 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     std::process::exit(1);
 }
 
+/// Name of the per-project lock file, kept inside the project directory.
+const PROJECT_LOCK_NAME: &str = ".auto-package.lock";
+
+/// Refuse a project directory that is a symlink: `create_dir_all` and the
+/// marker write would follow it and put state (and `--cleanup`'s deletes)
+/// wherever it points, e.g. `~/Documents`.
+fn reject_symlink_project_dir(dir: &Path) -> color_eyre::Result<()> {
+    if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(color_eyre::eyre::eyre!(
+            "{} is a symlink; refusing to use it as a project directory. \
+             Remove it, or point --work-dir somewhere else.",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Advisory per-project lock: a file holding the owner's pid, created
+/// exclusively. No locking crate is a dependency, so liveness of the recorded
+/// pid is what tells a live owner from a stale file left by a crash.
+struct ProjectLock {
+    path: PathBuf,
+}
+
+impl ProjectLock {
+    fn acquire(project_dir: &Path) -> color_eyre::Result<Self> {
+        use std::io::Write;
+        let path = project_dir.join(PROJECT_LOCK_NAME);
+        for _ in 0..3 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    writeln!(f, "{}", std::process::id())?;
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let pid = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|t| t.trim().parse::<u32>().ok());
+                    if let Some(pid) = pid
+                        && pid_is_alive(pid)
+                    {
+                        return Err(color_eyre::eyre::eyre!(
+                            "another auto-package run (pid {pid}) is using {}; \
+                             wait for it to finish. If that process is not an \
+                             auto-package run, delete {}.",
+                            project_dir.display(),
+                            path.display(),
+                        ));
+                    }
+                    // Stale (owner gone) or unreadable: take it over.
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(color_eyre::eyre::eyre!(
+            "could not take the project lock {}",
+            path.display()
+        ))
+    }
+}
+
+impl Drop for ProjectLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether `pid` is a running process. Without `/proc` this cannot be told,
+/// so it answers yes: refusing to start is safer than clobbering a live run.
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    if !Path::new("/proc/self").exists() {
+        return true;
+    }
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
@@ -669,7 +753,15 @@ fn main() -> color_eyre::Result<()> {
             );
             let project_dir = work_dir.join(&project_dir_name);
             const OWNERSHIP_MARKER: &str = ".auto-package";
-            if cleanup && project_dir.exists() {
+            reject_symlink_project_dir(&project_dir)?;
+            // Only a directory this run creates is ours to mark. Marking one that
+            // already existed would let a later --cleanup delete the user's files.
+            let mut created_now = !project_dir.exists();
+            std::fs::create_dir_all(&project_dir)?;
+            // Taken before --cleanup touches anything: a second run for this
+            // project must not delete state under one that is still building.
+            let _project_lock = ProjectLock::acquire(&project_dir)?;
+            if cleanup && !created_now {
                 let marker = project_dir.join(OWNERSHIP_MARKER);
                 if !marker.exists() {
                     return Err(color_eyre::eyre::eyre!(
@@ -683,12 +775,21 @@ fn main() -> color_eyre::Result<()> {
                         project_dir.display(),
                     ));
                 }
-                std::fs::remove_dir_all(&project_dir)?;
+                // Empty the directory rather than removing it: it holds our lock
+                // file, and the marker is rewritten below.
+                for entry in std::fs::read_dir(&project_dir)? {
+                    let path = entry?.path();
+                    if path.file_name().is_some_and(|n| n == PROJECT_LOCK_NAME) {
+                        continue;
+                    }
+                    if path.is_dir() && !path.is_symlink() {
+                        std::fs::remove_dir_all(&path)?;
+                    } else {
+                        std::fs::remove_file(&path)?;
+                    }
+                }
+                created_now = true;
             }
-            // Only a directory this run creates is ours to mark. Marking one that
-            // already existed would let a later --cleanup delete the user's files.
-            let created_now = !project_dir.exists();
-            std::fs::create_dir_all(&project_dir)?;
             if created_now {
                 // Non-fatal: without the marker, --cleanup just refuses later.
                 let _ = std::fs::write(project_dir.join(OWNERSHIP_MARKER), b"");
@@ -826,8 +927,12 @@ fn main() -> color_eyre::Result<()> {
             // One semaphore for the whole run: `--jobs` caps concurrent package
             // builds across the root build and every TUI-added root.
             let sem = make_semaphore(jobs);
+            // Roots added in the TUI run on their own threads; their failures
+            // are collected here so they reach the outcome and exit code.
+            let added_failures: Mutex<Vec<String>> = Mutex::new(Vec::new());
             let result = {
                 let sem = &sem;
+                let added_failures = &added_failures;
                 let (project, work_dir, state_root, rpms_dir) =
                     (&project, &work_dir, &state_root, &rpms_dir);
                 let (distro, arch, run_dir) = (&distro, &arch, &run_dir);
@@ -881,10 +986,16 @@ fn main() -> color_eyre::Result<()> {
                                                 step: None,
                                                 message: format!("{raw}: build finished"),
                                             },
-                                            Err(e) => Event::Warning {
-                                                step: None,
-                                                message: format!("{raw}: {e}"),
-                                            },
+                                            Err(e) => {
+                                                added_failures
+                                                    .lock()
+                                                    .unwrap_or_else(|p| p.into_inner())
+                                                    .push(format!("{raw}: {e:#}"));
+                                                Event::Warning {
+                                                    step: None,
+                                                    message: format!("{raw}: {e}"),
+                                                }
+                                            }
                                         });
                                     }
                                 });
@@ -944,7 +1055,10 @@ fn main() -> color_eyre::Result<()> {
                 })
             };
 
-            let outcome = if result.is_ok() {
+            let added_failures = added_failures
+                .into_inner()
+                .unwrap_or_else(|p| p.into_inner());
+            let outcome = if result.is_ok() && added_failures.is_empty() {
                 RunOutcome::Success
             } else {
                 RunOutcome::Failed
@@ -971,6 +1085,13 @@ fn main() -> color_eyre::Result<()> {
             });
 
             result?;
+            if !added_failures.is_empty() {
+                return Err(color_eyre::eyre::eyre!(
+                    "{} added package(s) failed: {}",
+                    added_failures.len(),
+                    added_failures.join("; ")
+                ));
+            }
         }
         Commands::Notes { name, notes_dir } => {
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
@@ -1014,7 +1135,9 @@ fn main() -> color_eyre::Result<()> {
                 ap_core::run::sanitize_name(&project),
                 ap_core::run::sanitize_name(&arch),
             ));
+            reject_symlink_project_dir(&project_dir)?;
             std::fs::create_dir_all(&project_dir)?;
+            let _project_lock = ProjectLock::acquire(&project_dir)?;
             let work_dir = project_dir.canonicalize()?;
 
             let rpms_dir = work_dir.join("rpms");
