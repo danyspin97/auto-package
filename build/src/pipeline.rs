@@ -7,6 +7,7 @@
 //! labels and directory names are the table `ap_core::step::STEPS`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ap_core::event::{Event, SelectionReason, SkipReason, StepKind, StepOutcome};
 use ap_core::run::{PkgRunDir, StepDir};
@@ -124,7 +125,6 @@ pub enum PipelineResult {
 pub const POLICY_VERSION: u32 = 0;
 
 /// Distinguishes the temp files of concurrent saves within one process.
-static STATE_SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PkgState {
@@ -269,17 +269,10 @@ impl PkgState {
         let s = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let path = ws.state_json();
-        // A temp name unique to this save: two writers sharing one name could
-        // interleave their bytes, and the rename would publish a torn file.
-        let tmp = path.with_extension(format!(
-            "json.{}.{}.tmp",
-            std::process::id(),
-            STATE_SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let with_path =
-            |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", path.display()));
-        std::fs::write(&tmp, s).map_err(with_path)?;
-        std::fs::rename(&tmp, &path).map_err(with_path)
+        // `write_atomic` names its temp file uniquely, so two writers never
+        // interleave their bytes and the rename never publishes a torn file.
+        ap_core::fsx::write_atomic(&path, s)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))
     }
 
     /// Read-modify-write of state.json under an exclusive lock, so two workers
@@ -287,29 +280,14 @@ impl PkgState {
     /// version and have the later save erase the earlier one's change. Returns
     /// the state as stored.
     pub fn update(ws: &Workspace, f: impl FnOnce(&mut PkgState)) -> std::io::Result<PkgState> {
-        use std::os::fd::AsRawFd;
         let path = ws.state_json();
         let lock_path = path.with_extension("json.lock");
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", lock_path.display())))?;
-        // Retry on EINTR; the lock is released when `lock` is dropped.
-        loop {
-            // SAFETY: the fd is open and owned by `lock` for this whole call.
-            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                break;
-            }
-            let e = std::io::Error::last_os_error();
-            if e.kind() != std::io::ErrorKind::Interrupted {
-                return Err(std::io::Error::new(
-                    e.kind(),
-                    format!("{}: {e}", lock_path.display()),
-                ));
-            }
-        }
+        // Held until `_lock` drops, after the save, so the whole
+        // load-modify-save is one critical section.
+        let _lock = ap_core::proc_lock::lock_with_wait(&lock_path, Duration::from_secs(60))
+            .map_err(|e| {
+                std::io::Error::other(format!("{}: {}", lock_path.display(), lock_error_text(&e)))
+            })?;
         let mut state = Self::load(ws);
         f(&mut state);
         state.save(ws)?;
@@ -970,12 +948,46 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// A build can run for a long time, so a second process waits this long for
+/// the first to finish before giving up.
+const BUILD_LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
+
+fn lock_error_text(e: &ap_core::proc_lock::LockError) -> String {
+    match e {
+        ap_core::proc_lock::LockError::Held(Some(pid)) => format!("held by pid {pid}"),
+        ap_core::proc_lock::LockError::Held(None) => "held by another process".to_string(),
+        ap_core::proc_lock::LockError::Io(e) => e.to_string(),
+    }
+}
+
 pub fn run_package(
     config: &PipelineConfig,
     pkg_run: &PkgRunDir,
     reporter: &dyn Reporter,
 ) -> PipelineResult {
     let _in_flight = InFlightGuard::acquire(&config.rpm_name);
+    // The in-flight guard is per process; this lock keeps a second `ap` on the
+    // same state root from building the same package at once. Held for the
+    // whole run. A failed open is left for `run_package_inner` to report.
+    let _build_lock = match Workspace::open(&config.state_root, &config.rpm_name) {
+        Ok(ws) => {
+            let lock_path = ws.dir().join("build.lock");
+            match ap_core::proc_lock::lock_with_wait(&lock_path, BUILD_LOCK_WAIT) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    return PipelineResult::Failed {
+                        rpm_name: config.rpm_name.clone(),
+                        reason: format!(
+                            "could not take {}: {}",
+                            lock_path.display(),
+                            lock_error_text(&e)
+                        ),
+                    };
+                }
+            }
+        }
+        Err(_) => None,
+    };
     let result = run_package_inner(config, pkg_run, reporter);
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the
@@ -1435,13 +1447,10 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
                 {
                     let src = step.file("spec.generated");
                     let link = ws.dir().join("spec.generated");
-                    if link.symlink_metadata().is_ok() {
-                        let _ = std::fs::remove_file(&link);
-                    }
                     warn_if_err(
                         reporter,
                         "linking spec.generated",
-                        std::os::unix::fs::symlink(&src, &link),
+                        ap_core::fsx::replace_symlink(&src, &link),
                     );
                 }
                 (
@@ -1578,7 +1587,7 @@ fn osc_service_stage(
             );
 
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
-            let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
+            let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
                 .and_then(|()| {
                     osc::run_service(checkout_dir, Emit::new(reporter, step.id))
@@ -1639,7 +1648,7 @@ fn osc_service_stage(
 
             let normalized = config.pkg_name.replace('-', "_").to_lowercase();
             let service_xml = render_maturin_service_file(&normalized, &extra_manifests);
-            let result = std::fs::write(checkout_dir.join("_service"), &service_xml)
+            let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
                 .and_then(|()| {
                     osc::run_service(checkout_dir, Emit::new(reporter, step.id))
@@ -1721,16 +1730,16 @@ fn fetch_sdist_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResu
     #[cfg(unix)]
     {
         let source_link = ws.dir().join("source");
-        if source_link.symlink_metadata().is_ok() {
-            let _ = std::fs::remove_file(&source_link);
-        }
         let source_target = ws.sdist_dir().join(&st.sdist_top_level);
         if source_target.exists() {
             warn_if_err(
                 reporter,
                 "linking source/",
-                std::os::unix::fs::symlink(&source_target, &source_link),
+                ap_core::fsx::replace_symlink(&source_target, &source_link),
             );
+        } else if source_link.symlink_metadata().is_ok() {
+            // A link to a directory that is gone would mislead quilt.
+            let _ = std::fs::remove_file(&source_link);
         }
     }
     Ok(())
@@ -2971,7 +2980,7 @@ fn agent_turn(
                     continue;
                 };
                 let path = step.file(name);
-                if std::fs::write(&path, content).is_ok() {
+                if ap_core::fsx::write_atomic(&path, content).is_ok() {
                     reporter.report(&Event::Artifact {
                         step: step.id,
                         name: name.to_string(),
@@ -3102,7 +3111,7 @@ fn restore_spec(spec_path: &Path, before: &str, step: &StepDir, reporter: &dyn R
     let problem = if before.trim().is_empty() {
         Some("no readable roll-back point; leaving the spec as the agent left it".to_string())
     } else {
-        std::fs::write(spec_path, before)
+        ap_core::fsx::write_atomic(spec_path, before)
             .err()
             .map(|e| format!("writing the rolled-back spec failed: {e}"))
     };
@@ -3131,15 +3140,15 @@ fn restore_spec(spec_path: &Path, before: &str, step: &StepDir, reporter: &dyn R
 /// covers that at the cost of duplicating the bytes.
 fn link_build_log(ws: &Workspace, build_log: &Path) {
     let link = ws.build_log();
-    if link.symlink_metadata().is_ok()
-        && let Err(e) = std::fs::remove_file(&link)
-    {
-        ap_core::diag!("  cannot replace {}: {e}", link.display());
-        return;
-    }
-    if let Err(e) = std::fs::hard_link(build_log, &link)
-        .or_else(|_| std::fs::copy(build_log, &link).map(|_| ()))
-    {
+    // Link under a temp name and rename over `build.log`, so the agent never
+    // finds the workspace without a log between the remove and the create.
+    let tmp = link.with_extension(format!("log.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let linked = std::fs::hard_link(build_log, &tmp)
+        .or_else(|_| std::fs::copy(build_log, &tmp).map(|_| ()))
+        .and_then(|()| std::fs::rename(&tmp, &link));
+    if let Err(e) = linked {
+        let _ = std::fs::remove_file(&tmp);
         ap_core::diag!(
             "  cannot link {} to {}: {e}",
             link.display(),
@@ -3356,7 +3365,7 @@ impl CheckoutSnapshot {
         //    deleted ones).
         for (name, bytes) in &self.files {
             let path = self.checkout_dir.join(name);
-            if let Err(e) = std::fs::write(&path, bytes) {
+            if let Err(e) = ap_core::fsx::write_atomic(&path, bytes) {
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
                     message: format!("could not restore {}: {e}", path.display()),
@@ -4174,7 +4183,7 @@ fn generate_spec(
                 }
                 Err(e) => return Err(e),
             };
-            std::fs::write(&tarball, &bytes)
+            ap_core::fsx::write_atomic(&tarball, &bytes)
                 .map_err(|e| GenSpecError::Other(format!("writing {}: {e}", tarball.display())))?;
             let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
                 .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
@@ -4208,7 +4217,7 @@ fn generate_spec(
             Some(&release),
         );
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
-        std::fs::write(spec_path, &spec_text)
+        ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
         let sdist_top_level = sdist_info
@@ -4249,7 +4258,7 @@ fn generate_spec(
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
 
     // Write to checkout dir.
-    std::fs::write(spec_path, &spec_text)
+    ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
 
     // Save artifact copy.
@@ -4288,7 +4297,7 @@ fn generate_from_repo(
     ));
 
     let (bytes, url) = fetch_release_archive(repo_url, &config.version)?;
-    std::fs::write(&tarball, &bytes)
+    ap_core::fsx::write_atomic(&tarball, &bytes)
         .map_err(|e| GenSpecError::Other(format!("writing {}: {e}", tarball.display())))?;
 
     // Same preference the probe used, so generation and naming agree on which
@@ -4421,7 +4430,7 @@ fn generate_from_repo(
             build,
         );
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
-        std::fs::write(spec_path, &spec_text)
+        ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
         return Ok(GenSpecResult {
@@ -4589,7 +4598,7 @@ fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
 /// run does not go on as if the file had been written.
 fn write_or_warn(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
     let path = path.as_ref();
-    if let Err(e) = std::fs::write(path, contents) {
+    if let Err(e) = ap_core::fsx::write_atomic(path, contents) {
         ap_core::diag!("  cannot write {}: {e}", path.display());
     }
 }
@@ -4663,7 +4672,7 @@ fn generate_rust_spec(
          %changelog\n"
     );
 
-    std::fs::write(spec_path, &spec_text)
+    ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     write_or_warn(step.file("spec.generated"), &spec_text);
 
@@ -4715,7 +4724,7 @@ fn generate_repo_python_spec(
             release.as_ref(),
         );
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
-        std::fs::write(spec_path, &spec_text)
+        ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
         return Ok(GenSpecResult {
@@ -4782,7 +4791,7 @@ fn generate_repo_python_spec(
 
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
 
-    std::fs::write(spec_path, &spec_text)
+    ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     write_or_warn(step.file("spec.generated"), &spec_text);
 
@@ -4951,9 +4960,9 @@ fn write_wheel_switch_provenance(
         wheel_sha256 = wheel.sha256,
         wheel_size = wheel.size,
     );
-    std::fs::write(checkout_dir.join("wheel-origin.txt"), provenance)?;
-    std::fs::write(
-        checkout_dir.join(format!("{rpm_name}.spec.pre-wheel-switch")),
+    ap_core::fsx::write_atomic(&checkout_dir.join("wheel-origin.txt"), provenance)?;
+    ap_core::fsx::write_atomic(
+        &checkout_dir.join(format!("{rpm_name}.spec.pre-wheel-switch")),
         original_spec,
     )?;
     Ok(())
@@ -5061,7 +5070,7 @@ fn generate_multi_flavor_wheel_spec(
                 root_is_purelib,
                 layout.as_ref(),
             ));
-        std::fs::write(spec_path, &spec_text)
+        ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
         if crate::spec::is_prebuilt_binary_wheel(&wheels[0].1, layout.as_ref()) {
@@ -5129,7 +5138,7 @@ fn generate_wheel_binary_spec(
         layout.as_ref(),
     );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
-    std::fs::write(spec_path, &spec_text)
+    ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     write_or_warn(step.file("spec.generated"), &spec_text);
     if crate::spec::is_prebuilt_binary_wheel(&wheel.filename, layout.as_ref()) {
@@ -5542,7 +5551,7 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
             // Write back the modified Cargo.toml
             let new_content = toml::to_string_pretty(&doc)
                 .map_err(|e| format!("serializing Cargo.toml: {}", e))?;
-            std::fs::write(cargo_toml_path, new_content)
+            ap_core::fsx::write_atomic(cargo_toml_path, new_content)
                 .map_err(|e| format!("writing Cargo.toml: {}", e))?;
 
             ap_core::diag!(

@@ -92,7 +92,6 @@ dependencies = [
  "diff",
  "flate2",
  "indicatif",
- "libc",
  "regex",
  "serde",
  "serde_json",
