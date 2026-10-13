@@ -2469,8 +2469,8 @@ fn agent_turn(
         });
     }
 
-    let notes = std::fs::read_to_string(ws.notes()).unwrap_or_default();
-    let package_notes = crate::package_notes::read(&config.rpm_name);
+    let notes = tail_for_prompt(&std::fs::read_to_string(ws.notes()).unwrap_or_default());
+    let package_notes = tail_for_prompt(&crate::package_notes::read(&config.rpm_name));
     let on_tool_use = |tool: &str, input: &str| {
         reporter.report(&Event::AgentToolUse {
             step: step.id,
@@ -4155,6 +4155,26 @@ fn add_run_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
     if let Err(e) = st.save(ws) {
         ap_core::diag!("  cannot save the notes cost: {e}");
     }
+}
+
+/// Most notes text inlined into one prompt. Older entries are dropped first, so
+/// a long history costs context but never blows up every turn.
+const MAX_PROMPT_NOTES_BYTES: usize = 16 * 1024;
+
+/// The last `MAX_PROMPT_NOTES_BYTES` of `text`, cut at a line boundary.
+fn tail_for_prompt(text: &str) -> String {
+    if text.len() <= MAX_PROMPT_NOTES_BYTES {
+        return text.to_string();
+    }
+    let mut start = text.len() - MAX_PROMPT_NOTES_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let rest = match text[start..].find('\n') {
+        Some(i) => &text[start + i + 1..],
+        None => "",
+    };
+    format!("(earlier entries omitted)\n{rest}")
 }
 
 /// Persist the fix-attempt count after every increment, the same way
@@ -6698,5 +6718,21 @@ Source:         %{undefined_macro}\n";
             .filter(|e| matches!(e, Event::StepSkipped { .. }))
             .count();
         assert_eq!(skips, 1);
+    }
+}
+
+#[cfg(test)]
+mod prompt_notes_tests {
+    use super::*;
+
+    #[test]
+    fn short_notes_pass_through_and_long_notes_keep_the_recent_end() {
+        assert_eq!(tail_for_prompt("short\n"), "short\n");
+        let long: String = (0..4000).map(|i| format!("line {i}\n")).collect();
+        let cut = tail_for_prompt(&long);
+        assert!(cut.len() <= MAX_PROMPT_NOTES_BYTES + 64);
+        assert!(cut.starts_with("(earlier entries omitted)\n"));
+        assert!(cut.trim_end().ends_with("line 3999"));
+        assert!(!cut.contains("line 0\n"));
     }
 }

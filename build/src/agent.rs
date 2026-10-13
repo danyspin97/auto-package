@@ -3807,9 +3807,9 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     } else {
         format!(
             "## Package memory (package-notes.md)\n\n{}\n\n\
-             This is what earlier successful builds of this package established. \
-             Treat its build requirements, test changes and workarounds as settled \
-             unless this run's build.log shows them wrong.\n\n",
+             These are findings from earlier builds of this package, written by the \
+             notes agent. Use them as a starting point, and check them against this \
+             run's build.log before relying on them.\n\n",
             req.package_notes
         )
     };

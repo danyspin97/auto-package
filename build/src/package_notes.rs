@@ -143,7 +143,13 @@ impl NotesLock {
 
 impl Drop for NotesLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Remove the lock only if it still names this process: a takeover by
+        // another run must not be deleted by the old owner.
+        let ours = std::fs::read_to_string(&self.path)
+            .is_ok_and(|t| t.split_whitespace().next() == Some(&std::process::id().to_string()));
+        if ours {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -180,7 +186,13 @@ fn update_inner(
     // Held across read, agent and write: a second build for the same package
     // waits here instead of overwriting this build's update.
     let _lock = NotesLock::acquire(&notes_file)?;
-    let before = std::fs::read_to_string(&notes_file).ok();
+    // Missing is the normal first-build case; any other read error means the
+    // existing notes would be overwritten from scratch, so stop instead.
+    let before = match std::fs::read_to_string(&notes_file) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {}: {e}", notes_file.display())),
+    };
     // The agent edits a private copy and the result is renamed into place, so
     // a failed or concurrent build never leaves the shared notes half-written.
     let dir = notes_file.parent().unwrap_or_else(|| Path::new("."));
