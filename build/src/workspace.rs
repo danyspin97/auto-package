@@ -48,11 +48,6 @@ impl Workspace {
         self.dir.join("notes.md")
     }
 
-    /// Durable per-package notes, rewritten by the agent after each successful build.
-    pub fn package_notes(&self) -> PathBuf {
-        self.dir.join("package-notes.md")
-    }
-
     /// Durable state JSON: last built version, last outcome.
     pub fn state_json(&self) -> PathBuf {
         self.dir.join("state.json")

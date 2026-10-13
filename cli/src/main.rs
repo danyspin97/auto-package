@@ -39,6 +39,10 @@ enum Commands {
         #[arg(long, default_value = "ap-work")]
         work_dir: PathBuf,
 
+        /// Where per-package notes are kept. Outside work_dir, so they survive cleanup.
+        #[arg(long, default_value = "notes/packages")]
+        notes_dir: PathBuf,
+
         #[arg(long, default_value = "openSUSE_Tumbleweed")]
         distro: String,
 
@@ -148,6 +152,10 @@ enum Commands {
 
         #[arg(long, default_value = "ap-work")]
         work_dir: PathBuf,
+
+        /// Where per-package notes are kept. Outside work_dir, so they survive cleanup.
+        #[arg(long, default_value = "notes/packages")]
+        notes_dir: PathBuf,
 
         #[arg(long, default_value = "openSUSE_Tumbleweed")]
         distro: String,
@@ -569,6 +577,7 @@ fn main() -> color_eyre::Result<()> {
             version,
             project,
             work_dir,
+            notes_dir,
             distro,
             arch,
             log,
@@ -595,6 +604,7 @@ fn main() -> color_eyre::Result<()> {
             // `--no-agent` promises no model calls at all, including the
             // web-search fallback that locates an upstream for unknown names.
             ap_build::discovery::set_agent_enabled(!no_agent);
+            ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
             // `build https://github.com/owner/repo` — the URL is the source and
             // the repository name is the package name. `--url` does the same
@@ -950,6 +960,7 @@ fn main() -> color_eyre::Result<()> {
             name: only,
             project,
             work_dir,
+            notes_dir,
             distro,
             arch,
             log,
@@ -962,6 +973,7 @@ fn main() -> color_eyre::Result<()> {
             regen,
         } => {
             ap_build::discovery::set_agent_enabled(!no_agent);
+            ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
             let level: LogLevel = log
                 .parse()

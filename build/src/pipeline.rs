@@ -2358,7 +2358,7 @@ fn agent_turn(
     }
 
     let notes = std::fs::read_to_string(ws.notes()).unwrap_or_default();
-    let package_notes = std::fs::read_to_string(ws.package_notes()).unwrap_or_default();
+    let package_notes = crate::package_notes::read(&config.rpm_name);
     let on_tool_use = |tool: &str, input: &str| {
         reporter.report(&Event::AgentToolUse {
             step: step.id,
