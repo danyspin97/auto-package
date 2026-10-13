@@ -459,7 +459,6 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     }
 
     ap_core::diag!("  no source found by search — asking the agent to look for {name}");
-    let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
     // Quotas are per model: when one answers 429, the next may still have room.
     let mut found = None;
     // Only a model actually answering is definitive. A rate limit, timeout or
@@ -467,25 +466,13 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     // as "no source" for the rest of the process.
     let mut answered = false;
     for model in AGENT_LOOKUP_MODELS {
-        let out = match crate::proc::capture_with_timeout_env(
-            "claude",
-            &[
-                "--print",
-                "--output-format",
-                "json",
-                "--model",
-                model,
-                "--allowed-tools",
-                "WebSearch,WebFetch",
-                "--max-budget-usd",
-                AGENT_LOOKUP_BUDGET_USD,
-                "-p",
-                &agent_prompt(name, hints),
-            ],
+        let out = match crate::package_notes::claude_print_json(
+            model,
+            "WebSearch,WebFetch",
+            AGENT_LOOKUP_BUDGET_USD,
+            &agent_prompt(name, hints),
             &std::env::temp_dir(),
-            crate::proc::Emit::quiet(),
             AGENT_LOOKUP_TIMEOUT,
-            Some(&env),
         ) {
             Ok(o) => o,
             Err(e) => {

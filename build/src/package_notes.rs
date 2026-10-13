@@ -65,15 +65,6 @@ struct NotesLock {
     path: PathBuf,
 }
 
-/// Start time of `pid` (field 22 of `/proc/<pid>/stat`), so a lock whose pid
-/// was reused by an unrelated process is not mistaken for a live one.
-fn process_start(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name may contain spaces or parens: count from the last `)`.
-    let rest = &stat[stat.rfind(')')? + 1..];
-    rest.split_whitespace().nth(19)?.parse().ok()
-}
-
 /// Whether the owner recorded in a lock file is still running. Without `/proc`
 /// this cannot be told, so it answers yes rather than clobber a live build.
 fn lock_text_is_held(text: &str) -> bool {
@@ -81,16 +72,8 @@ fn lock_text_is_held(text: &str) -> bool {
     let Some(pid) = it.next().and_then(|t| t.parse::<u32>().ok()) else {
         return false;
     };
-    if pid == std::process::id() || !Path::new("/proc/self").exists() {
-        return true;
-    }
-    match process_start(pid) {
-        None => false,
-        Some(now) => it
-            .next()
-            .and_then(|t| t.parse::<u64>().ok())
-            .is_none_or(|recorded| recorded == now),
-    }
+    let recorded = it.next().and_then(|t| t.parse::<u64>().ok());
+    ap_core::proc_lock::owner_is_running(pid, recorded)
 }
 
 impl NotesLock {
@@ -101,7 +84,7 @@ impl NotesLock {
     fn acquire_for(notes_file: &Path, wait: Duration) -> Result<Self, String> {
         let path = PathBuf::from(format!("{}.lock", notes_file.display()));
         let me = std::process::id();
-        let start = process_start(me)
+        let start = ap_core::proc_lock::process_start(me)
             .map(|s| format!(" {s}"))
             .unwrap_or_default();
         // Written in full before it becomes visible, so a second build never
@@ -151,6 +134,39 @@ impl Drop for NotesLock {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+/// One quiet `claude --print --output-format json` call with the scrubbed
+/// agent environment, shared by the notes update and the source lookup.
+pub fn claude_print_json(
+    model: &str,
+    tools: &str,
+    budget_usd: &str,
+    prompt: &str,
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
+    let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
+    crate::proc::capture_with_timeout_env(
+        "claude",
+        &[
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            model,
+            "--allowed-tools",
+            tools,
+            "--max-budget-usd",
+            budget_usd,
+            "-p",
+            prompt,
+        ],
+        cwd,
+        crate::proc::Emit::quiet(),
+        timeout,
+        Some(&env),
+    )
 }
 
 /// Refresh the notes for a package that has just built.
@@ -210,26 +226,13 @@ fn update_inner(
         })?;
     std::fs::write(scratch.path(), before.as_deref().unwrap_or_default())
         .map_err(|e| format!("cannot seed {}: {e}", scratch.path().display()))?;
-    let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
-    let out = crate::proc::capture_with_timeout_env(
-        "claude",
-        &[
-            "--print",
-            "--output-format",
-            "json",
-            "--model",
-            NOTES_MODEL,
-            "--allowed-tools",
-            "Read,Write,Edit",
-            "--max-budget-usd",
-            NOTES_BUDGET_USD,
-            "-p",
-            &notes_prompt(rpm_name, version, &ws.notes(), scratch.path()),
-        ],
+    let out = claude_print_json(
+        NOTES_MODEL,
+        "Read,Write,Edit",
+        NOTES_BUDGET_USD,
+        &notes_prompt(rpm_name, version, &ws.notes(), scratch.path()),
         ws.dir(),
-        crate::proc::Emit::quiet(),
         NOTES_TIMEOUT,
-        Some(&env),
     )
     .map_err(|e| format!("could not run claude: {e}"))?;
     *usage = usage_from_output(&out.stdout);

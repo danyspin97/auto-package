@@ -580,6 +580,12 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     std::process::exit(1);
 }
 
+/// Route Ctrl-C (a real SIGINT) to [`handle_interrupt`].
+fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) {
+    ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
+        .expect("failed to set Ctrl-C handler");
+}
+
 /// Name of the per-project lock file, kept inside the project directory.
 const PROJECT_LOCK_NAME: &str = ".auto-package.lock";
 
@@ -622,15 +628,17 @@ impl ProjectLock {
         // empty and filled afterwards can be read by a second run in between,
         // which would take it for stale. Linking a complete file is atomic.
         let staging = project_dir.join(format!("{PROJECT_LOCK_NAME}.{me}.tmp"));
-        let start = process_start(me)
+        let start = ap_core::proc_lock::process_start(me)
             .map(|s| format!(" {s}"))
             .unwrap_or_default();
         std::fs::write(&staging, format!("{me}{start}\n"))?;
         let result = (0..5).find_map(|attempt| match std::fs::hard_link(&staging, &path) {
             Ok(()) => Some(Ok(())),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let held_by =
-                    |text: &str| parse_lock(text).filter(|&(pid, start)| lock_is_held(pid, start));
+                let held_by = |text: &str| {
+                    parse_lock(text)
+                        .filter(|&(pid, start)| ap_core::proc_lock::owner_is_running(pid, start))
+                };
                 let busy = |pid: u32| {
                     color_eyre::eyre::eyre!(
                         "another auto-package run (pid {pid}) is using {}; \
@@ -689,33 +697,6 @@ static HELD_LOCK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 impl Drop for ProjectLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Start time of `pid` in clock ticks since boot (field 22 of
-/// `/proc/<pid>/stat`), or `None` when it cannot be read.
-fn process_start(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name is parenthesised and may contain spaces or parens, so
-    // count fields from the last `)`: the next one is field 3 (state).
-    let rest = &stat[stat.rfind(')')? + 1..];
-    rest.split_whitespace().nth(19)?.parse().ok()
-}
-
-/// Whether the process that wrote a lock is still running. `start` is the
-/// start time it recorded; a different one means the pid was reused. Without
-/// `/proc` this cannot be told, so it answers yes: refusing to start is safer
-/// than clobbering a live run.
-fn lock_is_held(pid: u32, start: Option<u64>) -> bool {
-    if pid == std::process::id() {
-        return true;
-    }
-    if !Path::new("/proc/self").exists() {
-        return true;
-    }
-    match process_start(pid) {
-        None => false,
-        Some(now) => start.is_none_or(|recorded| recorded == now),
     }
 }
 
@@ -937,12 +918,7 @@ fn main() -> color_eyre::Result<()> {
                 None => base_reporter.clone(),
             };
 
-            {
-                let memory = memory.clone();
-                let tui_active = tui_ctrl.is_some();
-                ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
-                    .expect("failed to set Ctrl-C handler");
-            }
+            install_interrupt_handler(tui_ctrl.is_some(), memory.clone());
 
             let argv: Vec<String> = std::env::args().collect();
             reporter.report(&Event::RunStarted {
@@ -1246,12 +1222,7 @@ fn main() -> color_eyre::Result<()> {
                 None => base_reporter.clone(),
             };
 
-            {
-                let memory = memory.clone();
-                let tui_active = tui_ctrl.is_some();
-                ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
-                    .expect("failed to set Ctrl-C handler");
-            }
+            install_interrupt_handler(tui_ctrl.is_some(), memory.clone());
 
             let argv: Vec<String> = std::env::args().collect();
             reporter.report(&Event::RunStarted {
@@ -2136,7 +2107,7 @@ fn cmd_build(
         // Spawn one thread per frontier package; OBS builds run concurrently.
         let handles: Vec<_> = targets
             .into_iter()
-            .map(|target_info| {
+            .map(|target_info| -> color_eyre::Result<_> {
                 let rpm_name = ap_build::osc::rpm_name(&target_info.name);
                 let pkg_config = PipelineConfig {
                     pkg_name: target_info.name.clone(),
@@ -2145,16 +2116,21 @@ fn cmd_build(
                     ..config.clone()
                 };
                 let pkg_run = run_dir.pkg(&rpm_name);
-                pkg_run.ensure().expect("failed to create pkg run dir");
+                pkg_run.ensure().map_err(|e| {
+                    color_eyre::eyre::eyre!(
+                        "cannot create the package run directory {}: {e}",
+                        pkg_run.path.display()
+                    )
+                })?;
                 let r = pkg_reporter(&rpm_name);
                 let sem2 = sem.clone();
                 let handle = std::thread::spawn(move || {
                     let _permit = Permit::acquire(&sem2);
                     run_package(&pkg_config, &pkg_run, r.as_ref())
                 });
-                (rpm_name, target_info.version, handle)
+                Ok((rpm_name, target_info.version, handle))
             })
-            .collect();
+            .collect::<color_eyre::Result<_>>()?;
 
         let mut batch_pending: Vec<String> = Vec::new();
         let mut batch_failures: Vec<(String, String)> = Vec::new();
