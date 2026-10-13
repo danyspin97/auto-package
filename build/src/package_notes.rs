@@ -68,8 +68,11 @@ pub fn update_after_build(ws: &Workspace, rpm_name: &str, version: &str) -> Resu
     // The agent edits a private copy and the result is renamed into place, so
     // a failed or concurrent build never leaves the shared notes half-written.
     let dir = notes_file.parent().unwrap_or_else(|| Path::new("."));
+    // Not `.md`: a scratch file left behind by an interrupted run must not look
+    // like a package's notes.
     let scratch = tempfile::Builder::new()
-        .suffix(".md")
+        .prefix(".scratch-")
+        .suffix(".tmp")
         .tempfile_in(dir)
         .map_err(|e| {
             format!(

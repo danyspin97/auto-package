@@ -548,6 +548,9 @@ fn resolve_dependency_config(
 /// rendering — the pipeline's package-build threads keep running otherwise,
 /// unaffected by whatever the TUI's own event loop does.
 fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
+    if let Some(lock) = HELD_LOCK.get() {
+        let _ = std::fs::remove_file(lock);
+    }
     // The TUI leaves the terminal in raw mode + the alternate screen;
     // without restoring it first, this message and the shell prompt after
     // exit both land inside that broken state instead of the user's normal
@@ -603,45 +606,53 @@ struct ProjectLock {
 
 impl ProjectLock {
     fn acquire(project_dir: &Path) -> color_eyre::Result<Self> {
-        use std::io::Write;
         let path = project_dir.join(PROJECT_LOCK_NAME);
-        for _ in 0..3 {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut f) => {
-                    writeln!(f, "{}", std::process::id())?;
-                    return Ok(Self { path });
+        // The pid is written before the lock becomes visible: a file created
+        // empty and filled afterwards can be read by a second run in between,
+        // which would take it for stale. Linking a complete file is atomic.
+        let staging = project_dir.join(format!("{PROJECT_LOCK_NAME}.{}.tmp", std::process::id()));
+        std::fs::write(&staging, format!("{}\n", std::process::id()))?;
+        let result = (0..3).find_map(|_| match std::fs::hard_link(&staging, &path) {
+            Ok(()) => Some(Ok(())),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let pid = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|t| t.trim().parse::<u32>().ok());
+                if let Some(pid) = pid
+                    && pid_is_alive(pid)
+                {
+                    return Some(Err(color_eyre::eyre::eyre!(
+                        "another auto-package run (pid {pid}) is using {}; \
+                         wait for it to finish. If that process is not an \
+                         auto-package run, delete {}.",
+                        project_dir.display(),
+                        path.display(),
+                    )));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let pid = std::fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|t| t.trim().parse::<u32>().ok());
-                    if let Some(pid) = pid
-                        && pid_is_alive(pid)
-                    {
-                        return Err(color_eyre::eyre::eyre!(
-                            "another auto-package run (pid {pid}) is using {}; \
-                             wait for it to finish. If that process is not an \
-                             auto-package run, delete {}.",
-                            project_dir.display(),
-                            path.display(),
-                        ));
-                    }
-                    // Stale (owner gone) or unreadable: take it over.
-                    let _ = std::fs::remove_file(&path);
-                }
-                Err(e) => return Err(e.into()),
+                // Stale (owner gone) or unreadable: take it over and retry.
+                let _ = std::fs::remove_file(&path);
+                None
             }
+            Err(e) => Some(Err(e.into())),
+        });
+        let _ = std::fs::remove_file(&staging);
+        match result {
+            Some(Ok(())) => {
+                let _ = HELD_LOCK.set(path.clone());
+                Ok(Self { path })
+            }
+            Some(Err(e)) => Err(e),
+            None => Err(color_eyre::eyre::eyre!(
+                "could not take the project lock {}",
+                path.display()
+            )),
         }
-        Err(color_eyre::eyre::eyre!(
-            "could not take the project lock {}",
-            path.display()
-        ))
     }
 }
+
+/// The lock this process holds, so an interrupt can release it: `exit` skips
+/// `Drop`, and a lock left behind blocks the next run until its pid is reused.
+static HELD_LOCK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 impl Drop for ProjectLock {
     fn drop(&mut self) {
@@ -1095,6 +1106,11 @@ fn main() -> color_eyre::Result<()> {
         }
         Commands::Notes { name, notes_dir } => {
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
+            if ap_build::package_notes::path_for(&name).is_none() {
+                return Err(color_eyre::eyre::eyre!(
+                    "{name:?} is not a valid package name"
+                ));
+            }
             let text = ap_build::package_notes::read(&name);
             if text.is_empty() {
                 println!("no notes for {name} yet in {}", notes_dir.display());

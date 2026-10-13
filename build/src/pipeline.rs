@@ -969,7 +969,7 @@ fn package_notes_step(
                     step: step.id,
                     usage: usage.clone(),
                 });
-                add_notes_spend(ws, &config.run_id, usage.cost_usd);
+                add_run_spend(ws, &config.run_id, usage.cost_usd);
                 StepOutcome::Ok
             }
             Err(e) => {
@@ -2543,6 +2543,9 @@ fn agent_turn(
         Err(e) => {
             if let Some(usage) = e.usage() {
                 *spent_usd += usage.cost_usd();
+                // Saved now, not with the next successful turn: a package that
+                // stops here would otherwise lose the spend in state.json.
+                add_run_spend(ws, &config.run_id, usage.cost_usd());
             }
             // Any of these failing is otherwise a dead end: nothing below
             // this point runs, so without this the prompt, stdout and stderr
@@ -4068,14 +4071,10 @@ fn save_state(state: &PkgState, ws: &Workspace, reporter: &dyn Reporter) {
     warn_if_err(reporter, "saving state.json", state.save(ws));
 }
 
-/// Persist the fix-attempt count after every increment, the same way
-/// `agent_turn` persists `spent_usd` after every turn — so a crash or a
-/// `MissingDeps` round trip mid-pipeline resumes with the right count
-/// instead of restarting `attempts` at 0 (see `PkgState::cumulative_attempts`).
-/// Add the notes turn's cost to the package's spend for this run, so the
-/// package's recorded cost includes it. Spend from an earlier run is not
-/// carried over (see `PkgState::cumulative_spent_run_id`).
-fn add_notes_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
+/// Add a turn's cost to the package's spend for this run, so state.json keeps
+/// it even when the pipeline stops before the next successful turn. Spend from
+/// an earlier run is not carried over (see `PkgState::cumulative_spent_run_id`).
+fn add_run_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
     let mut st = PkgState::load(ws);
     let base = if st.cumulative_spent_run_id.as_deref() == Some(run_id) {
         st.cumulative_spent_usd
@@ -4089,6 +4088,10 @@ fn add_notes_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
     }
 }
 
+/// Persist the fix-attempt count after every increment, the same way
+/// `agent_turn` persists `spent_usd` after every turn — so a crash or a
+/// `MissingDeps` round trip mid-pipeline resumes with the right count
+/// instead of restarting `attempts` at 0 (see `PkgState::cumulative_attempts`).
 fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
     let mut st = PkgState::load(ws);
     st.cumulative_attempts = attempts;
