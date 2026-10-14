@@ -160,8 +160,57 @@ fn parse_pass_list(raw: &str) -> Vec<String> {
 
 /// The environment for the `claude` subprocess: this process's, scrubbed,
 /// plus whatever [`AGENT_ENV_PASS_VAR`] asks for.
+///
+/// The agent runs with `--setting-sources project`, so the `env` block of the
+/// user's `settings.json` is never applied by claude itself. That block is
+/// where a Vertex / Bedrock / proxy setup usually lives (`CLAUDE_CODE_USE_VERTEX`,
+/// `ANTHROPIC_VERTEX_PROJECT_ID`, ...), and without it the child falls back to
+/// Anthropic OAuth and reports "not logged in". The entries are added here
+/// instead, under the variables of this process, which take precedence.
 pub(crate) fn agent_env() -> BTreeMap<String, String> {
-    scrub_env_for_agent_passing(std::env::vars().collect(), &[], &agent_env_pass_list())
+    let mut env = user_settings_env();
+    env.extend(scrub_env_for_agent_passing(
+        std::env::vars().collect(),
+        &[],
+        &agent_env_pass_list(),
+    ));
+    env
+}
+
+/// The `env` block of the user's claude `settings.json`
+/// (`$CLAUDE_CONFIG_DIR` or `~/.claude`), or nothing if absent or unreadable.
+/// `OSC*` names are dropped: the agent does not publish.
+fn user_settings_env() -> BTreeMap<String, String> {
+    let dir = match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => match std::env::var_os("HOME") {
+            Some(h) => std::path::PathBuf::from(h).join(".claude"),
+            None => return BTreeMap::new(),
+        },
+    };
+    match std::fs::read_to_string(dir.join("settings.json")) {
+        Ok(text) => parse_settings_env(&text),
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+fn parse_settings_env(text: &str) -> BTreeMap<String, String> {
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(text)
+    else {
+        return BTreeMap::new();
+    };
+    let Some(serde_json::Value::Object(env)) = root.get("env") else {
+        return BTreeMap::new();
+    };
+    env.iter()
+        .filter(|(name, _)| !name.to_ascii_uppercase().starts_with("OSC"))
+        .filter_map(|(name, v)| match v {
+            serde_json::Value::String(s) => Some((name.clone(), s.clone())),
+            serde_json::Value::Number(n) => Some((name.clone(), n.to_string())),
+            serde_json::Value::Bool(b) => Some((name.clone(), b.to_string())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// [`scrub_env_for_agent`] with `pass`: variables named there are kept even
@@ -4583,6 +4632,26 @@ mod tests {
     /// The conventions are cross-referenced by number in the prompt itself
     /// ("see convention 9"), so a duplicate or skipped number silently points
     /// the model at the wrong rule.
+    #[test]
+    fn settings_env_block_is_read_and_osc_dropped() {
+        let env = parse_settings_env(
+            r#"{"model":"x","env":{"CLAUDE_CODE_USE_VERTEX":"1","CLOUD_ML_REGION":"global",
+               "N":3,"OSC_PASS":"p","NESTED":{"a":1}}}"#,
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_USE_VERTEX").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            env.get("CLOUD_ML_REGION").map(String::as_str),
+            Some("global")
+        );
+        assert_eq!(env.get("N").map(String::as_str), Some("3"));
+        assert!(!env.contains_key("OSC_PASS") && !env.contains_key("NESTED"));
+        assert!(parse_settings_env("not json").is_empty());
+        assert!(parse_settings_env(r#"{"model":"x"}"#).is_empty());
+    }
+
     #[test]
     fn conventions_are_numbered_consecutively_from_one() {
         let numbers: Vec<usize> = CONVENTIONS
