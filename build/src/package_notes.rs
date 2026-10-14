@@ -404,6 +404,15 @@ fn commit_message(rpm_name: &str, version: &str) -> String {
 /// into a later notes commit; the file stays staged and the next update retries.
 fn commit_notes(dir: &Path, file: &Path, rpm_name: &str, version: &str) -> Result<(), String> {
     if !dir.join(".git").exists() {
+        // Said once per run, not per package: notes only being saved locally
+        // is a setup choice, but an unnoticed one loses the sharing.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            ap_core::diag!(
+                "  note: {} is not a git repository, so package notes are saved but not committed",
+                dir.display()
+            );
+        });
         return Ok(());
     }
     let git = |args: &[&str]| {
