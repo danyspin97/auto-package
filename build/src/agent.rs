@@ -3329,6 +3329,19 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         }
     };
 
+    // Both are piped above; if either is missing the turn cannot be read, so
+    // end the child rather than panic.
+    let (child_stdout, child_stderr) = match (child.stdout.take(), child.stderr.take()) {
+        (Some(o), Some(e)) => (o, e),
+        _ => {
+            crate::proc::kill_process_group(child.id());
+            let _ = child.wait();
+            return Err(Error::Io(std::io::Error::other(
+                "claude CLI output pipes were not captured",
+            )));
+        }
+    };
+
     // A turn that never ends (network stall, a tool waiting for input) would
     // otherwise block the stdout loop below forever; the per-package budget is
     // only checked between turns. Kill the whole group after the deadline.
@@ -3374,7 +3387,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
 
     // Collect stderr in a background thread so it doesn't block stdout reads.
     let stderr_rx = {
-        let stderr = child.stderr.take().unwrap();
+        let stderr = child_stderr;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::Read;
@@ -3384,10 +3397,15 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
             // bytes and converting lossily means a crash-stderr.log is never
             // silently empty just because one byte in it wasn't UTF-8.
             let mut buf = Vec::new();
-            let _ = std::io::BufReader::new(stderr)
+            let read = std::io::BufReader::new(stderr)
                 .take(MAX_AGENT_STREAM_BYTES)
                 .read_to_end(&mut buf);
-            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+            let mut text = String::from_utf8_lossy(&buf).into_owned();
+            // Say so rather than leave a stderr.log that looks like "no output".
+            if let Err(e) = read {
+                text.push_str(&format!("\n[stderr read error: {e}]\n"));
+            }
+            let _ = tx.send(text);
         });
         rx
     };
@@ -3413,7 +3431,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let mut stdout_raw = String::new();
     {
         use std::io::BufRead;
-        let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut reader = std::io::BufReader::new(child_stdout);
         let mut raw_line: Vec<u8> = Vec::new();
         let mut read_errors = 0u32;
         // Give up only after this many errors in a row, so a persistent one
@@ -3526,7 +3544,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     exited.map_err(Error::Io)?;
     let mut stderr_content = stderr_rx
         .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap_or_default();
+        .unwrap_or_else(|e| format!("[stderr unavailable: {e}]\n"));
     if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
         stderr_content = format!(
             "claude turn was killed: no output for {} minutes, or over {} minutes in total\n{stderr_content}",
