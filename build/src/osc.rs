@@ -3021,23 +3021,59 @@ pub fn fetch_buildlog(
 /// package `python-events` ships `python313-Events-…rpm`, which no
 /// `python-events-` prefix would ever match. If the listing cannot be read,
 /// fall back to counting RPMs written in the last few minutes.
-fn downloaded_rpm_count(
+fn downloaded_rpm_count(listing: Option<&[String]>, rpms_dir: &std::path::Path) -> usize {
+    match listing {
+        Some(names) => names.iter().filter(|n| rpms_dir.join(n).is_file()).count(),
+        None => count_recent_rpms(rpms_dir, Duration::from_secs(600)),
+    }
+}
+
+/// The `.rpm` binaries OBS lists for `pkg_name` in `repo`/`arch`, or `None`
+/// when the listing cannot be read.
+fn binary_rpm_listing(
     project: &str,
     pkg_name: &str,
     repo: &str,
     arch: &str,
-    rpms_dir: &std::path::Path,
-) -> usize {
-    let listing = osc_api(&format!(
+) -> Option<Vec<String>> {
+    osc_api(&format!(
         "/build/{project}/{}/{}/{}",
         enc(repo),
         enc(arch),
         enc(pkg_name)
     ))
-    .map(|xml| obs_status::parse_binary_rpms(&xml));
-    match listing {
-        Some(names) => names.iter().filter(|n| rpms_dir.join(n).is_file()).count(),
-        None => count_recent_rpms(rpms_dir, Duration::from_secs(600)),
+    .map(|xml| obs_status::parse_binary_rpms(&xml))
+}
+
+/// The package name of an RPM file name: `python313-foo-1.0-2.1.noarch.rpm`
+/// is `python313-foo`.
+fn rpm_base_name(file: &str) -> Option<&str> {
+    let (rest, _arch) = file.strip_suffix(".rpm")?.rsplit_once('.')?;
+    let (rest, _release) = rest.rsplit_once('-')?;
+    let (name, _version) = rest.rsplit_once('-')?;
+    Some(name)
+}
+
+/// Delete the RPMs in `rpms_dir` that an earlier build of the same package
+/// left behind: files named like one of `current` (same package name) but not
+/// one of them. `rpms_dir` is shared by every package, so they would
+/// otherwise pile up and satisfy a dependency with an old version.
+fn remove_superseded_rpms(rpms_dir: &Path, current: &[String]) {
+    let names: std::collections::HashSet<&str> =
+        current.iter().filter_map(|f| rpm_base_name(f)).collect();
+    let Ok(entries) = fs::read_dir(rpms_dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if current.contains(&file) || file.ends_with(".src.rpm") {
+            continue;
+        }
+        if rpm_base_name(&file).is_some_and(|n| names.contains(n))
+            && let Err(e) = fs::remove_file(entry.path())
+        {
+            ap_core::diag!("  cannot remove the superseded {file}: {e}");
+        }
     }
 }
 
@@ -3860,11 +3896,15 @@ pub fn obs_build(
         let mut fetch_result = Ok(());
         let mut downloaded_count = 0;
         for name in &packages {
+            let listing = binary_rpm_listing(project, name, repo, arch);
+            if let Some(names) = &listing {
+                remove_superseded_rpms(rpms_dir, names);
+            }
             if let Err(e) = get_binaries(project, name, repo, arch, rpms_dir, emit) {
                 fetch_result = Err(e);
                 break;
             }
-            downloaded_count += downloaded_rpm_count(project, name, repo, arch, rpms_dir);
+            downloaded_count += downloaded_rpm_count(listing.as_deref(), rpms_dir);
         }
         if let Err(e) = fetch_result {
             reporter.report(&Event::CommandDone {
@@ -4631,5 +4671,53 @@ mod overall_status_tests {
         let xml = r#"<resultlist><result repository="r" arch="a"><status package="foo" code="excluded"/></result></resultlist>"#;
         assert!(!overall(xml).is_success());
         assert!(!overall("<resultlist/>").is_success());
+    }
+}
+
+#[cfg(test)]
+mod superseded_rpm_tests {
+    use super::*;
+
+    #[test]
+    fn the_package_name_is_what_precedes_version_and_release() {
+        assert_eq!(
+            rpm_base_name("python313-foo-bar-1.0.2-2.1.noarch.rpm"),
+            Some("python313-foo-bar")
+        );
+        assert_eq!(rpm_base_name("libfoo1-3-1.1.x86_64.rpm"), Some("libfoo1"));
+        assert_eq!(rpm_base_name("notes.txt"), None);
+        assert_eq!(rpm_base_name("x.rpm"), None);
+    }
+
+    #[test]
+    fn an_old_version_of_a_listed_package_goes_and_everything_else_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [
+            "python313-foo-1.0-1.1.noarch.rpm",
+            "python313-foo-2.0-1.1.noarch.rpm",
+            "python313-foobar-1.0-1.1.noarch.rpm",
+            "other-3-1.1.x86_64.rpm",
+            "python-foo-1.0-1.1.src.rpm",
+        ] {
+            fs::write(dir.path().join(f), "").unwrap();
+        }
+        remove_superseded_rpms(
+            dir.path(),
+            &["python313-foo-2.0-1.1.noarch.rpm".to_string()],
+        );
+        let mut left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "other-3-1.1.x86_64.rpm",
+                "python-foo-1.0-1.1.src.rpm",
+                "python313-foo-2.0-1.1.noarch.rpm",
+                "python313-foobar-1.0-1.1.noarch.rpm",
+            ]
+        );
     }
 }
