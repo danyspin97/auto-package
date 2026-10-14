@@ -5,11 +5,11 @@
 //! format v1) and contains each node's name, version, sha256, and
 //! `requires_dist` with markers unevaluated.
 //!
-//! Resolution takes wheels only (`--only-binary=:all:`). Building an sdist
-//! runs its build backend, which is arbitrary code from the index, so sdists
-//! are used only when `AUTO_PACKAGE_ALLOW_SDIST_RESOLVE=1` is set. Pip runs
-//! with a cleared environment either way, so OBS, GitHub and Anthropic
-//! credentials do not reach it.
+//! Resolution may build sdists, so their build backends (arbitrary code from
+//! the index) run on the host. Pip runs with a cleared environment that holds
+//! only the allowlisted variables (`PIP_ENV_ALLOWLIST`), so OBS, GitHub and
+//! Anthropic credentials are not visible to pip or to any build backend it
+//! starts. Files in the home directory are not hidden.
 //!
 //! Known limitation: `--python-version` is ignored by pip when a real
 //! interpreter is running — marker evaluation uses the host interpreter.
@@ -46,11 +46,7 @@ pub enum Error {
     #[error("could not run pip: {0}")]
     Launch(std::io::Error),
 
-    #[error(
-        "no wheel found on PyPI for {0}; releases that ship only an sdist are skipped \
-         unless AUTO_PACKAGE_ALLOW_SDIST_RESOLVE=1 is set, since building them runs \
-         their build backend"
-    )]
+    #[error("package not found on PyPI: {0}")]
     NotFound(String),
 
     /// Every release exists but pip skipped all of them because their
@@ -303,7 +299,6 @@ fn classify_failure(name: &str, code: i32, stderr: String) -> Error {
             example,
         };
     }
-    // With wheels only this also covers releases that ship just an sdist.
     if stderr.contains("Could not find a version that satisfies the requirement")
         || stderr.contains("No matching distribution found for")
     {
@@ -320,11 +315,8 @@ const ALTERNATE_PYTHON_MINORS: [u32; 5] = [12, 11, 13, 10, 14];
 /// Run `pip install --dry-run --report -` through `program` (a pip command
 /// line prefix) and return its JSON report.
 fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, Error> {
-    let mut cmd = Command::new(program[0]);
-    cmd.env_clear()
-        .envs(pip_env(std::env::vars_os()))
-        .args(&program[1..])
-        .args(pip_report_args(spec, sdist_opt_in()));
+    let mut cmd = pip_command(program, std::env::vars_os());
+    cmd.args(pip_report_args(spec));
     let out = run_with_timeout(cmd, PIP_TIMEOUT)?;
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
@@ -334,10 +326,9 @@ fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, E
     Ok(out.stdout)
 }
 
-/// Environment variable that lets resolution build sdists. Off by default.
-pub const SDIST_OPT_IN_ENV: &str = "AUTO_PACKAGE_ALLOW_SDIST_RESOLVE";
-
-/// Variables pip is given. Everything else is cleared.
+/// Variables pip is given. Everything else is cleared. Proxy, CA and index
+/// settings are needed to reach the index; none of these carry credentials
+/// for OBS, GitHub or Anthropic.
 const PIP_ENV_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",
@@ -350,20 +341,33 @@ const PIP_ENV_ALLOWLIST: &[&str] = &[
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",
+    "PIP_TRUSTED_HOST",
     "PIP_CONFIG_FILE",
     "PIP_CERT",
 ];
 
-fn sdist_opt_in() -> bool {
-    std::env::var_os(SDIST_OPT_IN_ENV).is_some_and(|v| v == "1")
+/// A `program` command line prefix with a cleared environment that holds only
+/// the allowlisted variables found in `vars`.
+fn pip_command(program: &[&str], vars: impl Iterator<Item = (OsString, OsString)>) -> Command {
+    let mut cmd = Command::new(program[0]);
+    cmd.env_clear().envs(pip_env(vars)).args(&program[1..]);
+    cmd
 }
 
-/// The `pip install` arguments for one resolution. Wheels only unless
-/// `allow_sdist` is set.
-fn pip_report_args(spec: &str, allow_sdist: bool) -> Vec<&str> {
-    let mut args = vec![
+/// The `pip install` arguments for one resolution. Sdists are not excluded,
+/// so pip can resolve a release that ships only an sdist.
+fn pip_report_args(spec: &str) -> Vec<&str> {
+    vec![
         "install",
         "--dry-run",
         "--ignore-installed",
@@ -371,14 +375,10 @@ fn pip_report_args(spec: &str, allow_sdist: bool) -> Vec<&str> {
         "--disable-pip-version-check",
         "--report",
         "-",
-    ];
-    if !allow_sdist {
-        args.push("--only-binary=:all:");
-    }
-    // End of options: a hostile `name` must not be parsed as a flag.
-    args.push("--");
-    args.push(spec);
-    args
+        // End of options: a hostile `name` must not be parsed as a flag.
+        "--",
+        spec,
+    ]
 }
 
 /// The subset of `vars` pip may inherit.
@@ -745,13 +745,53 @@ mod tests {
     }
 
     #[test]
-    fn resolution_is_wheels_only_unless_sdists_are_opted_in() {
-        let wheels = pip_report_args("httpx==0.28.1", false);
-        assert!(wheels.contains(&"--only-binary=:all:"));
-        assert_eq!(wheels.last(), Some(&"httpx==0.28.1"));
+    fn resolution_accepts_sdists_without_any_opt_in() {
+        let args = pip_report_args("httpx==0.28.1");
+        assert!(!args.iter().any(|a| a.contains("only-binary")), "{args:?}");
+        assert_eq!(args[args.len() - 2], "--");
+        assert_eq!(args.last(), Some(&"httpx==0.28.1"));
+    }
 
-        let sdists = pip_report_args("httpx==0.28.1", true);
-        assert!(!sdists.contains(&"--only-binary=:all:"));
+    #[test]
+    fn pip_child_sees_allowed_variables_and_no_credentials() {
+        let vars = [
+            ("PATH", std::env::var("PATH").unwrap_or_default()),
+            ("HOME", "/home/u".to_string()),
+            ("HTTPS_PROXY", "http://proxy.invalid:3128".to_string()),
+            ("PIP_INDEX_URL", "https://idx.invalid/simple".to_string()),
+            ("SSL_CERT_FILE", "/etc/ssl/ca.pem".to_string()),
+            ("LANG", "C.UTF-8".to_string()),
+            ("GITHUB_TOKEN", "fake-github-secret".to_string()),
+            ("OSC_PASSWORD", "fake-osc-secret".to_string()),
+            ("ANTHROPIC_API_KEY", "fake-anthropic-secret".to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let mut cmd = pip_command(&["env"], vars);
+        let out = cmd.stdin(Stdio::null()).output().expect("env must run");
+        assert!(out.status.success());
+        let seen = String::from_utf8_lossy(&out.stdout);
+        let keys: Vec<&str> = seen
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+            .collect();
+
+        for want in [
+            "PATH",
+            "HOME",
+            "HTTPS_PROXY",
+            "PIP_INDEX_URL",
+            "SSL_CERT_FILE",
+            "LANG",
+        ] {
+            assert!(keys.contains(&want), "{want} missing from {keys:?}");
+        }
+        assert!(!seen.contains("fake-github-secret"), "{seen}");
+        assert!(!seen.contains("fake-osc-secret"), "{seen}");
+        assert!(!seen.contains("fake-anthropic-secret"), "{seen}");
+        for k in &keys {
+            assert!(PIP_ENV_ALLOWLIST.contains(k), "{k} is not allowlisted");
+        }
     }
 
     #[test]

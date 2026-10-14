@@ -146,9 +146,13 @@ tool assumes these may be hostile and limits what they can reach:
 - **Spec macros**: `rpmspec` expansion runs in a bubblewrap sandbox with no
   network and no home directory. Without a sandbox, specs with code-running
   macros (`%(...)`, `%{lua:...}`) are refused.
-- **Dependency resolution**: pip resolves wheels only. Building an sdist runs
-  its build backend, so that is opt-in via `AUTO_PACKAGE_ALLOW_SDIST_RESOLVE=1`.
-  pip gets a cleared environment.
+- **Dependency resolution**: resolving a package can build an sdist, which
+  runs its build backend and `setup.py` code from the index. That code runs on
+  the host, not in a sandbox. pip and its build backends get a scrubbed
+  environment holding only what pip needs (PATH, HOME, locale, temp dir, proxy,
+  CA bundle and index settings), so OBS, GitHub and Anthropic tokens are not
+  exposed to them through environment variables. Files in the home directory
+  remain readable to that code.
 - **Agent**: the build turn can read only the workspace and checkout, run
   `rpmspec`, `osc status`/`osc vc`, `ls`, `quilt` and the read-only
   `zypper search`/`what-provides` queries, and fetch PyPI metadata. It has no
