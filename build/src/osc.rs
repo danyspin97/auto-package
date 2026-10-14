@@ -67,6 +67,12 @@ pub enum Error {
         stderr: String,
     },
 
+    #[error(
+        "refusing to run rpmspec on {spec}: it contains `{marker}`, which runs code or reads \
+         files while expanding, and no sandbox (bubblewrap) is available to contain it"
+    )]
+    UnsandboxedMacro { spec: String, marker: String },
+
     #[error("osc build failed for {spec} (exit {code}); log at {log}")]
     BuildFailed {
         spec: String,
@@ -1617,6 +1623,86 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Macro forms that run a program or read a file while `rpmspec` expands them.
+/// The spec may come from upstream or from the agent, so these are only
+/// expanded inside the sandbox.
+const CODE_MACRO_MARKERS: &[&str] = &["%(", "%{lua:", "%lua", "%{expand:", "%{load:", "%{getenv:"];
+
+/// The first code-running macro form in `text`, if any.
+fn code_macro_marker(text: &str) -> Option<&'static str> {
+    CODE_MACRO_MARKERS
+        .iter()
+        .copied()
+        .find(|m| text.contains(m))
+}
+
+/// Whether `rpmspec` can run inside bubblewrap here. Probed once: `bwrap`
+/// installed is not enough, unprivileged user namespaces are often disabled.
+fn rpmspec_sandbox_works() -> bool {
+    static WORKS: OnceLock<bool> = OnceLock::new();
+    *WORKS.get_or_init(|| {
+        let mut args = sandbox_prefix(None);
+        args.extend(["rpmspec".to_string(), "--version".to_string()]);
+        proc::capture("bwrap", &args, &anywhere(), Emit::quiet()).is_ok_and(|out| out.success())
+    })
+}
+
+/// bubblewrap options for one `rpmspec` run, up to the program name. The
+/// system is read-only, the home directory is not mounted, the environment is
+/// cleared, and there is no network. `spec_dir`, when given, is the only user
+/// directory mounted, read-only.
+fn sandbox_prefix(spec_dir: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind-try",
+        "/bin",
+        "/bin",
+        "--ro-bind-try",
+        "/lib",
+        "/lib",
+        "--ro-bind-try",
+        "/lib64",
+        "/lib64",
+        "--ro-bind-try",
+        "/sbin",
+        "/sbin",
+        "--ro-bind",
+        "/etc",
+        "/etc",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/usr/bin:/bin",
+        "--setenv",
+        "HOME",
+        "/tmp",
+        "--setenv",
+        "LANG",
+        "C.UTF-8",
+    ]
+    .map(String::from)
+    .into();
+    let dir = spec_dir.unwrap_or("/tmp");
+    if spec_dir.is_some() {
+        args.extend(["--ro-bind", dir, dir].map(String::from));
+    }
+    args.extend(["--chdir", dir].map(String::from));
+    args
+}
+
 /// Run `rpmspec --parse` on a spec file and check for syntax errors.
 ///
 /// Judges on exit status only (warnings in stderr are not treated as failures).
@@ -1632,15 +1718,32 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 /// pre-flight syntax check; the one-shot [`emit_host_macro_warning`] call
 /// below surfaces the gap to the user. A durable fix would require
 /// containerized validation against the target repo's rpm-config.
+///
+/// Expanding a spec can run code (`%(...)`, `%{lua:...}`), so it runs inside
+/// bubblewrap when that works. Without a sandbox, a spec containing such a
+/// macro is refused rather than expanded on the host.
 pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> {
     emit_host_macro_warning(emit);
 
-    let out = proc::capture(
-        "rpmspec",
-        &["--parse", &spec_path.to_string_lossy()],
-        &anywhere(),
-        emit,
-    )?;
+    let spec = spec_path.to_string_lossy().into_owned();
+    let out = if rpmspec_sandbox_works() {
+        let dir = spec_path.parent().unwrap_or(Path::new("/"));
+        let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let file = dir.join(spec_path.file_name().unwrap_or_default());
+        let mut args = sandbox_prefix(Some(&dir.to_string_lossy()));
+        let file = file.to_string_lossy().into_owned();
+        args.extend(["rpmspec".to_string(), "--parse".to_string(), file]);
+        proc::capture("bwrap", &args, &anywhere(), emit)?
+    } else {
+        let text = fs::read(spec_path).unwrap_or_default();
+        if let Some(marker) = code_macro_marker(&String::from_utf8_lossy(&text)) {
+            return Err(Error::UnsandboxedMacro {
+                spec,
+                marker: marker.to_string(),
+            });
+        }
+        proc::capture("rpmspec", &["--parse", &spec], &anywhere(), emit)?
+    };
 
     if !out.success() {
         return Err(Error::RpmspecFailed {
@@ -2923,6 +3026,63 @@ mod project_repo_paths_tests {
         assert_eq!(
             paths,
             vec![("openSUSE:Factory".to_string(), "snapshot".to_string())]
+        );
+    }
+}
+
+#[cfg(test)]
+mod rpmspec_sandbox_tests {
+    use super::*;
+
+    #[test]
+    fn code_running_macros_are_recognised() {
+        assert_eq!(code_macro_marker("Summary: %(id -u)"), Some("%("));
+        assert_eq!(
+            code_macro_marker("%global x %{lua: print(1)}"),
+            Some("%{lua:")
+        );
+        assert_eq!(
+            code_macro_marker("%description\nuse %{name} and %{python_module foo}"),
+            None
+        );
+    }
+
+    /// A spec whose `Summary` runs `touch` on expansion must not create the
+    /// marker on the host. With bubblewrap the expansion runs in a sandbox
+    /// where the marker's directory does not exist; without it the spec is
+    /// refused before rpmspec sees it.
+    #[test]
+    fn spec_macro_cannot_touch_a_marker_on_the_host() {
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("pwned");
+        let work = tempfile::tempdir().unwrap();
+        let spec = work.path().join("demo.spec");
+        let text = format!(
+            "Name: demo\nVersion: 1.0\nRelease: 0\nSummary: %(touch {}; echo x)\n\
+             License: MIT\n%description\nx\n%files\n",
+            marker.display()
+        );
+        fs::write(&spec, text).unwrap();
+
+        let result = rpmspec_check(&spec, Emit::quiet());
+
+        assert!(!marker.exists(), "spec macro ran on the host");
+        if rpmspec_sandbox_works() {
+            let out = result.expect("rpmspec should expand inside the sandbox");
+            assert!(out.contains("Summary: x"), "{out}");
+        }
+    }
+
+    #[test]
+    fn refusal_names_the_macro_and_the_spec() {
+        let err = Error::UnsandboxedMacro {
+            spec: "/co/demo.spec".into(),
+            marker: "%(".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/co/demo.spec") && msg.contains("`%(`"),
+            "{msg}"
         );
     }
 }
