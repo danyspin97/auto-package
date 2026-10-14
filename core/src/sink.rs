@@ -630,6 +630,28 @@ pub fn flush_jsonl_sinks() {
     }
 }
 
+/// Start, once per process, the thread that flushes every run.jsonl each
+/// [`JSONL_FLUSH_EVERY`]. The per-event timer only fires when another event
+/// arrives, so without this a quiet stretch (a long build wait) leaves the
+/// tail buffered, and a SIGKILL or panic loses it. The thread is detached and
+/// sleeps between rounds, so it neither keeps the process alive nor delays
+/// its exit.
+fn start_jsonl_flusher() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("jsonl-flush".into())
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(JSONL_FLUSH_EVERY);
+                    flush_jsonl_sinks();
+                }
+            });
+        // Without it the timer-on-event flush still applies.
+        drop(spawned);
+    });
+}
+
 pub struct JsonlSink {
     writer: Arc<Mutex<JsonlWriter>>,
     /// Set after the first write failure so the diagnostic prints once, not
@@ -649,6 +671,8 @@ impl JsonlSink {
         let mut writers = JSONL_WRITERS.lock().unwrap_or_else(|e| e.into_inner());
         writers.retain(|w| w.strong_count() > 0);
         writers.push(Arc::downgrade(&writer));
+        drop(writers);
+        start_jsonl_flusher();
         Ok(Self {
             writer,
             warned: AtomicBool::new(false),
@@ -789,6 +813,27 @@ mod tests {
             "ap-sink-test-{tag}-{nanos}-{}.jsonl",
             std::process::id()
         ))
+    }
+
+    /// With no later event to trigger the per-event timer, the background
+    /// flusher still gets a buffered line to disk.
+    #[test]
+    fn a_quiet_stretch_still_flushes_the_tail() {
+        let path = tmp_path("quiet");
+        let sink = JsonlSink::open(&path).unwrap();
+        sink.report(&Event::StepStarted {
+            step: StepId(0),
+            kind: StepKind::Build,
+            attempt: 1,
+            round: 0,
+            detail: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::read_to_string(&path).unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "tail was never flushed");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
