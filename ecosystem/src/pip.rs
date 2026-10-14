@@ -339,8 +339,17 @@ fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, E
 /// Wall-clock limit for one pip resolve.
 const PIP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// How long the output readers get once the child has exited.
+const READER_GRACE: Duration = Duration::from_secs(5);
+
 /// `Command::output` with a deadline: the child is killed on expiry.
+///
+/// The child gets its own process group so that a timeout (or a descendant
+/// left running after the child exits) kills the whole tree; a grandchild
+/// holding the pipes open would otherwise block the readers forever.
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process::Output, Error> {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -348,20 +357,33 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
         .spawn()
         .map_err(Error::Launch)?;
     // Drain both pipes on threads so a chatty child can't block on a full pipe.
-    fn drain(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    // A read error is sent back rather than dropped: truncated output must
+    // fail the call, not parse as a shorter (wrong) report.
+    fn drain(
+        r: Option<impl Read + Send + 'static>,
+    ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = r.read_to_end(&mut buf);
-            buf
-        })
+            let res = match r {
+                Some(mut r) => {
+                    let mut buf = Vec::new();
+                    r.read_to_end(&mut buf).map(|_| buf)
+                }
+                None => Ok(Vec::new()),
+            };
+            let _ = tx.send(res);
+        });
+        rx
     }
-    let out_t = child.stdout.take().map(drain);
-    let err_t = child.stderr.take().map(drain);
-    let deadline = Instant::now() + timeout;
+    let out_rx = drain(child.stdout.take());
+    let err_rx = drain(child.stderr.take());
+    let start = Instant::now();
+    let deadline = start + timeout;
     let status = loop {
-        match child.try_wait().map_err(Error::Launch)? {
-            Some(st) => break st,
-            None if Instant::now() >= deadline => {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() >= deadline => {
+                kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(Error::Failed {
@@ -369,17 +391,55 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
                     stderr: format!("timed out after {}s and was killed", timeout.as_secs()),
                 });
             }
-            None => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => {
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Launch(e));
+            }
         }
     };
-    let join = |t: Option<std::thread::JoinHandle<Vec<u8>>>| {
-        t.and_then(|h| h.join().ok()).unwrap_or_default()
+    // The child is gone; reap whatever it left behind so the pipes close.
+    kill_process_group(child.id());
+    // One shared grace period for both readers.
+    let reader_deadline = Instant::now() + READER_GRACE;
+    let collect = |rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
+        let wait = reader_deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(wait) {
+            Ok(Ok(buf)) => Ok(buf),
+            Ok(Err(e)) => Err(format!("could not read pip output: {e}")),
+            Err(_) => Err("pip output did not close after the process exited".to_string()),
+        }
     };
-    Ok(std::process::Output {
-        status,
-        stdout: join(out_t),
-        stderr: join(err_t),
-    })
+    let stdout = collect(out_rx);
+    let stderr = collect(err_rx);
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        (Err(e), _) | (_, Err(e)) => Err(Error::Failed {
+            code: status.code().unwrap_or(-1),
+            stderr: e,
+        }),
+    }
+}
+
+/// SIGKILL a child's process group (the child was spawned with
+/// `process_group(0)`). Best effort: the group may already be gone.
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
@@ -726,6 +786,28 @@ mod tests {
         cmd.arg("hi");
         let out = run_with_timeout(cmd, Duration::from_secs(10)).unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+
+    #[test]
+    fn run_with_timeout_does_not_wait_for_a_leftover_grandchild() {
+        // The shell exits at once but its background `sleep` keeps the pipes
+        // open; the group kill after exit must let the readers finish.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo hi"]);
+        let t = Instant::now();
+        let out = run_with_timeout(cmd, Duration::from_secs(10)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+        assert!(t.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn run_with_timeout_kills_grandchildren_holding_the_pipes() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & wait"]);
+        let t = Instant::now();
+        let err = run_with_timeout(cmd, Duration::from_millis(200)).unwrap_err();
+        assert!(matches!(err, Error::Failed { .. }), "{err}");
+        assert!(t.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
