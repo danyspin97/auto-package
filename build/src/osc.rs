@@ -2271,7 +2271,10 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
         checkout_dir,
         emit,
         proc::DEFAULT_CAPTURE_TIMEOUT,
-        Some(&proc::minimal_env(&[])),
+        // osc reads its credentials from the desktop keyring at start-up, which
+        // it reaches through the session bus: without the address it dies
+        // with "Unable to initialize SecretService" before any service runs.
+        Some(&proc::minimal_env(&["DBUS_SESSION_BUS_ADDRESS"])),
     )
     .map_err(during(format!("service ra in {}", checkout_dir.display())))?;
     if !out.success() {
