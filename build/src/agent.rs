@@ -4365,7 +4365,12 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              `action` to `no_change` and list every name you were given in \
              `unresolvable_packages`, using whichever name you believe actually \
              identifies the upstream project (unchanged if you have no better \
-             name for it). Use WebSearch or PyPI only to disambiguate a name \
+             name for it). An RPM capability that is not a package name \
+             (`libfoo.so.1()(64bit)`, `pkgconfig(foo)`, `cmake(Foo)`, \
+             `/usr/bin/foo`, `python3dist(foo)`) is listed exactly as given: the \
+             pipeline classifies it itself (distro-provided, vendor driver library, \
+             or the upstream project it names), so never turn it into a guessed \
+             PyPI name. Use WebSearch or PyPI only to disambiguate a name \
              you are not confident about; do not spend the turn on anything else."
         }
     };
