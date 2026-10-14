@@ -4506,14 +4506,14 @@ mod tests {
     /// pyproject.toml, `%python_module`, `%pytest` — none of which apply.
     #[test]
     fn review_prompt_drops_python_checklist_for_non_python_packages() {
-        let tmp = std::env::temp_dir().join("ap-build-review-nonpython-test");
-        let _ = std::fs::create_dir_all(&tmp);
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path();
         // `source/` exists for a real review turn — make sure the workspace
         // map description doesn't tell the agent to read pyproject.toml under
         // a non-Python package's `source/`.
-        let _ = std::fs::create_dir_all(tmp.join("source"));
+        std::fs::create_dir_all(tmp.join("source")).unwrap();
         let subprojects: Vec<(String, String)> = Vec::new();
-        let mut req = request(&tmp, &subprojects);
+        let mut req = request(tmp, &subprojects);
         req.is_python = false;
         req.pkg_name = "drogon";
         let prompt = build_turn_prompt(&req);
@@ -4544,10 +4544,9 @@ mod tests {
     /// A Python package must still get the full Python checklist.
     #[test]
     fn review_prompt_keeps_python_checklist_for_python_packages() {
-        let tmp = std::env::temp_dir().join("ap-build-review-python-test");
-        let _ = std::fs::create_dir_all(&tmp);
+        let dir = tempfile::tempdir().unwrap();
         let subprojects: Vec<(String, String)> = Vec::new();
-        let req = request(&tmp, &subprojects); // is_python: true from request()
+        let req = request(dir.path(), &subprojects); // is_python: true from request()
         let prompt = build_turn_prompt(&req);
         assert!(prompt.contains("pyproject.toml"));
         assert!(prompt.contains("%{python_module"));
