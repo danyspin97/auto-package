@@ -4271,11 +4271,20 @@ fn extract_rpm_filename_version<'a>(name: &str, filename: &'a str) -> Option<&'a
     // stem = <name>-<version>-<release>.<arch>
     let after_name = stem.strip_prefix(name)?.strip_prefix('-')?;
     // after_name = <version>-<release>.<arch>
-    // Strip ".<arch>" from the right.
-    let (ver_rel, _arch) = after_name.rsplit_once('.')?;
-    // Strip "-<release>" from the right (release doesn't contain '-' in
-    // practice, so a single rsplit suffices).
-    let (version, _release) = ver_rel.rsplit_once('-')?;
+    let (ver_rel, arch) = after_name.rsplit_once('.')?;
+    const ARCHES: &[&str] = &[
+        "noarch", "x86_64", "i586", "i686", "aarch64", "ppc64le", "s390x", "armv7hl", "riscv64",
+    ];
+    if !ARCHES.contains(&arch) {
+        return None;
+    }
+    // Neither version nor release holds a '-', so exactly one separates them.
+    // Anything more means `name` is only a prefix of a longer package name
+    // (`python313-foo-bar-1.0-1.1`, `python313-foo-devel-1.0-1.1`).
+    let (version, release) = ver_rel.split_once('-')?;
+    if release.contains('-') || !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
     Some(version)
 }
 
@@ -7105,6 +7114,23 @@ mod tests {
 
         // nothing to check without patches
         assert!(check_patches_apply(&spec_path, "%autosetup -p1\n").is_ok());
+    }
+
+    #[test]
+    fn rpm_dep_is_not_satisfied_by_a_longer_sibling_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [
+            "python313-foo-bar-1.0-1.1.x86_64.rpm",
+            "python313-foo-devel-1.0-1.1.noarch.rpm",
+            "python313-foo-debuginfo-1.0-1.1.x86_64.rpm",
+        ] {
+            std::fs::write(dir.path().join(f), b"").unwrap();
+        }
+        assert!(!rpm_satisfies_dep(dir.path(), "python313-foo"));
+        assert!(!rpm_satisfies_dep(dir.path(), "python313-foo>=0.1"));
+        std::fs::write(dir.path().join("python313-foo-1.0-1.1.x86_64.rpm"), b"").unwrap();
+        assert!(rpm_satisfies_dep(dir.path(), "python313-foo"));
+        assert!(rpm_satisfies_dep(dir.path(), "python313-foo>=0.1"));
     }
 
     #[test]
