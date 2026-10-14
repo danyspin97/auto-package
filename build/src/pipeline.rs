@@ -1817,7 +1817,11 @@ fn osc_service_stage(
             .into_iter()
             .collect::<Vec<_>>();
         let service_lacks_manifest = std::fs::read_to_string(checkout_dir.join("_service"))
-            .map(|svc| extra_manifests.iter().any(|m| !svc.contains(m.as_str())))
+            .map(|svc| {
+                extra_manifests
+                    .iter()
+                    .any(|m| !svc.contains(crate::osc::xml_escape(m).as_str()))
+            })
             .unwrap_or(false);
         let need_service =
             need_spec || !checkout_dir.join("registry.tar.zst").exists() || service_lacks_manifest;
@@ -5763,6 +5767,7 @@ fn generate_wheel_binary_spec(
 /// version, and `pkg_name` is used as the `cargo_vendor` `src` directory name
 /// (the directory `tar_scm` creates matches the repo name).
 fn render_service_file(github_url: &str, version: &str, pkg_name: &str) -> String {
+    use crate::osc::xml_escape;
     let git_url = if github_url.ends_with(".git") {
         github_url.to_string()
     } else {
@@ -5774,6 +5779,13 @@ fn render_service_file(github_url: &str, version: &str, pkg_name: &str) -> Strin
         .next()
         .unwrap_or(pkg_name);
 
+    // Every value lands in element text: a `&` or `<` in a URL or a tag would
+    // make the file malformed or add elements.
+    let (git_url, repo_name, version) = (
+        xml_escape(&git_url),
+        xml_escape(repo_name),
+        xml_escape(version),
+    );
     format!(
         "<services>\n\
            <service mode=\"manual\" name=\"tar_scm\">\n\
@@ -5922,10 +5934,18 @@ fn unified_diff(before: &str, after: &str) -> String {
 /// `extra_manifests` are further Cargo manifests (relative to the archive
 /// root) to vendor alongside the root one — see [`maturin_manifest_path`].
 fn render_maturin_service_file(normalized_name: &str, extra_manifests: &[String]) -> String {
+    use crate::osc::xml_escape;
+    // The manifest path comes from the sdist's pyproject.toml.
+    let normalized_name = xml_escape(normalized_name);
     let extra: String = extra_manifests
         .iter()
         .filter(|m| m.as_str() != "Cargo.toml")
-        .map(|m| format!("         \x20    <param name=\"cargotoml\">{m}</param>\n"))
+        .map(|m| {
+            format!(
+                "         \x20    <param name=\"cargotoml\">{}</param>\n",
+                xml_escape(m)
+            )
+        })
         .collect();
     format!(
         "<?xml version=\"1.0\"?>\n\
@@ -7028,6 +7048,15 @@ mod tests {
             xml.contains("<param name=\"cargotoml\">hf_xet/Cargo.toml</param>"),
             "{xml}"
         );
+    }
+
+    #[test]
+    fn service_files_escape_values_taken_from_upstream() {
+        let xml = render_maturin_service_file("x", &["a&b</param><evil/>/Cargo.toml".to_string()]);
+        assert!(!xml.contains("<evil/>"), "{xml}");
+        assert!(xml.contains("a&amp;b&lt;/param&gt;"), "{xml}");
+        let xml = render_service_file("https://example.org/o/r?a=1&b=2", "1.0", "r");
+        assert!(xml.contains("a=1&amp;b=2.git"), "{xml}");
     }
 
     #[test]

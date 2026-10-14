@@ -2779,7 +2779,7 @@ fn osc_api(path: &str) -> Option<String> {
         .ok()
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
