@@ -62,6 +62,52 @@ impl Obs for LiveObs {
     }
 }
 
+/// The meta OBS gives a branch project it creates: each repository of the
+/// source, building for the same architectures, with a path to that
+/// repository of the source (so the branch builds against what the source
+/// publishes).
+pub fn synthetic_branch_meta(branch: &str, source: &str, source_info: &ProjectInfo) -> String {
+    let mut xml = format!("<project name=\"{branch}\">\n");
+    for repo in &source_info.repositories {
+        xml.push_str(&format!("  <repository name=\"{}\">\n", repo.name));
+        xml.push_str(&format!(
+            "    <path project=\"{source}\" repository=\"{}\"/>\n",
+            repo.name
+        ));
+        for arch in &repo.arches {
+            xml.push_str(&format!("    <arch>{arch}</arch>\n"));
+        }
+        xml.push_str("  </repository>\n");
+    }
+    xml.push_str("</project>\n");
+    xml
+}
+
+/// [`Obs`] for a dry run: a branch project that does not exist yet reads as
+/// the meta branching would give it, and nothing can be written.
+pub struct DryRunObs<O: Obs> {
+    pub inner: O,
+    pub branch_project: String,
+    pub branch_meta: String,
+}
+
+impl<O: Obs> Obs for DryRunObs<O> {
+    fn project_meta(&self, project: &str) -> Result<Option<String>, String> {
+        match self.inner.project_meta(project)? {
+            None if project == self.branch_project => Ok(Some(self.branch_meta.clone())),
+            other => Ok(other),
+        }
+    }
+
+    fn set_project_meta(&self, project: &str, _xml: &str) -> Result<(), String> {
+        Err(format!("dry run: not editing {project}"))
+    }
+
+    fn published_binaries(&self, names: &[&str]) -> Result<Vec<PublishedBinary>, String> {
+        self.inner.published_binaries(names)
+    }
+}
+
 /// A project that publishes a binary, for one repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
@@ -911,6 +957,41 @@ mod tests {
         let (fake, reporter) = fixture();
         let r = DepResolver::new(Box::new(fake), reporter, BRANCH, "aarch64");
         assert!(r.check(&[pkg("cmake")]).unwrap_err().contains("aarch64"));
+    }
+
+    #[test]
+    fn a_dry_run_sees_the_branch_a_branch_would_create_and_edits_nothing() {
+        let (fake, reporter) = fixture();
+        let source_info =
+            osc::parse_project_info(&fake.metas.lock().unwrap()["Base:System"].clone());
+        fake.metas.lock().unwrap().remove(BRANCH);
+        let obs = DryRunObs {
+            inner: fake,
+            branch_project: BRANCH.into(),
+            branch_meta: synthetic_branch_meta(BRANCH, "Base:System", &source_info),
+        };
+        let r = DepResolver::new(Box::new(obs), reporter, BRANCH, "x86_64");
+        let v = r.check(&[pkg("cmake"), pkg("libfoo-devel")]).unwrap();
+        // The branch would build against Base:System, so Factory is reached
+        // through it, and libfoo's project is not.
+        assert!(matches!(state(&v, "cmake"), DepState::Reachable { .. }));
+        assert!(matches!(state(&v, "libfoo-devel"), DepState::Missing { .. }));
+        let adds = choose_paths(&v);
+        assert_eq!(adds.len(), 2);
+        assert!(r.add_paths(&adds).is_err());
+    }
+
+    #[test]
+    fn the_synthetic_meta_points_each_repository_at_the_source() {
+        let info = osc::parse_project_info(&meta(
+            "S",
+            &[("r1", &[("x", "y")]), ("r2", &[])],
+        ));
+        let xml = synthetic_branch_meta("B", "S", &info);
+        let got = osc::parse_project_info(&xml);
+        assert_eq!(got.repositories.len(), 2);
+        assert_eq!(got.repositories[0].paths, [("S".to_string(), "r1".to_string())]);
+        assert_eq!(got.repositories[1].arches, ["x86_64"]);
     }
 
     #[test]

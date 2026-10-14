@@ -1,6 +1,7 @@
 //! Command-line surface — REDESIGN M1.
 
 mod tui;
+mod update_project;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -210,6 +211,17 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         regen: bool,
     },
+
+    /// Update the packages of an OBS project that have a newer upstream
+    /// release, in a branch project, and optionally submit them back.
+    ///
+    /// Browses SOURCE_PROJECT (read only), branches each package with a newer
+    /// release into the branch project, makes the BuildRequires that live in
+    /// other projects resolvable by adding those projects as build paths of the
+    /// branch project, and builds the new versions there with the ordinary
+    /// pipeline. With `--submit`, a package that built gets a submit request to
+    /// the project it was branched from.
+    UpdateProject(update_project::UpdateProjectArgs),
 
     /// Print what auto-package has learned about a package: the build
     /// requirements, test changes and workarounds kept in its notes.
@@ -931,6 +943,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                                         reporter.clone(),
                                                         base_reporter.clone(),
                                                         tui_ctrl.clone(),
+                                                        None,
                                                     )
                                                 })
                                             });
@@ -983,6 +996,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                             reporter.clone(),
                             base_reporter.clone(),
                             tui_ctrl.clone(),
+                            None,
                         )
                     });
                     if tui_ctrl.is_some() {
@@ -1035,6 +1049,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 ));
             }
         }
+        Commands::UpdateProject(args) => update_project::run(args, summary)?,
         Commands::Notes { name, notes_dir } => {
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
             if ap_build::package_notes::path_for(&name).is_none() {
@@ -1531,6 +1546,9 @@ fn cmd_build(
     reporter: Arc<dyn Reporter + Send + Sync>,
     base_reporter: Arc<dyn Reporter + Send + Sync>,
     tui_ctrl: Option<tui::TuiController>,
+    // Set by `update-project`, which builds in a branch project; `None` for
+    // every other command.
+    branch: Option<&update_project::BranchBuild>,
 ) -> color_eyre::Result<()> {
     // Reporter for events belonging to a single package: still delivered to
     // jsonl/memory like `reporter`, but tagged so the TUI can attribute
@@ -1665,7 +1683,23 @@ fn cmd_build(
         }
     };
     let rpm_name = ap_build::osc::obs_name(&own_listing, &rpm_name);
+    // A package branched from another project already has a name, and the
+    // pipeline's guess at it (above) is only a guess. Only a repository package
+    // is a single named package; a PyPI one is named for each node of its
+    // closure, and `update-project` refuses those whose name would differ.
+    let rpm_name = match branch.and_then(|b| b.rpm_name.as_deref()) {
+        Some(own) if source_repo.is_some() => own.to_string(),
+        _ => rpm_name,
+    };
     let name = name.as_str();
+    // The binary names a Python dependency may be published under, for the
+    // search `update-project` does before building one (read once: it runs
+    // `rpmspec`).
+    let cover_flavors: Vec<String> = if branch.is_some_and(|b| b.resolver.is_some()) {
+        python_flavors.effective()
+    } else {
+        Vec::new()
+    };
 
     let config = PipelineConfig {
         pkg_name: name.to_string(),
@@ -2055,6 +2089,32 @@ fn cmd_build(
                         );
                     }
                     keep
+                })
+                .filter(|dep| {
+                    // `update-project`: a dependency another project already
+                    // publishes becomes a build path of the branch project, or
+                    // is already reachable, instead of a second copy built here.
+                    let Some(resolver) = branch.and_then(|b| b.resolver.as_ref()) else {
+                        return true;
+                    };
+                    let mut candidates = vec![dep.clone(), ap_build::osc::rpm_name(dep)];
+                    candidates.extend(cover_flavors.iter().map(|f| format!("{f}-{dep}")));
+                    match resolver.cover_dependency(&candidates) {
+                        Ok(Some(note)) => {
+                            dep_drops.dropped(reporter.as_ref(), dep, note);
+                            false
+                        }
+                        Ok(None) => true,
+                        Err(e) => {
+                            reporter.report(&Event::Warning {
+                                step: None,
+                                message: format!(
+                                    "could not search OBS for {dep}: {e}; building it instead"
+                                ),
+                            });
+                            true
+                        }
+                    }
                 })
                 .filter_map(|dep| {
                     let mut dep_config =
@@ -2712,6 +2772,7 @@ fn cmd_update(
             reporter.clone(),
             base_reporter.clone(),
             tui_ctrl.clone(),
+            None,
         );
         if let Err(e) = r {
             failures.push((name, e.to_string()));

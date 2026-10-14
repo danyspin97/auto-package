@@ -270,14 +270,25 @@ fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
 /// sorted RPM-name order so `--check` output is stable across runs. Fails
 /// when the project's package listing cannot be read.
 pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Result<Vec<Candidate>, String> {
+    plan_where(
+        project,
+        &|n| only.is_none_or(|o| osc::fuzzy_key(o) == osc::fuzzy_key(n)),
+        emit,
+    )
+}
+
+/// [`plan`] over the packages of `project` that `wanted` accepts. Packages it
+/// rejects are not fetched at all, which is what makes a few names out of a
+/// large project cheap.
+pub fn plan_where(
+    project: &str,
+    wanted: &dyn Fn(&str) -> bool,
+    emit: Emit<'_>,
+) -> Result<Vec<Candidate>, String> {
     // A failed listing is an error: treating it as "no packages" would make
     // `update` report success for a project it never looked at.
     let packages = osc::try_list_project_packages(project, emit)?;
-    let mut names: Vec<String> = packages
-        .iter()
-        .filter(|n| only.is_none_or(|o| osc::fuzzy_key(o) == osc::fuzzy_key(n)))
-        .cloned()
-        .collect();
+    let mut names: Vec<String> = packages.iter().filter(|n| wanted(n)).cloned().collect();
     names.sort();
 
     // Enumerate the package's files instead of guessing `<pkg>.spec`.
@@ -304,7 +315,7 @@ pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Result<Vec<Can
 
 /// Fetch the primary spec from an OBS package, picking the right filename
 /// out of whatever `osc ls` returns.
-fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
     let files = osc::list_package_files(project, pkg, emit)?;
     let picked = pick_spec_filename(pkg, &files)?;
     osc::cat_file(project, pkg, &picked, emit)
