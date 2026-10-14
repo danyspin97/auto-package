@@ -7,11 +7,24 @@ use std::io;
 use std::path::Path;
 
 /// Write `contents` to `path` atomically: the bytes go to a temp file in the
-/// same directory, which is then renamed over `path`.
+/// same directory, which is synced and then renamed over `path`. An existing
+/// file keeps its permission bits; a new one gets 0644 rather than the 0600 a
+/// temp file is created with.
 pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let mut tmp = tempfile::NamedTempFile::new_in(dir.unwrap_or_else(|| Path::new(".")))?;
     std::io::Write::write_all(&mut tmp, contents.as_ref())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(0o644);
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))?;
+    }
+    // The rename must not outlive the data: without this, a crash after the
+    // rename can leave `path` pointing at an empty or partial file.
+    tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
@@ -48,6 +61,24 @@ mod tests {
         std::fs::write(&path, "old and longer").unwrap();
         write_atomic(&path, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_keeps_the_mode_of_an_existing_file_and_defaults_new_ones() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&path, "new").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+
+        let fresh = dir.path().join("g.txt");
+        write_atomic(&fresh, "new").unwrap();
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 
     #[cfg(unix)]
