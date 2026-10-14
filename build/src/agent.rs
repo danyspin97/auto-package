@@ -2726,22 +2726,6 @@ pub enum Task {
     TranslateUnresolvableDeps,
 }
 
-/// Per-turn tool-call and token budget.
-#[derive(Debug, Clone)]
-pub struct TurnBudget {
-    pub max_tool_calls: usize,
-    pub max_tokens: u64,
-}
-
-impl Default for TurnBudget {
-    fn default() -> Self {
-        Self {
-            max_tool_calls: 15,
-            max_tokens: 200_000,
-        }
-    }
-}
-
 /// Input to one agent turn.
 pub struct TurnRequest<'a> {
     pub workspace: &'a std::path::Path,
@@ -2769,7 +2753,6 @@ pub struct TurnRequest<'a> {
     /// to build and test, and the workarounds already in place. Inlined into
     /// the prompt so a new attempt does not rediscover them.
     pub package_notes: &'a str,
-    pub budget: TurnBudget,
     /// The tarball is a repository archive rather than a PyPI sdist.
     pub from_repo_archive: bool,
     /// Sibling projects found next to the one being built, as
@@ -2885,6 +2868,12 @@ pub struct EndedEarlySignal {
 /// it only works when the binary runs from within its own source checkout
 /// (the normal way this tool is used today).
 const PACKAGING_SKILLS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../packaging-skills");
+
+/// Least budget left for which a turn is launched.
+const MIN_TURN_BUDGET_USD: f64 = 0.10;
+/// Cap on the model's agentic turns within one `claude` call, so a looping
+/// turn ends well before the dollar budget does.
+const MAX_AGENT_TURNS: u32 = 40;
 
 const TURN_RESPONSE_SCHEMA: &str = r#"{
   "type": "object",
@@ -3240,7 +3229,24 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
 
     // Cap this turn at whatever is left of the package budget, so one runaway
     // turn cannot overshoot it — the caller only checks between turns.
-    let remaining_usd = (req.budget_usd - req.spent_usd).max(0.01);
+    let remaining_usd = req.budget_usd - req.spent_usd;
+    // Below the floor a turn cannot do anything useful and the old 1-cent
+    // minimum overspent an exhausted budget; report it the way the CLI reports
+    // its own cap, so the caller's budget handling applies.
+    if remaining_usd < MIN_TURN_BUDGET_USD {
+        return Err(Error::EndedEarly(Box::new(EndedEarlyError {
+            subtype: "error_max_budget_usd".to_string(),
+            message: format!(
+                "only ${:.2} of the ${:.2} budget is left, below the ${MIN_TURN_BUDGET_USD:.2} \
+                 a turn needs; no turn was started",
+                remaining_usd.max(0.0),
+                req.budget_usd
+            ),
+            stdout: String::new(),
+            prompt,
+            usage: Usage::default(),
+        })));
+    }
 
     // Sent via `--append-system-prompt` instead of folded into `prompt`
     // below — see `static_system_prompt`'s doc comment for why that's what
@@ -3280,6 +3286,8 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         &denied_tools,
         "--max-budget-usd",
         &format!("{remaining_usd:.4}"),
+        "--max-turns",
+        &MAX_AGENT_TURNS.to_string(),
         // Path rules in `--allowed-tools` are only enforced in the default
         // permission mode, and user settings could widen them, so the turn
         // runs with project settings only, as the notes turn does.
@@ -4416,7 +4424,6 @@ mod tests {
             hint: None,
             notes: "",
             package_notes: "",
-            budget: TurnBudget::default(),
             from_repo_archive: true,
             subprojects,
             unresolvable_deps: &[],
@@ -4641,6 +4648,17 @@ mod tests {
             resp.evidence,
             vec!["Read drogon.spec", "Read CMakeLists.txt"]
         );
+    }
+
+    #[test]
+    fn a_turn_is_not_launched_when_the_budget_is_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let subprojects: Vec<(String, String)> = Vec::new();
+        let mut req = request(dir.path(), &subprojects);
+        req.budget_usd = 2.0;
+        req.spent_usd = 1.95;
+        let err = turn(req).err().expect("no turn may start");
+        assert!(err.is_budget_exhausted(), "{err}");
     }
 
     #[test]

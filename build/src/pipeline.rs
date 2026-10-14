@@ -3209,7 +3209,6 @@ fn agent_turn(
         hint: ctx.hint,
         notes: &notes,
         package_notes: &package_notes,
-        budget: crate::agent::TurnBudget::default(),
         from_repo_archive: ctx.from_repo_archive,
         subprojects: &config.subprojects,
         unresolvable_deps: ctx.unresolvable_deps,
