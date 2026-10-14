@@ -656,6 +656,10 @@ impl ProjectLock {
     }
 }
 
+/// Exit status of a run stopped because the agent cannot work (claude is not
+/// logged in): distinct from 130 (interrupted) and 1 (an ordinary failure).
+const EXIT_AGENT_UNAVAILABLE: i32 = 2;
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
@@ -669,6 +673,11 @@ fn main() -> color_eyre::Result<()> {
     // what was built and what is still queued matters most.
     if let Some(text) = summary {
         print!("{text}");
+    }
+    // Checked before the interrupt case: an abort also raises the shutdown flag.
+    if let Some(reason) = ap_build::proc::abort_reason() {
+        eprintln!("\nerror: run stopped: {reason}");
+        std::process::exit(EXIT_AGENT_UNAVAILABLE);
     }
     if ap_build::proc::shutting_down() {
         // Ctrl-C (or SIGTERM) stopped the scheduler, which returned an
@@ -716,6 +725,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // `--no-agent` promises no model calls at all, including the
             // web-search fallback that locates an upstream for unknown names.
             ap_build::discovery::set_agent_enabled(!no_agent);
+            if !no_agent {
+                ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
+            }
             ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
@@ -1138,6 +1150,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             regen,
         } => {
             ap_build::discovery::set_agent_enabled(!no_agent);
+            if !no_agent {
+                ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
+            }
             ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
@@ -2362,6 +2377,10 @@ fn cmd_build(
 
             for (dep_rpm, _version, handle, dep) in handles {
                 let result = join_package(handle, &dep_rpm);
+                // Aborted run: the results are not outcomes of the packages.
+                if ap_build::proc::abort_reason().is_some() {
+                    continue;
+                }
                 let key = ap_build::osc::fuzzy_key(&dep);
                 match result {
                     PipelineResult::Built { .. } => {
@@ -2441,6 +2460,9 @@ fn cmd_build(
                         }
                     }
                 }
+            }
+            if ap_build::proc::abort_reason().is_some() {
+                return Err(color_eyre::eyre::eyre!("run aborted"));
             }
             if !retry_group.is_empty() {
                 retry_stack.push(retry_group);
@@ -2672,6 +2694,12 @@ fn cmd_build(
                 }
             };
             in_flight.retain(|r| *r != rpm_name);
+            // The run was aborted (not an ordinary failure): do not count or
+            // retry this result, just wait for the rest and stop.
+            if ap_build::proc::abort_reason().is_some() {
+                drain_in_flight(&rx, &mut in_flight);
+                return Err(color_eyre::eyre::eyre!("run aborted"));
+            }
             done_this_round.insert(rpm_name.clone());
 
             match result {

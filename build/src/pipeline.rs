@@ -120,6 +120,9 @@ pub enum FailureKind {
     /// Another process held the package's build lock past the wait. Nothing
     /// was tried, so the package is deferred rather than failed.
     Busy,
+    /// The run was aborted because the agent cannot work at all (claude is not
+    /// logged in). Not a package failure: nothing is retried or counted.
+    AgentUnavailable,
 }
 
 #[derive(Debug)]
@@ -1098,6 +1101,24 @@ pub fn run_package(
         Err(_) => None,
     };
     let result = run_package_inner(config, pkg_run, reporter);
+    // Once the run is aborted, whatever else was in flight died of the abort
+    // (killed children, refused spawns): report it as the abort, not as the
+    // package's own failure.
+    let result = match (result, crate::proc::abort_reason()) {
+        (
+            PipelineResult::Failed {
+                rpm_name,
+                kind: FailureKind::Other | FailureKind::AgentUnavailable,
+                ..
+            },
+            Some(reason),
+        ) => PipelineResult::Failed {
+            rpm_name,
+            reason,
+            kind: FailureKind::AgentUnavailable,
+        },
+        (result, _) => result,
+    };
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the
     // last attempt ended, instead of only "last_outcome: null" on anything
@@ -1116,6 +1137,11 @@ pub fn run_package(
             kind: FailureKind::Busy,
             ..
         } => None,
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::AgentUnavailable,
+            ..
+        } => Some(("interrupted", reason.clone())),
         PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
         PipelineResult::MissingDeps { deps, .. } => Some((
             "missing_deps",
@@ -1133,6 +1159,7 @@ pub fn run_package(
         .ok();
     // `--no-agent` promises no model calls, so the notes turn is skipped too.
     if !config.no_agent
+        && !crate::proc::shutting_down()
         && let (PipelineResult::Built { .. }, Some(ws)) = (&result, &ws)
     {
         package_notes_step(config, pkg_run, ws, reporter);
@@ -3365,7 +3392,9 @@ fn agent_turn(
             }
             let step = step.finish(StepOutcome::Failed);
             let message = friendly_agent_error(&e, config.budget_usd, &config.pkg_name);
-            let kind = if e.is_rate_limited() {
+            let kind = if e.is_not_logged_in() {
+                FailureKind::AgentUnavailable
+            } else if e.is_rate_limited() {
                 FailureKind::RateLimited
             } else {
                 FailureKind::Other

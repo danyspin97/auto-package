@@ -202,6 +202,9 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     }
 
     ap_build::discovery::set_agent_enabled(!a.no_agent);
+    if !a.no_agent {
+        ap_build::agent::ensure_logged_in().map_err(|e| eyre!(e))?;
+    }
     ap_build::package_notes::set_notes_dir(std::path::absolute(&a.notes_dir)?);
     let level: LogLevel = a
         .log

@@ -3378,6 +3378,36 @@ pub fn looks_like_not_logged_in(text: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// Whether `claude auth status` output says the CLI is logged out: JSON with
+/// `"loggedIn": false`. Anything else (missing field, odd output) is not
+/// treated as logged out, so an unfamiliar CLI version never blocks a run.
+fn status_says_logged_out(stdout: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()
+        .and_then(|v| v.get("loggedIn").and_then(serde_json::Value::as_bool))
+        == Some(false)
+}
+
+/// Fail fast, before any package work, when the claude CLI is logged out.
+/// `claude auth status` makes no model call, so this costs nothing. A CLI
+/// that cannot be run or answers unexpectedly passes: only a clear
+/// `loggedIn: false` is an error.
+pub fn ensure_logged_in() -> Result<(), String> {
+    let env = agent_env();
+    let out = crate::proc::capture_with_timeout_env(
+        "claude",
+        &["auth", "status"],
+        std::path::Path::new("."),
+        crate::proc::Emit::quiet(),
+        std::time::Duration::from_secs(30),
+        Some(&env),
+    );
+    match out {
+        Ok(c) if status_says_logged_out(&c.stdout) => Err(NOT_LOGGED_IN_MESSAGE.to_string()),
+        _ => Ok(()),
+    }
+}
+
 fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
@@ -5119,6 +5149,17 @@ mod tests {
         ] {
             assert!(looks_like_not_logged_in(t), "{t}");
         }
+    }
+
+    #[test]
+    fn auth_status_only_a_clear_logged_out_counts() {
+        assert!(status_says_logged_out(r#"{"loggedIn": false}"#));
+        assert!(!status_says_logged_out(
+            r#"{"loggedIn": true,"authMethod":"x"}"#
+        ));
+        assert!(!status_says_logged_out("Not logged in"));
+        assert!(!status_says_logged_out(""));
+        assert!(!status_says_logged_out("{}"));
     }
 
     #[test]
