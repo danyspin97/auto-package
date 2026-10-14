@@ -1191,6 +1191,16 @@ pub fn ensure_package(
     if check.success() {
         return Ok(());
     }
+    // Only a 404 means "not there yet". Any other failure (network, auth,
+    // a 5xx) says nothing about existence, and pushing meta then could
+    // overwrite the title/description of a package that is in fact there.
+    if !is_not_found(&check.stderr) {
+        return Err(Error::OscFailed {
+            cmd: format!("ls {project}/{pkg_name}"),
+            code: check.code,
+            stderr: check.stderr,
+        });
+    }
     // OBS names are case-sensitive, so the failed lookup above does not rule
     // out a package that differs only in case or separators
     // (`python-apscheduler` vs. `python-APScheduler`). Creating one would
@@ -1527,6 +1537,17 @@ mod not_found_tests {
     fn a_bare_number_containing_404_is_not_a_missing_resource() {
         assert!(!is_not_found("request id 1404 timed out"));
         assert!(!is_not_found("Skipping foo: conflict"));
+    }
+
+    /// `ensure_package` creates a package only when `osc ls` says 404; a
+    /// network, auth or server failure must not read as "missing".
+    #[test]
+    fn other_failures_are_not_a_missing_package() {
+        assert!(!is_not_found(
+            "Server returned an error: HTTP Error 500: Internal Server Error"
+        ));
+        assert!(!is_not_found("Name or service not known"));
+        assert!(!is_not_found("HTTP Error 401: Unauthorized"));
     }
 }
 
