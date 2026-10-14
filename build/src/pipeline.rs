@@ -6440,15 +6440,13 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             candidates: verified_candidates.clone(),
         };
         if let Some(url) = crate::discovery::agent_find_source(pkg_name, &hints) {
-            let recorded_hosts: Vec<String> = distro_evidence
+            let recorded_sites: Vec<String> = distro_evidence
                 .iter()
                 .flat_map(|d| d.homepages.iter())
                 .chain(recorded.iter())
-                .filter_map(|u| crate::http::host_of(u))
+                .cloned()
                 .collect();
-            let host_recorded =
-                crate::http::host_of(&url).is_some_and(|h| recorded_hosts.contains(&h));
-            if vouched(&url) || host_recorded {
+            if vouched(&url) || on_recorded_site(&url, &recorded_sites) {
                 verified_candidates.retain(|c| c != &url);
                 verified_candidates.insert(0, url);
             } else {
@@ -6493,6 +6491,35 @@ fn same_repo_url(a: &str, b: &str) -> bool {
             .to_ascii_lowercase()
     };
     norm(a) == norm(b)
+}
+
+/// Whether `url` is on a site the project itself records in `recorded`: the
+/// same host, or for a shared forge (github.com, gitlab.com ...) the same
+/// owner, since a host shared by everyone says nothing about who owns the
+/// repository.
+fn on_recorded_site(url: &str, recorded: &[String]) -> bool {
+    let Some(host) = crate::http::host_of(url) else {
+        return false;
+    };
+    let owner = |u: &str| {
+        ap_ecosystem::forge::parse(u).map(|f| {
+            f.project_path
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        })
+    };
+    recorded.iter().any(|r| {
+        if crate::http::host_of(r).as_deref() != Some(host.as_str()) {
+            return false;
+        }
+        if ap_ecosystem::forge::is_known_host(&host) {
+            matches!((owner(url), owner(r)), (Some(a), Some(b)) if a == b)
+        } else {
+            true
+        }
+    })
 }
 
 /// Whether discovery may use `url` without confirmation: a curated mapping,
@@ -7959,6 +7986,33 @@ mod discovery_vouching_tests {
             None,
             Some(&distro)
         ));
+    }
+
+    /// An agent's pick is trusted only on a site the project records: any
+    /// host that is not a shared forge, or the same owner on one that is.
+    #[test]
+    fn an_agent_pick_must_be_on_a_site_the_project_records() {
+        let recorded = vec![
+            "https://www.nongnu.org/lzip/".to_string(),
+            "https://github.com/acme/widget".to_string(),
+        ];
+        assert!(on_recorded_site(
+            "https://www.nongnu.org/lzip/releases/",
+            &recorded
+        ));
+        assert!(on_recorded_site(
+            "https://github.com/acme/other-repo",
+            &recorded
+        ));
+        assert!(!on_recorded_site(
+            "https://github.com/attacker/widget",
+            &recorded
+        ));
+        assert!(!on_recorded_site(
+            "https://download.savannah.gnu.org/releases/lzip/",
+            &recorded
+        ));
+        assert!(!on_recorded_site("https://github.com/acme/widget", &[]));
     }
 
     #[test]
