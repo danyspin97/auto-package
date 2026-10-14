@@ -1655,49 +1655,36 @@ fn rpmspec_sandbox_works() -> bool {
 /// cleared, and there is no network. `spec_dir`, when given, is the only user
 /// directory mounted, read-only.
 fn sandbox_prefix(spec_dir: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--ro-bind-try",
-        "/bin",
-        "/bin",
-        "--ro-bind-try",
-        "/lib",
-        "/lib",
-        "--ro-bind-try",
-        "/lib64",
-        "/lib64",
-        "--ro-bind-try",
-        "/sbin",
-        "/sbin",
-        "--ro-bind",
-        "/etc",
-        "/etc",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--unshare-net",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--die-with-parent",
-        "--new-session",
-        "--clearenv",
-        "--setenv",
-        "PATH",
-        "/usr/bin:/bin",
-        "--setenv",
-        "HOME",
-        "/tmp",
-        "--setenv",
-        "LANG",
-        "C.UTF-8",
-    ]
-    .map(String::from)
-    .into();
+    let mut args = ap_core::sandbox::system_ro_binds();
+    args.extend(
+        [
+            "--ro-bind",
+            "/etc",
+            "/etc",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--die-with-parent",
+            "--new-session",
+            "--clearenv",
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/tmp",
+            "--setenv",
+            "LANG",
+            "C.UTF-8",
+        ]
+        .map(String::from),
+    );
     let dir = spec_dir.unwrap_or("/tmp");
     if spec_dir.is_some() {
         args.extend(["--ro-bind", dir, dir].map(String::from));
