@@ -106,19 +106,44 @@ pub enum BranchResult {
 
 /// The API request that branches `source/pkg` into `target_project`.
 ///
-/// The devel project is not followed (`ignoredevel`): the package is
-/// branched from the project the caller named, which is also where the
-/// resulting request goes. When `target_project` does not exist OBS creates
-/// it, with the source's repositories.
-pub fn branch_api_path(source: &str, pkg: &str, target_project: &str, comment: &str) -> String {
+/// Unless `follow_devel`, the devel project is not followed (`ignoredevel`):
+/// the package is branched from the project the caller named, which is also
+/// where the resulting request goes. When following, OBS branches from the
+/// package's devel project and the response says which. When `target_project`
+/// does not exist OBS creates it, with the source's repositories.
+pub fn branch_api_path(
+    source: &str,
+    pkg: &str,
+    target_project: &str,
+    comment: &str,
+    follow_devel: bool,
+) -> String {
+    let ignore = if follow_devel { "" } else { "&ignoredevel=1" };
     format!(
         "/source/{source}/{}?cmd=branch&target_project={}&target_package={}\
-         &ignoredevel=1&comment={}",
+         {ignore}&comment={}",
         enc(pkg),
         enc(target_project),
         enc(pkg),
         enc(comment)
     )
+}
+
+/// The devel project `<devel project="..."/>` of a package meta, if it names one.
+pub fn parse_devel_project(meta_xml: &str) -> Option<String> {
+    let (_, rest) = meta_xml.split_once("<devel ")?;
+    let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
+    extract_xml_attr(tag, "project").filter(|p| !p.is_empty())
+}
+
+/// The devel project of `project/pkg`, or `None` when it has none or the meta
+/// cannot be read (a hint only, so a failed read is not an error).
+pub fn package_devel_project(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+    check_obs_name("project", project).ok()?;
+    check_obs_name("package", pkg).ok()?;
+    api_get(&format!("/source/{project}/{}/_meta", enc(pkg)), emit)
+        .ok()
+        .and_then(|xml| parse_devel_project(&xml))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -154,6 +179,7 @@ pub fn branch_package(
     source: &str,
     pkg: &str,
     target_project: &str,
+    follow_devel: bool,
     emit: Emit<'_>,
 ) -> Result<BranchResult, Error> {
     check_obs_name("project", source)?;
@@ -164,6 +190,7 @@ pub fn branch_package(
         pkg,
         target_project,
         &format!("auto-package: branch for a version update of {pkg}"),
+        follow_devel,
     );
     let out = api_call(Some("POST"), &path, None, emit)?;
     if out.success() {
@@ -712,11 +739,35 @@ mod tests {
                 "Base:System",
                 "libsigc++",
                 "home:u:branches:Base:System",
-                "a b"
+                "a b",
+                false
             ),
             "/source/Base:System/libsigc%2B%2B?cmd=branch\
              &target_project=home%3Au%3Abranches%3ABase%3ASystem\
              &target_package=libsigc%2B%2B&ignoredevel=1&comment=a%20b"
+        );
+    }
+
+    #[test]
+    fn following_the_devel_project_drops_ignoredevel() {
+        let path = branch_api_path("S", "p", "T", "c", true);
+        assert!(!path.contains("ignoredevel"), "{path}");
+        assert!(branch_api_path("S", "p", "T", "c", false).contains("&ignoredevel=1&"));
+    }
+
+    #[test]
+    fn the_devel_project_comes_from_the_package_meta() {
+        let meta = r#"<package name="foo" project="Base:System">
+  <title/>
+  <devel project="devel:languages:python" package="foo"/>
+</package>"#;
+        assert_eq!(
+            parse_devel_project(meta).as_deref(),
+            Some("devel:languages:python")
+        );
+        assert_eq!(
+            parse_devel_project("<package name=\"foo\"><title/></package>"),
+            None
         );
     }
 

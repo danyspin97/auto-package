@@ -73,6 +73,14 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub update_deps: bool,
 
+    /// Branch from a package's devel project, when it has one, instead of
+    /// from the project named by SOURCE; its submit request then goes to the
+    /// devel project. Without this the package is branched from SOURCE as
+    /// asked, which skips the devel project's own review, and a warning says
+    /// so for each package that has one.
+    #[arg(long, default_value_t = false)]
+    pub follow_devel: bool,
+
     #[arg(long, default_value = "ap-work")]
     pub work_dir: PathBuf,
 
@@ -400,7 +408,7 @@ fn cmd_update_project(
     let mut branch_checked = false;
     while let Some(mut item) = queue.pop_front() {
         if !a.dry_run {
-            match branch_item(branch, &mut item, ctx) {
+            match branch_item(branch, &mut item, a.follow_devel, ctx) {
                 Ok(()) => {}
                 Err(why) => {
                     ctx.warn(format!("{}: {why}", item.pkg));
@@ -642,10 +650,25 @@ fn visit_key(item: &Item) -> String {
 
 /// Branch `item` into the branch project, or note that it is already there.
 /// The item's origin becomes the project OBS says it was branched from.
-fn branch_item(branch: &str, item: &mut Item, ctx: &Ctx<'_>) -> Result<(), String> {
+fn branch_item(
+    branch: &str,
+    item: &mut Item,
+    follow_devel: bool,
+    ctx: &Ctx<'_>,
+) -> Result<(), String> {
     let emit = Emit::run(ctx.reporter.as_ref());
-    let result =
-        osc::branch_package(&item.origin, &item.pkg, branch, emit).map_err(|e| e.to_string());
+    if !follow_devel
+        && let Some(devel) = osc::package_devel_project(&item.origin, &item.pkg, emit)
+        && devel != item.origin
+    {
+        ctx.warn(format!(
+            "{} has the devel project {devel}; branching from {} as asked, so its request \
+             goes there and skips {devel} (--follow-devel branches from the devel project)",
+            item.pkg, item.origin
+        ));
+    }
+    let result = osc::branch_package(&item.origin, &item.pkg, branch, follow_devel, emit)
+        .map_err(|e| e.to_string());
     // The project's package listing is cached; it has changed now.
     osc::invalidate_project_packages_cache(branch);
     match result? {
