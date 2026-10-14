@@ -133,6 +133,38 @@ Run with debug logging:
 cargo run -- build <package> --project <project> --log debug
 ```
 
+## Threat model
+
+Upstream content is untrusted: PyPI sdists and wheels, source repositories,
+build logs, and anything the agent or a spec macro produces from them. The
+tool assumes these may be hostile and limits what they can reach:
+
+- **Archives**: links are refused if they can reach outside the unpacked tree,
+  and archives are bounded in size, expansion ratio and entry count.
+- **Spec macros**: `rpmspec` expansion runs in a bubblewrap sandbox with no
+  network and no home directory. Without a sandbox, specs with code-running
+  macros (`%(...)`, `%{lua:...}`) are refused.
+- **Dependency resolution**: pip resolves wheels only. Building an sdist runs
+  its build backend, so that is opt-in via `AUTO_PACKAGE_ALLOW_SDIST_RESOLVE=1`.
+  pip gets a cleared environment.
+- **Agent**: the build turn can read only the workspace and checkout, run
+  `rpmspec`, `osc status`/`osc vc`, `ls`, and `quilt`, and fetch PyPI metadata.
+  It has no shell `rm`, `zypper` or general web access. Credential variables
+  are removed from its environment, except the Anthropic credentials the CLI
+  itself needs. Those remain visible to its commands. Build logs are fenced
+  as data in prompts.
+- **Upstream sources**: a repository found by search is not built without
+  confirmation. Only a curated mapping, the repository PyPI records for the
+  project, or an NVIDIA-org repository is used automatically. Confirm another
+  with `--source-url`; the archive's sha256 is recorded in the spec.
+- **OBS commits**: only the spec, archives, service files, changelog, rpmlint
+  config and referenced patches are committed. Other files in the checkout
+  are reported and left out.
+- **Terminal output**: control sequences in printed diagnostics are removed.
+- **Not covered**: the machine running auto-package, the OBS server, and the
+  packages it builds. Credentials are not isolated from the agent's own
+  commands.
+
 ## License
 
 MIT
