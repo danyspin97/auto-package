@@ -383,7 +383,15 @@ pub struct DepResolver {
     binaries: Mutex<HashMap<String, Vec<Hit>>>,
     /// Held across a meta read-modify-write, so two edits cannot interleave.
     edit: Mutex<()>,
+    /// Held while fetching binaries, so callers with overlapping names fetch
+    /// each once: the later one finds them cached when its turn comes.
+    binaries_fetch: Mutex<()>,
+    /// The same for path-project metas.
+    metas_fetch: Mutex<()>,
 }
+
+/// Requests in flight at once when fetching several chunks or metas.
+const FETCH_PARALLELISM: usize = 8;
 
 impl DepResolver {
     pub fn new(
@@ -400,6 +408,8 @@ impl DepResolver {
             metas: Mutex::default(),
             binaries: Mutex::default(),
             edit: Mutex::new(()),
+            binaries_fetch: Mutex::new(()),
+            metas_fetch: Mutex::new(()),
         }
     }
 
@@ -456,6 +466,10 @@ impl DepResolver {
 
     /// Fetch and cache the binaries of every name not asked about yet.
     fn prefetch(&self, names: &[&str]) -> Result<(), String> {
+        let _turn = self
+            .binaries_fetch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let todo: Vec<&str> = {
             let cache = self.binaries.lock().unwrap_or_else(|e| e.into_inner());
             let mut seen = HashSet::new();
@@ -465,19 +479,79 @@ impl DepResolver {
                 .filter(|n| !cache.contains_key(*n) && seen.insert(*n))
                 .collect()
         };
-        for chunk in todo.chunks(SEARCH_CHUNK) {
-            let found = self.obs.published_binaries(chunk)?;
-            let mut cache = self.binaries.lock().unwrap_or_else(|e| e.into_inner());
-            for name in chunk {
-                let hits: Vec<Hit> = found
+        let chunks: Vec<&[&str]> = todo.chunks(SEARCH_CHUNK).collect();
+        for batch in chunks.chunks(FETCH_PARALLELISM) {
+            let results: Vec<Result<Vec<PublishedBinary>, String>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
                     .iter()
-                    .filter(|b| b.name == *name && b.arch == self.arch)
-                    .map(Hit::of)
+                    .map(|chunk| scope.spawn(|| self.obs.published_binaries(chunk)))
                     .collect();
-                cache.insert(name.to_string(), hits);
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("binary search panicked".to_string()))
+                    })
+                    .collect()
+            });
+            for (chunk, found) in batch.iter().zip(results) {
+                let found = found?;
+                let mut cache = self.binaries.lock().unwrap_or_else(|e| e.into_inner());
+                for name in *chunk {
+                    let hits: Vec<Hit> = found
+                        .iter()
+                        .filter(|b| b.name == *name && b.arch == self.arch)
+                        .map(Hit::of)
+                        .collect();
+                    cache.insert(name.to_string(), hits);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Read the metas of the projects `repositories` of `info` reach through
+    /// their paths, a level at a time with each level fetched in parallel, so
+    /// the walk in [`reachable_projects`] finds them all cached.
+    fn warm_path_metas(&self, info: &ProjectInfo, repositories: &[&str]) {
+        let _turn = self.metas_fetch.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut level: Vec<(String, String)> = info
+            .repositories
+            .iter()
+            .filter(|r| repositories.contains(&r.name.as_str()))
+            .flat_map(|r| r.paths.clone())
+            .collect();
+        while !level.is_empty() {
+            level.retain(|node| seen.len() < MAX_PATH_NODES && seen.insert(node.clone()));
+            let missing: Vec<&str> = {
+                let metas = self.metas.lock().unwrap_or_else(|e| e.into_inner());
+                let mut unique = HashSet::new();
+                level
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .filter(|p| !metas.contains_key(*p) && unique.insert(*p))
+                    .collect()
+            };
+            for batch in missing.chunks(FETCH_PARALLELISM) {
+                std::thread::scope(|scope| {
+                    for project in batch {
+                        scope.spawn(|| self.path_project_info(project));
+                    }
+                });
+            }
+            let metas = self.metas.lock().unwrap_or_else(|e| e.into_inner());
+            level = level
+                .iter()
+                .filter_map(|(project, repo)| Some((metas.get(project)?.as_ref()?, repo)))
+                .flat_map(|(info, repo)| {
+                    info.repositories
+                        .iter()
+                        .filter(move |r| &r.name == repo)
+                        .flat_map(|r| r.paths.clone())
+                })
+                .collect();
+        }
     }
 
     /// Check each dependency against what the branch project's paths reach.
@@ -493,6 +567,13 @@ impl DepResolver {
 
         let (_, info) = self.branch_info()?;
         let mut repos: Vec<(String, Vec<String>)> = Vec::new();
+        let building: Vec<&str> = info
+            .repositories
+            .iter()
+            .filter(|r| r.arches.contains(&self.arch))
+            .map(|r| r.name.as_str())
+            .collect();
+        self.warm_path_metas(&info, &building);
         for repo in info
             .repositories
             .iter()
@@ -509,11 +590,8 @@ impl DepResolver {
                 self.branch_project, self.arch
             ));
         }
-        let hits = self
-            .binaries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        // Judged under the lock rather than on a copy of the whole cache.
+        let hits = self.binaries.lock().unwrap_or_else(|e| e.into_inner());
         Ok(judge(deps, &repos, &hits, &self.branch_project))
     }
 
