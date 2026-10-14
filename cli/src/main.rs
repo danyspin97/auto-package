@@ -1698,6 +1698,19 @@ fn cmd_build(
     let mut pending_deps: Vec<String> = Vec::new();
     // Tracks deps we have already attempted to avoid infinite retry loops.
     let mut attempted_deps: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Dependencies already put behind the packages OBS says they wait on (see
+    // the own-project check in the queue below). Each is deferred once, so a
+    // dependency whose blockers never get built is still tried afterwards.
+    let mut deferred_once: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Dependencies (by `fuzzy_key`) that are being run again on purpose. A
+    // local workspace left by their first run would otherwise read as
+    // "mid-build through the ordinary frontier" and drop them.
+    let mut retrying: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // How many rounds each dependency's own build has had without finishing
+    // (failed, or came back needing packages of its own), by `fuzzy_key`.
+    let mut dep_rounds: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Rounds a dependency gets before it is written off.
+    const MAX_DEP_ATTEMPTS: usize = 3;
     // Deps seeded below because OBS already reports them Unresolvable, Failed,
     // or Broken. These are by definition already present in the project's own
     // package list, so the "skip deps already present" filter a few lines
@@ -1813,9 +1826,20 @@ fn cmd_build(
     loop {
         // Before re-resolving, build any runtime-discovered deps (e.g. test-only
         // deps the agent found to be unresolvable).
-        while !pending_deps.is_empty() {
+        // Groups of dependencies set aside until what they wait on has had its
+        // batch (see `retry_group` below). The most recent group runs first
+        // once nothing else is pending: it waits on the newest packages, and a
+        // package queued behind it may wait on it in turn.
+        let mut retry_stack: Vec<Vec<String>> = Vec::new();
+        while !pending_deps.is_empty() || !retry_stack.is_empty() {
+            if pending_deps.is_empty() {
+                pending_deps = retry_stack.pop().unwrap_or_default();
+            }
             let batch = std::mem::take(&mut pending_deps);
             let mut newly_unbuildable: Vec<String> = Vec::new();
+            // (dependency, the packages it waits on) for each dependency OBS
+            // reports unresolvable in this repository/architecture.
+            let mut deferred: Vec<(String, Vec<String>)> = Vec::new();
             // Everything the availability filter below needs is read once for
             // the batch, up front. A listing that cannot be read stops the
             // run: treated as empty, it would queue packages OBS already has.
@@ -1979,18 +2003,76 @@ fn cmd_build(
                         // Broken/Disabled/Excluded/Unknown or missing-
                         // status entry stays queued so the agent can look
                         // at it.
+                        // The status is the one for the repository and
+                        // architecture being built (`own_statuses` was read
+                        // for exactly that pair): the same package being
+                        // excluded or unresolvable on another one says
+                        // nothing about this build.
                         let status = own_statuses.get(real_pkg);
                         let skip = ap_build::pipeline::status_is_resolvable(status);
-                        if skip {
+                        if matches!(status, Some(ap_build::osc::BuildStatus::Excluded)) {
+                            // No rebuild changes a project/spec exclusion, and
+                            // whatever needs this package cannot be built
+                            // here either; say so instead of running a build
+                            // that can only report it.
                             dep_drops.dropped(
                                 reporter.as_ref(),
                                 dep,
                                 format!(
-                                    "it is already in {project} as {real_pkg} with status \
-                                     {:?}, which counts as resolvable",
-                                    status.map(|s| s.to_string()).unwrap_or_default()
+                                    "{real_pkg} is excluded for {distro}/{arch} in {project} \
+                                     (ExclusiveArch/ExcludeArch in its spec, or the project \
+                                     config), so nothing that needs it can be built for \
+                                     {arch}"
                                 ),
                             );
+                            return false;
+                        }
+                        if matches!(status, Some(ap_build::osc::BuildStatus::Unresolvable))
+                            && !deferred_once.contains(&bare_key)
+                        {
+                            // The package exists but cannot build because
+                            // packages it needs are missing; OBS names them.
+                            // Build those first, then come back to it.
+                            let blockers: Vec<String> = ap_build::osc::unresolvable_blockers(
+                                project, real_pkg, distro, arch,
+                            )
+                            .into_iter()
+                            .filter(|b| {
+                                ap_build::osc::built_in_project(&own_listing, &own_statuses, b)
+                                    .is_none()
+                            })
+                            .collect();
+                            if !blockers.is_empty() {
+                                deferred_once.insert(bare_key.clone());
+                                reporter.report(&Event::Progress {
+                                    step: None,
+                                    message: format!(
+                                        "{dep} exists in {project} as {real_pkg} but is \
+                                         unresolvable for {distro}/{arch}: building what it \
+                                         waits on first ({})",
+                                        blockers.join(", ")
+                                    ),
+                                });
+                                deferred.push((dep.clone(), blockers));
+                                return false;
+                            }
+                        }
+                        if skip {
+                            let mut reason = format!(
+                                "it is already in {project} as {real_pkg} with status \
+                                 {:?}, which counts as resolvable",
+                                status.map(|s| s.to_string()).unwrap_or_default()
+                            );
+                            // Built is not the same as usable: a skeleton spec
+                            // "succeeds" with an empty RPM.
+                            if matches!(status, Some(ap_build::osc::BuildStatus::Succeeded))
+                                && let Some(unusable) = ap_build::osc::empty_package_warning(
+                                    project, real_pkg, distro, arch,
+                                )
+                            {
+                                reason = format!("{reason}, but {unusable}");
+                            }
+                            dep_drops.dropped(reporter.as_ref(), dep, reason);
                         } else {
                             ap_core::diag!(
                                 "dep queue: keeping {dep} (in {project} as \
@@ -2041,7 +2123,7 @@ fn cmd_build(
                         .state_root
                         .join(ap_core::run::sanitize_name(&ap_build::osc::rpm_name(dep)))
                         .join("state.json");
-                    let keep = !state_path.exists();
+                    let keep = !state_path.exists() || retrying.contains(&bare_key);
                     if !keep {
                         dep_drops.dropped(
                             reporter.as_ref(),
@@ -2117,7 +2199,7 @@ fn cmd_build(
                         });
                         result
                     });
-                    Some((dep_rpm, dep_version, handle))
+                    Some((dep_rpm, dep_version, handle, dep))
                 })
                 .collect();
 
@@ -2127,8 +2209,20 @@ fn cmd_build(
                 }
             }
 
-            for (dep_rpm, _version, handle) in handles {
+            // Dependencies to run again once what they wait on has had its
+            // batch: those OBS reports unresolvable, and (below) those that
+            // came back needing packages of their own.
+            let mut retry_group: Vec<String> = Vec::new();
+            for (dep, blockers) in deferred {
+                attempted_deps.remove(&ap_build::osc::fuzzy_key(&dep));
+                retrying.insert(ap_build::osc::fuzzy_key(&dep));
+                pending_deps.extend(blockers);
+                retry_group.push(dep);
+            }
+
+            for (dep_rpm, _version, handle, dep) in handles {
                 let result = join_package(handle, &dep_rpm);
+                let key = ap_build::osc::fuzzy_key(&dep);
                 match result {
                     PipelineResult::Built { .. } => {
                         ap_core::diag!("built dep {dep_rpm}");
@@ -2151,10 +2245,47 @@ fn cmd_build(
                             &dep_rpm,
                             format!("it could not be built until {} exist", more.join(", ")),
                         );
+                        // It needs packages of its own: once those have had
+                        // their batch it is run again, instead of staying
+                        // "attempted" while the package waiting on it is
+                        // abandoned. Bounded like any other retry.
+                        let rounds = dep_rounds.entry(key.clone()).or_insert(0);
+                        *rounds += 1;
+                        if !more.is_empty() && *rounds < MAX_DEP_ATTEMPTS {
+                            attempted_deps.remove(&key);
+                            retrying.insert(key);
+                            retry_group.push(dep);
+                        }
                         pending_deps.extend(more);
                     }
-                    PipelineResult::Failed { reason, .. } => {
-                        dep_drops.note_outcome(&dep_rpm, format!("its build failed ({reason})"));
+                    PipelineResult::Failed { reason, kind, .. } => {
+                        // A dependency OBS or the pipeline failed is run
+                        // again through the normal pipeline when the package
+                        // needing it names it once more, rather than counted
+                        // as attempted and dropped after one go — unless it
+                        // used up its allowance, which a second round would
+                        // only repeat. Rounds are bounded and an attempt
+                        // within a round resumes the package's persisted
+                        // attempt count.
+                        let rounds = dep_rounds.entry(key.clone()).or_insert(0);
+                        *rounds += 1;
+                        let retry = *rounds < MAX_DEP_ATTEMPTS
+                            && !matches!(kind, FailureKind::Exhausted | FailureKind::RateLimited);
+                        if retry {
+                            attempted_deps.remove(&key);
+                            retrying.insert(key);
+                        }
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            format!(
+                                "its build failed ({reason}){}",
+                                if retry {
+                                    "; it is tried once more if it is still needed"
+                                } else {
+                                    ""
+                                }
+                            ),
+                        );
                         pkg_reporter(&dep_rpm).report(&Event::Warning {
                             step: None,
                             message: format!(
@@ -2170,6 +2301,9 @@ fn cmd_build(
                         }
                     }
                 }
+            }
+            if !retry_group.is_empty() {
+                retry_stack.push(retry_group);
             }
         }
 
