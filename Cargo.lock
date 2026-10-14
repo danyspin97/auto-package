@@ -94,6 +94,7 @@ dependencies = [
  "hex",
  "indicatif",
  "libc",
+ "pep440_rs",
  "quick-xml",
  "regex",
  "serde",

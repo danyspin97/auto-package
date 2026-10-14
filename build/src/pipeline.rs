@@ -16,6 +16,7 @@ use ap_core::sink::Reporter;
 use crate::proc::Emit;
 use crate::step::{Attempts, StepGuard};
 
+use crate::distro_bounds;
 use crate::osc;
 use crate::workspace::Workspace;
 
@@ -371,6 +372,68 @@ impl PkgState {
 
 // ── target selection ─────────────────────────────────────────────────────────
 
+/// The distro-bound check of `select_target`: the versions the linked projects
+/// ship for the distro nodes a bound is declared on, looked up in parallel
+/// (each is an OBS round trip), then [`distro_bounds::plan`]. A version that
+/// cannot be read is left out, which reports nothing for it.
+fn distro_bound_plan(
+    project: &str,
+    nodes: &[ap_ecosystem::pip::Node],
+    distro: &[bool],
+    needs_build: &[bool],
+    linked_packages: &std::collections::HashSet<String>,
+    reporter: &dyn Reporter,
+) -> distro_bounds::Plan {
+    let candidates = distro_bounds::candidates(nodes, distro, needs_build);
+    // The requested package, when the distro ships it: its version is checked
+    // against the resolved one rather than against a bound.
+    let root = nodes
+        .iter()
+        .position(|n| n.is_requested)
+        .filter(|&i| distro[i]);
+    let mut to_fetch = candidates.clone();
+    to_fetch.extend(root.filter(|r| !candidates.contains(r)));
+    if to_fetch.is_empty() {
+        return distro_bounds::Plan::default();
+    }
+    let paths = match osc::get_project_repo_paths(project, Emit::run(reporter)) {
+        Ok(paths) => paths,
+        Err(e) => {
+            ap_core::diag!("  no distro version check: {e}");
+            return distro_bounds::Plan::default();
+        }
+    };
+    let by_key: std::collections::HashMap<String, &String> = linked_packages
+        .iter()
+        .map(|p| (osc::fuzzy_key(p), p))
+        .collect();
+    let lookup = |i: usize| -> Option<String> {
+        let real = by_key.get(&osc::fuzzy_key(&osc::rpm_name(&nodes[i].name)))?;
+        paths
+            .iter()
+            .find_map(|(path_project, _repo)| osc::source_version(path_project, real))
+    };
+    let fetched = distro_bounds::fetch_parallel(&to_fetch, 8, lookup);
+    // A node found only once an earlier conflict turned a distro node into one
+    // built here was not prefetched; the few of those are looked up singly.
+    let tried: std::collections::HashSet<usize> = to_fetch.iter().copied().collect();
+    let mut plan = distro_bounds::plan(nodes, distro, needs_build, |i| {
+        if tried.contains(&i) {
+            fetched.get(&i).cloned()
+        } else {
+            lookup(i)
+        }
+    });
+    if let Some(r) = root
+        && let Some(shipped) = fetched.get(&r)
+    {
+        plan.notes.extend(distro_bounds::stale_root_message(
+            &nodes[r], shipped, project,
+        ));
+    }
+    plan
+}
+
 pub struct TargetInfo {
     /// PyPI display name (as returned by the API, e.g. `MarkupSafe`).
     pub name: String,
@@ -611,7 +674,7 @@ pub fn select_target(
         Built,
     }
 
-    let resolution: Vec<Resolution> = nodes
+    let mut resolution: Vec<Resolution> = nodes
         .iter()
         .map(|n| {
             // `--force` on the root was previously only observed inside
@@ -683,6 +746,46 @@ pub fn select_target(
             }
         })
         .collect();
+
+    // A distro package counts as resolved by presence alone, which a package
+    // built here can contradict by declaring a bound the shipped version
+    // misses. Where the distro's version is too old, the version pip resolved
+    // is built here instead; where it is too new, the dependent is told to
+    // relax the bound (see `distro_bounds`).
+    {
+        let distro: Vec<bool> = nodes
+            .iter()
+            .zip(&resolution)
+            .map(|(n, r)| {
+                *r == Resolution::Distro
+                    && linked_fuzzy.contains(&osc::fuzzy_key(&osc::rpm_name(&n.name)))
+            })
+            .collect();
+        let needs_build: Vec<bool> = resolution.iter().map(|r| *r == Resolution::No).collect();
+        let plan = distro_bound_plan(
+            &obs_project,
+            &nodes,
+            &distro,
+            &needs_build,
+            &linked_packages,
+            reporter,
+        );
+        for conflict in &plan.conflicts {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: conflict.message(&obs_project),
+            });
+        }
+        for note in &plan.notes {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: note.clone(),
+            });
+        }
+        for &i in &plan.rebuild {
+            resolution[i] = Resolution::No;
+        }
+    }
 
     // The caller names a given-up package by the OBS spelling it has, which
     // need not match this module's guess — compare by `fuzzy_key`.

@@ -3638,6 +3638,48 @@ pub fn unfinished_spec_reason(spec: &str) -> Option<String> {
     (!reasons.is_empty()).then(|| reasons.join(" and "))
 }
 
+/// The `<version>` of a `/source/<project>/<package>?view=info&parse=1`
+/// answer, or `None` when it names none (a package with no parsable spec).
+fn parse_sourceinfo_version(xml: &str) -> Option<String> {
+    let rest = &xml[xml.find("<version>")? + "<version>".len()..];
+    let version = rest[..rest.find("</version>")?].trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+/// The version `pkg_name` has in the sources of `project`, read from the spec
+/// OBS parsed, or `None` when it cannot be told. The version a linked project
+/// ships is what a dependent's bound has to be met by, so this is how the
+/// closure check learns it without checking the package out.
+pub fn source_version(project: &str, pkg_name: &str) -> Option<String> {
+    let xml = osc_api(&format!(
+        "/source/{}/{}?view=info&parse=1",
+        enc(project),
+        enc(pkg_name)
+    ))?;
+    parse_sourceinfo_version(&xml)
+}
+
+#[cfg(test)]
+mod sourceinfo_version_tests {
+    use super::parse_sourceinfo_version;
+
+    #[test]
+    fn reads_the_version_element() {
+        let xml = "<sourceinfo package=\"python-x\"><name>python-x</name>\
+                   <version>0.1.14.post1</version><release>0</release></sourceinfo>";
+        assert_eq!(
+            parse_sourceinfo_version(xml).as_deref(),
+            Some("0.1.14.post1")
+        );
+    }
+
+    #[test]
+    fn no_version_element_is_none() {
+        assert_eq!(parse_sourceinfo_version("<sourceinfo/>"), None);
+        assert_eq!(parse_sourceinfo_version("<version></version>"), None);
+    }
+}
+
 /// A warning for a package OBS reports `succeeded` whose result a dependent
 /// cannot use, or `None` when nothing is wrong or it cannot be told. The test
 /// is deterministic: the spec OBS holds is an unfinished skeleton (see
