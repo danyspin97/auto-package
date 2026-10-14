@@ -267,10 +267,16 @@ fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
 /// Hits OBS twice per package (`osc ls` to find the real spec filename, then
 /// `osc cat <pkg> <picked>.spec`), plus one PyPI call per PyPI-sourced
 /// package and one git-forge API call per repo-sourced one. Returned in
-/// sorted RPM-name order so `--check` output is stable across runs.
-pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate> {
-    // A failed listing is already reported by osc; it plans nothing.
-    let packages = osc::list_project_packages(project, emit).unwrap_or_default();
+/// sorted RPM-name order so `--check` output is stable across runs. Fails
+/// when the project's package listing cannot be read.
+pub fn plan(
+    project: &str,
+    only: Option<&str>,
+    emit: Emit<'_>,
+) -> Result<Vec<Candidate>, String> {
+    // A failed listing is an error: treating it as "no packages" would make
+    // `update` report success for a project it never looked at.
+    let packages = osc::try_list_project_packages(project, emit)?;
     let mut names: Vec<String> = packages
         .iter()
         .filter(|n| only.is_none_or(|o| o == n.as_str()))
@@ -294,10 +300,10 @@ pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate>
         fetch_repo_latest: &fetch_repo_latest,
     };
 
-    names
+    Ok(names
         .iter()
         .map(|n| classify(n, &fetch_spec, &lookups))
-        .collect()
+        .collect())
 }
 
 /// Fetch the primary spec from an OBS package, picking the right filename

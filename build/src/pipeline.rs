@@ -489,26 +489,21 @@ pub fn select_target(
     // Checked separately, not merged: whether a build-status check applies
     // depends on which side found the package (see the `resolvable` comment
     // below).
+    // A failed lookup stops the resolve: an empty answer would make every
+    // package look absent (and so get rebuilt) or present (and so be skipped).
     let obs_project = config.project.clone();
     let (nodes, own_packages, linked_packages, build_statuses) = std::thread::scope(|scope| {
-        let own_handle = scope.spawn(|| {
-            osc::list_project_packages(&obs_project, Emit::run(reporter)).unwrap_or_default()
-        });
+        let own_handle =
+            scope.spawn(|| osc::try_list_project_packages(&obs_project, Emit::run(reporter)));
         let linked_handle = scope.spawn(|| {
             let mut linked = std::collections::HashSet::new();
-            for (path_project, _repo) in
-                osc::get_project_repo_paths(&obs_project, Emit::run(reporter))
-            {
-                // `list_project_packages` already warned on failure; a project
-                // we could not list contributes nothing.
-                linked.extend(
-                    osc::list_project_packages(&path_project, Emit::run(reporter))
-                        .unwrap_or_default()
-                        .iter()
-                        .cloned(),
-                );
+            let paths = osc::get_project_repo_paths(&obs_project, Emit::run(reporter))
+                .map_err(|e| format!("could not read build paths of {obs_project}: {e}"))?;
+            for (path_project, _repo) in paths {
+                let listed = osc::try_list_project_packages(&path_project, Emit::run(reporter))?;
+                linked.extend(listed.iter().cloned());
             }
-            linked
+            Ok::<_, String>(linked)
         });
         let statuses_handle = scope.spawn(|| {
             osc::get_project_build_statuses(
@@ -517,17 +512,21 @@ pub fn select_target(
                 &config.arch,
                 Emit::run(reporter),
             )
+            .map_err(|e| format!("could not read build status of {obs_project}: {e}"))
         });
         let nodes = ap_ecosystem::pip::resolve(name, pinned_version);
         // Join the fetches (likely already done while pip was resolving).
         (
             nodes,
-            join_or_warn(own_handle, "own"),
-            join_or_warn(linked_handle, "linked"),
-            join_or_warn(statuses_handle, "statuses"),
+            join_lookup(own_handle, "own"),
+            join_lookup(linked_handle, "linked"),
+            join_lookup(statuses_handle, "statuses"),
         )
     });
     let nodes = nodes.map_err(|e| format!("resolve failed for {name}: {e}"))?;
+    let own_packages = own_packages??;
+    let linked_packages = linked_packages??;
+    let build_statuses = build_statuses??;
 
     let total = nodes.len();
 
@@ -984,13 +983,10 @@ impl Drop for AgentSlot {
     }
 }
 
-/// Join a resolve-phase worker, reporting a panic instead of treating it as
-/// an empty (and therefore believable) answer.
-fn join_or_warn<T: Default>(h: std::thread::ScopedJoinHandle<'_, T>, what: &str) -> T {
-    h.join().unwrap_or_else(|_| {
-        ap_core::diag!("  the {what} lookup thread panicked; treating it as empty");
-        T::default()
-    })
+/// Join a resolve-phase worker. A panic is an error, not an empty answer.
+fn join_lookup<T>(h: std::thread::ScopedJoinHandle<'_, T>, what: &str) -> Result<T, String> {
+    h.join()
+        .map_err(|_| format!("the {what} lookup thread panicked"))
 }
 
 // ── main pipeline ─────────────────────────────────────────────────────────────
@@ -2511,7 +2507,7 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
         ws.link_latest(&build_step.path),
     );
     // `config.project` now has one more package than whatever
-    // this process last cached — see `list_project_packages`'s
+    // this process last cached — see `try_list_project_packages`'s
     // doc comment. Without this, every package built from here
     // on stays invisible to every dependent package's
     // availability check for the rest of the run.

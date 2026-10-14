@@ -1363,7 +1363,10 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         distro,
         arch,
         ap_build::proc::Emit::quiet(),
-    );
+    )
+    // Only the "already built" extras come from this listing; without it the
+    // summary still lists everything this run built.
+    .unwrap_or_default();
     let built_lower: Vec<String> = built.iter().map(|p| p.to_lowercase()).collect();
     let mut cached: Vec<&String> = statuses
         .iter()
@@ -1623,7 +1626,7 @@ fn cmd_build(
             distro,
             arch,
             ap_build::proc::Emit::run(reporter.as_ref()),
-        )
+        )?
         .into_iter()
         .filter(|(_, status)| {
             matches!(
@@ -1685,6 +1688,22 @@ fn cmd_build(
         while !pending_deps.is_empty() {
             let batch = std::mem::take(&mut pending_deps);
             let mut newly_unbuildable: Vec<String> = Vec::new();
+            // Everything the availability filter below needs is read once for
+            // the batch, up front. A listing that cannot be read stops the
+            // run: treated as empty, it would queue packages OBS already has.
+            let lookup_emit = ap_build::proc::Emit::run(reporter.as_ref());
+            let own_listing = ap_build::osc::try_list_project_packages(project, lookup_emit)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+            let own_statuses =
+                ap_build::osc::get_project_build_statuses(project, distro, arch, lookup_emit)?;
+            let mut linked_listings = Vec::new();
+            for (path_project, _repo) in
+                ap_build::osc::get_project_repo_paths(project, lookup_emit)?
+            {
+                let listing = ap_build::osc::try_list_project_packages(&path_project, lookup_emit)
+                    .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                linked_listings.push((path_project, listing));
+            }
             let handles: Vec<_> = batch
                 .into_iter()
                 // Convert RPM names to PyPI names: "python-foo" → "foo"
@@ -1808,14 +1827,10 @@ fn cmd_build(
                         return true;
                     }
                     let rpm_key = ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(dep));
-                    let emit = ap_build::proc::Emit::run(reporter.as_ref());
 
                     // Own-project packages: index by fuzzy key so a
                     // separator mismatch can't false-miss.
-                    // A failed listing is already warned about by osc.
-                    let own =
-                        ap_build::osc::list_project_packages(project, emit).unwrap_or_default();
-                    let own_match = own.iter().find(|p| {
+                    let own_match = own_listing.iter().find(|p| {
                         let k = ap_build::osc::fuzzy_key(p);
                         k == rpm_key || k == bare_key
                     });
@@ -1827,9 +1842,7 @@ fn cmd_build(
                         // Broken/Disabled/Excluded/Unknown or missing-
                         // status entry stays queued so the agent can look
                         // at it.
-                        let statuses =
-                            ap_build::osc::get_project_build_statuses(project, distro, arch, emit);
-                        let status = statuses.get(real_pkg);
+                        let status = own_statuses.get(real_pkg);
                         let skip = ap_build::pipeline::status_is_resolvable(status);
                         if skip {
                             ap_core::diag!(
@@ -1851,11 +1864,7 @@ fn cmd_build(
 
                     // Linked / build-path projects: trust presence (see
                     // comment above).
-                    for (path_project, _repo) in
-                        ap_build::osc::get_project_repo_paths(project, emit)
-                    {
-                        let linked = ap_build::osc::list_project_packages(&path_project, emit)
-                            .unwrap_or_default();
+                    for (path_project, linked) in &linked_listings {
                         if let Some(match_name) = linked.iter().find(|p| {
                             let k = ap_build::osc::fuzzy_key(p);
                             k == rpm_key || k == bare_key
@@ -2393,7 +2402,8 @@ fn cmd_update(
     tui_ctrl: Option<tui::TuiController>,
 ) -> color_eyre::Result<()> {
     let emit = ap_build::proc::Emit::run(reporter.as_ref());
-    let candidates = ap_build::update::plan(project, only, emit);
+    let candidates = ap_build::update::plan(project, only, emit)
+        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     if candidates.is_empty() {
         reporter.report(&Event::Progress {

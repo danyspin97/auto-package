@@ -603,7 +603,7 @@ static DISTRO_PROVIDES_CACHE: Mutex<Option<HashMap<String, bool>>> = Mutex::new(
 /// trusts.
 ///
 /// This exists because the queue-filter checks elsewhere in this crate
-/// (`list_project_packages` / `get_project_repo_paths`, matched by
+/// (`try_list_project_packages` / `get_project_repo_paths`, matched by
 /// [`fuzzy_key`]) only ever compare against *source package names* in OBS
 /// projects — and a C library's RPM package name routinely embeds its
 /// SONAME version (`libpng16`, `libopenssl3`) where the bare upstream
@@ -776,38 +776,37 @@ mod distro_provides_tests {
 ///
 /// The repository half of each pair is deliberately not used by either
 /// caller to filter further ([`select_target`]'s resolvability check and
-/// [`get_available_packages`] both just list every package name in
+/// the CLI's queue filter both just list every package name in
 /// `path_project`, regardless of that package's build status *in* the named
 /// repository) — a package whose build in the linked repo is disabled or
 /// broken there is currently still treated as available here. Narrowing that
 /// would need a per-repo build-status query in addition to this one; nothing
 /// does that today.
-pub fn get_project_repo_paths(project: &str, emit: Emit<'_>) -> Vec<(String, String)> {
-    let out = match proc::capture_with_timeout(
+///
+/// A failed query is an `Err`, never an empty list: empty reads as "no build
+/// paths", which widens the set of packages reported missing.
+pub fn get_project_repo_paths(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<Vec<(String, String)>, Error> {
+    let cmd = format!("meta prj {project}");
+    let out = proc::capture_with_timeout(
         "osc",
         &["meta", "prj", project],
         &anywhere(),
         emit,
         OSC_QUERY_TIMEOUT,
-    ) {
-        Ok(out) if out.success() => out,
-        // Empty means "no build paths", which widens the set of packages
-        // reported missing — say so rather than letting it pass silently.
-        Ok(out) => {
-            ap_core::diag!(
-                "  osc meta prj {project}: exit {}: {}",
-                out.code,
-                first_line(&out.stderr)
-            );
-            return vec![];
-        }
-        Err(e) => {
-            ap_core::diag!("  osc meta prj {project}: {e}");
-            return vec![];
-        }
-    };
+    )
+    .map_err(during(cmd.clone()))?;
+    if !out.success() {
+        return Err(Error::OscFailed {
+            cmd,
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
 
-    parse_project_repo_paths(&out.stdout)
+    Ok(parse_project_repo_paths(&out.stdout))
 }
 
 /// Parsing half of [`get_project_repo_paths`], split out so it is testable
@@ -873,26 +872,6 @@ fn extract_xml_attr(tag: &str, attr: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
-/// Return the union of source packages in `project` and all its configured
-/// build/path projects (from `osc meta prj`).
-///
-/// This is the correct set to check for resolvability: a package is available
-/// for building if it exists in the user's own project OR in any project that
-/// the user's project is configured to build against.
-///
-/// Fails when any listing fails: a partial union would make packages that
-/// do exist look absent.
-pub fn get_available_packages(
-    project: &str,
-    emit: Emit<'_>,
-) -> Result<std::collections::HashSet<String>, String> {
-    let mut all = try_list_project_packages(project, emit)?.as_ref().clone();
-    for (path_project, _repo) in get_project_repo_paths(project, emit) {
-        all.extend(try_list_project_packages(&path_project, emit)?.iter().cloned());
-    }
-    Ok(all)
-}
-
 static PROJECT_PACKAGES_CACHE: OnceLock<
     Mutex<HashMap<String, Arc<std::collections::HashSet<String>>>>,
 > = OnceLock::new();
@@ -932,10 +911,9 @@ fn insert_if_current(
 /// Return the set of package names that exist in `project`.
 ///
 /// The result is cached per project name so repeated calls within a process
-/// skip the network round-trip — this is called once per dependency in the
-/// CLI's `pending_deps` availability filter, so without caching a single
-/// batch can mean dozens of `osc ls` round-trips. Callers that successfully
-/// commit a *new* package into `project` MUST call
+/// skip the network round-trip — callers look names up once per dependency,
+/// so without caching a single batch can mean dozens of `osc ls` round-trips.
+/// Callers that successfully commit a *new* package into `project` MUST call
 /// [`invalidate_project_packages_cache`] afterward: a long `auto-package
 /// build` run adds packages to the same project continuously, and this
 /// cache has no TTL and no other invalidation path. Without that call, the
@@ -971,28 +949,9 @@ pub fn try_list_project_packages(
     Ok(pkgs)
 }
 
-/// [`try_list_project_packages`] for callers that can only act on a known
-/// answer: warns and returns `None` on failure, which they must not treat as
-/// "the package is absent".
-pub fn list_project_packages(
-    project: &str,
-    emit: Emit<'_>,
-) -> Option<Arc<std::collections::HashSet<String>>> {
-    match try_list_project_packages(project, emit) {
-        Ok(pkgs) => Some(pkgs),
-        Err(e) => {
-            emit.reporter.report(&Event::Warning {
-                step: emit.step,
-                message: e,
-            });
-            None
-        }
-    }
-}
-
-/// Drop `project`'s cached package listing so the next [`list_project_packages`]
+/// Drop `project`'s cached package listing so the next [`try_list_project_packages`]
 /// call re-fetches it. Call this right after successfully building/committing
-/// a package into `project` — see [`list_project_packages`]'s doc comment for
+/// a package into `project` — see [`try_list_project_packages`]'s doc comment for
 /// why skipping this silently breaks every later availability check for the
 /// rest of the run, not just the one for the package just built.
 pub fn invalidate_project_packages_cache(project: &str) {
@@ -1950,7 +1909,7 @@ pub fn get_project_build_statuses(
     repo: &str,
     arch: &str,
     emit: Emit<'_>,
-) -> HashMap<String, BuildStatus> {
+) -> Result<HashMap<String, BuildStatus>, Error> {
     // XML first: one entry per package with a named code, instead of the
     // positional letter table below (which depends on terminal width and
     // `osc`'s padding). Fall back to the table if the API path yields nothing.
@@ -1973,35 +1932,30 @@ pub fn get_project_build_statuses(
             }
         };
         if !statuses.is_empty() {
-            return statuses;
+            return Ok(statuses);
         }
     }
 
     // An empty map reads as "no package has a status", so a failed listing
-    // is reported here instead of passing silently.
-    let out = match proc::capture_with_timeout(
+    // is an error rather than an empty answer.
+    let cmd = format!("results -r {repo} -a {arch} {project}");
+    let out = proc::capture_with_timeout(
         "osc",
         &["results", "-r", repo, "-a", arch, project],
         &anywhere(),
         emit,
         OSC_ARTIFACT_TIMEOUT,
-    ) {
-        Ok(out) if out.success() => out,
-        Ok(out) => {
-            ap_core::diag!(
-                "  osc results -r {repo} -a {arch} {project}: exit {}: {}",
-                out.code,
-                first_line(&out.stderr)
-            );
-            return HashMap::new();
-        }
-        Err(e) => {
-            ap_core::diag!("  osc results -r {repo} -a {arch} {project}: {e}");
-            return HashMap::new();
-        }
-    };
+    )
+    .map_err(during(cmd.clone()))?;
+    if !out.success() {
+        return Err(Error::OscFailed {
+            cmd,
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
 
-    parse_project_build_statuses(&out.stdout, repo, arch)
+    Ok(parse_project_build_statuses(&out.stdout, repo, arch))
 }
 
 /// Parsing half of [`get_project_build_statuses`], split out so it is
