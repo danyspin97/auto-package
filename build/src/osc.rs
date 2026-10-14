@@ -3651,7 +3651,7 @@ pub fn obs_build(
     let mut last_change = Instant::now();
     let mut last_warning = Instant::now();
     let mut rechecked_since_change = false;
-    const UNRESOLVABLE_CONFIRM: Duration = Duration::from_secs(60);
+    const UNRESOLVABLE_CONFIRM: Duration = Duration::from_secs(15);
     let mut unresolvable_since: Option<Instant> = None;
     // A repository/arch the project does not build for has no result at all,
     // which would otherwise read as "not started yet" until MAX_WAIT. A
@@ -3825,7 +3825,8 @@ pub fn obs_build(
 
         // `unresolvable` is only the scheduler's current view: a dependency
         // published a moment later turns it back into `scheduled`. Accept it
-        // as the answer only once it has held for UNRESOLVABLE_CONFIRM.
+        // as the answer only once a later poll agrees (UNRESOLVABLE_CONFIRM is
+        // one poll interval, so a genuine verdict costs a single extra poll).
         if status == BuildStatus::Unresolvable {
             let since = *unresolvable_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= UNRESOLVABLE_CONFIRM {
