@@ -282,7 +282,7 @@ tool assumes these may be hostile and limits what they can reach:
     cleared environment is the only protection, and files in your home
     directory are readable by build backends.
 - **Agent**: the build turn can read only the workspace and checkout, run
-  `rpmspec`, `osc status`/`osc vc`, `ls`, `quilt` and the read-only
+  `osc status`/`osc vc`, `ls`, `quilt` and the read-only
   `zypper search`/`what-provides` queries, and fetch PyPI metadata. It has no
   shell `rm` or general web access (the dependency-name lookup turn may search
   the web, but can touch no local file). Credential variables are removed from

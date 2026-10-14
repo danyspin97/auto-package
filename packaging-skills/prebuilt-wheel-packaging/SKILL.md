@@ -110,7 +110,7 @@ yourself:
     %python_clone -a %{buildroot}%{_bindir}/<console-script>
     %python_expand %fdupes %{buildroot}%{$python_sitearch}
 
-There is no `%build`. Get the flavors from `rpmspec -E '%{pythons}'` and
+There is no `%build`. Get the flavors from the `%pythons` definition under `/usr/lib/rpm/macros.d` (grep it) and
 pick one wheel per flavor THIS PROJECT BUILDS for the target arch — not every
 CPython PyPI happens to have a wheel for (onnxruntime was rewritten for
 cp311/cp312/cp313/cp314 when only cp313/cp314 are built).

@@ -9,7 +9,7 @@ A third ecosystem, much less uniform than Python or Rust. The generator only
 picks the build system and the `%autosetup -n` directory; everything else is
 a TODO to fill in from `source/`. The shapes below are taken from real
 openSUSE specs (`fmt`, `zlib-ng`, `libuv` in Factory) — verify the exact macro
-spelling with `rpmspec --parse` rather than assuming these examples
+spelling (grep `/usr/lib/rpm/macros.d`; the pipeline validates the spec after your turn) rather than assuming these examples
 generalize perfectly to this package.
 
 - **Shared library or not?** Grep `CMakeLists.txt` for
@@ -72,9 +72,9 @@ generalize perfectly to this package.
 
   **DO NOT rewrite `%ldconfig_scriptlets` to manual `%post -n <lib> -p
   /sbin/ldconfig` / `%postun -n <lib> -p /sbin/ldconfig` just because
-  your local `rpmspec --parse` complains the macro is undefined.** That
-  warning is a host-macro-vs-target-macro mismatch (your local `rpmspec` runs
-  on the review host, not an openSUSE build worker) — the macro IS defined on every openSUSE
+  the macro looks undefined when you grep the local macro files, or the pipeline's spec check warns about it.** That
+  warning is a host-macro-vs-target-macro mismatch (the local macros come
+  from the review host, not an openSUSE build worker) — the macro IS defined on every openSUSE
   build worker, and the manual rewrite is strictly worse because it
   loses the single-source-of-truth property of the macro (if openSUSE
   ever changes what ldconfig invocation to use, every manual spec has

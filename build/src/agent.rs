@@ -5194,6 +5194,22 @@ mod tests {
     }
 
     #[test]
+    fn skills_do_not_tell_the_turn_to_run_rpmspec() {
+        let skills = concat!(env!("CARGO_MANIFEST_DIR"), "/../packaging-skills");
+        for entry in std::fs::read_dir(skills).unwrap() {
+            let path = entry.unwrap().path().join("SKILL.md");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            assert!(
+                !text.contains("rpmspec"),
+                "{} mentions rpmspec, which the turn cannot run",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
     fn build_turn_tools_exclude_rm_curl_web_search_and_mutating_zypper() {
         let tools = turn_allowed_tools(
             Task::FixAfterBuild,

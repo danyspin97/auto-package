@@ -28,4 +28,4 @@ hand-written %files entry per language directory. Symptom:
 - `%python_find_lang` is a real, currently supported macro (defined by
   python-rpm-macros on both openSUSE Tumbleweed and SLE) — use it
   directly; do not invent a local `%define` workaround unless
-  `rpmspec --parse` actually reports it undefined.
+  the pipeline's spec validation actually reports it undefined.

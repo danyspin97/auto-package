@@ -47,8 +47,8 @@ The shape:
   dependency OBS cannot resolve. Use PYTHONPATH=%{buildroot}%{python_sitearch}
   (or sitelib) in %check to make sibling modules importable instead.
 Check the exact subpackage and %files macro spelling against the openSUSE
-Packaging/Python wiki page and confirm with `rpmspec --parse` before you
-finish — do not guess at macro names.
+Packaging/Python wiki page and grep `/usr/lib/rpm/macros.d` for the macro; the pipeline validates the spec after
+your turn. Do not guess at macro names.
 
 This is the usual answer, not a rule. Leave a project out, and say in your
 reasoning that you did, when:
