@@ -449,6 +449,20 @@ fn owner_repo(repo_url: &str) -> Result<(String, String, String), String> {
     Ok((forge.host, forge.project_path, forge.repo_name))
 }
 
+/// Whether `path` (after `https://api.github.com/`) is one of the requests this
+/// crate makes: a repository's latest release or tags, or a repository search.
+fn gh_api_path_ok(path: &str) -> bool {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:releases/latest|tags)|search/repositories)(?:\?[A-Za-z0-9%_=&.+~-]*)?$",
+        )
+        .unwrap()
+    })
+    .is_match(path)
+}
+
 /// Hand a GitHub API URL to the `gh` CLI if it's installed, otherwise
 /// return `None` so the caller falls back to a raw HTTP call.
 ///
@@ -474,9 +488,13 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
     // so an unrelated `api.github.com`-mentioning path (e.g. a
     // documentation link in a diag message that happens to come through
     // this function) doesn't get mis-routed.
-    let path = url
-        .strip_prefix("https://api.github.com/")
-        .or_else(|| url.strip_prefix("http://api.github.com/"))?;
+    let path = url.strip_prefix("https://api.github.com/")?;
+    // The path becomes an argument to `gh api`, which also takes `-X`,
+    // `--hostname` and the like, and may name any endpoint the token reaches.
+    // Only the request shapes this crate makes are passed on.
+    if !gh_api_path_ok(path) {
+        return None;
+    }
 
     // Resolve `gh` on PATH exactly once per process. Caching the "not
     // installed" result avoids spawning a doomed child subprocess on
@@ -509,7 +527,8 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
         crate::proc::private_dir(),
         crate::proc::Emit::quiet(),
         std::time::Duration::from_secs(60),
-        None,
+        // `gh` finds its token in its own config, `GH_*` or `GITHUB_*`.
+        Some(&crate::proc::minimal_env(&["GH_", "GITHUB_"])),
     )
     .ok()?;
 
@@ -1290,6 +1309,28 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gh_api_only_takes_the_requests_this_crate_makes() {
+        for ok in [
+            "repos/o/r/releases/latest",
+            "repos/o/r/tags?per_page=100",
+            "search/repositories?q=foo%20bar&sort=stars&order=desc",
+        ] {
+            assert!(gh_api_path_ok(ok), "{ok}");
+        }
+        for bad in [
+            "--hostname evil.example",
+            "-X",
+            "user",
+            "repos/o/r/contents/x",
+            "repos/o/../r/tags",
+            "repos/o/r/tags?x=1 -X DELETE",
+            "graphql",
+        ] {
+            assert!(!gh_api_path_ok(bad), "{bad}");
+        }
+    }
+
     #[test]
     fn name_normalisation_is_pep_503() {
         for n in ["foo.bar", "foo--bar", "Foo_Bar", "FOO-._bar"] {
