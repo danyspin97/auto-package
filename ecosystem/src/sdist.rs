@@ -496,6 +496,10 @@ fn extract_into(tarball: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Re
     match kind {
         ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd => {
             let mut archive = open_tar(tarball, kind)?;
+            // Both are off by default; stated so a setuid bit or an xattr
+            // from an untrusted archive can never be applied.
+            archive.set_preserve_permissions(false);
+            archive.set_unpack_xattrs(false);
             std::fs::create_dir_all(dest).map_err(|e| Error::Io {
                 path: dest.to_path_buf(),
                 source: e,
@@ -522,6 +526,17 @@ fn extract_into(tarball: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Re
                     if let Some(target) = entry.link_name().map_err(Error::Tar)? {
                         check_link(dest, &link, &target)?;
                     }
+                }
+                // A hard link's target is relative to the archive root and
+                // is opened through whatever directories are on disk, so a
+                // symlinked directory planted earlier would redirect it.
+                // Checked as a link at the root.
+                if entry.header().entry_type().is_hard_link()
+                    && let Some(target) = entry.link_name().map_err(Error::Tar)?
+                {
+                    let link = entry.path().map_err(Error::Tar)?.into_owned();
+                    let at_root = link.file_name().map(Path::new).unwrap_or(&link);
+                    check_link(dest, at_root, &target)?;
                 }
                 entry.unpack_in(dest).map_err(Error::Tar)?;
             }
@@ -1690,6 +1705,45 @@ build-backend = "flit_core.buildapi"
         let out = dir.path().join("out");
         extract(&src, &out).unwrap();
         assert_extracted(&out);
+    }
+
+    #[test]
+    fn extract_refuses_a_hard_link_through_a_symlinked_directory() {
+        let build = |hard_target: &str| {
+            let mut buf = Vec::new();
+            {
+                let mut ar = tar::Builder::new(&mut buf);
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Symlink);
+                h.set_size(0);
+                h.set_mode(0o777);
+                ar.append_link(&mut h, "pkg/d", "sub").unwrap();
+                let mut h = tar::Header::new_gnu();
+                h.set_size(1);
+                h.set_mode(0o644);
+                h.set_cksum();
+                ar.append_data(&mut h, "pkg/sub/f", b"x".as_slice()).unwrap();
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Link);
+                h.set_size(0);
+                h.set_mode(0o644);
+                ar.append_link(&mut h, "pkg/h", hard_target).unwrap();
+                ar.finish().unwrap();
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let tgz = dir.path().join("a.tar.gz");
+            let mut enc =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            std::io::Write::write_all(&mut enc, &buf).unwrap();
+            std::fs::write(&tgz, enc.finish().unwrap()).unwrap();
+            let dest = dir.path().join("out");
+            (extract(&tgz, &dest), dir, dest)
+        };
+        let (result, _dir, _) = build("pkg/d/f");
+        assert!(matches!(result, Err(Error::LinkEscapes { .. })), "{result:?}");
+        let (result, _dir, dest) = build("pkg/sub/f");
+        result.unwrap();
+        assert!(dest.join("pkg/h").is_file());
     }
 
     #[test]
