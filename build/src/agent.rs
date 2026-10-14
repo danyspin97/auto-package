@@ -5194,6 +5194,23 @@ mod tests {
     }
 
     #[test]
+    fn turn_tools_cover_the_quilt_forms_the_prompts_use() {
+        // Checked with `claude -p --allowed-tools "Bash(git init *)"`: a rule
+        // `x *` also matches the bare `x`, and `cd <dir> && x` is split and
+        // each part checked, so no separate bare-form rules are needed.
+        let tools = turn_allowed_tools(
+            Task::FixAfterBuild,
+            std::path::Path::new("/srv/ws"),
+            Some(std::path::Path::new("/srv/ws/checkout")),
+        );
+        let list: Vec<&str> = tools.split(',').collect();
+        for sub in ["new", "add", "refresh", "series", "top", "applied"] {
+            assert!(list.contains(&format!("Bash(quilt {sub} *)").as_str()));
+            assert!(list.contains(&format!("Bash(cd source && quilt {sub} *)").as_str()));
+        }
+    }
+
+    #[test]
     fn skills_do_not_tell_the_turn_to_run_rpmspec() {
         let skills = concat!(env!("CARGO_MANIFEST_DIR"), "/../packaging-skills");
         for entry in std::fs::read_dir(skills).unwrap() {
