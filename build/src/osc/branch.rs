@@ -158,9 +158,12 @@ enum BranchFailure {
 /// What an OBS error body from a branch request means.
 fn classify_branch_failure(stderr: &str) -> BranchFailure {
     let lower = stderr.to_lowercase();
-    if lower.contains("double_branch_package") || lower.contains("already exists") {
+    // OBS' own wording only: a bare "already exists" or "locked" would also
+    // match a project that exists, or a lock named in an unrelated message,
+    // and a refused branch would then read as a reusable one.
+    if lower.contains("double_branch_package") || lower.contains("package already exists") {
         BranchFailure::AlreadyThere
-    } else if lower.contains("locked") {
+    } else if lower.contains("_locked") || lower.contains("is locked") {
         BranchFailure::Locked
     } else if is_not_found(stderr)
         || lower.contains("unknown_package")
@@ -835,6 +838,10 @@ mod tests {
         );
         assert_eq!(c("branch target package already exists: a/b"), AlreadyThere);
         assert_eq!(c("project 'Base:System' is locked"), Locked);
+        assert_eq!(c("<status code=\"project_locked\">x</status>"), Locked);
+        // Neither word alone says what happened.
+        assert_eq!(c("create_project: project already exists"), Other);
+        assert_eq!(c("unlocked mirror lookup failed"), Other);
         assert_eq!(c("HTTP Error 404: Not Found"), NotFound);
         assert_eq!(c("unknown_package"), NotFound);
         assert_eq!(c("create_project_no_permission"), NoPermission);
