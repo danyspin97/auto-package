@@ -4200,7 +4200,17 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
         return Ok(());
     };
     let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
-    if ap_ecosystem::sdist::extract(&tarball, scratch.path()).is_err() {
+    // Unpack only what the patches touch: `patch` reads nothing else, and
+    // unpacking the whole sdist for every build is the cost to avoid.
+    let mut targets: Vec<String> = Vec::new();
+    for name in &patches {
+        let name = name.replace("%{version}", "");
+        if let Ok(diff) = std::fs::read(checkout.join(&name)) {
+            targets.extend(patch_targets(&String::from_utf8_lossy(&diff)));
+        }
+    }
+    let wanted = |p: &Path| targets.iter().any(|t| p.ends_with(t));
+    if ap_ecosystem::sdist::extract_where(&tarball, scratch.path(), wanted).is_err() {
         return Ok(());
     }
     // A single top-level directory is what `%autosetup -n` enters.
@@ -5660,6 +5670,19 @@ fn render_maturin_service_file(normalized_name: &str, extra_manifests: &[String]
     )
 }
 
+/// The source paths a unified diff names, as `patch -p1` resolves them: the
+/// `---` and `+++` names with their first component dropped. `/dev/null`
+/// (a created or removed file) names nothing.
+fn patch_targets(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter_map(|l| l.strip_prefix("--- ").or_else(|| l.strip_prefix("+++ ")))
+        .map(|name| name.split('\t').next().unwrap_or("").trim())
+        .filter(|name| *name != "/dev/null")
+        .filter_map(|name| name.split_once('/').map(|(_, rest)| rest.to_string()))
+        .filter(|rest| !rest.is_empty())
+        .collect()
+}
+
 /// The `[tool.maturin] manifest-path` of an sdist's root `pyproject.toml`,
 /// relative to the archive root, when it names a manifest other than the root
 /// `Cargo.toml`. `None` when absent, default, the archive cannot be read, or
@@ -5671,7 +5694,20 @@ fn render_maturin_service_file(normalized_name: &str, extra_manifests: &[String]
 /// of at the workspace root.
 fn maturin_manifest_path(tarball: &Path) -> Option<String> {
     let scratch = tempfile::tempdir().ok()?;
-    ap_ecosystem::sdist::extract(tarball, scratch.path()).ok()?;
+    // Only the two root manifests are needed; unpacking the whole sdist for
+    // them is what this used to do.
+    ap_ecosystem::sdist::extract_where(tarball, scratch.path(), |p| {
+        let depth = p
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .count();
+        depth <= 2
+            && matches!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some("pyproject.toml" | "Cargo.toml")
+            )
+    })
+    .ok()?;
     let entries: Vec<_> = std::fs::read_dir(scratch.path())
         .ok()?
         .filter_map(|e| e.ok())
@@ -6583,6 +6619,12 @@ mod tests {
             tb.into_inner().unwrap().finish().unwrap();
         }
         assert_eq!(maturin_manifest_path(&tarball), None);
+    }
+
+    #[test]
+    fn patch_targets_are_the_diff_names_minus_the_first_component() {
+        let diff = "--- a/src/x.c\t2026-01-01\n+++ b/src/x.c\n--- /dev/null\n+++ b/new.h\n";
+        assert_eq!(patch_targets(diff), vec!["src/x.c", "src/x.c", "new.h"]);
     }
 
     #[test]

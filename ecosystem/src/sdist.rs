@@ -394,11 +394,22 @@ pub fn wheel_root_is_purelib(wheel: &Path) -> Option<bool> {
 /// renamed into place only once complete, so a failed or interrupted unpack
 /// never leaves a `dest` that looks like a finished extraction.
 pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
+    extract_where(tarball, dest, |_| true)
+}
+
+/// [`extract`] restricted to the entries `keep` accepts. The path it is given
+/// is the entry's path inside the archive (including the top-level directory).
+/// Skipped entries are still decompressed on the way past, but never written.
+pub fn extract_where(
+    tarball: &Path,
+    dest: &Path,
+    keep: impl Fn(&Path) -> bool,
+) -> Result<(), Error> {
     let mut partial = dest.as_os_str().to_owned();
     partial.push(".partial");
     let partial = PathBuf::from(partial);
     let _ = std::fs::remove_dir_all(&partial);
-    let result = extract_into(tarball, &partial).and_then(|()| {
+    let result = extract_into(tarball, &partial, &keep).and_then(|()| {
         // Only an empty `dest` is replaced; anything else is an error here.
         let _ = std::fs::remove_dir(dest);
         std::fs::rename(&partial, dest).map_err(|e| Error::Io {
@@ -412,7 +423,7 @@ pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
     result
 }
 
-fn extract_into(tarball: &Path, dest: &Path) -> Result<(), Error> {
+fn extract_into(tarball: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<(), Error> {
     let kind = classify(tarball).ok_or_else(|| Error::Io {
         path: tarball.to_path_buf(),
         source: std::io::Error::other(format!(
@@ -432,6 +443,9 @@ fn extract_into(tarball: &Path, dest: &Path) -> Result<(), Error> {
             // `unpack_in` keeps tar-rs's traversal and symlink protections.
             for entry in archive.entries().map_err(Error::Tar)? {
                 let mut entry = entry.map_err(Error::Tar)?;
+                if !keep(&entry.path().map_err(Error::Tar)?) {
+                    continue;
+                }
                 budget.charge(entry.size())?;
                 if let Some(reason) = escaping_link(&entry) {
                     tracing::warn!("skipping tar entry: {reason}");
@@ -441,7 +455,7 @@ fn extract_into(tarball: &Path, dest: &Path) -> Result<(), Error> {
             }
             Ok(())
         }
-        ArchiveKind::Zip | ArchiveKind::Wheel => extract_zip(tarball, dest),
+        ArchiveKind::Zip | ArchiveKind::Wheel => extract_zip(tarball, dest, keep),
     }
 }
 
@@ -506,7 +520,7 @@ fn escaping_link<R: Read>(entry: &tar::Entry<'_, R>) -> Option<String> {
 /// Pure-Rust, no reliance on the system `unzip` binary — the previous
 /// implementation shelled out, which quietly failed on build hosts without
 /// InfoZip installed and left no artifact behind to diagnose from.
-fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
+fn extract_zip(archive: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<(), Error> {
     let file = std::fs::File::open(archive).map_err(|e| Error::Io {
         path: archive.to_path_buf(),
         source: e,
@@ -532,6 +546,9 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
         let Some(rel) = entry.enclosed_name() else {
             continue;
         };
+        if !keep(&rel) {
+            continue;
+        }
         let out_path = dest.join(rel);
         if entry.is_dir() {
             std::fs::create_dir_all(&out_path).map_err(|e| Error::Io {
@@ -1546,6 +1563,23 @@ build-backend = "flit_core.buildapi"
         assert!(std::fs::symlink_metadata(dest.join("pkg/abs")).is_err());
         assert!(std::fs::symlink_metadata(dest.join("pkg/up")).is_err());
         assert!(std::fs::symlink_metadata(dest.join("pkg/ok")).is_ok());
+    }
+
+    #[test]
+    fn extract_where_writes_only_the_kept_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.gz");
+        write_tar(
+            &src,
+            &[
+                ("thing-1.0/README", b"hello\n"),
+                ("thing-1.0/setup.py", b"print(1)\n"),
+            ],
+        );
+        let out = dir.path().join("out");
+        extract_where(&src, &out, |p| p.ends_with("setup.py")).unwrap();
+        assert!(out.join("thing-1.0").join("setup.py").is_file());
+        assert!(!out.join("thing-1.0").join("README").exists());
     }
 
     #[test]
