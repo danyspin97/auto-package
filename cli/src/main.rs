@@ -1347,6 +1347,26 @@ impl DepDrops {
     }
 }
 
+/// The error that ends a build when packages were given up on: each one with
+/// what actually blocked it, since "after N failed attempts" is false for a
+/// package given up on because the packages it needs cannot be built, and says
+/// nothing about which of them or why.
+fn build_incomplete_message(give_ups: &std::collections::BTreeMap<String, String>) -> String {
+    let mut out = format!(
+        "build incomplete — gave up on {} package(s), blocking everything left in the \
+         closure that needs them:",
+        give_ups.len()
+    );
+    for (pkg, why) in give_ups {
+        let mut lines = why.lines();
+        out.push_str(&format!("\n  - {pkg}: {}", lines.next().unwrap_or("")));
+        for line in lines {
+            out.push_str(&format!("\n    {}", line.trim_start()));
+        }
+    }
+    out
+}
+
 /// The version a package was last built at here, when its last outcome was a
 /// success. Read from its state file, so it does not depend on OBS indexing.
 ///
@@ -1816,6 +1836,8 @@ fn cmd_build(
     let mut rate_limited_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     const MAX_RATE_LIMITED_ROUNDS: usize = 200;
+    // Why each package in `permanently_failed` was given up on.
+    let mut give_ups: std::collections::BTreeMap<String, String> = Default::default();
     let mut permanently_failed: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     // Why each dependency left the queue, for the messages that give up.
@@ -2564,6 +2586,14 @@ fn cmd_build(
                         let count = fail_counts.entry(rpm_name.clone()).or_insert(0);
                         *count += 1;
                         permanently_failed.insert(rpm_name.clone());
+                        give_ups.insert(
+                            rpm_name.clone(),
+                            format!(
+                                "it needs {} and none of them can be queued again:\n{}",
+                                deps.join(", "),
+                                dep_drops.explain(&deps)
+                            ),
+                        );
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
                             message: format!(
@@ -2613,6 +2643,14 @@ fn cmd_build(
                     };
                     if exhausted || *count >= limit {
                         permanently_failed.insert(rpm_name.clone());
+                        give_ups.insert(
+                            rpm_name.clone(),
+                            if exhausted {
+                                format!("it spent its full budget/attempt allowance ({reason})")
+                            } else {
+                                format!("it failed {count} times in a row (last: {reason})")
+                            },
+                        );
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
                             message: if exhausted {
@@ -2651,14 +2689,12 @@ fn cmd_build(
                 ap_core::diag!("{name} and all dependencies are already built");
                 return Ok(());
             }
-            let mut names: Vec<&String> = permanently_failed.iter().collect();
-            names.sort();
-            let names = names.into_iter().cloned().collect::<Vec<_>>().join(", ");
-            return Err(color_eyre::eyre::eyre!(
-                "build incomplete — gave up on {} after {max_target_retries} failed attempt(s) \
-                 each, blocking everything left in the closure that needs them: {names}",
-                permanently_failed.len()
-            ));
+            for pkg in &permanently_failed {
+                give_ups
+                    .entry(pkg.clone())
+                    .or_insert_with(|| "no reason was recorded".to_string());
+            }
+            return Err(color_eyre::eyre::eyre!(build_incomplete_message(&give_ups)));
         }
 
         // Compute what, if anything, from `batch_pending` is actually new
@@ -3163,6 +3199,84 @@ mod dep_drops_tests {
         assert!(why.contains("mystery") && why.contains("other"), "{why}");
         assert!(why.contains("nothing was recorded"), "{why}");
         assert_eq!(why.lines().count(), 2);
+    }
+
+    /// The vllm run's three given-up packages: the message names each with
+    /// the reason its dependency is out of reach, and says nothing about
+    /// "failed attempts" that never happened.
+    #[test]
+    fn the_give_up_message_states_each_packages_blocking_reason() {
+        let reporter = Warnings::default();
+        let drops = DepDrops::default();
+        drops.dropped(
+            &reporter,
+            "fastapi-cloud-cli",
+            "it is already in home:dspinella:open-webui as python-fastapi-cloud-cli with \
+             status \"succeeded\", which counts as resolvable",
+        );
+        drops.dropped(
+            &reporter,
+            "cuda-bindings",
+            "it is already in home:dspinella:open-webui as python-cuda-bindings with status \
+             \"succeeded\", which counts as resolvable, but python-cuda-bindings is built \
+             in home:dspinella:open-webui, but its spec there is an unfinished skeleton",
+        );
+        drops.dropped(
+            &reporter,
+            "nvidia-cutlass-dsl-libs-base",
+            "python-nvidia-cutlass-dsl-libs-base is excluded for openSUSE_Tumbleweed/i586",
+        );
+        let mut give_ups = std::collections::BTreeMap::new();
+        for (pkg, dep) in [
+            ("python-fastapi-cli", "fastapi-cloud-cli"),
+            ("python-humming-kernels", "cuda-bindings"),
+            (
+                "python-nvidia-cutlass-dsl-libs-cu12",
+                "nvidia-cutlass-dsl-libs-base",
+            ),
+        ] {
+            let deps = [dep.to_string()];
+            give_ups.insert(
+                pkg.to_string(),
+                format!(
+                    "it needs {dep} and none of them can be queued again:\n{}",
+                    drops.explain(&deps)
+                ),
+            );
+        }
+        let msg = build_incomplete_message(&give_ups);
+        assert!(
+            msg.starts_with("build incomplete — gave up on 3 package(s)"),
+            "{msg}"
+        );
+        assert!(!msg.contains("failed attempt"), "{msg}");
+        for needle in [
+            "- python-fastapi-cli: it needs fastapi-cloud-cli",
+            "- python-humming-kernels: it needs cuda-bindings",
+            "- python-nvidia-cutlass-dsl-libs-cu12: it needs nvidia-cutlass-dsl-libs-base",
+            "status \"succeeded\", which counts as resolvable",
+            "unfinished skeleton",
+            "is excluded for openSUSE_Tumbleweed/i586",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in:\n{msg}");
+        }
+        // A multi-line reason stays under its package.
+        let blocks: Vec<&str> = msg.split("\n  - ").skip(1).collect();
+        assert_eq!(blocks.len(), 3, "{msg}");
+        assert!(blocks[0].contains("\n    - fastapi-cloud-cli:"), "{msg}");
+    }
+
+    #[test]
+    fn a_failure_reason_is_reported_as_given() {
+        let give_ups = std::collections::BTreeMap::from([(
+            "python-foo".to_string(),
+            "it failed 10 times in a row (last: spec invalid)".to_string(),
+        )]);
+        let msg = build_incomplete_message(&give_ups);
+        assert!(
+            msg.ends_with("- python-foo: it failed 10 times in a row (last: spec invalid)"),
+            "{msg}"
+        );
     }
 }
 
