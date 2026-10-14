@@ -216,25 +216,11 @@ pub fn kill_all_groups() {
     }
 }
 
-#[cfg(unix)]
+/// SIGKILL the group `pid` leads. Only while the leader is still unreaped (see
+/// [`ap_core::pgroup`]): after that the number may belong to another group.
 pub(crate) fn kill_process_group(pid: u32) {
-    // A group id of 0 or -1 would address the caller's own group or every
-    // process we may signal, so only a real positive pid is ever passed on.
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return;
-    };
-    if pid <= 0 {
-        return;
-    }
-    // SAFETY: `kill` only sends a signal; the negative pid names the process
-    // group the child was placed in at spawn (`process_group(0)`).
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
-    }
+    ap_core::pgroup::kill_group(pid);
 }
-
-#[cfg(not(unix))]
-pub(crate) fn kill_process_group(_pid: u32) {}
 
 /// [`capture`] with a wall-clock limit: the child is killed if it has not
 /// exited after `timeout`.
@@ -292,7 +278,7 @@ pub fn capture_with_timeout_env(
             program: program.to_string(),
             source: e,
         })?;
-    let _group = match track_group(child.id()) {
+    let group = match track_group(child.id()) {
         Ok(g) => g,
         Err(e) => {
             let _ = child.kill();
@@ -343,31 +329,41 @@ pub fn capture_with_timeout_env(
     let out_rx = drain(child.stdout.take());
     let err_rx = drain(child.stderr.take());
 
+    // The exit is noticed without reaping the child, and the group is swept
+    // and unregistered before it is reaped: until then the child still owns
+    // its pid, so the sweep cannot hit an unrelated group that was handed the
+    // number, and neither can a shutdown sweep that still lists it.
+    let mut group = Some(group);
     let status = loop {
-        let polled = match child.try_wait() {
-            Ok(polled) => polled,
-            Err(e) => {
-                // Don't leave the child (and its descendants) running.
+        match ap_core::pgroup::has_exited(child.id()) {
+            // A descendant it left behind can still hold the pipes open: reap
+            // the group, then wait only briefly for the readers.
+            Ok(true) => {
                 kill_process_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.into());
+                drop(group.take());
+                match child.wait() {
+                    Ok(status) => break Some(status),
+                    Err(e) => return Err(e.into()),
+                }
             }
-        };
-        match polled {
-            Some(status) => break Some(status),
-            None if start.elapsed() >= timeout => {
+            Ok(false) if start.elapsed() >= timeout => {
                 kill_process_group(child.id());
+                drop(group.take());
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
             }
-            None => std::thread::sleep(Duration::from_millis(25)),
+            Ok(false) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => {
+                // Don't leave the child (and its descendants) running.
+                kill_process_group(child.id());
+                drop(group.take());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
         }
     };
-    // The child is gone, but a descendant it left behind can still hold the
-    // pipes open: reap the group, then wait only briefly for the readers.
-    kill_process_group(child.id());
     // `None` when the reader never reported back or its read failed: empty
     // output then means "unknown", not "the child printed nothing".
     // One shared deadline: a second full wait would let a slow descendant

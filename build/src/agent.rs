@@ -3228,7 +3228,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(Error::Launch)?;
-    let _group = match crate::proc::track_group(child.id()) {
+    let group = match crate::proc::track_group(child.id()) {
         Ok(g) => g,
         // Shutdown began before registration; the group is already killed.
         Err(e) => {
@@ -3243,6 +3243,11 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // only checked between turns. Kill the whole group after the deadline.
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    // True until the CLI has exited. The watchdog signals the group only while
+    // holding this lock and seeing it true, and the turn clears it before it
+    // reaps the child, so the watchdog can never signal a group id that was
+    // freed by the reap and handed to another process.
+    let child_alive = std::sync::Arc::new(std::sync::Mutex::new(true));
     // Milliseconds since `started` at the last line of output. The watchdog
     // reads it; the stdout loop below writes it.
     let started = std::time::Instant::now();
@@ -3250,6 +3255,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     {
         let pid = child.id();
         let timed_out = timed_out.clone();
+        let child_alive = child_alive.clone();
         let last_output = last_output.clone();
         std::thread::spawn(move || {
             use std::sync::atomic::Ordering;
@@ -3264,8 +3270,11 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     last_output.load(Ordering::SeqCst),
                 ));
                 if elapsed >= AGENT_TURN_TIMEOUT || idle >= AGENT_IDLE_TIMEOUT {
-                    timed_out.store(true, Ordering::SeqCst);
-                    crate::proc::kill_process_group(pid);
+                    let alive = child_alive.lock().unwrap_or_else(|e| e.into_inner());
+                    if *alive {
+                        timed_out.store(true, Ordering::SeqCst);
+                        crate::proc::kill_process_group(pid);
+                    }
                     return;
                 }
             }
@@ -3412,11 +3421,18 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         }
     }
 
-    let status = child.wait().map_err(Error::Io)?;
-    let _ = done_tx.send(());
+    // The exit is awaited without reaping the CLI, so it still owns its pid
+    // while its group is swept; the watchdog and the shutdown sweep are then
+    // stood down before the reap frees the number.
+    let exited = ap_core::pgroup::wait_exited(child.id());
     // The CLI is gone; reap anything it left in its group, then give the
     // stderr reader a moment (a surviving descendant could hold the pipe).
     crate::proc::kill_process_group(child.id());
+    *child_alive.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    let _ = done_tx.send(());
+    drop(group);
+    let status = child.wait().map_err(Error::Io)?;
+    exited.map_err(Error::Io)?;
     let mut stderr_content = stderr_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap_or_default();

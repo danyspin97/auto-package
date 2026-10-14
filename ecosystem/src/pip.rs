@@ -430,11 +430,21 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
     let err_rx = drain(child.stderr.take());
     let start = Instant::now();
     let deadline = start + timeout;
+    // The exit is noticed without reaping the child, and its group is swept
+    // before it is reaped: until then the child still owns its pid, so the
+    // sweep cannot hit an unrelated group that was handed the number.
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) if Instant::now() >= deadline => {
-                kill_process_group(child.id());
+        match ap_core::pgroup::has_exited(child.id()) {
+            // Reap whatever it left behind so the pipes close.
+            Ok(true) => {
+                ap_core::pgroup::kill_group(child.id());
+                match child.wait() {
+                    Ok(st) => break st,
+                    Err(e) => return Err(Error::Launch(e)),
+                }
+            }
+            Ok(false) if Instant::now() >= deadline => {
+                ap_core::pgroup::kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(Error::Failed {
@@ -442,17 +452,15 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
                     stderr: format!("timed out after {}s and was killed", timeout.as_secs()),
                 });
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Ok(false) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => {
-                kill_process_group(child.id());
+                ap_core::pgroup::kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(Error::Launch(e));
             }
         }
     };
-    // The child is gone; reap whatever it left behind so the pipes close.
-    kill_process_group(child.id());
     // One shared grace period for both readers.
     let reader_deadline = Instant::now() + READER_GRACE;
     let collect = |rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
@@ -476,21 +484,6 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
             stderr: e,
         }),
     }
-}
-
-/// SIGKILL a child's process group (the child was spawned with
-/// `process_group(0)`). Best effort: the group may already be gone.
-fn kill_process_group(pid: u32) {
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
 }
 
 pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
