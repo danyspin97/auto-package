@@ -527,17 +527,7 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
     }
-    let usage = memory
-        .events()
-        .iter()
-        .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-            if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } = ev {
-                acc.input_tokens += usage.input_tokens;
-                acc.output_tokens += usage.output_tokens;
-                acc.cost_usd += usage.cost_usd;
-            }
-            acc
-        });
+    let usage = memory.usage();
     eprintln!(
         "\nInterrupted — tokens: {} in / {} out — cost: ${:.4}",
         usage.input_tokens, usage.output_tokens, usage.cost_usd
@@ -1006,24 +996,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 RunOutcome::Failed
             };
             // Sum usage from all AgentReply events recorded during the run.
-            let total_usage =
-                memory
-                    .events()
-                    .iter()
-                    .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } =
-                            ev
-                        {
-                            acc.input_tokens += usage.input_tokens;
-                            acc.output_tokens += usage.output_tokens;
-                            acc.cost_usd += usage.cost_usd;
-                        }
-                        acc
-                    });
             reporter.report(&Event::RunFinished {
                 outcome,
                 elapsed: start.elapsed(),
-                usage: total_usage,
+                usage: memory.usage(),
             });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
@@ -1193,24 +1169,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             } else {
                 RunOutcome::Failed
             };
-            let total_usage =
-                memory
-                    .events()
-                    .iter()
-                    .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } =
-                            ev
-                        {
-                            acc.input_tokens += usage.input_tokens;
-                            acc.output_tokens += usage.output_tokens;
-                            acc.cost_usd += usage.cost_usd;
-                        }
-                        acc
-                    });
             reporter.report(&Event::RunFinished {
                 outcome,
                 elapsed: start.elapsed(),
-                usage: total_usage,
+                usage: memory.usage(),
             });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
@@ -1351,7 +1313,7 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
     // reported as queued, and a package listed twice is listed once.
     let mut latest: std::collections::BTreeMap<String, (String, PackageOutcome)> =
         Default::default();
-    for ev in memory.events() {
+    for ev in memory.finished() {
         if let Event::PackageFinished {
             pkg,
             version,
