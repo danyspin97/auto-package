@@ -4352,8 +4352,10 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
         .filter_map(|l| {
             let (tag, value) = l.split_once(':')?;
             let tag = tag.trim();
+            // `get` rather than slicing: spec text can hold multi-byte
+            // characters, and a mid-character cut would panic.
             (tag.len() > 5
-                && tag[..5].eq_ignore_ascii_case("patch")
+                && tag.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("patch"))
                 && tag[5..].chars().all(|c| c.is_ascii_digit()))
             .then(|| value.trim().to_string())
         })
@@ -7103,6 +7105,14 @@ mod tests {
 
         // nothing to check without patches
         assert!(check_patches_apply(&spec_path, "%autosetup -p1\n").is_ok());
+    }
+
+    #[test]
+    fn check_patches_apply_survives_non_ascii_spec_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("x.spec");
+        let spec = "%description\n日本語: テスト\nПривет: мир\n%autosetup -p1\n";
+        assert_eq!(check_patches_apply(&spec_path, spec), Ok(None));
     }
 
     #[test]
