@@ -670,6 +670,14 @@ fn main() -> color_eyre::Result<()> {
     if let Some(text) = summary {
         print!("{text}");
     }
+    if ap_build::proc::shutting_down() {
+        // Ctrl-C (or SIGTERM) stopped the scheduler, which returned an
+        // "interrupted" error before the handler's `process::exit(130)` ran.
+        // Give the handler a moment to print its usage line and exit, then
+        // exit 130 ourselves so the status never reads as an ordinary failure.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::process::exit(130);
+    }
     result
 }
 

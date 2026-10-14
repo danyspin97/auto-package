@@ -157,6 +157,12 @@ pub fn private_dir() -> &'static Path {
 
 /// Remove [`private_dir`] and everything in it. Best effort, for process exit.
 pub fn remove_private_dir() {
+    // The interrupt handler and `main` can both get here as the process ends;
+    // the second would race the first's `remove_dir_all`.
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let dir = private_dir();
     if dir != Path::new("/") {
         let _ = std::fs::remove_dir_all(dir);
