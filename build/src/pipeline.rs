@@ -1343,7 +1343,7 @@ fn run_stages(
     let obs_status = checkout_stage(&ctx, &mut st)?;
     let spec = generate_spec_stage(&ctx, &mut st)?;
     osc_service_stage(&ctx, &mut st, &spec)?;
-    fetch_sdist_stage(&ctx, &mut st)?;
+    fetch_sdist_stage(&ctx, &mut st, spec.need_spec)?;
     resume_budget(&ctx, &mut st);
 
     let build_log_nonempty = ctx
@@ -1798,7 +1798,7 @@ fn osc_service_stage(
         // workspace that EXCLUDES hf_xet/, whose own Cargo.lock holds `pprof`).
         // Vendoring only the root manifest leaves the registry short of the
         // build's crates: "no matching package named `pprof` found".
-        let extra_manifests = find_tarball(checkout_dir)
+        let extra_manifests = find_tarball(checkout_dir, &config.version)
             .and_then(|t| match maturin_manifest_path(&t) {
                 Ok(path) => path,
                 Err(e) => {
@@ -1832,7 +1832,7 @@ fn osc_service_stage(
             );
 
             // Fix any broken workspace definitions in the tarball before vendoring
-            if let Some(tarball) = find_tarball(checkout_dir) {
+            if let Some(tarball) = find_tarball(checkout_dir, &config.version) {
                 warn_if_err(
                     reporter,
                     "fixing the cargo workspace in the tarball",
@@ -1864,7 +1864,11 @@ fn osc_service_stage(
 }
 
 /// Step: FetchSdist, then the quilt `source/` symlink.
-fn fetch_sdist_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
+fn fetch_sdist_stage(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    need_spec: bool,
+) -> Result<(), PipelineResult> {
     let RunCtx {
         pkg_run,
         reporter,
@@ -1877,7 +1881,16 @@ fn fetch_sdist_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResu
     let step_attempts = &mut st.step_attempts;
 
     // ── Step: FetchSdist (extract for log analysis, if not done) ─────────────
-    if !ws.sdist_extracted() {
+    let tarball = find_tarball(checkout_dir, &ctx.config.version);
+    // A regenerated spec may come with a different source, so a leftover
+    // extraction is not trusted then.
+    if need_spec {
+        warn_if_err(reporter, "clearing the old sdist", ws.clear_sdist());
+    }
+    let extracted = tarball
+        .as_deref()
+        .is_some_and(|t| ws.sdist_extracted_from(t));
+    if !extracted {
         let sdist_step = begin_or_fail!(
             pkg_run,
             reporter,
@@ -1889,8 +1902,10 @@ fn fetch_sdist_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResu
 
         // Find tarball in checkout and extract to ws.sdist_dir()
         let mut outcome = StepOutcome::Ok;
-        if let Some(tarball) = find_tarball(checkout_dir) {
+        if let Some(tarball) = tarball {
             let sdist_dir = ws.sdist_dir();
+            // A different tarball or a half-failed extraction left files here.
+            warn_if_err(reporter, "clearing the old sdist", ws.clear_sdist());
             let _ = std::fs::create_dir_all(&sdist_dir);
             if let Err(e) = ap_ecosystem::sdist::extract(&tarball, &sdist_dir) {
                 // The agent reads `sdist/` to review the package; an empty one
@@ -1900,6 +1915,12 @@ fn fetch_sdist_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResu
                     message: format!("extracting {} failed: {e}", tarball.display()),
                 });
                 outcome = StepOutcome::Failed;
+            } else {
+                warn_if_err(
+                    reporter,
+                    "recording the sdist extraction",
+                    ws.mark_sdist_extracted(&tarball),
+                );
             }
         } else {
             reporter.report(&Event::Warning {
@@ -4375,7 +4396,8 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
     let Some(checkout) = spec_path.parent() else {
         return Ok(None);
     };
-    let Some(tarball) = find_tarball(checkout) else {
+    let version = crate::spec::parse_header(spec).map(|h| h.version);
+    let Some(tarball) = find_tarball(checkout, version.as_deref().unwrap_or_default()) else {
         return Ok(None);
     };
     let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -4445,30 +4467,43 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
     Ok(None)
 }
 
-fn find_tarball(dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(dir).ok()?.find_map(|e| {
-        let e = e.ok()?;
-        let name = e.file_name();
-        let n = name.to_string_lossy();
-        // Exclude Cargo dep bundles — not the Python/Rust source tarball.
-        if n == "vendor.tar.zst" || n == "registry.tar.zst" {
-            return None;
-        }
-        if n.ends_with(".tar.gz")
-            || n.ends_with(".tar.bz2")
-            || n.ends_with(".tar.zst")
-            || n.ends_with(".zip")
-            || n.ends_with(".whl")
-        {
-            Some(e.path())
-        } else {
-            None
-        }
-    })
+/// The source archive in the checkout. A checkout can hold several (an old
+/// version's tarball next to the new one), so prefer the one named for
+/// `version` and break ties by name, never by directory order.
+fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let name = e.file_name();
+            let n = name.to_string_lossy();
+            // Exclude Cargo dep bundles — not the Python/Rust source tarball.
+            if n == "vendor.tar.zst" || n == "registry.tar.zst" {
+                return None;
+            }
+            (n.ends_with(".tar.gz")
+                || n.ends_with(".tar.bz2")
+                || n.ends_with(".tar.zst")
+                || n.ends_with(".zip")
+                || n.ends_with(".whl"))
+            .then(|| e.path())
+        })
+        .collect();
+    let named_for_version = |p: &PathBuf| {
+        !version.is_empty()
+            && p.file_name()
+                .is_some_and(|n| n.to_string_lossy().contains(version))
+    };
+    found.sort_by(|a, b| {
+        named_for_version(b)
+            .cmp(&named_for_version(a))
+            .then_with(|| a.cmp(b))
+    });
+    found.into_iter().next()
 }
 
 fn find_sdist_top_level(checkout_dir: &Path, pkg_name: &str, version: &str) -> String {
-    if let Some(tb) = find_tarball(checkout_dir) {
+    if let Some(tb) = find_tarball(checkout_dir, version) {
         let fname = tb.file_name().unwrap_or_default().to_string_lossy();
         // A wheel unpacks flat (no wrapping directory) — see
         // `ap_ecosystem::sdist::extract`'s `.whl` branch.
@@ -7132,6 +7167,21 @@ mod tests {
         std::fs::write(dir.path().join("python313-foo-1.0-1.1.x86_64.rpm"), b"").unwrap();
         assert!(rpm_satisfies_dep(dir.path(), "python313-foo"));
         assert!(rpm_satisfies_dep(dir.path(), "python313-foo>=0.1"));
+    }
+
+    #[test]
+    fn find_tarball_prefers_the_current_version_and_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a-1.0.tar.gz", "foo-1.0.tar.gz", "foo-2.0.tar.gz", "vendor.tar.zst"] {
+            std::fs::write(dir.path().join(f), b"").unwrap();
+        }
+        let name = |v: &str| {
+            find_tarball(dir.path(), v)
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        };
+        assert_eq!(name("2.0").as_deref(), Some("foo-2.0.tar.gz"));
+        assert_eq!(name("1.0").as_deref(), Some("a-1.0.tar.gz"));
+        assert_eq!(name("9").as_deref(), Some("a-1.0.tar.gz"));
     }
 
     #[test]
