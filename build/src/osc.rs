@@ -11,6 +11,9 @@ use ap_core::event::Event;
 use crate::obs_status;
 use crate::proc::{self, Captured, Emit};
 
+mod branch;
+pub use branch::*;
+
 /// Where `osc` runs when the command is not scoped to a checkout.
 fn anywhere() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
