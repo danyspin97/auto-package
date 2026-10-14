@@ -279,7 +279,7 @@ pub fn plan(
     let packages = osc::try_list_project_packages(project, emit)?;
     let mut names: Vec<String> = packages
         .iter()
-        .filter(|n| only.is_none_or(|o| o == n.as_str()))
+        .filter(|n| only.is_none_or(|o| osc::fuzzy_key(o) == osc::fuzzy_key(n)))
         .cloned()
         .collect();
     names.sort();

@@ -446,7 +446,7 @@ fn resolve_dependency_config(
             // which then fails spec generation and loops forever reselecting
             // the same broken version. Skip and keep trying other
             // candidates/repos instead.
-            if dep_rpm == config.rpm_name {
+            if ap_build::osc::fuzzy_key(&dep_rpm) == ap_build::osc::fuzzy_key(&config.rpm_name) {
                 probe_failure_warnings.push(format!(
                     "{repo_url}: resolved back to this package's own rpm_name \
                      ({dep_rpm}) — likely the umbrella project of a devel-wrapped \
@@ -1495,6 +1495,14 @@ fn cmd_build(
     // A repository tells us two things we were only guessing at: whether it is
     // a Python project or a Rust crate, and what it actually calls itself. Ask
     // it before anything is named after the guess.
+    // The package's OBS name is the spelling `project` already lists for it,
+    // if it has one: OBS names are case-sensitive, and a lowercase guess would
+    // check out, and so duplicate, a package OBS has as `python-APScheduler`.
+    let own_listing = ap_build::osc::try_list_project_packages(
+        project,
+        ap_build::proc::Emit::run(reporter.as_ref()),
+    )
+    .map_err(|e| color_eyre::eyre::eyre!(e))?;
     let (name, rpm_name, subprojects) = match &source_repo {
         None => (name.to_string(), ap_build::osc::rpm_name(name), Vec::new()),
         Some(repo) => {
@@ -1539,6 +1547,7 @@ fn cmd_build(
             (effective_name, rpm, probe.subprojects)
         }
     };
+    let rpm_name = ap_build::osc::obs_name(&own_listing, &rpm_name);
     let name = name.as_str();
 
     let config = PipelineConfig {
@@ -1909,7 +1918,7 @@ fn cmd_build(
                     keep
                 })
                 .filter_map(|dep| {
-                    let dep_config =
+                    let mut dep_config =
                         match resolve_dependency_config(&dep, &config, reporter.as_ref()) {
                             Some(c) => c,
                             None => {
@@ -1923,6 +1932,9 @@ fn cmd_build(
                                 return None;
                             }
                         };
+                    // Build it under the spelling OBS already lists, if any.
+                    dep_config.rpm_name =
+                        ap_build::osc::obs_name(&own_listing, &dep_config.rpm_name);
                     let dep_rpm = dep_config.rpm_name.clone();
                     let dep_pkg_run = run_dir.pkg(&dep_rpm);
                     if dep_pkg_run.ensure().is_err() {
@@ -2117,9 +2129,18 @@ fn cmd_build(
             ));
         }
 
-        for t in &targets {
+        let own_listing = ap_build::osc::try_list_project_packages(
+            project,
+            ap_build::proc::Emit::run(reporter.as_ref()),
+        )
+        .map_err(|e| color_eyre::eyre::eyre!(e))?;
+        let target_names: Vec<String> = targets
+            .iter()
+            .map(|t| ap_build::osc::obs_name(&own_listing, &ap_build::osc::rpm_name(&t.name)))
+            .collect();
+        for (t, rpm_name) in targets.iter().zip(&target_names) {
             reporter.report(&Event::TargetSelected {
-                pkg: ap_build::osc::rpm_name(&t.name),
+                pkg: rpm_name.clone(),
                 version: t.version.clone(),
                 reason: t.reason.clone(),
                 blocked_by: t.blocked_by.clone(),
@@ -2130,8 +2151,7 @@ fn cmd_build(
         let mut handles: Vec<(String, String, std::thread::JoinHandle<PipelineResult>)> =
             Vec::new();
         let mut spawn_error: Option<color_eyre::Report> = None;
-        for target_info in targets {
-            let rpm_name = ap_build::osc::rpm_name(&target_info.name);
+        for (target_info, rpm_name) in targets.into_iter().zip(target_names) {
             let pkg_config = PipelineConfig {
                 pkg_name: target_info.name.clone(),
                 rpm_name: rpm_name.clone(),

@@ -656,6 +656,12 @@ pub fn select_target(
         })
         .collect();
 
+    // The caller names a given-up package by the OBS spelling it has, which
+    // need not match this module's guess — compare by `fuzzy_key`.
+    let failed_keys: std::collections::HashSet<String> = permanently_failed
+        .iter()
+        .map(|p| osc::fuzzy_key(p))
+        .collect();
     let resolvable: Vec<bool> = resolution.iter().map(|r| *r != Resolution::No).collect();
     let in_distro_count = resolution
         .iter()
@@ -708,7 +714,7 @@ pub fn select_target(
         }
         // Given up on this one already — leave it (and anything that needs
         // it) out of the frontier instead of re-selecting it forever.
-        if permanently_failed.contains(&osc::rpm_name(&node.name)) {
+        if failed_keys.contains(&osc::fuzzy_key(&osc::rpm_name(&node.name))) {
             continue;
         }
 
@@ -751,7 +757,7 @@ pub fn select_target(
         // being silently swallowed just because *some* package gave up.
         let mut explained = vec![false; nodes.len()];
         for (i, node) in nodes.iter().enumerate() {
-            if !resolvable[i] && permanently_failed.contains(&osc::rpm_name(&node.name)) {
+            if !resolvable[i] && failed_keys.contains(&osc::fuzzy_key(&osc::rpm_name(&node.name))) {
                 explained[i] = true;
             }
         }

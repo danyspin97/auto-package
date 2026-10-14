@@ -1085,23 +1085,47 @@ fn fetch_project_packages(
     Ok(parse_package_listing(&out.stdout))
 }
 
-/// Package names from `osc ls <project>`, lowercased. A multibuild package is
-/// listed as `<source>:<flavor>` (`apache-arrow:python-pyarrow`) and its flavor
-/// is itself a package that gets built and published (python313-pyarrow), so
-/// the flavor name counts as available too — otherwise a dependency Factory
+/// Package names from `osc ls <project>`, in the spelling OBS stores them
+/// (OBS names are case-sensitive: `python-APScheduler`). A multibuild package
+/// is listed as `<source>:<flavor>` (`apache-arrow:python-pyarrow`) and its
+/// flavor is itself a package that gets built and published (python313-pyarrow),
+/// so the flavor name counts as available too — otherwise a dependency Factory
 /// already ships looks absent and gets queued to be built again.
 fn parse_package_listing(stdout: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    for line in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        let name = line.to_lowercase();
+    for name in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
         if let Some((_, flavor)) = name.split_once(':')
             && flavor.starts_with("python")
         {
             out.insert(flavor.to_string());
         }
-        out.insert(name);
+        out.insert(name.to_string());
     }
     out
+}
+
+/// The name OBS lists for the package `guess` refers to, or `guess` itself
+/// when nothing listed matches.
+///
+/// `guess` is an [`rpm_name`] guess, which is lowercase and may spell the
+/// separators differently from the real package. A listed name matches when
+/// its [`fuzzy_key`] equals the guess's, so `python-apscheduler` finds
+/// `python-APScheduler`. Anything that checks out, builds or names a package
+/// in `project` must use this spelling, not the guess: osc, the checkout
+/// directory and the spec file all follow the real name.
+pub fn obs_name(listing: &std::collections::HashSet<String>, guess: &str) -> String {
+    if listing.contains(guess) {
+        return guess.to_string();
+    }
+    let key = fuzzy_key(guess);
+    // Several listed spellings can share a key; take the first in sort order
+    // so the answer does not depend on hash iteration order.
+    listing
+        .iter()
+        .filter(|p| fuzzy_key(p) == key)
+        .min()
+        .cloned()
+        .unwrap_or_else(|| guess.to_string())
 }
 
 /// Create an initial `.changes` entry for a new package using `osc vc`.
@@ -1166,6 +1190,21 @@ pub fn ensure_package(
 
     if check.success() {
         return Ok(());
+    }
+    // OBS names are case-sensitive, so the failed lookup above does not rule
+    // out a package that differs only in case or separators
+    // (`python-apscheduler` vs. `python-APScheduler`). Creating one would
+    // leave the project with two packages for one upstream, so refuse and let
+    // the caller use the existing name.
+    let listing = try_list_project_packages(project, emit).map_err(Error::NotActionable)?;
+    if let Some(existing) = listing
+        .iter()
+        .filter(|p| fuzzy_key(p) == fuzzy_key(pkg_name))
+        .min()
+    {
+        return Err(Error::NotActionable(format!(
+            "{project} already has {existing}; refusing to create {pkg_name} next to it"
+        )));
     }
 
     let meta = format!(
@@ -1923,7 +1962,7 @@ pub fn get_project_build_statuses(
             Ok(entries) => entries
                 .into_iter()
                 .filter(|e| e.repo == repo && e.arch == arch)
-                .map(|e| (e.pkg.to_lowercase(), obs_status::resolve_lenient(&e)))
+                .map(|e| (e.pkg.clone(), obs_status::resolve_lenient(&e)))
                 .collect(),
             Err(e) => {
                 // A cut-off listing must not read as a partial set of statuses.
@@ -2004,7 +2043,7 @@ fn parse_project_build_statuses(
         }
         let name = line.trim_start_matches([' ', '|']).trim();
         if !name.is_empty() {
-            pending_pkgs.push(name.to_lowercase());
+            pending_pkgs.push(name.to_string());
         }
     }
 
@@ -2530,7 +2569,7 @@ mod package_listing_tests {
         assert!(pkgs.contains("python-pyarrow"));
         assert!(pkgs.contains("apache-arrow:python-pyarrow"));
         assert!(pkgs.contains("apache-arrow"));
-        assert!(pkgs.contains("python-foo"));
+        assert!(pkgs.contains("Python-Foo"));
     }
 
     #[test]
@@ -2538,6 +2577,40 @@ mod package_listing_tests {
         let pkgs = parse_package_listing("gcc15:bootstrap\nfoo:test\n");
         assert!(!pkgs.contains("bootstrap"));
         assert!(!pkgs.contains("test"));
+    }
+
+    /// OBS names are case-sensitive: the listing must keep the spelling it
+    /// has, or the name passed back to osc points at a package that does not
+    /// exist (`python-apscheduler` for `python-APScheduler`).
+    #[test]
+    fn the_listing_keeps_each_package_in_its_own_case() {
+        let pkgs = parse_package_listing("python-APScheduler\n");
+        assert!(pkgs.contains("python-APScheduler"));
+        assert!(!pkgs.contains("python-apscheduler"));
+    }
+
+    #[test]
+    fn obs_name_returns_the_listed_spelling_for_a_lowercase_guess() {
+        let listing = parse_package_listing("python-APScheduler\npython-pydantic_core\n");
+        assert_eq!(obs_name(&listing, "python-apscheduler"), "python-APScheduler");
+        // A separator difference between the guess and the listing still finds it.
+        assert_eq!(
+            obs_name(&listing, "python-pydantic-core"),
+            "python-pydantic_core"
+        );
+    }
+
+    #[test]
+    fn obs_name_keeps_the_guess_when_nothing_is_listed() {
+        let listing = parse_package_listing("python-APScheduler\n");
+        assert_eq!(obs_name(&listing, "python-croniter"), "python-croniter");
+        assert_eq!(obs_name(&listing, "python-APScheduler"), "python-APScheduler");
+    }
+
+    #[test]
+    fn obs_name_is_stable_when_several_spellings_match() {
+        let listing = parse_package_listing("python-Foo\npython-foo\n");
+        assert_eq!(obs_name(&listing, "python-FOO"), "python-Foo");
     }
 }
 
