@@ -32,9 +32,59 @@ pub fn is_quiet() -> bool {
 macro_rules! diag {
     ($($arg:tt)*) => {
         if !$crate::sink::is_quiet() {
-            eprintln!($($arg)*);
+            eprintln!("{}", $crate::sink::printable(&format!($($arg)*)));
         }
     };
+}
+
+/// `text` with control characters removed, keeping newlines and tabs.
+///
+/// Text printed to the terminal can come from upstream: a build log line or
+/// a package's own message. An escape sequence in it (a title change, a
+/// cursor move, OSC 52 clipboard writes) would act on the user's terminal, so
+/// C0, DEL and C1 controls, ESC included, are dropped before printing.
+pub fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(is_stripped_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(strip_controls(text, false))
+}
+
+fn is_stripped_control(c: char) -> bool {
+    c.is_control() && c != '\n' && c != '\t'
+}
+
+/// [`printable`], except that SGR colour sequences (`ESC [ <digits> m`) are
+/// kept. The human sink colours its own output with them; upstream text can
+/// still set a colour, which is harmless, but cannot move the cursor, set a
+/// title or write the clipboard.
+fn strip_controls(text: &str, keep_sgr: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if keep_sgr && c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            let mut params = String::new();
+            while let Some(&p) = chars.peek() {
+                if !(p.is_ascii_digit() || p == ';') {
+                    break;
+                }
+                params.push(p);
+                chars.next();
+            }
+            if chars.peek() == Some(&'m') {
+                chars.next();
+                out.push_str("\u{1b}[");
+                out.push_str(&params);
+                out.push('m');
+            }
+            continue;
+        }
+        if !is_stripped_control(c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -549,7 +599,7 @@ impl Reporter for HumanSink {
             return;
         }
         if let Some(msg) = self.format(event) {
-            eprintln!("{msg}");
+            eprintln!("{}", strip_controls(&msg, true));
         }
     }
 }
@@ -878,5 +928,37 @@ mod tests {
         // Can't downcast the Arc<dyn Reporter> to Probe easily; just verify
         // the ambient pkg was fully torn down after the whole call ends.
         assert_eq!(current_pkg(), None);
+    }
+}
+
+#[cfg(test)]
+mod printable_tests {
+    use super::*;
+
+    #[test]
+    fn escape_sequences_from_upstream_are_not_printed() {
+        // An OSC title change and a clipboard write, as a build log might carry.
+        let text = "ok\u{1b}]0;pwned\u{7}\n\tnext\u{1b}]52;c;ZGF0YQ==\u{1b}\\";
+        let out = printable(text);
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}'), "{out:?}");
+        assert_eq!(out, "ok]0;pwned\n\tnext]52;c;ZGF0YQ==\\");
+    }
+
+    #[test]
+    fn c1_controls_are_dropped_too() {
+        // U+009B is the single-character CSI.
+        assert_eq!(printable("a\u{9b}2Jb"), "a2Jb");
+    }
+
+    #[test]
+    fn plain_text_is_borrowed_unchanged() {
+        assert!(matches!(printable("plain\ttext\n"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn human_output_keeps_its_own_colours_only() {
+        let msg = "\u{1b}[31mred\u{1b}[0m \u{1b}[2J\u{1b}]0;x\u{7}";
+        let out = strip_controls(msg, true);
+        assert_eq!(out, "\u{1b}[31mred\u{1b}[0m J]0;x");
     }
 }
