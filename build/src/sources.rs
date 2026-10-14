@@ -315,11 +315,16 @@ pub fn fetch_archive_to(url: &str, dest: &Path) -> Result<(), FetchFailure> {
         }
         cache.files.remove(url)
     };
-    if let Some(path) = cached.filter(|p| p.is_file())
-        && std::fs::copy(&path, dest).is_ok()
-    {
-        let _ = std::fs::remove_file(&path);
-        return Ok(());
+    if let Some(path) = cached.filter(|p| p.is_file()) {
+        // A rename moves no data; it fails across filesystems (EXDEV), where
+        // a copy is the only way.
+        if std::fs::rename(&path, dest).is_ok() {
+            return Ok(());
+        }
+        if std::fs::copy(&path, dest).is_ok() {
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
+        }
     }
     download_archive(url, dest)
 }
