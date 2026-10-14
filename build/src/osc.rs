@@ -3769,6 +3769,10 @@ pub fn obs_build(
     // stays missing this long means it never will.
     const NO_RESULTS_LIMIT: Duration = Duration::from_secs(180);
     let mut no_results_since: Option<Instant> = None;
+    // A built verdict whose job history cannot be read at all is accepted
+    // after this long (see `obs_status::accept_unconfirmed`).
+    const UNCONFIRMED_LIMIT: Duration = Duration::from_secs(300);
+    let mut unconfirmed_since: Option<Instant> = None;
     let mut blocked_credit = Duration::ZERO;
     let mut last_tick = Instant::now();
     let mut last_block_change = Instant::now();
@@ -3849,6 +3853,30 @@ pub fn obs_build(
         } else {
             no_results_since = None;
         }
+        // A verdict no job history could confirm (empty or evicted history,
+        // failing API calls) is not worth waiting on forever: settle for it.
+        let status = match obs_status::accept_unconfirmed(&status) {
+            Some(accepted) => {
+                let since = *unconfirmed_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= UNCONFIRMED_LIMIT {
+                    reporter.report(&Event::Warning {
+                        step,
+                        message: format!(
+                            "no OBS job history to confirm the {accepted} result for \
+                             {pkg_name} after {}s; accepting it unconfirmed",
+                            since.elapsed().as_secs()
+                        ),
+                    });
+                    accepted
+                } else {
+                    status
+                }
+            }
+            None => {
+                unconfirmed_since = None;
+                status
+            }
+        };
         let status_str = status.to_string();
         // What blocks or delays the package is part of the status: a change
         // in it is progress worth showing, and keeps the polling brisk.

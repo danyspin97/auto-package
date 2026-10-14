@@ -451,8 +451,10 @@ fn word_status(word: &str) -> BuildStatus {
 ///   [`Evidence::confirm`], any built verdict) may describe an older source
 ///   revision, so it is only trusted when the newest job in the job history
 ///   was built from the revision currently on the server — and then the
-///   job's own result code wins. Otherwise the result is
-///   `Unknown("stale: <word>")`, which callers must keep waiting on.
+///   job's own result code wins (a non-verdict job code defers to the
+///   `_result` one). Otherwise the result is `Unknown("stale: <word>")`, or
+///   `Unknown("unconfirmed: <word>")` when no job information could be read;
+///   callers keep waiting on both, the latter only for a bounded time.
 pub fn resolve(entry: &ResultEntry, evidence: &Evidence) -> BuildStatus {
     let word = verdict_word(entry);
     let status = word_status(word);
@@ -468,15 +470,36 @@ pub fn resolve(entry: &ResultEntry, evidence: &Evidence) -> BuildStatus {
     if !must_confirm {
         return status;
     }
-    if let (Some(src), Some(job)) = (&evidence.source, &evidence.job)
-        && job.is_for(src)
-    {
-        let from_job = BuildStatus::from(job.code.as_str());
-        if from_job.is_terminal() {
-            return from_job;
+    match (&evidence.source, &evidence.job) {
+        (Some(src), Some(job)) if job.is_for(src) => {
+            // `unchanged` is a success; a code that is no verdict at all
+            // (`meta change`, ...) says nothing against the `_result` one,
+            // which then stands for the current revision.
+            let from_job = word_status(job.code.as_str());
+            if from_job.is_terminal() {
+                from_job
+            } else {
+                status
+            }
         }
+        // The newest job is from another revision: the verdict is old.
+        (Some(_), Some(_)) => BuildStatus::Unknown(format!("stale: {word}")),
+        // No job or source information could be read (empty or evicted job
+        // history, a failed API call): nothing to confirm against, which
+        // [`accept_unconfirmed`] lets a caller stop waiting for.
+        _ => BuildStatus::Unknown(format!("{UNCONFIRMED}{word}")),
     }
-    BuildStatus::Unknown(format!("stale: {word}"))
+}
+
+const UNCONFIRMED: &str = "unconfirmed: ";
+
+/// The verdict behind an `Unknown("unconfirmed: <word>")` from [`resolve`]:
+/// what to settle for once evidence has stayed unavailable for long enough.
+pub fn accept_unconfirmed(s: &BuildStatus) -> Option<BuildStatus> {
+    match s {
+        BuildStatus::Unknown(t) => t.strip_prefix(UNCONFIRMED).map(word_status),
+        _ => None,
+    }
 }
 
 /// Resolve ignoring staleness: the dirty flag is dropped, so every terminal
@@ -642,7 +665,34 @@ mod tests {
     #[test]
     fn dirty_repo_without_evidence_is_stale() {
         let s = resolve(&entry("succeeded", None, true), &Evidence::default());
-        assert_eq!(s, BuildStatus::Unknown("stale: succeeded".into()));
+        assert_eq!(s, BuildStatus::Unknown("unconfirmed: succeeded".into()));
+    }
+
+    #[test]
+    fn missing_job_info_is_unconfirmed_and_can_be_accepted() {
+        let s = resolve(&entry("succeeded", None, true), &Evidence::default());
+        assert_eq!(accept_unconfirmed(&s), Some(BuildStatus::Succeeded));
+        let f = BuildStatus::Unknown("unconfirmed: failed".into());
+        assert_eq!(accept_unconfirmed(&f), Some(BuildStatus::Failed));
+        // A job for another revision is stale, never accepted.
+        let stale = BuildStatus::Unknown("stale: failed".into());
+        assert_eq!(accept_unconfirmed(&stale), None);
+        assert_eq!(accept_unconfirmed(&BuildStatus::Building), None);
+    }
+
+    #[test]
+    fn matching_job_with_a_non_verdict_code_defers_to_the_result() {
+        let mut ev = evidence("abc", "abc", "unchanged");
+        ev.confirm = true;
+        assert_eq!(
+            resolve(&entry("succeeded", None, false), &ev),
+            BuildStatus::Succeeded
+        );
+        ev.job.as_mut().unwrap().code = "meta change".into();
+        assert_eq!(
+            resolve(&entry("failed", None, false), &ev),
+            BuildStatus::Failed
+        );
     }
 
     #[test]
@@ -850,7 +900,7 @@ mod tests {
         // No evidence at all is not a confirmation.
         assert_eq!(
             resolve(&e, &confirm(Evidence::default())),
-            BuildStatus::Unknown("stale: failed".into())
+            BuildStatus::Unknown("unconfirmed: failed".into())
         );
         // The job for the new sources decides.
         assert_eq!(
