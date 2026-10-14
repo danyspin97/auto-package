@@ -287,7 +287,14 @@ tool assumes these may be hostile and limits what they can reach:
   shell `rm` or general web access (the dependency-name lookup turn may search
   the web, but can touch no local file). Credential variables are removed from
   its environment, except the Anthropic credentials the CLI itself needs.
-  Those remain visible to its commands. Build logs, notes, and names taken
+  Those remain visible to its commands. The environment is an allowlist
+  (PATH, locale, proxy and CA settings, `ANTHROPIC_*`, `CLAUDE_*`), so
+  `AWS_*`, `GOOGLE_*` and other Bedrock/Vertex variables are dropped. To use
+  those backends, name the variables to hand over in
+  `AUTO_PACKAGE_AGENT_ENV_PASS`, e.g.
+  `AUTO_PACKAGE_AGENT_ENV_PASS=AWS_PROFILE,AWS_REGION,CLAUDE_CODE_USE_BEDROCK`.
+  Named variables skip every credential check (the agent's commands can then
+  read them), except `OSC*` ones, which are never passed. Build logs, notes, and names taken
   from a spec are fenced as data in prompts.
 - **Outbound HTTP**: downloads use https only, redirects included, and refuse
   loopback, private, link-local, carrier-grade NAT, reserved and multicast

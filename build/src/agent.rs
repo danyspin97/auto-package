@@ -128,19 +128,65 @@ const CREDENTIAL_EXCEPTIONS: &[&str] = &[
 /// listed in [`CREDENTIAL_EXCEPTIONS`] are dropped too.
 ///
 /// The pure-function shape is kept so tests can drive it with crafted
-/// inputs. The production call site is still
-/// `scrub_env_for_agent(std::env::vars().collect(), &[])`.
+/// inputs. The production call sites use [`agent_env`].
 ///
 /// `extra_deny` reserves an extension slot for a future `--deny-env`
 /// flag the user could use to add project-specific sensitive names
 /// (e.g. `MY_DEPLOY_HOOK=...`). Pass `&[]` when none is requested.
+#[cfg(test)]
 pub(crate) fn scrub_env_for_agent(
     vars: Vec<(String, String)>,
     extra_deny: &[String],
 ) -> BTreeMap<String, String> {
+    scrub_env_for_agent_passing(vars, extra_deny, &[])
+}
+
+/// Env var naming extra variables (comma-separated) to hand to the agent on
+/// top of the allowlist, e.g. `AWS_PROFILE,AWS_REGION` for Bedrock.
+pub(crate) const AGENT_ENV_PASS_VAR: &str = "AUTO_PACKAGE_AGENT_ENV_PASS";
+
+/// The names listed in [`AGENT_ENV_PASS_VAR`].
+fn agent_env_pass_list() -> Vec<String> {
+    parse_pass_list(&std::env::var(AGENT_ENV_PASS_VAR).unwrap_or_default())
+}
+
+fn parse_pass_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The environment for the `claude` subprocess: this process's, scrubbed,
+/// plus whatever [`AGENT_ENV_PASS_VAR`] asks for.
+pub(crate) fn agent_env() -> BTreeMap<String, String> {
+    scrub_env_for_agent_passing(std::env::vars().collect(), &[], &agent_env_pass_list())
+}
+
+/// [`scrub_env_for_agent`] with `pass`: variables named there are kept even
+/// if the allowlist, denylist or credential checks would drop them, since
+/// the operator asked for them by name (Bedrock and Vertex need `AWS_*` and
+/// `GOOGLE_*`, which are otherwise removed). `OSC*` names are never passed:
+/// the agent does not publish.
+pub(crate) fn scrub_env_for_agent_passing(
+    vars: Vec<(String, String)>,
+    extra_deny: &[String],
+    pass: &[String],
+) -> BTreeMap<String, String> {
     let mut kept: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in vars {
         let upper = name.to_ascii_uppercase();
+        if pass.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+            if upper.starts_with("OSC") {
+                ap_core::diag!(
+                    "ap-build: not passing {name} to the agent subprocess (OBS credential)"
+                );
+            } else if !extra_deny.iter().any(|a| a == &name) {
+                kept.insert(name, value);
+            }
+            continue;
+        }
         if !AGENT_ENV_ALLOW.contains(&upper.as_str())
             && !AGENT_ENV_ALLOW_PREFIXES
                 .iter()
@@ -3284,9 +3330,9 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // after this point — e.g. QUILT_PATCHES below — is additive and NOT
     // credential-shaped, so it is fine to set after the clear.
     //
-    // No `--pass-env` CLI flag yet; wire the extension through by threading
-    // a `&[String]` down from the caller when one is added.
-    let scrubbed_env = scrub_env_for_agent(std::env::vars().collect(), &[]);
+    // Extra variables the operator named in AUTO_PACKAGE_AGENT_ENV_PASS are
+    // added back by `agent_env`.
+    let scrubbed_env = agent_env();
     cmd.env_clear().envs(&scrubbed_env);
     cmd.args([
         "--print",
@@ -4769,6 +4815,24 @@ mod tests {
         // treating it as `no_change` would mask real bugs upstream.
         let text = "The review is complete. See you later.";
         assert!(pick_turn_response(text, &[]).is_none());
+    }
+
+    #[test]
+    fn named_variables_are_passed_through_but_not_osc_credentials() {
+        let vars = vec![
+            pair("AWS_PROFILE", "bedrock"),
+            pair("AWS_SECRET_ACCESS_KEY", "k"),
+            pair("AWS_REGION", "us-east-1"),
+            pair("OSC_PASSWORD", "hunter2"),
+            pair("GITHUB_TOKEN", "t"),
+        ];
+        let pass = parse_pass_list(" AWS_PROFILE, AWS_REGION ,,OSC_PASSWORD,AWS_SECRET_ACCESS_KEY");
+        let kept = scrub_env_for_agent_passing(vars.clone(), &[], &pass);
+        assert_eq!(kept.get("AWS_PROFILE").map(String::as_str), Some("bedrock"));
+        assert!(kept.contains_key("AWS_REGION") && kept.contains_key("AWS_SECRET_ACCESS_KEY"));
+        assert!(!kept.contains_key("OSC_PASSWORD") && !kept.contains_key("GITHUB_TOKEN"));
+        // Without the list none of them gets through.
+        assert!(scrub_env_for_agent(vars, &[]).is_empty());
     }
 
     // ── scrub_env_for_agent ───────────────────────────────────────────────────

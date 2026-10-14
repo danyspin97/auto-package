@@ -103,7 +103,7 @@ pub fn claude_print_json(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
-    let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
+    let env = crate::agent::agent_env();
     let args = [
         "--print",
         "--output-format",
