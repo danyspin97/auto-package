@@ -692,7 +692,15 @@ fn branch_item(
             item.origin = b.origin_project;
         }
         BranchResult::AlreadyThere => {
-            ctx.say(format!("{branch} already has {}; reusing it", item.pkg))
+            ctx.say(format!("{branch} already has {}; reusing it", item.pkg));
+            // A branch left by an earlier run may be behind its origin.
+            match osc::rebase_package(branch, &item.pkg, emit) {
+                Ok(()) => ctx.say(format!("rebased {branch}/{} onto its origin", item.pkg)),
+                Err(e) => ctx.warn(format!(
+                    "could not rebase {branch}/{} onto its origin, building it as it is: {e}",
+                    item.pkg
+                )),
+            }
         }
     }
     Ok(())

@@ -221,6 +221,30 @@ pub fn branch_package(
     }
 }
 
+/// The API request that rebases a branched package onto the current sources
+/// of its origin (what `osc rebase` does).
+pub fn rebase_api_path(project: &str, pkg: &str) -> String {
+    format!("/source/{project}/{}?cmd=rebase", enc(pkg))
+}
+
+/// Rebase the branched `project/pkg` onto its origin's current sources, so a
+/// branch reused from an earlier run does not build, and later submit, on
+/// sources the origin has since moved past.
+pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<(), Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", pkg)?;
+    let path = rebase_api_path(project, pkg);
+    let out = api_call(Some("POST"), &path, None, emit)?;
+    if out.success() {
+        return Ok(());
+    }
+    Err(Error::OscFailed {
+        cmd: format!("api -X POST {path}"),
+        code: out.code,
+        stderr: out.stderr,
+    })
+}
+
 /// Read a branch response, falling back to what was asked for when a field
 /// is missing.
 fn parse_branch_response(xml: &str, source: &str, pkg: &str, target_project: &str) -> Branched {
@@ -745,6 +769,14 @@ mod tests {
             "/source/Base:System/libsigc%2B%2B?cmd=branch\
              &target_project=home%3Au%3Abranches%3ABase%3ASystem\
              &target_package=libsigc%2B%2B&ignoredevel=1&comment=a%20b"
+        );
+    }
+
+    #[test]
+    fn rebase_path_names_the_branched_package() {
+        assert_eq!(
+            rebase_api_path("home:u:branches:S", "libsigc++"),
+            "/source/home:u:branches:S/libsigc%2B%2B?cmd=rebase"
         );
     }
 
