@@ -1471,16 +1471,19 @@ pub fn create_initial_changes(
     if checkout_dir.join(&changes_name).exists() {
         return Ok(());
     }
-    let out = proc::capture(
-        "osc",
-        &["vc", "-m", "Initial packaging"],
-        checkout_dir,
-        emit,
-    )
-    .map_err(during(format!("vc in {}", checkout_dir.display())))?;
+    add_changes_entry(checkout_dir, "Initial packaging", emit)
+}
+
+/// Add a `.changes` entry saying `message`, with `osc vc`: the committer
+/// identity comes from the osc configuration, and a missing `.changes` file is
+/// created. A version bump records its own entry this way, so a package
+/// updated by the tool does not reach OBS (or a submit request) without one.
+pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), Error> {
+    let out = proc::capture("osc", &["vc", "-m", message], checkout_dir, emit)
+        .map_err(during(format!("vc in {}", checkout_dir.display())))?;
     if !out.success() {
         return Err(Error::OscFailed {
-            cmd: format!("vc -m \"Initial packaging\" in {}", checkout_dir.display()),
+            cmd: format!("vc -m {message:?} in {}", checkout_dir.display()),
             code: out.code,
             stderr: out.stderr,
         });

@@ -1572,9 +1572,9 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
     // already have a spec" must reflect what was checked out, not what we
     // are about to write.
     let spec_existed_before_generation = spec_path.exists();
-    let need_spec = config.regen
-        || !spec_existed_before_generation
-        || spec_version_differs(spec_path, &config.version);
+    let version_bump =
+        spec_existed_before_generation && spec_version_differs(spec_path, &config.version);
+    let need_spec = config.regen || !spec_existed_before_generation || version_bump;
 
     let (sdist_top_level, is_maturin, from_repo_archive, is_rust) = if need_spec {
         let step = begin_or_fail!(
@@ -1602,6 +1602,20 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
                         osc::create_initial_changes(
                             checkout_dir,
                             rpm_name,
+                            Emit::new(reporter, step.id),
+                        ),
+                    );
+                }
+                // A version bump on an already-packaged package gets its own
+                // `.changes` entry; without one OBS accepts the new sources
+                // with no record of why they changed.
+                if version_bump {
+                    warn_if_err(
+                        reporter,
+                        "adding the version-update .changes entry",
+                        osc::add_changes_entry(
+                            checkout_dir,
+                            &format!("Update to {}", config.version),
                             Emit::new(reporter, step.id),
                         ),
                     );
