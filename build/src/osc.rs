@@ -3289,6 +3289,44 @@ pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
     out
 }
 
+/// Whether `info` (a project meta) builds for `repo` on `arch`: the `Err`
+/// says what the project does offer. A meta with no repository at all is
+/// left to the "no build repositories" handling elsewhere.
+fn check_repo_arch(
+    info: &ProjectInfo,
+    project: &str,
+    repo: &str,
+    arch: &str,
+) -> Result<(), String> {
+    if info.repositories.is_empty() {
+        return Ok(());
+    }
+    let Some(def) = info.repositories.iter().find(|r| r.name == repo) else {
+        let names: Vec<&str> = info.repositories.iter().map(|r| r.name.as_str()).collect();
+        return Err(format!(
+            "{project} has no repository {repo} (it has: {})",
+            names.join(", ")
+        ));
+    };
+    if !def.arches.iter().any(|a| a == arch) {
+        return Err(format!(
+            "{project} does not build {repo} for {arch} (it builds: {})",
+            def.arches.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Fail before waiting when the project does not build for `repo`/`arch`:
+/// OBS would answer with no result at all, forever. A meta that cannot be
+/// read skips the check; the wait's own "no results" limit still applies.
+fn ensure_builds_for(project: &str, repo: &str, arch: &str) -> Result<(), Error> {
+    let Ok(Some(meta)) = get_project_meta(project, Emit::quiet()) else {
+        return Ok(());
+    };
+    check_repo_arch(&parse_project_info(&meta), project, repo, arch).map_err(Error::NotActionable)
+}
+
 /// Wait for the OBS remote build to complete, fetch the log, and download
 /// built RPMs on success.
 ///
@@ -3307,6 +3345,7 @@ pub fn obs_build(
 ) -> Result<(), Error> {
     let reporter = emit.reporter;
     let step = emit.step;
+    ensure_builds_for(project, repo, arch)?;
     const POLL_INTERVAL: Duration = Duration::from_secs(15);
     const MAX_WAIT: Duration = Duration::from_secs(7200);
 
@@ -3336,6 +3375,12 @@ pub fn obs_build(
     let mut rechecked_since_change = false;
     const UNRESOLVABLE_CONFIRM: Duration = Duration::from_secs(60);
     let mut unresolvable_since: Option<Instant> = None;
+    // A repository/arch the project does not build for has no result at all,
+    // which would otherwise read as "not started yet" until MAX_WAIT. A
+    // freshly committed package shows up within seconds, so a result that
+    // stays missing this long means it never will.
+    const NO_RESULTS_LIMIT: Duration = Duration::from_secs(180);
+    let mut no_results_since: Option<Instant> = None;
 
     let status = loop {
         if crate::proc::shutting_down() {
@@ -3393,6 +3438,18 @@ pub fn obs_build(
                 continue;
             }
         };
+        if status == BuildStatus::Unknown("no results".to_string()) {
+            let since = *no_results_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= NO_RESULTS_LIMIT {
+                return Err(Error::NotActionable(format!(
+                    "OBS has reported no build result for {pkg_name} on {repo}/{arch} for {}s; \
+                     check that {project} builds for that repository and architecture",
+                    since.elapsed().as_secs()
+                )));
+            }
+        } else {
+            no_results_since = None;
+        }
         let status_str = status.to_string();
 
         let mut status = status;
@@ -4173,5 +4230,39 @@ mod dash_name_tests {
         assert!(check_obs_name("package", "-x").is_err());
         assert!(fetch_project_packages("-x", Emit::quiet()).is_err());
         assert!(list_package_files("-x", "p", Emit::quiet()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod repo_arch_tests {
+    use super::*;
+
+    const META: &str = r#"<project name="home:u:p">
+  <repository name="openSUSE_Tumbleweed">
+    <path project="openSUSE:Factory" repository="snapshot"/>
+    <arch>x86_64</arch>
+    <arch>aarch64</arch>
+  </repository>
+</project>"#;
+
+    #[test]
+    fn a_repository_and_arch_the_project_builds_are_accepted() {
+        let info = parse_project_info(META);
+        assert!(check_repo_arch(&info, "home:u:p", "openSUSE_Tumbleweed", "aarch64").is_ok());
+    }
+
+    #[test]
+    fn a_misspelt_repository_or_missing_arch_names_what_exists() {
+        let info = parse_project_info(META);
+        let e = check_repo_arch(&info, "home:u:p", "Tumbleweed", "x86_64").unwrap_err();
+        assert!(e.contains("openSUSE_Tumbleweed"), "{e}");
+        let e = check_repo_arch(&info, "home:u:p", "openSUSE_Tumbleweed", "i586").unwrap_err();
+        assert!(e.contains("x86_64, aarch64"), "{e}");
+    }
+
+    #[test]
+    fn a_meta_without_repositories_is_not_judged_here() {
+        let info = parse_project_info("<project name=\"p\"/>");
+        assert!(check_repo_arch(&info, "p", "r", "a").is_ok());
     }
 }
