@@ -1298,58 +1298,128 @@ pub fn normalized_module_name(pypi_name: &str) -> String {
     pypi_name.to_lowercase().replace(['-', '.'], "_")
 }
 
-/// Drop `BuildRequires` lines that name a package an earlier line already did.
+/// Drop `BuildRequires` lines that repeat a package an earlier line already
+/// required.
 ///
 /// py2pack emits the PyPI build requirements and [`post_process`] then adds
 /// `[build-system] requires` from the sdist, so anything declared in both
 /// appears twice — the single most common edit in the attempt journals, and
-/// once even a triplicate. The line carrying a version constraint wins,
-/// whichever order the two appear in.
+/// once even a triplicate. A duplicate is the same package with the same
+/// version constraint, or a bare line next to a constrained one (the
+/// constrained line wins, whichever order the two appear in). Lines in
+/// different `%if`/`%else` branches never duplicate each other, and a line
+/// naming several packages (`BuildRequires: gcc make`) is left untouched
+/// rather than risk dropping one of them.
 pub fn dedupe_build_requires(spec: &str) -> String {
     use std::collections::HashMap;
 
-    /// The bare package name a BuildRequires line is about, lowercased.
-    fn subject(line: &str) -> Option<String> {
-        let rest = line.strip_prefix("BuildRequires:")?.trim();
-        let inner = match rest.strip_prefix("%{python_module ") {
-            Some(i) => i.strip_suffix('}').unwrap_or(i),
-            None => rest,
+    /// Conditional scope plus package name, the unit duplicates are found in.
+    type Group = (Vec<u32>, String);
+
+    /// Split `BuildRequires` text into tokens, keeping `%{...}` whole.
+    fn tokens(text: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let (mut start, mut depth) = (None, 0usize);
+        for (i, c) in text.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            let sep = depth == 0 && (c.is_whitespace() || c == ',');
+            match (sep, start) {
+                (true, Some(s)) => {
+                    out.push(&text[s..i]);
+                    start = None;
+                }
+                (false, None) if !sep => start = Some(i),
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            out.push(&text[s..]);
+        }
+        out
+    }
+
+    /// `(name, constraint)` when `text` names exactly one package.
+    fn single(text: &str) -> Option<(String, String)> {
+        let toks = tokens(text);
+        let is_op = |t: &str| !t.is_empty() && t.chars().all(|c| "<>=!".contains(c));
+        let (name, constraint) = match toks.as_slice() {
+            [one] => match one.find(['<', '>', '=', '!']) {
+                Some(i) if i > 0 => (&one[..i], one[i..].to_string()),
+                Some(_) => return None,
+                None => (*one, String::new()),
+            },
+            [name, op, ver] if is_op(op) => (*name, format!("{op}{ver}")),
+            _ => return None,
         };
-        let name = inner.split([' ', '>', '<', '=', '!']).next()?.trim();
-        if name.is_empty() {
-            None
-        } else {
-            Some(format!(
-                "{}{}",
-                if rest.starts_with("%{python_module ") {
-                    "py:"
-                } else {
-                    ""
-                },
-                name.to_lowercase()
-            ))
+        // Any other macro or a rich dependency is not something to compare.
+        (!name.starts_with('%') && !name.starts_with('('))
+            .then(|| (name.to_lowercase(), constraint))
+    }
+
+    /// The package a BuildRequires line is about and its constraint, keyed so
+    /// `cmake` and `%{python_module cmake}` stay different packages.
+    fn subject(line: &str) -> Option<(String, String)> {
+        let rest = line.strip_prefix("BuildRequires:")?.trim();
+        match rest.strip_prefix("%{python_module ") {
+            Some(inner) => {
+                let (name, constraint) = single(inner.strip_suffix('}')?)?;
+                Some((format!("py:{name}"), constraint))
+            }
+            None => single(rest),
         }
     }
 
-    // First pass: for each subject, remember the index of the line to keep.
+    // Each line's conditional scope: the path of branch ids it sits in.
     let lines: Vec<&str> = spec.lines().collect();
-    let mut keep: HashMap<String, usize> = HashMap::new();
+    let mut stack: Vec<u32> = Vec::new();
+    let mut next_branch = 0u32;
+    let mut groups: HashMap<Group, Vec<(usize, String)>> = HashMap::new();
     for (i, line) in lines.iter().enumerate() {
-        let Some(key) = subject(line) else { continue };
-        match keep.get(&key) {
-            // Prefer the constrained form — it carries strictly more information.
-            Some(&prev) if lines[prev].contains(">=") || lines[prev].contains("<=") => {}
-            _ => {
-                keep.insert(key, i);
+        let word = line.split_whitespace().next().unwrap_or("");
+        match word {
+            "%if" | "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => {
+                next_branch += 1;
+                stack.push(next_branch);
+            }
+            "%else" | "%elif" | "%elifarch" | "%elifos" => {
+                next_branch += 1;
+                if let Some(top) = stack.last_mut() {
+                    *top = next_branch;
+                }
+            }
+            "%endif" => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        if let Some((name, constraint)) = subject(line) {
+            groups
+                .entry((stack.clone(), name))
+                .or_default()
+                .push((i, constraint));
+        }
+    }
+
+    let mut drop = vec![false; lines.len()];
+    for entries in groups.values() {
+        let any_constrained = entries.iter().any(|(_, c)| !c.is_empty());
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, constraint) in entries {
+            if (constraint.is_empty() && any_constrained) || seen.contains(&constraint.as_str()) {
+                drop[*i] = true;
+            } else {
+                seen.push(constraint);
             }
         }
     }
 
     let mut out = String::with_capacity(spec.len());
     for (i, line) in lines.iter().enumerate() {
-        if let Some(key) = subject(line)
-            && keep.get(&key) != Some(&i)
-        {
+        if drop[i] {
             continue;
         }
         out.push_str(line);
@@ -1927,6 +1997,37 @@ BuildRequires:  fdupes
         assert!(out.contains("%{python_module setuptools >= 42}"), "{out}");
         assert!(out.contains("fdupes"), "non-python BR dropped");
         assert!(out.contains("pip"), "pip dropped");
+    }
+
+    #[test]
+    fn dedupe_respects_conditionals_multi_package_lines_and_distinct_constraints() {
+        let spec = "\
+BuildRequires:  gcc make
+BuildRequires:  make
+BuildRequires:  foo >= 1
+BuildRequires:  foo < 2
+BuildRequires:  foo >= 1
+%if 0%{?suse_version} > 1500
+BuildRequires:  bar
+%else
+BuildRequires:  bar
+%endif
+BuildRequires:  bar
+BuildRequires:  baz
+%if 1
+BuildRequires:  baz
+BuildRequires:  baz
+%endif
+";
+        let out = dedupe_build_requires(spec);
+        assert!(out.contains("BuildRequires:  gcc make\n"), "{out}");
+        assert_eq!(out.matches("make").count(), 2, "{out}");
+        assert_eq!(out.matches("foo >= 1").count(), 1, "{out}");
+        assert_eq!(out.matches("foo < 2").count(), 1, "{out}");
+        // both branches and the top level keep their own `bar`
+        assert_eq!(out.matches("bar").count(), 3, "{out}");
+        // top-level `baz` plus one inside the %if
+        assert_eq!(out.matches("baz").count(), 2, "{out}");
     }
 
     #[test]
