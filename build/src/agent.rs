@@ -838,6 +838,8 @@ openSUSE spec conventions to keep in mind:
      (convention 40) — prefer this over hand-editing the file with Edit/Write,
      since it fills in the date/committer header for you in the exact format
      OBS expects.
+   - Bash(rpm -qlp <rpms dir>/*): list the files of an RPM this project built
+     (convention 61). Only when the workspace map shows an `rpms/` line.
    - WebFetch: read PyPI metadata only (`https://pypi.org/pypi/<name>/json`).
      There is no other web access in this turn.
    - Bash(cd source && quilt *): create and manage source patches using quilt.
@@ -2429,7 +2431,18 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    - `libcuda.so.1` is the NVIDIA DRIVER API, supplied at runtime by the
      driver (not the CUDA toolkit), so a package that links only against it
      can use the upstream wheel here. Do not add `cuda-devel`/`cuda-runtime`
-     or any CUDA toolkit BuildRequires for it.
+     or any CUDA toolkit BuildRequires for it. RPM's automatic dependency
+     generator turns that NEEDED entry into `Requires: libcuda.so.1()(64bit)`,
+     which no repository provides, so every package that depends on yours
+     becomes unresolvable (`nothing provides libcuda.so.1()(64bit)`). Filter
+     it out in the package that ships the `.so`, before `%description`:
+         %global __requires_exclude ^libcuda\.so\.1.*$
+     (list further driver libraries such as `libnvidia-ml\.so\.1` in the same
+     alternation, `^(libcuda|libnvidia-ml)\.so\.1.*$`). Such a capability is
+     never a package: do NOT report it in `unresolvable_packages`, and do not
+     add a `Requires:` or `Provides:` for it. If a dependency you only
+     consume carries it, return `"blocked"` with that as `why`; the fix belongs in that
+     dependency's spec.
    - Compiled code in the wheel means the spec must be per-architecture
      (`ExclusiveArch` for the arches the wheel covers, or the matching
      `%ifarch`), not noarch.
@@ -2462,6 +2475,17 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    differs from its distribution name, and the real module names are in the
    installed package's file list (`rpm -ql` or the wheel's contents). Fix the
    import in `%check`, and do not report the dependency as missing.
+   You cannot run `rpm -ql` (nothing is installed in your sandbox), but the
+   RPMs this project built are in the work directory's `rpms/` directory and
+   `rpm -qlp <that directory>/<file>.rpm` lists the files one ships (the
+   exact command and directory are in the prompt when they are available;
+   `ls` the directory to find the file). Do this before editing `%check` or
+   blocking on "the module is absent". A dependency RPM of only a few KB
+   whose file list holds no modules is a package whose own spec is
+   unfinished (an empty skeleton that "built"): name that package in your
+   `why`. A `cuda` namespace that resolves without `cuda.bindings` is this
+   case when `python3X-cuda-bindings` is that small. Do not guess at
+   `cuda-pathfinder` or at renamed modules.
    Split a subpackage only when a part of the package needs something the rest
    does not, such as an optional GPU backend (see convention 53). Do not split
    a package just because one dependency is hard to satisfy.
@@ -2938,6 +2962,9 @@ pub struct TurnRequest<'a> {
     pub checkout_dir: Option<&'a std::path::Path>,
     /// Optional short note injected into the prompt just before the hint section.
     pub context: Option<&'a str>,
+    /// Where the RPMs this project built are kept. When set, the turn may list
+    /// one's files with `rpm -qlp` (see [`rpm_inspection_tools`]).
+    pub rpms_dir: Option<&'a std::path::Path>,
     /// How many models to move along [`AGENT_MODELS`] from the one the attempt
     /// number picks. Quota is per model, so the pipeline bumps this after a 429
     /// to retry the same turn on a different model.
@@ -3436,6 +3463,19 @@ fn turn_allowed_tools(
     tools
 }
 
+/// Read-only queries on the RPMs this project built, so a turn can tell what a
+/// dependency really ships (convention 61) instead of guessing from an import
+/// error. Tied to the `rpms/` directory by prefix: `rpm -q` takes `--eval`
+/// and `--define`, so it is never granted as a bare command. Empty without a
+/// directory.
+fn rpm_inspection_tools(rpms_dir: Option<&std::path::Path>) -> String {
+    let Some(dir) = rpms_dir else {
+        return String::new();
+    };
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    format!(",Bash(rpm -qlp {}/*)", dir.display())
+}
+
 /// Project settings are read from the turn's directories, so a file the turn
 /// wrote there (hooks, MCP servers, wider permissions) would take effect on the
 /// next turn. Deny writing them.
@@ -3532,7 +3572,10 @@ pub fn ensure_logged_in() -> Result<(), String> {
 fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
-    let allowed_tools = turn_allowed_tools(req.task, req.workspace, req.checkout_dir);
+    let mut allowed_tools = turn_allowed_tools(req.task, req.workspace, req.checkout_dir);
+    if req.task != Task::TranslateUnresolvableDeps {
+        allowed_tools.push_str(&rpm_inspection_tools(req.rpms_dir));
+    }
     let denied_tools = turn_denied_tools(req.workspace, req.checkout_dir);
 
     // Escalate with the attempt number: the first 2 attempts go to Haiku 5.5
@@ -4365,7 +4408,12 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              `action` to `no_change` and list every name you were given in \
              `unresolvable_packages`, using whichever name you believe actually \
              identifies the upstream project (unchanged if you have no better \
-             name for it). Use WebSearch or PyPI only to disambiguate a name \
+             name for it). An RPM capability that is not a package name \
+             (`libfoo.so.1()(64bit)`, `pkgconfig(foo)`, `cmake(Foo)`, \
+             `/usr/bin/foo`, `python3dist(foo)`) is listed exactly as given: the \
+             pipeline classifies it itself (distro-provided, vendor driver library, \
+             or the upstream project it names), so never turn it into a guessed \
+             PyPI name. Use WebSearch or PyPI only to disambiguate a name \
              you are not confident about; do not spend the turn on anything else."
         }
     };
@@ -4436,6 +4484,13 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         if *always || path.exists() {
             map_lines.push(format!("  {name:<20} {desc}"));
         }
+    }
+    if let Some(dir) = req.rpms_dir {
+        map_lines.push(format!(
+            "  {:<20} RPMs built so far: `rpm -qlp {}/<file>.rpm` lists what one ships",
+            "rpms/",
+            dir.display()
+        ));
     }
     let workspace_map = map_lines.join("\n");
 
@@ -4800,6 +4855,7 @@ mod tests {
             session_id: None,
             checkout_dir: None,
             context: None,
+            rpms_dir: None,
             model_rotation: 0,
             on_tool_use: None,
         }
@@ -5657,6 +5713,14 @@ mod tests {
         assert!(tools.split(',').any(|t| t == "Read(//srv/ws/**)"));
         assert!(!tools.contains("quilt"));
         assert_eq!(tools.matches("Read(").count(), 1);
+    }
+
+    #[test]
+    fn rpm_listing_is_granted_only_under_the_rpms_directory() {
+        assert_eq!(rpm_inspection_tools(None), "");
+        let tools = rpm_inspection_tools(Some(std::path::Path::new("/srv/nonexistent/rpms")));
+        assert_eq!(tools, ",Bash(rpm -qlp /srv/nonexistent/rpms/*)");
+        assert!(!tools.contains("rpm *") && !tools.contains("rpm -q *"));
     }
 
     #[test]

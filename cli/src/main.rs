@@ -2129,10 +2129,7 @@ fn cmd_build(
                 .partition(|d| patch_requests.get(d).is_some());
             let mut patch_handles = Vec::new();
             for rpm_dep in patch_batch {
-                let dep = rpm_dep
-                    .strip_prefix("python-")
-                    .unwrap_or(&rpm_dep)
-                    .to_string();
+                let dep = ap_build::osc::strip_rpm_prefix(&rpm_dep).to_string();
                 let Some(request) = patch_requests.get(&dep) else {
                     continue;
                 };
@@ -2180,16 +2177,39 @@ fn cmd_build(
                     }
                 }
             }
-            let handles: Vec<_> = batch
+            // Every reported name is triaged once (see `depclass::triage`):
+            // the `python<ver>-` prefix and `-devel` wrapping come off, flavors
+            // and repeats of one package collapse, and what is not something to
+            // build (a capability, an interpreter package, a vendor library, a
+            // system tool, something the distro provides) is dropped with its
+            // reason. Each of those is final for the run, so it counts as
+            // attempted: a package that keeps re-reporting the name is then
+            // recognized as making no progress (see `new_deps` below).
+            let mut in_batch = std::collections::HashSet::new();
+            let mut triaged: Vec<String> = Vec::new();
+            for raw in batch {
+                match ap_build::depclass::triage(&raw, &|c| ap_build::osc::distro_provides(c)) {
+                    ap_build::depclass::Triage::Build { name, .. } => {
+                        if in_batch.insert(ap_build::osc::fuzzy_key(&name)) {
+                            triaged.push(name);
+                        }
+                    }
+                    ap_build::depclass::Triage::Skip(ap_build::depclass::Skip::Empty) => {}
+                    ap_build::depclass::Triage::Skip(skip) => {
+                        attempted_deps.insert(ap_build::osc::fuzzy_key(&raw));
+                        dep_drops.dropped(reporter.as_ref(), &raw, skip.reason());
+                        if skip.is_unbuildable() && !newly_unbuildable.contains(&raw) {
+                            newly_unbuildable.push(raw);
+                        }
+                    }
+                }
+            }
+            // Dependencies dropped only because a build of them is already
+            // underway: a later request for one must not be refused as "already
+            // attempted" if that build then fails.
+            let mid_build: std::cell::RefCell<Vec<String>> = Default::default();
+            let handles: Vec<_> = triaged
                 .into_iter()
-                // Convert RPM names to PyPI names: "python-foo" → "foo"
-                // The agent returns RPM names, but we need PyPI names for querying.
-                .map(|rpm_name| {
-                    rpm_name
-                        .strip_prefix("python-")
-                        .unwrap_or(&rpm_name)
-                        .to_string()
-                })
                 .filter(|dep| {
                     // A dependency we already built here is available, even while
                     // OBS has not indexed it yet. Its version is logged so a bound
@@ -2207,34 +2227,11 @@ fn cmd_build(
                     }
                 })
                 .filter(|dep| {
-                    // Some PyPI packages (`ninja`, reported by an agent per
-                    // convention 27 the same as any other missing
-                    // dependency) just redistribute a tool openSUSE already
-                    // ships as its own system package of the same name.
-                    // Building a `python-<name>` RPM for one would only
-                    // duplicate it — see `is_system_tool_alias`.
-                    let keep = !ap_build::pipeline::is_system_tool_alias(dep);
-                    if !keep {
-                        dep_drops.dropped(
-                            reporter.as_ref(),
-                            dep,
-                            "it redistributes a system package of the same name \
-                             (see SYSTEM_TOOL_ALIASES), which the distro already ships",
-                        );
-                    }
-                    keep
-                })
-                .filter(|dep| {
-                    // Must run before the `distro_provides` filter below,
-                    // not after: that filter can drop a dep for a reason
-                    // unrelated to "already attempted" (it's satisfied by
-                    // the distro, not built by us), and the no-progress
-                    // detection in the batch loop above (`new_deps`) relies
-                    // on every dep that ever passes through here ending up
-                    // in `attempted_deps` — regardless of which later filter
-                    // drops it — so a package that keeps re-reporting the
-                    // same distro-satisfied name is still recognized as
-                    // making no progress instead of retrying forever.
+                    // Counted as attempted whatever a later filter does with
+                    // it, so a package that keeps re-reporting a name that is
+                    // already satisfied (in the project, a linked project)
+                    // is still recognized as making no progress instead of
+                    // retrying forever.
                     let fresh = attempted_deps.insert(ap_build::osc::fuzzy_key(dep));
                     if !fresh {
                         let earlier = dep_drops
@@ -2247,33 +2244,6 @@ fn cmd_build(
                         );
                     }
                     fresh
-                })
-                .filter(|dep| {
-                    // A C library's openSUSE package name routinely embeds
-                    // its SONAME version (`libpng` -> `libpng16`), which the
-                    // own/linked-project checks below can never match by
-                    // name — they only compare source package name strings.
-                    // `distro_provides` checks the distro's actual
-                    // `Provides:` capabilities instead, so a dependency the
-                    // distro has shipped for years (observed: `libpng`,
-                    // `gcc`, `openssl` all reported "unresolvable" by an
-                    // agent that should have known better, but `libpng`
-                    // alone slipped past every other filter and got queued
-                    // for a redundant from-source build) is recognized
-                    // before falling through to "search GitHub and build it
-                    // from source".
-                    let keep = !ap_build::osc::distro_provides(dep);
-                    if !keep {
-                        dep_drops.dropped(
-                            reporter.as_ref(),
-                            dep,
-                            format!(
-                                "the distro already provides it (see `zypper search \
-                                 --provides --match-exact {dep}`)"
-                            ),
-                        );
-                    }
-                    keep
                 })
                 .filter(|dep| {
                     // Skip deps already resolvable in the project or any of
@@ -2311,15 +2281,22 @@ fn cmd_build(
                     if stuck_seeds.contains(&bare_key) {
                         return true;
                     }
-                    let rpm_key = ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(dep));
-
-                    // Own-project packages: index by fuzzy key so a
-                    // separator mismatch can't false-miss.
-                    let own_match = own_listing.iter().find(|p| {
-                        let k = ap_build::osc::fuzzy_key(p);
-                        k == rpm_key || k == bare_key
-                    });
-                    if let Some(real_pkg) = own_match {
+                    // Own-project packages are matched by fuzzy key so a
+                    // separator mismatch can't false-miss; of several
+                    // spellings the built one counts (see `availability`).
+                    let found = ap_build::depclass::availability(
+                        dep,
+                        &own_listing,
+                        &own_statuses,
+                        &linked_listings,
+                    );
+                    if let ap_build::depclass::Availability::InProject {
+                        pkg: real_pkg,
+                        status,
+                    } = &found
+                    {
+                        let real_pkg = real_pkg.as_str();
+                        let status = status.as_ref();
                         // Package exists in our project. Only skip queuing
                         // it when its OBS build status is actually
                         // resolvable — i.e. there's a built binary (or one
@@ -2332,7 +2309,6 @@ fn cmd_build(
                         // for exactly that pair): the same package being
                         // excluded or unresolvable on another one says
                         // nothing about this build.
-                        let status = own_statuses.get(real_pkg);
                         let skip = ap_build::pipeline::status_is_resolvable(status);
                         if matches!(status, Some(ap_build::osc::BuildStatus::Excluded)) {
                             // No rebuild changes a project/spec exclusion, and
@@ -2409,22 +2385,27 @@ fn cmd_build(
                     }
 
                     // Linked / build-path projects: trust presence (see
-                    // comment above).
-                    for (path_project, linked) in &linked_listings {
-                        if let Some(match_name) = linked.iter().find(|p| {
-                            let k = ap_build::osc::fuzzy_key(p);
-                            k == rpm_key || k == bare_key
-                        }) {
-                            dep_drops.dropped(
-                                reporter.as_ref(),
-                                dep,
-                                format!(
-                                    "it is available from the linked project \
-                                     {path_project} as {match_name}"
-                                ),
-                            );
-                            return false;
-                        }
+                    // comment above). That only holds for a requirement
+                    // without a version bound: when the package that needs it
+                    // still reports it unresolvable afterwards, the shipped
+                    // version is too old, which the give-up message says.
+                    if let ap_build::depclass::Availability::InLinked {
+                        project: path_project,
+                        pkg: match_name,
+                    } = &found
+                    {
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            format!(
+                                "it is available from the linked project {path_project} as \
+                                 {match_name} (if the package needing it still reports it \
+                                 unresolvable, that version does not meet its bound: it needs \
+                                 a newer release built in {project}, or a patch_dependencies \
+                                 request)"
+                            ),
+                        );
+                        return false;
                     }
                     // A local workspace already existing for this name means
                     // some earlier round already checked it out — most
@@ -2449,6 +2430,7 @@ fn cmd_build(
                         .join("state.json");
                     let keep = !state_path.exists() || retrying.contains(&bare_key);
                     if !keep {
+                        mid_build.borrow_mut().push(bare_key.clone());
                         dep_drops.dropped(
                             reporter.as_ref(),
                             dep,
@@ -2516,6 +2498,16 @@ fn cmd_build(
                 })
                 .collect();
             let handles: Vec<_> = handles.into_iter().chain(patch_handles).collect();
+
+            // A request that was only set aside for a build already underway
+            // may be made again if that build fails, a bounded number of times.
+            for key in mid_build.into_inner() {
+                let rounds = dep_rounds.entry(key.clone()).or_insert(0);
+                *rounds += 1;
+                if *rounds < MAX_DEP_ATTEMPTS {
+                    attempted_deps.remove(&key);
+                }
+            }
 
             for dep in newly_unbuildable {
                 if !config.unbuildable_deps.contains(&dep) {

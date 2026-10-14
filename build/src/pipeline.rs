@@ -2330,18 +2330,26 @@ fn missing_deps_from_turn(
         names: reported,
         source: ap_core::event::MissingSource::Agent,
     });
-    // Strip python<ver>- prefix so the caller gets PyPI names.
-    let mut to_build = without_built_deps(
-        ctx,
-        step,
-        osc::missing_package_names(&outcome.unresolvable_packages),
-    );
+    // The turn's names are triaged (python<ver>- prefix stripped, capabilities
+    // and interpreter packages set aside), then the ones the project or a
+    // linked project already has are dropped: those are not missing.
+    let (named, skipped) =
+        crate::depclass::triage_all(&outcome.unresolvable_packages, &|c| osc::distro_provides(c));
+    warn_skipped(ctx, step, &skipped);
+    let mut to_build = without_available_deps(ctx, step, named, DepScope::Anywhere);
+    // A patched dependency is one the distro ships by definition: only the
+    // project's own build of it ends the request.
     let patch_names: Vec<String> = outcome
         .patch_dependencies
         .iter()
         .map(|p| p.name.clone())
         .collect();
-    let still_patched = without_built_deps(ctx, step, osc::missing_package_names(&patch_names));
+    let still_patched = without_available_deps(
+        ctx,
+        step,
+        crate::depclass::triage_all(&patch_names, &|_| false).0,
+        DepScope::OwnProject,
+    );
     let patches: Vec<crate::agent::PatchRequest> = outcome
         .patch_dependencies
         .iter()
@@ -2373,8 +2381,34 @@ fn missing_deps_from_turn(
     })
 }
 
+/// Where a name an agent reported missing is looked for before it is queued.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepScope {
+    /// The project's own build only (what a dependency the distro ships and
+    /// that is to be patched needs: the shipped one is not the answer).
+    OwnProject,
+    /// The project and the projects it builds against: a package a linked
+    /// project ships is installable, so it is not missing either.
+    Anywhere,
+}
+
+/// Say, one warning per name, why `skipped` names are not queued.
+fn warn_skipped(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    skipped: &[(String, crate::depclass::Skip)],
+) {
+    for (name, why) in skipped {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(step),
+            message: format!("not queuing {name} as missing: {}", why.reason()),
+        });
+    }
+}
+
 /// `deps`, minus the ones the project already has built for this repository
-/// and architecture.
+/// and architecture (and, for [`DepScope::Anywhere`], the ones a linked
+/// project ships).
 ///
 /// An agent that is told a build failed decides what is missing from the log
 /// and from what it can see on the host, and the host's repositories are not
@@ -2385,10 +2419,15 @@ fn missing_deps_from_turn(
 /// so, and when what it published is unusable (an unfinished skeleton spec)
 /// say that instead, because that is the real problem. A listing that cannot
 /// be read keeps every name: not knowing is not a refutation.
-fn without_built_deps(
+///
+/// A linked project's package is only a stand-in for "built": it may be too
+/// old for a bound, which is what `patch_dependencies` and a build of the
+/// newer release are for, so the warning says what to do if it is not enough.
+fn without_available_deps(
     ctx: &RunCtx,
     step: ap_core::event::StepId,
     deps: Vec<String>,
+    scope: DepScope,
 ) -> Vec<String> {
     if deps.is_empty() {
         return deps;
@@ -2401,23 +2440,50 @@ fn without_built_deps(
     ) else {
         return deps;
     };
+    let mut linked = Vec::new();
+    if scope == DepScope::Anywhere {
+        let Ok(paths) = osc::get_project_repo_paths(&config.project, emit) else {
+            return deps;
+        };
+        for (path_project, _repo) in paths {
+            let Ok(l) = osc::try_list_project_packages(&path_project, emit) else {
+                return deps;
+            };
+            linked.push((path_project, l));
+        }
+    }
     deps.into_iter()
         .filter(|dep| {
-            let Some(real) = osc::built_in_project(&listing, &statuses, dep) else {
-                return true;
+            use crate::depclass::{Availability, availability};
+            let message = match availability(dep, &listing, &statuses, &linked) {
+                Availability::InProject {
+                    pkg,
+                    status: Some(osc::BuildStatus::Succeeded),
+                } => {
+                    match osc::empty_package_warning(
+                        &config.project,
+                        &pkg,
+                        &config.distro,
+                        &config.arch,
+                    ) {
+                        Some(why) => format!("not queuing {dep} as missing: {why}"),
+                        None => format!(
+                            "not queuing {dep} as missing: {pkg} is already built in {} for \
+                             {}/{}, so the failure is not caused by it being absent",
+                            config.project, config.distro, config.arch
+                        ),
+                    }
+                }
+                Availability::InLinked { project, pkg } => format!(
+                    "not queuing {dep} as missing: {project} ships it as {pkg}, so a \
+                     BuildRequires on it resolves (if its version is too old for a bound, \
+                     report it in patch_dependencies or ask for the newer release instead)"
+                ),
+                _ => return true,
             };
-            let unusable =
-                osc::empty_package_warning(&config.project, &real, &config.distro, &config.arch);
             ctx.reporter.report(&Event::Warning {
                 step: Some(step),
-                message: match unusable {
-                    Some(why) => format!("not queuing {dep} as missing: {why}"),
-                    None => format!(
-                        "not queuing {dep} as missing: {real} is already built in {} for \
-                         {}/{}, so the failure is not caused by it being absent",
-                        config.project, config.distro, config.arch
-                    ),
-                },
+                message,
             });
             false
         })
@@ -2985,14 +3051,22 @@ fn unresolvable_deps_round(
     } else {
         &translated
     };
-    let to_build = osc::missing_package_names(source_list);
+    // OBS says the target has nothing providing these, so the local distro is
+    // not asked: it would only second-guess the repository being built for.
+    let (to_build, skipped) = crate::depclass::triage_all(source_list, &|_| false);
+    warn_skipped(ctx, build_step.id, &skipped);
     if to_build.is_empty() {
         // Nothing here is something to build: reporting an empty list would
         // have the caller retry this package forever.
+        let why: Vec<String> = skipped
+            .iter()
+            .map(|(name, s)| format!("{name}: {}", s.reason()))
+            .collect();
         return Err(ctx.failed(format!(
             "OBS reports {} unresolvable, but none of them is a package this tool can \
-             build (interpreter subpackages or system tools the distro should provide)",
-            source_list.join(", ")
+             build:\n{}",
+            source_list.join(", "),
+            why.join("\n")
         )));
     }
     Err(PipelineResult::MissingDeps {
@@ -3391,6 +3465,7 @@ fn agent_turn(
         },
         checkout_dir: ctx.checkout_dir,
         context: nudge.get().map(String::as_str).or(ctx.context),
+        rpms_dir: Some(&config.rpms_dir),
         model_rotation: model_rotation.get(),
         on_tool_use: Some(&on_tool_use),
     };

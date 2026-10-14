@@ -298,7 +298,16 @@ fn extract_unresolvable(log: &str) -> Vec<String> {
 /// aren't valid RPM or PyPI names, so `strip_rpm_prefix` and PyPI lookup
 /// both miss and the dependency silently never gets queued to build.
 fn clean_unresolvable_name(pkg: &str) -> &str {
-    let pkg = pkg.trim_start_matches('(').trim_end_matches(')');
+    // Only an unbalanced parenthesis is decoration: the `()(64bit)` of a
+    // soname capability (`libcuda.so.1()(64bit)`) is part of its name.
+    let balance = |s: &str| s.matches('(').count() as isize - s.matches(')').count() as isize;
+    let mut pkg = pkg;
+    while pkg.starts_with('(') && balance(pkg) > 0 {
+        pkg = &pkg[1..];
+    }
+    while pkg.ends_with(')') && balance(pkg) < 0 {
+        pkg = &pkg[..pkg.len() - 1];
+    }
     match pkg.rfind('[') {
         Some(idx) if pkg.ends_with(']') => &pkg[..idx],
         _ => pkg,
@@ -386,6 +395,22 @@ nothing provides (python313-foo
         );
     }
 
+    /// The `()(64bit)` of a soname capability is part of the name; stripping
+    /// the trailing `)` turned it into something no lookup recognizes.
+    #[test]
+    fn keeps_the_parentheses_of_a_soname_capability() {
+        assert_eq!(
+            extract_unresolvable(
+                "nothing provides libcuda.so.1()(64bit) needed by python313-torch"
+            ),
+            vec!["libcuda.so.1()(64bit)"]
+        );
+        assert_eq!(
+            clean_unresolvable_name("pkgconfig(zlib)"),
+            "pkgconfig(zlib)"
+        );
+    }
+
     /// The `<details>` of python-fastapi-cloud-cli on i586 in
     /// home:dspinella:open-webui, verbatim: every requirement on one line.
     const FASTAPI_CLOUD_CLI_DETAILS: &str = "nothing provides python314-fastar, nothing provides python313-fastar, nothing provides python314-rignore, nothing provides python313-rignore, nothing provides python314-sentry-sdk, nothing provides python313-sentry-sdk";
@@ -448,6 +473,31 @@ conflict for providers of python314-baz needed by python314-qux
             blockers_from_details(FASTAPI_CLOUD_CLI_DETAILS),
             vec!["fastar", "rignore", "sentry-sdk"]
         );
+    }
+
+    #[test]
+    fn a_shared_library_capability_is_never_a_package_to_build() {
+        let details = "nothing provides libcuda.so.1()(64bit) needed by python314-foo, \
+                       nothing provides python314-bar";
+        assert_eq!(blockers_from_details(details), vec!["bar"]);
+        let names = vec![
+            "libcuda.so.1()(64bit)".to_string(),
+            "libnvidia-ml.so.1()(64bit)".to_string(),
+            "/usr/bin/nvcc".to_string(),
+            "python313-beautifulsoup4".to_string(),
+        ];
+        assert_eq!(missing_package_names(&names), vec!["beautifulsoup4"]);
+    }
+
+    #[test]
+    fn capability_names_keep_their_parentheses_when_extracted() {
+        assert_eq!(
+            extract_unresolvable("nothing provides libcuda.so.1()(64bit) needed by python314-x"),
+            vec!["libcuda.so.1()(64bit)"]
+        );
+        assert!(is_rpm_capability("libcuda.so.1"));
+        assert!(!is_rpm_capability("python313-duckdb)"));
+        assert!(!is_rpm_capability("libsodium-devel"));
     }
 
     #[test]
@@ -3642,49 +3692,30 @@ fn empty_package_message(
     )
 }
 
-/// Stems of the interpreter's own subpackages (`python3-devel`,
-/// `python-rpm-macros`, ...): the distro ships them, and no PyPI project of
-/// that name is what the requirement means.
-const PYTHON_INTERPRETER_STEMS: &[&str] = &[
-    "base",
-    "curses",
-    "devel",
-    "doc",
-    "idle",
-    "rpm-generators",
-    "rpm-macros",
-    "testsuite",
-    "tk",
-    "tools",
-    "xml",
-];
-
 /// Package names to queue for building, from the RPM names a build or an
-/// agent reports missing: the `python313-`/`python314-`/`python3-`/`python-`
-/// prefix and any `lib...-devel` wrapping are stripped, every flavor of one
-/// package (`python313-fastar`, `python314-fastar`) collapses to one name
-/// (compared by [`fuzzy_key`], first spelling kept), and requirements that
-/// are not something to build are left out: the interpreter's own
-/// subpackages and system tools a PyPI package merely redistributes.
+/// agent reports missing: see [`crate::depclass::triage_all`], here without
+/// asking the distro (the names come from OBS saying the target has nothing
+/// providing them). Callers that want to tell the user why a name was left out
+/// use `triage_all` directly.
 pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for raw in rpm_names {
-        let rpm = raw.trim();
-        let stripped = strip_rpm_prefix(rpm);
-        if stripped != rpm && PYTHON_INTERPRETER_STEMS.contains(&stripped) {
-            continue;
-        }
-        let name = strip_devel_wrapping(stripped);
-        if name.is_empty() || crate::pipeline::is_system_tool_alias(name) {
-            continue;
-        }
-        if seen.insert(fuzzy_key(name)) {
-            out.push(name.to_string());
-        }
+    crate::depclass::triage_all(rpm_names, &|_| false).0
+}
+
+/// Whether `name` is an RPM capability (a shared library such as
+/// `libcuda.so.1()(64bit)`, a file path, an `rpmlib(...)` feature) rather than
+/// a package name. OBS reports these as `nothing provides` too, but there is
+/// no project to build for them: `libcuda.so.1` is the NVIDIA driver's own
+/// library (convention 60), supplied at runtime, so queueing it as a package
+/// can never succeed. The fix is on the package that requires it (an
+/// `%global __requires_exclude`), which convention 60 tells the agent.
+pub fn is_rpm_capability(name: &str) -> bool {
+    let name = name.trim();
+    if name.starts_with('/') || name.starts_with("rpmlib(") || name.contains("()") {
+        return true;
     }
-    out.sort_unstable();
-    out
+    // `lib<x>.so`, `.so.<n>`: not a name that merely contains ".so".
+    name.match_indices(".so")
+        .any(|(i, _)| matches!(name[i + 3..].chars().next(), None | Some('.') | Some('(')))
 }
 
 /// Whether `info` (a project meta) builds for `repo` on `arch`: the `Err`
