@@ -2466,6 +2466,10 @@ pub fn commit(
         return Err(Error::NothingToPublish(checkout_dir.to_path_buf()));
     }
 
+    // A `write_atomic` temp file left by a killed run must not linger in the
+    // checkout where a later add could pick it up.
+    ap_core::fsx::sweep_stale_temp_files(checkout_dir, std::time::Duration::from_secs(24 * 3600));
+
     // Track new and deleted files among the listed ones. A failure is not
     // fatal (a new package may have nothing to add), but `ci` then commits
     // without them, so say so.
