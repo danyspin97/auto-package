@@ -399,12 +399,29 @@ fn resolve_dependency_config(
     let mut all_attempts: Vec<String> = Vec::new();
     let mut probe_failure_warnings: Vec<String> = Vec::new();
     let name_candidates = upstream_name_candidates(dep);
+    // A repository's latest release does not depend on the name it was found
+    // under, so each is asked for once per run, and the new ones for one
+    // candidate are asked for side by side.
+    let mut releases: std::collections::HashMap<String, Result<String, String>> =
+        std::collections::HashMap::new();
     for cand in &name_candidates {
         let repos = ap_build::pipeline::find_source_repo_candidates(cand);
+        let unknown: Vec<String> = repos
+            .verified
+            .iter()
+            .filter(|r| !releases.contains_key(*r))
+            .cloned()
+            .collect();
+        releases.extend(
+            unknown
+                .iter()
+                .cloned()
+                .zip(ap_build::sources::latest_releases(&unknown)),
+        );
         for repo_url in &repos.verified {
             all_attempts.push(repo_url.clone());
-            let version = match ap_build::sources::latest_release(repo_url) {
-                Ok(v) => v,
+            let version = match &releases[repo_url] {
+                Ok(v) => v.clone(),
                 Err(e) => {
                     probe_failure_warnings
                         .push(format!("{repo_url}: latest-release lookup failed: {e}"));

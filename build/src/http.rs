@@ -12,8 +12,10 @@ use sha2::{Digest, Sha256};
 /// Agents built so far, by (timeout, redirect limit). See [`agent`].
 static AGENTS: Mutex<Vec<(Duration, u32, ureq::Agent)>> = Mutex::new(Vec::new());
 
-/// Total time allowed for a metadata request (JSON, HTML listing, HEAD).
+/// Total time allowed for a metadata request (JSON, HTML listing).
 pub const API_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total time allowed for a HEAD probe.
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// Total time allowed for downloading a source archive.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// Largest metadata body we will read.
@@ -51,8 +53,10 @@ pub fn get(url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
     agent(API_TIMEOUT, 5).get(url)
 }
 
+/// A HEAD request is an existence check, not a fetch: it gets a short limit
+/// so a dead host cannot stall a candidate list for a minute each.
 pub fn head(url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
-    agent(API_TIMEOUT, 5).head(url)
+    agent(HEAD_TIMEOUT, 5).head(url)
 }
 
 pub fn get_download(url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {

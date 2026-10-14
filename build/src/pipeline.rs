@@ -6203,8 +6203,21 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
         // For NVIDIA packages, skip GitHub API search to avoid non-official repos
         ap_core::diag!("  skipping GitHub API search for NVIDIA package (prefer official repos)");
     } else {
-        // For non-NVIDIA packages, use GitHub API search
-        if let Some(urls) = search_github_repos(pkg_name) {
+        // For non-NVIDIA packages, use GitHub API search. Not everything lives
+        // on GitHub: ask Repology (the upstream other distributions record)
+        // and GitLab/Codeberg search too. Their hits are real search results,
+        // but a homepage can be stale, so they still have to answer a
+        // reachability probe below. The searches are independent: run them
+        // side by side.
+        let (github, (others, distro)) = std::thread::scope(|s| {
+            let github = s.spawn(|| search_github_repos(pkg_name));
+            let forges = crate::discovery::search_other_forges(pkg_name);
+            let github = github
+                .join()
+                .unwrap_or_else(|e| std::panic::resume_unwind(e));
+            (github, forges)
+        });
+        if let Some(urls) = github {
             for url in urls {
                 if !verified_candidates.contains(&url) && !candidates.contains(&url) {
                     ap_core::diag!("  found via GitHub search: {}", url);
@@ -6212,11 +6225,6 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
                 }
             }
         }
-        // Not everything lives on GitHub: ask Repology (the upstream other
-        // distributions record) and GitLab/Codeberg search too. Their hits
-        // are real search results, but a homepage can be stale, so they still
-        // have to answer a reachability probe below.
-        let (others, distro) = crate::discovery::search_other_forges(pkg_name);
         // openSUSE's own spec points at a non-forge release directory
         // (Savannah, ftp.gnu.org): if it lists real releases it is the
         // distro-confirmed upstream, ahead of anything a name search found.
@@ -6281,13 +6289,25 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     // Try the package name directly
     candidates.push(format!("https://github.com/{}", normalized_name));
 
-    // Check all generated candidates
+    // Check all generated candidates, side by side. An owner/org/user page
+    // (`github.com/oatpp`) is reachable but is not a repository: there is
+    // nothing in it to package, so it is not probed at all.
+    let mut to_check: Vec<String> = Vec::new();
+    for url in &candidates {
+        if !verified_candidates.contains(url)
+            && crate::discovery::is_repository_url(url)
+            && !to_check.contains(url)
+        {
+            to_check.push(url.clone());
+        }
+    }
+    let exists = verify_repos_exist(&to_check);
     for url in &candidates {
         if !verified_candidates.contains(url) {
             ap_core::diag!("  checking: {}", url);
-            // An owner/org/user page (`github.com/oatpp`) is reachable but is
-            // not a repository: there is nothing in it to package.
-            if crate::discovery::is_repository_url(url) && verify_repo_exists(url) {
+            if let Some(i) = to_check.iter().position(|c| c == url)
+                && exists[i]
+            {
                 ap_core::diag!("  ✓ verified: {}", url);
                 verified_candidates.push(url.clone());
             }
@@ -6413,6 +6433,20 @@ fn verify_repo_exists(url: &str) -> bool {
         .call()
         .map(|r| r.status() == 200)
         .unwrap_or(false)
+}
+
+/// [`verify_repo_exists`] for several URLs, each probe on its own thread.
+fn verify_repos_exist(urls: &[String]) -> Vec<bool> {
+    std::thread::scope(|s| {
+        let probes: Vec<_> = urls
+            .iter()
+            .map(|url| s.spawn(move || verify_repo_exists(url)))
+            .collect();
+        probes
+            .into_iter()
+            .map(|p| p.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
 }
 
 #[cfg(test)]

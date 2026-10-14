@@ -984,6 +984,21 @@ fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<Str
     }
 }
 
+/// [`latest_release`] for several repositories, one thread each, results in
+/// the same order as `repo_urls`.
+pub fn latest_releases(repo_urls: &[String]) -> Vec<Result<String, String>> {
+    std::thread::scope(|s| {
+        let lookups: Vec<_> = repo_urls
+            .iter()
+            .map(|url| s.spawn(move || latest_release(url)))
+            .collect();
+        lookups
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
 /// Ask the forge for the newest release tag of `repo_url`, and reduce it to a
 /// version.
 ///

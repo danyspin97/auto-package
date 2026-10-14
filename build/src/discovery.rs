@@ -249,14 +249,27 @@ pub fn search_codeberg(pkg: &str) -> Vec<String> {
 /// distro spec's own forge upstream, then GitLab, then Codeberg), without
 /// duplicates; plus the distro evidence itself.
 pub fn search_other_forges(pkg: &str) -> (Vec<String>, DistroInfo) {
-    let distro = distro_info(pkg);
+    // The three lookups are independent network calls: run them side by side,
+    // and keep the order the results are merged in below.
+    let (distro, gitlab, codeberg) = std::thread::scope(|s| {
+        let distro = s.spawn(|| distro_info(pkg));
+        let gitlab = s.spawn(|| search_gitlab(pkg));
+        let codeberg = search_codeberg(pkg);
+        let distro = distro
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        let gitlab = gitlab
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        (distro, gitlab, codeberg)
+    });
     let mut out: Vec<String> = Vec::new();
     for url in distro
         .forge_repos
         .iter()
         .cloned()
-        .chain(search_gitlab(pkg))
-        .chain(search_codeberg(pkg))
+        .chain(gitlab)
+        .chain(codeberg)
     {
         if !out.contains(&url) {
             out.push(url);
