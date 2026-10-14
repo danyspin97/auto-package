@@ -83,7 +83,10 @@ impl NotesLock {
 }
 
 /// One quiet `claude --print --output-format json` call with the scrubbed
-/// agent environment, shared by the notes update and the source lookup.
+/// agent environment, shared by the notes update and the source lookup. It
+/// always runs with `--permission-mode default --setting-sources project`: path
+/// rules in `tools` are only enforced in that mode, and user settings could
+/// otherwise widen them.
 pub fn claude_print_json(
     model: &str,
     tools: &str,
@@ -92,21 +95,8 @@ pub fn claude_print_json(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
-    claude_print_json_with(model, tools, budget_usd, prompt, cwd, timeout, &[])
-}
-
-/// [`claude_print_json`] with extra CLI flags placed before the prompt.
-fn claude_print_json_with(
-    model: &str,
-    tools: &str,
-    budget_usd: &str,
-    prompt: &str,
-    cwd: &Path,
-    timeout: Duration,
-    extra_args: &[&str],
-) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
     let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
-    let mut args = vec![
+    let args = [
         "--print",
         "--output-format",
         "json",
@@ -116,9 +106,13 @@ fn claude_print_json_with(
         tools,
         "--max-budget-usd",
         budget_usd,
+        "--permission-mode",
+        "default",
+        "--setting-sources",
+        "project",
+        "-p",
+        prompt,
     ];
-    args.extend_from_slice(extra_args);
-    args.extend(["-p", prompt]);
     crate::proc::capture_with_timeout_env(
         "claude",
         &args,
@@ -211,7 +205,7 @@ fn update_inner(
     // Path rules in `--allowed-tools` are only enforced in the default
     // permission mode with project-only settings; user settings could
     // otherwise widen what the agent may write.
-    let out = claude_print_json_with(
+    let out = claude_print_json(
         NOTES_MODEL,
         &tools,
         &format!("{NOTES_CAP_USD:.2}"),
@@ -226,12 +220,6 @@ fn update_inner(
         ),
         ws.dir(),
         NOTES_TIMEOUT,
-        &[
-            "--permission-mode",
-            "default",
-            "--setting-sources",
-            "project",
-        ],
     )
     .map_err(|e| match e {
         // Nothing ran, so nothing was spent.
