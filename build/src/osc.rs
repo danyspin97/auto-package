@@ -1478,7 +1478,22 @@ pub fn create_initial_changes(
 /// identity comes from the osc configuration, and a missing `.changes` file is
 /// created. A version bump records its own entry this way, so a package
 /// updated by the tool does not reach OBS (or a submit request) without one.
+/// Idempotent: when the newest entry already says `message` (an earlier run
+/// added it), nothing is added.
 pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), Error> {
+    if let Ok(rd) = fs::read_dir(checkout_dir) {
+        let mut files: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "changes"))
+            .collect();
+        files.sort();
+        if let Some(text) = files.first().and_then(|f| fs::read_to_string(f).ok())
+            && newest_changes_entry_says(&text, message)
+        {
+            return Ok(());
+        }
+    }
     let out = proc::capture("osc", &["vc", "-m", message], checkout_dir, emit)
         .map_err(during(format!("vc in {}", checkout_dir.display())))?;
     if !out.success() {
@@ -1489,6 +1504,24 @@ pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> 
         });
     }
     Ok(())
+}
+
+/// Whether the newest entry of a `.changes` file (the text between its first
+/// two separator lines) has `message` as one of its lines, bullet or not.
+fn newest_changes_entry_says(changes: &str, message: &str) -> bool {
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let mut started = false;
+    for line in changes.lines().map(str::trim) {
+        if is_separator(line) {
+            if started {
+                return false;
+            }
+            started = true;
+        } else if started && line.trim_start_matches(['-', '*', ' ']) == message {
+            return true;
+        }
+    }
+    false
 }
 
 /// Ensure the package exists in `project`, creating it if not.
@@ -4921,6 +4954,20 @@ mod overall_status_tests {
 #[cfg(test)]
 mod superseded_rpm_tests {
     use super::*;
+
+    #[test]
+    fn the_newest_changes_entry_is_matched_by_its_message() {
+        let sep = "-".repeat(67);
+        let changes = format!(
+            "{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 2.0\n\n{sep}\n\
+             Mon Jan  1 00:00:00 UTC 2023 - A <a@b.c>\n\n- Update to 1.0\n"
+        );
+        assert!(newest_changes_entry_says(&changes, "Update to 2.0"));
+        // An older entry does not count, nor does a different version.
+        assert!(!newest_changes_entry_says(&changes, "Update to 1.0"));
+        assert!(!newest_changes_entry_says(&changes, "Update to 2.0.1"));
+        assert!(!newest_changes_entry_says("", "Update to 2.0"));
+    }
 
     #[test]
     fn the_package_name_is_what_precedes_version_and_release() {

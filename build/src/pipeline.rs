@@ -1612,7 +1612,9 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
                 if version_bump {
                     warn_if_err(
                         reporter,
-                        "adding the version-update .changes entry",
+                        "adding the version-update .changes entry (the package ships \
+                         without an entry recording the update, and OBS and a submit \
+                         request will show none)",
                         osc::add_changes_entry(
                             checkout_dir,
                             &format!("Update to {}", config.version),
