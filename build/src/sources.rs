@@ -225,10 +225,17 @@ struct ArchiveCache {
     files: std::collections::HashMap<String, PathBuf>,
     /// URLs that answered 404, so they are not asked for again this run.
     missing: std::collections::HashSet<String>,
+    /// The latest other failure per URL and when it happened, so callers
+    /// queued behind a failed download take its result rather than each
+    /// repeating the download and its retries.
+    failed: std::collections::HashMap<String, (std::time::Instant, FetchFailure)>,
     /// One lock per URL being fetched, so concurrent callers for the same URL
     /// wait for one download instead of racing to write it.
     in_flight: std::collections::HashMap<String, std::sync::Arc<Mutex<()>>>,
 }
+
+/// How long a failed download other than a 404 is reused for the same URL.
+const FAILURE_REUSE: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn archive_cache() -> &'static Mutex<ArchiveCache> {
     static CACHE: OnceLock<Mutex<ArchiveCache>> = OnceLock::new();
@@ -284,6 +291,16 @@ pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
     if let Some(hit) = cached() {
         return hit;
     }
+    let recent_failure = archive_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .failed
+        .get(url)
+        .filter(|(at, _)| at.elapsed() < FAILURE_REUSE)
+        .map(|(_, failure)| failure.clone());
+    if let Some(failure) = recent_failure {
+        return Err(failure);
+    }
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     // Under the private directory, not a predictable name in the shared
     // temporary one, where another user could have put a link or a file first.
@@ -296,7 +313,19 @@ pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
         .filter(|b| !b.is_empty())
         .unwrap_or("archive");
     let path = dir.join(format!("{}-{base}", NEXT.fetch_add(1, Ordering::Relaxed)));
-    download_archive(url, &path)?;
+    if let Err(failure) = download_archive(url, &path) {
+        if failure != FetchFailure::NotFound {
+            archive_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .failed
+                .insert(
+                    url.to_string(),
+                    (std::time::Instant::now(), failure.clone()),
+                );
+        }
+        return Err(failure);
+    }
     archive_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1419,6 +1448,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_recent_failure_is_reused_instead_of_downloading_again() {
+        // Unique URL, never requested: a download attempt would return a
+        // transport error with a different message.
+        let url = "https://invalid.example/recent-failure-test.tar.gz";
+        archive_cache().lock().unwrap().failed.insert(
+            url.to_string(),
+            (std::time::Instant::now(), FetchFailure::RateLimited),
+        );
+        assert_eq!(fetch_archive(url), Err(FetchFailure::RateLimited));
+    }
 
     #[test]
     fn a_fetched_archive_is_moved_to_its_destination_without_a_download() {
