@@ -7,6 +7,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 /// Why a lock could not be taken.
@@ -39,6 +40,11 @@ pub fn lock_with_wait(path: &Path, wait: std::time::Duration) -> Result<File, Lo
 /// The file is never deleted by its owner: unlinking a locked file lets a
 /// second run lock the new file at the same path while the first still holds
 /// the old one.
+///
+/// The path is opened with `O_NOFOLLOW` and must be a regular file: a lock
+/// path is writable and gets truncated and rewritten, so a symlink planted
+/// there (the lock directories can sit in a shared location) must not turn
+/// that into a write to whatever it points at.
 pub fn try_lock(path: &Path) -> Result<File, LockError> {
     // No truncation on open: that would wipe the holder's pid before we know
     // whether we got the lock.
@@ -47,8 +53,17 @@ pub fn try_lock(path: &Path) -> Result<File, LockError> {
         .write(true)
         .create(true)
         .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(LockError::Io)?;
+    // Checked on the open descriptor, before anything is truncated.
+    let meta = file.metadata().map_err(LockError::Io)?;
+    if !meta.is_file() {
+        return Err(LockError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        )));
+    }
     // SAFETY: `file` owns a valid descriptor for the duration of the call.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let err = io::Error::last_os_error();
@@ -79,5 +94,34 @@ mod tests {
         }
         drop(first);
         try_lock(&path).unwrap();
+    }
+
+    /// A symlink at the lock path must not be followed: the lock file is
+    /// truncated and rewritten, which would clobber the link's target.
+    #[test]
+    fn a_symlinked_lock_file_is_refused_and_its_target_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("victim");
+        std::fs::write(&target, "precious").unwrap();
+        let path = dir.path().join("l.lock");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        match try_lock(&path) {
+            Err(LockError::Io(_)) => {}
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+    }
+
+    #[test]
+    fn a_lock_path_that_is_not_a_regular_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory cannot be opened for writing at all.
+        assert!(matches!(try_lock(dir.path()), Err(LockError::Io(_))));
+        // A FIFO opens, but is not a lock file.
+        let fifo = dir.path().join("fifo.lock");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(matches!(try_lock(&fifo), Err(LockError::Io(_))));
     }
 }
