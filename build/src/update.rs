@@ -269,11 +269,7 @@ fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
 /// package and one git-forge API call per repo-sourced one. Returned in
 /// sorted RPM-name order so `--check` output is stable across runs. Fails
 /// when the project's package listing cannot be read.
-pub fn plan(
-    project: &str,
-    only: Option<&str>,
-    emit: Emit<'_>,
-) -> Result<Vec<Candidate>, String> {
+pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Result<Vec<Candidate>, String> {
     // A failed listing is an error: treating it as "no packages" would make
     // `update` report success for a project it never looked at.
     let packages = osc::try_list_project_packages(project, emit)?;

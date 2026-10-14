@@ -2422,8 +2422,8 @@ fn cmd_update(
     tui_ctrl: Option<tui::TuiController>,
 ) -> color_eyre::Result<()> {
     let emit = ap_build::proc::Emit::run(reporter.as_ref());
-    let candidates = ap_build::update::plan(project, only, emit)
-        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+    let candidates =
+        ap_build::update::plan(project, only, emit).map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     if candidates.is_empty() {
         reporter.report(&Event::Progress {

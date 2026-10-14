@@ -984,10 +984,10 @@ mod project_packages_cache_tests {
     fn invalidate_drops_the_cached_entry() {
         let project = "ap-test-cache-invalidation-project";
         let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        cache
-            .lock()
-            .unwrap()
-            .insert(project.to_string(), Arc::new(std::collections::HashSet::new()));
+        cache.lock().unwrap().insert(
+            project.to_string(),
+            Arc::new(std::collections::HashSet::new()),
+        );
         assert!(cache.lock().unwrap().contains_key(project));
 
         invalidate_project_packages_cache(project);
@@ -1741,12 +1741,7 @@ fn get_build_status_from_results_table(
         });
     }
 
-    Ok(parse_single_build_status(
-        &out.stdout,
-        pkg_name,
-        repo,
-        arch,
-    ))
+    Ok(parse_single_build_status(&out.stdout, pkg_name, repo, arch))
 }
 
 /// Per-call limit for the short, network-bound `osc` queries used while
@@ -1883,9 +1878,7 @@ fn status_from_osc_text(text: &str) -> BuildStatus {
         None => (text, None),
     };
     let starred = head.ends_with('*');
-    let word = head
-        .trim_end_matches('*')
-        .trim_end_matches("(unpublished)");
+    let word = head.trim_end_matches('*').trim_end_matches("(unpublished)");
     if starred {
         return BuildStatus::Unknown(format!("stale: {word}"));
     }
@@ -2652,7 +2645,10 @@ mod package_listing_tests {
     #[test]
     fn obs_name_returns_the_listed_spelling_for_a_lowercase_guess() {
         let listing = parse_package_listing("python-APScheduler\npython-pydantic_core\n");
-        assert_eq!(obs_name(&listing, "python-apscheduler"), "python-APScheduler");
+        assert_eq!(
+            obs_name(&listing, "python-apscheduler"),
+            "python-APScheduler"
+        );
         // A separator difference between the guess and the listing still finds it.
         assert_eq!(
             obs_name(&listing, "python-pydantic-core"),
@@ -2664,7 +2660,10 @@ mod package_listing_tests {
     fn obs_name_keeps_the_guess_when_nothing_is_listed() {
         let listing = parse_package_listing("python-APScheduler\n");
         assert_eq!(obs_name(&listing, "python-croniter"), "python-croniter");
-        assert_eq!(obs_name(&listing, "python-APScheduler"), "python-APScheduler");
+        assert_eq!(
+            obs_name(&listing, "python-APScheduler"),
+            "python-APScheduler"
+        );
     }
 
     #[test]
