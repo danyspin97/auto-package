@@ -2481,9 +2481,17 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
             build_step.finish(StepOutcome::Failed);
             Err(ctx.failed(msg))
         }
-        Err(_) => {
+        Err(osc::Error::BuildFailed { .. }) => {
             let build_step = build_step.finish(StepOutcome::Failed);
             fix_after_build(ctx, st, &build_step, &build_log)
+        }
+        // Only a build OBS actually failed is something the agent can fix
+        // from its log. A poll that timed out or kept erroring, a launch or
+        // I/O failure, or an unreadable log says nothing about the spec, so
+        // it ends this attempt instead of being sent to the fix loop.
+        Err(e) => {
+            build_step.finish(StepOutcome::Failed);
+            Err(ctx.failed(e.to_string()))
         }
     }
 }

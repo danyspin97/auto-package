@@ -2503,8 +2503,6 @@ pub fn obs_build(
         stderr_bytes: 0,
     });
 
-    let log_text = fs::read_to_string(log_path).unwrap_or_default();
-
     Err(match status {
         BuildStatus::Unresolvable => {
             let (names, detail) =
@@ -2518,22 +2516,34 @@ pub fn obs_build(
         BuildStatus::Excluded => {
             Error::NotActionable("OBS: build is excluded in project config".to_string())
         }
-        _ => match classify_build_failure(&log_text) {
-            FailureKind::NoRepositories => Error::NotActionable(
-                "OBS project has no build repositories — configure them in OBS first".to_string(),
-            ),
-            FailureKind::NotWorkingCopy => {
-                Error::NotActionable("osc checkout is not server-backed".to_string())
+        _ => {
+            // The log is the only evidence for what went wrong. One that
+            // cannot be read is an environment problem: classifying the empty
+            // text would send the package to the fix agent as a BuildFailed.
+            let log_text = fs::read_to_string(log_path).map_err(|e| {
+                Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("could not read build log {}: {e}", log_path.display()),
+                ))
+            })?;
+            match classify_build_failure(&log_text) {
+                FailureKind::NoRepositories => Error::NotActionable(
+                    "OBS project has no build repositories — configure them in OBS first"
+                        .to_string(),
+                ),
+                FailureKind::NotWorkingCopy => {
+                    Error::NotActionable("osc checkout is not server-backed".to_string())
+                }
+                FailureKind::UnresolvableDeps { names, detail } => {
+                    Error::UnresolvableDeps { names, detail }
+                }
+                FailureKind::BuildFailed => Error::BuildFailed {
+                    spec: format!("{pkg_name}.spec"),
+                    code: 1,
+                    log: log_path.to_owned(),
+                },
             }
-            FailureKind::UnresolvableDeps { names, detail } => {
-                Error::UnresolvableDeps { names, detail }
-            }
-            FailureKind::BuildFailed => Error::BuildFailed {
-                spec: format!("{pkg_name}.spec"),
-                code: 1,
-                log: log_path.to_owned(),
-            },
-        },
+        }
     })
 }
 
