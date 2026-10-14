@@ -2154,7 +2154,8 @@ pub fn current_unresolvable(
 /// built RPMs on success.
 ///
 /// The caller must commit the package to OBS before calling this (see `commit`).
-/// Polls `osc results` every 15 seconds, up to 30 minutes. Emits a `Warning`
+/// Polls the OBS build status every 15 seconds, for at most two hours (the
+/// `MAX_WAIT` below), then gives up with a timeout error. Emits a `Progress`
 /// event each time the build status changes so the user can see progress.
 pub fn obs_build(
     project: &str,
