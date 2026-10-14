@@ -2,5 +2,6 @@
 
 pub mod forge;
 pub mod pip;
+mod pip_sandbox;
 pub mod pypi;
 pub mod sdist;

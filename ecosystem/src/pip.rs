@@ -5,11 +5,17 @@
 //! format v1) and contains each node's name, version, sha256, and
 //! `requires_dist` with markers unevaluated.
 //!
-//! Resolution may build sdists, so their build backends (arbitrary code from
-//! the index) run on the host. Pip runs with a cleared environment that holds
-//! only the allowlisted variables (`PIP_ENV_ALLOWLIST`), so OBS, GitHub and
-//! Anthropic credentials are not visible to pip or to any build backend it
-//! starts. Files in the home directory are not hidden.
+//! Resolution may build sdists, and building runs the sdist's build backend:
+//! arbitrary code from the index. So pip runs inside a bubblewrap sandbox
+//! (see [`crate::pip_sandbox`]) with a cleared environment that holds only the
+//! allowlisted variables (`PIP_ENV_ALLOWLIST`): the backend sees neither the
+//! user's files nor OBS, GitHub or Anthropic credentials, and cannot write
+//! outside scratch space. The network stays open, as resolution needs it.
+//!
+//! Without a working sandbox pip is not run on the host. Resolution falls
+//! back to wheels only (`--only-binary=:all:`), and [`set_unsafe_resolve`]
+//! (`--unsafe-resolve`, or `AUTO_PACKAGE_UNSAFE_RESOLVE=1`) opts into running
+//! pip unsandboxed. The same switch turns the sandbox off where it works.
 //!
 //! Known limitation: `--python-version` is ignored by pip when a real
 //! interpreter is running — marker evaluation uses the host interpreter.
@@ -20,10 +26,13 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::pip_sandbox::{self, SandboxError};
 
 /// One package in the resolved closure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +57,18 @@ pub enum Error {
 
     #[error("package not found on PyPI: {0}")]
     NotFound(String),
+
+    /// Wheels-only resolution (no sandbox, no opt-in) found nothing. The
+    /// release may exist as an sdist only.
+    #[error(
+        "no wheel found for {0}; it may ship only an sdist, which is not built because \
+         there is no sandbox to build it in (install bubblewrap and enable unprivileged \
+         user namespaces, or pass --unsafe-resolve to build it unsandboxed)"
+    )]
+    NoWheel(String),
+
+    #[error(transparent)]
+    Sandbox(#[from] SandboxError),
 
     /// Every release exists but pip skipped all of them because their
     /// `Requires-Python` excludes the interpreter pip runs under.
@@ -284,7 +305,7 @@ fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
 /// pip says "No matching distribution found" both when the project does not
 /// exist and when every release was skipped for its `Requires-Python`; only
 /// the preceding "Ignored the following versions…" line tells them apart.
-fn classify_failure(name: &str, code: i32, stderr: String) -> Error {
+fn classify_failure(name: &str, code: i32, stderr: String, wheels_only: bool) -> Error {
     if let Some(line) = stderr.lines().find(|l| {
         l.contains("Ignored the following versions that require a different python version")
     }) {
@@ -302,7 +323,12 @@ fn classify_failure(name: &str, code: i32, stderr: String) -> Error {
     if stderr.contains("Could not find a version that satisfies the requirement")
         || stderr.contains("No matching distribution found for")
     {
-        return Error::NotFound(name.to_string());
+        // Without sdists this also covers releases that ship only an sdist.
+        return if wheels_only {
+            Error::NoWheel(name.to_string())
+        } else {
+            Error::NotFound(name.to_string())
+        };
     }
     Error::Failed { code, stderr }
 }
@@ -314,16 +340,136 @@ const ALTERNATE_PYTHON_MINORS: [u32; 5] = [12, 11, 13, 10, 14];
 
 /// Run `pip install --dry-run --report -` through `program` (a pip command
 /// line prefix) and return its JSON report.
-fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, Error> {
-    let mut cmd = pip_command(program, std::env::vars_os());
-    cmd.args(pip_report_args(spec));
+fn run_pip_report(
+    program: &[&str],
+    name: &str,
+    spec: &str,
+    mode: ResolveMode,
+) -> Result<Vec<u8>, Error> {
+    let mut cmd = match mode {
+        ResolveMode::Sandboxed => {
+            let netrc = std::env::var_os(pip_sandbox::NETRC_ENV).is_some_and(|v| v == "1");
+            sandboxed_command(program, std::env::vars_os(), netrc)?
+        }
+        ResolveMode::WheelsOnly | ResolveMode::Unsandboxed => {
+            pip_command(program, std::env::vars_os())
+        }
+    };
+    cmd.args(pip_report_args(spec, mode == ResolveMode::WheelsOnly));
     let out = run_with_timeout(cmd, PIP_TIMEOUT)?;
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        return Err(classify_failure(name, code, stderr));
+        return Err(classify_failure(
+            name,
+            code,
+            stderr,
+            mode == ResolveMode::WheelsOnly,
+        ));
     }
     Ok(out.stdout)
+}
+
+/// How pip is run for a resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveMode {
+    /// Inside bubblewrap, sdists allowed. The default when bwrap works.
+    Sandboxed,
+    /// On the host, wheels only: no sandbox is available and the unsafe
+    /// opt-in was not given, so no build backend may run.
+    WheelsOnly,
+    /// On the host, sdists allowed, because the user asked for it.
+    Unsandboxed,
+}
+
+impl ResolveMode {
+    /// What the user should be told about this mode, when it is not the
+    /// ordinary sandboxed one.
+    pub fn notice(self) -> Option<String> {
+        match self {
+            ResolveMode::Sandboxed => None,
+            ResolveMode::WheelsOnly => Some(
+                "bubblewrap is not usable here (bwrap missing, or unprivileged user \
+                 namespaces are disabled), so pip resolves wheels only and releases that \
+                 ship only an sdist will fail to resolve. Building an sdist runs its \
+                 build backend on your machine; to allow that anyway, pass \
+                 --unsafe-resolve (or set AUTO_PACKAGE_UNSAFE_RESOLVE=1)."
+                    .to_string(),
+            ),
+            ResolveMode::Unsandboxed => Some(
+                "--unsafe-resolve: pip runs without a sandbox and may build sdists. \
+                 Their build backends run as you, with access to your files and network."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+static UNSAFE_RESOLVE: AtomicBool = AtomicBool::new(false);
+
+/// Environment variable equivalent to `--unsafe-resolve`.
+pub const UNSAFE_RESOLVE_ENV: &str = "AUTO_PACKAGE_UNSAFE_RESOLVE";
+
+/// Allow (or stop allowing) resolution to run pip without the sandbox.
+pub fn set_unsafe_resolve(unsafe_resolve: bool) {
+    UNSAFE_RESOLVE.store(unsafe_resolve, Ordering::Relaxed);
+}
+
+fn unsafe_resolve() -> bool {
+    UNSAFE_RESOLVE.load(Ordering::Relaxed)
+        || std::env::var_os(UNSAFE_RESOLVE_ENV).is_some_and(|v| v == "1")
+}
+
+/// How resolution runs now: unsandboxed on request, sandboxed when bwrap
+/// works here (probed once per process), wheels only otherwise.
+pub fn resolve_mode() -> ResolveMode {
+    if unsafe_resolve() {
+        ResolveMode::Unsandboxed
+    } else if ap_core::sandbox::bwrap_works() {
+        ResolveMode::Sandboxed
+    } else {
+        ResolveMode::WheelsOnly
+    }
+}
+
+/// `program` run through bubblewrap, with a cleared environment for bwrap
+/// itself and the sandbox's own environment built from the allowlisted
+/// variables found in `vars`.
+fn sandboxed_command(
+    program: &[&str],
+    vars: impl Iterator<Item = (OsString, OsString)>,
+    netrc: bool,
+) -> Result<Command, Error> {
+    let bwrap = ap_core::sandbox::bwrap_path().ok_or_else(|| {
+        Error::Launch(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "bwrap not found on PATH",
+        ))
+    })?;
+    let vars: Vec<_> = vars.collect();
+    let var = |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    let host = pip_sandbox::Host {
+        home: var("HOME")
+            .map(Into::into)
+            .unwrap_or_else(|| "/nonexistent".into()),
+        path: var("PATH").unwrap_or_default(),
+        vars: pip_env(vars.into_iter()),
+        netrc,
+    };
+    let args = match pip_sandbox::bwrap_args(program, &host) {
+        Ok(args) => args,
+        // A missing interpreter is how the alternate-Python search moves on.
+        Err(SandboxError::ProgramNotFound(p)) => {
+            return Err(Error::Launch(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{p} not found on PATH"),
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let mut cmd = Command::new(bwrap);
+    cmd.env_clear().args(args);
+    Ok(cmd)
 }
 
 /// Variables pip is given. Everything else is cleared. Proxy, CA and index
@@ -364,10 +510,11 @@ fn pip_command(program: &[&str], vars: impl Iterator<Item = (OsString, OsString)
     cmd
 }
 
-/// The `pip install` arguments for one resolution. Sdists are not excluded,
-/// so pip can resolve a release that ships only an sdist.
-fn pip_report_args(spec: &str) -> Vec<&str> {
-    vec![
+/// The `pip install` arguments for one resolution. Sdists are not excluded
+/// unless `wheels_only`, so pip can resolve a release that ships only an
+/// sdist.
+fn pip_report_args(spec: &str, wheels_only: bool) -> Vec<&str> {
+    let mut args = vec![
         "install",
         "--dry-run",
         "--ignore-installed",
@@ -375,10 +522,14 @@ fn pip_report_args(spec: &str) -> Vec<&str> {
         "--disable-pip-version-check",
         "--report",
         "-",
-        // End of options: a hostile `name` must not be parsed as a flag.
-        "--",
-        spec,
-    ]
+    ];
+    if wheels_only {
+        args.push("--only-binary=:all:");
+    }
+    // End of options: a hostile `name` must not be parsed as a flag.
+    args.push("--");
+    args.push(spec);
+    args
 }
 
 /// The subset of `vars` pip may inherit.
@@ -499,7 +650,8 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         None => name.to_string(),
     };
 
-    let stdout = match run_pip_report(&["pip"], name, &spec) {
+    let mode = resolve_mode();
+    let stdout = match run_pip_report(&["pip"], name, &spec, mode) {
         Err(e @ Error::IncompatiblePython { .. }) => {
             // The default pip's interpreter is outside every release's
             // Requires-Python (open-webui needs <3.13 on a 3.13 system):
@@ -508,7 +660,7 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
             let mut last_err: Option<Error> = None;
             for minor in ALTERNATE_PYTHON_MINORS {
                 let py = format!("python3.{minor}");
-                match run_pip_report(&[&py, "-m", "pip"], name, &spec) {
+                match run_pip_report(&[&py, "-m", "pip"], name, &spec, mode) {
                     Ok(out) => {
                         ap_core::diag!(
                             "  default pip's Python is incompatible with {name}; resolved with {py}"
@@ -746,7 +898,7 @@ mod tests {
 
     #[test]
     fn resolution_accepts_sdists_without_any_opt_in() {
-        let args = pip_report_args("httpx==0.28.1");
+        let args = pip_report_args("httpx==0.28.1", false);
         assert!(!args.iter().any(|a| a.contains("only-binary")), "{args:?}");
         assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last(), Some(&"httpx==0.28.1"));
@@ -941,7 +1093,7 @@ mod classify_failure_tests {
     #[test]
     fn skipped_for_requires_python_is_not_reported_as_missing() {
         let stderr = "ERROR: Ignored the following versions that require a different python version: 0.8.12 Requires-Python >=3.11,<3.13.0a1; 0.9.0 Requires-Python >=3.11,<3.13.0a1\nERROR: Could not find a version that satisfies the requirement open-webui (from versions: none)\nERROR: No matching distribution found for open-webui\n";
-        match classify_failure("open-webui", 1, stderr.to_string()) {
+        match classify_failure("open-webui", 1, stderr.to_string(), false) {
             Error::IncompatiblePython { name, example } => {
                 assert_eq!(name, "open-webui");
                 assert_eq!(example, "0.8.12 Requires-Python >=3.11,<3.13.0a1");
@@ -954,8 +1106,11 @@ mod classify_failure_tests {
     fn a_truly_missing_project_is_not_found() {
         let stderr = "ERROR: Could not find a version that satisfies the requirement nope (from versions: none)\nERROR: No matching distribution found for nope\n";
         assert!(matches!(
-            classify_failure("nope", 1, stderr.to_string()),
+            classify_failure("nope", 1, stderr.to_string(), false),
             Error::NotFound(_)
         ));
     }
 }
+
+#[cfg(test)]
+mod sandbox_tests;
