@@ -3765,9 +3765,10 @@ pub fn obs_build(
     let mut unresolvable_since: Option<Instant> = None;
     // A repository/arch the project does not build for has no result at all,
     // which would otherwise read as "not started yet" until MAX_WAIT. A
-    // freshly committed package shows up within seconds, so a result that
-    // stays missing this long means it never will.
-    const NO_RESULTS_LIMIT: Duration = Duration::from_secs(180);
+    // freshly committed package usually shows up within seconds, but a busy
+    // scheduler can take minutes: after this long the project meta is
+    // consulted again, and only a repository/arch it lacks ends the wait.
+    const NO_RESULTS_LIMIT: Duration = Duration::from_secs(600);
     let mut no_results_since: Option<Instant> = None;
     // A built verdict whose job history cannot be read at all is accepted
     // after this long (see `obs_status::accept_unconfirmed`).
@@ -3844,11 +3845,20 @@ pub fn obs_build(
         if status == BuildStatus::Unknown("no results".to_string()) {
             let since = *no_results_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= NO_RESULTS_LIMIT {
-                return Err(Error::NotActionable(format!(
-                    "OBS has reported no build result for {pkg_name} on {repo}/{arch} for {}s; \
-                     check that {project} builds for that repository and architecture",
-                    since.elapsed().as_secs()
-                )));
+                // The project meta decides: a repository/arch it does not
+                // build is a dead end, anything else is a slow scheduler
+                // and MAX_WAIT bounds the wait.
+                ensure_builds_for(project, repo, arch)?;
+                reporter.report(&Event::Warning {
+                    step,
+                    message: format!(
+                        "OBS has reported no build result for {pkg_name} on {repo}/{arch} \
+                         for {}s although {project} builds for it; the scheduler is slow, \
+                         still waiting",
+                        since.elapsed().as_secs()
+                    ),
+                });
+                no_results_since = Some(Instant::now());
             }
         } else {
             no_results_since = None;
