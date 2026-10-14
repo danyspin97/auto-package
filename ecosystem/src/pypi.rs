@@ -905,6 +905,11 @@ pub fn pypi_name_from_versioned_tarball(filename: &str, spec_version: &str) -> O
         .or_else(|| filename.strip_suffix(".tar.xz"))
         .or_else(|| filename.strip_suffix(".tar.bz2"))
         .or_else(|| filename.strip_suffix(".tgz"))?;
+    // A bare filename only: a URL (forge release asset, archive link) or any
+    // other macro would yield a bogus project name and shadow the forge check.
+    if stem.contains('/') || stem.replace("%{version}", "").contains('%') {
+        return None;
+    }
     // Macro form first — the generator's usual output.
     if let Some(name) = stem.strip_suffix("-%{version}")
         && !name.is_empty()
@@ -1481,6 +1486,20 @@ mod tests {
     #[test]
     fn tarball_filename_rejects_pure_name() {
         assert!(pypi_name_from_versioned_tarball("something.tar.gz", "9.9.9").is_none());
+    }
+
+    #[test]
+    fn tarball_filename_rejects_urls_and_other_macros() {
+        for src in [
+            "https://github.com/o/r/releases/download/v%{version}/r-%{version}.tar.gz",
+            "https://github.com/o/r/archive/foo-1.2.3.tar.gz",
+            "%{name}-%{version}.tar.gz",
+        ] {
+            assert!(
+                pypi_name_from_versioned_tarball(src, "1.2.3").is_none(),
+                "{src}"
+            );
+        }
     }
 
     /// A wheel-only release — NVIDIA's CUDA toolkit packages are the real
