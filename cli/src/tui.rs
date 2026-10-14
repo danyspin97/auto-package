@@ -10,7 +10,7 @@
 //! "global" tap for events with no package, like `RunStarted`), and the tap
 //! forwards a `(pkg, event)` pair into the render thread's channel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -398,11 +398,11 @@ struct PkgState {
     fail_reason: Option<String>,
     /// Conditional steps that did not run, in the order they were skipped.
     skipped: Vec<(StepKind, SkipReason)>,
-    log_lines: Vec<LogLine>,
+    log_lines: VecDeque<LogLine>,
     /// Lines ever added, including ones since evicted from `log_lines`. Only
     /// grows, so a view can count arrivals even once the cap is hit.
     log_seq: u64,
-    agent_activity: Vec<ActivityEntry>,
+    agent_activity: VecDeque<ActivityEntry>,
     /// Same as `log_seq`, for `agent_activity`.
     #[cfg_attr(not(test), allow(dead_code))]
     activity_seq: u64,
@@ -442,9 +442,9 @@ impl PkgState {
             step: None,
             fail_reason: None,
             skipped: Vec::new(),
-            log_lines: Vec::new(),
+            log_lines: VecDeque::new(),
             log_seq: 0,
-            agent_activity: Vec::new(),
+            agent_activity: VecDeque::new(),
             activity_seq: 0,
             input_tokens: 0,
             output_tokens: 0,
@@ -474,22 +474,22 @@ impl PkgState {
     }
 
     fn add_log_styled(&mut self, level: LogLevel, message: String, emphasis: bool) {
-        self.log_lines.push(LogLine {
+        self.log_lines.push_back(LogLine {
             level,
             message,
             emphasis,
         });
         self.log_seq += 1;
         if self.log_lines.len() > MAX_LOG_LINES {
-            self.log_lines.remove(0);
+            self.log_lines.pop_front();
         }
     }
 
     fn add_agent_activity(&mut self, kind: ActivityKind, text: String) {
-        self.agent_activity.push(ActivityEntry { kind, text });
+        self.agent_activity.push_back(ActivityEntry { kind, text });
         self.activity_seq += 1;
         if self.agent_activity.len() > MAX_AGENT_ACTIVITY {
-            self.agent_activity.remove(0);
+            self.agent_activity.pop_front();
         }
     }
 
@@ -1537,9 +1537,12 @@ fn filter_matches(line: &str, needle: &str) -> bool {
 
 /// Indices of the log lines that pass `filter_matches`, in order.
 #[cfg_attr(not(test), allow(dead_code))]
-fn filtered_indices(lines: &[LogLine], needle: &str) -> Vec<usize> {
-    (0..lines.len())
-        .filter(|&i| filter_matches(&lines[i].message, needle))
+fn filtered_indices<'a>(lines: impl IntoIterator<Item = &'a LogLine>, needle: &str) -> Vec<usize> {
+    lines
+        .into_iter()
+        .enumerate()
+        .filter(|(_, l)| filter_matches(&l.message, needle))
+        .map(|(i, _)| i)
         .collect()
 }
 
@@ -1846,7 +1849,7 @@ fn render_detail(
             if l.emphasis {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            ListItem::new(l.message.clone()).style(style)
+            ListItem::new(l.message.as_str()).style(style)
         })
         .collect();
     let filter_note = browse
@@ -1908,9 +1911,11 @@ fn render_detail(
     }
 
     let inner_w = chunks[1].width.saturating_sub(2) as usize;
-    let activity_items: Vec<ListItem> = pkg.agent_activity
-        [act_top..(act_top + act_viewport).min(act_len)]
+    let activity_items: Vec<ListItem> = pkg
+        .agent_activity
         .iter()
+        .skip(act_top)
+        .take(act_viewport)
         .map(|a| {
             // Entries can span lines; the list shows the first one, and the
             // full text is one Enter away.
@@ -2061,7 +2066,7 @@ fn render_footer(
     let last = state
         .last_global_log
         .as_ref()
-        .map(|l| Span::styled(l.message.clone(), Style::default().fg(l.level.color())))
+        .map(|l| Span::styled(l.message.as_str(), Style::default().fg(l.level.color())))
         .unwrap_or_else(|| Span::raw(""));
     let nav = match browse.focus {
         Focus::Table => "↑/↓ select │ PgUp/PgDn/Home/End scroll log",
