@@ -1,5 +1,6 @@
 //! Subprocess execution with captured output and event emission.
 
+use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -94,8 +95,18 @@ impl<'a> Emit<'a> {
 pub const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Cap on what one captured stream keeps. A chatty child is still drained
-/// (so it never blocks on a full pipe) but the excess is discarded.
+/// (so it never blocks on a full pipe) but only the last this-many bytes are
+/// kept: a failing build's cause is at the end of its log.
 const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Append `chunk` to `buf`, then drop from the front so at most `cap` bytes
+/// remain — the tail of everything written so far.
+fn push_tail(buf: &mut VecDeque<u8>, chunk: &[u8], cap: usize) {
+    buf.extend(chunk);
+    if buf.len() > cap {
+        buf.drain(..buf.len() - cap);
+    }
+}
 
 /// Run a subprocess and capture stdout/stderr separately as strings.
 ///
@@ -261,13 +272,13 @@ pub fn capture_with_timeout_env(
 
     // Drain both pipes on their own threads so a chatty child can't fill a
     // pipe buffer and deadlock against our `try_wait` polling. Each keeps at
-    // most MAX_CAPTURE_BYTES and discards the rest, and reports back over a
+    // most MAX_CAPTURE_BYTES, the tail of the stream, and reports back over a
     // channel so the join below can have a deadline.
     // The bool is true when a read failed, i.e. the bytes are incomplete.
     fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::sync::mpsc::Receiver<(Vec<u8>, bool)> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
+            let mut buf = VecDeque::new();
             let mut cut_short = false;
             if let Some(mut r) = r {
                 let mut chunk = [0u8; 16 * 1024];
@@ -277,8 +288,7 @@ pub fn capture_with_timeout_env(
                         Ok(0) => break,
                         Ok(n) => {
                             read_errors = 0;
-                            let room = (MAX_CAPTURE_BYTES as usize).saturating_sub(buf.len());
-                            buf.extend_from_slice(&chunk[..n.min(room)]);
+                            push_tail(&mut buf, &chunk[..n], MAX_CAPTURE_BYTES as usize);
                         }
                         // A signal is not the end of the stream.
                         Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -295,7 +305,7 @@ pub fn capture_with_timeout_env(
                     }
                 }
             }
-            let _ = tx.send((buf, cut_short));
+            let _ = tx.send((Vec::from(buf), cut_short));
         });
         rx
     }
@@ -484,6 +494,26 @@ mod capture_timeout_tests {
         .expect("complete stdout of a clean exit is returned");
         assert_eq!(out.code, 0);
         assert_eq!(out.stdout, "hi\n");
+    }
+
+    #[test]
+    fn push_tail_keeps_only_the_last_cap_bytes() {
+        let mut buf = VecDeque::new();
+        push_tail(&mut buf, b"abcdef", 4);
+        push_tail(&mut buf, b"gh", 4);
+        assert_eq!(Vec::from(buf.clone()), b"efgh");
+        push_tail(&mut buf, b"ij", 4);
+        assert_eq!(Vec::from(buf), b"ghij");
+    }
+
+    #[test]
+    fn a_stream_larger_than_the_cap_keeps_its_end() {
+        let mut buf = VecDeque::new();
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        for chunk in data.chunks(777) {
+            push_tail(&mut buf, chunk, 1_000);
+        }
+        assert_eq!(Vec::from(buf), &data[data.len() - 1_000..]);
     }
 
     #[test]
