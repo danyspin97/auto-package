@@ -674,8 +674,22 @@ fn branch_item(
     match result? {
         BranchResult::Branched(b) => {
             if b.target_package != item.pkg {
+                // The branch just created a package nothing will build or
+                // submit; remove it rather than leave it in the project.
+                let cleanup = if b.target_project == branch {
+                    match osc::delete_package(&b.target_project, &b.target_package, emit) {
+                        Ok(()) => format!("; removed {}/{}", b.target_project, b.target_package),
+                        Err(e) => format!(
+                            "; could not remove {}/{}: {e}",
+                            b.target_project, b.target_package
+                        ),
+                    }
+                } else {
+                    String::new()
+                };
+                osc::invalidate_project_packages_cache(branch);
                 return Err(format!(
-                    "OBS branched it as {}, not {}",
+                    "OBS branched it as {}, not {}{cleanup}",
                     b.target_package, item.pkg
                 ));
             }

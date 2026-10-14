@@ -248,6 +248,23 @@ pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<(), Er
     })
 }
 
+/// Delete `project/pkg`. Only for a package this run has just created, such
+/// as a branch that came out under a name nothing will ever build.
+pub fn delete_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<(), Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", pkg)?;
+    let path = format!("/source/{project}/{}", enc(pkg));
+    let out = api_call(Some("DELETE"), &path, None, emit)?;
+    if out.success() {
+        return Ok(());
+    }
+    Err(Error::OscFailed {
+        cmd: format!("api -X DELETE {path}"),
+        code: out.code,
+        stderr: out.stderr,
+    })
+}
+
 /// Read a branch response, falling back to what was asked for when a field
 /// is missing.
 fn parse_branch_response(xml: &str, source: &str, pkg: &str, target_project: &str) -> Branched {
