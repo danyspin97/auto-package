@@ -2961,7 +2961,8 @@ fn pick_turn_response(result_payload: &str, tool_calls: &[ToolCall]) -> Option<T
 /// at the parse level — missing required fields fall back to safe defaults
 /// (`action: "no_change"`, empty evidence, `confidence: "low"`) so the
 /// pipeline can at least act on whatever list the model gave; the caller
-/// still rejects a response that has no `action` marker at all.
+/// still rejects a response that has no `action` marker at all, or one whose
+/// action is anything but `no_change` or `blocked`.
 fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
     fn find_field(text: &str, key: &str) -> Option<String> {
         let needle = format!("**{key}**:");
@@ -2983,6 +2984,12 @@ fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
     // Require at least `action` — without it there is no shape at all, and
     // treating a random text reply as a `no_change` would mask real bugs.
     let action = strip_wrapping(&find_field(text, "action")?);
+    // Prose is not a verified structured reply, so it may only report that
+    // nothing changed or that the package is blocked. `edited` would claim a
+    // change nobody checked and `use_upstream_wheel` rewrites the package.
+    if action != "no_change" && action != "blocked" {
+        return None;
+    }
     let reasoning =
         find_field(text, "reasoning").unwrap_or_else(|| text.trim().chars().take(500).collect());
     let evidence = find_field(text, "evidence")
@@ -3649,7 +3656,20 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         "edited" => Action::Edited,
         "no_change" => Action::NoChange,
         "use_upstream_wheel" => Action::UseUpstreamWheel { why: resp.why },
-        _ => Action::Blocked { why: resp.why },
+        "blocked" => Action::Blocked { why: resp.why },
+        other => {
+            return Err(Error::Parse {
+                message: format!("unknown action {other:?} in the turn response"),
+                stdout: stdout_raw,
+                prompt: prompt.clone(),
+                usage: Usage {
+                    input_tokens: result_event.usage.input_tokens,
+                    output_tokens: result_event.usage.output_tokens,
+                    cli_cost_usd: result_event.total_cost_usd,
+                    ..Usage::default()
+                },
+            });
+        }
     };
 
     // Build minimal output summary for output.md
@@ -4621,6 +4641,16 @@ mod tests {
             resp.evidence,
             vec!["Read drogon.spec", "Read CMakeLists.txt"]
         );
+    }
+
+    #[test]
+    fn prose_fallback_never_accepts_an_edit_or_a_wheel_switch() {
+        for action in ["edited", "use_upstream_wheel", "nonsense"] {
+            let text = format!("- **action**: `{action}`\n- **reasoning**: x\n");
+            assert!(pick_turn_response(&text, &[]).is_none(), "{action}");
+        }
+        let blocked = pick_turn_response("- **action**: `blocked`\n", &[]).unwrap();
+        assert_eq!(blocked.action, "blocked");
     }
 
     /// A non-Python package (drogon-shape: no `python-` RPM prefix) must get
