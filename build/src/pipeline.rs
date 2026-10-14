@@ -107,12 +107,38 @@ pub enum AgentBackend {
     Cli,
 }
 
+/// Why a package failed. Callers decide what to retry, count and give up on
+/// from this, never from the wording of `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FailureKind {
+    #[default]
+    Other,
+    /// The API answered 429 and the shared pause did not clear it.
+    RateLimited,
+    /// The package used up its budget or its attempt allowance.
+    Exhausted,
+    /// Another process held the package's build lock past the wait. Nothing
+    /// was tried, so the package is deferred rather than failed.
+    Busy,
+}
+
 #[derive(Debug)]
 pub enum PipelineResult {
-    Built { rpm_name: String },
-    AlreadyBuilt { rpm_name: String },
-    MissingDeps { rpm_name: String, deps: Vec<String> },
-    Failed { rpm_name: String, reason: String },
+    Built {
+        rpm_name: String,
+    },
+    AlreadyBuilt {
+        rpm_name: String,
+    },
+    MissingDeps {
+        rpm_name: String,
+        deps: Vec<String>,
+    },
+    Failed {
+        rpm_name: String,
+        reason: String,
+        kind: FailureKind,
+    },
 }
 
 // ── durable package state ─────────────────────────────────────────────────────
@@ -1033,6 +1059,10 @@ pub fn run_package(
             match ap_core::proc_lock::lock_with_wait(&lock_path, BUILD_LOCK_WAIT) {
                 Ok(f) => Some(f),
                 Err(e) => {
+                    let kind = match e {
+                        ap_core::proc_lock::LockError::Held(_) => FailureKind::Busy,
+                        ap_core::proc_lock::LockError::Io(_) => FailureKind::Other,
+                    };
                     return PipelineResult::Failed {
                         rpm_name: config.rpm_name.clone(),
                         reason: format!(
@@ -1040,6 +1070,7 @@ pub fn run_package(
                             lock_path.display(),
                             lock_error_text(&e)
                         ),
+                        kind,
                     };
                 }
             }
@@ -1060,6 +1091,11 @@ pub fn run_package(
     // this closes (a `MissingDeps` round used to leave an older, unrelated
     // `Failed` reason sitting in state.json untouched).
     let outcome = match &result {
+        // Nothing was attempted, so the package's last outcome is left alone.
+        PipelineResult::Failed {
+            kind: FailureKind::Busy,
+            ..
+        } => None,
         PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
         PipelineResult::MissingDeps { deps, .. } => Some((
             "missing_deps",
@@ -1208,9 +1244,14 @@ struct RunCtx<'a> {
 
 impl RunCtx<'_> {
     fn failed(&self, reason: String) -> PipelineResult {
+        self.failed_as(FailureKind::Other, reason)
+    }
+
+    fn failed_as(&self, kind: FailureKind, reason: String) -> PipelineResult {
         PipelineResult::Failed {
             rpm_name: self.rpm_name.clone(),
             reason,
+            kind,
         }
     }
 
@@ -1317,7 +1358,11 @@ fn preflight<'a>(
     if let Err(reason) = validate_path_component("package name", &rpm_name)
         .and_then(|()| validate_path_component("project", &config.project))
     {
-        return Err(PipelineResult::Failed { rpm_name, reason });
+        return Err(PipelineResult::Failed {
+            rpm_name,
+            reason,
+            kind: FailureKind::Other,
+        });
     }
     let ws = match Workspace::open(&config.state_root, &rpm_name) {
         Ok(w) => w,
@@ -1325,6 +1370,7 @@ fn preflight<'a>(
             return Err(PipelineResult::Failed {
                 rpm_name,
                 reason: e.to_string(),
+                kind: FailureKind::Other,
             });
         }
     };
@@ -2192,7 +2238,7 @@ fn fix_after_validation(
             }
             Ok(())
         }
-        Err(e) => Err(ctx.failed(format!("{agent_failed_prefix}{e}"))),
+        Err((e, kind)) => Err(ctx.failed_as(kind, format!("{agent_failed_prefix}{e}"))),
     }
 }
 
@@ -2688,12 +2734,15 @@ fn fix_after_build(
         } else {
             format!("attempt limit {} reached", config.max_attempts)
         };
-        return Err(ctx.failed(format!(
-            "gave up after {} attempt(s): {}; log: {}",
-            attempts,
-            why,
-            build_log.display()
-        )));
+        return Err(ctx.failed_as(
+            FailureKind::Exhausted,
+            format!(
+                "gave up after {} attempt(s): {}; log: {}",
+                attempts,
+                why,
+                build_log.display()
+            ),
+        ));
     }
 
     link_build_log(ws, build_log);
@@ -2742,7 +2791,7 @@ fn fix_after_build(
         // `agent_turn` already routed the Error through
         // `friendly_agent_error`, so this is a user-ready message
         // (budget-exhausted hint included); pass it through verbatim.
-        Err(e) => return Err(ctx.failed(e)),
+        Err((e, kind)) => return Err(ctx.failed_as(kind, e)),
     };
 
     if !outcome.unresolvable_packages.is_empty() {
@@ -2800,6 +2849,7 @@ macro_rules! begin_or_fail {
                 return Err(PipelineResult::Failed {
                     rpm_name: $rpm_name,
                     reason: e.to_string(),
+                    kind: FailureKind::Other,
                 });
             }
         }
@@ -2940,7 +2990,7 @@ fn agent_turn(
     spent_usd: &mut f64,
     session_id: &mut Option<String>,
     step_attempts: &mut Attempts,
-) -> Result<(StepDir, crate::agent::TurnOutcome), String> {
+) -> Result<(StepDir, crate::agent::TurnOutcome), (String, FailureKind)> {
     let TurnEnv {
         config,
         ws,
@@ -2954,7 +3004,7 @@ fn agent_turn(
         Some(ctx.label),
         step_attempts,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| (e.to_string(), FailureKind::Other))?;
 
     if let Some(hint) = ctx.hint {
         let extract = hint.to_event_extract();
@@ -3111,11 +3161,16 @@ fn agent_turn(
             }
             let step = step.finish(StepOutcome::Failed);
             let message = friendly_agent_error(&e, config.budget_usd, &config.pkg_name);
+            let kind = if e.is_rate_limited() {
+                FailureKind::RateLimited
+            } else {
+                FailureKind::Other
+            };
             reporter.report(&Event::Warning {
                 step: Some(step.id),
                 message: message.clone(),
             });
-            return Err(message);
+            return Err((message, kind));
         }
     };
 

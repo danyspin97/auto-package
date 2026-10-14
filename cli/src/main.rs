@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ap_build::pipeline::{
-    AgentBackend, PipelineConfig, PipelineResult, run_package, select_target,
+    AgentBackend, FailureKind, PipelineConfig, PipelineResult, run_package, select_target,
 };
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SelectionReason};
 use ap_core::run::RunDir;
@@ -232,38 +232,6 @@ fn looks_like_url(s: &str) -> bool {
 ///
 /// `https://github.com/BurntSushi/ripgrep.git` → `ripgrep`; sub-paths
 /// (`…/tree/main`), queries and fragments do not leak into the name.
-/// Whether a package failed only because the model API answered 429 (the
-/// pipeline's message for that case contains "rate limit (429)").
-fn is_rate_limit_failure(reason: &str) -> bool {
-    reason.contains("rate limit (429)")
-}
-
-/// Whether a package gave up because it already spent its *entire*
-/// per-package budget or attempt allowance on this one round (the exact
-/// message `run_package_inner` constructs: `"gave up after {N} attempt(s):
-/// budget exhausted ..."` or `"... attempt limit {N} reached"`), as opposed
-/// to a single transient failure (a flaky `osc` call, a one-off agent
-/// mistake) that a fresh round might plausibly do better on.
-///
-/// This matters because `max_target_retries` reuses `max_attempts` (the
-/// per-round fix-attempt cap) as the number of *whole rounds* to retry a
-/// failed target before giving up on it for good — so without this check, a
-/// package that already burned its full budget without success gets
-/// re-selected and given an entirely fresh budget up to `max_target_retries`
-/// times over. Observed on python-chromadb: 5+ rounds, each spending its
-/// full ~$14 (over the nominal $10 budget — the check only triggers
-/// mid-attempt, after the costly agent turn that pushed it over already
-/// ran), before `max_target_retries` would even have kicked in — the kind
-/// of repeat-the-same-$10-mistake loop that looks like the whole run being
-/// stuck even though other packages keep progressing around it. A budget/
-/// attempt exhaustion on attempt N is strong evidence attempt N+1 (with a
-/// brand new budget, repeating the exact same fix loop from scratch) won't
-/// fare differently, so it gives up immediately instead of waiting for
-/// `max_target_retries` identical rounds to confirm that.
-fn is_budget_or_attempt_exhausted(reason: &str) -> bool {
-    reason.contains("budget exhausted (") || reason.contains("attempt limit ")
-}
-
 fn repo_package_name(url: &str) -> String {
     // A direct tarball URL names the project in its file name, not as the last
     // path segment (`…/hello-2.12.tar.gz` is `hello`, not the file).
@@ -1330,6 +1298,7 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     handle.join().unwrap_or_else(|p| PipelineResult::Failed {
         rpm_name: rpm_name.to_string(),
         reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
+        kind: FailureKind::Other,
     })
 }
 
@@ -2301,10 +2270,29 @@ fn cmd_build(
                     }
                     batch_pending.extend(deps);
                 }
-                PipelineResult::Failed { reason, .. } => {
+                PipelineResult::Failed { reason, kind, .. } => {
                     batch_failures.push((rpm_name.clone(), reason.clone()));
-                    let rate_limited = is_rate_limit_failure(&reason);
-                    let exhausted = is_budget_or_attempt_exhausted(&reason);
+                    if kind == FailureKind::Busy {
+                        // Another process is building this package, so nothing
+                        // was tried here. It is deferred to a later round and
+                        // does not count toward giving up.
+                        pkg_reporter(&rpm_name).report(&Event::Warning {
+                            step: None,
+                            message: format!(
+                                "{rpm_name} is being built by another process ({reason}); \
+                                 deferred to a later round"
+                            ),
+                        });
+                        continue;
+                    }
+                    let rate_limited = kind == FailureKind::RateLimited;
+                    // A package that already spent its *entire* budget or attempt
+                    // allowance on this round gives up at once, instead of
+                    // getting a fresh budget for each of `max_target_retries`
+                    // rounds. `max_target_retries` reuses `max_attempts` as the
+                    // whole-round retry count, so without this a package that
+                    // burned its budget would repeat the same loop over and over.
+                    let exhausted = kind == FailureKind::Exhausted;
                     let count = if rate_limited {
                         rate_limited_counts.entry(rpm_name.clone()).or_insert(0)
                     } else {
@@ -2608,37 +2596,6 @@ fn report_update_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_429_failure_is_recognised_by_the_pipelines_message() {
-        assert!(is_rate_limit_failure(
-            "the model API rejected the turn with a quota/rate limit (429): API Error"
-        ));
-        assert!(!is_rate_limit_failure("claude exited 1"));
-        assert!(!is_rate_limit_failure(
-            "budget exhausted ($4.00 spent of $4.00)"
-        ));
-    }
-
-    /// The python-chromadb case: `run_package_inner`'s exact two
-    /// "gave up" message shapes must be recognized so a package that
-    /// already burned its full budget/attempt allowance doesn't get
-    /// re-selected for `max_target_retries` more full-budget rounds.
-    #[test]
-    fn budget_or_attempt_exhaustion_is_recognised_by_the_pipelines_message() {
-        assert!(is_budget_or_attempt_exhausted(
-            "gave up after 12 attempt(s): budget exhausted ($13.94 spent of $10.00); log: x"
-        ));
-        assert!(is_budget_or_attempt_exhausted(
-            "gave up after 10 attempt(s): attempt limit 10 reached; log: x"
-        ));
-        assert!(!is_budget_or_attempt_exhausted(
-            "build failed; log: x/build.log"
-        ));
-        assert!(!is_budget_or_attempt_exhausted(
-            "the model API rejected the turn with a quota/rate limit (429): API Error"
-        ));
-    }
 
     #[test]
     fn repo_package_name_ignores_subpaths_and_queries() {
