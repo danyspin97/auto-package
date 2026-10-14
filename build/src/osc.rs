@@ -219,27 +219,67 @@ fn classify_build_failure(log: &str) -> FailureKind {
     FailureKind::BuildFailed
 }
 
+/// The `nothing provides` requirements named on one line of a build log or of
+/// OBS's `<details>` text, each without the marker and without any
+/// `needed by ...` clause.
+///
+/// OBS's `<details>` for an `unresolvable` package joins every missing
+/// requirement onto ONE line (`nothing provides python314-fastar, nothing
+/// provides python313-fastar, ...`), while a build log has one per line, so a
+/// line may hold several. Reading only the first, as this used to, queued
+/// `python314-fastar,` (comma included) and lost everything after it.
+fn nothing_provides_segments(line: &str) -> Vec<String> {
+    const MARKER: &str = "nothing provides ";
+    let line = line.trim();
+    let line = line
+        .strip_prefix("unresolvable:")
+        .unwrap_or(line)
+        .trim_start();
+    // Only a line that starts with the phrase names requirements: one that
+    // merely mentions it somewhere in prose must not count.
+    let Some(mut rest) = line.strip_prefix(MARKER) else {
+        return Vec::new();
+    };
+    let mut segments = Vec::new();
+    loop {
+        let (segment, next) = match rest.find(MARKER) {
+            Some(i) => (&rest[..i], Some(&rest[i + MARKER.len()..])),
+            None => (rest, None),
+        };
+        let segment = segment.trim().trim_end_matches(',').trim_end();
+        let segment = segment
+            .split(" needed by ")
+            .next()
+            .unwrap_or(segment)
+            .trim();
+        if !segment.is_empty() {
+            segments.push(segment.to_string());
+        }
+        match next {
+            Some(n) => rest = n,
+            None => break,
+        }
+    }
+    segments
+}
+
 /// Extract RPM package names from "nothing provides <pkg>" lines in a build log.
 ///
 /// Handles both bare `nothing provides <pkg>` and `unresolvable: nothing provides <pkg>`,
-/// strips any trailing `needed by ...` clause, and deduplicates.
+/// several requirements joined onto one line (OBS's `<details>` form), strips
+/// any trailing `needed by ...` clause and any version constraint, and
+/// deduplicates.
 fn extract_unresolvable(log: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
-    for raw_line in log.lines() {
-        let line = raw_line.trim();
-        let pkg_str = if let Some(rest) = line.strip_prefix("unresolvable: nothing provides ") {
-            rest.trim()
-        } else if let Some(rest) = line.strip_prefix("nothing provides ") {
-            rest.trim()
-        } else {
-            continue;
-        };
-        // Take just the package name; drop " needed by ..." suffix.
-        let pkg = pkg_str.split_whitespace().next().unwrap_or(pkg_str);
-        let pkg = clean_unresolvable_name(pkg);
-        if !pkg.is_empty() && seen.insert(pkg.to_string()) {
-            result.push(pkg.to_string());
+    for line in log.lines() {
+        for segment in nothing_provides_segments(line) {
+            // Take just the package name; drop any version constraint.
+            let pkg = segment.split_whitespace().next().unwrap_or(&segment);
+            let pkg = clean_unresolvable_name(pkg);
+            if !pkg.is_empty() && seen.insert(pkg.to_string()) {
+                result.push(pkg.to_string());
+            }
         }
     }
     result
@@ -275,12 +315,23 @@ fn extract_unresolvable_detail(log: &str) -> Vec<String> {
     let lines: Vec<&str> = log.lines().collect();
     for (i, raw_line) in lines.iter().enumerate() {
         let line = raw_line.trim();
-        if !line.starts_with("nothing provides")
-            && !line.starts_with("unresolvable: nothing provides")
-        {
+        let bare = line
+            .strip_prefix("unresolvable:")
+            .unwrap_or(line)
+            .trim_start();
+        // The solver's other complaints name no package to queue, but they
+        // are what separates "needs building" from "the spec asks for the
+        // impossible", so they travel with the detail.
+        if bare.starts_with("have choice for ") || bare.starts_with("conflict for providers of ") {
+            result.push(line.to_string());
             continue;
         }
-        result.push(line.to_string());
+        let segments = nothing_provides_segments(line);
+        match segments.as_slice() {
+            [] => continue,
+            [_] => result.push(line.to_string()),
+            many => result.extend(many.iter().map(|s| format!("nothing provides {s}"))),
+        }
         if let Some(next) = lines.get(i + 1) {
             let next = next.trim();
             if next.starts_with('(') {
@@ -327,6 +378,113 @@ nothing provides (python313-foo
             clean_unresolvable_name("python314-duckdb"),
             "python314-duckdb"
         );
+    }
+
+    /// The `<details>` of python-fastapi-cloud-cli on i586 in
+    /// home:dspinella:open-webui, verbatim: every requirement on one line.
+    const FASTAPI_CLOUD_CLI_DETAILS: &str = "nothing provides python314-fastar, nothing provides python313-fastar, nothing provides python314-rignore, nothing provides python313-rignore, nothing provides python314-sentry-sdk, nothing provides python313-sentry-sdk";
+
+    /// A joined details line used to yield only `python314-fastar,` (comma
+    /// attached), so five of the six names never reached the queue.
+    #[test]
+    fn reads_every_requirement_on_a_joined_details_line() {
+        assert_eq!(
+            extract_unresolvable(FASTAPI_CLOUD_CLI_DETAILS),
+            vec![
+                "python314-fastar",
+                "python313-fastar",
+                "python314-rignore",
+                "python313-rignore",
+                "python314-sentry-sdk",
+                "python313-sentry-sdk",
+            ]
+        );
+        let detail = extract_unresolvable_detail(FASTAPI_CLOUD_CLI_DETAILS);
+        assert_eq!(detail.len(), 6);
+        assert_eq!(detail[0], "nothing provides python314-fastar");
+    }
+
+    #[test]
+    fn joined_requirements_keep_needed_by_and_version_out_of_the_name() {
+        let line = "unresolvable: nothing provides python314-a >= 2 needed by python314-x, \
+                    nothing provides python314-b needed by python314-y";
+        assert_eq!(
+            extract_unresolvable(line),
+            vec!["python314-a", "python314-b"]
+        );
+        // A line that only mentions the phrase is not a requirement.
+        assert!(extract_unresolvable("error: nothing provides python314-a").is_empty());
+    }
+
+    #[test]
+    fn solver_conflicts_travel_with_the_detail_but_name_no_package() {
+        let log = "\
+unresolvable: have choice for python3-foo needed by python314-bar: python314-foo python313-foo
+unresolvable: nothing provides python314-setuptools < 70.0.0
+(got version 80.9.0-3.3)
+conflict for providers of python314-baz needed by python314-qux
+";
+        assert_eq!(extract_unresolvable(log), vec!["python314-setuptools"]);
+        assert_eq!(
+            extract_unresolvable_detail(log),
+            vec![
+                "unresolvable: have choice for python3-foo needed by python314-bar: python314-foo python313-foo",
+                "unresolvable: nothing provides python314-setuptools < 70.0.0",
+                "(got version 80.9.0-3.3)",
+                "conflict for providers of python314-baz needed by python314-qux",
+            ]
+        );
+    }
+
+    #[test]
+    fn blockers_collapse_flavors_to_one_package_each() {
+        assert_eq!(
+            blockers_from_details(FASTAPI_CLOUD_CLI_DETAILS),
+            vec!["fastar", "rignore", "sentry-sdk"]
+        );
+    }
+
+    #[test]
+    fn blockers_skip_version_conflicts_and_interpreter_pieces() {
+        let details = "nothing provides python314-setuptools < 70.0.0, \
+                       nothing provides python3-devel, \
+                       nothing provides python-rpm-macros, \
+                       nothing provides python314-ninja, \
+                       nothing provides libfoo-devel, \
+                       nothing provides python313-Foo_Bar, \
+                       nothing provides python314-foo-bar";
+        assert_eq!(blockers_from_details(details), vec!["Foo_Bar", "foo"]);
+    }
+
+    /// Both repositories' results arrive in one document; only the one asked
+    /// for may count.
+    const MULTI_REPO: &str = r#"<resultlist state="bfdf69d7aa217ca87031d1aff55605f2">
+  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+    <status package="python-fastapi-cloud-cli" code="unresolvable">
+      <details>nothing provides python314-fastar, nothing provides python313-fastar</details>
+    </status>
+  </result>
+  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
+    <status package="python-fastapi-cloud-cli" code="succeeded"/>
+  </result>
+</resultlist>"#;
+
+    #[test]
+    fn unresolvable_details_come_from_the_requested_arch_only() {
+        let details = |arch| {
+            unresolvable_details_from_xml(
+                MULTI_REPO,
+                "openSUSE_Tumbleweed",
+                arch,
+                "python-fastapi-cloud-cli",
+            )
+        };
+        assert_eq!(
+            details("i586").as_deref(),
+            Some("nothing provides python314-fastar, nothing provides python313-fastar")
+        );
+        assert_eq!(details("x86_64"), None);
+        assert_eq!(details("aarch64"), None);
     }
 }
 
@@ -2503,6 +2661,16 @@ pub fn current_unresolvable(
     log_path: &Path,
     emit: Emit<'_>,
 ) -> (Vec<String>, Vec<String>) {
+    // The `_result` document is what OBS says about the current revision in
+    // exactly this repository and architecture; a build log may be left over
+    // from an older revision, and the `osc results` text is a rendering of
+    // that same document, so both only run when it gives nothing.
+    if let Some(details) = unresolvable_details(project, pkg_name, repo, arch) {
+        let names = extract_unresolvable(&details);
+        if !names.is_empty() {
+            return (names, extract_unresolvable_detail(&details));
+        }
+    }
     let log_text = fs::read_to_string(log_path).unwrap_or_default();
     let mut names = extract_unresolvable(&log_text);
     let mut detail = extract_unresolvable_detail(&log_text);
@@ -2510,6 +2678,103 @@ pub fn current_unresolvable(
         (names, detail) = get_unresolvable_from_results(project, pkg_name, repo, arch, emit);
     }
     (names, detail)
+}
+
+/// The `<details>` text of `pkg_name`'s `unresolvable` status in this one
+/// repository/architecture, or `None` when it is not unresolvable there (or
+/// the status cannot be read). Other repositories' results in the same
+/// document are never looked at: a package can be `unresolvable` on `i586`
+/// and `succeeded` on `x86_64` at once.
+pub fn unresolvable_details(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+) -> Option<String> {
+    let xml = osc_api(&format!(
+        "/build/{project}/_result?package={}&repository={}&arch={}",
+        enc(pkg_name),
+        enc(repo),
+        enc(arch)
+    ))?;
+    unresolvable_details_from_xml(&xml, repo, arch, pkg_name)
+}
+
+fn unresolvable_details_from_xml(xml: &str, repo: &str, arch: &str, pkg: &str) -> Option<String> {
+    let entry = obs_status::find_entry(xml, repo, arch, pkg)?;
+    (BuildStatus::from(entry.code.as_str()) == BuildStatus::Unresolvable)
+        .then_some(entry.details)
+        .flatten()
+}
+
+/// The packages that must be built before the unresolvable `pkg_name` can
+/// build, read from OBS's own `nothing provides` details for this
+/// repository/architecture and mapped back to package names by
+/// [`missing_package_names`]. Empty when OBS names none (not unresolvable
+/// here, a version conflict, or an unreadable status).
+pub fn unresolvable_blockers(project: &str, pkg_name: &str, repo: &str, arch: &str) -> Vec<String> {
+    match unresolvable_details(project, pkg_name, repo, arch) {
+        Some(details) => blockers_from_details(&details),
+        None => Vec::new(),
+    }
+}
+
+fn blockers_from_details(details: &str) -> Vec<String> {
+    // A requirement with a version bound is the spec's own constraint failing
+    // against the one version the repository has, which building the named
+    // package cannot fix; only unconstrained ones are packages to build.
+    let unconstrained: Vec<String> = details
+        .lines()
+        .flat_map(nothing_provides_segments)
+        .filter(|segment| segment.split_whitespace().nth(1).is_none())
+        .map(|segment| format!("nothing provides {segment}"))
+        .collect();
+    missing_package_names(&extract_unresolvable(&unconstrained.join("\n")))
+}
+
+/// Stems of the interpreter's own subpackages (`python3-devel`,
+/// `python-rpm-macros`, ...): the distro ships them, and no PyPI project of
+/// that name is what the requirement means.
+const PYTHON_INTERPRETER_STEMS: &[&str] = &[
+    "base",
+    "curses",
+    "devel",
+    "doc",
+    "idle",
+    "rpm-generators",
+    "rpm-macros",
+    "testsuite",
+    "tk",
+    "tools",
+    "xml",
+];
+
+/// Package names to queue for building, from the RPM names a build or an
+/// agent reports missing: the `python313-`/`python314-`/`python3-`/`python-`
+/// prefix and any `lib...-devel` wrapping are stripped, every flavor of one
+/// package (`python313-fastar`, `python314-fastar`) collapses to one name
+/// (compared by [`fuzzy_key`], first spelling kept), and requirements that
+/// are not something to build are left out: the interpreter's own
+/// subpackages and system tools a PyPI package merely redistributes.
+pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in rpm_names {
+        let rpm = raw.trim();
+        let stripped = strip_rpm_prefix(rpm);
+        if stripped != rpm && PYTHON_INTERPRETER_STEMS.contains(&stripped) {
+            continue;
+        }
+        let name = strip_devel_wrapping(stripped);
+        if name.is_empty() || crate::pipeline::is_system_tool_alias(name) {
+            continue;
+        }
+        if seen.insert(fuzzy_key(name)) {
+            out.push(name.to_string());
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// Wait for the OBS remote build to complete, fetch the log, and download
