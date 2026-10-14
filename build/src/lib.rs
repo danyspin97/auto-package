@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod depreach;
 pub mod discovery;
+pub mod distro_bounds;
 pub mod flavors;
 pub mod http;
 pub mod log;
