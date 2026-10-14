@@ -2472,23 +2472,29 @@ fn static_system_prompt() -> &'static str {
     PROMPT.get_or_init(|| format!("{CONVENTIONS}\n\n{STATIC_WORKFLOW}"))
 }
 
-/// [`static_system_prompt`] written once per process to a file for
-/// `--append-system-prompt-file`. The path is stable for the process, so
-/// every turn reuses it.
-fn static_system_prompt_file() -> std::io::Result<&'static std::path::Path> {
-    static FILE: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
-        std::sync::OnceLock::new();
-    FILE.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("auto-package-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let path = dir.join("system-prompt.md");
-        std::fs::write(&path, static_system_prompt())
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(path)
-    })
-    .as_ref()
-    .map(|p| p.as_path())
-    .map_err(|e| std::io::Error::other(e.clone()))
+/// [`static_system_prompt`] written to a file for `--append-system-prompt-file`.
+/// The file sits in its own directory, created exclusively with mode 0700, so
+/// a file or symlink planted in the shared temp directory is never followed.
+/// Dropping the value removes both, so the copy does not outlive the turn.
+struct SystemPromptFile {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl SystemPromptFile {
+    fn create() -> std::io::Result<Self> {
+        let dir = tempfile::Builder::new().prefix("auto-package-").tempdir()?;
+        // The mode is set explicitly: tempfile leaves it to the umask.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+        let path = dir.path().join("system-prompt.md");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, static_system_prompt().as_bytes())?;
+        Ok(Self { _dir: dir, path })
+    }
 }
 
 // ── public types ──────────────────────────────────────────────────────────────
@@ -3045,7 +3051,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // actually lets this ~140KB of unchanging instructions be served from
     // Anthropic's prompt cache instead of re-billed as fresh input on every
     // single turn, for every package.
-    let system_prompt_file = static_system_prompt_file().map_err(Error::Io)?;
+    let system_prompt_file = SystemPromptFile::create().map_err(Error::Io)?;
 
     let mut cmd = Command::new("claude");
     // Scrub the inherited environment before applying any `.env(...)` call
@@ -3081,7 +3087,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         // within a few KB of that. The text — and so the prompt cache — is
         // identical either way.
         "--append-system-prompt-file",
-        &system_prompt_file.to_string_lossy(),
+        &system_prompt_file.path.to_string_lossy(),
         // The default system prompt's per-machine sections (cwd, env info,
         // git status) otherwise differ across packages' checkout
         // directories and would break cache-prefix reuse between them even
@@ -4248,10 +4254,20 @@ mod tests {
     /// exactly the cached text.
     #[test]
     fn system_prompt_file_holds_the_static_prompt() {
-        let path = static_system_prompt_file().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let file = SystemPromptFile::create().unwrap();
         assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
+            std::fs::read_to_string(&file.path).unwrap(),
             static_system_prompt()
+        );
+        let dir = file.path.parent().unwrap();
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let kept = dir.to_path_buf();
+        drop(file);
+        assert!(
+            !kept.exists(),
+            "the prompt copy must be removed with the turn"
         );
     }
 
