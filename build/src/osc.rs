@@ -2622,8 +2622,10 @@ fn get_build_status_xml(
     {
         return Ok(None);
     }
+    // `multibuild=1` adds the package's `<pkg>:<flavor>` entries: the package
+    // is only done when every flavor is.
     let path = format!(
-        "/build/{project}/_result?package={}&repository={}&arch={}",
+        "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
         enc(pkg_name),
         enc(repo),
         enc(arch)
@@ -2648,26 +2650,40 @@ fn get_build_status_xml(
     let Some(entry) = obs_status::find_entry(&xml, repo, arch, pkg_name) else {
         return Ok(None);
     };
-    let evidence = if obs_status::needs_evidence(&entry, confirm) {
-        obs_status::Evidence {
-            confirm,
-            source: osc_api(&format!("/source/{project}/{}?view=info", enc(pkg_name)))
-                .and_then(|x| obs_status::parse_source_info(&x)),
-            job: osc_api(&format!(
-                "/build/{project}/{}/{}/_jobhistory?package={}&limit=1",
-                enc(repo),
-                enc(arch),
-                enc(pkg_name)
-            ))
-            .and_then(|x| obs_status::parse_latest_job(&x)),
-        }
-    } else {
-        obs_status::Evidence {
-            confirm,
-            ..Default::default()
-        }
+    // The source revision is the package's; every flavor builds from it.
+    let mut source: Option<Option<obs_status::SourceInfo>> = None;
+    let mut resolve_entry = |entry: &obs_status::ResultEntry| {
+        let evidence = if obs_status::needs_evidence(entry, confirm) {
+            obs_status::Evidence {
+                confirm,
+                source: source
+                    .get_or_insert_with(|| {
+                        osc_api(&format!("/source/{project}/{}?view=info", enc(pkg_name)))
+                            .and_then(|x| obs_status::parse_source_info(&x))
+                    })
+                    .clone(),
+                job: osc_api(&format!(
+                    "/build/{project}/{}/{}/_jobhistory?package={}&limit=1",
+                    enc(repo),
+                    enc(arch),
+                    enc(&entry.pkg)
+                ))
+                .and_then(|x| obs_status::parse_latest_job(&x)),
+            }
+        } else {
+            obs_status::Evidence {
+                confirm,
+                ..Default::default()
+            }
+        };
+        obs_status::resolve(entry, &evidence)
     };
-    Ok(Some(obs_status::resolve(&entry, &evidence)))
+    let base = resolve_entry(&entry);
+    let flavors: Vec<BuildStatus> = obs_status::flavor_entries(&xml, repo, arch, pkg_name)
+        .iter()
+        .map(&mut resolve_entry)
+        .collect();
+    Ok(Some(obs_status::combine(base, &flavors)))
 }
 
 /// Parsing half of the `osc results` fallback in [`get_build_status`], split
@@ -3023,6 +3039,37 @@ fn downloaded_rpm_count(
         Some(names) => names.iter().filter(|n| rpms_dir.join(n).is_file()).count(),
         None => count_recent_rpms(rpms_dir, Duration::from_secs(600)),
     }
+}
+
+/// The `<pkg>:<flavor>` names of `pkg_name`'s multibuild flavors built for
+/// `repo`/`arch`; empty for a plain package or when the listing cannot be read.
+fn multibuild_flavors(project: &str, pkg_name: &str, repo: &str, arch: &str) -> Vec<String> {
+    if ![project, pkg_name, repo, arch]
+        .iter()
+        .all(|n| is_valid_obs_name(n))
+    {
+        return Vec::new();
+    }
+    osc_api(&format!(
+        "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
+        enc(pkg_name),
+        enc(repo),
+        enc(arch)
+    ))
+    .map(|xml| {
+        obs_status::flavor_entries(&xml, repo, arch, pkg_name)
+            .into_iter()
+            .filter(|e| {
+                is_valid_obs_name(&e.pkg)
+                    && !matches!(
+                        obs_status::resolve_lenient(e),
+                        BuildStatus::Excluded | BuildStatus::Disabled
+                    )
+            })
+            .map(|e| e.pkg)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// `.rpm` files (not `.src.rpm`) in `rpms_dir` modified within `window`.
@@ -3757,8 +3804,18 @@ pub fn obs_build(
         // with no files written when the project is misconfigured
         // (empty binary set for this repo/arch pair), which the warning
         // version silently papered over.
-        let fetch_result = get_binaries(project, pkg_name, repo, arch, rpms_dir, emit);
-        let downloaded_count = downloaded_rpm_count(project, pkg_name, repo, arch, rpms_dir);
+        // A multibuild package ships its flavors' RPMs under `<pkg>:<flavor>`.
+        let mut packages = vec![pkg_name.to_string()];
+        packages.extend(multibuild_flavors(project, pkg_name, repo, arch));
+        let mut fetch_result = Ok(());
+        let mut downloaded_count = 0;
+        for name in &packages {
+            if let Err(e) = get_binaries(project, name, repo, arch, rpms_dir, emit) {
+                fetch_result = Err(e);
+                break;
+            }
+            downloaded_count += downloaded_rpm_count(project, name, repo, arch, rpms_dir);
+        }
         if let Err(e) = fetch_result {
             reporter.report(&Event::CommandDone {
                 step,

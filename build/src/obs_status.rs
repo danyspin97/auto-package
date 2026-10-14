@@ -255,6 +255,39 @@ pub fn find_entry(xml: &str, repo: &str, arch: &str, pkg: &str) -> Option<Result
         .find(|e| e.repo == repo && e.arch == arch && e.pkg == pkg)
 }
 
+/// The multibuild flavor entries of `pkg` (`pkg:flavor`) in one
+/// repository/arch.
+pub fn flavor_entries(xml: &str, repo: &str, arch: &str, pkg: &str) -> Vec<ResultEntry> {
+    let prefix = format!("{pkg}:");
+    parse_results(xml)
+        .into_iter()
+        .filter(|e| e.repo == repo && e.arch == arch && e.pkg.starts_with(&prefix))
+        .collect()
+}
+
+/// One status for a package and its multibuild flavors: still going while any
+/// of them is (the first such), else the worst verdict — failed, broken, then
+/// unresolvable — else succeeded if anything built, else the package's own.
+pub fn combine(base: BuildStatus, flavors: &[BuildStatus]) -> BuildStatus {
+    let all: Vec<&BuildStatus> = std::iter::once(&base).chain(flavors).collect();
+    if let Some(active) = all.iter().find(|s| !s.is_terminal()) {
+        return (*active).clone();
+    }
+    for bad in [
+        BuildStatus::Failed,
+        BuildStatus::Broken,
+        BuildStatus::Unresolvable,
+    ] {
+        if all.contains(&&bad) {
+            return bad;
+        }
+    }
+    if all.iter().any(|s| s.is_success()) {
+        return BuildStatus::Succeeded;
+    }
+    base
+}
+
 /// Source revision identity from `/source/<prj>/<pkg>?view=info`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
@@ -703,6 +736,34 @@ mod tests {
         };
         assert_eq!(resolve(&e, &with_confirm), BuildStatus::Succeeded);
         assert!(!needs_evidence(&e, true));
+    }
+
+    #[test]
+    fn flavors_are_read_from_their_own_repository_and_arch() {
+        let xml = r#"<resultlist>
+  <result repository="r" arch="x86_64">
+    <status package="foo" code="succeeded"/>
+    <status package="foo:py313" code="failed"/>
+    <status package="foobar" code="failed"/>
+  </result>
+  <result repository="r" arch="i586"><status package="foo:py314" code="failed"/></result>
+</resultlist>"#;
+        let f = flavor_entries(xml, "r", "x86_64", "foo");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].pkg, "foo:py313");
+    }
+
+    #[test]
+    fn a_package_waits_for_its_flavors_and_fails_with_any_of_them() {
+        use BuildStatus::*;
+        assert_eq!(combine(Succeeded, &[Building]), Building);
+        assert_eq!(combine(Succeeded, &[Succeeded, Failed]), Failed);
+        assert_eq!(combine(Unresolvable, &[Succeeded]), Unresolvable);
+        assert_eq!(combine(Failed, &[Unresolvable]), Failed);
+        assert_eq!(combine(Succeeded, &[Excluded]), Succeeded);
+        assert_eq!(combine(Excluded, &[Succeeded]), Succeeded);
+        assert_eq!(combine(Excluded, &[]), Excluded);
+        assert_eq!(combine(Scheduled, &[Blocked]), Scheduled);
     }
 
     #[test]
