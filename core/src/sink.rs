@@ -2,8 +2,9 @@ use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use owo_colors::{OwoColorize, Stream::Stderr, Style};
 use serde::Serialize;
@@ -604,8 +605,33 @@ impl Reporter for HumanSink {
     }
 }
 
+/// The open file and when it was last flushed.
+struct JsonlWriter {
+    out: BufWriter<File>,
+    last_flush: Instant,
+}
+
+/// Longest the tail of run.jsonl may sit in the buffer while events keep
+/// arriving.
+const JSONL_FLUSH_EVERY: Duration = Duration::from_secs(1);
+
+/// Every open [`JsonlSink`]'s writer, so [`flush_jsonl_sinks`] can reach them
+/// from a path that ends the process without dropping them.
+static JSONL_WRITERS: Mutex<Vec<Weak<Mutex<JsonlWriter>>>> = Mutex::new(Vec::new());
+
+/// Flush every open run.jsonl. Call before `process::exit`, which skips the
+/// buffers' drop: events are only flushed on a timer and on terminal events.
+pub fn flush_jsonl_sinks() {
+    let writers = JSONL_WRITERS.lock().unwrap_or_else(|e| e.into_inner());
+    for w in writers.iter().filter_map(Weak::upgrade) {
+        let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = w.out.flush();
+        w.last_flush = Instant::now();
+    }
+}
+
 pub struct JsonlSink {
-    writer: Mutex<BufWriter<File>>,
+    writer: Arc<Mutex<JsonlWriter>>,
     /// Set after the first write failure so the diagnostic prints once, not
     /// once per event.
     warned: AtomicBool,
@@ -616,8 +642,15 @@ pub struct JsonlSink {
 impl JsonlSink {
     pub fn open(path: &Path) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let writer = Arc::new(Mutex::new(JsonlWriter {
+            out: BufWriter::new(file),
+            last_flush: Instant::now(),
+        }));
+        let mut writers = JSONL_WRITERS.lock().unwrap_or_else(|e| e.into_inner());
+        writers.retain(|w| w.strong_count() > 0);
+        writers.push(Arc::downgrade(&writer));
         Ok(Self {
-            writer: Mutex::new(BufWriter::new(file)),
+            writer,
             warned: AtomicBool::new(false),
             serialize_warned: AtomicBool::new(false),
         })
@@ -659,10 +692,23 @@ impl Reporter for JsonlSink {
         // A panic in another thread mid-write poisons the lock; the
         // buffer is still usable, so keep logging.
         let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        // Flushed per event on purpose: the CLI's exit paths call
-        // `process::exit`, which skips the BufWriter's drop, and a crash must
-        // not lose the events before it. The cost is a write per event.
-        let res = writeln!(w, "{line}").and_then(|()| w.flush());
+        // Flushed on events that close something out and at most a second
+        // apart otherwise, not per event. The CLI's exit paths call
+        // `process::exit`, which skips the BufWriter's drop, so they call
+        // [`flush_jsonl_sinks`] first.
+        let terminal = matches!(
+            event,
+            Event::PackageFinished { .. } | Event::RunFinished { .. } | Event::Warning { .. }
+        );
+        let due = terminal || w.last_flush.elapsed() >= JSONL_FLUSH_EVERY;
+        let res = writeln!(w.out, "{line}").and_then(|()| {
+            if due {
+                w.last_flush = Instant::now();
+                w.out.flush()
+            } else {
+                Ok(())
+            }
+        });
         if let Err(e) = res
             && !self.warned.swap(true, Ordering::Relaxed)
         {
@@ -763,6 +809,7 @@ mod tests {
         // After the call, the thread-local must be restored.
         assert_eq!(current_pkg(), None);
 
+        flush_jsonl_sinks();
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(
             contents.contains("\"pkg\":\"python-foo\""),
@@ -777,9 +824,14 @@ mod tests {
     fn jsonl_write_failure_warns_once_and_does_not_panic() {
         let sink = JsonlSink::open(Path::new("/dev/full")).unwrap();
         assert!(!sink.warned.load(Ordering::Relaxed));
-        sink.report(&Event::ResolveStarted { root: "x".into() });
+        // A warning is flushed straight away, so the failure shows at once.
+        let warning = Event::Warning {
+            step: None,
+            message: "x".into(),
+        };
+        sink.report(&warning);
         assert!(sink.warned.load(Ordering::Relaxed));
-        sink.report(&Event::ResolveStarted { root: "y".into() });
+        sink.report(&warning);
     }
 
     #[test]
@@ -869,6 +921,7 @@ mod tests {
             h.join().unwrap();
         }
 
+        flush_jsonl_sinks();
         let file = std::fs::File::open(&path).unwrap();
         let mut a = 0usize;
         let mut b = 0usize;
