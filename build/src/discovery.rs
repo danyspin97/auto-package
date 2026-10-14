@@ -293,7 +293,7 @@ fn same_repo(a: &str, b: &str) -> bool {
 // ── last resort: ask the agent ─────────────────────────────────────────────────
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -316,6 +316,19 @@ pub fn set_agent_enabled(enabled: bool) {
 fn agent_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
+}
+
+/// The lock that callers looking up `key` queue on. One per distinct name
+/// asked about, so the map stays a few entries per run and is never pruned.
+fn in_flight_slot(key: &str) -> Arc<Mutex<()>> {
+    static SLOTS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let slots = SLOTS.get_or_init(Default::default);
+    slots
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(key.to_string())
+        .or_default()
+        .clone()
 }
 
 /// Evidence handed to the agent so it checks rather than starts from scratch.
@@ -495,12 +508,18 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     if !AGENT_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
-    // One lookup at a time: with the cache check and the insert separated by a
-    // slow model call, concurrent callers asking about the same name each
-    // spawned the CLI and each spent one of the per-process lookups.
-    static LOOKUP_LOCK: Mutex<()> = Mutex::new(());
-    let _one_at_a_time = LOOKUP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let key = normalize(name);
+    // A name already answered comes straight from the cache, without waiting
+    // behind model calls in flight for other names.
+    if let Some(hit) = agent_cache().lock().ok()?.get(&key) {
+        return hit.clone();
+    }
+    // Callers asking about the same name queue on that name's slot, so the
+    // model is asked once and the rest read the cache; other names proceed in
+    // parallel.
+    let slot = in_flight_slot(&key);
+    let _turn = slot.lock().unwrap_or_else(|e| e.into_inner());
+    // Another caller may have answered this name while we were queued.
     if let Some(hit) = agent_cache().lock().ok()?.get(&key) {
         return hit.clone();
     }
@@ -891,6 +910,13 @@ Source3:        %name.keyring
             None
         );
         set_agent_enabled(true);
+    }
+
+    #[test]
+    fn lookups_for_one_name_share_a_slot_and_different_names_do_not() {
+        let a = in_flight_slot("zz-slot-probe-a");
+        assert!(Arc::ptr_eq(&a, &in_flight_slot("zz-slot-probe-a")));
+        assert!(!Arc::ptr_eq(&a, &in_flight_slot("zz-slot-probe-b")));
     }
 
     #[test]
