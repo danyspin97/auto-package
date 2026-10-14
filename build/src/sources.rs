@@ -944,7 +944,7 @@ fn fetch_index(index_url: &str) -> Result<Vec<String>, String> {
         ap_ecosystem::net::call_with_retries(|| {
             crate::http::get(index_url).header("User-Agent", "auto-package")
         })
-            .map_err(|e| format!("{index_url}: {e}"))?,
+        .map_err(|e| format!("{index_url}: {e}"))?,
     )
     .map_err(|e| format!("{index_url}: {e}"))?;
     Ok(parse_index_links(&body))

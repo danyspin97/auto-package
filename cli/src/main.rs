@@ -348,6 +348,24 @@ fn upstream_name_candidates(dep: &str) -> Vec<String> {
     out
 }
 
+/// PyPI's latest version of `name`, or `None` when PyPI has no such project.
+/// Any other failure (network, 5xx, unusable answer) also yields `None`, so
+/// the caller falls back to repository discovery, but is warned about first:
+/// "PyPI could not be asked" must not read as "not on PyPI".
+fn pypi_latest_version(name: &str, reporter: &dyn Reporter) -> Option<String> {
+    match ap_ecosystem::pypi::fetch_latest_version(name) {
+        Ok(v) => Some(v),
+        Err(e) if e.is_not_found() => None,
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!("PyPI lookup for {name} failed, treating it as not on PyPI: {e}"),
+            });
+            None
+        }
+    }
+}
+
 /// Resolve a bare dependency name (already stripped of any `python-` RPM
 /// prefix) discovered at runtime into a buildable [`PipelineConfig`].
 ///
@@ -383,7 +401,7 @@ fn resolve_dependency_config(
         // info.version but no sdist, and fetch_latest_release would reject
         // it on the sdist check — leaving the dependency unqueued even
         // though PyPI could tell us its version perfectly well.
-        let pypi_version = ap_ecosystem::pypi::fetch_latest_version(dep).ok();
+        let pypi_version = pypi_latest_version(dep, reporter);
 
         if let Some(version) = pypi_version {
             ap_core::diag!(
@@ -587,10 +605,7 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
 
 /// Route Ctrl-C (and, with ctrlc's `termination` feature, SIGTERM/SIGHUP) to
 /// [`handle_interrupt`].
-fn install_interrupt_handler(
-    tui_active: bool,
-    memory: Arc<MemorySink>,
-) -> color_eyre::Result<()> {
+fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) -> color_eyre::Result<()> {
     ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
         .map_err(|e| color_eyre::eyre::eyre!("failed to install the interrupt handler: {e}"))
 }
@@ -1643,7 +1658,7 @@ fn cmd_build(
                 // release (common for vendor SDKs) has a legitimate
                 // info.version but no sdist, and the full parser would reject
                 // it before the repo-fallback path even got a chance to run.
-                let pypi_version = ap_ecosystem::pypi::fetch_latest_version(name).ok();
+                let pypi_version = pypi_latest_version(name, reporter.as_ref());
                 if let Some(v) = pypi_version {
                     v
                 } else {

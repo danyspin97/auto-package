@@ -142,7 +142,9 @@ pub(crate) fn scrub_env_for_agent(
     for (name, value) in vars {
         let upper = name.to_ascii_uppercase();
         if !AGENT_ENV_ALLOW.contains(&upper.as_str())
-            && !AGENT_ENV_ALLOW_PREFIXES.iter().any(|p| upper.starts_with(p))
+            && !AGENT_ENV_ALLOW_PREFIXES
+                .iter()
+                .any(|p| upper.starts_with(p))
         {
             continue;
         }
@@ -3180,10 +3182,7 @@ fn turn_allowed_tools(
         // must not be able to touch the spec or checkout either way.
         ("WebFetch(domain:pypi.org),WebSearch", Vec::new())
     } else if let Some(checkout) = checkout {
-        (
-            CHECKOUT_TOOLS,
-            vec![workspace, checkout],
-        )
+        (CHECKOUT_TOOLS, vec![workspace, checkout])
     } else {
         (
             "Grep,Skill,Bash(osc status),Bash(ls *),Bash(zypper search *),Bash(zypper what-provides *),WebFetch(domain:pypi.org)",

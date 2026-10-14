@@ -111,6 +111,14 @@ pub enum FetchError {
     Parse(#[from] Error),
 }
 
+impl FetchError {
+    /// Whether PyPI answered 404: the project is not there, as opposed to
+    /// PyPI being unreachable or answering something unusable.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, FetchError::Http { source, .. } if matches!(**source, ureq::Error::StatusCode(404)))
+    }
+}
+
 /// Whole-request timeout for the small JSON endpoints.
 const JSON_TIMEOUT: Duration = Duration::from_secs(120);
 /// Whole-request timeout for file downloads.

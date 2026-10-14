@@ -543,7 +543,16 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
     for (idx, r) in results.iter_mut().enumerate() {
         let updated = r.outcome == ItemOutcome::Updated;
         let build = updated
-            .then(|| osc::get_build_status(branch, &r.item.pkg, &a.distro, &a.arch, emit).ok())
+            .then(|| {
+                osc::get_build_status(branch, &r.item.pkg, &a.distro, &a.arch, emit)
+                    .map_err(|e| {
+                        ctx.warn(format!(
+                            "could not read the build status of {}: {e}",
+                            r.item.pkg
+                        ))
+                    })
+                    .ok()
+            })
             .flatten();
         let spec_version = updated
             .then(|| update::spec_for_package(branch, &r.item.pkg, emit))

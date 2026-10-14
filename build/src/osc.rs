@@ -1395,7 +1395,9 @@ fn fetch_project_packages(
     emit: Emit<'_>,
 ) -> Result<std::collections::HashSet<String>, String> {
     if !is_valid_obs_name(project) {
-        return Err(format!("refusing to use project {project:?}: not a valid OBS name"));
+        return Err(format!(
+            "refusing to use project {project:?}: not a valid OBS name"
+        ));
     }
     let out = proc::capture_with_timeout(
         "osc",
@@ -2476,7 +2478,10 @@ fn get_build_status_xml(
     repo: &str,
     arch: &str,
 ) -> Option<BuildStatus> {
-    if ![project, pkg_name, repo, arch].iter().all(|n| is_valid_obs_name(n)) {
+    if ![project, pkg_name, repo, arch]
+        .iter()
+        .all(|n| is_valid_obs_name(n))
+    {
         return None;
     }
     let xml = osc_api(&format!(
@@ -2936,7 +2941,10 @@ fn get_unresolvable_from_results(
     arch: &str,
     emit: Emit<'_>,
 ) -> (Vec<String>, Vec<String>) {
-    if ![project, pkg_name, repo, arch].iter().all(|n| is_valid_obs_name(n)) {
+    if ![project, pkg_name, repo, arch]
+        .iter()
+        .all(|n| is_valid_obs_name(n))
+    {
         return (Vec::new(), Vec::new());
     }
     let out = match proc::capture(
