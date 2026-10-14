@@ -67,6 +67,101 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--cleanup`: Remove work directory before building
 - `--jobs`: Maximum concurrent builds (0 = unlimited)
 
+### Updating a whole project
+
+`update-project` browses a *source* OBS project, finds the packages that have
+a newer upstream release (the same sweep as `update --check`), branches them
+into a *branch* project, builds the new versions there with the ordinary
+pipeline, and optionally submits them back. The source project is only read.
+
+```bash
+# See what would happen: plan, branch project, build paths, requests.
+auto-package update-project Base:System --dry-run --submit
+
+# Update the packages that have a release and build them in
+# home:<you>:branches:Base:System.
+auto-package update-project Base:System
+
+# Only some packages, then submit requests for those that built.
+auto-package update-project Base:System --only libfoo,libbar --submit
+```
+
+Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
+`--arch`, `--log`, `--tui`, `--max-attempts`, `--budget-usd`, `--no-agent`,
+`--jobs`, `--regen` that `update` takes):
+
+- `--branch-project`: where to branch and build (default
+  `home:<osc user>:branches:<SOURCE>`, what `osc branch` uses). Created by the
+  first branch if it does not exist. It must not be the source.
+- `--only`, `--exclude`: comma-separated package names.
+- `--dry-run`: print the plan, the branch project, the build paths that would
+  be added and the requests that would be created, and change nothing.
+- `--update-deps`: also branch and update dependencies that live in another
+  project and have a newer release themselves (see below).
+- `--submit`: create submit requests (see below). `--yes` skips the question.
+
+Packages are branched with the OBS branch API, without following a devel
+project, so the request goes back to the project named. A package that is
+already in the branch project is reused. Maintenance projects and locked
+projects are refused with an explanation. A PyPI-sourced package whose OBS name
+is not `python-<name>` is skipped, since the pipeline would build a second
+package next to it.
+
+The run ends with a summary (updated, failed, skipped, requests, build paths
+added, branch project) and exits non-zero when a package failed.
+
+#### Dependencies in other projects
+
+A package in `Base:System` may build-require packages published by another
+project such as `devel:languages:c_c++`. The branch project builds against its
+repository paths, so such a package resolves only if some path, directly or
+through the paths of that path, reaches a project that publishes it.
+
+After branching, each package's `BuildRequires` names are looked up on OBS (one
+published-binary search per name, cached for the run) and compared with the
+projects the branch project's paths reach, repository by repository. A name that
+is published only outside that chain is made reachable by adding the publishing
+project to the branch project's meta as `<path project=... repository=.../>`:
+
+- the path points at the repository of the *same name* in the added project;
+  a branch repository for which the project has none gets nothing, with a
+  warning;
+- it goes after the existing paths, so it only supplies what they lack, and is
+  never added twice (re-running changes nothing);
+- the fewest projects are added: the project covering the most missing names is
+  taken first; personal (`home:`) projects are never added;
+- every added path is reported as it happens and listed in the summary.
+
+When a build later reports a missing dependency, OBS is searched for it before
+the pipeline creates a package for it; if a project publishes it, that project
+becomes a build path instead of a duplicate package being built.
+
+Capability-style requirements (`pkgconfig(foo)`, `%{python_module foo}`) cannot
+be looked up by name and are reported as not checked; the build finds those.
+
+With `--update-deps`, a dependency that the build will use from a project other
+than the source, the branch project, a distribution project (`openSUSE:`,
+`SUSE:`) or a personal one, and that has a newer upstream release, is branched
+and updated too, into the same branch project and ahead of the package that
+needs it. Its submit request goes to its own origin project. Without the flag,
+such a dependency is only referenced through a build path and never touched.
+
+#### Submit requests
+
+`--submit` creates one request per package that built, to the project the
+package was branched from (which is not always the source project). It is
+deliberately conservative:
+
+- a package gets no request unless OBS reports its build in the branch project
+  as succeeded and the branch spec is at the new version; failed and skipped
+  packages never do;
+- a package with an open request (new or in review) from the branch project to
+  that origin gets none; if the open requests cannot be read, none is created;
+- the list is shown and confirmed before anything is created; without a
+  terminal, or with `--tui`, pass `--yes` or nothing is submitted;
+- the description gives the old and new version and the newest `.changes`
+  entry. Created request ids are printed and listed in the summary.
+
 ## Architecture
 
 The project is organized as a Rust workspace:
