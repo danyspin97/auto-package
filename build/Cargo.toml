@@ -24,6 +24,7 @@ tracing = "0.1.44"
 ureq = "3.4.1"
 urlencoding = "2.1"
 walkdir = "2"
+quick-xml = "0.42"
 
 [dev-dependencies]
 color-eyre = "0.6.5"

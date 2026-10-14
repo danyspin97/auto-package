@@ -1996,66 +1996,141 @@ const ALLOWED_SERVICE_PARAMS: &[&str] = &[
 /// Params whose value is a path relative to the checkout.
 const SERVICE_PATH_PARAMS: &[&str] = &["subdir", "filename", "file", "src", "cargotoml", "archive"];
 
-/// Check a `_service` file against the allowlists. `Err` names the problem.
-fn validate_service_xml(xml: &str) -> Result<(), String> {
-    use regex::Regex;
-    static TAG: OnceLock<Regex> = OnceLock::new();
-    static ATTR_NAME: OnceLock<Regex> = OnceLock::new();
-    static PARAM: OnceLock<Regex> = OnceLock::new();
-    let tag = TAG.get_or_init(|| Regex::new(r"<\s*([!?/]?[A-Za-z_][\w.-]*|!\S*)").unwrap());
-    let attr_name = ATTR_NAME.get_or_init(|| {
-        Regex::new(r#"(?s)^\s*(?:[\w-]+\s*=\s*"[^"]*"\s*)*?\bname\s*=\s*"([^"]*)""#).unwrap()
-    });
-    let param = PARAM.get_or_init(|| {
-        Regex::new(r#"(?s)<param\s+name\s*=\s*"([^"]*)"\s*(?:/>|>(.*?)</param>)"#).unwrap()
-    });
+/// Check one `<param>` against the allowlists. `value` is the decoded text,
+/// as osc will see it.
+fn validate_service_param(name: &str, value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if !ALLOWED_SERVICE_PARAMS.contains(&name) {
+        return Err(format!("param `{name}` is not allowed"));
+    }
+    if name == "url" && !value.starts_with("https://") {
+        return Err(format!("url `{value}` must be https://"));
+    }
+    if name == "protocol" && value != "https" {
+        return Err(format!("protocol `{value}` must be https"));
+    }
+    if name == "revision" && value.starts_with('-') {
+        return Err(format!("revision `{value}` starts with `-`"));
+    }
+    if SERVICE_PATH_PARAMS.contains(&name)
+        && (value.starts_with('/') || value.split('/').any(|c| c == ".."))
+    {
+        return Err(format!("{name} `{value}` leaves the checkout"));
+    }
+    Ok(())
+}
 
-    let xml = Regex::new(r"(?s)<!--.*?-->").unwrap().replace_all(xml, "");
-    for caps in tag.captures_iter(&xml) {
-        let name = &caps[1];
-        if !matches!(
-            name,
-            "?xml" | "services" | "/services" | "service" | "/service" | "param" | "/param"
-        ) {
-            return Err(format!("unexpected markup `<{name}`"));
+/// Check a `_service` file against the allowlists. `Err` names the problem.
+///
+/// The file is parsed as XML and the checks run on decoded values, since osc
+/// decodes character references (`&#46;&#46;/`) before using them. Anything
+/// the parser cannot read, any DOCTYPE, processing instruction or entity
+/// other than the five predefined ones is refused.
+fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let xml = std::str::from_utf8(xml).map_err(|_| "not valid UTF-8".to_string())?;
+    let mut reader = Reader::from_str(xml);
+    // Open elements, and the name and text so far of the <param> being read.
+    let mut depth: Vec<String> = Vec::new();
+    let mut param: Option<(String, String)> = None;
+    let mut seen_root = false;
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|e| format!("malformed XML: {e}"))?;
+        let (start, empty) = match &event {
+            Event::Start(e) => (Some(e), false),
+            Event::Empty(e) => (Some(e), true),
+            _ => (None, false),
+        };
+        if let Some(e) = start {
+            let tag = e.name().as_ref().to_string();
+            let parent = depth.last().map(String::as_str);
+            let ok = match (tag.as_str(), parent) {
+                ("services", None) => !std::mem::replace(&mut seen_root, true),
+                ("service", Some("services")) | ("param", Some("service")) => true,
+                _ => false,
+            };
+            if !ok {
+                return Err(format!("unexpected markup `<{tag}`"));
+            }
+            let mut name = None;
+            for attr in e.attributes() {
+                let attr = attr.map_err(|e| format!("malformed attribute: {e}"))?;
+                if attr.key.as_ref() == "name" {
+                    let v = attr
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .map_err(|e| format!("malformed attribute: {e}"))?;
+                    name = Some(v.into_owned());
+                }
+            }
+            match tag.as_str() {
+                "service" => {
+                    let name = name.ok_or("a <service> without a name")?;
+                    if !ALLOWED_SERVICES.contains(&name.as_str()) {
+                        return Err(format!("service `{name}` is not allowed"));
+                    }
+                }
+                "param" => {
+                    let name = name.ok_or("a <param> without a name")?;
+                    if empty {
+                        validate_service_param(&name, "")?;
+                    } else {
+                        param = Some((name, String::new()));
+                    }
+                }
+                _ => {}
+            }
+            if !empty {
+                depth.push(tag);
+            }
+            continue;
+        }
+        match event {
+            Event::End(_) => {
+                if depth.pop().as_deref() == Some("param")
+                    && let Some((name, value)) = param.take()
+                {
+                    validate_service_param(&name, &value)?;
+                }
+            }
+            Event::Text(t) => {
+                if let Some((_, value)) = param.as_mut() {
+                    value.push_str(&t);
+                }
+            }
+            Event::CData(t) => {
+                if let Some((_, value)) = param.as_mut() {
+                    value.push_str(&t);
+                }
+            }
+            Event::GeneralRef(r) => {
+                let ch = match r.resolve_char_ref() {
+                    Ok(Some(c)) => c,
+                    Ok(None) => match &*r {
+                        "lt" => '<',
+                        "gt" => '>',
+                        "amp" => '&',
+                        "apos" => '\'',
+                        "quot" => '"',
+                        other => return Err(format!("entity `&{other};` is not allowed")),
+                    },
+                    Err(e) => return Err(format!("malformed reference: {e}")),
+                };
+                if let Some((_, value)) = param.as_mut() {
+                    value.push(ch);
+                }
+            }
+            Event::DocType(_) => return Err("a DOCTYPE is not allowed".to_string()),
+            Event::PI(_) => return Err("processing instructions are not allowed".to_string()),
+            Event::Eof => break,
+            _ => {}
         }
     }
-    if xml.contains("&") && xml.contains("<!") {
-        return Err("entity declarations are not allowed".to_string());
-    }
-    let services = Regex::new(r"(?s)<service\b([^>]*?)/?>").unwrap();
-    for caps in services.captures_iter(&xml) {
-        let name = attr_name
-            .captures(&caps[1])
-            .map(|c| c[1].to_string())
-            .ok_or("a <service> without a name")?;
-        if !ALLOWED_SERVICES.contains(&name.as_str()) {
-            return Err(format!("service `{name}` is not allowed"));
-        }
-    }
-    if xml.matches("<param").count() != param.captures_iter(&xml).count() {
-        return Err("a <param> in a form that is not recognised".to_string());
-    }
-    for caps in param.captures_iter(&xml) {
-        let name = &caps[1];
-        let value = caps.get(2).map_or("", |m| m.as_str()).trim();
-        if !ALLOWED_SERVICE_PARAMS.contains(&name) {
-            return Err(format!("param `{name}` is not allowed"));
-        }
-        if name == "url" && !value.starts_with("https://") {
-            return Err(format!("url `{value}` must be https://"));
-        }
-        if name == "protocol" && value != "https" {
-            return Err(format!("protocol `{value}` must be https"));
-        }
-        if name == "revision" && value.starts_with('-') {
-            return Err(format!("revision `{value}` starts with `-`"));
-        }
-        if SERVICE_PATH_PARAMS.contains(&name)
-            && (value.starts_with('/') || value.split('/').any(|c| c == ".."))
-        {
-            return Err(format!("{name} `{value}` leaves the checkout"));
-        }
+    if !depth.is_empty() {
+        return Err("unclosed element".to_string());
     }
     Ok(())
 }
@@ -2065,10 +2140,17 @@ fn validate_service_xml(xml: &str) -> Result<(), String> {
 /// The `_service` file is validated first (the agent may have edited it) and
 /// the service runs with a minimal environment, without publishing tokens.
 pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
-    if let Ok(xml) = fs::read_to_string(checkout_dir.join("_service"))
-        && let Err(reason) = validate_service_xml(&xml)
-    {
-        return Err(Error::ServiceRejected { reason });
+    // Fail closed: only a missing file skips validation.
+    match fs::read(checkout_dir.join("_service")) {
+        Ok(xml) => {
+            validate_service_xml(&xml).map_err(|reason| Error::ServiceRejected { reason })?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Error::ServiceRejected {
+                reason: format!("cannot read _service: {e}"),
+            });
+        }
     }
     let out = proc::capture_with_timeout_env(
         "osc",
@@ -4524,7 +4606,18 @@ mod service_validation_tests {
     <param name="src">r</param>
   </service>
 </services>"#;
-        validate_service_xml(xml).unwrap();
+        validate_service_xml(xml.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn non_utf8_input_is_refused() {
+        assert!(validate_service_xml(b"<services><!-- \xff --></services>").is_err());
+    }
+
+    #[test]
+    fn decoded_values_are_what_is_checked() {
+        let xml = r#"<services><service name="tar_scm"><param name="url">https://x/a&amp;b</param><param name="revision"><![CDATA[v1]]></param></service></services>"#;
+        validate_service_xml(xml.as_bytes()).unwrap();
     }
 
     #[test]
@@ -4536,8 +4629,14 @@ mod service_validation_tests {
             r#"<services><service name="tar_scm"><param name="url">git://x/y</param></service></services>"#,
             r#"<services><service name="cargo_vendor"><param name="src">../x</param></service></services>"#,
             r#"<!DOCTYPE x [<!ENTITY a "b">]><services/>"#,
+            r#"<services><service name="cargo_vendor"><param name="src">&#46;&#46;/x</param></service></services>"#,
+            r#"<services><service name="tar_scm"><param name="revision">&#45;&#45;opt</param></service></services>"#,
+            r#"<services><service name="tar_scm"><param name="url">&xxe;</param></service></services>"#,
+            r#"<services><service name="tar_scm"><param name="url">https://x</service></services>"#,
+            r#"<services><service name="tar_scm"><?pi x?></service></services>"#,
+            r#"<services><service name="tar_scm"><evil/></service></services>"#,
         ] {
-            assert!(validate_service_xml(xml).is_err(), "{xml}");
+            assert!(validate_service_xml(xml.as_bytes()).is_err(), "{xml}");
         }
     }
 }
