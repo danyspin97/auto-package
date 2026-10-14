@@ -44,15 +44,19 @@ pub fn path_for(rpm_name: &str) -> Option<PathBuf> {
         .map(|dir| dir.join(format!("{rpm_name}.md")))
 }
 
-/// How long a build waits for another build's update of the same notes.
-const LOCK_WAIT: Duration = Duration::from_secs(60);
+/// How long a build waits for another build's update of the same notes. The
+/// holder keeps the lock for the whole agent turn and for the git calls that
+/// commit the file, so the wait must outlast that or a healthy update reads as
+/// a timeout.
+const LOCK_WAIT: Duration =
+    Duration::from_secs(NOTES_TIMEOUT.as_secs() + 5 * GIT_TIMEOUT.as_secs());
 
 /// Exclusive lock on one package's notes, so two builds cannot both read the
 /// same notes and have the later writer silently discard the earlier update.
 /// An `flock(2)` on `<rpm-name>.md.lock`, held while the file stays open; the
 /// kernel releases it if the build dies, so a crash leaves nothing to clear.
-/// The file itself stays behind: deleting a locked file would let a second
-/// build lock a fresh one at the same path.
+/// The lock file stays behind by design, one empty file per package: deleting a
+/// locked file would let a second build lock a fresh one at the same path.
 struct NotesLock {
     _file: std::fs::File,
 }
@@ -173,10 +177,13 @@ fn update_inner(
     // The agent edits a private copy and the result is renamed into place, so
     // a failed or concurrent build never leaves the shared notes half-written.
     let dir = notes_file.parent().unwrap_or_else(|| Path::new("."));
+    // The lock is ours, so no live update for this package owns a scratch file.
+    remove_stale_scratch(dir, rpm_name);
     // Not `.md`: a scratch file left behind by an interrupted run must not look
     // like a package's notes.
+    let prefix = scratch_prefix(rpm_name);
     let scratch = tempfile::Builder::new()
-        .prefix(".scratch-")
+        .prefix(&prefix)
         .suffix(".tmp")
         .tempfile_in(dir)
         .map_err(|e| {
@@ -264,6 +271,30 @@ fn update_inner(
         ap_core::diag!("  notes for {rpm_name} saved but not committed: {e}");
     }
     Ok(())
+}
+
+/// Prefix of one package's scratch files. `sanitize_name` never keeps a `~`, so
+/// no package's prefix can match another package's files.
+fn scratch_prefix(rpm_name: &str) -> String {
+    format!(".scratch-{rpm_name}~")
+}
+
+/// Delete the scratch files an interrupted update left for `rpm_name`. Only
+/// called while holding that package's lock.
+fn remove_stale_scratch(dir: &Path, rpm_name: &str) {
+    let prefix = scratch_prefix(rpm_name);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".tmp"))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The commit message for an updated notes file.
@@ -447,6 +478,27 @@ mod tests {
         assert!(err.contains("p.md.lock"), "{err}");
         drop(first);
         NotesLock::acquire_for(&notes, Duration::from_millis(100)).unwrap();
+    }
+
+    #[test]
+    fn lock_wait_outlasts_a_healthy_holder() {
+        // The holder runs the agent turn, then up to four git calls under the lock.
+        assert!(LOCK_WAIT > NOTES_TIMEOUT + GIT_TIMEOUT * 4);
+    }
+
+    #[test]
+    fn stale_scratch_is_removed_only_for_its_own_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join(".scratch-python-foo~abc123.tmp");
+        let other = dir.path().join(".scratch-python-foo-bar~abc123.tmp");
+        let notes = dir.path().join("python-foo.md");
+        for p in [&mine, &other, &notes] {
+            std::fs::write(p, "x").unwrap();
+        }
+        remove_stale_scratch(dir.path(), "python-foo");
+        assert!(!mine.exists());
+        assert!(other.exists());
+        assert!(notes.exists());
     }
 
     #[test]
