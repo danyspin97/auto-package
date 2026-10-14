@@ -2403,6 +2403,69 @@ fn get_build_status_after_commit(
     get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
 }
 
+/// What every repository/arch of `pkg_name` says, as one status: `Succeeded`
+/// only when each result of the package (all repositories and architectures,
+/// multibuild flavors included) is succeeded, excluded or disabled; otherwise
+/// the first result that is not. For deciding whether the package may be
+/// submitted, where a build that is green on `repo`/`arch` but failed on
+/// another architecture is not a good update. `repo`/`arch` is read the
+/// careful way ([`get_build_status`]); the others by their plain verdict.
+pub fn get_overall_build_status(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    emit: Emit<'_>,
+) -> Result<BuildStatus, Error> {
+    let own = get_build_status(project, pkg_name, repo, arch, emit)?;
+    if !own.is_success() {
+        return Ok(own);
+    }
+    check_obs_name("project", project)?;
+    check_obs_name("pkg_name", pkg_name)?;
+    let path = format!(
+        "/build/{}/_result?package={}&multibuild=1",
+        enc(project),
+        enc(pkg_name)
+    );
+    let xml = osc_api_checked(&path).map_err(|e| match e {
+        ApiFailure::Http(code, msg) => Error::OscFailed {
+            cmd: format!("api {path}"),
+            code: i32::from(code),
+            stderr: msg,
+        },
+        ApiFailure::Other(msg) => Error::NotActionable(msg),
+    })?;
+    let entries =
+        obs_status::try_parse_results(&xml).map_err(|e| Error::NotActionable(e.to_string()))?;
+    Ok(overall_status(&entries, pkg_name))
+}
+
+/// The aggregate of [`get_overall_build_status`], from a `_result` document's
+/// entries: only the package and its `<package>:<flavor>` multibuild entries
+/// count.
+fn overall_status(entries: &[obs_status::ResultEntry], pkg_name: &str) -> BuildStatus {
+    let flavor_prefix = format!("{pkg_name}:");
+    let statuses: Vec<BuildStatus> = entries
+        .iter()
+        .filter(|e| e.pkg == pkg_name || e.pkg.starts_with(&flavor_prefix))
+        .map(obs_status::resolve_lenient)
+        .collect();
+    if let Some(bad) = statuses.iter().find(|s| {
+        !matches!(
+            s,
+            BuildStatus::Succeeded | BuildStatus::Excluded | BuildStatus::Disabled
+        )
+    }) {
+        return bad.clone();
+    }
+    if statuses.iter().any(BuildStatus::is_success) {
+        BuildStatus::Succeeded
+    } else {
+        BuildStatus::Unknown("no result built".to_string())
+    }
+}
+
 /// The `osc results` human-table path only — no XML, no staleness
 /// resolution via job history. Used by [`get_build_status`] as its fallback
 /// when the XML `_result` document is unreadable, and by [`obs_build`] as an
@@ -4416,5 +4479,50 @@ mod poll_tests {
         assert_eq!(http_status("401 Client Error: Unauthorized"), Some(401));
         assert_eq!(http_status("connection reset by peer"), None);
         assert_eq!(http_status("took 5000 Server Error"), None);
+    }
+}
+
+#[cfg(test)]
+mod overall_status_tests {
+    use super::*;
+
+    fn overall(xml: &str) -> BuildStatus {
+        overall_status(&obs_status::parse_results(xml), "foo")
+    }
+
+    #[test]
+    fn every_repository_and_arch_must_be_built_or_out_of_scope() {
+        let doc = |second: &str| {
+            format!(
+                r#"<resultlist>
+  <result repository="r" arch="x86_64"><status package="foo" code="succeeded"/></result>
+  <result repository="r" arch="i586"><status package="foo" code="{second}"/></result>
+  <result repository="r" arch="aarch64"><status package="bar" code="failed"/></result>
+</resultlist>"#
+            )
+        };
+        assert_eq!(overall(&doc("excluded")), BuildStatus::Succeeded);
+        assert_eq!(overall(&doc("disabled")), BuildStatus::Succeeded);
+        assert_eq!(overall(&doc("failed")), BuildStatus::Failed);
+        assert_eq!(overall(&doc("building")), BuildStatus::Building);
+    }
+
+    #[test]
+    fn a_failed_multibuild_flavor_counts_against_its_package() {
+        let xml = r#"<resultlist>
+  <result repository="r" arch="x86_64">
+    <status package="foo" code="succeeded"/>
+    <status package="foo:py313" code="failed"/>
+    <status package="foobar" code="failed"/>
+  </result>
+</resultlist>"#;
+        assert_eq!(overall(xml), BuildStatus::Failed);
+    }
+
+    #[test]
+    fn nothing_built_is_not_a_success() {
+        let xml = r#"<resultlist><result repository="r" arch="a"><status package="foo" code="excluded"/></result></resultlist>"#;
+        assert!(!overall(xml).is_success());
+        assert!(!overall("<resultlist/>").is_success());
     }
 }

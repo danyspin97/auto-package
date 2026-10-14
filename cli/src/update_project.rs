@@ -544,7 +544,7 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
         let updated = r.outcome == ItemOutcome::Updated;
         let build = updated
             .then(|| {
-                osc::get_build_status(branch, &r.item.pkg, &a.distro, &a.arch, emit)
+                osc::get_overall_build_status(branch, &r.item.pkg, &a.distro, &a.arch, emit)
                     .map_err(|e| {
                         ctx.warn(format!(
                             "could not read the build status of {}: {e}",
