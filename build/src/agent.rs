@@ -2689,6 +2689,11 @@ impl Error {
         }
     }
 
+    /// Did the turn run out of `--max-turns` before it answered?
+    pub fn is_max_turns(&self) -> bool {
+        matches!(self, Error::EndedEarly(e) if e.subtype == "error_max_turns")
+    }
+
     /// Was this turn rejected by the API for quota/rate limiting (HTTP 429)?
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, Error::EndedEarly(e)
@@ -2901,6 +2906,33 @@ pub struct TurnOutcome {
 pub struct EndedEarlySignal {
     pub subtype: String,
     pub message: String,
+}
+
+/// The end-early signal in a `result` event. `error_max_turns` (and any other
+/// `error_*` subtype) counts even with `is_error: false` and an empty result,
+/// which is how the CLI can report running out of turns.
+fn ended_early_signal(result_event: &ResultEvent) -> Option<EndedEarlySignal> {
+    let failed = result_event.is_error && !result_event.subtype.is_empty()
+        || result_event.subtype.starts_with("error_");
+    if !failed {
+        return None;
+    }
+    // `subtype: "success"` with `is_error: true` is how the CLI reports a
+    // failure whose reason only lives in the `result` text (API errors,
+    // a refused tool call); the subtype alone says nothing there.
+    let message = if !result_event.errors.is_empty() {
+        result_event.errors.join("; ")
+    } else if !result_event.result.trim().is_empty() {
+        let t = result_event.result.trim();
+        t.chars().take(600).collect::<String>()
+    } else {
+        result_event.subtype.clone()
+    };
+    let subtype = match result_event.api_error_status {
+        Some(status) => format!("api_error_{status}"),
+        None => result_event.subtype.clone(),
+    };
+    Some(EndedEarlySignal { subtype, message })
 }
 
 // ── turn ──────────────────────────────────────────────────────────────────────
@@ -3656,26 +3688,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // budget-cut-but-rescued turn would look indistinguishable from a
     // clean one in the event stream and the per-package budget would
     // silently run out one turn later with no visible warning.
-    let ended_early = if result_event.is_error && !result_event.subtype.is_empty() {
-        // `subtype: "success"` with `is_error: true` is how the CLI reports a
-        // failure whose reason only lives in the `result` text (API errors,
-        // a refused tool call); the subtype alone says nothing there.
-        let message = if !result_event.errors.is_empty() {
-            result_event.errors.join("; ")
-        } else if !result_event.result.trim().is_empty() {
-            let t = result_event.result.trim();
-            t.chars().take(600).collect::<String>()
-        } else {
-            result_event.subtype.clone()
-        };
-        let subtype = match result_event.api_error_status {
-            Some(status) => format!("api_error_{status}"),
-            None => result_event.subtype.clone(),
-        };
-        Some(EndedEarlySignal { subtype, message })
-    } else {
-        None
-    };
+    let ended_early = ended_early_signal(&result_event);
 
     // Prefer the `result` event's payload (the normal success path), but fall
     // back to the last `StructuredOutput` tool call the model emitted during
@@ -5077,6 +5090,28 @@ mod tests {
     /// ($0.03)"]`, together with the usual success-path fields so the
     /// test also catches the case where someone accidentally reshapes
     /// those out of sync.
+    #[test]
+    fn error_subtype_is_an_end_early_signal_even_without_is_error() {
+        let ev: ResultEvent = serde_json::from_str(
+            r#"{"type":"result","subtype":"error_max_turns","is_error":false,"result":""}"#,
+        )
+        .unwrap();
+        let sig = ended_early_signal(&ev).expect("max turns is a signal");
+        assert_eq!(sig.subtype, "error_max_turns");
+        let ok: ResultEvent =
+            serde_json::from_str(r#"{"type":"result","subtype":"success","result":"x"}"#).unwrap();
+        assert!(ended_early_signal(&ok).is_none());
+        let err = Error::EndedEarly(Box::new(EndedEarlyError {
+            subtype: sig.subtype,
+            message: sig.message,
+            stdout: String::new(),
+            prompt: String::new(),
+            usage: Usage::default(),
+        }));
+        assert!(err.is_max_turns());
+        assert!(!err.is_budget_exhausted());
+    }
+
     #[test]
     fn result_event_deserializes_budget_cap_fixture() {
         let fixture = r#"{

@@ -3072,6 +3072,14 @@ fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64, pkg_name: &str
              crash-stdout.log) if you need to see how far it got."
         );
     }
+    if e.is_max_turns() {
+        return format!(
+            "the agent ran out of turns (--max-turns) before it answered for {pkg_name}. \
+             This is not a response-format problem and is not retried as one; the \
+             prompt + partial output are preserved in the step dir (crash-prompt.md, \
+             crash-stdout.log)."
+        );
+    }
     if e.is_rate_limited() {
         let detail = e.ended_early_message().unwrap_or("rate limited");
         return format!(
@@ -6786,6 +6794,19 @@ fn verify_repos_exist(urls: &[String]) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_turns_is_reported_as_its_own_failure_not_a_format_problem() {
+        let e = crate::agent::Error::EndedEarly(Box::new(crate::agent::EndedEarlyError {
+            subtype: "error_max_turns".into(),
+            message: "error_max_turns".into(),
+            stdout: String::new(),
+            prompt: String::new(),
+            usage: Default::default(),
+        }));
+        let msg = friendly_agent_error(&e, 2.0, "python-foo");
+        assert!(msg.contains("ran out of turns"), "{msg}");
+    }
 
     #[test]
     fn validate_path_component_rejects_unsafe_names() {
