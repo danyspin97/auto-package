@@ -573,6 +573,61 @@ mod tests {
         assert!(!needs_evidence(&entry("excluded", None, true)));
     }
 
+    /// python-nvidia-cutlass-dsl-libs-base as OBS reported it: excluded on
+    /// i586, succeeded on x86_64, in one document. Each pair resolves to its
+    /// own state whichever order the document lists them in, and the x86_64
+    /// `building` of the repository itself does not leak into the package.
+    #[test]
+    fn each_repository_arch_resolves_to_its_own_status() {
+        let xml = r#"<resultlist>
+  <result project="p" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+    <status package="python-nvidia-cutlass-dsl-libs-base" code="excluded"/>
+  </result>
+  <result project="p" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
+    <status package="python-nvidia-cutlass-dsl-libs-base" code="succeeded"/>
+  </result>
+</resultlist>"#;
+        let status = |arch: &str| {
+            let e = find_entry(
+                xml,
+                "openSUSE_Tumbleweed",
+                arch,
+                "python-nvidia-cutlass-dsl-libs-base",
+            )
+            .unwrap();
+            resolve(&e, &Evidence::default())
+        };
+        assert_eq!(status("x86_64"), BuildStatus::Succeeded);
+        assert_eq!(status("i586"), BuildStatus::Excluded);
+        assert!(
+            find_entry(
+                xml,
+                "openSUSE_Tumbleweed",
+                "aarch64",
+                "python-nvidia-cutlass-dsl-libs-base"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn unresolvable_details_stay_with_their_own_result() {
+        let xml = r#"<resultlist>
+  <result repository="r" arch="i586">
+    <status package="p" code="unresolvable"><details>nothing provides python314-fastar, nothing provides python313-fastar</details></status>
+  </result>
+  <result repository="r" arch="x86_64">
+    <status package="p" code="succeeded"/>
+  </result>
+</resultlist>"#;
+        let i586 = find_entry(xml, "r", "i586", "p").unwrap();
+        assert_eq!(
+            i586.details.as_deref(),
+            Some("nothing provides python314-fastar, nothing provides python313-fastar")
+        );
+        assert_eq!(find_entry(xml, "r", "x86_64", "p").unwrap().details, None);
+    }
+
     #[test]
     fn needs_evidence_only_for_dirty_terminal_results() {
         assert!(needs_evidence(&entry("succeeded", None, true)));
