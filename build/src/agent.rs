@@ -2864,10 +2864,32 @@ pub struct EndedEarlySignal {
 /// Django test settings) that CONVENTIONS only briefly points at instead of
 /// spelling out in full — most packages never need any of them, so their
 /// detailed content is loaded on demand via the `Skill` tool rather than
-/// sent on every turn. Resolved at compile time relative to this crate, so
-/// it only works when the binary runs from within its own source checkout
-/// (the normal way this tool is used today).
+/// sent on every turn. Found at run time by
+/// `ap_core::skills::resolve_skills_dir`; this const is only its last-resort
+/// fallback, relative to this crate's source checkout.
 const PACKAGING_SKILLS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../packaging-skills");
+
+/// The skills plugin directory, resolved once. A miss is warned about once and
+/// the turn runs without `--plugin-dir`: the prompts still name the skills, but
+/// the agent works from the conventions in them alone.
+fn skills_dir() -> Option<&'static std::path::Path> {
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let found = ap_core::skills::resolve_skills_dir(
+            std::env::var("AUTO_PACKAGE_SKILLS_DIR").ok().as_deref(),
+            std::env::current_exe().ok().as_deref(),
+            std::path::Path::new(PACKAGING_SKILLS_DIR),
+        );
+        if found.is_none() {
+            ap_core::diag!(
+                "warning: packaging-skills directory not found (set AUTO_PACKAGE_SKILLS_DIR); \
+                 agent turns run without the on-demand skills"
+            );
+        }
+        found
+    })
+    .as_deref()
+}
 
 /// Least budget left for which a turn is launched.
 const MIN_TURN_BUDGET_USD: f64 = 0.10;
@@ -3278,8 +3300,6 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         TURN_RESPONSE_SCHEMA,
         "--add-dir",
         &req.workspace.to_string_lossy(),
-        "--plugin-dir",
-        PACKAGING_SKILLS_DIR,
         "--allowed-tools",
         &allowed_tools,
         "--disallowed-tools",
@@ -3307,6 +3327,9 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         // with a shared `--append-system-prompt`.
         "--exclude-dynamic-system-prompt-sections",
     ]);
+    if let Some(dir) = skills_dir() {
+        cmd.arg("--plugin-dir").arg(dir);
+    }
     // The agent edits the spec through the checkout, not through the
     // workspace's `spec` symlink, so it needs access to both directories.
     if let Some(checkout) = req.checkout_dir {
