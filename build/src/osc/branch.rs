@@ -48,9 +48,9 @@ fn api_get(path: &str, emit: Emit<'_>) -> Result<String, Error> {
 /// The text of `<data name="NAME">value</data>` in an OBS status document.
 fn xml_data_value(xml: &str, name: &str) -> Option<String> {
     let open = format!("<data name=\"{name}\">");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find("</data>")?;
-    Some(xml[start..start + end].trim().to_string())
+    let (_, rest) = xml.split_once(&open)?;
+    let (value, _) = rest.split_once("</data>")?;
+    Some(value.trim().to_string())
 }
 
 /// The OBS user `osc` is configured for.
@@ -536,8 +536,8 @@ pub fn submit_request_xml(sr: &SubmitRequest) -> String {
 
 /// The id in a created request's response.
 pub fn parse_request_id(xml: &str) -> Option<String> {
-    let i = xml.find("<request ")?;
-    let tag = &xml[i..i + xml[i..].find('>')?];
+    let (_, rest) = xml.split_once("<request ")?;
+    let (tag, _) = rest.split_once('>')?;
     extract_xml_attr(tag, "id")
         .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -944,6 +944,13 @@ mod tests {
         );
         assert_eq!(parse_request_id("<status code=\"err\"/>"), None);
         assert_eq!(parse_request_id("<request id=\"x\">"), None);
+        // Cut off before the closing `>`, and multi-byte text around.
+        assert_eq!(parse_request_id("<request id=\"12\""), None);
+        assert_eq!(xml_data_value("<data name=\"a\">é", "a"), None);
+        assert_eq!(
+            xml_data_value("é<data name=\"a\"> v </data>é", "a").as_deref(),
+            Some("v")
+        );
     }
 
     #[test]

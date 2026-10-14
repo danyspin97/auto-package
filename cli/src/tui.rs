@@ -618,12 +618,10 @@ impl TuiState {
     }
 
     fn pkg_mut(&mut self, name: &str) -> &mut PkgState {
-        if !self.packages.contains_key(name) {
+        self.packages.entry(name.to_string()).or_insert_with(|| {
             self.order.push(name.to_string());
-            self.packages
-                .insert(name.to_string(), PkgState::new(String::new()));
-        }
-        self.packages.get_mut(name).unwrap()
+            PkgState::new(String::new())
+        })
     }
 
     fn apply(&mut self, msg: Msg) {
