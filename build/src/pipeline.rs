@@ -2915,7 +2915,7 @@ fn agent_turn(
     }
 
     let notes = tail_for_prompt(&std::fs::read_to_string(ws.notes()).unwrap_or_default());
-    let package_notes = tail_for_prompt(&crate::package_notes::read(&config.rpm_name));
+    let package_notes = package_notes_for_prompt(&crate::package_notes::read(&config.rpm_name));
     let on_tool_use = |tool: &str, input: &str| {
         reporter.report(&Event::AgentToolUse {
             step: step.id,
@@ -4621,7 +4621,7 @@ fn add_run_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
 const MAX_PROMPT_NOTES_BYTES: usize = 16 * 1024;
 
 /// The last `MAX_PROMPT_NOTES_BYTES` of `text`, cut at a line boundary.
-fn tail_for_prompt(text: &str) -> String {
+pub(crate) fn tail_for_prompt(text: &str) -> String {
     if text.len() <= MAX_PROMPT_NOTES_BYTES {
         return text.to_string();
     }
@@ -4634,6 +4634,66 @@ fn tail_for_prompt(text: &str) -> String {
         None => "",
     };
     format!("(earlier entries omitted)\n{rest}")
+}
+
+/// Package notes for a prompt. When they are too long, whole sections are
+/// dropped rather than the top of the file: build requirements and workarounds
+/// are kept, then test changes, then anything else (failure history). Only if
+/// the kept sections still do not fit does the plain tail cut apply.
+fn package_notes_for_prompt(text: &str) -> String {
+    if text.len() <= MAX_PROMPT_NOTES_BYTES {
+        return text.to_string();
+    }
+    // A section starts at a markdown heading or a bold label at the line start.
+    // Text before the first heading is kept with the highest priority.
+    let mut sections: Vec<(u8, String)> = Vec::new();
+    for line in text.lines() {
+        let heading = line.starts_with('#') || line.starts_with("**");
+        if heading || sections.is_empty() {
+            let rank = if heading { notes_section_rank(line) } else { 0 };
+            sections.push((rank, String::new()));
+        }
+        if let Some((_, body)) = sections.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    let mut used = 0;
+    let mut keep = vec![false; sections.len()];
+    for (i, (rank, body)) in sections.iter().enumerate() {
+        if *rank == 0 {
+            keep[i] = true;
+            used += body.len();
+        }
+    }
+    for want in [1, 2] {
+        for (i, (rank, body)) in sections.iter().enumerate() {
+            if *rank == want && used + body.len() <= MAX_PROMPT_NOTES_BYTES {
+                keep[i] = true;
+                used += body.len();
+            }
+        }
+    }
+    let kept: String = sections
+        .iter()
+        .zip(&keep)
+        .filter(|(_, keep)| **keep)
+        .map(|((_, body), _)| body.as_str())
+        .collect();
+    tail_for_prompt(&kept)
+}
+
+/// How much a notes section matters to the next build: 0 keeps it, 1 and 2 drop
+/// it first (test changes, then everything else).
+fn notes_section_rank(heading: &str) -> u8 {
+    let h = heading.to_ascii_lowercase();
+    if h.contains("build requirements") || h.contains("workaround") {
+        0
+    } else if h.contains("test changes") {
+        1
+    } else {
+        2
+    }
 }
 
 /// Persist the fix-attempt count after every increment, the same way
@@ -7243,6 +7303,21 @@ mod prompt_notes_tests {
         assert!(cut.starts_with("(earlier entries omitted)\n"));
         assert!(cut.trim_end().ends_with("line 3999"));
         assert!(!cut.contains("line 0\n"));
+    }
+
+    #[test]
+    fn long_package_notes_drop_failure_history_before_workarounds() {
+        let filler = "- a fact about the build\n".repeat(1000);
+        let text = format!(
+            "# Notes\n## Build requirements\n- gcc\n## Workarounds\n- patch X\n\
+             ## Failure history\n{filler}## Test changes\n- skip Y\n"
+        );
+        assert!(text.len() > MAX_PROMPT_NOTES_BYTES);
+        let cut = package_notes_for_prompt(&text);
+        assert!(cut.contains("## Build requirements\n- gcc"));
+        assert!(cut.contains("## Workarounds\n- patch X"));
+        assert!(!cut.contains("## Failure history"));
+        assert!(cut.contains("## Test changes"));
     }
 }
 

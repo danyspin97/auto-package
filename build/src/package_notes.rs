@@ -21,6 +21,10 @@ const NOTES_MODEL: &str = "claude-haiku-5-5";
 /// The most one notes turn can cost. The turn runs under this `--max-budget-usd`,
 /// so it is also the upper bound the caller reserves before the call.
 pub const NOTES_CAP_USD: f64 = 0.20;
+/// Largest notes file the turn may write. A bigger result is refused and the
+/// previous notes stay; the prompt asks for under 60 lines.
+const MAX_NOTES_LINES: usize = 60;
+const MAX_NOTES_BYTES: usize = 8 * 1024;
 const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
 /// Local git operations on the notes repository; they never touch a network.
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -205,6 +209,9 @@ fn update_inner(
     // Path rules in `--allowed-tools` are only enforced in the default
     // permission mode with project-only settings; user settings could
     // otherwise widen what the agent may write.
+    // The newest journal entries are inlined; older ones stay in the file.
+    let journal_tail =
+        crate::pipeline::tail_for_prompt(&std::fs::read_to_string(ws.notes()).unwrap_or_default());
     let out = claude_print_json(
         NOTES_MODEL,
         &tools,
@@ -217,6 +224,7 @@ fn update_inner(
             arch,
             &ws.notes(),
             scratch.path(),
+            &journal_tail,
         ),
         ws.dir(),
         NOTES_TIMEOUT,
@@ -254,6 +262,7 @@ fn update_inner(
     if after.trim().is_empty() || after == before {
         return Err(format!("the agent did not update {}", notes_file.display()));
     }
+    check_size(&after)?;
     ap_core::fsx::write_atomic(&notes_file, &after)
         .map_err(|e| format!("cannot write {}: {e}", notes_file.display()))?;
     // The notes are already saved; a failed commit must not fail the update.
@@ -285,6 +294,20 @@ fn remove_stale_scratch(dir: &Path, rpm_name: &str) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// Refuse a notes file over the size cap, so one turn cannot grow the notes
+/// without bound. The previous notes stay in place.
+fn check_size(notes: &str) -> Result<(), String> {
+    let lines = notes.lines().count();
+    if lines > MAX_NOTES_LINES || notes.len() > MAX_NOTES_BYTES {
+        return Err(format!(
+            "the notes update is {lines} lines and {} bytes, over the \
+             {MAX_NOTES_LINES}-line, {MAX_NOTES_BYTES}-byte cap; kept the previous notes",
+            notes.len()
+        ));
+    }
+    Ok(())
 }
 
 /// The commit message for an updated notes file.
@@ -394,6 +417,7 @@ pub fn read(rpm_name: &str) -> String {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn notes_prompt(
     rpm_name: &str,
     version: &str,
@@ -402,14 +426,16 @@ fn notes_prompt(
     arch: &str,
     journal: &Path,
     notes_file: &Path,
+    journal_tail: &str,
 ) -> String {
     format!(
         "You are keeping the notes for the openSUSE package {rpm_name} \
          (version {version}), which just built successfully in project \
          {project} for {distro}.\n\n\
-         Read the attempt journal at `{journal}`: it is the build agent's own \
-         record of this package. Read `{notes_file}` too if it exists: it is this \
-         package's memory from earlier builds. Then update `{notes_file}` in place \
+         The newest part of the attempt journal is at the end of this prompt: \
+         it is the build agent's own record of this package. Older entries are in \
+         `{journal}` if you need them. Read `{notes_file}` too if it exists: it is \
+         this package's memory from earlier builds. Then update `{notes_file}` in place \
          (create it if missing) as a short Markdown document with these sections, \
          omitting any that are empty. Keep what is still true, correct what this \
          build changed, and drop what no longer applies:\n\n\
@@ -428,10 +454,15 @@ fn notes_prompt(
          openSUSE:Leap:16.0 only\" or \"on x86_64 only\"); leave general findings \
          unlabelled. This build is {project} / {distro} / {arch}; findings from \
          earlier builds that name a different target are not evidence about it.\n\n\
+         Under each section you change, add a line saying which build it was \
+         checked against, for example `Checked against {version} on {distro}, \
+         {arch}.`, so a later build can judge how old the entry is.\n\n\
          Keep it factual and under 60 lines. Do not copy the journal verbatim. \
-         Do not touch any other file, and do not run commands.",
+         Do not touch any other file, and do not run commands.\n\n\
+         {journal_block}",
         journal = journal.display(),
         notes_file = notes_file.display(),
+        journal_block = crate::agent::untrusted_data("journal", journal_tail),
     )
 }
 
@@ -539,6 +570,17 @@ mod tests {
     }
 
     #[test]
+    fn a_notes_file_over_the_cap_is_refused() {
+        assert!(check_size("## Workarounds\n- one\n").is_ok());
+        let long: String = (0..MAX_NOTES_LINES + 1)
+            .map(|i| format!("- {i}\n"))
+            .collect();
+        let err = check_size(&long).unwrap_err();
+        assert!(err.contains("kept the previous notes"), "{err}");
+        assert!(check_size(&"x".repeat(MAX_NOTES_BYTES + 1)).is_err());
+    }
+
+    #[test]
     fn unparseable_reply_is_free() {
         let u = usage_from_output("not json");
         assert_eq!(u.input_tokens + u.output_tokens, 0);
@@ -555,7 +597,9 @@ mod tests {
             "x86_64",
             Path::new("/w/notes.md"),
             Path::new("/n/python-foo.md"),
+            "the newest entry",
         );
+        assert!(p.contains("the newest entry"));
         assert!(p.contains("python-foo"));
         assert!(p.contains("1.2.3"));
         assert!(p.contains("home:me"));

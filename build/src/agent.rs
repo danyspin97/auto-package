@@ -3026,7 +3026,7 @@ struct StreamUsage {
 /// are model-written and can repeat whatever a package or its log contained, so
 /// the block says they are evidence, not instructions. A closing tag inside the
 /// text is defanged so the block cannot end early.
-fn untrusted_data(label: &str, text: &str) -> String {
+pub(crate) fn untrusted_data(label: &str, text: &str) -> String {
     let body = text.replace("</untrusted-data>", "<\\/untrusted-data>");
     format!(
         "<untrusted-data source=\"{label}\">\n\
