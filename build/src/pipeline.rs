@@ -5827,12 +5827,9 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
 
     ap_core::diag!("  checking for broken Cargo workspace in tarball");
 
-    // Extract tarball
-    let archive_file =
-        std::fs::File::open(tarball).map_err(|e| format!("opening tarball: {}", e))?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive_file));
-    archive
-        .unpack(extract_dir)
+    // Extract tarball. The sdist extractor refuses links that could reach
+    // outside `extract_dir`, so nothing below can read or write past it.
+    ap_ecosystem::sdist::extract(tarball, extract_dir)
         .map_err(|e| format!("extracting tarball: {}", e))?;
 
     // Find Cargo.toml files
@@ -5844,6 +5841,11 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
         .filter_map(|e| e.ok())
     {
         if entry.file_name() != "Cargo.toml" {
+            continue;
+        }
+        // Only a real file is a manifest: a link named Cargo.toml must not
+        // be read or rewritten through.
+        if !entry.file_type().is_file() {
             continue;
         }
 
@@ -5972,13 +5974,25 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
 
     // Re-pack the tarball
     ap_core::diag!("  re-packing fixed tarball");
+    repack_tarball(extract_dir, tarball)?;
+
+    ap_core::diag!("  ✓ tarball updated with fixed workspace");
+    Ok(())
+}
+
+/// Pack `extract_dir` into `tarball`, replacing it.
+///
+/// Links are recorded as links, never followed: a symlink in the tree must
+/// not turn into a copy of whatever it points at on this host. Anything that
+/// is neither a file, a directory nor a link is left out.
+fn repack_tarball(extract_dir: &Path, tarball: &Path) -> Result<(), String> {
     let temp_tarball = tarball.with_extension("tar.gz.tmp");
     let tar_file = std::fs::File::create(&temp_tarball)
         .map_err(|e| format!("creating temp tarball: {}", e))?;
     let enc = flate2::write::GzEncoder::new(tar_file, flate2::Compression::default());
     let mut tar_builder = tar::Builder::new(enc);
+    tar_builder.follow_symlinks(false);
 
-    // Add all files from extract_dir
     for entry in walkdir::WalkDir::new(extract_dir) {
         // An unreadable entry must fail the rebuild: skipping it would ship a
         // tarball that silently lacks files.
@@ -5991,12 +6005,13 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
         let relative = path
             .strip_prefix(extract_dir)
             .map_err(|e| format!("{}: {e}", path.display()))?;
+        let file_type = entry.file_type();
 
-        if path.is_file() {
+        if file_type.is_file() || file_type.is_symlink() {
             tar_builder
                 .append_path_with_name(path, relative)
                 .map_err(|e| format!("adding file to tarball: {}", e))?;
-        } else if path.is_dir() {
+        } else if file_type.is_dir() {
             tar_builder
                 .append_dir(relative, path)
                 .map_err(|e| format!("adding dir to tarball: {}", e))?;
@@ -6009,8 +6024,6 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
 
     // Replace original tarball
     std::fs::rename(&temp_tarball, tarball).map_err(|e| format!("replacing tarball: {}", e))?;
-
-    ap_core::diag!("  ✓ tarball updated with fixed workspace");
     Ok(())
 }
 
@@ -7655,5 +7668,84 @@ mod policy_tests {
         };
         assert!(st.policy_current());
         assert!(st.is_built("1.0"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_link_tests {
+    use super::*;
+
+    /// Decompressed bytes of a `.tar.gz`, for looking inside a repacked sdist.
+    fn gunzip(path: &Path) -> Vec<u8> {
+        let mut raw = Vec::new();
+        let file = std::fs::File::open(path).unwrap();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(file), &mut raw).unwrap();
+        raw
+    }
+
+    const HOST_SECRET: &[u8] = b"HOST-SECRET-BYTES";
+
+    /// A sdist whose workspace needs fixing and which also carries a symlink
+    /// to a file outside the archive. The fix must never copy that file's
+    /// bytes into the tarball it rewrites.
+    #[test]
+    fn workspace_fix_does_not_copy_a_host_file_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, HOST_SECRET).unwrap();
+        let tarball = dir.path().join("pkg-1.0.tar.gz");
+        {
+            let file = std::fs::File::create(&tarball).unwrap();
+            let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut ar = tar::Builder::new(enc);
+            let manifest = b"[workspace]\nmembers = [\"gone\"]\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(manifest.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            ar.append_data(&mut h, "pkg-1.0/Cargo.toml", &manifest[..])
+                .unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_mode(0o777);
+            ar.append_link(&mut h, "pkg-1.0/leak", &secret).unwrap();
+            ar.into_inner().unwrap().finish().unwrap();
+        }
+
+        // The fix may refuse the archive; either way the host file stays out.
+        let _ = fix_cargo_workspace_in_tarball(&tarball, "pkg");
+
+        let raw = gunzip(&tarball);
+        assert!(!raw.windows(HOST_SECRET.len()).any(|w| w == HOST_SECRET));
+    }
+
+    /// Repacking records a link as a link. Following it would copy the host
+    /// file into the archive.
+    #[test]
+    fn repacking_records_a_link_instead_of_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, HOST_SECRET).unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("pkg-1.0")).unwrap();
+        std::fs::write(tree.join("pkg-1.0/Cargo.toml"), "[package]\n").unwrap();
+        std::os::unix::fs::symlink(&secret, tree.join("pkg-1.0/leak")).unwrap();
+        let tarball = dir.path().join("out.tar.gz");
+        std::fs::write(&tarball, b"stale").unwrap();
+
+        repack_tarball(&tree, &tarball).unwrap();
+
+        let raw = gunzip(&tarball);
+        assert!(!raw.windows(HOST_SECRET.len()).any(|w| w == HOST_SECRET));
+        let file = std::fs::File::open(&tarball).unwrap();
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let leak = ar
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap())
+            .find(|e| e.path().unwrap().ends_with("leak"))
+            .expect("link entry is packed");
+        assert!(leak.header().entry_type().is_symlink());
     }
 }
