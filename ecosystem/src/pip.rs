@@ -538,6 +538,10 @@ fn pip_env(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsString, O
 /// Wall-clock limit for one pip resolve.
 const PIP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// Most of one stream kept from pip. A report is a few megabytes at the very
+/// most; a runaway child must not fill memory.
+const MAX_PIP_OUTPUT: u64 = 64 * 1024 * 1024;
+
 /// How long the output readers get once the child has exited.
 const READER_GRACE: Duration = Duration::from_secs(5);
 
@@ -566,7 +570,21 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
             let res = match r {
                 Some(mut r) => {
                     let mut buf = Vec::new();
-                    r.read_to_end(&mut buf).map(|_| buf)
+                    (&mut r)
+                        .take(MAX_PIP_OUTPUT)
+                        .read_to_end(&mut buf)
+                        .and_then(|_| {
+                            // Keep reading past the cap, so the child never
+                            // blocks on a full pipe, but report it: a cut-off
+                            // report must fail, not parse as a shorter one.
+                            let extra = std::io::copy(&mut r, &mut std::io::sink())?;
+                            if extra > 0 {
+                                return Err(std::io::Error::other(format!(
+                                    "more than {MAX_PIP_OUTPUT} bytes"
+                                )));
+                            }
+                            Ok(buf)
+                        })
                 }
                 None => Ok(Vec::new()),
             };
