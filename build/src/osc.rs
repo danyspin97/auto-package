@@ -1249,10 +1249,18 @@ pub fn try_list_project_packages(
 
     let generation = project_generation(project);
     // A failed listing must not be cached: an empty set would make every
-    // package look absent from OBS for the rest of the run. Retry once, then
-    // report the error so the next call tries again.
-    let pkgs = fetch_project_packages(project, emit)
-        .or_else(|_| fetch_project_packages(project, Emit::quiet()))
+    // package look absent from OBS for the rest of the run. Try up to three
+    // times with a short backoff, then report the error so the next call
+    // tries again.
+    let mut listing = fetch_project_packages(project, emit);
+    for backoff in [1, 2] {
+        if listing.is_ok() || crate::proc::shutting_down() {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(backoff));
+        listing = fetch_project_packages(project, Emit::quiet());
+    }
+    let pkgs = listing
         .map(Arc::new)
         .map_err(|e| format!("could not list packages of {project}: {e}"))?;
     insert_if_current(project, generation, &pkgs);

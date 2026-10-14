@@ -654,22 +654,23 @@ fn http_get_text(url: &str) -> Result<String, String> {
     let agent = crate::http::agent(crate::http::API_TIMEOUT, 0);
     let mut current = url.to_string();
     for _ in 0..5 {
-        let mut req = agent
-            .get(&current)
-            .header("User-Agent", "auto-package")
-            .header("Accept", "application/json");
         let origin_host = crate::http::host_of(url);
-        if crate::http::host_of(&current) == origin_host
-            && let Some((name, value)) = forge_auth_header(&current)
-        {
-            req = req.header(name, value);
-        }
-        let resp = req
-            .config()
-            .http_status_as_error(false)
-            .build()
-            .call()
-            .map_err(|e| describe_forge_http_error(url, &e.to_string()))?;
+        let auth = if crate::http::host_of(&current) == origin_host {
+            forge_auth_header(&current)
+        } else {
+            None
+        };
+        let resp = ap_ecosystem::net::call_with_retries(|| {
+            let mut req = agent
+                .get(&current)
+                .header("User-Agent", "auto-package")
+                .header("Accept", "application/json");
+            if let Some((name, value)) = &auth {
+                req = req.header(*name, value.as_str());
+            }
+            req
+        })
+        .map_err(|e| describe_forge_http_error(url, &e.to_string()))?;
         let status = resp.status().as_u16();
         if (300..400).contains(&status)
             && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
@@ -940,9 +941,9 @@ pub fn index_has_only_unsupported(links: &[String]) -> bool {
 
 fn fetch_index(index_url: &str) -> Result<Vec<String>, String> {
     let body = crate::http::read_text(
-        crate::http::get(index_url)
-            .header("User-Agent", "auto-package")
-            .call()
+        ap_ecosystem::net::call_with_retries(|| {
+            crate::http::get(index_url).header("User-Agent", "auto-package")
+        })
             .map_err(|e| format!("{index_url}: {e}"))?,
     )
     .map_err(|e| format!("{index_url}: {e}"))?;

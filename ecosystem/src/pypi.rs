@@ -132,9 +132,7 @@ fn get_json(url: &str) -> Result<String, FetchError> {
     // `read_to_string` stops at 10 MiB, which a project with thousands of
     // releases exceeds. Raise the limit explicitly; ureq errors out when it is
     // hit instead of returning a truncated body.
-    agent(JSON_TIMEOUT)
-        .get(url)
-        .call()
+    crate::net::call_with_retries(|| agent(JSON_TIMEOUT).get(url))
         .map_err(to_http_err)?
         .into_body()
         .with_config()
@@ -216,9 +214,7 @@ impl Sdist {
             MAX_DOWNLOAD_BYTES
         };
 
-        let resp = agent(DOWNLOAD_TIMEOUT)
-            .get(&self.url)
-            .call()
+        let resp = crate::net::call_with_retries(|| agent(DOWNLOAD_TIMEOUT).get(&self.url))
             .map_err(|e| FetchError::Http {
                 url: self.url.clone(),
                 source: Box::new(e),

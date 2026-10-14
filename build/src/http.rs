@@ -58,6 +58,13 @@ pub fn head(url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
     agent(HEAD_TIMEOUT, 5).head(url)
 }
 
+/// [`get`] sent through [`ap_ecosystem::net::call_with_retries`]: for the
+/// metadata lookups, where a dropped connection or a 5xx should not read as
+/// "not found".
+pub fn get_with_retries(url: &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    ap_ecosystem::net::call_with_retries(|| get(url))
+}
+
 pub fn get_download(url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
     agent(DOWNLOAD_TIMEOUT, 5).get(url)
 }
@@ -107,9 +114,11 @@ pub struct Download {
 
 /// Stream `url` into `dest`, hashing as it goes, so the body is never held in
 /// memory. The bytes go to a `.part` sibling that is renamed into place only
-/// when complete. A transport failure is retried once: a GET is safe to
-/// repeat and a dropped connection is common. Other failures are answers
-/// and are returned as they are.
+/// when complete. The request is retried with backoff (see
+/// `ap_ecosystem::net::call_with_retries`), and a transport failure while
+/// the body streams is retried once more: a GET is safe to repeat and a
+/// dropped connection is common. Other failures are answers and are
+/// returned as they are.
 pub fn download_file(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
     match download_once(url, dest) {
         Err(FetchFailure::Transport(_)) => download_once(url, dest),
@@ -118,7 +127,7 @@ pub fn download_file(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
 }
 
 fn download_once(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
-    let resp = match get_download(url).call() {
+    let resp = match ap_ecosystem::net::call_with_retries(|| get_download(url)) {
         Ok(resp) => resp,
         Err(ureq::Error::StatusCode(404)) => return Err(FetchFailure::NotFound),
         Err(ureq::Error::StatusCode(429)) => return Err(FetchFailure::RateLimited),

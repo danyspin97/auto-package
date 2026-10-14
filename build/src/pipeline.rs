@@ -4498,7 +4498,7 @@ fn generate_spec(
     use ap_ecosystem::sdist;
 
     let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
-    let json = crate::http::read_text(crate::http::get(&pypi_url).call().map_err(|e| {
+    let json = crate::http::read_text(crate::http::get_with_retries(&pypi_url).map_err(|e| {
         GenSpecError::Other(format!(
             "PyPI fetch failed for {} {}: {e}",
             config.pkg_name, config.version
@@ -4968,7 +4968,7 @@ fn pypi_json_url(name: &str, version: &str) -> String {
 /// on PyPI (404), `Err` for anything else (network, 5xx, oversized body) so the
 /// caller can tell "not published" from "could not ask".
 fn fetch_pypi_json(name: &str, version: &str) -> Result<Option<String>, String> {
-    match crate::http::get(&pypi_json_url(name, version)).call() {
+    match crate::http::get_with_retries(&pypi_json_url(name, version)) {
         Ok(resp) => crate::http::read_text(resp)
             .map(Some)
             .map_err(|e| format!("reading PyPI JSON for {name} {version}: {e}")),
@@ -5336,7 +5336,7 @@ fn try_wheel_fallback(
     step: &StepDir,
 ) -> Result<ap_ecosystem::pypi::WheelFile, String> {
     let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
-    let json = crate::http::read_text(crate::http::get(&pypi_url).call().map_err(|e| {
+    let json = crate::http::read_text(crate::http::get_with_retries(&pypi_url).map_err(|e| {
         format!(
             "PyPI fetch failed for {} {}: {e}",
             config.pkg_name, config.version
@@ -6614,7 +6614,7 @@ fn recorded_upstream(pkg_name: &str) -> Option<String> {
         "https://pypi.org/pypi/{}/json",
         urlencoding::encode(pkg_name)
     );
-    let body = crate::http::read_text(crate::http::get(&url).call().ok()?).ok()?;
+    let body = crate::http::read_text(crate::http::get_with_retries(&url).ok()?).ok()?;
     ap_ecosystem::pypi::source_url_from_json(&body)
 }
 
