@@ -3503,22 +3503,38 @@ fn extract_failure_step(
 /// macro reference inside a comment is only warned about, because RPM expands
 /// comments but the great majority of such lines still parse fine, and
 /// throwing away an otherwise good fix costs an attempt.
-/// Snapshot of every top-level file in a checkout directory before an agent
-/// turn runs, so a reject can roll back ALL of the agent's changes — not
-/// just the spec, which was the only file the pre-fix `accept_or_restore`
-/// touched. Patches, `_service`, `.changes`, and anything else at the
-/// checkout root are now part of the atomic unit.
+/// Snapshot of the top-level files in a checkout directory before an agent
+/// turn runs, so a reject can roll back the agent's changes to the files it
+/// may edit: spec, patches, `.changes`, `series`, and `_service`.
 ///
-/// Scoped to top-level files (`checkout_dir/*`): the agent's expected
-/// write surface is just the OSC-committed artifacts. The `.osc/` metadata
-/// directory and the extracted source tree (potentially millions of files)
-/// are deliberately NOT snapshotted — editing those would be the agent
-/// stepping well outside the recipe, and copying them around on every
-/// turn would be prohibitively expensive.
+/// Only those editable files have their contents kept (and only when small).
+/// Everything else at the checkout root — source archives, which can be
+/// hundreds of megabytes — is recorded by size and mtime alone and is never
+/// read. The `.osc/` metadata directory and the extracted source tree
+/// (potentially millions of files) are deliberately NOT snapshotted.
 struct CheckoutSnapshot {
     checkout_dir: PathBuf,
-    /// filename → contents at snapshot time
-    files: std::collections::HashMap<std::ffi::OsString, Vec<u8>>,
+    /// filename → what the file looked like at snapshot time
+    files: std::collections::HashMap<std::ffi::OsString, SnapshotEntry>,
+}
+
+/// Largest editable file whose contents are kept for rollback.
+const SNAPSHOT_CONTENT_CAP: u64 = 16 * 1024 * 1024;
+
+struct SnapshotEntry {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    /// Contents, kept only for editable files under [`SNAPSHOT_CONTENT_CAP`].
+    content: Option<Vec<u8>>,
+}
+
+/// Top-level files the agent is allowed to change; their contents are kept.
+fn is_agent_editable(name: &str) -> bool {
+    name == "series"
+        || name == "_service"
+        || [".spec", ".patch", ".diff", ".changes"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
 }
 
 impl CheckoutSnapshot {
@@ -3533,10 +3549,24 @@ impl CheckoutSnapshot {
                 if !ty.is_file() {
                     continue;
                 }
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
                 let name = entry.file_name();
-                if let Ok(bytes) = std::fs::read(entry.path()) {
-                    files.insert(name, bytes);
-                }
+                let editable = name.to_str().is_some_and(is_agent_editable);
+                let content = if editable && meta.len() <= SNAPSHOT_CONTENT_CAP {
+                    std::fs::read(entry.path()).ok()
+                } else {
+                    None
+                };
+                files.insert(
+                    name,
+                    SnapshotEntry {
+                        len: meta.len(),
+                        modified: meta.modified().ok(),
+                        content,
+                    },
+                );
             }
         }
         Self {
@@ -3548,11 +3578,41 @@ impl CheckoutSnapshot {
     /// Restore every top-level file to its snapshot state: restore
     /// modified files, re-create deleted ones, and delete any top-level
     /// files the agent added. Idempotent — called on reject only.
+    ///
+    /// A file whose contents already match is never rewritten, so its mtime
+    /// and inode stay as they were.
     fn restore(&self, reporter: &dyn Reporter, step: &StepDir) {
-        // 1) Re-write every snapshotted file (handles both edited and
-        //    deleted ones).
-        for (name, bytes) in &self.files {
+        // 1) Put back every snapshotted file the agent changed or deleted.
+        for (name, entry) in &self.files {
             let path = self.checkout_dir.join(name);
+            let Some(bytes) = &entry.content else {
+                // Not kept (an archive or an oversized file): all that can be
+                // done is to say that it changed.
+                let changed = match std::fs::symlink_metadata(&path) {
+                    Ok(m) => {
+                        !m.is_file() || m.len() != entry.len || m.modified().ok() != entry.modified
+                    }
+                    Err(_) => true,
+                };
+                if changed {
+                    reporter.report(&Event::Warning {
+                        step: Some(step.id),
+                        message: format!(
+                            "cannot roll back {}: its contents were not snapshotted",
+                            path.display()
+                        ),
+                    });
+                }
+                continue;
+            };
+            let current_matches = std::fs::symlink_metadata(&path)
+                .ok()
+                .filter(|m| m.is_file() && m.len() == bytes.len() as u64)
+                .and_then(|_| std::fs::read(&path).ok())
+                .is_some_and(|now| now == *bytes);
+            if current_matches {
+                continue;
+            }
             if let Err(e) = ap_core::fsx::write_atomic(&path, bytes) {
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
@@ -7298,6 +7358,46 @@ Patch0:         0001-fix.patch
         );
         // Nested .osc untouched.
         assert!(dir.join(".osc").join("_meta").exists());
+    }
+
+    #[test]
+    fn checkout_snapshot_does_not_rewrite_or_read_unchanged_files() {
+        struct Null;
+        impl Reporter for Null {
+            fn report(&self, _: &Event) {}
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("foo.spec"), "Name: foo\n").unwrap();
+        std::fs::write(dir.join("foo-1.0.tar.zst"), "archive\n").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for name in ["foo.spec", "foo-1.0.tar.zst"] {
+            std::fs::File::options()
+                .write(true)
+                .open(dir.join(name))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let snap = CheckoutSnapshot::take(dir);
+        assert!(
+            snap.files[std::ffi::OsStr::new("foo-1.0.tar.zst")]
+                .content
+                .is_none()
+        );
+        let step = StepDir {
+            path: dir.to_path_buf(),
+            id: ap_core::event::StepId(0),
+        };
+        snap.restore(&Null, &step);
+        // Nothing changed, so nothing was rewritten: the mtimes are the old ones.
+        for name in ["foo.spec", "foo-1.0.tar.zst"] {
+            let mtime = std::fs::metadata(dir.join(name))
+                .unwrap()
+                .modified()
+                .unwrap();
+            assert_eq!(mtime, old, "{name} was rewritten");
+        }
     }
 
     #[test]
