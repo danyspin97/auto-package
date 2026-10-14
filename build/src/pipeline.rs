@@ -6834,8 +6834,13 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
     let mut close_matches = Vec::new();
 
     for item in items.iter().take(10) {
-        let repo_name = item.get("name")?.as_str()?;
-        let html_url = item.get("html_url")?.as_str()?;
+        // One malformed hit must not discard the others.
+        let (Some(repo_name), Some(html_url)) = (
+            item.get("name").and_then(|v| v.as_str()),
+            item.get("html_url").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
 
         let repo_normalized = repo_name.replace("_", "-").to_lowercase();
         let pkg_normalized = normalized.to_lowercase();
