@@ -52,6 +52,8 @@ const AGENT_ENV_DENYLIST: &[&str] = &[
     "GIT_ASKPASS",
     "GIT_SSH_COMMAND",
     "SSH_AUTH_SOCK",
+    "KUBECONFIG",
+    "DOCKER_AUTH_CONFIG",
     "DATABASE_URL",
     "PGPASSWORD",
 ];
@@ -65,6 +67,9 @@ const AGENT_ENV_DENYLIST: &[&str] = &[
 /// exceptions.
 const CREDENTIAL_SUFFIX_PATTERNS: &[&str] = &[
     "_TOKEN",
+    "_AUTH",
+    "_KEY",
+    "_PASSPHRASE",
     "_SECRET",
     "_SECRET_KEY",
     "_PASSWORD",
@@ -84,6 +89,8 @@ const CREDENTIAL_EXCEPTIONS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_API_KEY",
+    // The token the CLI logs in with when it is not given an API key.
+    "CLAUDE_CODE_OAUTH_TOKEN",
 ];
 
 /// Build the environment map handed to the `claude` subprocess.
@@ -220,8 +227,8 @@ openSUSE spec conventions to keep in mind:
    `[project.dependencies]` or `install_requires` (a main-dependencies diff,
    or any test-dependency addition) is NOT safe —
    re-check every name you add against its canonical PyPI spelling
-   (`https://pypi.org/project/<name>/` or `curl -s
-   https://pypi.org/pypi/<name>/json | jq .info.name`) before writing it into
+   (`https://pypi.org/project/<name>/` or the JSON at
+   `https://pypi.org/pypi/<name>/json`, field `info.name`) before writing it into
    BuildRequires/Requires. Known mixed-case names include Pillow, PyYAML,
    MarkupSafe, PyJWT, PySide6, PyQt5, PyMySQL, PyNaCl, Cython, Brotli — but
    don't rely on a memorized list, verify each one. Getting this wrong
@@ -274,9 +281,8 @@ openSUSE spec conventions to keep in mind:
 
    Add BuildRequires for any C libraries the extension links against,
    e.g. 'BuildRequires: openssl-devel' for SSL, 'BuildRequires: libffi-devel'
-   for cffi. When headers or libraries are missing, use `zypper search --provides`
-   or `zypper what-provides` to find the package that provides them (see the
-   "Missing C Headers and Libraries" section below for the search pattern).
+   for cffi. When headers or libraries are missing, name the -devel package that
+   provides them (see the "Missing C Headers and Libraries" section below).
 
    **Cython packages: force regeneration by removing PKG-INFO.** When the
    package `BuildRequires: %{python_module Cython ...}` and ships `.pyx`
@@ -702,7 +708,8 @@ openSUSE spec conventions to keep in mind:
      (convention 40) — prefer this over hand-editing the file with Edit/Write,
      since it fills in the date/committer header for you in the exact format
      OBS expects.
-   - WebSearch: search the web for missing source repositories or package information
+   - WebFetch: read PyPI metadata only (`https://pypi.org/pypi/<name>/json`).
+     There is no other web access in this turn.
    - Bash(cd source && quilt *): create and manage source patches using quilt.
      QUILT_PATCHES is already set to the OBS checkout directory, so patches land
      there automatically. Workflow for each logical fix:
@@ -1290,7 +1297,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       already in the spec's BuildRequires.
    2. If found: do NOT add `cuda-devel`/`cuda-runtime` and do NOT report them
       in `unresolvable_packages`. Check the wheels PyPI publishes
-      (`curl -s https://pypi.org/pypi/<name>/<version>/json`) and return
+      (WebFetch `https://pypi.org/pypi/<name>/<version>/json`) and return
       action `"use_upstream_wheel"` with `why` naming what needs CUDA and the
       line that proves it. If every wheel is locked to one CPython each
       (`cp313`, `cp314`, ...), follow convention 49 instead and return
@@ -1439,7 +1446,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `prebuilt-wheel-packaging` skill to finish it.
 
    BEFORE choosing `"use_upstream_wheel"`, look at the wheels PyPI actually
-   publishes for this release (`curl -s https://pypi.org/pypi/<name>/<version>/json`
+   publishes for this release (WebFetch `https://pypi.org/pypi/<name>/<version>/json`
    — the `urls[].filename` list). The automatic switch handles two shapes:
    ONE wheel that serves every flavor (a `-none-any.whl`, an `abi3` wheel, or a
    single configured flavor), and wheels each locked to one CPython
@@ -1463,20 +1470,14 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    didn't line up, and use `use_upstream_wheel` the same way.
 
 29. Missing source code: when the build fails because a package has no source
-   tarball on PyPI and no repository URL in its metadata, search for it
-   directly. Use WebSearch with queries like:
-   - "site:github.com <package-name> NVIDIA" for NVIDIA CUDA packages
-   - "site:github.com <package-name> python" for other packages
-   - "<package-name> github repository"
-   Look for:
-   - Official repositories (nvidia/*, NVIDIA/*, or the project's organization)
-   - Releases or tags matching the package version
-   - Monorepo structures where the package is a subdirectory
-   Once found, report the GitHub repository URL and the specific tag/release
-   in your reasoning. Prefer fixing the spec to build from that repository
-   (convention 26) when you can. Setting action to "blocked" with that URL in
-   `why` ENDS this package for the run — nothing in the pipeline fetches the
-   URL; it is there for the human operator to read.
+   tarball on PyPI and no repository URL in its metadata, you cannot search the
+   web for one in this turn. Do not guess a repository URL. Name the project you
+   would expect to host it (the official organization, e.g. nvidia/* for NVIDIA
+   CUDA packages) in your evidence. Prefer fixing the spec to build from a
+   repository the checkout itself names (convention 26) when you can. Setting
+   action to "blocked" with why: "source not on PyPI, repository not recorded in
+   metadata" ENDS this package for the run; the operator then supplies the
+   repository with `--source-url`, which is checked before it is used.
 
 30. Monorepos: when the "Other projects in this archive" section above lists
    more than one project, package ALL sibling projects as subpackages of this
@@ -2365,6 +2366,7 @@ linker errors about missing libraries:
 
 1. **Search for the providing package**: Use `zypper search --provides --match-exact "/usr/include/<header.h>"`
 or `zypper what-provides '<library>.so*'` to find which package provides the missing file.
+(Only these read-only zypper queries are available in this turn.)
 
 2. **Add the -devel package**: C headers are typically in -devel packages.
 For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
@@ -2447,7 +2449,7 @@ latter, name the exact missing compiler/SDK and quote the build.log line proving
 resolve and must be built first — Python dependencies as the PyPI name, C/C++
 libraries with the `lib` prefix and `-devel` suffix stripped (`libtrantor-devel`
 → `trantor`, convention 27). **IMPORTANT**: Before listing any python-* package here,
-verify it exists on PyPI with `curl -s https://pypi.org/pypi/<name>/json`. Never
+verify it exists on PyPI with WebFetch `https://pypi.org/pypi/<name>/json`. Never
 report system tools (cmake, ninja, pkg-config, gcc) as python-* packages — fix
 the spec to use the plain package name instead."#;
 
@@ -3086,6 +3088,46 @@ fn turn_usage(
     }
 }
 
+/// Tool allowlist for one agent turn.
+///
+/// The turn reads hostile upstream content (sdists, build logs, notes), so it
+/// gets only what a spec edit needs. Edit, Write and Read are granted under
+/// the directories the turn works in, not anywhere on disk (path rules are
+/// written as `//<absolute path>`); there is no `rm`, only the read-only
+/// `zypper search` and `what-provides` queries, and web
+/// access is `WebFetch` on PyPI. The read-only translate task is the one
+/// turn that may also search the web: it can touch no local file.
+fn turn_allowed_tools(
+    task: Task,
+    workspace: &std::path::Path,
+    checkout: Option<&std::path::Path>,
+) -> String {
+    let (base_tools, roots): (&str, Vec<&std::path::Path>) = if task
+        == Task::TranslateUnresolvableDeps
+    {
+        // Read-only by construction, not just by prompt instruction: this
+        // task only reports upstream names for `unresolvable_packages`, it
+        // must not be able to touch the spec or checkout either way.
+        ("WebFetch(domain:pypi.org),WebSearch", Vec::new())
+    } else if let Some(checkout) = checkout {
+        (
+            "Grep,Skill,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),Bash(osc status),Bash(osc vc *),Bash(ls *),Bash(zypper search *),Bash(zypper what-provides *),WebFetch(domain:pypi.org)",
+            vec![workspace, checkout],
+        )
+    } else {
+        (
+            "Grep,Skill,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(zypper search *),Bash(zypper what-provides *),WebFetch(domain:pypi.org)",
+            vec![workspace],
+        )
+    };
+    let mut tools = base_tools.to_string();
+    for root in roots {
+        let p = permission_path(root);
+        tools.push_str(&format!(",Edit({p}/**),Write({p}/**),Read({p}/**)"));
+    }
+    tools
+}
+
 /// Run one agent turn. The agent has tool access to the workspace and edits
 /// `spec` in place. The caller is responsible for validating and rolling back
 /// on failure.
@@ -3096,31 +3138,7 @@ fn turn_usage(
 pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
-    // Edit and Write are granted under the directories this turn works in, not
-    // anywhere on disk. Path rules are written as `//<absolute path>`.
-    let (base_tools, write_roots): (&str, Vec<&std::path::Path>) = if req.task
-        == Task::TranslateUnresolvableDeps
-    {
-        // Read-only by construction, not just by prompt instruction: this
-        // task only reports upstream names for `unresolvable_packages`, it
-        // must not be able to touch the spec or checkout either way.
-        ("Bash(curl -s https://pypi.org/*),WebSearch", Vec::new())
-    } else if let Some(checkout) = req.checkout_dir {
-        (
-            "Read,Grep,Skill,Bash(rpmspec *),Bash(quilt *),Bash(cd source && quilt *),Bash(osc status),Bash(osc vc *),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch",
-            vec![req.workspace, checkout],
-        )
-    } else {
-        (
-            "Read,Grep,Skill,Bash(rpmspec *),Bash(osc status),Bash(ls *),Bash(rm *),Bash(zypper *),Bash(curl -s https://pypi.org/*),WebSearch",
-            vec![req.workspace],
-        )
-    };
-    let mut allowed_tools = base_tools.to_string();
-    for root in write_roots {
-        let p = permission_path(root);
-        allowed_tools.push_str(&format!(",Edit({p}/**),Write({p}/**)"));
-    }
+    let allowed_tools = turn_allowed_tools(req.task, req.workspace, req.checkout_dir);
 
     // Escalate with the attempt number: the first 2 attempts go to Haiku 5.5
     // (cheapest), the next 3 to Sonnet 5.5, and everything from attempt 6 on —
@@ -3704,7 +3722,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  though pyproject.toml spells them with an underscore: `flit_core` → \
                  `flit-core`, `tomli_w` → `tomli-w`, `uv_build` → `uv-build`, \
                  `backports.zstd` → `backports-zstd` (a dot, not even an underscore). Don't \
-                 stop at this list — `curl -s https://pypi.org/pypi/<name>/json | jq .info.name` \
+                 stop at this list — WebFetch `https://pypi.org/pypi/<name>/json` (`info.name`) \
                  every backend name you have not already verified this session.\n\
              \n\
              0f. **CUDA needed to BUILD**: `Grep` the source for `find_package(CUDAToolkit`, \
@@ -4074,7 +4092,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              until all dependencies are satisfied and the final package successfully builds.\n\n\
              **CRITICAL - Verify before reporting python-* packages**:\n\
              1. **Check PyPI first**: Before reporting a python-* package as unresolvable, \
-             verify it exists on PyPI: `curl -s https://pypi.org/pypi/<name>/json`. If you \
+             verify it exists on PyPI: WebFetch `https://pypi.org/pypi/<name>/json`. If you \
              get a 404, the package doesn't exist on PyPI.\n\
              2. **Check name variations**: PyPI package names use `-` while imports use `_`. \
              Try variations (e.g., `rich-toolkit` vs `rich_toolkit`).\n\
@@ -4856,5 +4874,87 @@ mod tests {
                 assert!(n >= 1 && n <= count, "dangling reference to convention {n}");
             }
         }
+    }
+
+    #[test]
+    fn build_turn_tools_exclude_rm_curl_web_search_and_mutating_zypper() {
+        let tools = turn_allowed_tools(
+            Task::FixAfterBuild,
+            std::path::Path::new("/srv/ws"),
+            Some(std::path::Path::new("/srv/ws/checkout")),
+        );
+        let list: Vec<&str> = tools.split(',').collect();
+        for banned in ["Bash(rm *)", "Bash(zypper *)", "WebSearch", "Bash(curl"] {
+            assert!(
+                !tools.contains(banned),
+                "{banned} must not be allowed: {tools}"
+            );
+        }
+        // zypper is limited to the queries the conventions rely on.
+        assert!(list.contains(&"Bash(zypper search *)"));
+        assert!(list.contains(&"Bash(zypper what-provides *)"));
+        assert!(list.contains(&"WebFetch(domain:pypi.org)"));
+        assert!(
+            !list.contains(&"Read"),
+            "bare Read would reach the whole filesystem"
+        );
+        assert!(list.contains(&"Read(//srv/ws/**)"));
+        assert!(list.contains(&"Read(//srv/ws/checkout/**)"));
+    }
+
+    #[test]
+    fn build_turn_without_checkout_reads_only_the_workspace() {
+        let tools = turn_allowed_tools(Task::FixAfterBuild, std::path::Path::new("/srv/ws"), None);
+        assert!(tools.split(',').any(|t| t == "Read(//srv/ws/**)"));
+        assert!(!tools.contains("quilt"));
+        assert_eq!(tools.matches("Read(").count(), 1);
+    }
+
+    #[test]
+    fn translate_turn_reads_no_local_file() {
+        let tools = turn_allowed_tools(
+            Task::TranslateUnresolvableDeps,
+            std::path::Path::new("/srv/ws"),
+            None,
+        );
+        assert!(!tools.contains("Read") && !tools.contains("Edit") && !tools.contains("Write"));
+    }
+
+    #[test]
+    fn credential_shaped_variables_are_scrubbed_but_claude_auth_is_kept() {
+        let vars = |names: &[&str]| -> Vec<(String, String)> {
+            names
+                .iter()
+                .map(|n| (n.to_string(), "v".to_string()))
+                .collect()
+        };
+        let kept = scrub_env_for_agent(
+            vars(&[
+                "GPG_PASSPHRASE",
+                "MY_SIGNING_KEY",
+                "OBS_AUTH",
+                "GITHUB_TOKEN",
+                "AWS_SECRET_ACCESS_KEY",
+                "DB_PASSWORD",
+                "KUBECONFIG",
+                "DOCKER_AUTH_CONFIG",
+                "SSH_AUTH_SOCK",
+                "PATH",
+                "HOME",
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ]),
+            &[],
+        );
+        let names: Vec<&str> = kept.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "HOME",
+                "PATH"
+            ]
+        );
     }
 }
