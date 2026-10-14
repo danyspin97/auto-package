@@ -1767,7 +1767,21 @@ fn osc_service_stage(
         // Vendoring only the root manifest leaves the registry short of the
         // build's crates: "no matching package named `pprof` found".
         let extra_manifests = find_tarball(checkout_dir)
-            .and_then(|t| maturin_manifest_path(&t))
+            .and_then(|t| match maturin_manifest_path(&t) {
+                Ok(path) => path,
+                Err(e) => {
+                    // Without it the vendored registry may lack the crates the
+                    // build needs; say why instead of vendoring the root only.
+                    reporter.report(&Event::Warning {
+                        step: None,
+                        message: format!(
+                            "could not read the maturin manifest path from {}: {e}",
+                            t.display()
+                        ),
+                    });
+                    None
+                }
+            })
             .into_iter()
             .collect::<Vec<_>>();
         let service_lacks_manifest = std::fs::read_to_string(checkout_dir.join("_service"))
@@ -3738,7 +3752,14 @@ fn accept_or_restore_with_snapshot(
     // `rpmspec --parse` cannot see a patch that does not apply; that would only
     // surface as a `%prep` failure after a full OBS cycle. Hand-written patches
     // with wrong hunk counts ("malformed patch") are the usual culprit.
-    if let Err(problem) = check_patches_apply(spec_path, &after) {
+    let patch_check = check_patches_apply(spec_path, &after);
+    if let Ok(Some(unchecked)) = &patch_check {
+        reporter.report(&Event::Warning {
+            step: Some(step.id),
+            message: unchecked.clone(),
+        });
+    }
+    if let Err(problem) = patch_check {
         reporter.report(&Event::SpecRejected {
             step: step.id,
             reason: ap_core::event::SpecRejection::RpmspecParseFailed {
@@ -4188,8 +4209,10 @@ fn spec_version_differs(spec_path: &Path, version: &str) -> bool {
 
 /// Apply the spec's `PatchN:` files, in order, to a scratch copy of the source
 /// tarball the way `%autosetup -p1` will. `Ok` when there is nothing to check
-/// (no patches, no tarball, not a `-p1` autosetup) or all of them apply.
-fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
+/// (no patches, no tarball, not a `-p1` autosetup) or all of them apply; the
+/// `Ok` value is what could not be checked and should be reported (the source
+/// archive would not unpack), which says nothing about the patches themselves.
+fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, String> {
     let patches: Vec<String> = spec
         .lines()
         .filter_map(|l| {
@@ -4202,13 +4225,13 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
         })
         .collect();
     if patches.is_empty() || !spec.contains("%autosetup") || !spec.contains("-p1") {
-        return Ok(());
+        return Ok(None);
     }
     let Some(checkout) = spec_path.parent() else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(tarball) = find_tarball(checkout) else {
-        return Ok(());
+        return Ok(None);
     };
     let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
     // Unpack only what the patches touch: `patch` reads nothing else, and
@@ -4221,8 +4244,11 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
         }
     }
     let wanted = |p: &Path| targets.iter().any(|t| p.ends_with(t));
-    if ap_ecosystem::sdist::extract_where(&tarball, scratch.path(), wanted).is_err() {
-        return Ok(());
+    if let Err(e) = ap_ecosystem::sdist::extract_where(&tarball, scratch.path(), wanted) {
+        return Ok(Some(format!(
+            "could not unpack {} to test the patches, so they were not checked: {e}",
+            tarball.display()
+        )));
     }
     // A single top-level directory is what `%autosetup -n` enters.
     let entries: Vec<_> = std::fs::read_dir(scratch.path())
@@ -4271,7 +4297,7 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn find_tarball(dir: &Path) -> Option<PathBuf> {
@@ -5745,15 +5771,16 @@ fn patch_targets(diff: &str) -> Vec<String> {
 
 /// The `[tool.maturin] manifest-path` of an sdist's root `pyproject.toml`,
 /// relative to the archive root, when it names a manifest other than the root
-/// `Cargo.toml`. `None` when absent, default, the archive cannot be read, or
-/// the manifest is itself a member of the root `Cargo.toml`'s workspace: the
+/// `Cargo.toml`. `Ok(None)` when absent, default, or the manifest is itself a
+/// member of the root `Cargo.toml`'s workspace; `Err` when the archive cannot
+/// be unpacked (a refused link, a size limit, a corrupt file). The
 /// root manifest's own `cargotoml` param already vendors every workspace
 /// member through their one shared lockfile, and `obs-service-cargo` errors
 /// out (bare `NotFound`, os error 2) when told to additionally vendor a
 /// member path, since it looks for a lockfile next to that manifest instead
 /// of at the workspace root.
-fn maturin_manifest_path(tarball: &Path) -> Option<String> {
-    let scratch = tempfile::tempdir().ok()?;
+fn maturin_manifest_path(tarball: &Path) -> Result<Option<String>, String> {
+    let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
     // Only the two root manifests are needed; unpacking the whole sdist for
     // them is what this used to do.
     ap_ecosystem::sdist::extract_where(tarball, scratch.path(), |p| {
@@ -5767,14 +5794,20 @@ fn maturin_manifest_path(tarball: &Path) -> Option<String> {
                 Some("pyproject.toml" | "Cargo.toml")
             )
     })
-    .ok()?;
-    let entries: Vec<_> = std::fs::read_dir(scratch.path())
+    .map_err(|e| e.to_string())?;
+    Ok(maturin_manifest_in(scratch.path()))
+}
+
+/// The manifest path named by the unpacked sdist at `scratch`, if any (see
+/// [`maturin_manifest_path`]).
+fn maturin_manifest_in(scratch: &Path) -> Option<String> {
+    let entries: Vec<_> = std::fs::read_dir(scratch)
         .ok()?
         .filter_map(|e| e.ok())
         .collect();
     let root = match entries.as_slice() {
         [only] if only.path().is_dir() => only.path(),
-        _ => scratch.path().to_path_buf(),
+        _ => scratch.to_path_buf(),
     };
     let text = std::fs::read_to_string(root.join("pyproject.toml")).ok()?;
     let doc: toml::Value = toml::from_str(&text).ok()?;
@@ -6808,7 +6841,7 @@ mod tests {
             tb.into_inner().unwrap().finish().unwrap();
         }
         assert_eq!(
-            maturin_manifest_path(&tarball).as_deref(),
+            maturin_manifest_path(&tarball).unwrap().as_deref(),
             Some("hf_xet/Cargo.toml")
         );
     }
@@ -6845,7 +6878,17 @@ mod tests {
             );
             tb.into_inner().unwrap().finish().unwrap();
         }
-        assert_eq!(maturin_manifest_path(&tarball), None);
+        assert_eq!(maturin_manifest_path(&tarball), Ok(None));
+    }
+
+    /// An archive that cannot be unpacked is an error to report, not the same
+    /// answer as "no manifest path".
+    #[test]
+    fn maturin_manifest_path_reports_an_archive_it_cannot_unpack() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("broken-1.0.tar.gz");
+        std::fs::write(&tarball, b"not a gzip stream").unwrap();
+        assert!(maturin_manifest_path(&tarball).is_err());
     }
 
     #[test]
@@ -6893,7 +6936,15 @@ mod tests {
         )
         .unwrap();
         drop(good);
-        assert!(check_patches_apply(&spec_path, spec).is_ok());
+        assert_eq!(check_patches_apply(&spec_path, spec), Ok(None));
+
+        // A source archive that will not unpack is not a patch failure, but the
+        // patches went unchecked and that is reported rather than skipped.
+        std::fs::write(&tarball, b"not a gzip stream").unwrap();
+        let unchecked = check_patches_apply(&spec_path, spec)
+            .unwrap()
+            .expect("an unpack failure is reported");
+        assert!(unchecked.contains("were not checked"), "{unchecked}");
 
         // nothing to check without patches
         assert!(check_patches_apply(&spec_path, "%autosetup -p1\n").is_ok());
