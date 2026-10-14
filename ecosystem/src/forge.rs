@@ -70,6 +70,11 @@ pub fn is_known_host(host: &str) -> bool {
     })
 }
 
+/// Hosts running GitLab, where the project path may nest subgroups.
+fn is_gitlab_style(host: &str) -> bool {
+    host == "salsa.debian.org" || host.split('.').any(|label| label == "gitlab")
+}
+
 /// Parse any forge URL spelling into its parts, dropping sub-paths that
 /// aren't part of the project path itself.
 ///
@@ -129,6 +134,10 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
     // blob, issues, …). Everything before `/-/` is the project path.
     let project_path = if let Some(idx) = path.find("/-/") {
         &path[..idx]
+    } else if is_gitlab_style(&host) {
+        // Subgroups make any segment a possible group name
+        // (`org/team/security/project`), so nothing is trimmed without `/-/`.
+        path
     } else {
         // GitHub (and anything shaped like it) uses literal sub-paths
         // directly after the repo. Trim at the first one we recognise.
@@ -191,6 +200,17 @@ mod tests {
         assert_eq!(f.project_path, "NVIDIA/cuda-python");
         assert_eq!(f.repo_name, "cuda-python");
         assert_eq!(f.canonical_https(), "https://github.com/NVIDIA/cuda-python");
+    }
+
+    #[test]
+    fn gitlab_subgroups_named_like_github_subpaths_are_kept() {
+        let f = parse("https://gitlab.com/org/team/security/project").unwrap();
+        assert_eq!(f.project_path, "org/team/security/project");
+        let f = parse("https://gitlab.com/org/team/actions/project/-/releases").unwrap();
+        assert_eq!(f.project_path, "org/team/actions/project");
+        // GitHub-style hosts still trim.
+        let f = parse("https://github.com/o/r/security/advisories").unwrap();
+        assert_eq!(f.project_path, "o/r");
     }
 
     #[test]
