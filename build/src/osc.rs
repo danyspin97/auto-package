@@ -1991,10 +1991,38 @@ const ALLOWED_SERVICE_PARAMS: &[&str] = &[
     "archive",
     "disablereview",
     "strategy",
+    // tar_scm / obs_scm
+    "exclude",
+    "include",
+    "extract",
+    "submodules",
+    "depth",
+    "history-depth",
+    "parent-tag",
+    "package-meta",
+    // cargo_vendor
+    "versioned-dirs",
+    "respect-lockfile",
+    // download_files
+    "enforceupstream",
+    "enforcehash",
+    // set_version
+    "regex",
+    "parse-version",
 ];
 
 /// Params whose value is a path relative to the checkout.
-const SERVICE_PATH_PARAMS: &[&str] = &["subdir", "filename", "file", "src", "cargotoml", "archive"];
+const SERVICE_PATH_PARAMS: &[&str] = &[
+    "subdir",
+    "filename",
+    "file",
+    "src",
+    "cargotoml",
+    "archive",
+    "exclude",
+    "include",
+    "extract",
+];
 
 /// Check one `<param>` against the allowlists. `value` is the decoded text,
 /// as osc will see it.
@@ -4607,6 +4635,27 @@ mod service_validation_tests {
   </service>
 </services>"#;
         validate_service_xml(xml.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn common_tar_scm_and_cargo_vendor_params_pass() {
+        let xml = r#"<services>
+  <service name="tar_scm">
+    <param name="url">https://github.com/o/r.git</param>
+    <param name="exclude">.git</param>
+    <param name="include">src</param>
+    <param name="submodules">enable</param>
+    <param name="depth">1</param>
+  </service>
+  <service name="cargo_vendor">
+    <param name="src">r</param>
+    <param name="versioned-dirs">true</param>
+    <param name="respect-lockfile">true</param>
+  </service>
+</services>"#;
+        validate_service_xml(xml.as_bytes()).unwrap();
+        let bad = r#"<services><service name="tar_scm"><param name="extract">../../x</param></service></services>"#;
+        assert!(validate_service_xml(bad.as_bytes()).is_err());
     }
 
     #[test]
