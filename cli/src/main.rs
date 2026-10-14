@@ -2076,6 +2076,13 @@ fn cmd_build(
     let patch_requests = PatchRequests::default();
     let native_names = NativeNames::default();
 
+    // Packages that are running, and where their results arrive. These outlive
+    // one pass of the loop below: a package that reports missing dependencies
+    // ends the pass so the dependency queue can build them at once, while the
+    // other packages keep running and their results are taken in the next pass.
+    let (tx, rx) = std::sync::mpsc::channel::<(String, String, PipelineResult)>();
+    let mut in_flight: Vec<String> = Vec::new();
+
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
     loop {
@@ -2807,8 +2814,6 @@ fn cmd_build(
         // resolvability gate for the root -- see `select_target`'s doc
         // comment. Without this, the gate would skip the package before
         // `run_package`'s own force check could ever fire.
-        let (tx, rx) = std::sync::mpsc::channel::<(String, String, PipelineResult)>();
-        let mut in_flight: Vec<String> = Vec::new();
         let mut done_this_round: std::collections::HashSet<String> = Default::default();
         let mut spawned_any = false;
         let mut batch_pending: Vec<String> = Vec::new();
@@ -2905,7 +2910,6 @@ fn cmd_build(
                     });
                     let _ = tx.send((rpm_name, version, result));
                 });
-                spawned_any = true;
             }
 
             // Wait for one package to finish, then select again: its result may
@@ -2929,6 +2933,8 @@ fn cmd_build(
                 }
             };
             in_flight.retain(|r| *r != rpm_name);
+            // A result counts as work done in this pass, whoever started it.
+            spawned_any = true;
             // The run was aborted (not an ordinary failure): do not count or
             // retry this result, just wait for the rest and stop.
             if ap_build::proc::abort_reason().is_some() {
@@ -3087,6 +3093,14 @@ fn cmd_build(
                         });
                     }
                 }
+            }
+            // Missing dependencies are handed to the dependency queue now, not
+            // when every package still running has finished: a package waiting
+            // on `logfire` should not sit behind an hour-long build of another.
+            // The packages still running keep running (their results are read
+            // when the stream resumes).
+            if !batch_pending.is_empty() {
+                break;
             }
         }
 
