@@ -3272,6 +3272,7 @@ fn agent_turn(
         },
         checkout_dir: ctx.checkout_dir,
         context: nudge.get().map(String::as_str).or(ctx.context),
+        rpms_dir: Some(&config.rpms_dir),
         model_rotation: model_rotation.get(),
         on_tool_use: Some(&on_tool_use),
     };
