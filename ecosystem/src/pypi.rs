@@ -121,10 +121,7 @@ const MAX_JSON_BYTES: u64 = 64 << 20;
 const MAX_DOWNLOAD_BYTES: u64 = 2 << 30;
 
 fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .build()
-        .into()
+    crate::net::agent(ureq::Agent::config_builder().timeout_global(Some(timeout)))
 }
 
 fn get_json(url: &str) -> Result<String, FetchError> {

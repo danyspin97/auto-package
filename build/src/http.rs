@@ -38,12 +38,11 @@ pub fn agent(timeout: Duration, redirects: u32) -> ureq::Agent {
     {
         return agent.clone();
     }
-    let agent = ureq::Agent::new_with_config(
+    let agent = ap_ecosystem::net::agent(
         ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .max_redirects(redirects)
-            .max_redirects_will_error(false)
-            .build(),
+            .max_redirects_will_error(false),
     );
     agents.push((timeout, redirects, agent.clone()));
     agent
