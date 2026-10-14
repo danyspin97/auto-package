@@ -25,7 +25,10 @@
 //!   directories (a venv, `/opt/python`);
 //! - pip's own config (`PIP_CONFIG_FILE`, `~/.config/pip/pip.conf`,
 //!   `~/.pip/pip.conf`), since private indexes are configured there. Index
-//!   URLs in those files can carry credentials, and a backend can read them;
+//!   URLs in those files, and in `PIP_INDEX_URL` and `PIP_EXTRA_INDEX_URL`,
+//!   can carry credentials, and a backend can read them. They are passed on
+//!   as they are, because stripping them would break private indexes; use an
+//!   index credential that is only good for reading packages;
 //! - `~/.netrc`, only when `AUTO_PACKAGE_PIP_NETRC=1`, for the same reason.
 //!   The default is off because a netrc usually holds credentials for hosts
 //!   other than the index.
@@ -49,33 +52,7 @@ const SANDBOX_PIP_CONFIG_FILE: &str = "/home/sandbox/.pip-config-file";
 /// Set to `1` to give the sandbox `~/.netrc`. Off by default.
 pub const NETRC_ENV: &str = "AUTO_PACKAGE_PIP_NETRC";
 
-/// `/etc` entries that are bound read-only when they exist. Everything else
-/// in `/etc` is absent.
-const ETC_ENTRIES: &[&str] = &[
-    "/etc/resolv.conf",
-    "/etc/hosts",
-    "/etc/host.conf",
-    "/etc/nsswitch.conf",
-    "/etc/gai.conf",
-    "/etc/services",
-    "/etc/protocols",
-    "/etc/passwd",
-    "/etc/group",
-    "/etc/localtime",
-    "/etc/os-release",
-    "/etc/ld.so.cache",
-    "/etc/ld.so.conf",
-    "/etc/ld.so.conf.d",
-    "/etc/ssl",
-    "/etc/pki",
-    "/etc/ca-certificates",
-    "/etc/ca-certificates.conf",
-    "/etc/crypto-policies",
-    "/etc/alternatives",
-    "/etc/pip.conf",
-    "/etc/xdg/pip",
-    "/var/lib/ca-certificates",
-];
+use ap_core::sandbox::ETC_ENTRIES;
 
 /// Directories the sandbox already has from the system mounts.
 const SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64"];
@@ -161,11 +138,11 @@ pub fn bwrap_args(program: &[&str], host: &Host) -> Result<Vec<OsString>, Sandbo
         "--die-with-parent",
         "--new-session",
         "--clearenv",
+        "--cap-drop",
+        "ALL",
     ]);
     a.flags(ap_core::sandbox::system_ro_binds());
-    for etc in ETC_ENTRIES {
-        a.flags(["--ro-bind-try", etc, etc]);
-    }
+    a.flags(ap_core::sandbox::etc_ro_binds());
     a.flags(["--proc", "/proc", "--dev", "/dev"]);
     a.flags(["--tmpfs", "/tmp", "--tmpfs", "/run"]);
     a.flags(["--tmpfs", SANDBOX_HOME]);

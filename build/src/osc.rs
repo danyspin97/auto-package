@@ -2085,11 +2085,18 @@ fn rpmspec_sandbox_works() -> bool {
 /// directory mounted, read-only.
 fn sandbox_prefix(spec_dir: Option<&str>) -> Vec<String> {
     let mut args = ap_core::sandbox::system_ro_binds();
+    args.extend(ap_core::sandbox::etc_ro_binds());
     args.extend(
         [
-            "--ro-bind",
-            "/etc",
-            "/etc",
+            // rpm's own configuration, which the shared list does not carry.
+            "--ro-bind-try",
+            "/etc/rpm",
+            "/etc/rpm",
+            "--ro-bind-try",
+            "/etc/rpmrc",
+            "/etc/rpmrc",
+            "--cap-drop",
+            "ALL",
             "--proc",
             "/proc",
             "--dev",

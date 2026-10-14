@@ -10,14 +10,50 @@ use std::sync::OnceLock;
 
 /// `bwrap` arguments that mount the system read-only: `/usr` (required), and
 /// `/bin`, `/lib`, `/lib64`, `/sbin` when present (symlinks into `/usr` on
-/// merged-usr systems). `/etc` is left to the caller, since how much of it a
-/// tool needs differs.
+/// merged-usr systems). `/etc` is left to the caller (see [`etc_ro_binds`]),
+/// since how much of it a tool needs differs.
 pub fn system_ro_binds() -> Vec<String> {
     let mut args = vec!["--ro-bind".to_string(), "/usr".into(), "/usr".into()];
     for dir in ["/bin", "/lib", "/lib64", "/sbin"] {
         args.extend(["--ro-bind-try".to_string(), dir.into(), dir.into()]);
     }
     args
+}
+
+/// `/etc` entries that are bound read-only when they exist. Everything else
+/// in `/etc` is absent.
+pub const ETC_ENTRIES: &[&str] = &[
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/host.conf",
+    "/etc/nsswitch.conf",
+    "/etc/gai.conf",
+    "/etc/services",
+    "/etc/protocols",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/localtime",
+    "/etc/os-release",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    "/etc/ssl",
+    "/etc/pki",
+    "/etc/ca-certificates",
+    "/etc/ca-certificates.conf",
+    "/etc/crypto-policies",
+    "/etc/alternatives",
+    "/etc/pip.conf",
+    "/etc/xdg/pip",
+    "/var/lib/ca-certificates",
+];
+
+/// `bwrap` arguments that bind the [`ETC_ENTRIES`] that exist, read-only.
+pub fn etc_ro_binds() -> Vec<String> {
+    ETC_ENTRIES
+        .iter()
+        .flat_map(|e| ["--ro-bind-try", e, e].map(String::from))
+        .collect()
 }
 
 /// The `bwrap` executable on `PATH`, as an absolute path.
