@@ -425,6 +425,25 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
 fn owner_repo(repo_url: &str) -> Result<(String, String, String), String> {
     let forge = ap_ecosystem::forge::parse(repo_url)
         .ok_or_else(|| format!("{repo_url} is not a repository URL"))?;
+    // These go into API paths and archive URLs. Anything beyond a plain name
+    // (a `?`, a `%` escape, or `.`/`..`, which a URL resolves) could point the
+    // request at another endpoint. A nested GitLab path is checked segment by
+    // segment.
+    let name_ok = |s: &str| {
+        s != "."
+            && s != ".."
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    let host_ok = forge
+        .host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+    if !host_ok || !forge.project_path.split('/').all(name_ok) {
+        return Err(format!(
+            "{repo_url} does not name a forge owner and repository"
+        ));
+    }
     Ok((forge.host, forge.project_path, forge.repo_name))
 }
 
@@ -1531,6 +1550,24 @@ mod tests {
             owner_repo("git@gitlab.com:group/subgroup/project.git").unwrap();
         assert_eq!(host, "gitlab.com");
         assert_eq!(project_path, "group/subgroup/project");
+    }
+
+    /// Owner and repository become path segments of API and archive URLs, so
+    /// traversal, escapes and query characters are refused.
+    #[test]
+    fn owner_and_repo_must_be_plain_names() {
+        for url in [
+            "https://github.com/../orgs",
+            "https://github.com/owner/..",
+            "https://github.com/owner/.",
+            "https://github.com/a%2Fb/repo",
+            "https://github.com/owner/repo%2e%2e",
+            "https://github.com/group/../repo",
+        ] {
+            assert!(owner_repo(url).is_err(), "{url} should be refused");
+        }
+        assert!(owner_repo("https://github.com/owner/repo.name_1-x").is_ok());
+        assert!(owner_repo("https://gitlab.com/group/subgroup/project").is_ok());
     }
 
     #[test]

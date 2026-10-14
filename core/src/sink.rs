@@ -952,7 +952,10 @@ mod printable_tests {
 
     #[test]
     fn plain_text_is_borrowed_unchanged() {
-        assert!(matches!(printable("plain\ttext\n"), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            printable("plain\ttext\n"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
