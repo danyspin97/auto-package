@@ -225,6 +225,9 @@ struct ArchiveCache {
     files: std::collections::HashMap<String, PathBuf>,
     /// URLs that answered 404, so they are not asked for again this run.
     missing: std::collections::HashSet<String>,
+    /// One lock per URL being fetched, so concurrent callers for the same URL
+    /// wait for one download instead of racing to write it.
+    in_flight: std::collections::HashMap<String, std::sync::Arc<Mutex<()>>>,
 }
 
 fn archive_cache() -> &'static Mutex<ArchiveCache> {
@@ -254,14 +257,32 @@ fn download_archive(url: &str, dest: &Path) -> Result<(), FetchFailure> {
 /// The archive at `url` as a file in this process's scratch directory, reused
 /// when it was already fetched this run.
 pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
-    {
+    let cached = || {
         let cache = archive_cache().lock().unwrap_or_else(|e| e.into_inner());
         if cache.missing.contains(url) {
-            return Err(FetchFailure::NotFound);
+            return Some(Err(FetchFailure::NotFound));
         }
-        if let Some(path) = cache.files.get(url).filter(|p| p.is_file()) {
-            return Ok(path.clone());
-        }
+        cache
+            .files
+            .get(url)
+            .filter(|p| p.is_file())
+            .map(|p| Ok(p.clone()))
+    };
+    if let Some(hit) = cached() {
+        return hit;
+    }
+    // Callers wanting the same URL queue on its slot: the first downloads, the
+    // rest find the result in the cache. Other URLs proceed in parallel.
+    let slot = archive_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .in_flight
+        .entry(url.to_string())
+        .or_default()
+        .clone();
+    let _turn = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = cached() {
+        return hit;
     }
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     // Under the private directory, not a predictable name in the shared
