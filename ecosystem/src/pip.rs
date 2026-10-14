@@ -282,13 +282,10 @@ fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
     // Serialize and save
     // Write to a temp file in the same directory and rename into place, so
     // a concurrent reader never sees a half-written cache file.
-    if let Ok(json) = serde_json::to_string_pretty(nodes) {
-        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-        if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-            ap_core::diag!("  cached resolution for future use");
-        } else {
-            let _ = std::fs::remove_file(&tmp);
-        }
+    if let Ok(json) = serde_json::to_string_pretty(nodes)
+        && ap_core::fsx::write_atomic(&path, json).is_ok()
+    {
+        ap_core::diag!("  cached resolution for future use");
     }
 }
 

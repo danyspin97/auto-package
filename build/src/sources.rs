@@ -82,7 +82,8 @@ impl SourceMap {
         let path = Self::path(work_dir);
         let text =
             toml::to_string_pretty(self).map_err(|e| format!("serializing source map: {e}"))?;
-        std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
+        ap_core::fsx::write_atomic(&path, text)
+            .map_err(|e| format!("writing {}: {e}", path.display()))
     }
 
     pub fn get(&self, pkg: &str) -> Option<&str> {

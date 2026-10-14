@@ -126,6 +126,35 @@ pub fn download_file(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
     }
 }
 
+/// How old a leftover `.download-*.part` must be before it is deleted. A run
+/// killed outright (SIGKILL, power loss) cannot clean up after itself.
+const STALE_PART_AGE: Duration = Duration::from_secs(24 * 3600);
+
+/// Delete `.download-*.part` files in `dir` older than [`STALE_PART_AGE`].
+/// Best effort.
+fn sweep_stale_parts(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with(".download-") && name.ends_with(".part")) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_PART_AGE);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn download_once(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
     let resp = match ap_ecosystem::net::call_with_retries(|| get_download(url)) {
         Ok(resp) => resp,
@@ -138,6 +167,7 @@ fn download_once(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
     let dir = dest.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = dir.unwrap_or(Path::new("."));
     let local = |e: std::io::Error| FetchFailure::Transport(format!("{}: {e}", dir.display()));
+    sweep_stale_parts(dir);
     let temp = tempfile::Builder::new()
         .prefix(".download-")
         .suffix(".part")
@@ -255,6 +285,28 @@ mod tests {
             stream_to(Capped, &mut file).unwrap_err(),
             FetchFailure::TooLarge
         );
+    }
+
+    #[test]
+    fn stale_parts_are_swept_and_fresh_files_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join(".download-old.part");
+        let fresh = dir.path().join(".download-fresh.part");
+        let other = dir.path().join("keep.part");
+        for f in [&old, &fresh, &other] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let long_ago = std::time::SystemTime::now() - STALE_PART_AGE * 2;
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        sweep_stale_parts(dir.path());
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
     }
 
     #[test]
