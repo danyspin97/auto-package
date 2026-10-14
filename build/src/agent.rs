@@ -835,10 +835,6 @@ openSUSE spec conventions to keep in mind:
      from the one-paragraph summary alone.
    - rpmspec is not available to you: the pipeline validates the spec with
      `rpmspec --parse` itself after your turn and reports any error back.
-   - Bash(osc vc *): add a changelog entry to the package's `.changes` file
-     (convention 40) — prefer this over hand-editing the file with Edit/Write,
-     since it fills in the date/committer header for you in the exact format
-     OBS expects.
    - Bash(rpm -qlp <rpms dir>/*): list the files of an RPM this project built
      (convention 61). Only when the workspace map shows an `rpms/` line.
    - WebFetch: read PyPI metadata only (`https://pypi.org/pypi/<name>/json`).
@@ -1775,23 +1771,14 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `summary-too-long`/badness-budget items convention 31 already tells you
    to just fix directly.
 
-40. **Update the `.changes` file for any spec edit meant to fix this build.**
-   Only the final spec state gets committed to OBS (one `osc ci` after the
-   build succeeds) — there is no separate step that writes a changelog entry
-   for you, so if you do not add one during the turn that makes the fix, the
-   committed package ends up with no record of what changed and why.
-   Whenever you edit the spec (or add/refresh a quilt patch) to address the
-   reported failure, also add an entry to `<name>.changes` in the same
-   checkout, in the same turn:
-     osc vc -m "<one-line summary of this fix>"
-   `osc vc` reads the committer identity from oscrc and writes a correctly
-   formatted, datestamped entry at the top of the file — matching the
-   `----...` separator / `<date> - <name> <email>` header / `- ` bullet
-   structure already in every `.changes` file — so prefer it over hand-
-   editing. If `osc vc` is unavailable for some reason, open the existing
-   `.changes` file first and match its exact format by hand rather than
-   guessing at one. Skip this only for a turn that makes no spec change (a
-   pure investigation turn, or `action: "blocked"` with nothing edited).
+40. **The `.changes` file is written for you: do not touch it.** The build
+   system adds the changelog entry itself after a turn that edited the
+   package, using the first sentence of your `reasoning` as the bullet. So
+   make that first sentence say what you changed and why, in one line a
+   reader of the package history would understand (`Relax the numpy upper
+   bound to build with numpy 2`, not `Fixed the build`). Do not run `osc vc`
+   (it cannot reach its credentials in a turn) and do not edit or create the
+   `.changes` file.
 
 41. **Obsolete build/test-runner shims in `setup.py`/`setup.cfg` — delete, do
    not package.** Some entries in `install_requires`/`setup_requires`/
@@ -3413,7 +3400,7 @@ fn turn_usage(
 /// is absent as well, because `%(...)` in a spec runs shell commands; the
 /// pipeline runs it itself on the turn's result.
 const CHECKOUT_TOOLS: &str = concat!(
-    "Grep,Skill,Bash(osc status),Bash(osc vc *),Bash(ls *),Bash(zypper search *),",
+    "Grep,Skill,Bash(osc status),Bash(ls *),Bash(zypper search *),",
     "Bash(zypper what-provides *),WebFetch(domain:pypi.org),",
     "Bash(quilt push *),",
     "Bash(quilt pop *),",
@@ -4420,7 +4407,8 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 listed as a `PatchN:` line with a comment saying what it restores and \
                 the upstream commit it comes from, and applied by `%autosetup -p1` or \
                 `%patch`.\n\
-             3. Add a `.changes` entry with `osc vc`.\n\
+             3. The `.changes` entry is added for you from your `reasoning`: make its \
+                first sentence say what the patch restores.\n\
              Do not change the package's version, its sources or anything unrelated to \
              the problem. If you cannot find the code upstream, or the patch would \
              need more than restoring it, return `blocked` and say why in `why`."

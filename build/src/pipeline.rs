@@ -3033,6 +3033,12 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         &mut st.step_attempts,
         ctx.rpm_name.clone()
     );
+    // The only write to OBS: nothing without a spec, without its sources, or
+    // with a placeholder in it goes there, whatever an earlier stage let by.
+    if let Err(reason) = ensure_publishable(ctx, commit_step.id) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(reason));
+    }
     let plan = osc::publish_plan(&ctx.checkout_dir);
     for name in &plan.skipped {
         ctx.reporter.report(&Event::Warning {
@@ -3052,6 +3058,38 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         return Err(ctx.failed(e.to_string()));
     }
     commit_step.finish(StepOutcome::Ok);
+    Ok(())
+}
+
+/// Why the checkout must not be committed to OBS yet, or `Ok`: the spec is
+/// missing, it still has a TODO/FIXME placeholder or is an unfinished skeleton,
+/// or a `Source`/`Patch` it names is not in the checkout.
+fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<(), String> {
+    let spec = std::fs::read_to_string(&ctx.spec_path)
+        .map_err(|_| format!("there is no spec ({}) to commit", ctx.spec_path.display()))?;
+    let todos = crate::spec::todo_placeholders(&spec);
+    if !todos.is_empty() {
+        return Err(format!(
+            "the spec still has placeholders and is not committed: {}",
+            todos
+                .iter()
+                .map(|(n, t)| format!("{n}: {t}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if let Some(why) = osc::unfinished_spec_reason(&spec) {
+        return Err(format!("the spec is an unfinished skeleton ({why})"));
+    }
+    let expanded = osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step))
+        .map_err(|e| format!("the spec does not parse, so it is not committed: {e}"))?;
+    let missing = missing_source_files(&expanded, &ctx.checkout_dir);
+    if !missing.is_empty() {
+        return Err(format!(
+            "the sources the spec names are not in the checkout, so it is not committed: {}",
+            missing.join(", ")
+        ));
+    }
     Ok(())
 }
 
@@ -4529,6 +4567,20 @@ fn apply_turn_outcome(
                 ),
                 notes_path,
             );
+            // The turn cannot run `osc vc` (osc needs the keyring, which its
+            // environment does not reach), so the entry is written here, from
+            // what the turn said it did.
+            if changed {
+                warn_if_err(
+                    reporter,
+                    "adding the .changes entry for the agent's edit",
+                    osc::add_changes_entry(
+                        checkout_dir,
+                        &changes_message(&outcome.reasoning),
+                        Emit::new(reporter, step.id),
+                    ),
+                );
+            }
             Ok(if changed {
                 TurnEffect::Edited
             } else {
@@ -4687,6 +4739,22 @@ enum TurnEffect {
     NoChange,
     Edited,
     SwitchedToWheel,
+}
+
+/// The one-line `.changes` bullet for an agent turn: the first sentence of its
+/// `reasoning`, on a single line and not longer than a changelog line should be.
+fn changes_message(reasoning: &str) -> String {
+    let flat = reasoning.split_whitespace().collect::<Vec<_>>().join(" ");
+    let first = flat
+        .split_once(". ")
+        .map(|(s, _)| s)
+        .unwrap_or(&flat)
+        .trim_end_matches('.');
+    let mut line: String = first.chars().take(200).collect();
+    if line.is_empty() {
+        line = "Update the packaging".to_string();
+    }
+    line
 }
 
 /// Count added/removed lines in a diff produced by [`unified_diff`].
@@ -7440,6 +7508,16 @@ fn verify_repos_exist(urls: &[String]) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_message_is_the_first_sentence_on_one_line() {
+        assert_eq!(
+            changes_message("Relax the numpy bound.\nIt broke the build. More text."),
+            "Relax the numpy bound"
+        );
+        assert_eq!(changes_message("   "), "Update the packaging");
+        assert_eq!(changes_message(&"x".repeat(500)).chars().count(), 200);
+    }
 
     #[test]
     fn the_structured_output_nudge_says_not_to_redo_the_work() {
