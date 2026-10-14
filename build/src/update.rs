@@ -272,8 +272,9 @@ pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Vec<Candidate>
     // A failed listing is already reported by osc; it plans nothing.
     let packages = osc::list_project_packages(project, emit).unwrap_or_default();
     let mut names: Vec<String> = packages
-        .into_iter()
+        .iter()
         .filter(|n| only.is_none_or(|o| o == n.as_str()))
+        .cloned()
         .collect();
     names.sort();
 

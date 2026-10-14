@@ -503,7 +503,9 @@ pub fn select_target(
                 // we could not list contributes nothing.
                 linked.extend(
                     osc::list_project_packages(&path_project, Emit::run(reporter))
-                        .unwrap_or_default(),
+                        .unwrap_or_default()
+                        .iter()
+                        .cloned(),
                 );
             }
             linked

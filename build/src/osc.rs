@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ap_core::event::Event;
@@ -886,15 +886,16 @@ pub fn get_available_packages(
     project: &str,
     emit: Emit<'_>,
 ) -> Result<std::collections::HashSet<String>, String> {
-    let mut all = try_list_project_packages(project, emit)?;
+    let mut all = try_list_project_packages(project, emit)?.as_ref().clone();
     for (path_project, _repo) in get_project_repo_paths(project, emit) {
-        all.extend(try_list_project_packages(&path_project, emit)?);
+        all.extend(try_list_project_packages(&path_project, emit)?.iter().cloned());
     }
     Ok(all)
 }
 
-static PROJECT_PACKAGES_CACHE: OnceLock<Mutex<HashMap<String, std::collections::HashSet<String>>>> =
-    OnceLock::new();
+static PROJECT_PACKAGES_CACHE: OnceLock<
+    Mutex<HashMap<String, Arc<std::collections::HashSet<String>>>>,
+> = OnceLock::new();
 
 /// Per-project count of invalidations. A fetch that started before an
 /// invalidation holds a listing that may predate the package just committed;
@@ -916,11 +917,15 @@ fn project_generation(project: &str) -> u64 {
 /// was read. The generation is checked under the cache lock, and
 /// invalidation bumps it before taking that lock, so no interleaving lets a
 /// stale set land after the removal.
-fn insert_if_current(project: &str, generation: u64, pkgs: &std::collections::HashSet<String>) {
+fn insert_if_current(
+    project: &str,
+    generation: u64,
+    pkgs: &Arc<std::collections::HashSet<String>>,
+) {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if project_generation(project) == generation {
-        guard.insert(project.to_owned(), pkgs.clone());
+        guard.insert(project.to_owned(), Arc::clone(pkgs));
     }
 }
 
@@ -944,13 +949,13 @@ fn insert_if_current(project: &str, generation: u64, pkgs: &std::collections::Ha
 pub fn try_list_project_packages(
     project: &str,
     emit: Emit<'_>,
-) -> Result<std::collections::HashSet<String>, String> {
+) -> Result<Arc<std::collections::HashSet<String>>, String> {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     {
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pkgs) = guard.get(project) {
-            return Ok(pkgs.clone());
+            return Ok(Arc::clone(pkgs));
         }
     }
 
@@ -960,6 +965,7 @@ pub fn try_list_project_packages(
     // report the error so the next call tries again.
     let pkgs = fetch_project_packages(project, emit)
         .or_else(|_| fetch_project_packages(project, Emit::quiet()))
+        .map(Arc::new)
         .map_err(|e| format!("could not list packages of {project}: {e}"))?;
     insert_if_current(project, generation, &pkgs);
     Ok(pkgs)
@@ -971,7 +977,7 @@ pub fn try_list_project_packages(
 pub fn list_project_packages(
     project: &str,
     emit: Emit<'_>,
-) -> Option<std::collections::HashSet<String>> {
+) -> Option<Arc<std::collections::HashSet<String>>> {
     match try_list_project_packages(project, emit) {
         Ok(pkgs) => Some(pkgs),
         Err(e) => {
@@ -1022,7 +1028,7 @@ mod project_packages_cache_tests {
         cache
             .lock()
             .unwrap()
-            .insert(project.to_string(), std::collections::HashSet::new());
+            .insert(project.to_string(), Arc::new(std::collections::HashSet::new()));
         assert!(cache.lock().unwrap().contains_key(project));
 
         invalidate_project_packages_cache(project);
@@ -1038,12 +1044,12 @@ mod project_packages_cache_tests {
         let generation = project_generation(project);
         // ...fetch happens here, then another worker commits and invalidates...
         invalidate_project_packages_cache(project);
-        insert_if_current(project, generation, &std::collections::HashSet::new());
+        insert_if_current(project, generation, &Arc::default());
         let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         assert!(!cache.lock().unwrap().contains_key(project));
 
         // A fetch that started after the invalidation is cached normally.
-        insert_if_current(project, project_generation(project), &Default::default());
+        insert_if_current(project, project_generation(project), &Arc::default());
         assert!(cache.lock().unwrap().contains_key(project));
     }
 
