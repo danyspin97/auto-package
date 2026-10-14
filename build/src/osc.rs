@@ -2178,8 +2178,6 @@ pub fn obs_build(
     // the build away: tolerate a few consecutive poll failures, then give up.
     const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 8;
     let mut poll_errors: u32 = 0;
-    const STALE_PATIENCE: Duration = Duration::from_secs(600);
-    let mut stale_since: Option<Instant> = None;
 
     // The previous mechanism only ever broke silence for one specific case
     // (an `Unknown("stale: ...")` verdict). A plain non-terminal status
@@ -2308,31 +2306,11 @@ pub fn obs_build(
             break status;
         }
 
-        // `stale: <verdict>` means "a terminal result I couldn't confirm is
-        // for the current sources". Normally the scheduler catches up within
-        // a minute or two; if it stays like that this long the repo is stuck
-        // dirty, so take the verdict at face value instead of idling until
-        // the overall timeout.
-        if let BuildStatus::Unknown(s) = &status
-            && let Some(word) = s.strip_prefix("stale: ")
-        {
-            let since = *stale_since.get_or_insert_with(Instant::now);
-            let verdict = BuildStatus::from(word);
-            if since.elapsed() >= STALE_PATIENCE && verdict.is_terminal() {
-                reporter.report(&Event::Warning {
-                    step,
-                    message: format!(
-                        "OBS result has been unconfirmed for {}s (repository stuck dirty?); \
-                         taking its verdict, {verdict}, at face value",
-                        STALE_PATIENCE.as_secs()
-                    ),
-                });
-                break verdict;
-            }
-        } else {
-            stale_since = None;
-        }
-
+        // `stale: <verdict>` is not a final answer: that terminal result is
+        // from a source revision the server may already have superseded, so
+        // keep polling. Only a verdict confirmed for the current sources
+        // (see `obs_status::resolve`) ends the wait; if none arrives, the
+        // MAX_WAIT check above reports a timeout error.
         std::thread::sleep(POLL_INTERVAL);
     };
 
