@@ -1362,6 +1362,10 @@ pub fn normalize_files_paths(spec: &str, pypi_name: &str) -> String {
             format!("{prefix}{normalized}-%{{version}}.dist-info{tail}")
         } else if let Some((prefix, last)) = trimmed.rsplit_once('/')
             && trimmed.starts_with('%')
+            // Only module directories: `%{_bindir}/black` is a script, not a
+            // package directory. Covers `%{python_sitelib}`, `%{$python_sitearch}`
+            // and the `%python_expand` spellings.
+            && (prefix.contains("sitelib") || prefix.contains("sitearch"))
             && last.trim_end_matches('/').eq_ignore_ascii_case(pypi_name)
         {
             format!("{prefix}/{normalized}/")
@@ -2287,6 +2291,19 @@ BuildRequires:  %{python_module pip}
         // top_level.txt, so the module line must survive untouched.
         let spec = "%files %{python_files}\n%{python_sitelib}/jwt/\n";
         assert_eq!(normalize_files_paths(spec, "PyJWT"), spec);
+    }
+
+    #[test]
+    fn a_script_named_like_the_package_is_not_made_a_directory() {
+        let spec = "%files %{python_files}\n%{_bindir}/black\n\
+                    %python_alternative %{_bindir}/black\n\
+                    %{_bindir}/black/\n%{python_sitelib}/Black\n\
+                    %{$python_sitelib}/Black/\n";
+        let out = normalize_files_paths(spec, "Black");
+        assert!(out.contains("\n%{_bindir}/black\n"), "{out}");
+        assert!(out.contains("\n%python_alternative %{_bindir}/black\n"), "{out}");
+        assert!(out.contains("\n%{python_sitelib}/black/\n"), "{out}");
+        assert!(out.contains("\n%{$python_sitelib}/black/\n"), "{out}");
     }
 
     #[test]
