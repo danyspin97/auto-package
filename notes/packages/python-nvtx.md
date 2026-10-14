@@ -1,8 +1,9 @@
 # python-nvtx notes
 
 ## Build requirements
-- The package compiles a Cython extension (cythonize over the .pyx files in the nvtx _lib directory, driven by setup.py), so it is architecture-specific: the duplicate-file cleanup targets the architecture-specific Python site directory, not the noarch one.
+- The package compiles a Cython extension (cythonize over the .pyx files in the nvtx _lib directory, driven by setup.py), so it is architecture-specific: the duplicate-file cleanup (fdupes) targets the architecture-specific Python site directory, not the noarch one.
 - The License field uses the SPDX expression from pyproject.toml, and LICENSE.txt is shipped with the license macro.
+- BuildRequires setuptools with a minimum version, because the build needs at least that version of setuptools.
 Checked against 0.2.15 on openSUSE_Tumbleweed, x86_64.
 
 ## Test changes

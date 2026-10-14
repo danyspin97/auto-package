@@ -153,7 +153,7 @@ impl BoundConflict {
     /// The handling this conflict gets, as a sentence for the run log.
     pub fn message(&self, project: &str) -> String {
         let head = format!(
-            "{} {} from {project} misses the bound `{}` that {} declares",
+            "{} {} (shipped by a project {project} links to) misses the bound `{}` that {} declares",
             self.dependency, self.distro_version, self.specifier, self.dependent
         );
         match self.kind {
@@ -298,7 +298,7 @@ pub fn stale_root_message(node: &Node, shipped: &str, project: &str) -> Option<S
     let (shipped_v, resolved_v) = (parse_version(shipped)?, parse_version(&node.version)?);
     (shipped_v < resolved_v).then(|| {
         format!(
-            "{} {shipped} from {project} is older than the {} that was resolved, and counts \
+            "{} {shipped} (shipped by a project {project} links to) is older than the {} that was resolved, and counts \
              as available: nothing builds it here (pass --force to branch it into this project and update it to {})",
             node.name, node.version, node.version
         )
