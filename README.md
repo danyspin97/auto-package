@@ -289,6 +289,13 @@ tool assumes these may be hostile and limits what they can reach:
   its environment, except the Anthropic credentials the CLI itself needs.
   Those remain visible to its commands. Build logs, notes, and names taken
   from a spec are fenced as data in prompts.
+- **Outbound HTTP**: downloads use https only, redirects included, and refuse
+  loopback, private, link-local, carrier-grade NAT, reserved and multicast
+  addresses (including IPv4 ones embedded in IPv4-mapped, NAT64 and 6to4
+  IPv6 addresses), checked on the address actually connected to. Behind a
+  proxy (`HTTPS_PROXY`) the proxy resolves the target, so only IP literals in
+  the URL can be refused; a hostname that resolves to a private address is not
+  caught.
 - **Upstream sources**: a repository found by search is not built without
   confirmation. Only a curated mapping, the repository PyPI records for the
   project, the upstream another distribution's spec records, or an NVIDIA-org
