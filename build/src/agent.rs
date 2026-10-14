@@ -3143,8 +3143,9 @@ fn turn_usage(
 
 /// The turn tools when a checkout exists. quilt is limited to fixed
 /// subcommands: `quilt --quiltrc FILE` sources a shell file, which the turn
-/// could write first. `rpmspec` is absent as well, because `%(...)` in a spec
-/// runs shell commands; the pipeline runs it itself on the turn's result.
+/// could write first, and `quilt diff --diff=UTILITY` runs a program. `rpmspec`
+/// is absent as well, because `%(...)` in a spec runs shell commands; the
+/// pipeline runs it itself on the turn's result.
 const CHECKOUT_TOOLS: &str = concat!(
     "Grep,Skill,Bash(osc status),Bash(osc vc *),Bash(ls *),Bash(zypper search *),",
     "Bash(zypper what-provides *),WebFetch(domain:pypi.org),",
@@ -3160,7 +3161,6 @@ const CHECKOUT_TOOLS: &str = concat!(
     "Bash(quilt top *),",
     "Bash(quilt applied *),",
     "Bash(quilt unapplied *),",
-    "Bash(quilt diff *),",
     "Bash(quilt files *),",
     "Bash(cd source && quilt push *),",
     "Bash(cd source && quilt pop *),",
@@ -3174,7 +3174,6 @@ const CHECKOUT_TOOLS: &str = concat!(
     "Bash(cd source && quilt top *),",
     "Bash(cd source && quilt applied *),",
     "Bash(cd source && quilt unapplied *),",
-    "Bash(cd source && quilt diff *),",
     "Bash(cd source && quilt files *)"
 );
 
@@ -3338,8 +3337,10 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     if let Some(checkout) = req.checkout_dir {
         cmd.env("QUILT_PATCHES", checkout.as_os_str());
     }
-    // A quiltrc is sourced as shell; never let one be picked up.
-    cmd.env("QUILT_QUILTRC", "/dev/null");
+    // A quiltrc is sourced as shell; never let one be picked up. The variable
+    // quilt reads is QUILTRC (there is no QUILT_QUILTRC), and without it
+    // ~/.quiltrc is sourced.
+    cmd.env("QUILTRC", "/dev/null");
     if let Some(id) = req.session_id {
         cmd.args(["--resume", id]);
     }
@@ -5121,6 +5122,7 @@ mod tests {
             let tools = turn_allowed_tools(Task::FixAfterBuild, ws, checkout);
             assert!(!tools.contains("rpmspec"), "{tools}");
             assert!(!tools.contains("quilt *"), "{tools}");
+            assert!(!tools.contains("quilt diff"), "{tools}");
         }
         let denied = turn_denied_tools(ws, co);
         assert!(denied.contains("Write(//srv/ws/.claude/**)"));
