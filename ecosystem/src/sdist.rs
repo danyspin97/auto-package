@@ -13,7 +13,7 @@
 //! replaced by this to avoid opening and iterating the archive multiple times.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
 use serde::Deserialize;
@@ -389,7 +389,30 @@ pub fn wheel_root_is_purelib(wheel: &Path) -> Option<bool> {
 /// bare `.zip`) is a zip archive with no wrapping top-level directory — it
 /// unpacks flat into `dest` itself. The gzip, bzip2 and zstd paths all share
 /// the tar iterator; only the outer decoder differs.
+///
+/// `dest` must be absent or empty. The archive is unpacked beside it and
+/// renamed into place only once complete, so a failed or interrupted unpack
+/// never leaves a `dest` that looks like a finished extraction.
 pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
+    let mut partial = dest.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    let _ = std::fs::remove_dir_all(&partial);
+    let result = extract_into(tarball, &partial).and_then(|()| {
+        // Only an empty `dest` is replaced; anything else is an error here.
+        let _ = std::fs::remove_dir(dest);
+        std::fs::rename(&partial, dest).map_err(|e| Error::Io {
+            path: dest.to_path_buf(),
+            source: e,
+        })
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&partial);
+    }
+    result
+}
+
+fn extract_into(tarball: &Path, dest: &Path) -> Result<(), Error> {
     let kind = classify(tarball).ok_or_else(|| Error::Io {
         path: tarball.to_path_buf(),
         source: std::io::Error::other(format!(
@@ -1579,6 +1602,17 @@ build-backend = "flit_core.buildapi"
         let out = dir.path().join("out");
         let err = extract(&src, &out).expect_err("rar is not supported");
         assert!(matches!(err, Error::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn failed_extract_leaves_neither_dest_nor_partial_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("broken.tar.gz");
+        std::fs::write(&src, b"not gzip at all").unwrap();
+        let out = dir.path().join("sdist");
+        assert!(extract(&src, &out).is_err());
+        assert!(!out.exists());
+        assert!(!dir.path().join("sdist.partial").exists());
     }
 
     // --- Inspection across formats ----------------------------------------
