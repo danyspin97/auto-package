@@ -714,7 +714,17 @@ fn branch_item(
             ctx.say(format!("{branch} already has {}; reusing it", item.pkg));
             // A branch left by an earlier run may be behind its origin.
             match osc::rebase_package(branch, &item.pkg, emit) {
-                Ok(()) => ctx.say(format!("rebased {branch}/{} onto its origin", item.pkg)),
+                Ok(osc::Rebased::NotALink) => {}
+                Ok(osc::Rebased::Clean) => {
+                    ctx.say(format!("rebased {branch}/{} onto its origin", item.pkg))
+                }
+                Ok(osc::Rebased::Conflict(why)) => {
+                    return Err(format!(
+                        "rebasing {branch}/{} onto its origin left a conflict ({why}); \
+                         resolve it in OBS or delete the branch package",
+                        item.pkg
+                    ));
+                }
                 Err(e) => ctx.warn(format!(
                     "could not rebase {branch}/{} onto its origin, building it as it is: {e}",
                     item.pkg

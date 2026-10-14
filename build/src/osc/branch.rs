@@ -230,22 +230,67 @@ pub fn rebase_api_path(project: &str, pkg: &str) -> String {
     format!("/source/{project}/{}?cmd=rebase", enc(pkg))
 }
 
+/// What [`rebase_package`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rebased {
+    /// The package is not a link (a plain copy), so there is nothing to rebase.
+    NotALink,
+    /// The link was rebased and still expands cleanly.
+    Clean,
+    /// The link no longer expands: the rebase left a conflict (or the link is
+    /// broken). The reason is OBS's own.
+    Conflict(String),
+}
+
+/// The `error` OBS puts on a package listing's `<linkinfo>` for a link that
+/// is broken or in conflict with its origin.
+fn linkinfo_error(xml: &str) -> Option<String> {
+    let rest = &xml[xml.find("<linkinfo")?..];
+    let tag = &rest[..rest.find('>')?];
+    extract_xml_attr(tag, "error").filter(|e| !e.is_empty())
+}
+
 /// Rebase the branched `project/pkg` onto its origin's current sources, so a
 /// branch reused from an earlier run does not build, and later submit, on
-/// sources the origin has since moved past.
-pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<(), Error> {
+/// sources the origin has since moved past. A package that is not a link is
+/// left alone, and the state after the rebase is checked: a conflict leaves
+/// sources that cannot be built or submitted.
+pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebased, Error> {
     check_obs_name("project", project)?;
     check_obs_name("package", pkg)?;
+    let link = api_call(
+        None,
+        &format!("/source/{project}/{}/_link", enc(pkg)),
+        None,
+        emit,
+    )?;
+    if !link.success() && is_not_found(&link.stderr) {
+        return Ok(Rebased::NotALink);
+    }
     let path = rebase_api_path(project, pkg);
     let out = api_call(Some("POST"), &path, None, emit)?;
-    if out.success() {
-        return Ok(());
+    if !out.success() {
+        return Err(Error::OscFailed {
+            cmd: format!("api -X POST {path}"),
+            code: out.code,
+            stderr: out.stderr,
+        });
     }
-    Err(Error::OscFailed {
-        cmd: format!("api -X POST {path}"),
-        code: out.code,
-        stderr: out.stderr,
-    })
+    let listing = api_get(&format!("/source/{project}/{}", enc(pkg)), emit)?;
+    if let Some(e) = linkinfo_error(&listing) {
+        return Ok(Rebased::Conflict(e));
+    }
+    // A conflicting link only fails when expanded.
+    let expanded = api_call(
+        None,
+        &format!("/source/{project}/{}?expand=1", enc(pkg)),
+        None,
+        emit,
+    )?;
+    if !expanded.success() {
+        return Ok(Rebased::Conflict(first_line(&expanded.stderr).to_string()));
+    }
+    Ok(Rebased::Clean)
 }
 
 /// Delete `project/pkg`. Only for a package this run has just created, such
@@ -758,6 +803,18 @@ mod tests {
             project: project.into(),
             path_repository: path_repo.into(),
         }
+    }
+
+    #[test]
+    fn a_broken_link_shows_in_the_linkinfo_error() {
+        let ok = r#"<directory name="p"><linkinfo project="o" package="p" srcmd5="a" xsrcmd5="b"/></directory>"#;
+        assert_eq!(linkinfo_error(ok), None);
+        let bad = r#"<directory name="p"><linkinfo project="o" package="p" error="conflict in file p.spec"/></directory>"#;
+        assert_eq!(
+            linkinfo_error(bad).as_deref(),
+            Some("conflict in file p.spec")
+        );
+        assert_eq!(linkinfo_error("<directory/>"), None);
     }
 
     #[test]
