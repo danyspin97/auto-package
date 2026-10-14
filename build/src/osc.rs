@@ -950,7 +950,9 @@ static DISTRO_PROVIDES_CACHE: Mutex<Option<HashMap<String, bool>>> = Mutex::new(
 /// silently skipping a dependency that's actually missing.
 pub fn distro_provides(capability: &str) -> bool {
     let capability = capability.trim();
-    if capability.is_empty() {
+    // A name an agent reported is passed to zypper as an argument: one that
+    // starts with `-` would be read as an option.
+    if capability.is_empty() || capability.starts_with('-') {
         return false;
     }
 
@@ -4341,6 +4343,13 @@ mod obs_name_tests {
         for bad in ["", "-rf", "../x", "a/b", "a b", "a\nb", "x..y", "/abs"] {
             assert!(!is_valid_obs_name(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_capability_that_looks_like_an_option_is_never_queried() {
+        // Returns before touching zypper or the cache.
+        assert!(!distro_provides("--repo"));
+        assert!(!distro_provides(" -x"));
     }
 
     #[test]
