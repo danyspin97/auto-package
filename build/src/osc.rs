@@ -2561,14 +2561,24 @@ pub fn obs_build(
         }
         _ => {
             // The log is the only evidence for what went wrong. One that
-            // cannot be read is an environment problem: classifying the empty
-            // text would send the package to the fix agent as a BuildFailed.
-            let log_text = fs::read_to_string(log_path).map_err(|e| {
-                Error::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("could not read build log {}: {e}", log_path.display()),
-                ))
-            })?;
+            // cannot be read, or is empty (a failed `osc buildlog` leaves an
+            // empty file behind), is an environment problem: classifying it
+            // would send the package to the fix agent as a BuildFailed.
+            let log_text = fs::read_to_string(log_path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| {
+                    if text.trim().is_empty() {
+                        Err("the file is empty".to_string())
+                    } else {
+                        Ok(text)
+                    }
+                })
+                .map_err(|why| {
+                    Error::Io(std::io::Error::other(format!(
+                        "no usable build log at {}: {why}",
+                        log_path.display()
+                    )))
+                })?;
             match classify_build_failure(&log_text) {
                 FailureKind::NoRepositories => Error::NotActionable(
                     "OBS project has no build repositories — configure them in OBS first"
