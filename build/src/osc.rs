@@ -456,6 +456,141 @@ conflict for providers of python314-baz needed by python314-qux
         assert_eq!(blockers_from_details(details), vec!["Foo_Bar", "foo"]);
     }
 
+    /// The spec OBS holds for python-cuda-bindings (13.4.3-2.1), verbatim
+    /// apart from the licence header: the monorepo skeleton, never finished.
+    /// Its build "succeeded" and published two ~11 KB RPMs with no modules.
+    const CUDA_BINDINGS_SPEC: &str = "\
+Name:           python-cuda-bindings
+Version:        13.4.3
+Release:        0
+Summary:        Python bindings for CUDA
+License:        Apache-2.0
+BuildRequires:  python-rpm-macros
+BuildRequires:  %{python_module pip}
+%python_subpackages
+
+# This is a monorepo: all subprojects below must become %%package sections.
+# TODO: add %package -n python-%{name}-cuda-bindings for cuda_bindings/
+%description
+Python bindings for CUDA
+
+%prep
+%autosetup -p1 -n cuda-python-13.4.3
+
+%build
+# TODO: build each subproject in dependency order
+
+%install
+# TODO: install each subproject
+
+%check
+# TODO: check each subproject
+
+%files %{python_files}
+%license LICENSE
+
+%changelog
+";
+
+    #[test]
+    fn the_unfinished_cuda_bindings_skeleton_is_recognised() {
+        let reason = unfinished_spec_reason(CUDA_BINDINGS_SPEC).unwrap();
+        assert!(
+            reason.contains("%files lists nothing but %license/%doc"),
+            "{reason}"
+        );
+        assert!(reason.contains("%install has no commands"), "{reason}");
+    }
+
+    #[test]
+    fn a_finished_spec_is_not_flagged() {
+        let spec = "\
+Name:           python-foo
+%description
+Foo
+%prep
+%autosetup
+%build
+%pyproject_wheel
+%install
+%pyproject_install
+%python_expand %fdupes %{buildroot}%{$python_sitelib}
+%files %{python_files}
+%license LICENSE
+%{python_sitelib}/foo
+%{python_sitelib}/foo-%{version}.dist-info
+%changelog
+- A TODO in the changelog is history, not a placeholder
+";
+        assert_eq!(unfinished_spec_reason(spec), None);
+    }
+
+    #[test]
+    fn the_warning_names_the_package_the_evidence_and_the_way_out() {
+        let sizes = vec![
+            (
+                "python313-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                11053,
+            ),
+            (
+                "python314-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                10925,
+            ),
+        ];
+        let reason = unfinished_spec_reason(CUDA_BINDINGS_SPEC).unwrap();
+        let msg = empty_package_message("python-cuda-bindings", "home:u:p", &reason, &sizes);
+        assert!(
+            msg.contains("python-cuda-bindings is built in home:u:p"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("python314-cuda-bindings-13.4.3-2.1.x86_64.rpm: 10925 bytes"),
+            "{msg}"
+        );
+        assert!(msg.contains("--force"), "{msg}");
+    }
+
+    #[test]
+    fn only_a_succeeded_package_of_this_arch_counts_as_built() {
+        let listing: std::collections::HashSet<String> =
+            ["python-fastapi-cloud-cli", "python-Foo_Bar", "python-bad"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let statuses: HashMap<String, BuildStatus> = [
+            ("python-fastapi-cloud-cli", BuildStatus::Succeeded),
+            ("python-Foo_Bar", BuildStatus::Succeeded),
+            ("python-bad", BuildStatus::Unresolvable),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(
+            built_in_project(&listing, &statuses, "fastapi-cloud-cli").as_deref(),
+            Some("python-fastapi-cloud-cli")
+        );
+        assert_eq!(
+            built_in_project(&listing, &statuses, "foo-bar").as_deref(),
+            Some("python-Foo_Bar")
+        );
+        assert_eq!(built_in_project(&listing, &statuses, "bad"), None);
+        assert_eq!(built_in_project(&listing, &statuses, "nothing"), None);
+    }
+
+    #[test]
+    fn missing_names_collapse_flavors_and_drop_what_is_not_built() {
+        let names: Vec<String> = [
+            "python313-cuda-bindings",
+            "python314-cuda-bindings",
+            "python3-cuda-bindings",
+            "python3-devel",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(missing_package_names(&names), vec!["cuda-bindings"]);
+    }
+
     /// Both repositories' results arrive in one document; only the one asked
     /// for may count.
     const MULTI_REPO: &str = r#"<resultlist state="bfdf69d7aa217ca87031d1aff55605f2">
@@ -2746,6 +2881,155 @@ fn blockers_from_details(details: &str) -> Vec<String> {
         .map(|segment| format!("nothing provides {segment}"))
         .collect();
     missing_package_names(&extract_unresolvable(&unconstrained.join("\n")))
+}
+
+/// The name `dep` has in `listing` when the project has it built
+/// (`succeeded`) in the repository/architecture `statuses` was read for, else
+/// `None`. Names are matched by [`fuzzy_key`], with or without the `python-`
+/// prefix, and the listing's own spelling is returned.
+pub fn built_in_project(
+    listing: &std::collections::HashSet<String>,
+    statuses: &HashMap<String, BuildStatus>,
+    dep: &str,
+) -> Option<String> {
+    let bare = fuzzy_key(dep);
+    let rpm = fuzzy_key(&rpm_name(dep));
+    listing
+        .iter()
+        .filter(|p| {
+            let k = fuzzy_key(p);
+            k == bare || k == rpm
+        })
+        .find(|p| statuses.get(*p).is_some_and(BuildStatus::is_success))
+        .cloned()
+}
+
+/// Section headers of an RPM spec, for [`spec_section`].
+const SPEC_SECTIONS: &[&str] = &[
+    "%package",
+    "%description",
+    "%prep",
+    "%conf",
+    "%generate_buildrequires",
+    "%build",
+    "%install",
+    "%check",
+    "%pre",
+    "%post",
+    "%preun",
+    "%postun",
+    "%pretrans",
+    "%posttrans",
+    "%files",
+    "%changelog",
+];
+
+/// The lines of every `name` section (`%files`, `%install`, ...) of `spec`,
+/// header lines excluded.
+fn spec_section<'a>(spec: &'a str, name: &str) -> Vec<&'a str> {
+    let mut inside = false;
+    let mut lines = Vec::new();
+    for line in spec.lines() {
+        let word = line.split_whitespace().next().unwrap_or("");
+        if SPEC_SECTIONS.contains(&word) {
+            inside = word == name;
+            continue;
+        }
+        if inside {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// Whether `spec` is an unfinished skeleton whose package builds but ships
+/// next to nothing, and why: a `%files` that lists only `%license`/`%doc`
+/// (nothing the build installed is packaged), or an `%install` that is empty
+/// apart from comments next to a `TODO`. Both are what the skeleton
+/// generators leave for a monorepo or a wheel they could not lay out, and OBS
+/// builds either one "successfully".
+pub fn unfinished_spec_reason(spec: &str) -> Option<String> {
+    let body = spec.split("\n%changelog").next().unwrap_or(spec);
+    let is_code = |l: &&str| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#')
+    };
+    let files: Vec<&str> = spec_section(body, "%files")
+        .into_iter()
+        .filter(is_code)
+        .collect();
+    let files_listed = files.iter().any(|l| {
+        let t = l.trim_start();
+        !["%license", "%doc", "%defattr", "%dir"]
+            .iter()
+            .any(|p| t.starts_with(p))
+    });
+    let mut reasons = Vec::new();
+    if body.contains("\n%files") && !files_listed {
+        reasons.push("its %files lists nothing but %license/%doc".to_string());
+    }
+    if !spec_section(body, "%install").iter().any(is_code)
+        && body
+            .lines()
+            .any(|l| l.trim_start().starts_with('#') && l.contains("TODO"))
+    {
+        reasons.push("its %install has no commands, only TODO comments".to_string());
+    }
+    (!reasons.is_empty()).then(|| reasons.join(" and "))
+}
+
+/// A warning for a package OBS reports `succeeded` whose result a dependent
+/// cannot use, or `None` when nothing is wrong or it cannot be told. The test
+/// is deterministic: the spec OBS holds is an unfinished skeleton (see
+/// [`unfinished_spec_reason`]), and the RPMs it published are listed with
+/// their sizes as evidence. A dependent installs such a package and still
+/// finds its modules missing, which reads as "the dependency is missing".
+pub fn empty_package_warning(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+) -> Option<String> {
+    let spec = osc_api(&format!(
+        "/source/{}/{}/{}.spec",
+        enc(project),
+        enc(pkg_name),
+        enc(pkg_name)
+    ))?;
+    let reason = unfinished_spec_reason(&spec)?;
+    let sizes = osc_api(&format!(
+        "/build/{}/{}/{}/{}",
+        enc(project),
+        enc(repo),
+        enc(arch),
+        enc(pkg_name)
+    ))
+    .map(|xml| obs_status::parse_binary_rpm_sizes(&xml))
+    .unwrap_or_default();
+    Some(empty_package_message(pkg_name, project, &reason, &sizes))
+}
+
+fn empty_package_message(
+    pkg: &str,
+    project: &str,
+    reason: &str,
+    sizes: &[(String, u64)],
+) -> String {
+    let published = if sizes.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = sizes
+            .iter()
+            .map(|(f, b)| format!("{f}: {b} bytes"))
+            .collect();
+        format!(" (published: {})", list.join(", "))
+    };
+    format!(
+        "{pkg} is built in {project}, but its spec there is an unfinished skeleton: {reason}, \
+         so the RPMs it published are effectively empty{published}. A package that needs it \
+         installs it and still cannot import it. Finish {pkg}'s spec, then rebuild it with \
+         `auto-package build --project {project} --force <name>`"
+    )
 }
 
 /// Stems of the interpreter's own subpackages (`python3-devel`,

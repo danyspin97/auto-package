@@ -228,6 +228,26 @@ pub fn parse_binary_rpms(xml: &str) -> Vec<String> {
     out
 }
 
+/// The `.rpm` binaries of a package listing with their sizes in bytes (source
+/// RPMs excluded; a binary with no readable size is left out).
+pub fn parse_binary_rpm_sizes(xml: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(tag) = next_tag(xml, pos) {
+        pos = tag.end;
+        if tag.name == "binary"
+            && !tag.closing
+            && let Some(f) = tag.attr("filename")
+            && f.ends_with(".rpm")
+            && !f.ends_with(".src.rpm")
+            && let Some(size) = tag.attr("size").and_then(|s| s.parse().ok())
+        {
+            out.push((f.to_string(), size));
+        }
+    }
+    out
+}
+
 /// The entry for one package in one repository/arch, if present.
 pub fn find_entry(xml: &str, repo: &str, arch: &str, pkg: &str) -> Option<ResultEntry> {
     parse_results(xml)
@@ -607,6 +627,30 @@ mod tests {
                 "python-nvidia-cutlass-dsl-libs-base"
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn binary_sizes_skip_source_rpms_and_non_rpms() {
+        let listing = r#"<binarylist>
+  <binary filename="_buildenv" size="348736" mtime="1791824718"/>
+  <binary filename="python-cuda-bindings-13.4.3-2.1.src.rpm" size="3285054" mtime="1791824718"/>
+  <binary filename="python313-cuda-bindings-13.4.3-2.1.x86_64.rpm" size="11053" mtime="1791824718"/>
+  <binary filename="python314-cuda-bindings-13.4.3-2.1.x86_64.rpm" size="10925" mtime="1791824718"/>
+  <binary filename="rpmlint.log" size="2502" mtime="1791824717"/>
+</binarylist>"#;
+        assert_eq!(
+            parse_binary_rpm_sizes(listing),
+            vec![
+                (
+                    "python313-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                    11053
+                ),
+                (
+                    "python314-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                    10925
+                ),
+            ]
         );
     }
 

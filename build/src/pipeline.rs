@@ -2140,17 +2140,19 @@ fn prefix_stage(
                     names: outcome.unresolvable_packages.clone(),
                     source: ap_core::event::MissingSource::Agent,
                 });
-                let mut to_build: Vec<String> = outcome
-                    .unresolvable_packages
-                    .iter()
-                    .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
-                    .collect();
-                to_build.sort_unstable();
-                to_build.dedup();
-                return Err(PipelineResult::MissingDeps {
-                    rpm_name: rpm_name.clone(),
-                    deps: to_build,
-                });
+                let to_build = without_built_deps(
+                    ctx,
+                    prefix_step.id,
+                    osc::missing_package_names(&outcome.unresolvable_packages),
+                );
+                if !to_build.is_empty() {
+                    return Err(PipelineResult::MissingDeps {
+                        rpm_name: rpm_name.clone(),
+                        deps: to_build,
+                    });
+                }
+                // Everything the turn called missing is already built here, so
+                // the turn's edit (and the build that follows it) goes ahead.
             }
 
             let effect = match apply_turn_and_reset(
@@ -2181,6 +2183,57 @@ fn prefix_stage(
         }
     }
     Ok(())
+}
+
+/// `deps`, minus the ones the project already has built for this repository
+/// and architecture.
+///
+/// An agent that is told a build failed decides what is missing from the log
+/// and from what it can see on the host, and the host's repositories are not
+/// the project's: it called `fastapi-cloud-cli` missing while OBS had it
+/// built, and the package was then abandoned for a dependency that was never
+/// missing (its edit, which named that dependency in BuildRequires, thrown
+/// away unbuilt). A package OBS reports `succeeded` here is not missing; say
+/// so, and when what it published is unusable (an unfinished skeleton spec)
+/// say that instead, because that is the real problem. A listing that cannot
+/// be read keeps every name: not knowing is not a refutation.
+fn without_built_deps(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    deps: Vec<String>,
+) -> Vec<String> {
+    if deps.is_empty() {
+        return deps;
+    }
+    let config = ctx.config;
+    let emit = Emit::new(ctx.reporter, step);
+    let (Ok(listing), Ok(statuses)) = (
+        osc::try_list_project_packages(&config.project, emit),
+        osc::get_project_build_statuses(&config.project, &config.distro, &config.arch, emit),
+    ) else {
+        return deps;
+    };
+    deps.into_iter()
+        .filter(|dep| {
+            let Some(real) = osc::built_in_project(&listing, &statuses, dep) else {
+                return true;
+            };
+            let unusable =
+                osc::empty_package_warning(&config.project, &real, &config.distro, &config.arch);
+            ctx.reporter.report(&Event::Warning {
+                step: Some(step),
+                message: match unusable {
+                    Some(why) => format!("not queuing {dep} as missing: {why}"),
+                    None => format!(
+                        "not queuing {dep} as missing: {real} is already built in {} for \
+                         {}/{}, so the failure is not caused by it being absent",
+                        config.project, config.distro, config.arch
+                    ),
+                },
+            });
+            false
+        })
+        .collect()
 }
 
 /// One fix-after-validation agent turn: counts the attempt, runs the turn and
@@ -2739,12 +2792,16 @@ fn unresolvable_deps_round(
     } else {
         &translated
     };
-    let mut to_build: Vec<String> = source_list
-        .iter()
-        .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
-        .collect();
-    to_build.sort_unstable();
-    to_build.dedup();
+    let to_build = osc::missing_package_names(source_list);
+    if to_build.is_empty() {
+        // Nothing here is something to build: reporting an empty list would
+        // have the caller retry this package forever.
+        return Err(ctx.failed(format!(
+            "OBS reports {} unresolvable, but none of them is a package this tool can \
+             build (interpreter subpackages or system tools the distro should provide)",
+            source_list.join(", ")
+        )));
+    }
     Err(PipelineResult::MissingDeps {
         rpm_name: rpm_name.clone(),
         deps: to_build,
@@ -2867,17 +2924,19 @@ fn fix_after_build(
             source: ap_core::event::MissingSource::Agent,
         });
         // Strip python<ver>- prefix so the caller gets PyPI names.
-        let mut to_build: Vec<String> = outcome
-            .unresolvable_packages
-            .iter()
-            .map(|d| osc::strip_devel_wrapping(osc::strip_rpm_prefix(d)).to_string())
-            .collect();
-        to_build.sort_unstable();
-        to_build.dedup();
-        return Err(PipelineResult::MissingDeps {
-            rpm_name: rpm_name.clone(),
-            deps: to_build,
-        });
+        let to_build = without_built_deps(
+            ctx,
+            agent_step.id,
+            osc::missing_package_names(&outcome.unresolvable_packages),
+        );
+        if !to_build.is_empty() {
+            return Err(PipelineResult::MissingDeps {
+                rpm_name: rpm_name.clone(),
+                deps: to_build,
+            });
+        }
+        // Everything the turn called missing is already built here: its edit
+        // is applied below and the build runs again.
     }
 
     if let Err(reason) = apply_turn_and_reset(
