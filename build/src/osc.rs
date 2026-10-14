@@ -1372,63 +1372,74 @@ fn is_benign_up_output(text: &str) -> bool {
 /// caller can keep interpreting failure (which stderr patterns are benign,
 /// whether 404 is a non-error) in its own, different way.
 fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Error> {
+    // Each recovery runs at most once per call, so a checkout that keeps
+    // failing the same way is reported, not retried forever.
+    let mut repaired = false;
+    let mut moved_aside = false;
     let up = || {
         proc::capture_with_timeout("osc", &["up"], checkout_dir, emit, OSC_TRANSFER_TIMEOUT)
             .map_err(during(format!("up in {}", checkout_dir.display())))
     };
-    let out = up()?;
-    if out.success() {
-        return Ok(out);
-    }
-
-    if is_inconsistent_wc_error(&out.stderr) {
-        repair_wc(checkout_dir, emit)?;
-        return up();
-    }
-
-    if let Some(name) = changes_conflict_file(&out.stderr)
-        .filter(|n| !n.contains('/') && !n.contains("..") && !n.starts_with('-'))
-    {
-        // osc only raises this when `name` is untracked in this working
-        // copy's `.osc/_files` (see `Package.__update`'s check against
-        // `filenamelist_unvers`), so it is always safe to move aside — it
-        // was never osc's file to begin with. The usual cause here is our
-        // own `create_initial_changes` writing `<pkg>.changes` directly
-        // before that revision's commit reached the server, and the
-        // server later gaining its own file of the same name in the
-        // meantime (e.g. a prior interrupted run that got further).
-        let name = name.to_string();
-        let conflicting = checkout_dir.join(&name);
-        // This checkout can legitimately go through this recovery more than
-        // once across retried pipeline attempts — `fs::rename` overwrites
-        // silently on Unix, so without the existence check a second recovery
-        // would clobber whatever the first one had moved aside with no trace
-        // either backup ever existed.
-        let mut backup = checkout_dir.join(format!("{name}.preexisting"));
-        let mut n = 1;
-        while backup.exists() {
-            n += 1;
-            backup = checkout_dir.join(format!("{name}.preexisting.{n}"));
+    let mut out = up()?;
+    loop {
+        if out.success() {
+            return Ok(out);
         }
-        if let Err(e) = std::fs::rename(&conflicting, &backup) {
-            ap_core::diag!(
-                "  could not move '{name}' aside in {}: {e}",
-                checkout_dir.display()
-            );
+        if !repaired && is_inconsistent_wc_error(&out.stderr) {
+            repair_wc(checkout_dir, emit)?;
+            repaired = true;
+        } else if !moved_aside && let Some(name) = changes_conflict_file(&out.stderr) {
+            // osc only raises this when `name` is untracked in this working
+            // copy's `.osc/_files` (see `Package.__update`'s check against
+            // `filenamelist_unvers`), so it is always safe to move aside — it
+            // was never osc's file to begin with. The usual cause here is our
+            // own `create_initial_changes` writing `<pkg>.changes` directly
+            // before that revision's commit reached the server, and the
+            // server later gaining its own file of the same name in the
+            // meantime (e.g. a prior interrupted run that got further).
+            // If the move fails the checkout is not usable: that is the
+            // error to report, not a retry that will hit the same conflict.
+            let backup = move_aside(checkout_dir, name)?;
+            emit.reporter.report(&Event::Warning {
+                step: emit.step,
+                message: format!(
+                    "osc up: untracked local '{name}' conflicted with a newer revision's \
+                     file of the same name; moved it aside as '{}' and retrying",
+                    backup.display()
+                ),
+            });
+            moved_aside = true;
+        } else {
+            return Ok(out);
         }
-        let backup_name = backup.file_name().map(|n| n.to_string_lossy().into_owned());
-        emit.reporter.report(&Event::Warning {
-            step: emit.step,
-            message: format!(
-                "osc up: untracked local '{name}' conflicted with a newer revision's \
-                 file of the same name; moved it aside as '{}' and retrying",
-                backup_name.as_deref().unwrap_or("<unknown>")
-            ),
-        });
-        return up();
+        out = up()?;
     }
+}
 
-    Ok(out)
+/// Move the untracked `name` out of `checkout_dir` so `osc up` can add the
+/// server's file in its place, and return where it went.
+///
+/// The backup goes beside the checkout (`<project>/.preexisting/<pkg>/`), not
+/// inside it: `osc addremove` runs on the package directory and would commit
+/// a backup left there. A backup already present is never overwritten (a
+/// checkout can go through this more than once), so each one gets a numbered
+/// name instead.
+fn move_aside(checkout_dir: &Path, name: &str) -> Result<PathBuf, Error> {
+    let pkg = checkout_dir.file_name().unwrap_or(checkout_dir.as_os_str());
+    let dir = checkout_dir
+        .parent()
+        .unwrap_or(checkout_dir)
+        .join(".preexisting")
+        .join(pkg);
+    fs::create_dir_all(&dir)?;
+    let mut backup = dir.join(name);
+    let mut n = 1;
+    while backup.exists() {
+        n += 1;
+        backup = dir.join(format!("{name}.{n}"));
+    }
+    fs::rename(checkout_dir.join(name), &backup)?;
+    Ok(backup)
 }
 
 /// Extract the filename osc names in its uncaught `PackageFileConflict`
@@ -1438,12 +1449,22 @@ fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Er
 /// working copy while the server's newer revision also adds a file with the
 /// same name — an unhandled exception in osc itself, not one of its usual
 /// "inconsistent working copy" messages, so `repairwc` does not apply here.
+///
+/// Only a `.changes` file (a bare name, not a path) is returned: that is the
+/// one file this tool writes into a checkout itself, so the only conflict it
+/// is safe to resolve by moving the local copy aside. Any other conflict is
+/// left for the caller to report.
 fn changes_conflict_file(stderr: &str) -> Option<&str> {
-    stderr
+    let name = stderr
         .split("failed to add file '")
         .nth(1)?
         .split('\'')
-        .next()
+        .next()?;
+    (name.ends_with(".changes")
+        && !name.contains('/')
+        && !name.contains("..")
+        && !name.starts_with('-'))
+    .then_some(name)
 }
 
 #[cfg(test)]
@@ -1460,6 +1481,35 @@ mod changes_conflict_tests {
     #[test]
     fn returns_none_for_unrelated_errors() {
         assert_eq!(changes_conflict_file("404 Not Found"), None);
+    }
+
+    #[test]
+    fn a_moved_aside_changes_file_lands_outside_the_checkout_and_is_never_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("proj").join("python-foo");
+        fs::create_dir_all(&checkout).unwrap();
+        fs::write(checkout.join("python-foo.changes"), "local").unwrap();
+
+        let first = move_aside(&checkout, "python-foo.changes").unwrap();
+        assert!(!first.starts_with(&checkout));
+        assert!(!checkout.join("python-foo.changes").exists());
+        assert_eq!(fs::read_to_string(&first).unwrap(), "local");
+
+        fs::write(checkout.join("python-foo.changes"), "again").unwrap();
+        let second = move_aside(&checkout, "python-foo.changes").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(&first).unwrap(), "local");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "again");
+    }
+
+    #[test]
+    fn only_a_changes_file_is_ever_moved_aside() {
+        let spec = "osc: failed to add file 'python-foo.spec' \
+                    file/dir with the same name already exists\n";
+        assert_eq!(changes_conflict_file(spec), None);
+        let path = "osc: failed to add file 'sub/python-foo.changes' \
+                    file/dir with the same name already exists\n";
+        assert_eq!(changes_conflict_file(path), None);
     }
 }
 
