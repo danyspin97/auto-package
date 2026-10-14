@@ -4422,8 +4422,8 @@ fn generate_spec(
                 safe_file_part(&config.pkg_name.to_lowercase()),
                 safe_file_part(&config.version)
             ));
-            let (bytes, url) = match fetch_release_archive(&source_url, &config.version) {
-                Ok(v) => v,
+            let url = match fetch_release_archive(&source_url, &config.version, &tarball) {
+                Ok(url) => url,
                 // The repository exists but has no archive for THIS version (a
                 // guessed repo for a vendor wheel such as nvidia-nccl-cu13, or an
                 // unusual tag scheme): it cannot be this release's source. Use
@@ -4441,8 +4441,6 @@ fn generate_spec(
                 }
                 Err(e) => return Err(e),
             };
-            ap_core::fsx::write_atomic(&tarball, &bytes)
-                .map_err(|e| GenSpecError::Other(format!("writing {}: {e}", tarball.display())))?;
             let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
                 .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
 
@@ -4554,9 +4552,7 @@ fn generate_from_repo(
         safe_file_part(&config.version)
     ));
 
-    let (bytes, url) = fetch_release_archive(repo_url, &config.version)?;
-    ap_core::fsx::write_atomic(&tarball, &bytes)
-        .map_err(|e| GenSpecError::Other(format!("writing {}: {e}", tarball.display())))?;
+    let url = fetch_release_archive(repo_url, &config.version, &tarball)?;
 
     // Same preference the probe used, so generation and naming agree on which
     // subproject of a monorepo is being built.
@@ -4708,18 +4704,31 @@ fn generate_from_repo(
     )))
 }
 
-/// Download the first release archive that exists, returning its bytes and URL.
-fn fetch_release_archive(repo_url: &str, version: &str) -> Result<(Vec<u8>, String), GenSpecError> {
+/// Put the first release archive that exists at `dest`, returning its URL.
+///
+/// A 404 only means that candidate is not this release. Any other failure
+/// (timeout, dropped connection, rate limit, size cap) is no evidence that the
+/// archive does not exist, so it is reported as a failure, not as a missing
+/// archive: the caller falls back to PyPI only for the latter.
+fn fetch_release_archive(
+    repo_url: &str,
+    version: &str,
+    dest: &Path,
+) -> Result<String, GenSpecError> {
     let candidates = crate::sources::archive_urls(repo_url, version);
+    let mut failures = Vec::new();
     for url in &candidates {
-        let Ok(resp) = crate::http::get_download(url).call() else {
-            continue;
-        };
-        if let Ok(buf) = crate::http::read_download(resp)
-            && !buf.is_empty()
-        {
-            return Ok((buf, url.clone()));
+        match crate::sources::fetch_archive_to(url, dest) {
+            Ok(()) => return Ok(url.clone()),
+            Err(crate::http::FetchFailure::NotFound) => {}
+            Err(e) => failures.push(format!("{url}: {e}")),
         }
+    }
+    if !failures.is_empty() {
+        return Err(GenSpecError::Other(format!(
+            "could not download a release archive for {version} from {repo_url}:\n  {}",
+            failures.join("\n  ")
+        )));
     }
     Err(GenSpecError::NoReleaseArchive(format!(
         "no release archive for version {version} at {repo_url}. Tried:\n{}",

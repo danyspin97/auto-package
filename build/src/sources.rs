@@ -13,6 +13,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use crate::http::FetchFailure;
 
 /// Package name (normalized) → source repository URL.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -213,6 +217,89 @@ pub struct RepoProbe {
     pub archive_url: String,
 }
 
+/// Archives fetched this run, by URL. The probe downloads the archive it
+/// inspects; the spec generator takes that copy rather than fetching it again.
+#[derive(Default)]
+struct ArchiveCache {
+    files: std::collections::HashMap<String, PathBuf>,
+    /// URLs that answered 404, so they are not asked for again this run.
+    missing: std::collections::HashSet<String>,
+}
+
+fn archive_cache() -> &'static Mutex<ArchiveCache> {
+    static CACHE: OnceLock<Mutex<ArchiveCache>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Download `url` to `dest`, noting a 404 in the cache.
+fn download_archive(url: &str, dest: &Path) -> Result<(), FetchFailure> {
+    let result = crate::http::download_file(url, dest);
+    if let Err(FetchFailure::NotFound) = result {
+        archive_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .missing
+            .insert(url.to_string());
+    }
+    let download = result?;
+    ap_core::diag!(
+        "  fetched {url} ({} bytes, sha256 {})",
+        download.bytes,
+        download.sha256
+    );
+    Ok(())
+}
+
+/// The archive at `url` as a file in this process's scratch directory, reused
+/// when it was already fetched this run.
+pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
+    {
+        let cache = archive_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if cache.missing.contains(url) {
+            return Err(FetchFailure::NotFound);
+        }
+        if let Some(path) = cache.files.get(url).filter(|p| p.is_file()) {
+            return Ok(path.clone());
+        }
+    }
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("ap-archives-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| FetchFailure::Transport(e.to_string()))?;
+    let base = url
+        .split(['?', '#'])
+        .next()
+        .and_then(|u| u.rsplit('/').next())
+        .filter(|b| !b.is_empty())
+        .unwrap_or("archive");
+    let path = dir.join(format!("{}-{base}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    download_archive(url, &path)?;
+    archive_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .files
+        .insert(url.to_string(), path.clone());
+    Ok(path)
+}
+
+/// Put the archive at `url` at `dest`: the copy the probe fetched when there is
+/// one (moved there, so it is not kept twice), otherwise a fresh download.
+pub fn fetch_archive_to(url: &str, dest: &Path) -> Result<(), FetchFailure> {
+    let cached = {
+        let mut cache = archive_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if cache.missing.contains(url) {
+            return Err(FetchFailure::NotFound);
+        }
+        cache.files.remove(url)
+    };
+    if let Some(path) = cached.filter(|p| p.is_file())
+        && std::fs::copy(&path, dest).is_ok()
+    {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    download_archive(url, dest)
+}
+
 /// Download a release archive and work out how it is built and what it calls
 /// itself.
 ///
@@ -220,26 +307,24 @@ pub struct RepoProbe {
 /// checkout is created — long before the spec is generated.
 pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, String> {
     let candidates = archive_urls(repo_url, version);
-    let mut last_err = None;
+    // Candidates that exist but could not be used, in order. A 404 is not one
+    // of them: that URL is simply not this release's archive.
+    let mut failures: Vec<String> = Vec::new();
 
     for url in &candidates {
-        let Ok(resp) = crate::http::get_download(url).call() else {
-            continue;
+        let path = match fetch_archive(url) {
+            Ok(path) => path,
+            Err(FetchFailure::NotFound) => continue,
+            Err(e) => {
+                failures.push(format!("{url}: {e}"));
+                continue;
+            }
         };
-        let Ok(buf) = crate::http::read_download(resp) else {
-            continue;
-        };
-        if buf.is_empty() {
-            continue;
-        }
-
-        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let path = dir.path().join("archive.tar.gz");
-        std::fs::write(&path, &buf).map_err(|e| e.to_string())?;
         let info = match ap_ecosystem::sdist::inspect_preferring(&path, Some(want)) {
             Ok(i) => i,
             Err(e) => {
-                last_err = Some(format!("{url}: {e}"));
+                failures.push(format!("{url}: {e}"));
+                let _ = std::fs::remove_file(&path);
                 continue;
             }
         };
@@ -292,32 +377,34 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
     }
 
     // Provide helpful error with available tags
-    let error_msg = match last_err {
-        Some(e) => format!("could not read a release archive for {version}: {e}"),
-        None => {
-            let mut msg = format!(
-                "no release archive for version {version} at {repo_url}. Tried:\n{}",
-                candidates
-                    .iter()
-                    .map(|u| format!("  {u}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
+    let error_msg = if !failures.is_empty() {
+        format!(
+            "could not read a release archive for {version}:\n  {}",
+            failures.join("\n  ")
+        )
+    } else {
+        let mut msg = format!(
+            "no release archive for version {version} at {repo_url}. Tried:\n{}",
+            candidates
+                .iter()
+                .map(|u| format!("  {u}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
 
-            // Add available tags to help user find the right version
-            if let Ok(tags) = get_repo_tags(repo_url)
-                && !tags.is_empty()
-            {
-                msg.push_str("\n\nAvailable tags (showing first 20):");
-                for tag in tags.iter().take(20) {
-                    let version = version_from_tag(tag, want);
-                    msg.push_str(&format!("\n  {} -> version {}", tag, version));
-                }
-                msg.push_str("\n\nTry one of these versions with: --version <version>");
+        // Add available tags to help user find the right version
+        if let Ok(tags) = get_repo_tags(repo_url)
+            && !tags.is_empty()
+        {
+            msg.push_str("\n\nAvailable tags (showing first 20):");
+            for tag in tags.iter().take(20) {
+                let version = version_from_tag(tag, want);
+                msg.push_str(&format!("\n  {} -> version {}", tag, version));
             }
-
-            msg
+            msg.push_str("\n\nTry one of these versions with: --version <version>");
         }
+
+        msg
     };
 
     Err(error_msg)
@@ -1226,6 +1313,36 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_fetched_archive_is_moved_to_its_destination_without_a_download() {
+        // The probe's copy is handed over, not fetched again. The URLs are
+        // unique to this test and never requested.
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("cached.tar.gz");
+        std::fs::write(&cached, b"archive").unwrap();
+        let url = "https://example.invalid/zz-handover-1.0.tar.gz";
+        archive_cache()
+            .lock()
+            .unwrap()
+            .files
+            .insert(url.to_string(), cached.clone());
+        let dest = dir.path().join("out.tar.gz");
+        fetch_archive_to(url, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"archive");
+        assert!(!cached.exists());
+
+        let gone = "https://example.invalid/zz-handover-missing-1.0.tar.gz";
+        archive_cache()
+            .lock()
+            .unwrap()
+            .missing
+            .insert(gone.to_string());
+        assert_eq!(
+            fetch_archive_to(gone, &dest).unwrap_err(),
+            FetchFailure::NotFound
+        );
+    }
 
     /// Tests that touch the process environment must not run concurrently.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
