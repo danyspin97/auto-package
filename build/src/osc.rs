@@ -298,7 +298,16 @@ fn extract_unresolvable(log: &str) -> Vec<String> {
 /// aren't valid RPM or PyPI names, so `strip_rpm_prefix` and PyPI lookup
 /// both miss and the dependency silently never gets queued to build.
 fn clean_unresolvable_name(pkg: &str) -> &str {
-    let pkg = pkg.trim_start_matches('(').trim_end_matches(')');
+    // Only an unbalanced parenthesis is decoration: the `()(64bit)` of a
+    // soname capability (`libcuda.so.1()(64bit)`) is part of its name.
+    let balance = |s: &str| s.matches('(').count() as isize - s.matches(')').count() as isize;
+    let mut pkg = pkg;
+    while pkg.starts_with('(') && balance(pkg) > 0 {
+        pkg = &pkg[1..];
+    }
+    while pkg.ends_with(')') && balance(pkg) < 0 {
+        pkg = &pkg[..pkg.len() - 1];
+    }
     match pkg.rfind('[') {
         Some(idx) if pkg.ends_with(']') => &pkg[..idx],
         _ => pkg,
@@ -383,6 +392,22 @@ nothing provides (python313-foo
         assert_eq!(
             clean_unresolvable_name("python314-duckdb"),
             "python314-duckdb"
+        );
+    }
+
+    /// The `()(64bit)` of a soname capability is part of the name; stripping
+    /// the trailing `)` turned it into something no lookup recognizes.
+    #[test]
+    fn keeps_the_parentheses_of_a_soname_capability() {
+        assert_eq!(
+            extract_unresolvable(
+                "nothing provides libcuda.so.1()(64bit) needed by python313-torch"
+            ),
+            vec!["libcuda.so.1()(64bit)"]
+        );
+        assert_eq!(
+            clean_unresolvable_name("pkgconfig(zlib)"),
+            "pkgconfig(zlib)"
         );
     }
 
@@ -3642,49 +3667,13 @@ fn empty_package_message(
     )
 }
 
-/// Stems of the interpreter's own subpackages (`python3-devel`,
-/// `python-rpm-macros`, ...): the distro ships them, and no PyPI project of
-/// that name is what the requirement means.
-const PYTHON_INTERPRETER_STEMS: &[&str] = &[
-    "base",
-    "curses",
-    "devel",
-    "doc",
-    "idle",
-    "rpm-generators",
-    "rpm-macros",
-    "testsuite",
-    "tk",
-    "tools",
-    "xml",
-];
-
 /// Package names to queue for building, from the RPM names a build or an
-/// agent reports missing: the `python313-`/`python314-`/`python3-`/`python-`
-/// prefix and any `lib...-devel` wrapping are stripped, every flavor of one
-/// package (`python313-fastar`, `python314-fastar`) collapses to one name
-/// (compared by [`fuzzy_key`], first spelling kept), and requirements that
-/// are not something to build are left out: the interpreter's own
-/// subpackages and system tools a PyPI package merely redistributes.
+/// agent reports missing: see [`crate::depclass::triage_all`], here without
+/// asking the distro (the names come from OBS saying the target has nothing
+/// providing them). Callers that want to tell the user why a name was left out
+/// use `triage_all` directly.
 pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for raw in rpm_names {
-        let rpm = raw.trim();
-        let stripped = strip_rpm_prefix(rpm);
-        if stripped != rpm && PYTHON_INTERPRETER_STEMS.contains(&stripped) {
-            continue;
-        }
-        let name = strip_devel_wrapping(stripped);
-        if name.is_empty() || crate::pipeline::is_system_tool_alias(name) {
-            continue;
-        }
-        if seen.insert(fuzzy_key(name)) {
-            out.push(name.to_string());
-        }
-    }
-    out.sort_unstable();
-    out
+    crate::depclass::triage_all(rpm_names, &|_| false).0
 }
 
 /// Whether `info` (a project meta) builds for `repo` on `arch`: the `Err`
