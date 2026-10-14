@@ -167,6 +167,9 @@ pub enum Task {
     /// One-off, read-only lookup of upstream names for OBS's unresolvable
     /// dependency list — not counted against `FixAfterBuild`'s attempts.
     TranslateUnresolvableDeps,
+    /// Patching a distro package branched into the project because another
+    /// package needs a change to it.
+    PatchDependency,
 }
 
 impl std::fmt::Display for Task {
@@ -180,6 +183,7 @@ impl std::fmt::Display for Task {
                 write!(f, "fix {attempt}/{max_attempts}")
             }
             Task::TranslateUnresolvableDeps => write!(f, "translate deps"),
+            Task::PatchDependency => write!(f, "patch dependency"),
         }
     }
 }

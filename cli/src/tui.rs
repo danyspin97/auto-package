@@ -907,6 +907,7 @@ impl TuiState {
                         format!("Fixing spec (attempt {attempt}/{max_attempts})")
                     }
                     Task::TranslateUnresolvableDeps => "Looking up dependency names".to_string(),
+                    Task::PatchDependency => "Patching a dependency".to_string(),
                 };
                 state.add_agent_activity(ActivityKind::Task, task_str.clone());
                 state.add_log(LogLevel::Info, format!("Agent: {task_str}"));

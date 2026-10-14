@@ -1373,6 +1373,99 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     })
 }
 
+/// Branch the distro package `request` names from the linked project that ships
+/// it into `project`, and the config to build the branch as: same version, so
+/// the existing spec is carried forward, with `patch_request` set so the
+/// pre-build turn patches it (convention 62). The error is why that is not
+/// possible.
+fn branch_for_patch(
+    dep: &str,
+    request: &ap_build::agent::PatchRequest,
+    project: &str,
+    config: &PipelineConfig,
+    own_listing: &std::collections::HashSet<String>,
+    linked_listings: &[(String, std::sync::Arc<std::collections::HashSet<String>>)],
+    emit: ap_build::proc::Emit<'_>,
+) -> Result<PipelineConfig, String> {
+    let rpm = ap_build::osc::rpm_name(dep);
+    let (origin, shipped) = linked_listings
+        .iter()
+        .find_map(|(path_project, listing)| {
+            listing
+                .iter()
+                .find(|p| {
+                    let k = ap_build::osc::fuzzy_key(p);
+                    k == ap_build::osc::fuzzy_key(&rpm) || k == ap_build::osc::fuzzy_key(dep)
+                })
+                .map(|p| (path_project.clone(), p.clone()))
+        })
+        .ok_or_else(|| {
+            format!(
+                "no linked project of {project} ships it, so there is nothing to branch and                  patch (the package that asked for the patch: {})",
+                request.problem
+            )
+        })?;
+    // The branch lives under the spelling the project already uses, if any.
+    let real = ap_build::osc::obs_name(own_listing, &shipped);
+    match ap_build::osc::branch_package(&origin, &shipped, project, false, emit) {
+        Ok(ap_build::osc::BranchResult::Branched(b)) if b.target_package != shipped => {
+            return Err(format!(
+                "OBS branched {origin}/{shipped} as {}, not {shipped}; delete it and patch                  {shipped} by hand",
+                b.target_package
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(format!(
+                "cannot branch {origin}/{shipped} into {project}: {e}"
+            ));
+        }
+    }
+    ap_build::osc::invalidate_project_packages_cache(project);
+    let version = ap_build::update::spec_for_package(project, &real, emit)
+        .and_then(|text| ap_build::spec::parse_header(&text))
+        .map(|h| h.version)
+        .ok_or_else(|| format!("cannot read the Version of {project}/{real} after branching it"))?;
+    ap_core::diag!("  patching {real} {version} (branched from {origin}) for another package");
+    Ok(PipelineConfig {
+        pkg_name: dep.to_string(),
+        rpm_name: real,
+        version,
+        source_repo: None,
+        subprojects: Vec::new(),
+        // The branch builds green unchanged; the patch must still be made.
+        force: true,
+        regen: false,
+        patch_request: Some(request.problem.clone()),
+        ..config.clone()
+    })
+}
+
+/// The dependencies a package asked to have patched instead of built
+/// (convention 62), by the name's `fuzzy_key` without its `python-` prefix, so
+/// the dependency queue can tell them from the ones it builds.
+#[derive(Default)]
+struct PatchRequests {
+    by_key: std::cell::RefCell<std::collections::HashMap<String, ap_build::agent::PatchRequest>>,
+}
+
+impl PatchRequests {
+    fn key(dep: &str) -> String {
+        ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(dep))
+    }
+
+    fn record(&self, patches: &[ap_build::agent::PatchRequest]) {
+        let mut by_key = self.by_key.borrow_mut();
+        for p in patches {
+            by_key.insert(Self::key(&p.name), p.clone());
+        }
+    }
+
+    fn get(&self, dep: &str) -> Option<ap_build::agent::PatchRequest> {
+        self.by_key.borrow().get(&Self::key(dep)).cloned()
+    }
+}
+
 /// Why each dependency left the dependency queue without being built (or what
 /// became of it when it was), kept so that the message that finally gives up on
 /// a package can say why every one of its dependencies is out of reach instead
@@ -1815,6 +1908,7 @@ fn cmd_build(
         run_id: run_dir.run_id.clone().0,
         source_urls,
         python_flavors,
+        patch_request: None,
         failed_deps: Vec::new(),
         unbuildable_deps: Vec::new(),
     };
@@ -1949,6 +2043,8 @@ fn cmd_build(
         std::collections::HashSet::new();
     // Why each dependency left the queue, for the messages that give up.
     let dep_drops = DepDrops::default();
+    // Dependencies to branch and patch rather than build.
+    let patch_requests = PatchRequests::default();
 
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
@@ -1984,6 +2080,105 @@ fn cmd_build(
                 let listing = ap_build::osc::try_list_project_packages(&path_project, lookup_emit)
                     .map_err(|e| color_eyre::eyre::eyre!(e))?;
                 linked_listings.push((path_project, listing));
+            }
+            // What a dependency build runs as: its own thread, reported as soon
+            // as it is done. Reporting in join order let a slower sibling hold
+            // back every package finished after it, so their rows stayed on
+            // their last step.
+            let spawn_dep_build = |dep_config: PipelineConfig, dep: String| {
+                let dep_rpm = dep_config.rpm_name.clone();
+                let dep_pkg_run = run_dir.pkg(&dep_rpm);
+                if let Err(e) = dep_pkg_run.ensure() {
+                    dep_drops.dropped(
+                        reporter.as_ref(),
+                        &dep,
+                        format!(
+                            "its run directory {} could not be created: {e}",
+                            dep_pkg_run.path.display()
+                        ),
+                    );
+                    return None;
+                }
+                reporter.report(&Event::TargetSelected {
+                    pkg: dep_rpm.clone(),
+                    version: dep_config.version.clone(),
+                    reason: SelectionReason::FirstUnbuiltDependency,
+                    blocked_by: vec![],
+                });
+                let dep_version = dep_config.version.clone();
+                let r = pkg_reporter(&dep_rpm);
+                let sem2 = sem.clone();
+                let finished_name = dep_rpm.clone();
+                let finished_version = dep_version.clone();
+                let handle = std::thread::spawn(move || {
+                    let _permit = Permit::acquire(&sem2);
+                    let result = run_package(&dep_config, &dep_pkg_run, r.as_ref());
+                    r.report(&Event::PackageFinished {
+                        pkg: finished_name,
+                        version: finished_version,
+                        outcome: package_outcome(&result),
+                    });
+                    result
+                });
+                Some((dep_rpm, dep_version, handle, dep))
+            };
+            // A dependency a package asked to have patched is branched from the
+            // linked project that ships it, not looked up on PyPI or a forge.
+            let (patch_batch, batch): (Vec<String>, Vec<String>) = batch
+                .into_iter()
+                .partition(|d| patch_requests.get(d).is_some());
+            let mut patch_handles = Vec::new();
+            for rpm_dep in patch_batch {
+                let dep = rpm_dep
+                    .strip_prefix("python-")
+                    .unwrap_or(&rpm_dep)
+                    .to_string();
+                let Some(request) = patch_requests.get(&dep) else {
+                    continue;
+                };
+                if !attempted_deps.insert(ap_build::osc::fuzzy_key(&dep)) {
+                    let earlier = dep_drops
+                        .reason(&dep)
+                        .unwrap_or_else(|| "no outcome was recorded for it".to_string());
+                    dep_drops.dropped(
+                        reporter.as_ref(),
+                        &dep,
+                        format!("it was already attempted this run ({earlier})"),
+                    );
+                    continue;
+                }
+                let key = ap_build::osc::fuzzy_key(&dep);
+                if !retrying.contains(&key)
+                    && let Some(real) =
+                        ap_build::osc::built_in_project(&own_listing, &own_statuses, &dep)
+                {
+                    dep_drops.dropped(
+                        reporter.as_ref(),
+                        &dep,
+                        format!(
+                            "{project} already builds it as {real}, so it is not patched again"
+                        ),
+                    );
+                    continue;
+                }
+                match branch_for_patch(
+                    &dep,
+                    &request,
+                    project,
+                    &config,
+                    &own_listing,
+                    &linked_listings,
+                    lookup_emit,
+                ) {
+                    Ok(dep_config) => {
+                        if let Some(h) = spawn_dep_build(dep_config, dep.clone()) {
+                            patch_handles.push(h);
+                        }
+                    }
+                    Err(why) => {
+                        dep_drops.dropped(reporter.as_ref(), &dep, why);
+                    }
+                }
             }
             let handles: Vec<_> = batch
                 .into_iter()
@@ -2317,46 +2512,10 @@ fn cmd_build(
                     // Build it under the spelling OBS already lists, if any.
                     dep_config.rpm_name =
                         ap_build::osc::obs_name(&own_listing, &dep_config.rpm_name);
-                    let dep_rpm = dep_config.rpm_name.clone();
-                    let dep_pkg_run = run_dir.pkg(&dep_rpm);
-                    if let Err(e) = dep_pkg_run.ensure() {
-                        dep_drops.dropped(
-                            reporter.as_ref(),
-                            &dep,
-                            format!(
-                                "its run directory {} could not be created: {e}",
-                                dep_pkg_run.path.display()
-                            ),
-                        );
-                        return None;
-                    }
-                    reporter.report(&Event::TargetSelected {
-                        pkg: dep_rpm.clone(),
-                        version: dep_config.version.clone(),
-                        reason: SelectionReason::FirstUnbuiltDependency,
-                        blocked_by: vec![],
-                    });
-                    let dep_version = dep_config.version.clone();
-                    let r = pkg_reporter(&dep_rpm);
-                    let sem2 = sem.clone();
-                    let finished_name = dep_rpm.clone();
-                    let finished_version = dep_version.clone();
-                    let handle = std::thread::spawn(move || {
-                        let _permit = Permit::acquire(&sem2);
-                        let result = run_package(&dep_config, &dep_pkg_run, r.as_ref());
-                        // Reported as soon as this package is done. Reporting in
-                        // join order let a slower sibling hold back every package
-                        // finished after it, so their rows stayed on their last step.
-                        r.report(&Event::PackageFinished {
-                            pkg: finished_name,
-                            version: finished_version,
-                            outcome: package_outcome(&result),
-                        });
-                        result
-                    });
-                    Some((dep_rpm, dep_version, handle, dep))
+                    spawn_dep_build(dep_config, dep)
                 })
                 .collect();
+            let handles: Vec<_> = handles.into_iter().chain(patch_handles).collect();
 
             for dep in newly_unbuildable {
                 if !config.unbuildable_deps.contains(&dep) {
@@ -2399,7 +2558,12 @@ fn cmd_build(
                              reports it missing (a name mismatch?)",
                         );
                     }
-                    PipelineResult::MissingDeps { deps: more, .. } => {
+                    PipelineResult::MissingDeps {
+                        deps: more,
+                        patches,
+                        ..
+                    } => {
+                        patch_requests.record(&patches);
                         dep_drops.note_outcome(
                             &dep_rpm,
                             format!("it could not be built until {} exist", more.join(", ")),
@@ -2501,7 +2665,8 @@ fn cmd_build(
             });
             match result {
                 PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => return Ok(()),
-                PipelineResult::MissingDeps { deps, .. } => {
+                PipelineResult::MissingDeps { deps, patches, .. } => {
+                    patch_requests.record(&patches);
                     // Only queue deps we haven't tried yet; if every dep was
                     // already attempted we cannot make progress. Compared by
                     // `fuzzy_key`, not the raw string — see its doc comment.
@@ -2711,7 +2876,8 @@ fn cmd_build(
                     ap_core::diag!("{rpm_name} {version} already built");
                     fail_counts.remove(&rpm_name);
                 }
-                PipelineResult::MissingDeps { deps, .. } => {
+                PipelineResult::MissingDeps { deps, patches, .. } => {
+                    patch_requests.record(&patches);
                     // No-progress detection (review finding #15 in the Sep
                     // report; still open in Oct). A package that keeps
                     // surfacing MissingDeps on names already in
