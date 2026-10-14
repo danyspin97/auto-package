@@ -30,6 +30,39 @@ pub enum ProcessError {
     },
 }
 
+/// A minimal environment for tools that need no credentials: search path,
+/// home, locale, terminal, proxies, CA bundles, XDG dirs. Variables with one
+/// of `extra_prefixes` (upper-case) are kept as well.
+pub fn minimal_env(extra_prefixes: &[&str]) -> std::collections::BTreeMap<String, String> {
+    const EXACT: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LANGUAGE",
+        "TERM",
+        "TZ",
+        "TMPDIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+    ];
+    std::env::vars()
+        .filter(|(name, _)| {
+            let upper = name.to_ascii_uppercase();
+            EXACT.contains(&upper.as_str())
+                || upper.starts_with("LC_")
+                || upper.starts_with("XDG_")
+                || extra_prefixes.iter().any(|p| upper.starts_with(p))
+        })
+        .collect()
+}
+
 /// Where a subprocess reports the fact that it ran.
 ///
 /// Carried explicitly rather than read from a global: the subprocess layer is

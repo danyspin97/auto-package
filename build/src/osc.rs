@@ -63,6 +63,9 @@ pub enum Error {
         stderr: String,
     },
 
+    #[error("refusing to run the checkout's _service: {reason}")]
+    ServiceRejected { reason: String },
+
     #[error("nothing to publish in {0}: no spec or archive found")]
     NothingToPublish(PathBuf),
 
@@ -1908,10 +1911,140 @@ pub fn repair_wc(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Services a checkout's `_service` may name. The agent can edit the file, and
+/// a service runs arbitrary code on this machine (`refresh_obs_scm` etc. would
+/// too), so anything outside the set the pipeline and OBS packaging use is
+/// refused.
+const ALLOWED_SERVICES: &[&str] = &[
+    "tar_scm",
+    "obs_scm",
+    "recompress",
+    "set_version",
+    "cargo_vendor",
+    "download_files",
+    "go_modules",
+    "format_spec_file",
+];
+
+/// Parameters those services take. Notably absent are anything that names a
+/// command or an output directory.
+const ALLOWED_SERVICE_PARAMS: &[&str] = &[
+    "url",
+    "scm",
+    "revision",
+    "versionformat",
+    "versionprefix",
+    "match-tag",
+    "versionrewrite-pattern",
+    "versionrewrite-replacement",
+    "changesgenerate",
+    "changesauthor",
+    "subdir",
+    "filename",
+    "file",
+    "compression",
+    "src",
+    "update",
+    "method",
+    "cargotoml",
+    "no-root-manifest",
+    "version",
+    "basename",
+    "without-version",
+    "protocol",
+    "host",
+    "path",
+    "archive",
+    "disablereview",
+    "strategy",
+];
+
+/// Params whose value is a path relative to the checkout.
+const SERVICE_PATH_PARAMS: &[&str] = &["subdir", "filename", "file", "src", "cargotoml", "archive"];
+
+/// Check a `_service` file against the allowlists. `Err` names the problem.
+fn validate_service_xml(xml: &str) -> Result<(), String> {
+    use regex::Regex;
+    static TAG: OnceLock<Regex> = OnceLock::new();
+    static ATTR_NAME: OnceLock<Regex> = OnceLock::new();
+    static PARAM: OnceLock<Regex> = OnceLock::new();
+    let tag = TAG.get_or_init(|| Regex::new(r"<\s*([!?/]?[A-Za-z_][\w.-]*|!\S*)").unwrap());
+    let attr_name = ATTR_NAME.get_or_init(|| {
+        Regex::new(r#"(?s)^\s*(?:[\w-]+\s*=\s*"[^"]*"\s*)*?\bname\s*=\s*"([^"]*)""#).unwrap()
+    });
+    let param = PARAM.get_or_init(|| {
+        Regex::new(r#"(?s)<param\s+name\s*=\s*"([^"]*)"\s*(?:/>|>(.*?)</param>)"#).unwrap()
+    });
+
+    let xml = Regex::new(r"(?s)<!--.*?-->").unwrap().replace_all(xml, "");
+    for caps in tag.captures_iter(&xml) {
+        let name = &caps[1];
+        if !matches!(
+            name,
+            "?xml" | "services" | "/services" | "service" | "/service" | "param" | "/param"
+        ) {
+            return Err(format!("unexpected markup `<{name}`"));
+        }
+    }
+    if xml.contains("&") && xml.contains("<!") {
+        return Err("entity declarations are not allowed".to_string());
+    }
+    let services = Regex::new(r"(?s)<service\b([^>]*?)/?>").unwrap();
+    for caps in services.captures_iter(&xml) {
+        let name = attr_name
+            .captures(&caps[1])
+            .map(|c| c[1].to_string())
+            .ok_or("a <service> without a name")?;
+        if !ALLOWED_SERVICES.contains(&name.as_str()) {
+            return Err(format!("service `{name}` is not allowed"));
+        }
+    }
+    if xml.matches("<param").count() != param.captures_iter(&xml).count() {
+        return Err("a <param> in a form that is not recognised".to_string());
+    }
+    for caps in param.captures_iter(&xml) {
+        let name = &caps[1];
+        let value = caps.get(2).map_or("", |m| m.as_str()).trim();
+        if !ALLOWED_SERVICE_PARAMS.contains(&name) {
+            return Err(format!("param `{name}` is not allowed"));
+        }
+        if name == "url" && !value.starts_with("https://") {
+            return Err(format!("url `{value}` must be https://"));
+        }
+        if name == "protocol" && value != "https" {
+            return Err(format!("protocol `{value}` must be https"));
+        }
+        if name == "revision" && value.starts_with('-') {
+            return Err(format!("revision `{value}` starts with `-`"));
+        }
+        if SERVICE_PATH_PARAMS.contains(&name)
+            && (value.starts_with('/') || value.split('/').any(|c| c == ".."))
+        {
+            return Err(format!("{name} `{value}` leaves the checkout"));
+        }
+    }
+    Ok(())
+}
+
 /// Run `osc service ra` from `checkout_dir` to fetch sources and vendor Cargo deps.
+///
+/// The `_service` file is validated first (the agent may have edited it) and
+/// the service runs with a minimal environment, without publishing tokens.
 pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
-    let out = proc::capture("osc", &["service", "ra"], checkout_dir, emit)
-        .map_err(during(format!("service ra in {}", checkout_dir.display())))?;
+    if let Ok(xml) = fs::read_to_string(checkout_dir.join("_service"))
+        && let Err(reason) = validate_service_xml(&xml)
+    {
+        return Err(Error::ServiceRejected { reason });
+    }
+    let out = proc::capture_with_timeout_env(
+        "osc",
+        &["service", "ra"],
+        checkout_dir,
+        emit,
+        proc::DEFAULT_CAPTURE_TIMEOUT,
+        Some(&proc::minimal_env(&[])),
+    )
+    .map_err(during(format!("service ra in {}", checkout_dir.display())))?;
     if !out.success() {
         return Err(Error::OscFailed {
             cmd: format!("service ra in {}", checkout_dir.display()),
@@ -3875,5 +4008,40 @@ mod publish_plan_tests {
         let dir = tempfile::tempdir().unwrap();
         let err = commit(dir.path(), "msg", &[], Emit::quiet()).unwrap_err();
         assert!(matches!(err, Error::NothingToPublish(_)), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod service_validation_tests {
+    use super::validate_service_xml;
+
+    #[test]
+    fn the_rendered_services_pass() {
+        let xml = r#"<services>
+  <service mode="manual" name="tar_scm">
+    <param name="url">https://github.com/o/r.git</param>
+    <param name="revision">v1.0</param>
+    <param name="changesauthor"> YOUR EMAIL HERE </param>
+  </service>
+  <service mode="manual" name="set_version"/>
+  <service name="cargo_vendor" mode="manual">
+    <param name="src">r</param>
+  </service>
+</services>"#;
+        validate_service_xml(xml).unwrap();
+    }
+
+    #[test]
+    fn unknown_services_params_and_urls_are_refused() {
+        for xml in [
+            r#"<services><service name="evil"/></services>"#,
+            r#"<services><service name="tar_scm"><param name="command">id</param></service></services>"#,
+            r#"<services><service name="tar_scm"><param name="url">file:///etc</param></service></services>"#,
+            r#"<services><service name="tar_scm"><param name="url">git://x/y</param></service></services>"#,
+            r#"<services><service name="cargo_vendor"><param name="src">../x</param></service></services>"#,
+            r#"<!DOCTYPE x [<!ENTITY a "b">]><services/>"#,
+        ] {
+            assert!(validate_service_xml(xml).is_err(), "{xml}");
+        }
     }
 }
