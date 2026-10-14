@@ -3286,6 +3286,13 @@ pub fn obs_build(
     let mut rechecked_since_change = false;
 
     let status = loop {
+        if crate::proc::shutting_down() {
+            return Err(Error::OscFailed {
+                cmd: format!("wait {project}/{pkg_name}"),
+                code: -1,
+                stderr: "interrupted".to_string(),
+            });
+        }
         if start.elapsed() >= MAX_WAIT {
             return Err(Error::OscFailed {
                 cmd: format!("wait {project}/{pkg_name}"),

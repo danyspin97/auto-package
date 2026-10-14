@@ -975,10 +975,10 @@ impl AgentSlot {
                 return;
             };
             let now = std::time::Instant::now();
-            if now >= until {
+            if now >= until || crate::proc::shutting_down() {
                 return;
             }
-            std::thread::sleep(until - now);
+            std::thread::sleep((until - now).min(std::time::Duration::from_secs(1)));
         }
     }
 

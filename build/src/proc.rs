@@ -235,6 +235,13 @@ impl Drop for GroupGuard {
     }
 }
 
+/// Whether the process has been told to stop. Long polling loops and the
+/// scheduler check this so in-flight work gives up instead of waiting out a
+/// full build timeout.
+pub fn shutting_down() -> bool {
+    SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// SIGKILL every child still running. For process shutdown (Ctrl-C, quit).
 pub fn kill_all_groups() {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);

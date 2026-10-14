@@ -244,7 +244,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         Some(t) => t.tap(base_reporter.clone(), None),
         None => base_reporter.clone(),
     };
-    install_interrupt_handler(tui_ctrl.is_some(), memory.clone());
+    install_interrupt_handler(tui_ctrl.is_some(), memory.clone())?;
 
     reporter.report(&Event::RunStarted {
         run_id: run_dir.run_id.clone(),

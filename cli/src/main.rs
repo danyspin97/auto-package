@@ -567,6 +567,8 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     // screen.
     // Stop the build workers (own process groups, so the terminal's Ctrl-C
     // never reached them): otherwise `osc`/`claude` outlive this process.
+    // Sets the shutdown flag first, so polling loops and the scheduler stop
+    // on their next check.
     ap_build::proc::kill_all_groups();
     ap_build::proc::remove_private_dir();
     if tui_active {
@@ -578,13 +580,19 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
         "\nInterrupted — tokens: {} in / {} out — cost: ${:.4}",
         usage.input_tokens, usage.output_tokens, usage.cost_usd
     );
-    std::process::exit(1);
+    // The shell convention for death by SIGINT; scripts can tell an
+    // interrupted run from a failed one.
+    std::process::exit(130);
 }
 
-/// Route Ctrl-C (a real SIGINT) to [`handle_interrupt`].
-fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) {
+/// Route Ctrl-C (and, with ctrlc's `termination` feature, SIGTERM/SIGHUP) to
+/// [`handle_interrupt`].
+fn install_interrupt_handler(
+    tui_active: bool,
+    memory: Arc<MemorySink>,
+) -> color_eyre::Result<()> {
     ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
-        .expect("failed to set Ctrl-C handler");
+        .map_err(|e| color_eyre::eyre::eyre!("failed to install the interrupt handler: {e}"))
 }
 
 /// Name of the per-project lock file, kept inside the project directory.
@@ -865,7 +873,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 None => base_reporter.clone(),
             };
 
-            install_interrupt_handler(tui_ctrl.is_some(), memory.clone());
+            install_interrupt_handler(tui_ctrl.is_some(), memory.clone())?;
 
             let argv: Vec<String> = std::env::args().collect();
             reporter.report(&Event::RunStarted {
@@ -1163,7 +1171,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 None => base_reporter.clone(),
             };
 
-            install_interrupt_handler(tui_ctrl.is_some(), memory.clone());
+            install_interrupt_handler(tui_ctrl.is_some(), memory.clone())?;
 
             let argv: Vec<String> = std::env::args().collect();
             reporter.report(&Event::RunStarted {
@@ -2517,6 +2525,10 @@ fn cmd_build(
         let mut batch_pending: Vec<String> = Vec::new();
         let mut batch_failures: Vec<(String, String)> = Vec::new();
         loop {
+            if ap_build::proc::shutting_down() {
+                drain_in_flight(&rx, &mut in_flight);
+                return Err(color_eyre::eyre::eyre!("interrupted"));
+            }
             // The package names OBS lists are what builds and tracking use, so
             // the listing is read with the frontier: a failure of either ends
             // the build, after the packages already running have finished.
@@ -2609,8 +2621,24 @@ fn cmd_build(
 
             // Wait for one package to finish, then select again: its result may
             // have unblocked others.
-            let (rpm_name, version, result) =
-                rx.recv().expect("package thread ended without reporting");
+            let (rpm_name, version, result) = match rx.recv() {
+                Ok(r) => r,
+                Err(_) => {
+                    // Every worker is gone without a result: fail the oldest
+                    // in-flight package rather than panic the scheduler.
+                    let Some(rpm_name) = in_flight.first().cloned() else {
+                        return Err(color_eyre::eyre::eyre!(
+                            "package workers ended without reporting"
+                        ));
+                    };
+                    let result = PipelineResult::Failed {
+                        rpm_name: rpm_name.clone(),
+                        reason: "build thread ended without reporting a result".to_string(),
+                        kind: FailureKind::Other,
+                    };
+                    (rpm_name, String::new(), result)
+                }
+            };
             in_flight.retain(|r| *r != rpm_name);
             done_this_round.insert(rpm_name.clone());
 
