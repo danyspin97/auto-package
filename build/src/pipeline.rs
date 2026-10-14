@@ -2292,7 +2292,8 @@ fn review_stage(
     // A package to patch is not reviewed: the turn that would review it makes
     // the patch instead, whether or not an older build left a log.
     let run_turn = match patching {
-        Some(_) => !already_reviewed,
+        // A request is asked of a package that may have been reviewed before.
+        Some(_) => true,
         None => (need_spec || !build_log_nonempty) && !already_reviewed,
     };
     if !config.no_agent && run_turn {
@@ -2396,7 +2397,9 @@ fn review_stage(
                 Ok(effect) => effect,
                 Err(reason) => return Err(ctx.failed(reason)),
             };
-            if patching.is_some() && effect != TurnEffect::Edited {
+            // A patch an earlier run already made (the turn finds nothing left
+            // to do) is not a failure to patch.
+            if patching.is_some() && effect != TurnEffect::Edited && !already_reviewed {
                 return Err(ctx.failed(format!(
                     "the agent did not patch {rpm_name} ({}): the package that needs the \
                      change cannot be built",

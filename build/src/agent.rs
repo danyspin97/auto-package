@@ -2480,8 +2480,16 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    does not, such as an optional GPU backend (see convention 53). Do not split
    a package just because one dependency is hard to satisfy.
 
-62. **A dependency the distro ships is too new for this package, and the break
-   is one symbol or API: patch the dependency, do not pin it old.** This is
+62. **A dependency is wrong for this package in a way only a change to the
+   dependency fixes: patch the dependency, do not pin it old or give up.** Two
+   cases. (a) A dependency the distro ships is too new for this package, and the
+   break is one symbol or API. (b) A package this project already builds is
+   unfinished or wrong, so that its RPM lacks files this package needs (a
+   Python package missing from its file list, a `%files` that omits part of the
+   wheel); you cannot edit it from here, so report it instead of returning
+   `blocked`. The rest of this entry is written for case (a); for (b) the
+   `problem` text gives the RPM, the missing files or module, and the error line,
+   and the dependency's own recipe is fixed in place. This is
    rare; use it only after the other options fail. The signs: the package
    declares an upper bound on a dependency (`apache-tvm-ffi < 0.1.12`), the
    distro (or this project) ships a newer release, and the build or `%check`

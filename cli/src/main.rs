@@ -1392,6 +1392,35 @@ fn branch_for_patch(
     emit: ap_build::proc::Emit<'_>,
 ) -> Result<PipelineConfig, String> {
     let rpm = ap_build::osc::rpm_name(dep);
+    // A package this project already builds, with a defect a dependent found
+    // (an RPM that lacks files it needs, a spec left unfinished): it is fixed
+    // where it is, from its own recipe, not branched from anywhere.
+    let own_key = ap_build::osc::fuzzy_key(&rpm);
+    if let Some(real) = own_listing
+        .iter()
+        .find(|p| {
+            let k = ap_build::osc::fuzzy_key(p);
+            k == own_key || k == ap_build::osc::fuzzy_key(dep)
+        })
+        .cloned()
+    {
+        let version = ap_build::update::spec_for_package(project, &real, emit)
+            .and_then(|text| ap_build::spec::parse_header(&text))
+            .map(|h| h.version)
+            .ok_or_else(|| format!("cannot read the Version of {project}/{real}"))?;
+        ap_core::diag!("  fixing {real} {version} in {project} for another package");
+        return Ok(PipelineConfig {
+            pkg_name: dep.to_string(),
+            rpm_name: real,
+            version,
+            source_repo: None,
+            subprojects: Vec::new(),
+            force: true,
+            regen: false,
+            patch_request: Some(request.problem.clone()),
+            ..config.clone()
+        });
+    }
     let (origin, shipped) = linked_listings
         .iter()
         .find_map(|(path_project, listing)| {
@@ -2178,20 +2207,6 @@ fn cmd_build(
                         reporter.as_ref(),
                         &dep,
                         format!("it was already attempted this run ({earlier})"),
-                    );
-                    continue;
-                }
-                let key = ap_build::osc::fuzzy_key(&dep);
-                if !retrying.contains(&key)
-                    && let Some(real) =
-                        ap_build::osc::built_in_project(&own_listing, &own_statuses, &dep)
-                {
-                    dep_drops.dropped(
-                        reporter.as_ref(),
-                        &dep,
-                        format!(
-                            "{project} already builds it as {real}, so it is not patched again"
-                        ),
                     );
                     continue;
                 }
