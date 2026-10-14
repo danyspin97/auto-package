@@ -3235,9 +3235,11 @@ fn rpm_base_name(file: &str) -> Option<&str> {
 }
 
 /// Delete the RPMs in `rpms_dir` that an earlier build of the same package
-/// left behind: files named like one of `current` (same package name) but not
-/// one of them. `rpms_dir` is shared by every package, so they would
-/// otherwise pile up and satisfy a dependency with an old version.
+/// left behind: files named like one of `current` (same package name),
+/// including a `current` file itself, so that a download which wrote nothing
+/// is not mistaken for one that did by a stale file of the same name.
+/// `rpms_dir` is shared by every package, so they would otherwise pile up and
+/// satisfy a dependency with an old version.
 fn remove_superseded_rpms(rpms_dir: &Path, current: &[String]) {
     let names: std::collections::HashSet<&str> =
         current.iter().filter_map(|f| rpm_base_name(f)).collect();
@@ -3246,13 +3248,13 @@ fn remove_superseded_rpms(rpms_dir: &Path, current: &[String]) {
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let file = entry.file_name().to_string_lossy().into_owned();
-        if current.contains(&file) || file.ends_with(".src.rpm") {
+        if file.ends_with(".src.rpm") {
             continue;
         }
         if rpm_base_name(&file).is_some_and(|n| names.contains(n))
             && let Err(e) = fs::remove_file(entry.path())
         {
-            ap_core::diag!("  cannot remove the superseded {file}: {e}");
+            ap_core::diag!("  cannot remove the stale {file}: {e}");
         }
     }
 }
@@ -3862,15 +3864,21 @@ pub fn obs_build(
         if was_blocked && last_block_change.elapsed() < BLOCK_STALL {
             blocked_credit += tick;
         }
-        if start.elapsed().saturating_sub(blocked_credit) >= MAX_WAIT
-            || start.elapsed() >= MAX_TOTAL_WAIT
-        {
+        let waited = start.elapsed();
+        if waited.saturating_sub(blocked_credit) >= MAX_WAIT || waited >= MAX_TOTAL_WAIT {
+            // Which limit tripped: the total one only when it did so alone.
+            let limit = if waited >= MAX_TOTAL_WAIT {
+                MAX_TOTAL_WAIT
+            } else {
+                MAX_WAIT
+            };
             return Err(Error::OscFailed {
                 cmd: format!("wait {project}/{pkg_name}"),
                 code: -1,
                 stderr: format!(
-                    "timed out after {}s waiting for OBS build (last status: {})",
-                    MAX_WAIT.as_secs(),
+                    "timed out after {}s (limit {}s) waiting for OBS build (last status: {})",
+                    waited.as_secs(),
+                    limit.as_secs(),
                     if prev_status.is_empty() {
                         "none"
                     } else {
@@ -4981,7 +4989,7 @@ mod superseded_rpm_tests {
     }
 
     #[test]
-    fn an_old_version_of_a_listed_package_goes_and_everything_else_stays() {
+    fn every_file_of_a_listed_package_goes_and_everything_else_stays() {
         let dir = tempfile::tempdir().unwrap();
         for f in [
             "python313-foo-1.0-1.1.noarch.rpm",
@@ -5006,7 +5014,6 @@ mod superseded_rpm_tests {
             [
                 "other-3-1.1.x86_64.rpm",
                 "python-foo-1.0-1.1.src.rpm",
-                "python313-foo-2.0-1.1.noarch.rpm",
                 "python313-foobar-1.0-1.1.noarch.rpm",
             ]
         );
