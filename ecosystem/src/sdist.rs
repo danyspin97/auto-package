@@ -1033,7 +1033,10 @@ fn inspect_from_entries(
         && let Some((_, src)) = &cargo
         && let Ok(doc) = toml::from_str::<CargoToml>(src)
     {
-        project_name = doc.package.and_then(|p| p.name);
+        project_name = doc
+            .package
+            .and_then(|p| p.name)
+            .filter(|n| is_plain_project_name(n));
     }
 
     let python_depth = match (pyproject.as_ref().map(|(d, _, _)| *d), setup_py_depth) {
@@ -1131,16 +1134,32 @@ struct RawProject {
     name: Option<String>,
 }
 
+/// Whether an upstream-declared project name is safe to build a package, a
+/// directory and a command line around: the characters PyPI and crates.io
+/// allow, so no path separator, whitespace, shell or XML metacharacter. The
+/// manifest is untrusted, and the name ends up in file names and spec text.
+fn is_plain_project_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+}
+
 impl PyprojectToml {
     /// `[project].name`, else the legacy `[tool.poetry].name`.
     fn declared_name(self) -> Option<String> {
-        self.project.and_then(|p| p.name).or_else(|| {
-            self.tool?
-                .get("poetry")?
-                .get("name")?
-                .as_str()
-                .map(str::to_string)
-        })
+        self.project
+            .and_then(|p| p.name)
+            .or_else(|| {
+                self.tool?
+                    .get("poetry")?
+                    .get("name")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .filter(|n| is_plain_project_name(n))
     }
 }
 
@@ -1201,6 +1220,16 @@ mod tests {
         );
         // Both manifests present: the Python name wins (maturin projects).
         assert_eq!(info.project_name.as_deref(), Some("thing-py"));
+    }
+
+    #[test]
+    fn a_declared_name_that_is_not_a_plain_project_name_is_dropped() {
+        for ok in ["Flask", "zope.interface", "a_b-c", "libsigc++"] {
+            assert!(is_plain_project_name(ok), "{ok}");
+        }
+        for bad in ["", "../x", "a/b", "a b", "-x", "a;rm", "a<b", "a%{x}", "é"] {
+            assert!(!is_plain_project_name(bad), "{bad}");
+        }
     }
 
     #[test]
