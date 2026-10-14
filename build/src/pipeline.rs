@@ -856,10 +856,10 @@ fn dep_names_from_requires_dist(requires_dist: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// How many times one turn is simply re-issued, with no pause, when the API
-/// answers 429. A rejected call costs nothing and the quota is a moving
-/// window, so retrying straight away is the fastest way through; past this
-/// the failure goes to the round loop, which retries the package next round.
+/// How many times one turn is re-issued when the API answers 429. Each retry
+/// first waits out the process-wide pause (see `AgentSlot::note_rate_limited`),
+/// so the retries of parallel packages do not all hit the quota at once. Past
+/// this the failure goes to the round loop, which retries the package next round.
 const MAX_IMMEDIATE_RATE_LIMIT_RETRIES: u32 = 5;
 
 /// Agent turns running at once, process-wide. Unlimited by default so packages
@@ -867,6 +867,25 @@ const MAX_IMMEDIATE_RATE_LIMIT_RETRIES: u32 = 5;
 /// it if the model quota (429s) is the bottleneck.
 static AGENT_ACTIVE: (std::sync::Mutex<usize>, std::sync::Condvar) =
     (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// The quota is one pool shared by every package, so a 429 from any turn pauses
+/// all of them: no turn starts before `until`. Each consecutive 429 lengthens
+/// the pause, and a turn that gets through resets it.
+struct RateLimit {
+    until: Option<std::time::Instant>,
+    streak: u32,
+}
+
+static AGENT_RATE_LIMIT: std::sync::Mutex<RateLimit> = std::sync::Mutex::new(RateLimit {
+    until: None,
+    streak: 0,
+});
+
+/// The pause after the `streak`-th consecutive 429: 2s, doubling, capped at 60s.
+fn rate_limit_pause(streak: u32) -> std::time::Duration {
+    let secs = 2u64 << streak.saturating_sub(1).min(5);
+    std::time::Duration::from_secs(secs.min(60))
+}
 
 struct AgentSlot;
 
@@ -879,7 +898,43 @@ impl AgentSlot {
             .filter(|n| *n > 0)
     }
 
+    /// Record a 429: no turn starts again before the pause for it has passed.
+    fn note_rate_limited() {
+        let mut rl = AGENT_RATE_LIMIT.lock().unwrap_or_else(|e| e.into_inner());
+        rl.streak = rl.streak.saturating_add(1);
+        let until = std::time::Instant::now() + rate_limit_pause(rl.streak);
+        rl.until = Some(rl.until.map_or(until, |u| u.max(until)));
+    }
+
+    /// A turn got through, so the next 429 starts the pause from the beginning.
+    fn note_turn_ok() {
+        AGENT_RATE_LIMIT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .streak = 0;
+    }
+
+    /// Sleep until any shared pause has passed. Checked again after each sleep,
+    /// since another package's 429 may have extended it in the meantime.
+    fn wait_out_rate_limit() {
+        loop {
+            let until = AGENT_RATE_LIMIT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .until;
+            let Some(until) = until else {
+                return;
+            };
+            let now = std::time::Instant::now();
+            if now >= until {
+                return;
+            }
+            std::thread::sleep(until - now);
+        }
+    }
+
     fn acquire() -> Self {
+        Self::wait_out_rate_limit();
         let (lock, cvar) = &AGENT_ACTIVE;
         let max = Self::limit();
         let mut active = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -2969,8 +3024,8 @@ fn agent_turn(
 
     // A 429 is the provider's quota, not this package's fault. Re-issue the
     // turn on the next model in the rotation (each model has its own quota)
-    // before spending one of the package's attempts, so a burst of parallel
-    // packages does not all give up at once.
+    // after the pause every turn shares, before spending one of the package's
+    // attempts, so a burst of parallel packages does not all give up at once.
     let mut rate_limit_retries = 0u32;
     let turn_result = loop {
         // The quota is shared by every package running in parallel: when any
@@ -3004,6 +3059,11 @@ fn agent_turn(
             charge_failed_call(ws, &config.run_id, spent_usd, &result);
         }
         drop(slot);
+        if matches!(&result, Err(e) if e.is_rate_limited()) {
+            AgentSlot::note_rate_limited();
+        } else if result.is_ok() {
+            AgentSlot::note_turn_ok();
+        }
         match result {
             Err(e)
                 if e.is_rate_limited() && rate_limit_retries < MAX_IMMEDIATE_RATE_LIMIT_RETRIES =>
@@ -3013,7 +3073,7 @@ fn agent_turn(
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
                     message: format!(
-                        "model API rate-limited (429) on {}; retrying now on {} ({rate_limit_retries}/{MAX_IMMEDIATE_RATE_LIMIT_RETRIES})",
+                        "model API rate-limited (429) on {}; pausing, then retrying on {} ({rate_limit_retries}/{MAX_IMMEDIATE_RATE_LIMIT_RETRIES})",
                         crate::agent::model_for_attempt(ctx.attempt, model_rotation.get() - 1),
                         crate::agent::model_for_attempt(ctx.attempt, model_rotation.get()),
                     ),
@@ -6765,6 +6825,14 @@ mod tests {
             err.contains("backports.zstd"),
             "error should list available names: {err}"
         );
+    }
+
+    #[test]
+    fn rate_limit_pause_doubles_and_caps_at_a_minute() {
+        assert_eq!(rate_limit_pause(1).as_secs(), 2);
+        assert_eq!(rate_limit_pause(2).as_secs(), 4);
+        assert_eq!(rate_limit_pause(4).as_secs(), 16);
+        assert_eq!(rate_limit_pause(50).as_secs(), 60);
     }
 
     #[test]
