@@ -135,9 +135,20 @@ pub enum BuildFailure {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpecRejection {
-    MacroInComment { line: u32, text: String },
-    RpmspecParseFailed { stderr: String },
-    MissingSourceFiles { names: Vec<String> },
+    MacroInComment {
+        line: u32,
+        text: String,
+    },
+    RpmspecParseFailed {
+        stderr: String,
+    },
+    MissingSourceFiles {
+        names: Vec<String>,
+    },
+    /// The spec still has `TODO` placeholders, as `line: text`.
+    Placeholders {
+        lines: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

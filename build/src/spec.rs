@@ -2560,3 +2560,39 @@ mod review_fix_tests {
         );
     }
 }
+
+/// Lines of `spec` that still carry a `TODO` placeholder, as `(line number,
+/// text)`. The skeleton generators leave these for the agent to fill in, and a
+/// spec that keeps one builds an empty or half-described package. The
+/// `%changelog` is history, not a placeholder, and is not searched.
+pub fn todo_placeholders(spec: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for (i, line) in spec.lines().enumerate() {
+        if line.trim_end() == "%changelog" {
+            break;
+        }
+        if line.contains("TODO") {
+            found.push((i + 1, line.trim().to_string()));
+        }
+    }
+    found
+}
+
+#[cfg(test)]
+mod todo_placeholder_tests {
+    use super::todo_placeholders;
+
+    #[test]
+    fn finds_markers_outside_the_changelog_only() {
+        let spec = "Summary: TODO: fill in summary\n%install\n# TODO: install\n%changelog\n- TODO in history\n";
+        let found = todo_placeholders(spec);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0, 1);
+        assert_eq!(found[1].1, "# TODO: install");
+    }
+
+    #[test]
+    fn a_finished_spec_has_none() {
+        assert!(todo_placeholders("Summary: A tool\n%build\n%make_build\n").is_empty());
+    }
+}

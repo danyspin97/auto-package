@@ -1404,6 +1404,13 @@ fn run_stages(
     }
 }
 
+/// Whether the spec at `path` still carries a TODO placeholder (convention 63).
+/// An unreadable spec has none.
+fn spec_has_placeholders(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|text| !crate::spec::todo_placeholders(&text).is_empty())
+}
+
 /// Name checks and the local-state fast path; opens the workspace.
 fn preflight<'a>(
     config: &'a PipelineConfig,
@@ -1432,7 +1439,16 @@ fn preflight<'a>(
     };
 
     let prior = PkgState::load(&ws);
-    if !config.force && prior.is_built(&config.version) {
+    // A package whose checked-out spec is an unfinished skeleton is not done,
+    // whatever an earlier build of it reported.
+    let unfinished = spec_has_placeholders(
+        &config
+            .work_dir
+            .join(&config.project)
+            .join(&rpm_name)
+            .join(format!("{rpm_name}.spec")),
+    );
+    if !config.force && prior.is_built(&config.version) && !unfinished {
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
     }
     if prior.last_outcome.as_deref() == Some("success") && !prior.policy_current() {
@@ -1569,6 +1585,7 @@ fn checkout_stage(
         && spec_path.exists()
         && !has_local_changes
         && !spec_version_differs(spec_path, &config.version)
+        && !spec_has_placeholders(spec_path)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
         && PkgState::load(ws).policy_current()
     {
@@ -2674,6 +2691,59 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                     Some(&context),
                     "missing source files",
                     "missing source files and agent failed: ",
+                )?;
+                return Ok(Flow::Retry);
+            }
+
+            // A skeleton left unfinished builds "successfully" and publishes an
+            // empty package, so no spec with a TODO placeholder is committed
+            // (convention 63).
+            let todos = crate::spec::todo_placeholders(
+                &std::fs::read_to_string(spec_path).unwrap_or_default(),
+            );
+            if !todos.is_empty() {
+                let lines: Vec<String> = todos
+                    .iter()
+                    .map(|(n, text)| format!("{n}: {text}"))
+                    .collect();
+                let validate_step = validate_step.finish(StepOutcome::Failed);
+                reporter.report(&Event::SpecRejected {
+                    step: validate_step.id,
+                    reason: ap_core::event::SpecRejection::Placeholders {
+                        lines: lines.clone(),
+                    },
+                    restored_from: spec_path.clone(),
+                });
+                if config.no_agent
+                    || st.attempts >= config.max_attempts
+                    || st.spent_usd >= config.budget_usd
+                {
+                    skip_agent(
+                        reporter,
+                        &mut st.step_attempts,
+                        config,
+                        st.attempts,
+                        st.spent_usd,
+                    );
+                    return Err(ctx.failed(format!(
+                        "the spec still has TODO placeholders: {}",
+                        lines.join("; ")
+                    )));
+                }
+                let context = format!(
+                    "The spec still contains TODO placeholders, so it is an unfinished \
+                     skeleton and cannot be built or committed (convention 63). Replace each \
+                     with real content from `source/`: the summary, the SPDX license, the \
+                     description, the build, install and check commands, and the exact \
+                     `%files`. These are the lines:\n\n{}",
+                    crate::agent::fenced_data(&lines.join("\n"))
+                );
+                fix_after_validation(
+                    ctx,
+                    st,
+                    Some(&context),
+                    "TODO placeholders",
+                    "TODO placeholders and agent failed: ",
                 )?;
                 return Ok(Flow::Retry);
             }

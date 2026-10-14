@@ -717,8 +717,9 @@ openSUSE spec conventions to keep in mind:
 
    Write any such comment WITHOUT a '%' character, because RPM expands macros
    inside comments (see the note below the conventions). Write
-   `# TODO: tests are not run - all tests require network access`, never
-   `# no %check - ...`. Never leave %check empty, never add '|| true', and
+   `# tests are not run - all tests require network access`, never
+   `# no %check - ...`. A spec never carries the word TODO: the pipeline
+   rejects it before the build (convention 63). Never leave %check empty, never add '|| true', and
    never add '|| [ "$?" = "5" ]'. (Sole exception: convention 48's per-arch
    `test_failok` second pass, which may end in `||:` — the main pass must
    still fail the build.)
@@ -1657,7 +1658,9 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
 33. **Plain C/C++ packages** (no Python, no Cargo — just CMakeLists.txt or
    configure.ac): a third ecosystem, much less uniform than the other two.
    The generator only picked the build system and the `%autosetup -n`
-   directory; everything else is a TODO for you to fill in from `source/`.
+   directory; everything else is a TODO placeholder in the generated spec for
+   you to fill in from `source/`; none may be left in the finished spec
+   (convention 63).
    Use the `plain-c-cpp-packaging` skill for the full treatment (shared-
    library SONAME subpackage split, `%ldconfig_scriptlets`, CMake/autotools
    `%build`/`%check` patterns, `%files` layout).
@@ -2514,6 +2517,20 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    be asked again then. Check convention 61 first: if this project already
    builds the patched dependency, only relax the bound and do not report it
    again.
+
+63. **No TODO placeholder is ever left in a spec.** The generators emit
+   skeleton specs (an unfinished monorepo layout, a generic C/C++ package, a
+   wheel they could not lay out) with `TODO` markers in `Summary:`,
+   `License:`, the description, `%build`, `%install`, `%check` and `%files`.
+   Every one of them is yours to replace with real content before you
+   finish the turn: read `source/` and fill in the summary, the SPDX
+   license, the description, the build and install commands and the exact
+   `%files`. An `%install` that holds only comments, or a `%files` that
+   lists only `%license`, builds "successfully" and publishes an empty
+   package that every dependent then fails on. If you cannot finish a part,
+   return `blocked` and say why; never leave a marker for later, and never
+   write TODO into a comment either. The pipeline rejects a spec that still
+   contains the word TODO outside `%changelog`.
 
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
@@ -4157,9 +4174,9 @@ fn review_prompt_non_python() -> &'static str {
      \n\
      6. **%check**: if there is no automated test target (no `enable_testing()` \
         in CMakeLists.txt, no `make check` in configure.ac), note that in the \
-        spec: omit `%check` and put a `# TODO: no upstream test suite` comment where \
+        spec: omit `%check` and put a `# no upstream test suite` comment where \
         it would go (matches the plain-c-cpp-packaging skill) rather than inventing \
-        one.\n\
+        one. Never write TODO in the spec.\n\
      \n\
      If a check does not apply, say so in one clause; do not invent work."
 }

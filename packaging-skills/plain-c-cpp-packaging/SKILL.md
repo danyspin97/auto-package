@@ -7,7 +7,7 @@ description: Use when packaging a plain C/C++ library or binary with no Python a
 
 A third ecosystem, much less uniform than Python or Rust. The generator only
 picks the build system and the `%autosetup -n` directory; everything else is
-a TODO to fill in from `source/`. The shapes below are taken from real
+a placeholder to fill in from `source/` (none may stay in the spec). The shapes below are taken from real
 openSUSE specs (`fmt`, `zlib-ng`, `libuv` in Factory) — verify the exact macro
 spelling (grep `/usr/lib/rpm/macros.d`; the pipeline validates the spec after your turn) rather than assuming these examples
 generalize perfectly to this package.
@@ -136,7 +136,7 @@ generalize perfectly to this package.
   `add_test()`; `%make_build check` (sometimes gated behind
   `%if !0%{?qemu_user_space_build}` when the suite needs the build arch's
   native execution) for autotools projects with a `check` target. If
-  neither exists, say so and leave `%check` out with a `# TODO:` comment
+  neither exists, say so and leave `%check` out with a plain `# no upstream test suite` comment
   — never `|| true`. For autotools specifically, dump the real test log on
   failure instead of leaving only a generic "check failed" in build.log —
   autotools' own `tests/testsuite.log`/`test-suite.log` has the actual
