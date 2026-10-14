@@ -2791,6 +2791,7 @@ fn unresolvable_deps_round(
             &mut st.session_id,
             &mut st.step_attempts,
         );
+        let turn_succeeded = turn.is_ok();
         if let Ok((_, outcome)) = turn {
             translated = outcome.unresolvable_packages;
         }
@@ -2827,10 +2828,14 @@ fn unresolvable_deps_round(
             }
         }
 
-        update_state(ws, reporter, |state| {
-            state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
-            state.unresolvable_translated = translated.clone();
-        });
+        // A failed turn (rate limit, timeout, budget) asked nothing, so the
+        // dep set must stay un-reviewed for the next invocation to retry.
+        if turn_succeeded {
+            update_state(ws, reporter, |state| {
+                state.unresolvable_review_hash = Some(hash_deps(&sorted_deps));
+                state.unresolvable_translated = translated.clone();
+            });
+        }
     }
 
     if !translated.is_empty() {
