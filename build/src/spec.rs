@@ -253,13 +253,19 @@ pub fn fix_c_extension_arch(spec: &str) -> String {
 /// surfaces at actual install/build time (observed on python-nvidia-nvtx: a
 /// bare `chmod %{$python_sitelib}/...` line). Every real usage in this
 /// ecosystem's specs is single-line (`%python_expand <command...>`), so
-/// prefixing the whole line is sufficient; comment lines are left alone.
+/// prefixing the whole line is sufficient; comment lines are left alone, and so
+/// are continuation lines (after a trailing `\`), which already belong to the
+/// command their first line started.
 pub fn fix_stray_dollar_macros(spec: &str) -> String {
+    let mut continued = false;
     let out: Vec<String> = spec
         .lines()
         .map(|line| {
+            let is_continuation =
+                std::mem::replace(&mut continued, line.trim_end().ends_with('\\'));
             let trimmed = line.trim_start();
-            if trimmed.starts_with('#')
+            if is_continuation
+                || trimmed.starts_with('#')
                 || trimmed.contains("%python_expand")
                 || !trimmed.contains("%{$")
             {
@@ -912,6 +918,28 @@ Version:        3.0.3
     /// `%{$python_sitelib}` only resolves inside `%python_expand` — a bare
     /// line reproduces the python-nvidia-nvtx bug where it silently expands
     /// to `%{}` instead of failing loudly.
+    #[test]
+    fn a_continuation_line_is_not_prefixed_again() {
+        let spec = "\
+%install
+%python_expand cp -a foo \\
+  %{buildroot}%{$python_sitelib}/foo
+chmod +x %{$python_sitelib}/a \\
+  %{$python_sitelib}/b
+";
+        let fixed = fix_stray_dollar_macros(spec);
+        assert!(
+            fixed.contains("\n  %{buildroot}%{$python_sitelib}/foo\n"),
+            "{fixed}"
+        );
+        assert!(fixed.contains("\n  %{$python_sitelib}/b\n"), "{fixed}");
+        assert!(
+            fixed.contains("%python_expand chmod +x %{$python_sitelib}/a \\\n"),
+            "{fixed}"
+        );
+        assert_eq!(fixed.matches("%python_expand").count(), 2, "{fixed}");
+    }
+
     #[test]
     fn a_bare_dollar_macro_line_gets_python_expand_prefixed() {
         let spec = "\
@@ -2301,7 +2329,10 @@ BuildRequires:  %{python_module pip}
                     %{$python_sitelib}/Black/\n";
         let out = normalize_files_paths(spec, "Black");
         assert!(out.contains("\n%{_bindir}/black\n"), "{out}");
-        assert!(out.contains("\n%python_alternative %{_bindir}/black\n"), "{out}");
+        assert!(
+            out.contains("\n%python_alternative %{_bindir}/black\n"),
+            "{out}"
+        );
         assert!(out.contains("\n%{python_sitelib}/black/\n"), "{out}");
         assert!(out.contains("\n%{$python_sitelib}/black/\n"), "{out}");
     }

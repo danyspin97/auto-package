@@ -4390,7 +4390,9 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
             // `get` rather than slicing: spec text can hold multi-byte
             // characters, and a mid-character cut would panic.
             (tag.len() > 5
-                && tag.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("patch"))
+                && tag
+                    .get(..5)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
                 && tag[5..].chars().all(|c| c.is_ascii_digit()))
             .then(|| value.trim().to_string())
         })
@@ -7177,7 +7179,12 @@ mod tests {
     #[test]
     fn find_tarball_prefers_the_current_version_and_is_deterministic() {
         let dir = tempfile::tempdir().unwrap();
-        for f in ["a-1.0.tar.gz", "foo-1.0.tar.gz", "foo-2.0.tar.gz", "vendor.tar.zst"] {
+        for f in [
+            "a-1.0.tar.gz",
+            "foo-1.0.tar.gz",
+            "foo-2.0.tar.gz",
+            "vendor.tar.zst",
+        ] {
             std::fs::write(dir.path().join(f), b"").unwrap();
         }
         let name = |v: &str| {
