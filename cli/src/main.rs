@@ -390,10 +390,14 @@ fn pypi_latest_version(name: &str, reporter: &dyn Reporter) -> Option<String> {
 /// the agent reports it.
 fn resolve_dependency_config(
     dep: &str,
+    native: bool,
     config: &PipelineConfig,
     reporter: &dyn Reporter,
 ) -> Option<PipelineConfig> {
-    let parent_is_python = config.rpm_name.starts_with("python-");
+    // A C/C++ library (reported as `lib<x>-devel`, `pkgconfig(x)`, a soname) is
+    // never looked up on PyPI: a PyPI project that happens to share its name is
+    // not it, and would be packaged as `python-<x>`.
+    let parent_is_python = config.rpm_name.starts_with("python-") && !native;
 
     if parent_is_python {
         // Use the version-only path, not fetch_latest_release: a wheel-only
@@ -2187,9 +2191,14 @@ fn cmd_build(
             // recognized as making no progress (see `new_deps` below).
             let mut in_batch = std::collections::HashSet::new();
             let mut triaged: Vec<String> = Vec::new();
+            // Names `triage` found to be native libraries, by `fuzzy_key`.
+            let mut native_keys: std::collections::HashSet<String> = Default::default();
             for raw in batch {
                 match ap_build::depclass::triage(&raw, &|c| ap_build::osc::distro_provides(c)) {
-                    ap_build::depclass::Triage::Build { name, .. } => {
+                    ap_build::depclass::Triage::Build { name, kind } => {
+                        if kind == ap_build::depclass::PackageKind::Native {
+                            native_keys.insert(ap_build::osc::fuzzy_key(&name));
+                        }
                         if in_batch.insert(ap_build::osc::fuzzy_key(&name)) {
                             triaged.push(name);
                         }
@@ -2471,8 +2480,9 @@ fn cmd_build(
                     }
                 })
                 .filter_map(|dep| {
+                    let native = native_keys.contains(&ap_build::osc::fuzzy_key(&dep));
                     let mut dep_config =
-                        match resolve_dependency_config(&dep, &config, reporter.as_ref()) {
+                        match resolve_dependency_config(&dep, native, &config, reporter.as_ref()) {
                             Some(c) => c,
                             None => {
                                 // No PyPI project and no discoverable source repo —

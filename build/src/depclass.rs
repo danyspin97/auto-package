@@ -60,8 +60,11 @@ impl Skip {
                  (see SYSTEM_TOOL_ALIASES), which the distro already ships"
             ),
             Skip::Vendor(n) => format!(
-                "{n} belongs to a vendor driver or toolkit with no public source: it cannot \
-                 be built here, and a build must not require it"
+                "{n} belongs to a vendor driver or toolkit that cannot be built here (no \
+                 public source, or it needs the CUDA compiler), so it is never packaged as \
+                 a `python-<lib>` package for a C library. A Python package that loads it \
+                 from site-packages depends on NVIDIA's own wheel of it (`nvidia-<lib>-cuNN` \
+                 on PyPI); anything else must not require it"
             ),
             Skip::NotAPackage { capability, why } => {
                 format!("{capability} is not a package: {why}")
@@ -131,7 +134,27 @@ const PYTHON_INTERPRETER_STEMS: &[&str] = &[
 /// Library stems of vendor drivers and toolkits that ship no source: the
 /// driver's own library (`libcuda`, the one a container gets from the host)
 /// and NVIDIA's closed-source user-space libraries.
-const VENDOR_LIBRARY_PREFIXES: &[&str] = &["libcuda", "libnvidia-", "libnvcuvid", "libnvoptix"];
+const VENDOR_LIBRARY_PREFIXES: &[&str] = &[
+    "libcuda",
+    "libnvidia-",
+    "libnvcuvid",
+    "libnvoptix",
+    // The CUDA toolkit's own libraries, which need `nvcc` to build and ship
+    // only as NVIDIA's binaries: never a `python-<lib>` package of their own.
+    "libnccl",
+    "libcudnn",
+    "libcublas",
+    "libcufft",
+    "libcurand",
+    "libcusolver",
+    "libcusparse",
+    "libcudart",
+    "libnvrtc",
+    "libnvjitlink",
+    "libnvshmem",
+    "libcufile",
+    "libnvtx",
+];
 
 /// `python3dist(x)` / `python313dist(x)` -> `x`.
 fn python_dist(name: &str) -> Option<&str> {

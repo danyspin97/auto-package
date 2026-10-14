@@ -1973,6 +1973,74 @@ fn license_tag(license: &License) -> String {
     }
 }
 
+/// Whether a wheel's declared licence is a vendor's proprietary one rather than
+/// an open source licence: free text or an SPDX expression naming NVIDIA or a
+/// proprietary / end-user agreement, or the "Proprietary" trove classifier.
+pub fn license_is_proprietary(license: &License) -> bool {
+    let text = match license {
+        License::Spdx(t) | License::FreeText(t) => t.to_lowercase(),
+        License::Classifiers(c) => c.join(" ").to_lowercase(),
+        License::Unknown => return false,
+    };
+    ["proprietary", "nvidia", "license agreement", "eula"]
+        .iter()
+        .any(|w| text.contains(w))
+}
+
+/// `spec` with a sentence added to the `%description`, saying the package is a
+/// vendor's prebuilt library unpacked from its wheel and not built from source.
+pub fn note_prebuilt_library(spec: &str, proprietary: bool) -> String {
+    let note = if proprietary {
+        "This package redistributes the vendor's prebuilt binary library, unpacked from \
+         its wheel; it is not built from source and its licence is not an open source one."
+    } else {
+        "This package redistributes the upstream prebuilt binary library, unpacked from \
+         its wheel; it is not built from source."
+    };
+    let mut out = Vec::new();
+    let mut after_description = false;
+    let mut done = false;
+    for line in spec.lines() {
+        out.push(line.to_string());
+        if !done && after_description {
+            out.push(String::new());
+            out.push(note.to_string());
+            done = true;
+        }
+        if line.trim_end() == "%description" {
+            after_description = true;
+        }
+    }
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+#[cfg(test)]
+mod prebuilt_library_tests {
+    use super::*;
+
+    #[test]
+    fn the_description_gets_the_note_once() {
+        let spec = "%description\nNCCL runtime\n\n%prep\n";
+        let out = note_prebuilt_library(spec, true);
+        assert!(
+            out.starts_with(
+                "%description\nNCCL runtime\n\nThis package redistributes the vendor's"
+            )
+        );
+        assert_eq!(out.matches("redistributes").count(), 1);
+        assert!(out.contains("%prep"));
+    }
+
+    #[test]
+    fn nvidia_licence_text_is_proprietary() {
+        assert!(license_is_proprietary(&License::FreeText(
+            "LicenseRef-NVIDIA-Proprietary".into()
+        )));
+        assert!(!license_is_proprietary(&License::Spdx("MIT".into())));
+        assert!(!license_is_proprietary(&License::Unknown));
+    }
+}
+
 #[cfg(test)]
 mod generator_tests {
     use super::*;
@@ -2561,7 +2629,7 @@ mod review_fix_tests {
     }
 }
 
-/// Lines of `spec` that still carry a `TODO` placeholder, as `(line number,
+/// Lines of `spec` that still carry a `TODO` or `FIXME` placeholder, as `(line number,
 /// text)`. The skeleton generators leave these for the agent to fill in, and a
 /// spec that keeps one builds an empty or half-described package. The
 /// `%changelog` is history, not a placeholder, and is not searched.
@@ -2571,7 +2639,7 @@ pub fn todo_placeholders(spec: &str) -> Vec<(usize, String)> {
         if line.trim_end() == "%changelog" {
             break;
         }
-        if line.contains("TODO") {
+        if line.contains("TODO") || line.contains("FIXME") {
             found.push((i + 1, line.trim().to_string()));
         }
     }

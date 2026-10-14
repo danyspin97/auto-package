@@ -2532,6 +2532,17 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    write TODO into a comment either. The pipeline rejects a spec that still
    contains the word TODO outside `%changelog`.
 
+64. **A C/C++ or CUDA library is never packaged as `python-<lib>`.** A native
+   library is a package of its own (`libfoo`, `foo-devel`), reported with the
+   `lib` prefix and `-devel` suffix removed (convention 27), and it is looked
+   up in upstream source repositories, not on PyPI: a PyPI project that merely
+   shares its name is a different thing. NVIDIA's `nvidia-<lib>-cuNN` wheels
+   (NCCL, cuDNN, cuBLAS, ...) are vendor binaries carried through PyPI; they
+   exist here only so a Python package that loads them from site-packages
+   (torch) has them, so depend on them by that PyPI name and only then. Never
+   report a vendor library (`libcuda`, `libnccl`, `libcudnn`, `libcublas`, ...)
+   as a package to build.
+
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
 A standalone Rust package (binary/library built entirely with Cargo — a

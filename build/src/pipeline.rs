@@ -6262,6 +6262,27 @@ fn generate_wheel_binary_spec(
         layout.as_ref(),
     );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
+    // A wheel that is only a vendor's shared library is a C library carried
+    // through PyPI, not a Python package. It is repackaged only because a
+    // Python package loads it from site-packages; say so in the description,
+    // and flag a licence that is not open source.
+    let library_only = layout.as_ref().is_some_and(|l| l.is_library_only());
+    let spec_text = if library_only {
+        let proprietary = crate::spec::license_is_proprietary(&release.license);
+        ap_core::diag!(
+            "warning: {} {} is a prebuilt vendor library, not a Python package{}",
+            config.pkg_name,
+            config.version,
+            if proprietary {
+                "; its licence is not open source, so this redistributes proprietary binaries"
+            } else {
+                ""
+            }
+        );
+        crate::spec::note_prebuilt_library(&spec_text, proprietary)
+    } else {
+        spec_text
+    };
     ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     write_or_warn(step.file("spec.generated"), &spec_text);

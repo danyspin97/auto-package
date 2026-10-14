@@ -289,6 +289,15 @@ pub struct WheelLayout {
     pub header_dirs: Vec<String>,
 }
 
+impl WheelLayout {
+    /// The wheel only carries shared libraries: nothing to `import`. NVIDIA's
+    /// `nvidia-<lib>-cuNN` wheels are this, a vendor's C/CUDA library shipped
+    /// through PyPI.
+    pub fn is_library_only(&self) -> bool {
+        self.importable.is_none() && self.first_shared_lib.is_some()
+    }
+}
+
 /// Inspect a wheel's file list. `None` when it cannot be read as a zip.
 pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
     let file = std::fs::File::open(wheel).ok()?;
