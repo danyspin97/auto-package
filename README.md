@@ -139,8 +139,10 @@ Upstream content is untrusted: PyPI sdists and wheels, source repositories,
 build logs, and anything the agent or a spec macro produces from them. The
 tool assumes these may be hostile and limits what they can reach:
 
-- **Archives**: links are refused if they can reach outside the unpacked tree,
-  and archives are bounded in size, expansion ratio and entry count.
+- **Archives**: links are refused if they can reach outside the unpacked tree
+  (including through a chain of earlier links), zip symlinks are never
+  created, and archives are bounded in total size, per-file size and entry
+  count. An archive that will not unpack is reported, not skipped silently.
 - **Spec macros**: `rpmspec` expansion runs in a bubblewrap sandbox with no
   network and no home directory. Without a sandbox, specs with code-running
   macros (`%(...)`, `%{lua:...}`) are refused.
@@ -148,18 +150,27 @@ tool assumes these may be hostile and limits what they can reach:
   its build backend, so that is opt-in via `AUTO_PACKAGE_ALLOW_SDIST_RESOLVE=1`.
   pip gets a cleared environment.
 - **Agent**: the build turn can read only the workspace and checkout, run
-  `rpmspec`, `osc status`/`osc vc`, `ls`, and `quilt`, and fetch PyPI metadata.
-  It has no shell `rm`, `zypper` or general web access. Credential variables
-  are removed from its environment, except the Anthropic credentials the CLI
-  itself needs. Those remain visible to its commands. Build logs are fenced
-  as data in prompts.
+  `rpmspec`, `osc status`/`osc vc`, `ls`, `quilt` and the read-only
+  `zypper search`/`what-provides` queries, and fetch PyPI metadata. It has no
+  shell `rm` or general web access (the dependency-name lookup turn may search
+  the web, but can touch no local file). Credential variables are removed from
+  its environment, except the Anthropic credentials the CLI itself needs.
+  Those remain visible to its commands. Build logs, notes, and names taken
+  from a spec are fenced as data in prompts.
 - **Upstream sources**: a repository found by search is not built without
   confirmation. Only a curated mapping, the repository PyPI records for the
-  project, or an NVIDIA-org repository is used automatically. Confirm another
-  with `--source-url`; the archive's sha256 is recorded in the spec.
+  project, the upstream another distribution's spec records, or an NVIDIA-org
+  repository is used automatically. A source the agent finds on the web must
+  also be on an allowed host and on a site the project itself records. Confirm
+  another with `--source-url`; the archive's sha256 is recorded in the spec.
 - **OBS commits**: only the spec, archives, service files, changelog, rpmlint
   config and referenced patches are committed. Other files in the checkout
   are reported and left out.
+- **Local files**: lock files are opened without following symlinks. Scratch
+  files and the working directory of `gh` and `osc` live in a private,
+  randomly named, mode-0700 directory rather than a predictable shared path.
+  A child's process group is signalled before the child is reaped, so a reused
+  process id is never hit.
 - **Terminal output**: control sequences in printed diagnostics are removed.
 - **Not covered**: the machine running auto-package, the OBS server, and the
   packages it builds. Credentials are not isolated from the agent's own
