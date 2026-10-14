@@ -210,8 +210,16 @@ fn update_inner(
     // permission mode with project-only settings; user settings could
     // otherwise widen what the agent may write.
     // The newest journal entries are inlined; older ones stay in the file.
-    let journal_tail =
-        crate::pipeline::tail_for_prompt(&std::fs::read_to_string(ws.notes()).unwrap_or_default());
+    // The journal is only read, never rewritten, so an unreadable one costs
+    // the prompt its context but cannot lose anything; say so.
+    let journal = read_or_empty(&ws.notes()).unwrap_or_else(|e| {
+        ap_core::diag!(
+            "  cannot read {}: {e}; notes prompt has no journal",
+            ws.notes().display()
+        );
+        String::new()
+    });
+    let journal_tail = crate::pipeline::tail_for_prompt(&journal);
     let out = claude_print_json(
         NOTES_MODEL,
         &tools,
@@ -378,9 +386,18 @@ fn commit_notes(dir: &Path, file: &Path, rpm_name: &str, version: &str) -> Resul
 }
 
 /// Token counts and cost from `claude --output-format json`. A reply that does
-/// not parse counts as free rather than failing the notes update.
+/// not parse does not fail the notes update, but the turn may have spent up to
+/// its cap, so that is charged (with a warning) rather than nothing.
 fn usage_from_output(stdout: &str) -> Usage {
-    let v: serde_json::Value = serde_json::from_str(stdout).unwrap_or_default();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        ap_core::diag!(
+            "  notes reply was not JSON; cost counted as the ${NOTES_CAP_USD:.2} turn cap, an estimate"
+        );
+        return Usage {
+            cost_usd: NOTES_CAP_USD,
+            ..Usage::default()
+        };
+    };
     Usage {
         input_tokens: v["usage"]["input_tokens"].as_u64().unwrap_or(0),
         output_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
@@ -581,10 +598,10 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_reply_is_free() {
+    fn unparseable_reply_is_charged_the_cap() {
         let u = usage_from_output("not json");
         assert_eq!(u.input_tokens + u.output_tokens, 0);
-        assert_eq!(u.cost_usd, 0.0);
+        assert_eq!(u.cost_usd, NOTES_CAP_USD);
     }
 
     #[test]
