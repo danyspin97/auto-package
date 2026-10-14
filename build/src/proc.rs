@@ -1,12 +1,7 @@
-//! Subprocess execution with single-fd log capture and event emission.
-//!
-//! Both stdout and stderr are redirected to the same file descriptor so
-//! the combined log is strictly chronological.
+//! Subprocess execution with captured output and event emission.
 
-use std::collections::HashMap;
-use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -91,143 +86,6 @@ impl<'a> Emit<'a> {
             stderr_bytes,
         });
     }
-}
-
-pub struct ProcessOutput {
-    pub code: i32,
-    pub log_path: PathBuf,
-    /// Bytes kept in `combined` (stdout+stderr merged); at most the last
-    /// 64 MiB, so it can be smaller than the log file.
-    pub stdout_bytes: u64,
-    /// Always 0 — stderr is merged into stdout_bytes.
-    pub stderr_bytes: u64,
-    pub elapsed: Duration,
-    /// Tail of the combined stdout+stderr: the last 64 MiB of `log_path`
-    /// (all of it when smaller). Read the file for the full log.
-    pub combined: Vec<u8>,
-}
-
-impl ProcessOutput {
-    pub fn combined_str(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.combined)
-    }
-
-    pub fn success(&self) -> bool {
-        self.code == 0
-    }
-}
-
-/// Limit for [`run`] (package builds): long enough for the biggest compile,
-/// finite so a wedged child cannot hold the run forever.
-const RUN_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
-
-/// The last `cap` bytes of `path` (all of it when smaller); empty on error.
-fn read_tail(path: &Path, cap: u64) -> Vec<u8> {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = File::open(path) else {
-        return Vec::new();
-    };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if len > cap {
-        let _ = f.seek(SeekFrom::Start(len - cap));
-    }
-    let mut buf = Vec::new();
-    let _ = f.read_to_end(&mut buf);
-    buf
-}
-
-/// Run a subprocess, capturing stdout+stderr to a single log file.
-///
-/// Both file descriptors share the same underlying file description so
-/// writes are interleaved in arrival order. Emits `Event::Command` before
-/// launch and `Event::CommandDone` after completion.
-pub fn run(
-    program: &str,
-    args: &[impl AsRef<std::ffi::OsStr>],
-    cwd: &Path,
-    env: &HashMap<String, String>,
-    log_path: &Path,
-    emit: Emit<'_>,
-) -> Result<ProcessOutput, ProcessError> {
-    let argv: Vec<String> = args
-        .iter()
-        .map(|a| a.as_ref().to_string_lossy().into_owned())
-        .collect();
-
-    emit.started(program, &argv, cwd, Some(log_path));
-
-    // Both stdout and stderr go to the same file; try_clone shares the offset.
-    let log_file = File::create(log_path)?;
-    let log_clone = log_file.try_clone()?;
-
-    let start = Instant::now();
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .envs(env.iter())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_clone))
-        .stderr(Stdio::from(log_file));
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|e| ProcessError::Launch {
-        program: program.to_string(),
-        source: e,
-    })?;
-    let _group = match track_group(child.id()) {
-        Ok(g) => g,
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(e.into());
-        }
-    };
-    let status = loop {
-        let polled = match child.try_wait() {
-            Ok(polled) => polled,
-            Err(e) => {
-                // Don't leave the child (and its descendants) running.
-                kill_process_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.into());
-            }
-        };
-        match polled {
-            Some(status) => break status,
-            None if start.elapsed() >= RUN_TIMEOUT => {
-                kill_process_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                emit.done(-1, start.elapsed(), 0, 0);
-                return Err(ProcessError::Timeout {
-                    program: program.to_string(),
-                    secs: RUN_TIMEOUT.as_secs(),
-                });
-            }
-            None => std::thread::sleep(Duration::from_millis(100)),
-        }
-    };
-    // Same as `capture`: a descendant the child left behind must not outlive
-    // the step (it could keep writing to the log or holding resources).
-    kill_process_group(child.id());
-    let elapsed = start.elapsed();
-
-    let combined = read_tail(log_path, MAX_CAPTURE_BYTES);
-    let total_bytes = combined.len() as u64;
-    let code = status.code().unwrap_or(-1);
-
-    emit.done(code, elapsed, total_bytes, 0);
-
-    Ok(ProcessOutput {
-        code,
-        log_path: log_path.to_path_buf(),
-        stdout_bytes: total_bytes,
-        stderr_bytes: 0,
-        elapsed,
-        combined,
-    })
 }
 
 /// Wall-clock limit applied by [`capture`] when the caller has no tighter one:
@@ -318,11 +176,19 @@ pub fn kill_all_groups() {
 
 #[cfg(unix)]
 pub(crate) fn kill_process_group(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // A group id of 0 or -1 would address the caller's own group or every
+    // process we may signal, so only a real positive pid is ever passed on.
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    if pid <= 0 {
+        return;
+    }
+    // SAFETY: `kill` only sends a signal; the negative pid names the process
+    // group the child was placed in at spawn (`process_group(0)`).
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
 }
 
 #[cfg(not(unix))]
@@ -572,6 +438,20 @@ mod capture_timeout_tests {
         .expect("must time out");
         assert!(matches!(err, ProcessError::Timeout { .. }));
         assert!(t.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_process_group_sigkills_a_child_started_in_its_own_group() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        kill_process_group(child.id());
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 
     #[test]
