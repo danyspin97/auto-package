@@ -263,7 +263,9 @@ pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
         }
     }
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!("ap-archives-{}", std::process::id()));
+    // Under the private directory, not a predictable name in the shared
+    // temporary one, where another user could have put a link or a file first.
+    let dir = crate::proc::private_dir().join("archives");
     std::fs::create_dir_all(&dir).map_err(|e| FetchFailure::Transport(e.to_string()))?;
     let base = url
         .split(['?', '#'])
@@ -503,7 +505,8 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
         // Pass the path verbatim including any query string — gh accepts
         // `repos/owner/repo/tags?per_page=1` directly.
         &["api", path],
-        &std::env::temp_dir(),
+        // `gh` reads `.git` from where it starts; not the shared temp dir.
+        crate::proc::private_dir(),
         crate::proc::Emit::quiet(),
         std::time::Duration::from_secs(60),
         None,

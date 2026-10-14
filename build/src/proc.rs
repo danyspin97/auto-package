@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -98,6 +98,37 @@ pub const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// (so it never blocks on a full pipe) but only the last this-many bytes are
 /// kept: a failing build's cause is at the end of its log.
 const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A directory only this process can use, for scratch files and as the working
+/// directory of helpers that read configuration from the directory they start
+/// in (`gh` and `git` look for `.git`, `osc` for `.osc`).
+///
+/// The shared temporary directory is writable by every local user, so a path
+/// there can be pre-created by someone else (a predictable name, a planted
+/// `.git`), and a symlink or a hostile file in it is read as if it were ours.
+/// This one is created once, with a random name and mode 0700. If it cannot be
+/// created the root directory is returned, which holds nothing of that kind
+/// and nobody else can write to.
+pub fn private_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt;
+        tempfile::Builder::new()
+            .prefix("auto-package-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .map(tempfile::TempDir::keep)
+            .unwrap_or_else(|_| PathBuf::from("/"))
+    })
+}
+
+/// Remove [`private_dir`] and everything in it. Best effort, for process exit.
+pub fn remove_private_dir() {
+    let dir = private_dir();
+    if dir != Path::new("/") {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
 
 /// Append `chunk` to `buf`, then drop from the front so at most `cap` bytes
 /// remain — the tail of everything written so far.
@@ -494,6 +525,20 @@ mod capture_timeout_tests {
         .expect("complete stdout of a clean exit is returned");
         assert_eq!(out.code, 0);
         assert_eq!(out.stdout, "hi\n");
+    }
+
+    /// Scratch files and the working directory of `gh`/`osc` live in a
+    /// directory only this user can enter, not at a predictable shared path.
+    #[test]
+    fn private_dir_is_a_fresh_mode_0700_directory_under_the_temp_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_dir();
+        let meta = std::fs::symlink_metadata(dir).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        assert!(dir.starts_with(std::env::temp_dir()));
+        // The same directory every time within one process.
+        assert_eq!(dir, private_dir());
     }
 
     #[test]

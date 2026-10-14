@@ -205,7 +205,8 @@ pub fn distro_info(pkg: &str) -> DistroInfo {
     let Ok(out) = crate::proc::capture_with_timeout(
         "osc",
         &["cat", "openSUSE:Factory", &name, &spec_file],
-        &std::env::temp_dir(),
+        // `osc` looks for a working copy in the directory it starts in.
+        crate::proc::private_dir(),
         crate::proc::Emit::quiet(),
         Duration::from_secs(45),
     ) else {

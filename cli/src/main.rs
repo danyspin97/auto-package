@@ -542,6 +542,7 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     // Stop the build workers (own process groups, so the terminal's Ctrl-C
     // never reached them): otherwise `osc`/`claude` outlive this process.
     ap_build::proc::kill_all_groups();
+    ap_build::proc::remove_private_dir();
     if tui_active {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
@@ -611,6 +612,7 @@ fn main() -> color_eyre::Result<()> {
 
     let mut summary: Option<String> = None;
     let result = run(cli, &mut summary);
+    ap_build::proc::remove_private_dir();
     // Printed after `run` returns so the TUI has restored the terminal, and
     // whether or not the run failed: a failed run is the one where the list of
     // what was built and what is still queued matters most.
