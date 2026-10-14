@@ -19,6 +19,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -128,8 +129,20 @@ const MAX_JSON_BYTES: u64 = 64 << 20;
 /// Download cap when the index didn't tell us the file size.
 const MAX_DOWNLOAD_BYTES: u64 = 2 << 30;
 
+/// One agent per timeout, shared after that: agents hold the connection pool,
+/// so a fresh one per request would reopen a TLS connection every time.
 fn agent(timeout: Duration) -> ureq::Agent {
-    crate::net::agent(ureq::Agent::config_builder().timeout_global(Some(timeout)))
+    static JSON: OnceLock<ureq::Agent> = OnceLock::new();
+    static DOWNLOAD: OnceLock<ureq::Agent> = OnceLock::new();
+    let slot = if timeout == DOWNLOAD_TIMEOUT {
+        &DOWNLOAD
+    } else {
+        &JSON
+    };
+    slot.get_or_init(|| {
+        crate::net::agent(ureq::Agent::config_builder().timeout_global(Some(timeout)))
+    })
+    .clone()
 }
 
 fn get_json(url: &str) -> Result<String, FetchError> {
