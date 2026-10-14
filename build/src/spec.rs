@@ -2596,3 +2596,75 @@ mod todo_placeholder_tests {
         assert!(todo_placeholders("Summary: A tool\n%build\n%make_build\n").is_empty());
     }
 }
+
+/// `spec` with its `Version:` set to `version`, keeping everything else: the
+/// recipe a version bump carries forward. A `Version:` that is a single macro
+/// (`%{package_version}`) is followed to its plain `%define`/`%global` and that
+/// is set instead. `None` when the version cannot be found or is computed.
+pub fn set_version(spec: &str, version: &str) -> Option<String> {
+    let raw = tag_value(spec, "Version:")?;
+    let macro_name = raw
+        .strip_prefix("%{")
+        .and_then(|r| r.strip_suffix('}'))
+        .or_else(|| raw.strip_prefix('%'));
+    let defines = collect_simple_defines(spec);
+    let (prefixes, old_value): (Vec<String>, String) = match macro_name {
+        Some(name) if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') => {
+            (
+                vec![format!("%define {name}"), format!("%global {name}")],
+                defines.get(name)?.clone(),
+            )
+        }
+        Some(_) => return None,
+        None if raw.contains('%') => return None,
+        None => (vec!["Version:".to_string()], raw.to_string()),
+    };
+    let mut replaced = false;
+    let lines: Vec<String> = spec
+        .lines()
+        .map(|line| {
+            let t = line.trim_start();
+            let hit = !replaced
+                && prefixes.iter().any(|p| {
+                    t.strip_prefix(p.as_str())
+                        .is_some_and(|rest| rest.starts_with([' ', '\t']) || rest.is_empty())
+                })
+                && line.contains(old_value.as_str());
+            if hit {
+                replaced = true;
+                line.replacen(old_value.as_str(), version, 1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    replaced.then(|| lines.join("\n") + if spec.ends_with('\n') { "\n" } else { "" })
+}
+
+#[cfg(test)]
+mod set_version_tests {
+    use super::set_version;
+
+    #[test]
+    fn plain_version_is_replaced_and_the_rest_kept() {
+        let spec = "Name:           python-foo\nVersion:        0.1.0\nRelease:        0\n%build\n";
+        let out = set_version(spec, "0.2.0").unwrap();
+        assert_eq!(
+            out,
+            "Name:           python-foo\nVersion:        0.2.0\nRelease:        0\n%build\n"
+        );
+    }
+
+    #[test]
+    fn a_version_macro_sets_its_define() {
+        let spec = "%define package_version 1.0\nName: x\nVersion: %{package_version}\n";
+        let out = set_version(spec, "2.0").unwrap();
+        assert!(out.contains("%define package_version 2.0"), "{out}");
+        assert!(out.contains("Version: %{package_version}"), "{out}");
+    }
+
+    #[test]
+    fn a_computed_version_is_refused() {
+        assert!(set_version("Name: x\nVersion: %(echo 1)\n", "2").is_none());
+    }
+}

@@ -17,9 +17,10 @@
 //!   makes the distro package worth branching and patching (convention 62).
 //!   The dependency stays resolved; the conflict is reported.
 //! - The distro's version is too OLD (below a lower bound or an exact pin):
-//!   relaxing cannot help, so the version pip resolved is built in this project,
-//!   where it shadows the distro's package. The dependency is no longer
-//!   resolved.
+//!   relaxing cannot help, so the distro's package is branched into this
+//!   project and updated to the version pip resolved, carrying the distro's own
+//!   recipe forward (not packaged from scratch), where it shadows the distro's
+//!   package. The dependency is no longer resolved.
 //!
 //! Only dependents that still have to be built here are checked: a package the
 //! distro ships was built against what the distro ships.
@@ -298,7 +299,7 @@ pub fn stale_root_message(node: &Node, shipped: &str, project: &str) -> Option<S
     (shipped_v < resolved_v).then(|| {
         format!(
             "{} {shipped} from {project} is older than the {} that was resolved, and counts \
-             as available: nothing builds it here (pass --force to build {} in this project)",
+             as available: nothing builds it here (pass --force to branch it into this project and update it to {})",
             node.name, node.version, node.version
         )
     })

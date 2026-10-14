@@ -1435,11 +1435,50 @@ struct RunState {
     session_id: Option<String>,
 }
 
+/// The linked project that ships `rpm_name`, when the own project does not
+/// have it yet: the package is branched from there so the existing recipe is
+/// the starting point. `Ok(None)` when nothing needs branching (the project has
+/// it, no linked project ships it, or the shipped name differs in spelling, in
+/// which case a branch would land under the wrong name).
+fn branch_from_linked(
+    config: &PipelineConfig,
+    rpm_name: &str,
+    emit: Emit<'_>,
+) -> Result<Option<String>, String> {
+    let own = osc::try_list_project_packages(&config.project, emit).map_err(|e| e.to_string())?;
+    let key = osc::fuzzy_key(rpm_name);
+    if own.iter().any(|p| osc::fuzzy_key(p) == key) {
+        return Ok(None);
+    }
+    for (path_project, _repo) in
+        osc::get_project_repo_paths(&config.project, emit).map_err(|e| e.to_string())?
+    {
+        let listing =
+            osc::try_list_project_packages(&path_project, emit).map_err(|e| e.to_string())?;
+        let Some(shipped) = listing.iter().find(|p| osc::fuzzy_key(p) == key) else {
+            continue;
+        };
+        if shipped != rpm_name {
+            return Err(format!(
+                "{path_project} ships it as {shipped}, not {rpm_name}"
+            ));
+        }
+        let result = osc::branch_package(&path_project, rpm_name, &config.project, false, emit)
+            .map_err(|e| e.to_string());
+        osc::invalidate_project_packages_cache(&config.project);
+        return result.map(|_| Some(path_project));
+    }
+    Ok(None)
+}
+
 /// What `generate_spec_stage` learned about the package.
 struct SpecInfo {
     need_spec: bool,
     is_maturin: bool,
     is_rust: bool,
+    /// The version whose recipe this spec carries forward, when a version bump
+    /// kept the existing spec instead of regenerating it.
+    carried_from: Option<String>,
 }
 
 /// Whether a round of the validate/build loop moves on or goes around again.
@@ -1612,6 +1651,19 @@ fn checkout_stage(
         // previous flow also ran `osc::pull` right after, which is a
         // second `osc up` on the same directory — the server round-trip
         // was doubled on every single build. Removed.
+        // A package the distro already ships is branched into the project and
+        // updated from the distro's own recipe, not packaged from scratch.
+        match branch_from_linked(config, rpm_name, emit) {
+            Ok(Some(origin)) => reporter.report(&Event::Progress {
+                step: Some(step.id),
+                message: format!("branched {origin}/{rpm_name} into {}", config.project),
+            }),
+            Ok(None) => {}
+            Err(why) => reporter.report(&Event::Warning {
+                step: Some(step.id),
+                message: format!("not branching {rpm_name} from the distro: {why}"),
+            }),
+        }
         let result = osc::ensure_package(&config.project, rpm_name, &config.work_dir, emit)
             .and_then(|()| {
                 osc::checkout(&config.project, rpm_name, &config.work_dir, emit).map(|_| ())
@@ -1731,6 +1783,16 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
     let version_bump =
         spec_existed_before_generation && spec_version_differs(spec_path, &config.version);
     let need_spec = config.regen || !spec_existed_before_generation || version_bump;
+    // A bump keeps the recipe the package already has (its patches,
+    // BuildRequires, `%check` skips, a distro package's whole layout) unless
+    // `--regen` asks to start over; only the version and the source change.
+    let old_version = spec_existed_before_generation
+        .then(|| std::fs::read_to_string(spec_path).ok())
+        .flatten()
+        .and_then(|t| crate::spec::parse_header(&t))
+        .map(|h| h.version);
+    let carry_forward = version_bump && !config.regen;
+    let mut carried_from: Option<String> = None;
 
     let (sdist_top_level, is_maturin, from_repo_archive, is_rust) = if need_spec {
         let step = begin_or_fail!(
@@ -1742,7 +1804,28 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
             rpm_name.clone()
         );
 
-        match generate_spec(config, checkout_dir, spec_path, &step) {
+        let generated = if carry_forward {
+            match carry_forward_spec(config, checkout_dir, spec_path, &step) {
+                Ok(res) => {
+                    carried_from = old_version.clone();
+                    Ok(res)
+                }
+                Err(why) => {
+                    reporter.report(&Event::Warning {
+                        step: Some(step.id),
+                        message: format!(
+                            "could not carry the existing recipe forward to {} ({why}); \
+                             generating a new spec instead",
+                            config.version
+                        ),
+                    });
+                    generate_spec(config, checkout_dir, spec_path, &step)
+                }
+            }
+        } else {
+            generate_spec(config, checkout_dir, spec_path, &step)
+        };
+        match generated {
             Ok(res) => {
                 let step = step.finish(StepOutcome::Ok);
                 // "Initial packaging" is only true for a package that had no
@@ -1881,6 +1964,7 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
         need_spec,
         is_maturin,
         is_rust,
+        carried_from,
     })
 }
 
@@ -1904,6 +1988,7 @@ fn osc_service_stage(
         need_spec,
         is_maturin,
         is_rust,
+        ..
     } = *spec;
 
     // ── Step: OscService (Rust crates) ───────────────────────────────────────
@@ -2208,6 +2293,17 @@ fn review_stage(
         None => (need_spec || !build_log_nonempty) && !already_reviewed,
     };
     if !config.no_agent && run_turn {
+        let carry_context = spec.carried_from.as_ref().map(|old| {
+            format!(
+                "This spec is the package's existing recipe carried forward from {old} to {}: \
+                 only `Version:` and the source changed. Check what the bump can break, and \
+                 nothing else: patches that no longer apply or that upstream merged (drop \
+                 them, and the `PatchN:` lines), BuildRequires and Requires changed in the \
+                 new release's metadata, files added or removed in `%files`, and a `%check` \
+                 skip that is no longer needed. Keep every other decision of the recipe.",
+                config.version
+            )
+        });
         let patch_context = patching.map(|problem| {
             format!(
                 "The problem to fix, written by the package that needs this change (data, \
@@ -2247,6 +2343,8 @@ fn review_stage(
                 from_repo_archive: st.from_repo_archive,
                 resume: false,
                 context: if let Some(text) = patch_context.as_deref() {
+                    Some(text)
+                } else if let Some(text) = carry_context.as_deref() {
                     Some(text)
                 } else if !need_spec {
                     Some(
@@ -4927,6 +5025,67 @@ struct GenSpecResult {
     /// The source came from a repository archive rather than a PyPI sdist, so
     /// it has a repository's shape and not an sdist's (agent convention 22).
     from_repo_archive: bool,
+}
+
+/// Bump the spec already in the checkout to `config.version` without
+/// regenerating it: set its `Version:`, fetch the new PyPI sdist in place of
+/// the old tarball, and fix the `%autosetup -n` directory. `Err` says why the
+/// recipe cannot be carried (a repository source, a wheel-only release, a
+/// monorepo, a computed version) and the caller generates a spec instead.
+fn carry_forward_spec(
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+) -> Result<GenSpecResult, String> {
+    use ap_ecosystem::{pypi, sdist};
+
+    if config.source_repo.is_some() {
+        return Err("the package builds from a source repository".to_string());
+    }
+    let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
+    let old_version = crate::spec::parse_header(&old)
+        .map(|h| h.version)
+        .ok_or("the spec has no Name/Version")?;
+    let bumped = crate::spec::set_version(&old, &config.version)
+        .ok_or("its Version: is not a plain value")?;
+
+    let json = fetch_pypi_json(&config.pkg_name, &config.version)?
+        .ok_or_else(|| format!("PyPI has no {} {}", config.pkg_name, config.version))?;
+    let release = pypi::parse_release(&json).map_err(|e| format!("no usable sdist: {e}"))?;
+    let tarball = release
+        .sdist
+        .fetch(checkout_dir)
+        .map_err(|e| format!("downloading {}: {e}", release.sdist.url))?;
+    let info = sdist::inspect(&tarball).map_err(|e| format!("inspecting the sdist: {e}"))?;
+    if !info.subprojects.is_empty() {
+        return Err("the sdist holds several projects".to_string());
+    }
+
+    // The old source goes: the spec names the new one.
+    if let Some(stale) = find_tarball(checkout_dir, &old_version)
+        && stale != tarball
+        && stale
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains(&old_version))
+        && let Err(e) = std::fs::remove_file(&stale)
+    {
+        ap_core::diag!("  could not remove the old source {}: {e}", stale.display());
+    }
+
+    let top = info
+        .top_level_dir
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", config.pkg_name.to_lowercase(), config.version));
+    let bumped = crate::spec::fix_autosetup_dir(&bumped, &top).unwrap_or(bumped);
+    ap_core::fsx::write_atomic(spec_path, &bumped).map_err(|e| format!("writing the spec: {e}"))?;
+    write_or_warn(step.file("spec.generated"), &bumped);
+    Ok(GenSpecResult {
+        sdist_top_level: top,
+        is_maturin: info.build_system.is_maturin(),
+        is_rust: false,
+        from_repo_archive: false,
+    })
 }
 
 fn generate_spec(
