@@ -2694,6 +2694,29 @@ impl Error {
         matches!(self, Error::EndedEarly(e) if e.subtype == "error_max_turns")
     }
 
+    /// Did the turn fail because the claude CLI is not logged in (or its
+    /// credentials were rejected)? Only claude's own error fields are
+    /// scanned: the structured end-early subtype/message, a failed exit's
+    /// stderr and its non-JSON stdout lines. Never the result text of a
+    /// turn that succeeded, nor a `Parse` error (which quotes it).
+    pub fn is_not_logged_in(&self) -> bool {
+        match self {
+            Error::EndedEarly(e) => {
+                e.subtype == "api_error_401"
+                    || looks_like_not_logged_in(&e.subtype)
+                    || looks_like_not_logged_in(&e.message)
+            }
+            Error::Failed { stderr, stdout, .. } => {
+                looks_like_not_logged_in(stderr)
+                    || stdout
+                        .lines()
+                        .filter(|l| !l.trim_start().starts_with('{'))
+                        .any(looks_like_not_logged_in)
+            }
+            Error::Launch(_) | Error::Parse { .. } | Error::Io(_) => false,
+        }
+    }
+
     /// Was this turn rejected by the API for quota/rate limiting (HTTP 429)?
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, Error::EndedEarly(e)
@@ -3316,6 +3339,46 @@ fn turn_denied_tools(workspace: &std::path::Path, checkout: Option<&std::path::P
 /// printed to stderr in real time as they arrive. The structured JSON response
 /// is parsed from the final `result` event in the stream.
 pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
+    let result = turn_inner(req);
+    // Every caller (build, notes, discovery, translate-deps) goes through
+    // here: a logged-out CLI cannot do any work, so stop the whole run rather
+    // than let each package retry and escalate into the same wall.
+    if let Err(e) = &result
+        && e.is_not_logged_in()
+    {
+        crate::proc::abort_run(NOT_LOGGED_IN_MESSAGE.to_string());
+    }
+    result
+}
+
+/// What the user is told when the claude CLI is not logged in.
+pub const NOT_LOGGED_IN_MESSAGE: &str =
+    "claude is not logged in \u{2014} run `claude` and `/login`, then re-run";
+
+/// Whether text the claude CLI itself produced (a failed `result` event's
+/// error, its stderr) says it is not authenticated. Case-insensitive.
+///
+/// Only feed this claude's own error fields, never the agent's prose or a
+/// build log: the phrases are specific enough to avoid a bare "login", but
+/// prose can still quote them.
+pub fn looks_like_not_logged_in(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "not logged in",
+        "please run /login",
+        "run /login",
+        "invalid api key",
+        "authentication_error",
+        "api_error_401",
+        "api error: 401",
+        "failed to authenticate",
+        "oauth token has expired",
+        "token expired",
+    ];
+    let lower = text.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
+fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
     let allowed_tools = turn_allowed_tools(req.task, req.workspace, req.checkout_dir);
@@ -5041,6 +5104,92 @@ mod tests {
         assert!(!generic.is_budget_exhausted());
         assert_eq!(generic.ended_early_subtype(), None);
         assert_eq!(generic.ended_early_message(), None);
+    }
+
+    #[test]
+    fn matcher_recognises_logged_out_texts_case_insensitively() {
+        for t in [
+            "Not logged in \u{b7} Please run /login",
+            "Invalid API key",
+            "OAuth token has expired. Please run /login",
+            "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}",
+            "Failed to authenticate",
+            "api_error_401",
+            "refresh token expired",
+        ] {
+            assert!(looks_like_not_logged_in(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn matcher_ignores_unrelated_text() {
+        for t in [
+            "",
+            "building python-login 1.2 for openSUSE",
+            "error: login shell not found in /etc/shells",
+            "the login page test failed with a timeout",
+            "Reached maximum budget ($0.03)",
+            "HTTP 429 rate limited",
+        ] {
+            assert!(!looks_like_not_logged_in(t), "{t}");
+        }
+    }
+
+    fn ended(subtype: &str, message: &str) -> Error {
+        Error::EndedEarly(Box::new(EndedEarlyError {
+            subtype: subtype.to_string(),
+            message: message.to_string(),
+            stdout: String::new(),
+            prompt: String::new(),
+            usage: Usage::default(),
+        }))
+    }
+
+    fn failed(stderr: &str, stdout: &str) -> Error {
+        Error::Failed {
+            code: 1,
+            stderr: stderr.to_string(),
+            stdout: stdout.to_string(),
+            prompt: String::new(),
+            usage: Usage::default(),
+        }
+    }
+
+    #[test]
+    fn error_classifies_not_logged_in_from_claudes_own_fields() {
+        // A synthetic failed result event, as `turn` turns it into an error.
+        let ev: ResultEvent = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","is_error":true,
+                "result":"Not logged in \u00b7 Please run /login","api_error_status":401}"#,
+        )
+        .unwrap();
+        let sig = ended_early_signal(&ev).unwrap();
+        assert!(ended(&sig.subtype, &sig.message).is_not_logged_in());
+        assert!(ended("api_error_401", "x").is_not_logged_in());
+        assert!(ended("success", "Invalid API key \u{b7} Please run /login").is_not_logged_in());
+
+        assert!(failed("Error: not logged in", "").is_not_logged_in());
+        assert!(failed("", "Invalid API key\n{\"type\":\"system\"}").is_not_logged_in());
+
+        assert!(!ended("error_max_budget_usd", "Reached maximum budget").is_not_logged_in());
+        assert!(!ended("api_error_429", "rate limited").is_not_logged_in());
+        assert!(!failed("segfault", "").is_not_logged_in());
+        // Agent prose in the JSON stream is not claude's own error text.
+        assert!(
+            !failed(
+                "",
+                r#"{"type":"assistant","text":"the user is not logged in to the site"}"#
+            )
+            .is_not_logged_in()
+        );
+        // A turn that succeeded but returned prose quoting the phrase.
+        let parse = Error::Parse {
+            message: "no usable turn response: result event is \"not logged in\"".into(),
+            stdout: String::new(),
+            prompt: String::new(),
+            usage: Usage::default(),
+        };
+        assert!(!parse.is_not_logged_in());
     }
 
     #[test]

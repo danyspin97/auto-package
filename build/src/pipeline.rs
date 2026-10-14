@@ -3104,6 +3104,9 @@ Describing an edit in prose is not accepted; only the StructuredOutput call is."
 /// — two different dollar figures with no indication that $2.00 is the
 /// per-package cap and $0.03 is the per-turn remainder.
 fn friendly_agent_error(e: &crate::agent::Error, budget_usd: f64, pkg_name: &str) -> String {
+    if e.is_not_logged_in() {
+        return crate::agent::NOT_LOGGED_IN_MESSAGE.to_string();
+    }
     if e.is_budget_exhausted() {
         let detail = e.ended_early_message().unwrap_or("budget exhausted");
         return format!(

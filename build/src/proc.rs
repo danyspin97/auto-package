@@ -263,6 +263,32 @@ pub fn kill_all_groups() {
     }
 }
 
+/// Why the run was stopped by [`abort_run`]; the first reason wins.
+static ABORT_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Stop the whole run because it cannot continue (e.g. the agent CLI is not
+/// logged in): record `reason` (only the first call's is kept), raise the
+/// shutdown flag so the scheduler and the wait loops wind down, and kill the
+/// running child groups. Unlike [`kill_all_groups`] this is not an interrupt:
+/// the caller decides the exit code, see [`abort_reason`].
+pub fn abort_run(reason: String) {
+    {
+        let mut slot = ABORT_REASON.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(reason);
+        }
+    }
+    kill_all_groups();
+}
+
+/// The reason given to the first [`abort_run`], if the run was aborted.
+pub fn abort_reason() -> Option<String> {
+    ABORT_REASON
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// SIGKILL the group `pid` leads. Only while the leader is still unreaped (see
 /// [`ap_core::pgroup`]): after that the number may belong to another group.
 pub(crate) fn kill_process_group(pid: u32) {
