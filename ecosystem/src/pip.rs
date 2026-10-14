@@ -5,17 +5,18 @@
 //! format v1) and contains each node's name, version, sha256, and
 //! `requires_dist` with markers unevaluated.
 //!
-//! We run in default wheel mode, which prefers wheels. For a release that
-//! ships only an sdist, `pip install --dry-run` still has to build the
-//! package's metadata, so that sdist's build backend (and any `setup.py`)
-//! does run during resolution. Run this inside a sandbox, not on trusted
-//! ground.
+//! Resolution takes wheels only (`--only-binary=:all:`). Building an sdist
+//! runs its build backend, which is arbitrary code from the index, so sdists
+//! are used only when `AUTO_PACKAGE_ALLOW_SDIST_RESOLVE=1` is set. Pip runs
+//! with a cleared environment either way, so OBS, GitHub and Anthropic
+//! credentials do not reach it.
 //!
 //! Known limitation: `--python-version` is ignored by pip when a real
 //! interpreter is running — marker evaluation uses the host interpreter.
 //! Cross-flavor resolution (python311 vs python313) requires the actual
 //! interpreter binaries to be installed and a separate run per flavor.
 
+use std::ffi::OsString;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -45,7 +46,11 @@ pub enum Error {
     #[error("could not run pip: {0}")]
     Launch(std::io::Error),
 
-    #[error("package not found on PyPI: {0}")]
+    #[error(
+        "no wheel found on PyPI for {0}; releases that ship only an sdist are skipped \
+         unless AUTO_PACKAGE_ALLOW_SDIST_RESOLVE=1 is set, since building them runs \
+         their build backend"
+    )]
     NotFound(String),
 
     /// Every release exists but pip skipped all of them because their
@@ -298,6 +303,7 @@ fn classify_failure(name: &str, code: i32, stderr: String) -> Error {
             example,
         };
     }
+    // With wheels only this also covers releases that ship just an sdist.
     if stderr.contains("Could not find a version that satisfies the requirement")
         || stderr.contains("No matching distribution found for")
     {
@@ -315,18 +321,10 @@ const ALTERNATE_PYTHON_MINORS: [u32; 5] = [12, 11, 13, 10, 14];
 /// line prefix) and return its JSON report.
 fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, Error> {
     let mut cmd = Command::new(program[0]);
-    cmd.args(&program[1..]).args([
-        "install",
-        "--dry-run",
-        "--ignore-installed",
-        "--quiet",
-        "--disable-pip-version-check",
-        "--report",
-        "-",
-        // End of options: a hostile `name` must not be parsed as a flag.
-        "--",
-        spec,
-    ]);
+    cmd.env_clear()
+        .envs(pip_env(std::env::vars_os()))
+        .args(&program[1..])
+        .args(pip_report_args(spec, sdist_opt_in()));
     let out = run_with_timeout(cmd, PIP_TIMEOUT)?;
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
@@ -334,6 +332,59 @@ fn run_pip_report(program: &[&str], name: &str, spec: &str) -> Result<Vec<u8>, E
         return Err(classify_failure(name, code, stderr));
     }
     Ok(out.stdout)
+}
+
+/// Environment variable that lets resolution build sdists. Off by default.
+pub const SDIST_OPT_IN_ENV: &str = "AUTO_PACKAGE_ALLOW_SDIST_RESOLVE";
+
+/// Variables pip is given. Everything else is cleared.
+const PIP_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_CONFIG_FILE",
+    "PIP_CERT",
+];
+
+fn sdist_opt_in() -> bool {
+    std::env::var_os(SDIST_OPT_IN_ENV).is_some_and(|v| v == "1")
+}
+
+/// The `pip install` arguments for one resolution. Wheels only unless
+/// `allow_sdist` is set.
+fn pip_report_args(spec: &str, allow_sdist: bool) -> Vec<&str> {
+    let mut args = vec![
+        "install",
+        "--dry-run",
+        "--ignore-installed",
+        "--quiet",
+        "--disable-pip-version-check",
+        "--report",
+        "-",
+    ];
+    if !allow_sdist {
+        args.push("--only-binary=:all:");
+    }
+    // End of options: a hostile `name` must not be parsed as a flag.
+    args.push("--");
+    args.push(spec);
+    args
+}
+
+/// The subset of `vars` pip may inherit.
+fn pip_env(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsString, OsString)> {
+    vars.filter(|(k, _)| k.to_str().is_some_and(|k| PIP_ENV_ALLOWLIST.contains(&k)))
+        .collect()
 }
 
 /// Wall-clock limit for one pip resolve.
@@ -698,6 +749,35 @@ mod tests {
             nodes.iter().find(|n| n.name == "httpx").unwrap().sha256,
             "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"
         );
+    }
+
+    #[test]
+    fn resolution_is_wheels_only_unless_sdists_are_opted_in() {
+        let wheels = pip_report_args("httpx==0.28.1", false);
+        assert!(wheels.contains(&"--only-binary=:all:"));
+        assert_eq!(wheels.last(), Some(&"httpx==0.28.1"));
+
+        let sdists = pip_report_args("httpx==0.28.1", true);
+        assert!(!sdists.contains(&"--only-binary=:all:"));
+    }
+
+    #[test]
+    fn pip_inherits_only_allowlisted_environment() {
+        let vars = [
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/u"),
+            ("OSC_PASSWORD", "x"),
+            ("GITHUB_TOKEN", "x"),
+            ("ANTHROPIC_API_KEY", "x"),
+            ("PIP_INDEX_URL", "https://idx"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let kept: Vec<String> = pip_env(vars)
+            .into_iter()
+            .map(|(k, _)| k.into_string().unwrap())
+            .collect();
+        assert_eq!(kept, ["PATH", "HOME", "PIP_INDEX_URL"]);
     }
 
     #[test]
