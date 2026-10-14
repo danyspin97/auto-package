@@ -1097,6 +1097,7 @@ pub fn get_project_repo_paths(
     project: &str,
     emit: Emit<'_>,
 ) -> Result<Vec<(String, String)>, Error> {
+    check_obs_name("project", project)?;
     let cmd = format!("meta prj {project}");
     let out = proc::capture_with_timeout(
         "osc",
@@ -1147,6 +1148,7 @@ fn parse_project_repo_paths(xml: &str) -> Vec<(String, String)> {
 /// `Ok(false)` when the project meta loaded but has none, and `Err` when the
 /// `osc meta prj` call itself failed (project doesn't exist, auth broken, ...).
 pub fn project_has_repositories(project: &str, emit: Emit<'_>) -> Result<bool, Error> {
+    check_obs_name("project", project)?;
     let out = proc::capture_with_timeout(
         "osc",
         &["meta", "prj", project],
@@ -1344,6 +1346,9 @@ mod project_packages_cache_tests {
 /// to the OBS package name. The guess silently missed every one of these
 /// before (Oct 6 review finding #3).
 pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Vec<String>> {
+    if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) {
+        return None;
+    }
     let out = osc_query(&["ls", project, pkg], emit, &format!("ls {project}/{pkg}"))?;
     if !out.success() {
         return None;
@@ -1363,6 +1368,9 @@ pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Ve
 /// `osc cat` otherwise fails — the update sweep uses that `None` to skip the
 /// package instead of blowing up the whole run on a stray missing spec.
 pub fn cat_file(project: &str, pkg: &str, filename: &str, emit: Emit<'_>) -> Option<String> {
+    if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) {
+        return None;
+    }
     let out = osc_query(
         &["cat", project, pkg, filename],
         emit,
@@ -1378,6 +1386,9 @@ fn fetch_project_packages(
     project: &str,
     emit: Emit<'_>,
 ) -> Result<std::collections::HashSet<String>, String> {
+    if !is_valid_obs_name(project) {
+        return Err(format!("refusing to use project {project:?}: not a valid OBS name"));
+    }
     let out = proc::capture_with_timeout(
         "osc",
         &["ls", project],
@@ -2363,6 +2374,10 @@ fn get_build_status_from_results_table(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("pkg_name", pkg_name)?;
+    check_obs_name("repo", repo)?;
+    check_obs_name("arch", arch)?;
     let cmd = format!("results --verbose -r {repo} -a {arch} {project} {pkg_name}");
     // `--verbose` is what carries a `finished` result's verdict.
     let out = proc::capture_with_timeout(
@@ -2453,6 +2468,9 @@ fn get_build_status_xml(
     repo: &str,
     arch: &str,
 ) -> Option<BuildStatus> {
+    if ![project, pkg_name, repo, arch].iter().all(|n| is_valid_obs_name(n)) {
+        return None;
+    }
     let xml = osc_api(&format!(
         "/build/{project}/_result?package={}&repository={}&arch={}",
         enc(pkg_name),
@@ -2642,6 +2660,9 @@ pub fn get_project_build_statuses(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<HashMap<String, BuildStatus>, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("repo", repo)?;
+    check_obs_name("arch", arch)?;
     // XML first: one entry per package with a named code, instead of the
     // positional letter table below (which depends on terminal width and
     // `osc`'s padding). Fall back to the table if the API path yields nothing.
@@ -2772,6 +2793,10 @@ pub fn fetch_buildlog(
     log_path: &Path,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("pkg_name", pkg_name)?;
+    check_obs_name("repo", repo)?;
+    check_obs_name("arch", arch)?;
     let out = proc::capture_with_timeout(
         "osc",
         &["buildlog", project, pkg_name, repo, arch],
@@ -2858,6 +2883,10 @@ pub fn get_binaries(
     dest_dir: &Path,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("pkg_name", pkg_name)?;
+    check_obs_name("repo", repo)?;
+    check_obs_name("arch", arch)?;
     fs::create_dir_all(dest_dir)?;
     let dest = dest_dir.to_string_lossy();
     let out = proc::capture_with_timeout(
@@ -2899,6 +2928,9 @@ fn get_unresolvable_from_results(
     arch: &str,
     emit: Emit<'_>,
 ) -> (Vec<String>, Vec<String>) {
+    if ![project, pkg_name, repo, arch].iter().all(|n| is_valid_obs_name(n)) {
+        return (Vec::new(), Vec::new());
+    }
     let out = match proc::capture(
         "osc",
         &[
@@ -4050,5 +4082,20 @@ mod service_validation_tests {
         ] {
             assert!(validate_service_xml(xml).is_err(), "{xml}");
         }
+    }
+}
+
+#[cfg(test)]
+mod dash_name_tests {
+    use super::*;
+
+    #[test]
+    fn names_that_look_like_options_are_refused() {
+        assert!(!is_valid_obs_name("--help"));
+        assert!(!is_valid_obs_name("-x"));
+        assert!(is_valid_obs_name("python-foo"));
+        assert!(check_obs_name("package", "-x").is_err());
+        assert!(fetch_project_packages("-x", Emit::quiet()).is_err());
+        assert!(list_package_files("-x", "p", Emit::quiet()).is_none());
     }
 }

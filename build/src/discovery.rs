@@ -200,6 +200,9 @@ pub fn parse_spec_upstream(spec: &str, name: &str) -> DistroInfo {
 /// never a requirement.
 pub fn distro_info(pkg: &str) -> DistroInfo {
     let name = normalize(pkg);
+    if !crate::osc::is_valid_obs_name(&name) {
+        return DistroInfo::default();
+    }
     ap_core::diag!("  checking openSUSE:Factory for {name}");
     let spec_file = format!("{name}.spec");
     let Ok(out) = crate::proc::capture_with_timeout(

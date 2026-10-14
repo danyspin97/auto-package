@@ -1059,6 +1059,9 @@ pub fn generate(release: &Release, build_system: &BuildSystem) -> Result<String,
             "opensuse.spec",
             "-f",
             &spec_path.to_string_lossy(),
+            // The name comes from an index; `--` keeps it a positional even
+            // when it starts with `-`.
+            "--",
             &release.name,
             &release.version,
         ])
