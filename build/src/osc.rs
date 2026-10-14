@@ -298,6 +298,10 @@ fn extract_unresolvable(log: &str) -> Vec<String> {
 /// aren't valid RPM or PyPI names, so `strip_rpm_prefix` and PyPI lookup
 /// both miss and the dependency silently never gets queued to build.
 fn clean_unresolvable_name(pkg: &str) -> &str {
+    // A capability such as `libcuda.so.1()(64bit)` owns its parentheses.
+    if is_rpm_capability(pkg) {
+        return pkg;
+    }
     let pkg = pkg.trim_start_matches('(').trim_end_matches(')');
     match pkg.rfind('[') {
         Some(idx) if pkg.ends_with(']') => &pkg[..idx],
@@ -448,6 +452,31 @@ conflict for providers of python314-baz needed by python314-qux
             blockers_from_details(FASTAPI_CLOUD_CLI_DETAILS),
             vec!["fastar", "rignore", "sentry-sdk"]
         );
+    }
+
+    #[test]
+    fn a_shared_library_capability_is_never_a_package_to_build() {
+        let details = "nothing provides libcuda.so.1()(64bit) needed by python314-foo, \
+                       nothing provides python314-bar";
+        assert_eq!(blockers_from_details(details), vec!["bar"]);
+        let names = vec![
+            "libcuda.so.1()(64bit)".to_string(),
+            "libnvidia-ml.so.1()(64bit)".to_string(),
+            "/usr/bin/nvcc".to_string(),
+            "python313-beautifulsoup4".to_string(),
+        ];
+        assert_eq!(missing_package_names(&names), vec!["beautifulsoup4"]);
+    }
+
+    #[test]
+    fn capability_names_keep_their_parentheses_when_extracted() {
+        assert_eq!(
+            extract_unresolvable("nothing provides libcuda.so.1()(64bit) needed by python314-x"),
+            vec!["libcuda.so.1()(64bit)"]
+        );
+        assert!(is_rpm_capability("libcuda.so.1"));
+        assert!(!is_rpm_capability("python313-duckdb)"));
+        assert!(!is_rpm_capability("libsodium-devel"));
     }
 
     #[test]
@@ -3671,6 +3700,9 @@ pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for raw in rpm_names {
         let rpm = raw.trim();
+        if is_rpm_capability(rpm) {
+            continue;
+        }
         let stripped = strip_rpm_prefix(rpm);
         if stripped != rpm && PYTHON_INTERPRETER_STEMS.contains(&stripped) {
             continue;
@@ -3685,6 +3717,23 @@ pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
     }
     out.sort_unstable();
     out
+}
+
+/// Whether `name` is an RPM capability (a shared library such as
+/// `libcuda.so.1()(64bit)`, a file path, an `rpmlib(...)` feature) rather than
+/// a package name. OBS reports these as `nothing provides` too, but there is
+/// no project to build for them: `libcuda.so.1` is the NVIDIA driver's own
+/// library (convention 60), supplied at runtime, so queueing it as a package
+/// can never succeed. The fix is on the package that requires it (an
+/// `%global __requires_exclude`), which convention 60 tells the agent.
+pub fn is_rpm_capability(name: &str) -> bool {
+    let name = name.trim();
+    if name.starts_with('/') || name.starts_with("rpmlib(") || name.contains("()") {
+        return true;
+    }
+    // `lib<x>.so`, `.so.<n>`: not a name that merely contains ".so".
+    name.match_indices(".so")
+        .any(|(i, _)| matches!(name[i + 3..].chars().next(), None | Some('.') | Some('(')))
 }
 
 /// Whether `info` (a project meta) builds for `repo` on `arch`: the `Err`
