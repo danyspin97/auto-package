@@ -1659,10 +1659,20 @@ fn get_build_status_from_results_table(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    let cmd = format!("results -r {repo} -a {arch} {project} {pkg_name}");
+    let cmd = format!("results --verbose -r {repo} -a {arch} {project} {pkg_name}");
+    // `--verbose` is what carries a `finished` result's verdict.
     let out = proc::capture_with_timeout(
         "osc",
-        &["results", "-r", repo, "-a", arch, project, pkg_name],
+        &[
+            "results",
+            "--verbose",
+            "-r",
+            repo,
+            "-a",
+            arch,
+            project,
+            pkg_name,
+        ],
         &anywhere(),
         emit,
         OSC_QUERY_TIMEOUT,
@@ -1677,7 +1687,12 @@ fn get_build_status_from_results_table(
         });
     }
 
-    Ok(parse_single_build_status(&out.stdout, arch))
+    Ok(parse_single_build_status(
+        &out.stdout,
+        pkg_name,
+        repo,
+        arch,
+    ))
 }
 
 /// Per-call limit for the short, network-bound `osc` queries used while
@@ -1764,41 +1779,89 @@ fn get_build_status_xml(
     Some(obs_status::resolve(&entry, &evidence))
 }
 
-/// Parsing half of [`get_build_status`], split out so it is testable without
-/// shelling out to `osc`.
-fn parse_single_build_status(stdout: &str, arch: &str) -> BuildStatus {
+/// Parsing half of the `osc results` fallback in [`get_build_status`], split
+/// out so it is testable without shelling out to `osc`.
+///
+/// `osc results --verbose -r <repo> -a <arch> <project> <pkg>` prints one line
+/// per result as `<repo> <arch> <pkg> <status>` (osc's `get_results` format,
+/// columns in that order). The status is the rest of the line:
+/// - a plain code (`succeeded`, `failed`, `scheduled`, ...), optionally with
+///   `: <details>` after it, and `(unpublished)` for a build that succeeded
+///   but is not published yet;
+/// - `finished: <verdict>`: OBS hides the verdict behind the bare `finished`
+///   code, and `--verbose` prints it as the details;
+/// - `outdated (was: ...)` when the repository is dirty, or a trailing `*` in
+///   the non-verbose form: the result may be for an older source revision.
+///
+/// Multi-line `unresolvable:` details only add lines that do not start with
+/// the repo, so reading the first matching line is enough.
+fn parse_single_build_status(stdout: &str, pkg_name: &str, repo: &str, arch: &str) -> BuildStatus {
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        // A result line is `<pkg> <repo> <arch> <status>`. Anything else (an
-        // error message that happens to contain words) must not be read as a
-        // status word.
-        if parts.len() >= 3 && parts[parts.len() - 2] == arch {
-            let raw = parts[parts.len() - 1];
-            let word = raw.trim_end_matches('*');
-            // OBS suffixes the status word with `*` when this result is for
-            // an older source revision than what's on the server now (e.g. a
-            // revision was committed while this result was already showing,
-            // or right after). Reporting the stripped word as plain
-            // `Succeeded` would make the `AlreadyBuilt` fast path in
-            // pipeline.rs believe a since-superseded result still verifies
-            // the current revision, and skip a rebuild that result was never
-            // actually for — `has_local_changes` and `spec_version_differs`
-            // both check the local checkout, so neither one catches "the
-            // server has a newer committed revision than this result
-            // covers". Reporting `Unknown` here forces that fast path to
-            // fall through and resync instead of trusting a stale verdict.
-            if raw != word {
-                return BuildStatus::Unknown(format!("stale: {word}"));
-            }
-            return BuildStatus::from(word);
+        let mut rest = line.trim_start();
+        let mut columns = [""; 3];
+        for col in &mut columns {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            *col = &rest[..end];
+            rest = rest[end..].trim_start();
         }
+        if columns != [repo, arch, pkg_name] {
+            continue;
+        }
+        return status_from_osc_text(rest.trim());
     }
     BuildStatus::Unknown("no results".to_string())
+}
+
+/// The status part of one `osc results` line (see [`parse_single_build_status`]).
+fn status_from_osc_text(text: &str) -> BuildStatus {
+    // OBS marks a result as possibly older than the sources on the server:
+    // the dirty-repository form, which `--verbose` spells `outdated (was: ..)`
+    // and the plain form spells with a trailing `*`. Never trust those as-is:
+    // reporting the stripped word as plain `Succeeded` would make the
+    // `AlreadyBuilt` fast path in pipeline.rs believe a since-superseded
+    // result still verifies the current revision. `Unknown` makes that path
+    // fall through and resync instead.
+    if text.starts_with("outdated") {
+        return BuildStatus::Unknown(format!("stale: {text}"));
+    }
+    let (head, details) = match text.split_once(':') {
+        Some((head, details)) => (head.trim(), Some(details.trim())),
+        None => (text, None),
+    };
+    let starred = head.ends_with('*');
+    let word = head
+        .trim_end_matches('*')
+        .trim_end_matches("(unpublished)");
+    if starred {
+        return BuildStatus::Unknown(format!("stale: {word}"));
+    }
+    if word == "finished" {
+        // The verdict is the first word of the details, if osc printed it.
+        return match details.and_then(|d| d.split_whitespace().next()) {
+            Some(verdict) => BuildStatus::from(verdict),
+            None => BuildStatus::Unknown("finished".to_string()),
+        };
+    }
+    BuildStatus::from(word)
 }
 
 #[cfg(test)]
 mod single_build_status_tests {
     use super::*;
+
+    const REPO: &str = "openSUSE_Tumbleweed";
+    const ARCH: &str = "x86_64";
+
+    fn parse(stdout: &str) -> BuildStatus {
+        parse_single_build_status(stdout, "python-foo", REPO, ARCH)
+    }
+
+    #[test]
+    fn a_plain_status_is_read_from_the_last_column() {
+        // Real `osc results -r .. -a .. prj pkg` line: repo, arch, package, status.
+        let stdout = "openSUSE_Tumbleweed  x86_64  python-foo  succeeded\n";
+        assert_eq!(parse(stdout), BuildStatus::Succeeded);
+    }
 
     #[test]
     fn a_starred_status_is_unknown_not_its_unstarred_meaning() {
@@ -1806,28 +1869,58 @@ mod single_build_status_tests {
         // and immediately watching build status used to report `Succeeded`
         // from the *previous* revision's still-displayed, now-stale result,
         // before OBS had even started rebuilding the new one.
-        let stdout = "python-foo  openSUSE_Tumbleweed  x86_64  succeeded*\n";
+        let stdout = "openSUSE_Tumbleweed  x86_64  python-foo  succeeded*\n";
         assert_eq!(
-            parse_single_build_status(stdout, "x86_64"),
+            parse(stdout),
             BuildStatus::Unknown("stale: succeeded".to_string())
         );
     }
 
     #[test]
-    fn an_unstarred_status_is_read_normally() {
-        let stdout = "python-foo  openSUSE_Tumbleweed  x86_64  succeeded\n";
-        assert_eq!(
-            parse_single_build_status(stdout, "x86_64"),
-            BuildStatus::Succeeded
-        );
+    fn a_verbose_outdated_result_is_stale() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo outdated (was: finished: succeeded)\n";
+        assert!(matches!(parse(stdout), BuildStatus::Unknown(s) if s.starts_with("stale: ")));
     }
 
     #[test]
-    fn a_line_for_another_arch_or_a_message_is_not_a_status() {
-        let stdout = "python-foo  openSUSE_Tumbleweed  aarch64  failed\n\
-                      osc: E001: package not found here\n";
+    fn a_bare_finished_takes_its_verdict_from_the_details() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo finished: failed\n";
+        assert_eq!(parse(stdout), BuildStatus::Failed);
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo finished: succeeded\n";
+        assert_eq!(parse(stdout), BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn a_finished_without_a_verdict_is_not_terminal() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo finished\n";
+        let status = parse(stdout);
+        assert_eq!(status, BuildStatus::Unknown("finished".to_string()));
+        assert!(!status.is_terminal());
+    }
+
+    #[test]
+    fn verbose_details_after_a_code_are_ignored() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo failed: some details\n";
+        assert_eq!(parse(stdout), BuildStatus::Failed);
+    }
+
+    #[test]
+    fn an_unpublished_success_counts_as_succeeded() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo succeeded(unpublished)\n";
+        assert_eq!(parse(stdout), BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn lines_for_other_repos_arches_and_packages_are_skipped() {
+        let stdout = "\
+openSUSE_Leap x86_64 python-foo failed
+openSUSE_Tumbleweed aarch64 python-foo failed
+openSUSE_Tumbleweed x86_64 python-foo:flavor failed
+openSUSE_Tumbleweed x86_64 python-foo building
+";
+        assert_eq!(parse(stdout), BuildStatus::Building);
         assert_eq!(
-            parse_single_build_status(stdout, "x86_64"),
+            parse_single_build_status("", "python-foo", REPO, ARCH),
             BuildStatus::Unknown("no results".to_string())
         );
     }
