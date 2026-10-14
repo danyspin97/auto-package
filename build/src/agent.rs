@@ -2552,12 +2552,15 @@ pub enum Error {
     #[error("could not run claude: {0}")]
     Launch(std::io::Error),
 
+    /// `usage` is what the turn cost before it died (see `turn_usage`), so a
+    /// killed or crashed turn is charged rather than read as free.
     #[error("claude exited {code}:\n{stderr}")]
     Failed {
         code: i32,
         stderr: String,
         stdout: String,
         prompt: String,
+        usage: Usage,
     },
 
     /// Claude ended mid-turn with a known structured error: budget cap
@@ -2574,6 +2577,7 @@ pub enum Error {
         message: String,
         stdout: String,
         prompt: String,
+        usage: Usage,
     },
 
     #[error("io error: {0}")]
@@ -2617,12 +2621,14 @@ impl Error {
         }
     }
 
-    /// What an ended-early turn cost before it was cut off, so the caller can
-    /// charge it against the package budget.
+    /// What a failed turn cost before it died, so the caller can charge it
+    /// against the package budget. `None` only for failures that happen before
+    /// any model call (`Launch`, a stream-read `Io` error).
     pub fn usage(&self) -> Option<&Usage> {
         match self {
             Error::EndedEarly(e) => Some(&e.usage),
-            _ => None,
+            Error::Failed { usage, .. } | Error::Parse { usage, .. } => Some(usage),
+            Error::Launch(_) | Error::Io(_) => None,
         }
     }
 
@@ -3016,6 +3022,48 @@ struct StreamUsage {
     output_tokens: u64,
 }
 
+/// One assistant message's usage, from the `usage` object of a stream event.
+fn usage_from_message(u: &serde_json::Value) -> Usage {
+    Usage {
+        input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+        cache_creation_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        cli_cost_usd: None,
+    }
+}
+
+/// What a turn that produced no usable reply cost. The CLI's own totals win when
+/// it reported them; otherwise the usage its messages reported is summed (a
+/// lower bound if the turn was cut off). A turn that reported neither, such as
+/// one killed or crashed before printing, is charged its whole cap: the most it
+/// could have spent.
+fn turn_usage(
+    result_event: &ResultEvent,
+    message_usage: &std::collections::BTreeMap<String, Usage>,
+    cap_usd: f64,
+) -> Usage {
+    if result_event.total_cost_usd.is_some() {
+        return Usage {
+            input_tokens: result_event.usage.input_tokens,
+            output_tokens: result_event.usage.output_tokens,
+            cli_cost_usd: result_event.total_cost_usd,
+            ..Usage::default()
+        };
+    }
+    let mut total = Usage::default();
+    for u in message_usage.values() {
+        total.add(u);
+    }
+    if total.cost_usd() > 0.0 {
+        return total;
+    }
+    Usage {
+        cli_cost_usd: Some(cap_usd),
+        ..Usage::default()
+    }
+}
+
 /// Run one agent turn. The agent has tool access to the workspace and edits
 /// `spec` in place. The caller is responsible for validating and rolling back
 /// on failure.
@@ -3192,6 +3240,11 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // no CI signal.
     let mut result_event = ResultEvent::default();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    // Usage each assistant message reported, keyed by message id: one message
+    // is sent as several events, so keeping the last report per id avoids
+    // counting it more than once.
+    let mut message_usage: std::collections::BTreeMap<String, Usage> =
+        std::collections::BTreeMap::new();
     // Raw copy of every stdout line, kept independent of JSON parsing so a
     // crash mid-stream (or an unparseable line) still leaves something to
     // inspect — the parsed path above silently drops anything it can't read.
@@ -3246,6 +3299,12 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
             };
             match event.get("type").and_then(|t| t.as_str()) {
                 Some("assistant") => {
+                    if let Some(msg) = event.get("message")
+                        && let Some(u) = msg.get("usage")
+                    {
+                        let id = msg.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                        message_usage.insert(id.to_string(), usage_from_message(u));
+                    }
                     // Text and tool_use arrive as content blocks of the
                     // assistant message — there is no top-level `tool_use`
                     // stream event to match on.
@@ -3368,12 +3427,14 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     },
                 })));
             }
+            let usage = turn_usage(&result_event, &message_usage, remaining_usd);
             return Err(if !status.success() {
                 Error::Failed {
                     code: status.code().unwrap_or(-1),
                     stderr: stderr_content,
                     stdout: stdout_raw,
                     prompt: prompt.clone(),
+                    usage,
                 }
             } else {
                 Error::Parse {
@@ -3384,6 +3445,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     ),
                     stdout: stdout_raw,
                     prompt: prompt.clone(),
+                    usage,
                 }
             });
         }
@@ -4616,10 +4678,36 @@ mod tests {
             stderr: String::new(),
             stdout: String::new(),
             prompt: String::new(),
+            usage: Usage::default(),
         };
         assert!(!generic.is_budget_exhausted());
         assert_eq!(generic.ended_early_subtype(), None);
         assert_eq!(generic.ended_early_message(), None);
+    }
+
+    #[test]
+    fn a_turn_with_no_reported_usage_is_charged_its_cap() {
+        let silent = ResultEvent::default();
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(turn_usage(&silent, &none, 0.75).cost_usd(), 0.75);
+
+        // Per-message usage is summed when the CLI reported no totals, and each
+        // message id counts once however many events it arrived in.
+        let mut messages = std::collections::BTreeMap::new();
+        let one = Usage {
+            output_tokens: 1_000_000,
+            ..Usage::default()
+        };
+        messages.insert("msg_1".to_string(), one.clone());
+        messages.insert("msg_1".to_string(), one);
+        assert!((turn_usage(&silent, &messages, 0.75).cost_usd() - 25.0).abs() < 1e-9);
+
+        // The CLI's totals win when it reported them.
+        let reported = ResultEvent {
+            total_cost_usd: Some(0.2),
+            ..ResultEvent::default()
+        };
+        assert_eq!(turn_usage(&reported, &messages, 0.75).cost_usd(), 0.2);
     }
 
     /// Lock the claude-CLI schema contract: the exact field names the

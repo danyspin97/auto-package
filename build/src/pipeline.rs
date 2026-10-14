@@ -2812,6 +2812,26 @@ fn skip_agent(
     step_attempts.skip(reporter, StepKind::AgentTurn, reason);
 }
 
+/// Charge a failed model call's cost to the package and the run as soon as the
+/// call returns. A retry overwrites the error it follows, so the cost cannot
+/// wait for the final result: that would drop the first call's spend.
+fn charge_failed_call(
+    ws: &Workspace,
+    run_id: &str,
+    spent_usd: &mut f64,
+    result: &Result<crate::agent::TurnOutcome, crate::agent::Error>,
+) {
+    let Err(e) = result else {
+        return;
+    };
+    if let Some(usage) = e.usage() {
+        *spent_usd += usage.cost_usd();
+        // Saved now, not with the next successful turn: a package that
+        // stops here would otherwise lose the spend in state.json.
+        add_run_spend(ws, run_id, usage.cost_usd());
+    }
+}
+
 /// Run one agent turn and emit every event it produces.
 ///
 /// Allocates the step directory, writes `prompt.md`, `output.md`,
@@ -2870,7 +2890,9 @@ fn agent_turn(
     // model has its own quota).
     let model_rotation = std::cell::Cell::new(0usize);
     let nudge: std::cell::OnceCell<String> = std::cell::OnceCell::new();
-    let make_req = || crate::agent::TurnRequest {
+    // `spent` is what the package has spent when this call starts; it is passed
+    // in so the closure does not hold `spent_usd` while the loop charges it.
+    let make_req = |spent: f64| crate::agent::TurnRequest {
         workspace: ws.dir(),
         pkg_name: &config.pkg_name,
         version: &config.version,
@@ -2882,7 +2904,7 @@ fn agent_turn(
         task: ctx.task,
         attempt: ctx.attempt,
         max_attempts: config.max_attempts,
-        spent_usd: *spent_usd,
+        spent_usd: spent,
         budget_usd: config.budget_usd,
         hint: ctx.hint,
         notes: &notes,
@@ -2915,7 +2937,8 @@ fn agent_turn(
         // turn hits a 429, all of them pause instead of each discovering it
         // separately and retrying in lockstep.
         let slot = AgentSlot::acquire();
-        let mut result = crate::agent::turn(make_req());
+        let mut result = crate::agent::turn(make_req(*spent_usd));
+        charge_failed_call(ws, &config.run_id, spent_usd, &result);
         // A resumed session can answer in prose ("I already called
         // StructuredOutput in my previous message") without making the call in
         // THIS turn, which leaves nothing to act on (python-brotlicffi's last
@@ -2937,7 +2960,8 @@ fn agent_turn(
                 ctx.context.map(|c| format!("{c}\n\n")).unwrap_or_default()
             ));
             fresh_session.set(true);
-            result = crate::agent::turn(make_req());
+            result = crate::agent::turn(make_req(*spent_usd));
+            charge_failed_call(ws, &config.run_id, spent_usd, &result);
         }
         drop(slot);
         match result {
@@ -2961,12 +2985,6 @@ fn agent_turn(
     let outcome = match turn_result {
         Ok(o) => o,
         Err(e) => {
-            if let Some(usage) = e.usage() {
-                *spent_usd += usage.cost_usd();
-                // Saved now, not with the next successful turn: a package that
-                // stops here would otherwise lose the spend in state.json.
-                add_run_spend(ws, &config.run_id, usage.cost_usd());
-            }
             // Any of these failing is otherwise a dead end: nothing below
             // this point runs, so without this the prompt, stdout and stderr
             // all vanish the moment this process exits and the failure
