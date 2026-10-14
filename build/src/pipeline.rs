@@ -2599,7 +2599,20 @@ fn unresolvable_deps_round(
     // agent only sees packages that are genuinely not available yet.
     let unresolvable_deps: Vec<String> = deps
         .into_iter()
-        .filter(|dep| !rpm_satisfies_dep(&config.rpms_dir, dep))
+        .filter(|dep| {
+            let satisfied = rpm_satisfies_dep(&config.rpms_dir, dep);
+            if satisfied {
+                reporter.report(&Event::Warning {
+                    step: Some(build_step.id),
+                    message: format!(
+                        "OBS reports {dep} unresolvable, but an RPM built here already \
+                         satisfies it in {}: not queuing it again",
+                        config.rpms_dir.display()
+                    ),
+                });
+            }
+            !satisfied
+        })
         .collect();
 
     if unresolvable_deps.is_empty() {

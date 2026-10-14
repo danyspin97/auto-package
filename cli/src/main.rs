@@ -1285,6 +1285,68 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     })
 }
 
+/// Why each dependency left the dependency queue without being built (or what
+/// became of it when it was), kept so that the message that finally gives up on
+/// a package can say why every one of its dependencies is out of reach instead
+/// of pointing at earlier output that never said.
+///
+/// Keyed by the name with its separators and `python-` prefix ignored, since
+/// the same project comes back spelled differently from one agent turn to the
+/// next. The first reason recorded for a dependency is kept: it is the reason
+/// it was dropped; later drops of the same name only repeat that it was seen
+/// before. [`DepDrops::note_outcome`] overwrites, as the outcome of a build.
+#[derive(Default)]
+struct DepDrops {
+    reasons: std::cell::RefCell<std::collections::HashMap<String, String>>,
+}
+
+impl DepDrops {
+    fn key(dep: &str) -> String {
+        ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(dep))
+    }
+
+    /// Record why `dep` is dropped from the queue and report it as a warning.
+    fn dropped(&self, reporter: &dyn Reporter, dep: &str, reason: impl Into<String>) {
+        let reason = reason.into();
+        reporter.report(&Event::Warning {
+            step: None,
+            message: format!("dependency {dep} dropped from the build queue: {reason}"),
+        });
+        self.reasons
+            .borrow_mut()
+            .entry(Self::key(dep))
+            .or_insert(reason);
+    }
+
+    /// Record what became of a dependency that was queued and built.
+    fn note_outcome(&self, dep: &str, outcome: impl Into<String>) {
+        self.reasons
+            .borrow_mut()
+            .insert(Self::key(dep), outcome.into());
+    }
+
+    /// The reason recorded for `dep`, if any.
+    fn reason(&self, dep: &str) -> Option<String> {
+        self.reasons.borrow().get(&Self::key(dep)).cloned()
+    }
+
+    /// `deps` with the reason each is out of reach, one per line, for a
+    /// message that gives up on the package needing them.
+    fn explain(&self, deps: &[String]) -> String {
+        deps.iter()
+            .map(|d| {
+                let why = self.reason(d).unwrap_or_else(|| {
+                    "queued earlier this run, but nothing was recorded about what \
+                     became of it"
+                        .to_string()
+                });
+                format!("  - {d}: {why}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 /// The version a package was last built at here, when its last outcome was a
 /// success. Read from its state file, so it does not depend on OBS indexing.
 ///
@@ -1743,6 +1805,8 @@ fn cmd_build(
     const MAX_RATE_LIMITED_ROUNDS: usize = 200;
     let mut permanently_failed: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Why each dependency left the queue, for the messages that give up.
+    let dep_drops = DepDrops::default();
 
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
@@ -1784,8 +1848,10 @@ fn cmd_build(
                     // it does not meet is still visible.
                     match built_locally(state_root, &ap_build::osc::rpm_name(dep)) {
                         Some(version) => {
-                            ap_core::diag!(
-                                "dep queue: dropping {dep} (already built locally at {version})"
+                            dep_drops.dropped(
+                                reporter.as_ref(),
+                                dep,
+                                format!("it was already built locally at {version}"),
                             );
                             false
                         }
@@ -1801,10 +1867,11 @@ fn cmd_build(
                     // duplicate it — see `is_system_tool_alias`.
                     let keep = !ap_build::pipeline::is_system_tool_alias(dep);
                     if !keep {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (redistributes a \
-                             system package of the same name — see \
-                             SYSTEM_TOOL_ALIASES)"
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            "it redistributes a system package of the same name \
+                             (see SYSTEM_TOOL_ALIASES), which the distro already ships",
                         );
                     }
                     keep
@@ -1822,10 +1889,13 @@ fn cmd_build(
                     // making no progress instead of retrying forever.
                     let fresh = attempted_deps.insert(ap_build::osc::fuzzy_key(dep));
                     if !fresh {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (already attempted \
-                             this run — see earlier log lines for the \
-                             outcome)"
+                        let earlier = dep_drops
+                            .reason(dep)
+                            .unwrap_or_else(|| "no outcome was recorded for it".to_string());
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            format!("it was already attempted this run ({earlier})"),
                         );
                     }
                     fresh
@@ -1846,10 +1916,13 @@ fn cmd_build(
                     // from source".
                     let keep = !ap_build::osc::distro_provides(dep);
                     if !keep {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (the distro already \
-                             provides it — see `zypper search --provides \
-                             --match-exact {dep}`)"
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            format!(
+                                "the distro already provides it (see `zypper search \
+                                 --provides --match-exact {dep}`)"
+                            ),
                         );
                     }
                     keep
@@ -1909,11 +1982,14 @@ fn cmd_build(
                         let status = own_statuses.get(real_pkg);
                         let skip = ap_build::pipeline::status_is_resolvable(status);
                         if skip {
-                            ap_core::diag!(
-                                "dep queue: dropping {dep} (already in \
-                                 {project} as {real_pkg}, status {:?} — \
-                                 treating as resolvable)",
-                                status.map(|s| s.to_string()).unwrap_or_default()
+                            dep_drops.dropped(
+                                reporter.as_ref(),
+                                dep,
+                                format!(
+                                    "it is already in {project} as {real_pkg} with status \
+                                     {:?}, which counts as resolvable",
+                                    status.map(|s| s.to_string()).unwrap_or_default()
+                                ),
                             );
                         } else {
                             ap_core::diag!(
@@ -1933,9 +2009,13 @@ fn cmd_build(
                             let k = ap_build::osc::fuzzy_key(p);
                             k == rpm_key || k == bare_key
                         }) {
-                            ap_core::diag!(
-                                "dep queue: dropping {dep} (available from \
-                                 linked project {path_project} as {match_name})"
+                            dep_drops.dropped(
+                                reporter.as_ref(),
+                                dep,
+                                format!(
+                                    "it is available from the linked project \
+                                     {path_project} as {match_name}"
+                                ),
                             );
                             return false;
                         }
@@ -1963,11 +2043,15 @@ fn cmd_build(
                         .join("state.json");
                     let keep = !state_path.exists();
                     if !keep {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (local workspace at \
-                             {} already exists — probably mid-build via the \
-                             frontier mechanism; it keeps retrying on its own)",
-                            state_path.display()
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            format!(
+                                "a local workspace at {} already exists, so it is \
+                                 probably mid-build through the ordinary frontier, which \
+                                 keeps retrying it on its own",
+                                state_path.display()
+                            ),
                         );
                     }
                     keep
@@ -1983,6 +2067,12 @@ fn cmd_build(
                                 // package needing it learns that from its next
                                 // prompt (convention 28 Exception 4) instead of
                                 // reporting it again forever.
+                                dep_drops.dropped(
+                                    reporter.as_ref(),
+                                    &dep,
+                                    "it is unresolvable: no PyPI release and no usable public \
+                                     source repository (the warning above lists what was tried)",
+                                );
                                 newly_unbuildable.push(dep);
                                 return None;
                             }
@@ -1992,7 +2082,15 @@ fn cmd_build(
                         ap_build::osc::obs_name(&own_listing, &dep_config.rpm_name);
                     let dep_rpm = dep_config.rpm_name.clone();
                     let dep_pkg_run = run_dir.pkg(&dep_rpm);
-                    if dep_pkg_run.ensure().is_err() {
+                    if let Err(e) = dep_pkg_run.ensure() {
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            &dep,
+                            format!(
+                                "its run directory {} could not be created: {e}",
+                                dep_pkg_run.path.display()
+                            ),
+                        );
                         return None;
                     }
                     reporter.report(&Event::TargetSelected {
@@ -2034,14 +2132,29 @@ fn cmd_build(
                 match result {
                     PipelineResult::Built { .. } => {
                         ap_core::diag!("built dep {dep_rpm}");
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            "it was built this run, yet the package that needs it still \
+                             reports it missing (a name mismatch?)",
+                        );
                     }
                     PipelineResult::AlreadyBuilt { .. } => {
                         ap_core::diag!("dep {dep_rpm} already built");
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            "it was already built, yet the package that needs it still \
+                             reports it missing (a name mismatch?)",
+                        );
                     }
                     PipelineResult::MissingDeps { deps: more, .. } => {
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            format!("it could not be built until {} exist", more.join(", ")),
+                        );
                         pending_deps.extend(more);
                     }
                     PipelineResult::Failed { reason, .. } => {
+                        dep_drops.note_outcome(&dep_rpm, format!("its build failed ({reason})"));
                         pkg_reporter(&dep_rpm).report(&Event::Warning {
                             step: None,
                             message: format!(
@@ -2124,9 +2237,8 @@ fn cmd_build(
                         return Err(color_eyre::eyre::eyre!(
                             "{rpm_name} needs {} but every one has already \
                              been attempted without success{}{}; cannot \
-                             build. Check the per-dep warnings above for \
-                             WHY each dep couldn't be queued (no PyPI \
-                             release AND no discoverable source repo is \
+                             build. Why each one is out of reach:\n{}\n\
+                             (no PyPI release AND no discoverable source repo is \
                              the usual answer — pass --source-url to \
                              point it at one).",
                             deps.join(", "),
@@ -2140,6 +2252,7 @@ fn cmd_build(
                             } else {
                                 format!(" (failed-to-build: {failed})")
                             },
+                            dep_drops.explain(&deps),
                         ));
                     }
                     pending_deps.extend(new_deps);
@@ -2321,9 +2434,10 @@ fn cmd_build(
                             step: None,
                             message: format!(
                                 "giving up on {rpm_name}: it needs {} and each of those was \
-                                 already attempted and dropped (see the dep queue warnings \
-                                 above for why); anything depending on it stays blocked",
-                                deps.join(", ")
+                                 already attempted and dropped; anything depending on it \
+                                 stays blocked. Why each one is out of reach:\n{}",
+                                deps.join(", "),
+                                dep_drops.explain(&deps)
                             ),
                         });
                     }
@@ -2451,8 +2565,9 @@ fn cmd_build(
                     .join(", ");
                 return Err(color_eyre::eyre::eyre!(
                     "{name} needs {} but every one has already been attempted \
-                     without success; cannot build",
-                    names
+                     without success; cannot build. Why each one is out of reach:\n{}",
+                    names,
+                    dep_drops.explain(&pending_deps)
                 ));
             }
             if pending_deps.is_empty() {
@@ -2843,6 +2958,77 @@ mod tests {
             repo_package_name("https://gitlab.com/group/sub/thing"),
             "thing"
         );
+    }
+}
+
+#[cfg(test)]
+mod dep_drops_tests {
+    use super::*;
+
+    /// Keeps the warnings a drop reports.
+    #[derive(Default)]
+    struct Warnings(Mutex<Vec<String>>);
+
+    impl Reporter for Warnings {
+        fn report(&self, event: &Event) {
+            if let Event::Warning { message, .. } = event {
+                self.0.lock().unwrap().push(message.clone());
+            }
+        }
+    }
+
+    /// A dependency dropped for a concrete reason says so in a warning, and the
+    /// message that later gives up on a package that needs it repeats that
+    /// reason instead of pointing at output that never gave one.
+    #[test]
+    fn a_dropped_dependency_is_reported_and_explained_when_giving_up() {
+        let reporter = Warnings::default();
+        let drops = DepDrops::default();
+        drops.dropped(
+            &reporter,
+            "vllm-flash-attn",
+            "it is unresolvable: no PyPI release and no usable public source repository",
+        );
+        let warnings = reporter.0.lock().unwrap().clone();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("vllm-flash-attn"), "{warnings:?}");
+        assert!(warnings[0].contains("no PyPI release"), "{warnings:?}");
+
+        let why = drops.explain(&["python-vllm_flash_attn".to_string()]);
+        assert!(why.contains("python-vllm_flash_attn"), "{why}");
+        assert!(why.contains("no PyPI release"), "{why}");
+    }
+
+    /// The reason a dependency was dropped is the first one; seeing it dropped
+    /// again as "already attempted" quotes it rather than replacing it, and the
+    /// outcome of a build replaces a reason because it is newer evidence.
+    #[test]
+    fn the_first_reason_is_kept_and_a_build_outcome_replaces_it() {
+        let reporter = Warnings::default();
+        let drops = DepDrops::default();
+        drops.dropped(&reporter, "foo", "the distro already provides it");
+        drops.dropped(&reporter, "foo", "it was already attempted this run");
+        assert_eq!(
+            drops.reason("foo").as_deref(),
+            Some("the distro already provides it")
+        );
+        // Every drop is reported, even a repeat.
+        assert_eq!(reporter.0.lock().unwrap().len(), 2);
+
+        drops.note_outcome("python-foo", "its build failed (boom)");
+        assert_eq!(
+            drops.reason("foo").as_deref(),
+            Some("its build failed (boom)")
+        );
+    }
+
+    #[test]
+    fn a_dependency_with_nothing_recorded_is_still_named() {
+        let drops = DepDrops::default();
+        let why = drops.explain(&["mystery".to_string(), "other".to_string()]);
+        assert!(why.contains("mystery") && why.contains("other"), "{why}");
+        assert!(why.contains("nothing was recorded"), "{why}");
+        assert_eq!(why.lines().count(), 2);
     }
 }
 
