@@ -125,9 +125,25 @@ fn download_once(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
         Err(ureq::Error::StatusCode(429)) => return Err(FetchFailure::RateLimited),
         Err(e) => return Err(FetchFailure::Transport(e.to_string())),
     };
-    let part = PathBuf::from(format!("{}.part", dest.display()));
-    let local = |e: std::io::Error| FetchFailure::Transport(format!("{}: {e}", part.display()));
-    let mut file = std::fs::File::create(&part).map_err(local)?;
+    // A fresh file with a random name, created exclusively: a predictable
+    // `<dest>.part` could be a symlink planted in a shared directory.
+    let dir = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = dir.unwrap_or(Path::new("."));
+    let local = |e: std::io::Error| FetchFailure::Transport(format!("{}: {e}", dir.display()));
+    let temp = tempfile::Builder::new()
+        .prefix(".download-")
+        .suffix(".part")
+        .tempfile_in(dir)
+        .map_err(local)?;
+    let part: PathBuf = temp.path().to_path_buf();
+    let (mut file, _) = temp.keep().map_err(|e| local(e.error))?;
+    // Same mode a plain `File::create` would have given the download.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))
+            .map_err(local)?;
+    }
     let mut body = resp.into_body();
     let reader = body.with_config().limit(MAX_DOWNLOAD).reader();
     let streamed = stream_to(reader, &mut file);
@@ -185,12 +201,15 @@ fn stream_to(mut reader: impl Read, file: &mut std::fs::File) -> Result<Download
     })
 }
 
-/// `host` of an `http(s)://` URL, lowercased, without userinfo or port.
+/// `host` of an `http(s)://` URL, lowercased, without userinfo or port. IPv6
+/// literals keep their brackets. Anything the URI parser rejects (a backslash
+/// in the authority, whitespace) has no host.
 pub fn host_of(url: &str) -> Option<String> {
-    let rest = url.split_once("://")?.1;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let host = authority.rsplit('@').next()?;
-    let host = host.split(':').next()?;
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return None;
+    }
+    let host = uri.host()?;
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
@@ -245,6 +264,9 @@ mod tests {
             Some("evil.com")
         );
         assert_eq!(host_of("not a url"), None);
+        assert_eq!(host_of("https://[::1]:8080/x").as_deref(), Some("[::1]"));
+        assert_eq!(host_of("https://evil.com\\@good.com/"), None);
+        assert_eq!(host_of("file:///etc/passwd"), None);
     }
 
     #[test]
