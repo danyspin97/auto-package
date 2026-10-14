@@ -245,6 +245,7 @@ pub fn shutting_down() -> bool {
 /// SIGKILL every child still running. For process shutdown (Ctrl-C, quit).
 pub fn kill_all_groups() {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    ap_ecosystem::net::request_stop();
     let pids: Vec<u32> = ACTIVE_GROUPS
         .lock()
         .unwrap_or_else(|e| e.into_inner())

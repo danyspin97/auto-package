@@ -11,6 +11,7 @@
 //! address is the proxy's to deal with.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ureq::config::Config;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
@@ -198,6 +199,30 @@ fn retry_wait(retry_after: Option<&str>, attempt: u32) -> std::time::Duration {
         .min(MAX_RETRY_WAIT)
 }
 
+/// Set when the process is told to stop; retry pauses end early then.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+/// Tell retry loops to give up instead of waiting out their pauses.
+pub fn request_stop() {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+/// Sleep for `wait`, waking early when `stop` is set. Returns whether it was.
+fn sleep_unless_stopped(wait: std::time::Duration, stop: &AtomicBool) -> bool {
+    const SLICE: std::time::Duration = std::time::Duration::from_millis(100);
+    let end = std::time::Instant::now() + wait;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return true;
+        }
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(left.min(SLICE));
+    }
+}
+
 /// Send the request `build` makes, up to [`ATTEMPTS`] times. Transport
 /// errors and 429/5xx answers are repeated after a pause; any other answer
 /// is final. A final 4xx/5xx comes back as `ureq::Error::StatusCode`, as it
@@ -227,7 +252,12 @@ pub fn call_with_retries(
             Err(e) if is_transient(e) && attempt < ATTEMPTS => retry_wait(None, attempt),
             Err(_) => return result,
         };
-        std::thread::sleep(wait);
+        if sleep_unless_stopped(wait, &STOP) {
+            return Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "interrupted while waiting to retry",
+            )));
+        }
         attempt += 1;
     }
 }
@@ -320,6 +350,17 @@ mod tests {
             retry_wait(Some("Wed, 21 Oct 2026 07:28:00 GMT"), 2),
             Duration::from_secs(2)
         );
+    }
+
+    #[test]
+    fn a_retry_pause_ends_early_when_stopped() {
+        use std::time::{Duration, Instant};
+        let stop = AtomicBool::new(true);
+        let t = Instant::now();
+        assert!(sleep_unless_stopped(Duration::from_secs(30), &stop));
+        assert!(t.elapsed() < Duration::from_secs(1));
+        let go = AtomicBool::new(false);
+        assert!(!sleep_unless_stopped(Duration::from_millis(10), &go));
     }
 
     #[test]

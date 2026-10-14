@@ -117,12 +117,32 @@ pub struct Download {
 /// when complete. The request is retried with backoff (see
 /// `ap_ecosystem::net::call_with_retries`), and a transport failure while
 /// the body streams is retried once more: a GET is safe to repeat and a
-/// dropped connection is common. Other failures are answers and are
-/// returned as they are.
+/// dropped connection is common. Failures before the body starts already got
+/// their retries there, and other failures are answers; both are returned as
+/// they are.
 pub fn download_file(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
     match download_once(url, dest) {
-        Err(FetchFailure::Transport(_)) => download_once(url, dest),
-        other => other,
+        Err(a) if a.mid_body && !crate::proc::shutting_down() => {
+            download_once(url, dest).map_err(|a| a.failure)
+        }
+        other => other.map_err(|a| a.failure),
+    }
+}
+
+/// A failed [`download_once`].
+struct Attempt {
+    failure: FetchFailure,
+    /// The response headers arrived and the body then failed to stream, which
+    /// `call_with_retries` knows nothing about.
+    mid_body: bool,
+}
+
+impl From<FetchFailure> for Attempt {
+    fn from(failure: FetchFailure) -> Self {
+        Attempt {
+            failure,
+            mid_body: false,
+        }
     }
 }
 
@@ -155,12 +175,12 @@ fn sweep_stale_parts(dir: &Path) {
     }
 }
 
-fn download_once(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
+fn download_once(url: &str, dest: &Path) -> Result<Download, Attempt> {
     let resp = match ap_ecosystem::net::call_with_retries(|| get_download(url)) {
         Ok(resp) => resp,
-        Err(ureq::Error::StatusCode(404)) => return Err(FetchFailure::NotFound),
-        Err(ureq::Error::StatusCode(429)) => return Err(FetchFailure::RateLimited),
-        Err(e) => return Err(FetchFailure::Transport(e.to_string())),
+        Err(ureq::Error::StatusCode(404)) => return Err(FetchFailure::NotFound.into()),
+        Err(ureq::Error::StatusCode(429)) => return Err(FetchFailure::RateLimited.into()),
+        Err(e) => return Err(FetchFailure::Transport(e.to_string()).into()),
     };
     // A fresh file with a random name, created exclusively: a predictable
     // `<dest>.part` could be a symlink planted in a shared directory.
@@ -196,7 +216,11 @@ fn download_once(url: &str, dest: &Path) -> Result<Download, FetchFailure> {
         Ok(d) => d,
         Err(e) => {
             let _ = std::fs::remove_file(&part);
-            return Err(e);
+            let mid_body = matches!(e, FetchFailure::Transport(_));
+            return Err(Attempt {
+                failure: e,
+                mid_body,
+            });
         }
     };
     std::fs::rename(&part, dest).map_err(|e| {
@@ -254,6 +278,12 @@ pub fn host_of(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_failed_body_stream_is_retried_by_the_caller() {
+        let early: Attempt = FetchFailure::Transport("connect".into()).into();
+        assert!(!early.mid_body);
+    }
 
     #[test]
     fn stream_to_hashes_what_it_copies() {
