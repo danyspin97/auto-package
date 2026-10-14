@@ -2363,9 +2363,11 @@ pub fn commit(
 /// trusted once the job history confirms it was built from the source
 /// revision currently on the server (otherwise `Unknown("stale: ...")`).
 ///
-/// If the API call or its parse fails, falls back to scraping `osc results`
-/// so a surprising response shape degrades to the old behaviour instead of
-/// breaking the build loop.
+/// If the API call cannot run or its answer lacks the package, falls back to
+/// scraping `osc results` so a surprising response shape degrades to the old
+/// behaviour instead of breaking the build loop. An HTTP error from the API
+/// (401, 429, 503, ...) is returned as is: the fallback would meet the same
+/// refusal and only add load.
 pub fn get_build_status(
     project: &str,
     pkg_name: &str,
@@ -2373,7 +2375,7 @@ pub fn get_build_status(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, false) {
+    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, false)? {
         return Ok(status);
     }
     get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
@@ -2392,7 +2394,7 @@ fn get_build_status_after_commit(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, true) {
+    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, true)? {
         return Ok(status);
     }
     get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
@@ -2469,8 +2471,37 @@ fn osc_query(args: &[&str], emit: Emit<'_>, what: &str) -> Option<Captured> {
         .ok()
 }
 
-/// `osc api <path>` stdout, or `None` on any failure or timeout.
-fn osc_api(path: &str) -> Option<String> {
+/// Why an `osc api` read gave no document.
+enum ApiFailure {
+    /// The server answered with this HTTP status (401, 429, 503, ...): asking
+    /// again through another `osc` command will not get a different answer.
+    Http(u16, String),
+    /// `osc` could not run, timed out, or failed without an HTTP status.
+    Other(String),
+}
+
+/// The HTTP status in an `osc` error message, in either wording `osc`
+/// versions use (`HTTP Error 503: ...`, `503 Server Error: ...`).
+fn http_status(stderr: &str) -> Option<u16> {
+    let digits = |s: &str| {
+        let n: String = s.chars().take_while(char::is_ascii_digit).collect();
+        (n.len() == 3).then(|| n.parse().ok()).flatten()
+    };
+    if let Some((_, rest)) = stderr.split_once("HTTP Error ") {
+        return digits(rest);
+    }
+    stderr
+        .split_whitespace()
+        .zip(stderr.split_whitespace().skip(1))
+        .find_map(|(code, kind)| {
+            matches!(kind, "Client" | "Server")
+                .then(|| digits(code))
+                .flatten()
+        })
+}
+
+/// `osc api <path>` stdout, or why there is none.
+fn osc_api_checked(path: &str) -> Result<String, ApiFailure> {
     let out = proc::capture_with_timeout(
         "osc",
         &["api", path],
@@ -2478,13 +2509,24 @@ fn osc_api(path: &str) -> Option<String> {
         Emit::quiet(),
         OSC_QUERY_TIMEOUT,
     )
-    .map_err(|e| ap_core::diag!("  osc api {path}: {e}"))
-    .ok()?;
+    .map_err(|e| ApiFailure::Other(format!("osc api {path}: {e}")))?;
     if !out.success() {
-        ap_core::diag!("  osc api {path}: exit {}: {}", out.code, out.stderr.trim());
-        return None;
+        let msg = format!("osc api {path}: exit {}: {}", out.code, out.stderr.trim());
+        return Err(match http_status(&out.stderr) {
+            Some(code) => ApiFailure::Http(code, msg),
+            None => ApiFailure::Other(msg),
+        });
     }
-    Some(out.stdout)
+    Ok(out.stdout)
+}
+
+/// `osc api <path>` stdout, or `None` on any failure or timeout.
+fn osc_api(path: &str) -> Option<String> {
+    osc_api_checked(path)
+        .map_err(|e| match e {
+            ApiFailure::Http(_, m) | ApiFailure::Other(m) => ap_core::diag!("  {m}"),
+        })
+        .ok()
 }
 
 fn xml_escape(s: &str) -> String {
@@ -2507,20 +2549,39 @@ fn get_build_status_xml(
     repo: &str,
     arch: &str,
     confirm: bool,
-) -> Option<BuildStatus> {
+) -> Result<Option<BuildStatus>, Error> {
     if ![project, pkg_name, repo, arch]
         .iter()
         .all(|n| is_valid_obs_name(n))
     {
-        return None;
+        return Ok(None);
     }
-    let xml = osc_api(&format!(
+    let path = format!(
         "/build/{project}/_result?package={}&repository={}&arch={}",
         enc(pkg_name),
         enc(repo),
         enc(arch)
-    ))?;
-    let entry = obs_status::find_entry(&xml, repo, arch, pkg_name)?;
+    );
+    let xml = match osc_api_checked(&path) {
+        Ok(xml) => xml,
+        // An HTTP error (login, rate limit, outage) would repeat through the
+        // `osc results` fallback, which only adds another request to a
+        // server that is already refusing: report it.
+        Err(ApiFailure::Http(code, msg)) => {
+            return Err(Error::OscFailed {
+                cmd: format!("api {path}"),
+                code: i32::from(code),
+                stderr: msg,
+            });
+        }
+        Err(ApiFailure::Other(msg)) => {
+            ap_core::diag!("  {msg}");
+            return Ok(None);
+        }
+    };
+    let Some(entry) = obs_status::find_entry(&xml, repo, arch, pkg_name) else {
+        return Ok(None);
+    };
     let evidence = if obs_status::needs_evidence(&entry, confirm) {
         obs_status::Evidence {
             confirm,
@@ -2540,7 +2601,7 @@ fn get_build_status_xml(
             ..Default::default()
         }
     };
-    Some(obs_status::resolve(&entry, &evidence))
+    Ok(Some(obs_status::resolve(&entry, &evidence)))
 }
 
 /// Parsing half of the `osc results` fallback in [`get_build_status`], split
@@ -3327,11 +3388,53 @@ fn ensure_builds_for(project: &str, repo: &str, arch: &str) -> Result<(), Error>
     check_repo_arch(&parse_project_info(&meta), project, repo, arch).map_err(Error::NotActionable)
 }
 
+/// How long to wait before the next status poll. A status that keeps
+/// holding is polled less often (15s, then 30s after 4 unchanged polls, then
+/// 60s after 8) and a failing poll backs off exponentially up to 2 minutes, so
+/// a long build or an ailing server is not hammered. `jitter` in `[0, 1)`
+/// spreads concurrent waiters by up to +-20%.
+fn poll_delay(unchanged_polls: u32, errors: u32, jitter: f64) -> Duration {
+    let base = match unchanged_polls {
+        0..=3 => 15,
+        4..=7 => 30,
+        _ => 60,
+    };
+    let secs = if errors == 0 {
+        base
+    } else {
+        (base << errors.min(4)).min(120)
+    };
+    Duration::from_secs_f64(secs as f64 * (0.8 + 0.4 * jitter))
+}
+
+/// A pseudo-random value in `[0, 1)` from the clock, enough to de-synchronise
+/// pollers without a randomness dependency.
+fn jitter() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    f64::from(nanos % 1000) / 1000.0
+}
+
+/// Sleep for `total`, waking each second to notice a shutdown request, so a
+/// long poll delay does not hold up an interrupt.
+fn sleep_interruptible(total: Duration) {
+    let end = Instant::now() + total;
+    while !crate::proc::shutting_down() {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        std::thread::sleep(left.min(Duration::from_secs(1)));
+    }
+}
+
 /// Wait for the OBS remote build to complete, fetch the log, and download
 /// built RPMs on success.
 ///
 /// The caller must commit the package to OBS before calling this (see `commit`).
-/// Polls the OBS build status every 15 seconds, for at most two hours (the
+/// Polls the OBS build status (every 15 seconds, less often while it holds
+/// still; see [`poll_delay`]), for at most two hours (the
 /// `MAX_WAIT` below), then gives up with a timeout error. Emits a `Progress`
 /// event each time the build status changes so the user can see progress.
 pub fn obs_build(
@@ -3346,7 +3449,6 @@ pub fn obs_build(
     let reporter = emit.reporter;
     let step = emit.step;
     ensure_builds_for(project, repo, arch)?;
-    const POLL_INTERVAL: Duration = Duration::from_secs(15);
     const MAX_WAIT: Duration = Duration::from_secs(7200);
 
     let start = Instant::now();
@@ -3357,6 +3459,9 @@ pub fn obs_build(
     // the build away: tolerate a few consecutive poll failures, then give up.
     const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 8;
     let mut poll_errors: u32 = 0;
+    // Polls in a row that saw the same status; the delay between polls grows
+    // with it (see `poll_delay`).
+    let mut unchanged_polls: u32 = 0;
 
     // The previous mechanism only ever broke silence for one specific case
     // (an `Unknown("stale: ...")` verdict). A plain non-terminal status
@@ -3434,7 +3539,7 @@ pub fn obs_build(
                         "OBS status poll failed ({poll_errors}/{MAX_CONSECUTIVE_POLL_ERRORS}), retrying: {e}"
                     ),
                 });
-                std::thread::sleep(POLL_INTERVAL);
+                sleep_interruptible(poll_delay(unchanged_polls, poll_errors, jitter()));
                 continue;
             }
         };
@@ -3453,6 +3558,11 @@ pub fn obs_build(
         let status_str = status.to_string();
 
         let mut status = status;
+        if status_str == prev_status {
+            unchanged_polls = unchanged_polls.saturating_add(1);
+        } else {
+            unchanged_polls = 0;
+        }
         if status_str != prev_status {
             reporter.report(&Event::Progress {
                 step,
@@ -3534,7 +3644,7 @@ pub fn obs_build(
         // keep polling. Only a verdict confirmed for the current sources
         // (see `obs_status::resolve`) ends the wait; if none arrives, the
         // MAX_WAIT check above reports a timeout error.
-        std::thread::sleep(POLL_INTERVAL);
+        sleep_interruptible(poll_delay(unchanged_polls, 0, jitter()));
     };
 
     // Fetch the log regardless of outcome — partial logs help diagnose failures.
@@ -4264,5 +4374,44 @@ mod repo_arch_tests {
     fn a_meta_without_repositories_is_not_judged_here() {
         let info = parse_project_info("<project name=\"p\"/>");
         assert!(check_repo_arch(&info, "p", "r", "a").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+
+    #[test]
+    fn the_delay_grows_while_the_status_holds_still() {
+        let d = |n| poll_delay(n, 0, 0.5).as_secs();
+        assert_eq!(
+            (d(0), d(3), d(4), d(7), d(8), d(100)),
+            (15, 15, 30, 30, 60, 60)
+        );
+    }
+
+    #[test]
+    fn failing_polls_back_off_to_two_minutes() {
+        let d = |e| poll_delay(0, e, 0.5).as_secs();
+        assert_eq!((d(1), d(2), d(3), d(8)), (30, 60, 120, 120));
+        assert_eq!(poll_delay(8, 5, 0.5).as_secs(), 120);
+    }
+
+    #[test]
+    fn jitter_stays_within_a_fifth() {
+        assert_eq!(poll_delay(0, 0, 0.0).as_secs_f64(), 12.0);
+        assert!(poll_delay(0, 0, 0.999).as_secs_f64() < 18.0);
+    }
+
+    #[test]
+    fn the_http_status_is_read_from_either_osc_wording() {
+        assert_eq!(http_status("HTTP Error 429: Too Many Requests"), Some(429));
+        assert_eq!(
+            http_status("x\n503 Server Error: Service Unavailable for url"),
+            Some(503)
+        );
+        assert_eq!(http_status("401 Client Error: Unauthorized"), Some(401));
+        assert_eq!(http_status("connection reset by peer"), None);
+        assert_eq!(http_status("took 5000 Server Error"), None);
     }
 }
