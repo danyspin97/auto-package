@@ -6313,6 +6313,14 @@ fn repack_tarball(extract_dir: &Path, tarball: &Path) -> Result<(), String> {
     tar_builder
         .finish()
         .map_err(|e| format!("finalizing tarball: {}", e))?;
+    // The gzip trailer is written by `finish`, not by dropping the encoder,
+    // where a failure would go unseen and a truncated archive replace the
+    // original.
+    tar_builder
+        .into_inner()
+        .and_then(|enc| enc.finish())
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("finalizing tarball: {}", e))?;
 
     // Replace original tarball
     std::fs::rename(&temp_tarball, tarball).map_err(|e| format!("replacing tarball: {}", e))?;
@@ -6363,17 +6371,18 @@ fn glob_matches_single_segment(pattern: &str, candidate: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == candidate;
     }
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or("");
-    if !candidate.starts_with(first) {
+    let pieces: Vec<&str> = pattern.split('*').collect();
+    let (first, last) = (pieces[0], pieces[pieces.len() - 1]);
+    // The ends are anchored (and must not overlap); only the pieces between
+    // them float, in order.
+    if candidate.len() < first.len() + last.len()
+        || !candidate.starts_with(first)
+        || !candidate.ends_with(last)
+    {
         return false;
     }
-    let mut rest = &candidate[first.len()..];
-    let mut peekable = parts.peekable();
-    while let Some(part) = peekable.next() {
-        if part.is_empty() && peekable.peek().is_none() {
-            return true; // trailing *
-        }
+    let mut rest = &candidate[first.len()..candidate.len() - last.len()];
+    for part in &pieces[1..pieces.len() - 1] {
         match rest.find(part) {
             Some(idx) => rest = &rest[idx + part.len()..],
             None => return false,
@@ -7904,6 +7913,11 @@ Patch0:         0001-fix.patch
         assert!(!glob_matches_single_segment("a*b*c", "aXXbYY"));
         assert!(glob_matches_single_segment("literal", "literal"));
         assert!(!glob_matches_single_segment("literal", "other"));
+        // The last piece anchors the end, and the ends cannot overlap.
+        assert!(!glob_matches_single_segment("*-core", "ripgrep-core-x"));
+        assert!(!glob_matches_single_segment("a*b", "abX"));
+        assert!(!glob_matches_single_segment("ab*ba", "aba"));
+        assert!(glob_matches_single_segment("a*b*c", "abc"));
     }
 
     #[test]
