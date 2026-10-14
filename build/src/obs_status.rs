@@ -321,12 +321,25 @@ impl JobInfo {
 pub struct Evidence {
     pub source: Option<SourceInfo>,
     pub job: Option<JobInfo>,
+    /// The caller has just committed sources and waits for their build: a
+    /// built verdict (`succeeded`/`failed`) is trusted only when the job
+    /// history confirms it, dirty flag or not. Right after a commit the
+    /// repository is not yet flagged dirty, so the previous revision's
+    /// verdict would otherwise read as the answer.
+    pub confirm: bool,
 }
 
 /// Whether [`resolve`] needs [`Evidence`] for this entry — lets callers skip
-/// two API calls in the common case.
-pub fn needs_evidence(entry: &ResultEntry) -> bool {
-    entry.dirty && verdict(entry).is_some_and(|v| revision_dependent(&v))
+/// two API calls in the common case. `confirm` is [`Evidence::confirm`].
+pub fn needs_evidence(entry: &ResultEntry, confirm: bool) -> bool {
+    verdict(entry)
+        .is_some_and(|v| (entry.dirty && revision_dependent(&v)) || (confirm && is_built(&v)))
+}
+
+/// A verdict that comes from running a build (the job history records it),
+/// as opposed to a scheduler judgement like `unresolvable` or `excluded`.
+fn is_built(s: &BuildStatus) -> bool {
+    matches!(s, BuildStatus::Succeeded | BuildStatus::Failed)
 }
 
 /// A package's verdict word: the code itself, or `<details>` for `finished`.
@@ -362,7 +375,8 @@ fn word_status(word: &str) -> BuildStatus {
 ///
 /// * Active states (`scheduled`, `building`, ...) map straight across.
 /// * A bare `finished` is resolved through its `<details>` verdict.
-/// * A terminal verdict in a `dirty` repository may describe an older source
+/// * A terminal verdict in a `dirty` repository (or, with
+///   [`Evidence::confirm`], any built verdict) may describe an older source
 ///   revision, so it is only trusted when the newest job in the job history
 ///   was built from the revision currently on the server — and then the
 ///   job's own result code wins. Otherwise the result is
@@ -377,7 +391,9 @@ pub fn resolve(entry: &ResultEntry, evidence: &Evidence) -> BuildStatus {
             _ => status,
         };
     }
-    if !entry.dirty || !revision_dependent(&status) {
+    let must_confirm =
+        (entry.dirty && revision_dependent(&status)) || (evidence.confirm && is_built(&status));
+    if !must_confirm {
         return status;
     }
     if let (Some(src), Some(job)) = (&evidence.source, &evidence.job)
@@ -439,6 +455,7 @@ mod tests {
                 verifymd5: None,
                 code: job_code.into(),
             }),
+            confirm: false,
         }
     }
 
@@ -590,7 +607,7 @@ mod tests {
             resolve(&entry("excluded", None, true), &none),
             BuildStatus::Excluded
         );
-        assert!(!needs_evidence(&entry("excluded", None, true)));
+        assert!(!needs_evidence(&entry("excluded", None, true), false));
     }
 
     /// python-nvidia-cutlass-dsl-libs-base as OBS reported it: excluded on
@@ -674,10 +691,52 @@ mod tests {
 
     #[test]
     fn needs_evidence_only_for_dirty_terminal_results() {
-        assert!(needs_evidence(&entry("succeeded", None, true)));
-        assert!(needs_evidence(&entry("finished", Some("failed"), true)));
-        assert!(!needs_evidence(&entry("succeeded", None, false)));
-        assert!(!needs_evidence(&entry("building", None, true)));
+        assert!(needs_evidence(&entry("succeeded", None, true), false));
+        assert!(needs_evidence(
+            &entry("finished", Some("failed"), true),
+            false
+        ));
+        assert!(!needs_evidence(&entry("succeeded", None, false), false));
+        assert!(!needs_evidence(&entry("building", None, true), false));
+    }
+
+    #[test]
+    fn after_a_commit_a_clean_built_verdict_needs_the_job_history() {
+        assert!(needs_evidence(&entry("failed", None, false), true));
+        assert!(needs_evidence(&entry("succeeded", None, false), true));
+        // Scheduler judgements are not in the job history.
+        assert!(!needs_evidence(&entry("unresolvable", None, false), true));
+        assert!(!needs_evidence(&entry("excluded", None, false), true));
+        assert!(!needs_evidence(&entry("building", None, false), true));
+    }
+
+    #[test]
+    fn after_a_commit_the_previous_revisions_verdict_is_stale_even_when_clean() {
+        let e = entry("failed", None, false);
+        let confirm = |mut ev: Evidence| {
+            ev.confirm = true;
+            ev
+        };
+        // The newest job is for the old sources.
+        assert_eq!(
+            resolve(&e, &confirm(evidence("new", "old", "failed"))),
+            BuildStatus::Unknown("stale: failed".into())
+        );
+        // No evidence at all is not a confirmation.
+        assert_eq!(
+            resolve(&e, &confirm(Evidence::default())),
+            BuildStatus::Unknown("stale: failed".into())
+        );
+        // The job for the new sources decides.
+        assert_eq!(
+            resolve(&e, &confirm(evidence("new", "new", "succeeded"))),
+            BuildStatus::Succeeded
+        );
+        // Not asked to confirm: the clean verdict stands.
+        assert_eq!(
+            resolve(&e, &evidence("new", "old", "failed")),
+            BuildStatus::Failed
+        );
     }
 
     #[test]

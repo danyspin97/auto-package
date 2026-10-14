@@ -2373,7 +2373,26 @@ pub fn get_build_status(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch) {
+    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, false) {
+        return Ok(status);
+    }
+    get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
+}
+
+/// [`get_build_status`] for a package whose sources were just committed: a
+/// built verdict only counts once the job history shows it came from the
+/// revision now on the server (see [`obs_status::Evidence::confirm`]), so the
+/// previous revision's `failed`/`succeeded` is never mistaken for the result.
+/// Without the XML answer there is no job history to check, so the table
+/// fallback applies as usual.
+fn get_build_status_after_commit(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    emit: Emit<'_>,
+) -> Result<BuildStatus, Error> {
+    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, true) {
         return Ok(status);
     }
     get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
@@ -2487,6 +2506,7 @@ fn get_build_status_xml(
     pkg_name: &str,
     repo: &str,
     arch: &str,
+    confirm: bool,
 ) -> Option<BuildStatus> {
     if ![project, pkg_name, repo, arch]
         .iter()
@@ -2501,8 +2521,9 @@ fn get_build_status_xml(
         enc(arch)
     ))?;
     let entry = obs_status::find_entry(&xml, repo, arch, pkg_name)?;
-    let evidence = if obs_status::needs_evidence(&entry) {
+    let evidence = if obs_status::needs_evidence(&entry, confirm) {
         obs_status::Evidence {
+            confirm,
             source: osc_api(&format!("/source/{project}/{}?view=info", enc(pkg_name)))
                 .and_then(|x| obs_status::parse_source_info(&x)),
             job: osc_api(&format!(
@@ -2514,7 +2535,10 @@ fn get_build_status_xml(
             .and_then(|x| obs_status::parse_latest_job(&x)),
         }
     } else {
-        obs_status::Evidence::default()
+        obs_status::Evidence {
+            confirm,
+            ..Default::default()
+        }
     };
     Some(obs_status::resolve(&entry, &evidence))
 }
@@ -3335,7 +3359,13 @@ pub fn obs_build(
             });
         }
 
-        let status = match get_build_status(project, pkg_name, repo, arch, Emit::quiet()) {
+        let status = match get_build_status_after_commit(
+            project,
+            pkg_name,
+            repo,
+            arch,
+            Emit::quiet(),
+        ) {
             Ok(s) => {
                 poll_errors = 0;
                 s
