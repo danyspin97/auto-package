@@ -18,7 +18,9 @@ use crate::workspace::Workspace;
 
 /// Haiku is enough for summarising a journal, and it is the cheapest tier.
 const NOTES_MODEL: &str = "claude-haiku-5-5";
-const NOTES_BUDGET_USD: &str = "0.20";
+/// The most one notes turn can cost. The turn runs under this `--max-budget-usd`,
+/// so it is also the upper bound the caller reserves before the call.
+pub const NOTES_CAP_USD: f64 = 0.20;
 const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
 /// Local git operations on the notes repository; they never touch a network.
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -212,7 +214,7 @@ fn update_inner(
     let out = claude_print_json_with(
         NOTES_MODEL,
         &tools,
-        NOTES_BUDGET_USD,
+        &format!("{NOTES_CAP_USD:.2}"),
         &notes_prompt(
             rpm_name,
             version,
@@ -238,9 +240,9 @@ fn update_inner(
         // turn can have spent up to its cap, so charge that as an upper bound
         // rather than let a timed-out turn read as free.
         _ => {
-            usage.cost_usd = NOTES_BUDGET_USD.parse().unwrap_or(0.0);
+            usage.cost_usd = NOTES_CAP_USD;
             format!(
-                "could not run claude: {e}; cost counted as the ${NOTES_BUDGET_USD} \
+                "could not run claude: {e}; cost counted as the ${NOTES_CAP_USD:.2} \
                  turn cap, an estimate"
             )
         }
@@ -249,7 +251,7 @@ fn update_inner(
     // A nonzero exit with no usage report (killed, or crashed before printing)
     // may still have spent money: charge the cap as an upper bound.
     if out.code != 0 && usage.cost_usd == 0.0 {
-        usage.cost_usd = NOTES_BUDGET_USD.parse().unwrap_or(0.0);
+        usage.cost_usd = NOTES_CAP_USD;
     }
     if out.code != 0 {
         return Err(format!(
