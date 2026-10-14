@@ -3110,7 +3110,7 @@ pub fn get_project_build_statuses(
             }
         };
         if !statuses.is_empty() {
-            return Ok(statuses);
+            return Ok(fold_flavor_statuses(statuses));
         }
     }
 
@@ -3133,7 +3133,45 @@ pub fn get_project_build_statuses(
         });
     }
 
-    Ok(parse_project_build_statuses(&out.stdout, repo, arch))
+    Ok(fold_flavor_statuses(parse_project_build_statuses(
+        &out.stdout,
+        repo,
+        arch,
+    )))
+}
+
+/// A package is only as built as its worst multibuild flavor: `python-mcp` is
+/// `succeeded` while its `python-mcp:test` flavor is `unresolvable` (a test
+/// dependency nothing provides), and counting the base alone as built left the
+/// package out of the build queue with its missing dependency never reported.
+/// A flavor that is not `succeeded`/`excluded`/`disabled` passes its status to
+/// the base package when the base would otherwise count as built. The flavor
+/// entries stay in the map.
+fn fold_flavor_statuses(
+    mut statuses: HashMap<String, BuildStatus>,
+) -> HashMap<String, BuildStatus> {
+    let blocks = |s: &BuildStatus| {
+        !matches!(
+            s,
+            BuildStatus::Succeeded | BuildStatus::Excluded | BuildStatus::Disabled
+        )
+    };
+    let flavors: Vec<(String, BuildStatus)> = statuses
+        .iter()
+        .filter(|(k, s)| k.contains(':') && blocks(s))
+        .map(|(k, s)| (k.clone(), s.clone()))
+        .collect();
+    for (key, status) in flavors {
+        let Some((base, _)) = key.split_once(':') else {
+            continue;
+        };
+        if let Some(b) = statuses.get_mut(base)
+            && b.is_success()
+        {
+            *b = status;
+        }
+    }
+    statuses
 }
 
 /// Every package's status in ONE repository/architecture of a `_result`
@@ -5026,6 +5064,22 @@ mod overall_status_tests {
             overall_status(&obs_status::parse_results(xml), "foo"),
             (BuildStatus::Scheduled, Some("r/i586".to_string()))
         );
+    }
+
+    #[test]
+    fn an_unresolvable_flavor_keeps_the_package_out_of_the_built_set() {
+        let xml = r#"<resultlist>
+  <result repository="r" arch="x86_64">
+    <status package="python-mcp" code="succeeded"/>
+    <status package="python-mcp:test" code="unresolvable"/>
+    <status package="python-ok" code="succeeded"/>
+    <status package="python-ok:test" code="succeeded"/>
+  </result>
+</resultlist>"#;
+        let folded = fold_flavor_statuses(project_statuses_from_xml(xml, "r", "x86_64").unwrap());
+        assert!(!folded["python-mcp"].is_success());
+        assert!(folded["python-ok"].is_success());
+        assert!(folded.contains_key("python-mcp:test"));
     }
 
     #[test]
