@@ -3529,6 +3529,24 @@ fn jitter() -> f64 {
     f64::from(nanos % 1000) / 1000.0
 }
 
+/// The `<details>` OBS gives a package's result in `repo`/`arch` (what a
+/// `blocked` or `scheduled` package is waiting for), if any.
+fn build_details(project: &str, pkg_name: &str, repo: &str, arch: &str) -> Option<String> {
+    if ![project, pkg_name, repo, arch]
+        .iter()
+        .all(|n| is_valid_obs_name(n))
+    {
+        return None;
+    }
+    let xml = osc_api(&format!(
+        "/build/{project}/_result?package={}&repository={}&arch={}",
+        enc(pkg_name),
+        enc(repo),
+        enc(arch)
+    ))?;
+    obs_status::find_entry(&xml, repo, arch, pkg_name)?.details
+}
+
 /// Sleep for `total`, waking each second to notice a shutdown request, so a
 /// long poll delay does not hold up an interrupt.
 fn sleep_interruptible(total: Duration) {
@@ -3563,6 +3581,12 @@ pub fn obs_build(
     let step = emit.step;
     ensure_builds_for(project, repo, arch)?;
     const MAX_WAIT: Duration = Duration::from_secs(7200);
+    // Time spent `blocked` (waiting for other packages to build) does not
+    // count against MAX_WAIT while the blocker is visibly moving, i.e. its
+    // details changed within BLOCK_STALL; the wait as a whole is still
+    // bounded by MAX_TOTAL_WAIT.
+    const BLOCK_STALL: Duration = Duration::from_secs(600);
+    const MAX_TOTAL_WAIT: Duration = Duration::from_secs(6 * 3600);
 
     let start = Instant::now();
     let mut prev_status = String::new();
@@ -3599,6 +3623,10 @@ pub fn obs_build(
     // stays missing this long means it never will.
     const NO_RESULTS_LIMIT: Duration = Duration::from_secs(180);
     let mut no_results_since: Option<Instant> = None;
+    let mut blocked_credit = Duration::ZERO;
+    let mut last_tick = Instant::now();
+    let mut last_block_change = Instant::now();
+    let mut was_blocked = false;
 
     let status = loop {
         if crate::proc::shutting_down() {
@@ -3608,7 +3636,14 @@ pub fn obs_build(
                 stderr: "interrupted".to_string(),
             });
         }
-        if start.elapsed() >= MAX_WAIT {
+        let tick = last_tick.elapsed();
+        last_tick = Instant::now();
+        if was_blocked && last_block_change.elapsed() < BLOCK_STALL {
+            blocked_credit += tick;
+        }
+        if start.elapsed().saturating_sub(blocked_credit) >= MAX_WAIT
+            || start.elapsed() >= MAX_TOTAL_WAIT
+        {
             return Err(Error::OscFailed {
                 cmd: format!("wait {project}/{pkg_name}"),
                 code: -1,
@@ -3669,19 +3704,34 @@ pub fn obs_build(
             no_results_since = None;
         }
         let status_str = status.to_string();
+        // What blocks or delays the package is part of the status: a change
+        // in it is progress worth showing, and keeps the polling brisk.
+        let label = match status {
+            BuildStatus::Blocked | BuildStatus::Scheduled => {
+                match build_details(project, pkg_name, repo, arch) {
+                    Some(d) => format!("{status_str}: {d}"),
+                    None => status_str.clone(),
+                }
+            }
+            _ => status_str.clone(),
+        };
+        was_blocked = status == BuildStatus::Blocked;
 
         let mut status = status;
-        if status_str == prev_status {
+        if label == prev_status {
             unchanged_polls = unchanged_polls.saturating_add(1);
         } else {
             unchanged_polls = 0;
         }
-        if status_str != prev_status {
+        if label != prev_status {
             reporter.report(&Event::Progress {
                 step,
-                message: format!("OBS build status: {status_str}"),
+                message: format!("OBS build status: {label}"),
             });
-            prev_status = status_str;
+            if was_blocked {
+                last_block_change = Instant::now();
+            }
+            prev_status = label;
             last_change = Instant::now();
             last_warning = Instant::now();
             rechecked_since_change = false;
@@ -3692,7 +3742,7 @@ pub fn obs_build(
                 reporter.report(&Event::Warning {
                     step,
                     message: format!(
-                        "OBS build status still {status_str} after {}s with no change",
+                        "OBS build status still {prev_status} after {}s with no change",
                         last_change.elapsed().as_secs()
                     ),
                 });
