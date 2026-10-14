@@ -3389,8 +3389,8 @@ fn agent_turn(
         // Only the spend fields: the in-memory total is the truth for them,
         // while everything else in the file may have moved under another writer.
         update_state(&ws, reporter, |st| {
+            claim_run(st, &config.run_id);
             st.cumulative_spent_usd = *spent_usd;
-            st.cumulative_spent_run_id = Some(config.run_id.clone());
         });
     }
 
@@ -5024,6 +5024,17 @@ fn update_state(ws: &Workspace, reporter: &dyn Reporter, f: impl FnOnce(&mut Pkg
     warn_if_err(reporter, "saving state.json", PkgState::update(ws, f));
 }
 
+/// Tag the per-run counters with `run_id`. Stamping this run's id onto spend or
+/// attempts recorded under another run would make that run's dollars and
+/// attempts count against this one, so both reset when the id changes.
+fn claim_run(st: &mut PkgState, run_id: &str) {
+    if st.cumulative_spent_run_id.as_deref() != Some(run_id) {
+        st.cumulative_spent_usd = 0.0;
+        st.cumulative_attempts = 0;
+    }
+    st.cumulative_spent_run_id = Some(run_id.to_string());
+}
+
 /// Add a turn's cost to the package's spend for this run, so state.json keeps
 /// it even when the pipeline stops before the next successful turn. Spend from
 /// an earlier run is not carried over (see `PkgState::cumulative_spent_run_id`).
@@ -5031,13 +5042,8 @@ fn add_run_spend(ws: &Workspace, run_id: &str, cost_usd: f64) {
     // A read-modify-write under the state lock: `base` must come from the
     // file as it is now, not from a copy another writer has since replaced.
     let saved = PkgState::update(ws, |st| {
-        let base = if st.cumulative_spent_run_id.as_deref() == Some(run_id) {
-            st.cumulative_spent_usd
-        } else {
-            0.0
-        };
-        st.cumulative_spent_usd = base + cost_usd;
-        st.cumulative_spent_run_id = Some(run_id.to_string());
+        claim_run(st, run_id);
+        st.cumulative_spent_usd += cost_usd;
     });
     if let Err(e) = saved {
         ap_core::diag!("  cannot save the notes cost: {e}");
@@ -5130,13 +5136,8 @@ fn notes_section_rank(heading: &str) -> u8 {
 /// instead of restarting `attempts` at 0 (see `PkgState::cumulative_attempts`).
 fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
     let saved = PkgState::update(ws, |st| {
+        claim_run(st, run_id);
         st.cumulative_attempts = attempts;
-        // Stamping this run's id onto a spend recorded under another run would
-        // make that run's dollars count against this one. Reset it first.
-        if st.cumulative_spent_run_id.as_deref() != Some(run_id) {
-            st.cumulative_spent_usd = 0.0;
-        }
-        st.cumulative_spent_run_id = Some(run_id.to_string());
     });
     if let Err(e) = saved {
         ap_core::diag!("  cannot save the attempt count: {e}");
@@ -7471,6 +7472,21 @@ mod tests {
         assert_eq!(rate_limit_pause(2).as_secs(), 4);
         assert_eq!(rate_limit_pause(4).as_secs(), 16);
         assert_eq!(rate_limit_pause(50).as_secs(), 60);
+    }
+
+    #[test]
+    fn claiming_a_new_run_resets_spend_and_attempts_but_keeps_the_same_run() {
+        let mut st = PkgState {
+            cumulative_spent_usd: 3.5,
+            cumulative_attempts: 4,
+            cumulative_spent_run_id: Some("run-a".to_string()),
+            ..PkgState::default()
+        };
+        claim_run(&mut st, "run-a");
+        assert_eq!((st.cumulative_spent_usd, st.cumulative_attempts), (3.5, 4));
+        claim_run(&mut st, "run-b");
+        assert_eq!((st.cumulative_spent_usd, st.cumulative_attempts), (0.0, 0));
+        assert_eq!(st.cumulative_spent_run_id.as_deref(), Some("run-b"));
     }
 
     #[test]
