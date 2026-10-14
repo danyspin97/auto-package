@@ -1401,6 +1401,40 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
     out
 }
 
+/// The selected targets that are neither running nor already finished in this
+/// round: the ones the scheduler may start now, each with the name OBS lists
+/// the package under (see [`ap_build::osc::obs_name`]), which is how a running
+/// or finished package is tracked.
+fn unstarted_targets(
+    targets: Vec<ap_build::pipeline::TargetInfo>,
+    own_listing: &std::collections::HashSet<String>,
+    in_flight: &[String],
+    done_this_round: &std::collections::HashSet<String>,
+) -> Vec<(ap_build::pipeline::TargetInfo, String)> {
+    targets
+        .into_iter()
+        .map(|t| {
+            let rpm = ap_build::osc::obs_name(own_listing, &ap_build::osc::rpm_name(&t.name));
+            (t, rpm)
+        })
+        .filter(|(_, rpm)| !in_flight.contains(rpm) && !done_this_round.contains(rpm))
+        .collect()
+}
+
+/// Wait for every package still running, so none is left running unobserved
+/// when the build stops on an error. Their results are not used.
+fn drain_in_flight(
+    rx: &std::sync::mpsc::Receiver<(String, String, PipelineResult)>,
+    in_flight: &mut Vec<String>,
+) {
+    while !in_flight.is_empty() {
+        match rx.recv() {
+            Ok((rpm_name, _, _)) => in_flight.retain(|r| *r != rpm_name),
+            Err(_) => break,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_build(
     name: &str,
@@ -2113,109 +2147,122 @@ fn cmd_build(
             }
         }
 
-        // Select all currently buildable targets (the full frontier).
+        // Select the frontier and build it as a stream: a package starts as soon
+        // as everything it needs has been built, rather than when the whole
+        // round has finished. Each finished package is handled below and the
+        // frontier is selected again. A package that finished in this round is
+        // not started again until the next round, so a retry keeps the
+        // round-level pacing.
         //
         // `config.force` is passed down so `--force` (and `update`, which
         // always sets it) can override the "OBS says it's already green"
         // resolvability gate for the root -- see `select_target`'s doc
         // comment. Without this, the gate would skip the package before
         // `run_package`'s own force check could ever fire.
-        let targets = select_target(
-            name,
-            explicit_target,
-            pinned_version.as_deref(),
-            &config,
-            &permanently_failed,
-            config.force,
-            reporter.as_ref(),
-        )
-        .map_err(|e| color_eyre::eyre::eyre!(e))?;
-
-        if targets.is_empty() {
-            if permanently_failed.is_empty() {
-                ap_core::diag!("{name} and all dependencies are already built");
-                return Ok(());
-            }
-            let mut names: Vec<&String> = permanently_failed.iter().collect();
-            names.sort();
-            let names = names.into_iter().cloned().collect::<Vec<_>>().join(", ");
-            return Err(color_eyre::eyre::eyre!(
-                "build incomplete — gave up on {} after {max_target_retries} failed attempt(s) \
-                 each, blocking everything left in the closure that needs them: {names}",
-                permanently_failed.len()
-            ));
-        }
-
-        let own_listing = ap_build::osc::try_list_project_packages(
-            project,
-            ap_build::proc::Emit::run(reporter.as_ref()),
-        )
-        .map_err(|e| color_eyre::eyre::eyre!(e))?;
-        let target_names: Vec<String> = targets
-            .iter()
-            .map(|t| ap_build::osc::obs_name(&own_listing, &ap_build::osc::rpm_name(&t.name)))
-            .collect();
-        for (t, rpm_name) in targets.iter().zip(&target_names) {
-            reporter.report(&Event::TargetSelected {
-                pkg: rpm_name.clone(),
-                version: t.version.clone(),
-                reason: t.reason.clone(),
-                blocked_by: t.blocked_by.clone(),
-            });
-        }
-
-        // Spawn one thread per frontier package; OBS builds run concurrently.
-        let mut handles: Vec<(String, String, std::thread::JoinHandle<PipelineResult>)> =
-            Vec::new();
-        let mut spawn_error: Option<color_eyre::Report> = None;
-        for (target_info, rpm_name) in targets.into_iter().zip(target_names) {
-            let pkg_config = PipelineConfig {
-                pkg_name: target_info.name.clone(),
-                rpm_name: rpm_name.clone(),
-                version: target_info.version.clone(),
-                ..config.clone()
-            };
-            let pkg_run = run_dir.pkg(&rpm_name);
-            if let Err(e) = pkg_run.ensure() {
-                spawn_error = Some(color_eyre::eyre::eyre!(
-                    "cannot create the package run directory {}: {e}",
-                    pkg_run.path.display()
-                ));
-                break;
-            }
-            let r = pkg_reporter(&rpm_name);
-            let sem2 = sem.clone();
-            let finished_name = rpm_name.clone();
-            let finished_version = target_info.version.clone();
-            let handle = std::thread::spawn(move || {
-                let _permit = Permit::acquire(&sem2);
-                let result = run_package(&pkg_config, &pkg_run, r.as_ref());
-                // Reported as soon as this package is done. Reporting in join
-                // order let a slower sibling hold back every package finished
-                // after it, so their rows stayed on their last step.
-                r.report(&Event::PackageFinished {
-                    pkg: finished_name,
-                    version: finished_version,
-                    outcome: package_outcome(&result),
-                });
-                result
-            });
-            handles.push((rpm_name, target_info.version, handle));
-        }
-        if let Some(e) = spawn_error {
-            // Join the workers already spawned so none is left running
-            // unobserved once we return.
-            for (rpm_name, _version, handle) in handles {
-                join_package(handle, &rpm_name);
-            }
-            return Err(e);
-        }
-
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String, PipelineResult)>();
+        let mut in_flight: Vec<String> = Vec::new();
+        let mut done_this_round: std::collections::HashSet<String> = Default::default();
+        let mut spawned_any = false;
         let mut batch_pending: Vec<String> = Vec::new();
         let mut batch_failures: Vec<(String, String)> = Vec::new();
+        loop {
+            // The package names OBS lists are what builds and tracking use, so
+            // the listing is read with the frontier: a failure of either ends
+            // the build, after the packages already running have finished.
+            let selected = select_target(
+                name,
+                explicit_target,
+                pinned_version.as_deref(),
+                &config,
+                &permanently_failed,
+                config.force,
+                reporter.as_ref(),
+            )
+            .map_err(|e| color_eyre::eyre::eyre!(e))
+            .and_then(|targets| {
+                let listing = ap_build::osc::try_list_project_packages(
+                    project,
+                    ap_build::proc::Emit::run(reporter.as_ref()),
+                )
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                Ok((targets, listing))
+            });
+            let (targets, own_listing) = match selected {
+                Ok(v) => v,
+                Err(e) => {
+                    // Packages already running are not abandoned: let them
+                    // finish (their results land in state as usual) first.
+                    drain_in_flight(&rx, &mut in_flight);
+                    return Err(e);
+                }
+            };
+            let fresh = unstarted_targets(targets, &own_listing, &in_flight, &done_this_round);
+            if fresh.is_empty() && in_flight.is_empty() {
+                break;
+            }
 
-        for (rpm_name, version, handle) in handles {
-            let result = join_package(handle, &rpm_name);
+            for (t, rpm_name) in &fresh {
+                reporter.report(&Event::TargetSelected {
+                    pkg: rpm_name.clone(),
+                    version: t.version.clone(),
+                    reason: t.reason.clone(),
+                    blocked_by: t.blocked_by.clone(),
+                });
+            }
+
+            // One thread per package; OBS builds run concurrently.
+            for (target_info, rpm_name) in fresh {
+                let pkg_config = PipelineConfig {
+                    pkg_name: target_info.name.clone(),
+                    rpm_name: rpm_name.clone(),
+                    version: target_info.version.clone(),
+                    ..config.clone()
+                };
+                let pkg_run = run_dir.pkg(&rpm_name);
+                if let Err(e) = pkg_run.ensure() {
+                    // Join the workers already spawned so none is left running
+                    // unobserved once we return.
+                    drain_in_flight(&rx, &mut in_flight);
+                    return Err(color_eyre::eyre::eyre!(
+                        "cannot create the package run directory {}: {e}",
+                        pkg_run.path.display()
+                    ));
+                }
+                let r = pkg_reporter(&rpm_name);
+                let sem2 = sem.clone();
+                let tx = tx.clone();
+                let version = target_info.version.clone();
+                in_flight.push(rpm_name.clone());
+                std::thread::spawn(move || {
+                    let _permit = Permit::acquire(&sem2);
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_package(&pkg_config, &pkg_run, r.as_ref())
+                    }))
+                    .unwrap_or_else(|p| PipelineResult::Failed {
+                        rpm_name: rpm_name.clone(),
+                        reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
+                        kind: FailureKind::Other,
+                    });
+                    // Reported as soon as this package is done, not when the
+                    // scheduler gets to its result, so a slower sibling never
+                    // holds back the row of one that already finished.
+                    r.report(&Event::PackageFinished {
+                        pkg: rpm_name.clone(),
+                        version: version.clone(),
+                        outcome: package_outcome(&result),
+                    });
+                    let _ = tx.send((rpm_name, version, result));
+                });
+                spawned_any = true;
+            }
+
+            // Wait for one package to finish, then select again: its result may
+            // have unblocked others.
+            let (rpm_name, version, result) =
+                rx.recv().expect("package thread ended without reporting");
+            in_flight.retain(|r| *r != rpm_name);
+            done_this_round.insert(rpm_name.clone());
+
             match result {
                 PipelineResult::Built { .. } => {
                     ap_core::diag!("built {rpm_name} {version}");
@@ -2343,6 +2390,23 @@ fn cmd_build(
                     }
                 }
             }
+        }
+
+        // Nothing was started this round: the closure is either built or
+        // blocked, which is the terminal state checked here.
+        if !spawned_any {
+            if permanently_failed.is_empty() {
+                ap_core::diag!("{name} and all dependencies are already built");
+                return Ok(());
+            }
+            let mut names: Vec<&String> = permanently_failed.iter().collect();
+            names.sort();
+            let names = names.into_iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(color_eyre::eyre::eyre!(
+                "build incomplete — gave up on {} after {max_target_retries} failed attempt(s) \
+                 each, blocking everything left in the closure that needs them: {names}",
+                permanently_failed.len()
+            ));
         }
 
         // Compute what, if anything, from `batch_pending` is actually new
@@ -2605,6 +2669,42 @@ fn report_update_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_or_finished_package_is_not_started_again() {
+        use ap_core::event::SelectionReason;
+        let target = |name: &str| ap_build::pipeline::TargetInfo {
+            name: name.to_string(),
+            version: "1.0".to_string(),
+            reason: SelectionReason::FirstUnbuiltDependency,
+            blocked_by: vec![],
+        };
+        let targets = vec![target("alpha"), target("beta"), target("gamma")];
+        let in_flight = vec![ap_build::osc::rpm_name("beta")];
+        let done: std::collections::HashSet<String> =
+            [ap_build::osc::rpm_name("gamma")].into_iter().collect();
+        let fresh: Vec<String> = unstarted_targets(targets, &Default::default(), &in_flight, &done)
+            .into_iter()
+            .map(|(t, _)| t.name)
+            .collect();
+        assert_eq!(fresh, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn a_package_is_tracked_under_the_spelling_obs_lists() {
+        use ap_core::event::SelectionReason;
+        let target = ap_build::pipeline::TargetInfo {
+            name: "apscheduler".to_string(),
+            version: "1.0".to_string(),
+            reason: SelectionReason::FirstUnbuiltDependency,
+            blocked_by: vec![],
+        };
+        let listing: std::collections::HashSet<String> =
+            ["python-APScheduler".to_string()].into_iter().collect();
+        let running = vec!["python-APScheduler".to_string()];
+        let fresh = unstarted_targets(vec![target], &listing, &running, &Default::default());
+        assert!(fresh.is_empty());
+    }
 
     #[test]
     fn repo_package_name_ignores_subpaths_and_queries() {
