@@ -3334,6 +3334,8 @@ pub fn obs_build(
     let mut last_change = Instant::now();
     let mut last_warning = Instant::now();
     let mut rechecked_since_change = false;
+    const UNRESOLVABLE_CONFIRM: Duration = Duration::from_secs(60);
+    let mut unresolvable_since: Option<Instant> = None;
 
     let status = loop {
         if crate::proc::shutting_down() {
@@ -3455,8 +3457,19 @@ pub fn obs_build(
             }
         }
 
-        if status.is_terminal() {
-            break status;
+        // `unresolvable` is only the scheduler's current view: a dependency
+        // published a moment later turns it back into `scheduled`. Accept it
+        // as the answer only once it has held for UNRESOLVABLE_CONFIRM.
+        if status == BuildStatus::Unresolvable {
+            let since = *unresolvable_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= UNRESOLVABLE_CONFIRM {
+                break status;
+            }
+        } else {
+            unresolvable_since = None;
+            if status.is_terminal() {
+                break status;
+            }
         }
 
         // `stale: <verdict>` is not a final answer: that terminal result is

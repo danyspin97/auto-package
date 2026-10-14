@@ -332,14 +332,16 @@ pub struct Evidence {
 /// Whether [`resolve`] needs [`Evidence`] for this entry — lets callers skip
 /// two API calls in the common case. `confirm` is [`Evidence::confirm`].
 pub fn needs_evidence(entry: &ResultEntry, confirm: bool) -> bool {
-    verdict(entry)
-        .is_some_and(|v| (entry.dirty && revision_dependent(&v)) || (confirm && is_built(&v)))
+    verdict(entry).is_some_and(|v| {
+        (entry.dirty && revision_dependent(&v)) || (confirm && is_built(&v, verdict_word(entry)))
+    })
 }
 
 /// A verdict that comes from running a build (the job history records it),
-/// as opposed to a scheduler judgement like `unresolvable` or `excluded`.
-fn is_built(s: &BuildStatus) -> bool {
-    matches!(s, BuildStatus::Succeeded | BuildStatus::Failed)
+/// as opposed to a scheduler judgement like `unresolvable`, `excluded` or
+/// `unchanged` (no build was run: the sources produce what is already there).
+fn is_built(s: &BuildStatus, word: &str) -> bool {
+    matches!(s, BuildStatus::Succeeded | BuildStatus::Failed) && word != "unchanged"
 }
 
 /// A package's verdict word: the code itself, or `<details>` for `finished`.
@@ -367,6 +369,9 @@ fn word_status(word: &str) -> BuildStatus {
         // Transitional: the binary is still being published, so a dependent must
         // wait for it rather than schedule a second build of the same package.
         "dispatching" | "signing" | "publishing" | "unpublished" => BuildStatus::Building,
+        // `finished` with the details `unchanged`: OBS found the new sources
+        // build to the same result and kept the previous binaries.
+        "unchanged" => BuildStatus::Succeeded,
         other => BuildStatus::from(other),
     }
 }
@@ -391,8 +396,8 @@ pub fn resolve(entry: &ResultEntry, evidence: &Evidence) -> BuildStatus {
             _ => status,
         };
     }
-    let must_confirm =
-        (entry.dirty && revision_dependent(&status)) || (evidence.confirm && is_built(&status));
+    let must_confirm = (entry.dirty && revision_dependent(&status))
+        || (evidence.confirm && is_built(&status, word));
     if !must_confirm {
         return status;
     }
@@ -687,6 +692,17 @@ mod tests {
             Some("nothing provides python314-fastar, nothing provides python313-fastar")
         );
         assert_eq!(find_entry(xml, "r", "x86_64", "p").unwrap().details, None);
+    }
+
+    #[test]
+    fn finished_unchanged_is_a_success_that_needs_no_new_job() {
+        let e = entry("finished", Some("unchanged"), false);
+        let with_confirm = Evidence {
+            confirm: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve(&e, &with_confirm), BuildStatus::Succeeded);
+        assert!(!needs_evidence(&e, true));
     }
 
     #[test]
