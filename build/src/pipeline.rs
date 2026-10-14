@@ -312,6 +312,9 @@ impl PkgState {
     }
 
     /// Whether the last success was checked against the current policy.
+    // The comparison is always true while POLICY_VERSION is 0; it becomes a
+    // real check the first time the version is bumped.
+    #[allow(clippy::absurd_extreme_comparisons)]
     pub fn policy_current(&self) -> bool {
         self.policy_version >= POLICY_VERSION
     }
