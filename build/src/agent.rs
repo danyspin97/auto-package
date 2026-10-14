@@ -12,17 +12,43 @@ use crate::log::ExtractedLog;
 
 // ── subprocess environment scrubbing ──────────────────────────────────────────
 
+/// Names (exact, upper-case) the `claude` subprocess may inherit.
+const AGENT_ENV_ALLOW: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LANGUAGE",
+    "TERM",
+    "COLORTERM",
+    "NO_COLOR",
+    "TZ",
+    "TMPDIR",
+    // Proxies and CA bundles the CLI and Node need to reach the API.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NIX_SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_PATH",
+    "REQUESTS_CA_BUNDLE",
+];
+
+/// Name prefixes (upper-case) the subprocess may inherit.
+const AGENT_ENV_ALLOW_PREFIXES: &[&str] = &["LC_", "XDG_", "ANTHROPIC_", "CLAUDE_"];
+
 /// Env vars this process explicitly STRIPS from the Claude subprocess
 /// environment (publishing credentials, cloud / forge push tokens).
 ///
 /// The Oct 2026 external review flagged the agent subprocess as inheriting
-/// the full caller environment with no credential separation. Addressed by
-/// a denylist (not an allowlist — the first attempt tried a strict
-/// allowlist and immediately broke user runs that depended on things like
-/// NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, NIX_SSL_CERT_FILE, NODE_PATH or any
-/// locale/terminal env the shell happened to export). The pragmatic
-/// posture is: inherit by default, drop only the obviously-sensitive
-/// stuff AND anything whose name shape screams credential.
+/// the full caller environment. The environment is now an allowlist
+/// ([`AGENT_ENV_ALLOW`]); this denylist and the credential-shape checks are a
+/// second layer over the names that pass it.
 ///
 /// Publishing (osc commit, GitHub pushes, cloud deploys) all happens in
 /// the pipeline's OWN subprocess calls, not the agent's — the agent never
@@ -95,10 +121,11 @@ const CREDENTIAL_EXCEPTIONS: &[&str] = &[
 
 /// Build the environment map handed to the `claude` subprocess.
 ///
-/// Denylist posture: inherit the caller env by default, drop only
-/// explicitly-sensitive names ([`AGENT_ENV_DENYLIST`]) and anything whose
-/// name shape says credential ([`CREDENTIAL_SUFFIX_PATTERNS`], minus the
-/// vetted [`CREDENTIAL_EXCEPTIONS`]).
+/// Allowlist posture ([`AGENT_ENV_ALLOW`], [`AGENT_ENV_ALLOW_PREFIXES`]):
+/// anything else is dropped, so a credential with an unexpected name never
+/// reaches the agent. The denylist and credential-shape checks below still
+/// apply to allowed names, so `ANTHROPIC_*` or `CLAUDE_*` credentials not
+/// listed in [`CREDENTIAL_EXCEPTIONS`] are dropped too.
 ///
 /// The pure-function shape is kept so tests can drive it with crafted
 /// inputs. The production call site is still
@@ -114,6 +141,11 @@ pub(crate) fn scrub_env_for_agent(
     let mut kept: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in vars {
         let upper = name.to_ascii_uppercase();
+        if !AGENT_ENV_ALLOW.contains(&upper.as_str())
+            && !AGENT_ENV_ALLOW_PREFIXES.iter().any(|p| upper.starts_with(p))
+        {
+            continue;
+        }
         if AGENT_ENV_DENYLIST.contains(&upper.as_str()) {
             ap_core::diag!(
                 "ap-build: scrubbing publishing credential {name} from agent subprocess \
@@ -4729,18 +4761,20 @@ mod tests {
     }
 
     #[test]
-    fn scrub_env_keeps_unknown_benign_var() {
-        // Denylist posture: SOMETHING_IRRELEVANT isn't a sensitive name
-        // and isn't credential-shaped, so it passes through. The agent
-        // inherits anything not explicitly dangerous, including the
-        // Node.js runtime vars / SSL cert paths / NIX_* / locale leftovers
-        // that broke the previous strict-allowlist attempt.
-        let scrubbed = scrub_env_for_agent(vec![pair("SOMETHING_IRRELEVANT", "value")], &[]);
-        assert_eq!(
-            scrubbed.get("SOMETHING_IRRELEVANT").map(String::as_str),
-            Some("value"),
-            "benign unknown names pass through under the denylist"
+    fn scrub_env_drops_unknown_var_and_keeps_locale_and_xdg() {
+        let scrubbed = scrub_env_for_agent(
+            vec![
+                pair("SOMETHING_IRRELEVANT", "value"),
+                pair("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/x"),
+                pair("LC_ALL", "C"),
+                pair("XDG_CONFIG_HOME", "/home/u/.config"),
+            ],
+            &[],
         );
+        assert!(!scrubbed.contains_key("SOMETHING_IRRELEVANT"));
+        assert!(!scrubbed.contains_key("DBUS_SESSION_BUS_ADDRESS"));
+        assert!(scrubbed.contains_key("LC_ALL"));
+        assert!(scrubbed.contains_key("XDG_CONFIG_HOME"));
     }
 
     #[test]
