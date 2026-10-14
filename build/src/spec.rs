@@ -355,6 +355,87 @@ pub fn parse_header(spec: &str) -> Option<Header> {
     })
 }
 
+/// What one `BuildRequires:` entry asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildRequire {
+    /// A plain package name (`cmake`, `libfoo-devel`), version bound dropped.
+    Package(String),
+    /// Anything that is not a package name — `pkgconfig(foo)`, `/usr/bin/x`,
+    /// `%{python_module foo}`: what provides it cannot be told from the name.
+    Capability(String),
+}
+
+/// Split a dependency list at whitespace and commas outside `%{...}` and
+/// `(...)`, so `%{python_module foo >= 1}` and `pkgconfig(a b)` stay whole.
+fn split_dependency_tokens(list: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let (mut depth, mut start) = (0usize, None);
+    for (i, c) in list.char_indices() {
+        match c {
+            '{' | '(' => depth += 1,
+            '}' | ')' => depth = depth.saturating_sub(1),
+            c if depth == 0 && (c.is_whitespace() || c == ',') => {
+                if let Some(s) = start.take() {
+                    tokens.push(&list[s..i]);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        start.get_or_insert(i);
+    }
+    if let Some(s) = start {
+        tokens.push(&list[s..]);
+    }
+    tokens
+}
+
+/// Every `BuildRequires:` entry of a spec, in file order, without duplicates.
+/// Conditionals are not evaluated: an entry under `%if` is listed.
+pub fn build_requires(spec: &str) -> Vec<BuildRequire> {
+    let mut out: Vec<BuildRequire> = Vec::new();
+    for line in spec.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("BuildRequires") else {
+            continue;
+        };
+        // `BuildRequires(pre):` and friends carry a qualifier before the colon.
+        let rest = rest.trim_start();
+        let rest = match rest.strip_prefix('(') {
+            Some(q) => q.split_once(')').map(|(_, r)| r.trim_start()),
+            None => Some(rest),
+        };
+        let Some(list) = rest.and_then(|r| r.strip_prefix(':')) else {
+            continue;
+        };
+        let mut tokens = split_dependency_tokens(list).into_iter();
+        while let Some(token) = tokens.next() {
+            if matches!(token, ">=" | "<=" | "=" | "<" | ">" | "==") {
+                // The bound belongs to the previous name.
+                tokens.next();
+                continue;
+            }
+            if token.starts_with(['<', '>', '=']) {
+                // `foo >=1.0`: operator and version in one token.
+                continue;
+            }
+            let name = token.split(['<', '>', '=']).next().unwrap_or(token);
+            let entry = if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+            {
+                BuildRequire::Package(name.to_string())
+            } else {
+                BuildRequire::Capability(token.to_string())
+            };
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
 /// Collect `%define <name> <value>` and `%global <name> <value>` entries
 /// from a spec, in file order so later definitions override earlier ones (as
 /// rpmbuild itself does). Only the simple single-token-value shape is
@@ -2287,5 +2368,43 @@ mod review_fix_tests {
         let l = |c: &str| license_tag(&License::Classifiers(vec![c.to_string()]));
         assert_eq!(l("License :: Other/Proprietary License"), "FIXME");
         assert_eq!(l("License :: OSI Approved :: MIT License"), "MIT");
+    }
+
+    #[test]
+    fn build_requires_lists_names_without_bounds_or_duplicates() {
+        use BuildRequire::*;
+        let spec = "Name: foo\n\
+                    BuildRequires:  cmake >= 3.10\n\
+                    BuildRequires:  gcc-c++, libfoo-devel<2 libbar-devel\n\
+                    BuildRequires:  cmake\n\
+                    BuildRequires(pre):  fdupes\n\
+                    Requires:       notthis\n\
+                    BuildRequires:  libx >=1.0\n";
+        assert_eq!(
+            build_requires(spec),
+            [
+                Package("cmake".into()),
+                Package("gcc-c++".into()),
+                Package("libfoo-devel".into()),
+                Package("libbar-devel".into()),
+                Package("fdupes".into()),
+                Package("libx".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_requires_keeps_capabilities_whole() {
+        use BuildRequire::*;
+        let spec =
+            "BuildRequires:  pkgconfig(glib-2.0) >= 2.5 %{python_module foo >= 1} /usr/bin/x\n";
+        assert_eq!(
+            build_requires(spec),
+            [
+                Capability("pkgconfig(glib-2.0)".into()),
+                Capability("%{python_module foo >= 1}".into()),
+                Capability("/usr/bin/x".into()),
+            ]
+        );
     }
 }

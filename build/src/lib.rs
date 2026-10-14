@@ -2,6 +2,7 @@
 //! and the validation gate.
 
 pub mod agent;
+pub mod depreach;
 pub mod discovery;
 pub mod flavors;
 pub mod http;
