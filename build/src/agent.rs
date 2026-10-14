@@ -3192,22 +3192,33 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let mut stdout_raw = String::new();
     {
         use std::io::BufRead;
-        let reader = std::io::BufReader::new(child.stdout.take().unwrap());
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                // A read error (e.g. invalid UTF-8 from `BufRead::lines`, a
-                // broken pipe) used to break silently, leaving `stdout_raw`
-                // truncated with nothing to say why — indistinguishable from
-                // the process simply having nothing more to say. Recording
-                // the reason inline means a crash-stdout.log that stops
-                // mid-stream is diagnosable instead of a second mystery on
-                // top of the one it was captured to explain.
+        let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut raw_line: Vec<u8> = Vec::new();
+        let mut read_errors = 0u32;
+        // Give up only after this many errors in a row, so a persistent one
+        // cannot spin the loop.
+        const MAX_CONSECUTIVE_READ_ERRORS: u32 = 16;
+        loop {
+            raw_line.clear();
+            match reader.read_until(b'\n', &mut raw_line) {
+                Ok(0) => break,
+                Ok(_) => read_errors = 0,
+                // Keep draining after a read error. Stopping here left the CLI
+                // blocked on a full pipe until the watchdog killed it, and lost
+                // the turn's result. The error is recorded so a truncated
+                // stdout log says why.
                 Err(e) => {
+                    read_errors += 1;
                     stdout_raw.push_str(&format!("[stdout read error: {e}]\n"));
-                    break;
+                    if read_errors >= MAX_CONSECUTIVE_READ_ERRORS {
+                        break;
+                    }
+                    continue;
                 }
-            };
+            }
+            // Lossy conversion: one invalid byte must not end the stream.
+            let text = String::from_utf8_lossy(&raw_line);
+            let line = text.trim_end_matches(['\n', '\r']);
             last_output.store(
                 started.elapsed().as_millis() as u64,
                 std::sync::atomic::Ordering::SeqCst,
@@ -3215,7 +3226,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
             // Keep a bounded copy: a long turn streams every Edit/Write input,
             // and the raw copy is only for post-mortem reading.
             if (stdout_raw.len() as u64) < MAX_AGENT_STREAM_BYTES {
-                stdout_raw.push_str(&line);
+                stdout_raw.push_str(line);
                 stdout_raw.push('\n');
             } else if !stdout_raw.ends_with("[stdout truncated]\n") {
                 stdout_raw.push_str("[stdout truncated]\n");

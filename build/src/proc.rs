@@ -405,18 +405,26 @@ pub fn capture_with_timeout_env(
             let mut cut_short = false;
             if let Some(mut r) = r {
                 let mut chunk = [0u8; 16 * 1024];
+                let mut read_errors = 0u32;
                 loop {
                     match r.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(n) => {
+                            read_errors = 0;
                             let room = (MAX_CAPTURE_BYTES as usize).saturating_sub(buf.len());
                             buf.extend_from_slice(&chunk[..n.min(room)]);
                         }
                         // A signal is not the end of the stream.
                         Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        // Keep draining: stopping would leave the child blocked
+                        // on a full pipe. The bytes are still marked incomplete,
+                        // and only a run of errors ends the drain.
                         Err(_) => {
                             cut_short = true;
-                            break;
+                            read_errors += 1;
+                            if read_errors >= 16 {
+                                break;
+                            }
                         }
                     }
                 }
