@@ -52,11 +52,45 @@ fn decode_entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }
-    s.replace("&quot;", "\"")
+    // `&amp;` last, so `&amp;lt;` stays the literal text `&lt;`. Numeric
+    // references (`&#39;`, `&#x27;`) are decoded in one pass beforehand.
+    decode_numeric_entities(s)
+        .replace("&quot;", "\"")
         .replace("&apos;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
+}
+
+/// Replace `&#NN;` and `&#xHH;` with the character they name; anything that
+/// is not a valid reference is left as written.
+fn decode_numeric_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("&#") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let decoded = after.find(';').filter(|&e| e <= 8).and_then(|e| {
+            let body = &after[..e];
+            let code = match body.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => body.parse().ok()?,
+            };
+            Some((char::from_u32(code)?, e))
+        });
+        match decoded {
+            Some((c, e)) => {
+                out.push(c);
+                rest = &after[e + 1..];
+            }
+            None => {
+                out.push_str("&#");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Parse `key="value"` / `key='value'` pairs from the inside of a tag.
@@ -533,6 +567,20 @@ mod tests {
             (e.pkg.as_str(), e.code.as_str(), e.dirty),
             ("a&b", "succeeded", true)
         );
+    }
+
+    #[test]
+    fn numeric_entities_are_decoded_and_bad_ones_left_alone() {
+        assert_eq!(
+            decode_entities("it&#39;s &#x41;&#66; &amp;lt;"),
+            "it's AB &lt;"
+        );
+        assert_eq!(
+            decode_entities("a &#; b &#xZZ; &#99999999999; &#"),
+            "a &#; b &#xZZ; &#99999999999; &#"
+        );
+        let xml = "<resultlist><result repository='r' arch='a'><status package='a&#43;&#43;' code='succeeded'/></result></resultlist>";
+        assert_eq!(parse_results(xml)[0].pkg, "a++");
     }
 
     #[test]
