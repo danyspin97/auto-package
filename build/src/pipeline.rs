@@ -3039,6 +3039,16 @@ struct TurnCtx<'a> {
     context: Option<&'a str>,
 }
 
+/// Sent in the fresh session after a turn that ended without calling
+/// StructuredOutput. Any edit it made is already on disk, so it must not redo
+/// the work, and a prose description of an edit is not accepted as a response.
+const STRUCTURED_OUTPUT_NUDGE: &str = "Your previous reply did not call the \
+StructuredOutput tool, so only your final response was lost: any edits you \
+already made to the spec, patches or checkout are on disk and are kept. Do NOT \
+redo that work. Look at the current files to confirm what is there, then call \
+StructuredOutput with your result (use action `edited` if you changed anything). \
+Describing an edit in prose is not accepted; only the StructuredOutput call is.";
+
 /// Reshape an agent turn's `Error` into the one-line reason the pipeline
 /// propagates to the user via `PipelineResult::Failed`.
 ///
@@ -3260,10 +3270,7 @@ fn agent_turn(
                     .to_string(),
             });
             let _ = nudge.set(format!(
-                "{}Your previous reply did not call the StructuredOutput tool, so \
-                 nothing you did was recorded. The checkout and spec on disk are in \
-                 whatever state you left them: re-read them, finish the task, and END \
-                 by calling StructuredOutput with your result.",
+                "{}{STRUCTURED_OUTPUT_NUDGE}",
                 ctx.context.map(|c| format!("{c}\n\n")).unwrap_or_default()
             ));
             fresh_session.set(true);
@@ -6794,6 +6801,14 @@ fn verify_repos_exist(urls: &[String]) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_structured_output_nudge_says_not_to_redo_the_work() {
+        assert!(STRUCTURED_OUTPUT_NUDGE.contains("already made"));
+        assert!(STRUCTURED_OUTPUT_NUDGE.contains("on disk"));
+        assert!(STRUCTURED_OUTPUT_NUDGE.contains("Do NOT"));
+        assert!(STRUCTURED_OUTPUT_NUDGE.contains("StructuredOutput call"));
+    }
 
     #[test]
     fn max_turns_is_reported_as_its_own_failure_not_a_format_problem() {
