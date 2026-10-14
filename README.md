@@ -62,6 +62,7 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--max-attempts`: Maximum AI fix attempts per package (default: 10)
 - `--budget-usd`: USD budget cap for AI calls (default: 2.0)
 - `--no-agent`: Build only, never call the AI model
+- `--unsafe-resolve`: Run pip without its sandbox (see the threat model)
 - `--force`: Rebuild even if already built
 - `--regen`: Regenerate spec from scratch
 - `--cleanup`: Remove work directory before building
@@ -147,12 +148,44 @@ tool assumes these may be hostile and limits what they can reach:
   network and no home directory. Without a sandbox, specs with code-running
   macros (`%(...)`, `%{lua:...}`) are refused.
 - **Dependency resolution**: resolving a package can build an sdist, which
-  runs its build backend and `setup.py` code from the index. That code runs on
-  the host, not in a sandbox. pip and its build backends get a scrubbed
-  environment holding only what pip needs (PATH, HOME, locale, temp dir, proxy,
-  CA bundle and index settings), so OBS, GitHub and Anthropic tokens are not
-  exposed to them through environment variables. Files in the home directory
-  remain readable to that code.
+  runs its build backend and `setup.py` code from the index (and installs its
+  `build-system.requires`). pip runs in a bubblewrap sandbox for that reason.
+  - *What the sandbox does*: the system (`/usr`, `/lib*`, `/bin`, `/sbin`,
+    and a short list of `/etc` files for DNS, TLS, users and compilers) is
+    read-only. Your home directory, `~/.ssh`, `~/.config`, XDG directories,
+    `/run/user` (D-Bus, ssh-agent and gpg-agent sockets), `/var` and `/opt` do
+    not exist inside it. The only writable places are a private `/tmp`,
+    `/run` and an empty home (`/home/sandbox`) in memory, gone when pip exits;
+    pip's cache is there too, so nothing survives to poison a later run. It
+    has its own PID, IPC, UTS and user namespaces and a new session, and it is
+    killed with auto-package. The environment is cleared down to what pip
+    needs (PATH, locale, proxy, CA bundle and index settings), so OBS, GitHub
+    and Anthropic tokens are not visible to it.
+  - *What it does not do*: the network stays open, because resolution needs
+    the index. Anything a build backend can read inside the sandbox, it can
+    send out: the allowlisted variables (an index URL with a password in
+    `PIP_INDEX_URL` included), the pip config below, the interpreter prefix.
+    Memory-backed scratch space is not size-limited, so a backend can use up
+    RAM.
+  - *What is shared on purpose*, each read-only and as a single path: the
+    Python install when it is outside `/usr` (a venv or `/opt` prefix; a pip
+    under `~/.local` or another credential directory is refused rather than
+    bound whole); pip's own config for private indexes (`PIP_CONFIG_FILE`,
+    `~/.config/pip/pip.conf`, `~/.pip/pip.conf`), whose index URLs may carry
+    credentials that a backend could read; and custom CA bundles named by
+    `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE` or `PIP_CERT`.
+    `~/.netrc` is **not** shared unless `AUTO_PACKAGE_PIP_NETRC=1`, since it
+    usually holds credentials for more than the index. Keyring-based pip
+    authentication is not available inside the sandbox.
+  - *Without a working sandbox* (no `bwrap`, or unprivileged user namespaces
+    disabled; probed once per run), pip is not run on the host. Resolution
+    falls back to wheels only (`--only-binary=:all:`) with a warning, and
+    releases that ship only an sdist fail to resolve. `--unsafe-resolve` (or
+    `AUTO_PACKAGE_UNSAFE_RESOLVE=1`) opts into running pip without the sandbox
+    and building sdists; it also turns the sandbox off where it would work,
+    for example when a private index setup does not fit it. In that mode the
+    cleared environment is the only protection, and files in your home
+    directory are readable by build backends.
 - **Agent**: the build turn can read only the workspace and checkout, run
   `rpmspec`, `osc status`/`osc vc`, `ls`, `quilt` and the read-only
   `zypper search`/`what-provides` queries, and fetch PyPI metadata. It has no
