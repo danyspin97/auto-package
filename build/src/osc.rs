@@ -1552,8 +1552,18 @@ pub fn ensure_package(
         xml_escape(pkg_name),
         xml_escape(project)
     );
-    let meta_file = work_dir.join(format!(".{pkg_name}.meta.xml"));
-    fs::write(&meta_file, &meta).map_err(|e| Error::OscFailed {
+    // A fresh, uniquely named file in the private directory: a name built
+    // from the package in the work directory could collide with a concurrent
+    // run or an existing file. Removed when `meta_file` drops.
+    let write_meta = || -> std::io::Result<tempfile::NamedTempFile> {
+        let mut file = tempfile::Builder::new()
+            .prefix("meta-")
+            .suffix(".xml")
+            .tempfile_in(proc::private_dir())?;
+        std::io::Write::write_all(&mut file, meta.as_bytes())?;
+        Ok(file)
+    };
+    let meta_file = write_meta().map_err(|e| Error::OscFailed {
         cmd: format!("meta pkg {project} {pkg_name} (writing temp meta file)"),
         code: -1,
         stderr: e.to_string(),
@@ -1567,13 +1577,13 @@ pub fn ensure_package(
             project,
             pkg_name,
             "-F",
-            &meta_file.to_string_lossy(),
+            &meta_file.path().to_string_lossy(),
         ],
         work_dir,
         emit,
         OSC_QUERY_TIMEOUT,
     );
-    let _ = fs::remove_file(&meta_file);
+    drop(meta_file);
     let out = out.map_err(during(format!("meta pkg {project} {pkg_name}")))?;
 
     if !out.success() {

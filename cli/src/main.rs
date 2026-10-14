@@ -801,7 +801,14 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             }
             if created_now {
                 // Non-fatal: without the marker, --cleanup just refuses later.
-                let _ = std::fs::write(project_dir.join(OWNERSHIP_MARKER), b"");
+                if let Err(e) = ap_core::fsx::write_atomic(&project_dir.join(OWNERSHIP_MARKER), b"")
+                {
+                    ap_core::diag!(
+                        "warning: could not write the ownership marker in {}: {e}; \
+                         --cleanup will refuse this directory",
+                        project_dir.display()
+                    );
+                }
             }
 
             // Canonicalize so no relative path can reach a subprocess whose
