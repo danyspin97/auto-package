@@ -228,6 +228,26 @@ pub fn parse_binary_rpms(xml: &str) -> Vec<String> {
     out
 }
 
+/// The `.rpm` binaries of a package listing with their sizes in bytes (source
+/// RPMs excluded; a binary with no readable size is left out).
+pub fn parse_binary_rpm_sizes(xml: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(tag) = next_tag(xml, pos) {
+        pos = tag.end;
+        if tag.name == "binary"
+            && !tag.closing
+            && let Some(f) = tag.attr("filename")
+            && f.ends_with(".rpm")
+            && !f.ends_with(".src.rpm")
+            && let Some(size) = tag.attr("size").and_then(|s| s.parse().ok())
+        {
+            out.push((f.to_string(), size));
+        }
+    }
+    out
+}
+
 /// The entry for one package in one repository/arch, if present.
 pub fn find_entry(xml: &str, repo: &str, arch: &str, pkg: &str) -> Option<ResultEntry> {
     parse_results(xml)
@@ -571,6 +591,85 @@ mod tests {
             BuildStatus::Excluded
         );
         assert!(!needs_evidence(&entry("excluded", None, true)));
+    }
+
+    /// python-nvidia-cutlass-dsl-libs-base as OBS reported it: excluded on
+    /// i586, succeeded on x86_64, in one document. Each pair resolves to its
+    /// own state whichever order the document lists them in, and the x86_64
+    /// `building` of the repository itself does not leak into the package.
+    #[test]
+    fn each_repository_arch_resolves_to_its_own_status() {
+        let xml = r#"<resultlist>
+  <result project="p" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+    <status package="python-nvidia-cutlass-dsl-libs-base" code="excluded"/>
+  </result>
+  <result project="p" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
+    <status package="python-nvidia-cutlass-dsl-libs-base" code="succeeded"/>
+  </result>
+</resultlist>"#;
+        let status = |arch: &str| {
+            let e = find_entry(
+                xml,
+                "openSUSE_Tumbleweed",
+                arch,
+                "python-nvidia-cutlass-dsl-libs-base",
+            )
+            .unwrap();
+            resolve(&e, &Evidence::default())
+        };
+        assert_eq!(status("x86_64"), BuildStatus::Succeeded);
+        assert_eq!(status("i586"), BuildStatus::Excluded);
+        assert!(
+            find_entry(
+                xml,
+                "openSUSE_Tumbleweed",
+                "aarch64",
+                "python-nvidia-cutlass-dsl-libs-base"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn binary_sizes_skip_source_rpms_and_non_rpms() {
+        let listing = r#"<binarylist>
+  <binary filename="_buildenv" size="348736" mtime="1791824718"/>
+  <binary filename="python-cuda-bindings-13.4.3-2.1.src.rpm" size="3285054" mtime="1791824718"/>
+  <binary filename="python313-cuda-bindings-13.4.3-2.1.x86_64.rpm" size="11053" mtime="1791824718"/>
+  <binary filename="python314-cuda-bindings-13.4.3-2.1.x86_64.rpm" size="10925" mtime="1791824718"/>
+  <binary filename="rpmlint.log" size="2502" mtime="1791824717"/>
+</binarylist>"#;
+        assert_eq!(
+            parse_binary_rpm_sizes(listing),
+            vec![
+                (
+                    "python313-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                    11053
+                ),
+                (
+                    "python314-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                    10925
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn unresolvable_details_stay_with_their_own_result() {
+        let xml = r#"<resultlist>
+  <result repository="r" arch="i586">
+    <status package="p" code="unresolvable"><details>nothing provides python314-fastar, nothing provides python313-fastar</details></status>
+  </result>
+  <result repository="r" arch="x86_64">
+    <status package="p" code="succeeded"/>
+  </result>
+</resultlist>"#;
+        let i586 = find_entry(xml, "r", "i586", "p").unwrap();
+        assert_eq!(
+            i586.details.as_deref(),
+            Some("nothing provides python314-fastar, nothing provides python313-fastar")
+        );
+        assert_eq!(find_entry(xml, "r", "x86_64", "p").unwrap().details, None);
     }
 
     #[test]

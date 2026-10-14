@@ -3,8 +3,10 @@
 pub mod error;
 pub mod event;
 pub mod fsx;
+pub mod pgroup;
 pub mod proc_lock;
 pub mod run;
+pub mod sandbox;
 pub mod sink;
 pub mod skills;
 pub mod step;

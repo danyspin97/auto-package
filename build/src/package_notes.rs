@@ -18,7 +18,13 @@ use crate::workspace::Workspace;
 
 /// Haiku is enough for summarising a journal, and it is the cheapest tier.
 const NOTES_MODEL: &str = "claude-haiku-5-5";
-const NOTES_BUDGET_USD: &str = "0.20";
+/// The most one notes turn can cost. The turn runs under this `--max-budget-usd`,
+/// so it is also the upper bound the caller reserves before the call.
+pub const NOTES_CAP_USD: f64 = 0.20;
+/// Largest notes file the turn may write. A bigger result is refused and the
+/// previous notes stay; the prompt asks for under 60 lines.
+const MAX_NOTES_LINES: usize = 60;
+const MAX_NOTES_BYTES: usize = 8 * 1024;
 const NOTES_TIMEOUT: Duration = Duration::from_secs(300);
 /// Local git operations on the notes repository; they never touch a network.
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -44,15 +50,19 @@ pub fn path_for(rpm_name: &str) -> Option<PathBuf> {
         .map(|dir| dir.join(format!("{rpm_name}.md")))
 }
 
-/// How long a build waits for another build's update of the same notes.
-const LOCK_WAIT: Duration = Duration::from_secs(60);
+/// How long a build waits for another build's update of the same notes. The
+/// holder keeps the lock for the whole agent turn and for the git calls that
+/// commit the file, so the wait must outlast that or a healthy update reads as
+/// a timeout.
+const LOCK_WAIT: Duration =
+    Duration::from_secs(NOTES_TIMEOUT.as_secs() + 5 * GIT_TIMEOUT.as_secs());
 
 /// Exclusive lock on one package's notes, so two builds cannot both read the
 /// same notes and have the later writer silently discard the earlier update.
 /// An `flock(2)` on `<rpm-name>.md.lock`, held while the file stays open; the
 /// kernel releases it if the build dies, so a crash leaves nothing to clear.
-/// The file itself stays behind: deleting a locked file would let a second
-/// build lock a fresh one at the same path.
+/// The lock file stays behind by design, one empty file per package: deleting a
+/// locked file would let a second build lock a fresh one at the same path.
 struct NotesLock {
     _file: std::fs::File,
 }
@@ -77,7 +87,10 @@ impl NotesLock {
 }
 
 /// One quiet `claude --print --output-format json` call with the scrubbed
-/// agent environment, shared by the notes update and the source lookup.
+/// agent environment, shared by the notes update and the source lookup. It
+/// always runs with `--permission-mode default --setting-sources project`: path
+/// rules in `tools` are only enforced in that mode, and user settings could
+/// otherwise widen them.
 pub fn claude_print_json(
     model: &str,
     tools: &str,
@@ -86,21 +99,8 @@ pub fn claude_print_json(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
-    claude_print_json_with(model, tools, budget_usd, prompt, cwd, timeout, &[])
-}
-
-/// [`claude_print_json`] with extra CLI flags placed before the prompt.
-fn claude_print_json_with(
-    model: &str,
-    tools: &str,
-    budget_usd: &str,
-    prompt: &str,
-    cwd: &Path,
-    timeout: Duration,
-    extra_args: &[&str],
-) -> Result<crate::proc::Captured, crate::proc::ProcessError> {
     let env = crate::agent::scrub_env_for_agent(std::env::vars().collect(), &[]);
-    let mut args = vec![
+    let args = [
         "--print",
         "--output-format",
         "json",
@@ -110,9 +110,13 @@ fn claude_print_json_with(
         tools,
         "--max-budget-usd",
         budget_usd,
+        "--permission-mode",
+        "default",
+        "--setting-sources",
+        "project",
+        "-p",
+        prompt,
     ];
-    args.extend_from_slice(extra_args);
-    args.extend(["-p", prompt]);
     crate::proc::capture_with_timeout_env(
         "claude",
         &args,
@@ -173,10 +177,13 @@ fn update_inner(
     // The agent edits a private copy and the result is renamed into place, so
     // a failed or concurrent build never leaves the shared notes half-written.
     let dir = notes_file.parent().unwrap_or_else(|| Path::new("."));
+    // The lock is ours, so no live update for this package owns a scratch file.
+    remove_stale_scratch(dir, rpm_name);
     // Not `.md`: a scratch file left behind by an interrupted run must not look
     // like a package's notes.
+    let prefix = scratch_prefix(rpm_name);
     let scratch = tempfile::Builder::new()
-        .prefix(".scratch-")
+        .prefix(&prefix)
         .suffix(".tmp")
         .tempfile_in(dir)
         .map_err(|e| {
@@ -202,10 +209,13 @@ fn update_inner(
     // Path rules in `--allowed-tools` are only enforced in the default
     // permission mode with project-only settings; user settings could
     // otherwise widen what the agent may write.
-    let out = claude_print_json_with(
+    // The newest journal entries are inlined; older ones stay in the file.
+    let journal_tail =
+        crate::pipeline::tail_for_prompt(&std::fs::read_to_string(ws.notes()).unwrap_or_default());
+    let out = claude_print_json(
         NOTES_MODEL,
         &tools,
-        NOTES_BUDGET_USD,
+        &format!("{NOTES_CAP_USD:.2}"),
         &notes_prompt(
             rpm_name,
             version,
@@ -214,15 +224,10 @@ fn update_inner(
             arch,
             &ws.notes(),
             scratch.path(),
+            &journal_tail,
         ),
         ws.dir(),
         NOTES_TIMEOUT,
-        &[
-            "--permission-mode",
-            "default",
-            "--setting-sources",
-            "project",
-        ],
     )
     .map_err(|e| match e {
         // Nothing ran, so nothing was spent.
@@ -231,9 +236,9 @@ fn update_inner(
         // turn can have spent up to its cap, so charge that as an upper bound
         // rather than let a timed-out turn read as free.
         _ => {
-            usage.cost_usd = NOTES_BUDGET_USD.parse().unwrap_or(0.0);
+            usage.cost_usd = NOTES_CAP_USD;
             format!(
-                "could not run claude: {e}; cost counted as the ${NOTES_BUDGET_USD} \
+                "could not run claude: {e}; cost counted as the ${NOTES_CAP_USD:.2} \
                  turn cap, an estimate"
             )
         }
@@ -242,7 +247,7 @@ fn update_inner(
     // A nonzero exit with no usage report (killed, or crashed before printing)
     // may still have spent money: charge the cap as an upper bound.
     if out.code != 0 && usage.cost_usd == 0.0 {
-        usage.cost_usd = NOTES_BUDGET_USD.parse().unwrap_or(0.0);
+        usage.cost_usd = NOTES_CAP_USD;
     }
     if out.code != 0 {
         return Err(format!(
@@ -257,11 +262,50 @@ fn update_inner(
     if after.trim().is_empty() || after == before {
         return Err(format!("the agent did not update {}", notes_file.display()));
     }
+    check_size(&after)?;
     ap_core::fsx::write_atomic(&notes_file, &after)
         .map_err(|e| format!("cannot write {}: {e}", notes_file.display()))?;
     // The notes are already saved; a failed commit must not fail the update.
     if let Err(e) = commit_notes(dir, &notes_file, rpm_name, version) {
         ap_core::diag!("  notes for {rpm_name} saved but not committed: {e}");
+    }
+    Ok(())
+}
+
+/// Prefix of one package's scratch files. `sanitize_name` never keeps a `~`, so
+/// no package's prefix can match another package's files.
+fn scratch_prefix(rpm_name: &str) -> String {
+    format!(".scratch-{rpm_name}~")
+}
+
+/// Delete the scratch files an interrupted update left for `rpm_name`. Only
+/// called while holding that package's lock.
+fn remove_stale_scratch(dir: &Path, rpm_name: &str) {
+    let prefix = scratch_prefix(rpm_name);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".tmp"))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Refuse a notes file over the size cap, so one turn cannot grow the notes
+/// without bound. The previous notes stay in place.
+fn check_size(notes: &str) -> Result<(), String> {
+    let lines = notes.lines().count();
+    if lines > MAX_NOTES_LINES || notes.len() > MAX_NOTES_BYTES {
+        return Err(format!(
+            "the notes update is {lines} lines and {} bytes, over the \
+             {MAX_NOTES_LINES}-line, {MAX_NOTES_BYTES}-byte cap; kept the previous notes",
+            notes.len()
+        ));
     }
     Ok(())
 }
@@ -373,6 +417,7 @@ pub fn read(rpm_name: &str) -> String {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn notes_prompt(
     rpm_name: &str,
     version: &str,
@@ -381,14 +426,16 @@ fn notes_prompt(
     arch: &str,
     journal: &Path,
     notes_file: &Path,
+    journal_tail: &str,
 ) -> String {
     format!(
         "You are keeping the notes for the openSUSE package {rpm_name} \
          (version {version}), which just built successfully in project \
          {project} for {distro}.\n\n\
-         Read the attempt journal at `{journal}`: it is the build agent's own \
-         record of this package. Read `{notes_file}` too if it exists: it is this \
-         package's memory from earlier builds. Then update `{notes_file}` in place \
+         The newest part of the attempt journal is at the end of this prompt: \
+         it is the build agent's own record of this package. Older entries are in \
+         `{journal}` if you need them. Read `{notes_file}` too if it exists: it is \
+         this package's memory from earlier builds. Then update `{notes_file}` in place \
          (create it if missing) as a short Markdown document with these sections, \
          omitting any that are empty. Keep what is still true, correct what this \
          build changed, and drop what no longer applies:\n\n\
@@ -407,10 +454,15 @@ fn notes_prompt(
          openSUSE:Leap:16.0 only\" or \"on x86_64 only\"); leave general findings \
          unlabelled. This build is {project} / {distro} / {arch}; findings from \
          earlier builds that name a different target are not evidence about it.\n\n\
+         Under each section you change, add a line saying which build it was \
+         checked against, for example `Checked against {version} on {distro}, \
+         {arch}.`, so a later build can judge how old the entry is.\n\n\
          Keep it factual and under 60 lines. Do not copy the journal verbatim. \
-         Do not touch any other file, and do not run commands.",
+         Do not touch any other file, and do not run commands.\n\n\
+         {journal_block}",
         journal = journal.display(),
         notes_file = notes_file.display(),
+        journal_block = crate::agent::untrusted_data("journal", journal_tail),
     )
 }
 
@@ -447,6 +499,27 @@ mod tests {
         assert!(err.contains("p.md.lock"), "{err}");
         drop(first);
         NotesLock::acquire_for(&notes, Duration::from_millis(100)).unwrap();
+    }
+
+    #[test]
+    fn lock_wait_outlasts_a_healthy_holder() {
+        // The holder runs the agent turn, then up to four git calls under the lock.
+        assert!(LOCK_WAIT > NOTES_TIMEOUT + GIT_TIMEOUT * 4);
+    }
+
+    #[test]
+    fn stale_scratch_is_removed_only_for_its_own_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join(".scratch-python-foo~abc123.tmp");
+        let other = dir.path().join(".scratch-python-foo-bar~abc123.tmp");
+        let notes = dir.path().join("python-foo.md");
+        for p in [&mine, &other, &notes] {
+            std::fs::write(p, "x").unwrap();
+        }
+        remove_stale_scratch(dir.path(), "python-foo");
+        assert!(!mine.exists());
+        assert!(other.exists());
+        assert!(notes.exists());
     }
 
     #[test]
@@ -497,6 +570,17 @@ mod tests {
     }
 
     #[test]
+    fn a_notes_file_over_the_cap_is_refused() {
+        assert!(check_size("## Workarounds\n- one\n").is_ok());
+        let long: String = (0..MAX_NOTES_LINES + 1)
+            .map(|i| format!("- {i}\n"))
+            .collect();
+        let err = check_size(&long).unwrap_err();
+        assert!(err.contains("kept the previous notes"), "{err}");
+        assert!(check_size(&"x".repeat(MAX_NOTES_BYTES + 1)).is_err());
+    }
+
+    #[test]
     fn unparseable_reply_is_free() {
         let u = usage_from_output("not json");
         assert_eq!(u.input_tokens + u.output_tokens, 0);
@@ -513,7 +597,9 @@ mod tests {
             "x86_64",
             Path::new("/w/notes.md"),
             Path::new("/n/python-foo.md"),
+            "the newest entry",
         );
+        assert!(p.contains("the newest entry"));
         assert!(p.contains("python-foo"));
         assert!(p.contains("1.2.3"));
         assert!(p.contains("home:me"));

@@ -13,7 +13,7 @@
 //! replaced by this to avoid opening and iterating the archive multiple times.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use flate2::read::GzDecoder;
 use serde::Deserialize;
@@ -177,6 +177,12 @@ pub enum Error {
 
     #[error("archive exceeds extraction limit: {0}")]
     LimitExceeded(String),
+
+    #[error("refusing link {link} -> {target}: it would reach outside the archive")]
+    LinkEscapes {
+        link: std::path::PathBuf,
+        target: std::path::PathBuf,
+    },
 
     #[error("pyproject.toml is not valid TOML: {0}")]
     Toml(#[from] toml::de::Error),
@@ -389,7 +395,96 @@ pub fn wheel_root_is_purelib(wheel: &Path) -> Option<bool> {
 /// bare `.zip`) is a zip archive with no wrapping top-level directory — it
 /// unpacks flat into `dest` itself. The gzip, bzip2 and zstd paths all share
 /// the tar iterator; only the outer decoder differs.
+///
+/// `dest` must be absent or empty. The archive is unpacked beside it and
+/// renamed into place only once complete, so a failed or interrupted unpack
+/// never leaves a `dest` that looks like a finished extraction.
 pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
+    extract_where(tarball, dest, |_| true)
+}
+
+/// Refuse a symlink whose location or target can reach outside `root`.
+///
+/// Walks the link's directory and then its target one component at a time,
+/// keeping the path relative to `root`. Every directory it steps through must
+/// be a real directory, not a link, so the walk is exact and a `..` can only
+/// pop a real directory. The final component of the target may be a link:
+/// it was checked when it was created.
+fn check_link(root: &Path, link: &Path, target: &Path) -> Result<(), Error> {
+    let escape = || Error::LinkEscapes {
+        link: link.to_path_buf(),
+        target: target.to_path_buf(),
+    };
+    if target.has_root() {
+        return Err(escape());
+    }
+    let is_link_on_disk = |rel: &Path| {
+        std::fs::symlink_metadata(root.join(rel)).is_ok_and(|m| m.file_type().is_symlink())
+    };
+
+    let mut rel = std::path::PathBuf::new();
+    for c in link.parent().unwrap_or(Path::new("")).components() {
+        match c {
+            Component::Normal(p) => {
+                if is_link_on_disk(&rel.join(p)) {
+                    return Err(escape());
+                }
+                rel.push(p);
+            }
+            Component::CurDir => {}
+            _ => return Err(escape()),
+        }
+    }
+
+    let parts: Vec<Component<'_>> = target.components().collect();
+    for (i, c) in parts.iter().enumerate() {
+        match c {
+            Component::Normal(p) => {
+                let last = i + 1 == parts.len();
+                if !last && is_link_on_disk(&rel.join(p)) {
+                    return Err(escape());
+                }
+                rel.push(p);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !rel.pop() {
+                    return Err(escape());
+                }
+            }
+            _ => return Err(escape()),
+        }
+    }
+    Ok(())
+}
+
+/// [`extract`] restricted to the entries `keep` accepts. The path it is given
+/// is the entry's path inside the archive (including the top-level directory).
+/// Skipped entries are still decompressed on the way past, but never written.
+pub fn extract_where(
+    tarball: &Path,
+    dest: &Path,
+    keep: impl Fn(&Path) -> bool,
+) -> Result<(), Error> {
+    let mut partial = dest.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    let _ = std::fs::remove_dir_all(&partial);
+    let result = extract_into(tarball, &partial, &keep).and_then(|()| {
+        // Only an empty `dest` is replaced; anything else is an error here.
+        let _ = std::fs::remove_dir(dest);
+        std::fs::rename(&partial, dest).map_err(|e| Error::Io {
+            path: dest.to_path_buf(),
+            source: e,
+        })
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&partial);
+    }
+    result
+}
+
+fn extract_into(tarball: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<(), Error> {
     let kind = classify(tarball).ok_or_else(|| Error::Io {
         path: tarball.to_path_buf(),
         source: std::io::Error::other(format!(
@@ -409,16 +504,30 @@ pub fn extract(tarball: &Path, dest: &Path) -> Result<(), Error> {
             // `unpack_in` keeps tar-rs's traversal and symlink protections.
             for entry in archive.entries().map_err(Error::Tar)? {
                 let mut entry = entry.map_err(Error::Tar)?;
+                if !keep(&entry.path().map_err(Error::Tar)?) {
+                    continue;
+                }
                 budget.charge(entry.size())?;
                 if let Some(reason) = escaping_link(&entry) {
                     tracing::warn!("skipping tar entry: {reason}");
                     continue;
                 }
+                // Each symlink is also checked against what is already on
+                // disk. `unpack_in` only canonicalizes the parent of the entry
+                // it is writing, so a link planted earlier can redirect a
+                // later one out of the tree even when each link looks fine
+                // on its own.
+                if entry.header().entry_type().is_symlink() {
+                    let link = entry.path().map_err(Error::Tar)?.into_owned();
+                    if let Some(target) = entry.link_name().map_err(Error::Tar)? {
+                        check_link(dest, &link, &target)?;
+                    }
+                }
                 entry.unpack_in(dest).map_err(Error::Tar)?;
             }
             Ok(())
         }
-        ArchiveKind::Zip | ArchiveKind::Wheel => extract_zip(tarball, dest),
+        ArchiveKind::Zip | ArchiveKind::Wheel => extract_zip(tarball, dest, keep),
     }
 }
 
@@ -483,7 +592,7 @@ fn escaping_link<R: Read>(entry: &tar::Entry<'_, R>) -> Option<String> {
 /// Pure-Rust, no reliance on the system `unzip` binary — the previous
 /// implementation shelled out, which quietly failed on build hosts without
 /// InfoZip installed and left no artifact behind to diagnose from.
-fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
+fn extract_zip(archive: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<(), Error> {
     let file = std::fs::File::open(archive).map_err(|e| Error::Io {
         path: archive.to_path_buf(),
         source: e,
@@ -509,6 +618,9 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Error> {
         let Some(rel) = entry.enclosed_name() else {
             continue;
         };
+        if !keep(&rel) {
+            continue;
+        }
         let out_path = dest.join(rel);
         if entry.is_dir() {
             std::fs::create_dir_all(&out_path).map_err(|e| Error::Io {
@@ -1238,6 +1350,96 @@ mod tests {
         );
     }
 
+    enum Member<'a> {
+        File(&'a str, &'a [u8]),
+        Dir(&'a str),
+        Link(&'a str, &'a str),
+    }
+
+    fn write_members(path: &std::path::Path, members: &[Member<'_>]) {
+        let file = std::fs::File::create(path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(enc);
+        for m in members {
+            let mut header = tar::Header::new_gnu();
+            match m {
+                Member::File(name, body) => {
+                    header.set_entry_type(tar::EntryType::Regular);
+                    header.set_size(body.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    ar.append_data(&mut header, name, *body).unwrap();
+                }
+                Member::Dir(name) => {
+                    header.set_entry_type(tar::EntryType::Directory);
+                    header.set_size(0);
+                    header.set_mode(0o755);
+                    header.set_cksum();
+                    ar.append_data(&mut header, name, std::io::empty()).unwrap();
+                }
+                Member::Link(name, target) => {
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    header.set_size(0);
+                    header.set_mode(0o777);
+                    ar.append_link(&mut header, name, target).unwrap();
+                }
+            }
+        }
+        ar.into_inner().unwrap().finish().unwrap();
+    }
+
+    /// The chain from the review: `x` is a link that resolves back to the
+    /// root, so `x/y` is really `y`, and a link created under `x/y` climbs
+    /// out of the archive. Each step passes the lexical check on its own.
+    #[test]
+    fn a_chain_of_links_cannot_redirect_a_later_link_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"host secret").unwrap();
+        let tarball = dir.path().join("pkg.tar.gz");
+        write_members(
+            &tarball,
+            &[
+                Member::Dir("a/"),
+                Member::Dir("a/b/"),
+                Member::Link("x", "a/b/../.."),
+                Member::Dir("x/y/"),
+                Member::Link("x/y/link", "../../outside"),
+            ],
+        );
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+
+        let err = extract(&tarball, &root).unwrap_err();
+
+        assert!(matches!(err, Error::LinkEscapes { .. }), "{err}");
+        assert!(!root.join("y/link").exists() && !root.join("x/y/link").exists());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"host secret");
+    }
+
+    #[test]
+    fn links_that_stay_inside_the_archive_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("pkg.tar.gz");
+        write_members(
+            &tarball,
+            &[
+                Member::Dir("pkg-1/"),
+                Member::Dir("pkg-1/sub/"),
+                Member::File("pkg-1/lib.so.1", b"elf"),
+                Member::Link("pkg-1/lib.so", "lib.so.1"),
+                Member::Link("pkg-1/sub/up", "../lib.so"),
+                Member::Link("pkg-1/a/d", "../lib.so.1"),
+            ],
+        );
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+
+        extract(&tarball, &root).unwrap();
+
+        assert_eq!(std::fs::read(root.join("pkg-1/sub/up")).unwrap(), b"elf");
+    }
+
     fn write_tar(path: &std::path::Path, entries: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).unwrap();
         let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
@@ -1526,6 +1728,23 @@ build-backend = "flit_core.buildapi"
     }
 
     #[test]
+    fn extract_where_writes_only_the_kept_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.tar.gz");
+        write_tar(
+            &src,
+            &[
+                ("thing-1.0/README", b"hello\n"),
+                ("thing-1.0/setup.py", b"print(1)\n"),
+            ],
+        );
+        let out = dir.path().join("out");
+        extract_where(&src, &out, |p| p.ends_with("setup.py")).unwrap();
+        assert!(out.join("thing-1.0").join("setup.py").is_file());
+        assert!(!out.join("thing-1.0").join("README").exists());
+    }
+
+    #[test]
     fn extract_tar_bz2() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.tar.bz2");
@@ -1579,6 +1798,17 @@ build-backend = "flit_core.buildapi"
         let out = dir.path().join("out");
         let err = extract(&src, &out).expect_err("rar is not supported");
         assert!(matches!(err, Error::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn failed_extract_leaves_neither_dest_nor_partial_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("broken.tar.gz");
+        std::fs::write(&src, b"not gzip at all").unwrap();
+        let out = dir.path().join("sdist");
+        assert!(extract(&src, &out).is_err());
+        assert!(!out.exists());
+        assert!(!dir.path().join("sdist.partial").exists());
     }
 
     // --- Inspection across formats ----------------------------------------

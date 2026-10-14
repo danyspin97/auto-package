@@ -1,13 +1,14 @@
 //! Command-line surface — REDESIGN M1.
 
 mod tui;
+mod update_project;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ap_build::pipeline::{
-    AgentBackend, PipelineConfig, PipelineResult, run_package, select_target,
+    AgentBackend, FailureKind, PipelineConfig, PipelineResult, run_package, select_target,
 };
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SelectionReason};
 use ap_core::run::RunDir;
@@ -96,6 +97,13 @@ enum Commands {
         /// Build only; never call the model.
         #[arg(long, default_value_t = false)]
         no_agent: bool,
+
+        /// Resolve dependencies without the sandbox: pip runs on the host and
+        /// may build sdists, running their build backends as you. Without
+        /// this, pip runs in bubblewrap, or resolves wheels only when
+        /// bubblewrap is unusable. Same as AUTO_PACKAGE_UNSAFE_RESOLVE=1.
+        #[arg(long, default_value_t = false)]
+        unsafe_resolve: bool,
 
         /// Remove the work directory before building.
         #[arg(long, default_value_t = false)]
@@ -190,6 +198,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         no_agent: bool,
 
+        /// Resolve dependencies without the sandbox: pip runs on the host and
+        /// may build sdists, running their build backends as you. Without
+        /// this, pip runs in bubblewrap, or resolves wheels only when
+        /// bubblewrap is unusable. Same as AUTO_PACKAGE_UNSAFE_RESOLVE=1.
+        #[arg(long, default_value_t = false)]
+        unsafe_resolve: bool,
+
         /// Maximum number of packages to rebuild concurrently (0 = unlimited).
         /// Each rebuild still runs its own dep closure, so this bounds the
         /// top-level update loop, not every spawned sub-build.
@@ -210,6 +225,17 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         regen: bool,
     },
+
+    /// Update the packages of an OBS project that have a newer upstream
+    /// release, in a branch project, and optionally submit them back.
+    ///
+    /// Browses SOURCE_PROJECT (read only), branches each package with a newer
+    /// release into the branch project, makes the BuildRequires that live in
+    /// other projects resolvable by adding those projects as build paths of the
+    /// branch project, and builds the new versions there with the ordinary
+    /// pipeline. With `--submit`, a package that built gets a submit request to
+    /// the project it was branched from.
+    UpdateProject(update_project::UpdateProjectArgs),
 
     /// Print what auto-package has learned about a package: the build
     /// requirements, test changes and workarounds kept in its notes.
@@ -232,38 +258,6 @@ fn looks_like_url(s: &str) -> bool {
 ///
 /// `https://github.com/BurntSushi/ripgrep.git` → `ripgrep`; sub-paths
 /// (`…/tree/main`), queries and fragments do not leak into the name.
-/// Whether a package failed only because the model API answered 429 (the
-/// pipeline's message for that case contains "rate limit (429)").
-fn is_rate_limit_failure(reason: &str) -> bool {
-    reason.contains("rate limit (429)")
-}
-
-/// Whether a package gave up because it already spent its *entire*
-/// per-package budget or attempt allowance on this one round (the exact
-/// message `run_package_inner` constructs: `"gave up after {N} attempt(s):
-/// budget exhausted ..."` or `"... attempt limit {N} reached"`), as opposed
-/// to a single transient failure (a flaky `osc` call, a one-off agent
-/// mistake) that a fresh round might plausibly do better on.
-///
-/// This matters because `max_target_retries` reuses `max_attempts` (the
-/// per-round fix-attempt cap) as the number of *whole rounds* to retry a
-/// failed target before giving up on it for good — so without this check, a
-/// package that already burned its full budget without success gets
-/// re-selected and given an entirely fresh budget up to `max_target_retries`
-/// times over. Observed on python-chromadb: 5+ rounds, each spending its
-/// full ~$14 (over the nominal $10 budget — the check only triggers
-/// mid-attempt, after the costly agent turn that pushed it over already
-/// ran), before `max_target_retries` would even have kicked in — the kind
-/// of repeat-the-same-$10-mistake loop that looks like the whole run being
-/// stuck even though other packages keep progressing around it. A budget/
-/// attempt exhaustion on attempt N is strong evidence attempt N+1 (with a
-/// brand new budget, repeating the exact same fix loop from scratch) won't
-/// fare differently, so it gives up immediately instead of waiting for
-/// `max_target_retries` identical rounds to confirm that.
-fn is_budget_or_attempt_exhausted(reason: &str) -> bool {
-    reason.contains("budget exhausted (") || reason.contains("attempt limit ")
-}
-
 fn repo_package_name(url: &str) -> String {
     // A direct tarball URL names the project in its file name, not as the last
     // path segment (`…/hello-2.12.tar.gz` is `hello`, not the file).
@@ -431,12 +425,29 @@ fn resolve_dependency_config(
     let mut all_attempts: Vec<String> = Vec::new();
     let mut probe_failure_warnings: Vec<String> = Vec::new();
     let name_candidates = upstream_name_candidates(dep);
+    // A repository's latest release does not depend on the name it was found
+    // under, so each is asked for once per run, and the new ones for one
+    // candidate are asked for side by side.
+    let mut releases: std::collections::HashMap<String, Result<String, String>> =
+        std::collections::HashMap::new();
     for cand in &name_candidates {
         let repos = ap_build::pipeline::find_source_repo_candidates(cand);
+        let unknown: Vec<String> = repos
+            .verified
+            .iter()
+            .filter(|r| !releases.contains_key(*r))
+            .cloned()
+            .collect();
+        releases.extend(
+            unknown
+                .iter()
+                .cloned()
+                .zip(ap_build::sources::latest_releases(&unknown)),
+        );
         for repo_url in &repos.verified {
             all_attempts.push(repo_url.clone());
-            let version = match ap_build::sources::latest_release(repo_url) {
-                Ok(v) => v,
+            let version = match &releases[repo_url] {
+                Ok(v) => v.clone(),
                 Err(e) => {
                     probe_failure_warnings
                         .push(format!("{repo_url}: latest-release lookup failed: {e}"));
@@ -478,7 +489,7 @@ fn resolve_dependency_config(
             // which then fails spec generation and loops forever reselecting
             // the same broken version. Skip and keep trying other
             // candidates/repos instead.
-            if dep_rpm == config.rpm_name {
+            if ap_build::osc::fuzzy_key(&dep_rpm) == ap_build::osc::fuzzy_key(&config.rpm_name) {
                 probe_failure_warnings.push(format!(
                     "{repo_url}: resolved back to this package's own rpm_name \
                      ({dep_rpm}) — likely the umbrella project of a devel-wrapped \
@@ -528,7 +539,9 @@ fn resolve_dependency_config(
              cuda-devel/cuda-runtime), it must already be provided by \
              the target project's own repository configuration; this \
              tool has no way to manufacture one. Otherwise, pass \
-             --source-url {dep}=<url> to point it at the upstream repo."
+             --source-url {dep}=<url> to point it at the upstream repo \
+             (a repository found only by a name search is not used \
+             without that confirmation)."
         ),
     });
     None
@@ -555,21 +568,12 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     // Stop the build workers (own process groups, so the terminal's Ctrl-C
     // never reached them): otherwise `osc`/`claude` outlive this process.
     ap_build::proc::kill_all_groups();
+    ap_build::proc::remove_private_dir();
     if tui_active {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
     }
-    let usage = memory
-        .events()
-        .iter()
-        .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-            if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } = ev {
-                acc.input_tokens += usage.input_tokens;
-                acc.output_tokens += usage.output_tokens;
-                acc.cost_usd += usage.cost_usd;
-            }
-            acc
-        });
+    let usage = memory.usage();
     eprintln!(
         "\nInterrupted — tokens: {} in / {} out — cost: ${:.4}",
         usage.input_tokens, usage.output_tokens, usage.cost_usd
@@ -634,6 +638,7 @@ fn main() -> color_eyre::Result<()> {
 
     let mut summary: Option<String> = None;
     let result = run(cli, &mut summary);
+    ap_build::proc::remove_private_dir();
     // Printed after `run` returns so the TUI has restored the terminal, and
     // whether or not the run failed: a failed run is the one where the list of
     // what was built and what is still queued matters most.
@@ -662,6 +667,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             regen,
             agent_backend,
             no_agent,
+            unsafe_resolve,
             cleanup,
             jobs,
             url,
@@ -677,6 +683,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // `--no-agent` promises no model calls at all, including the
             // web-search fallback that locates an upstream for unknown names.
             ap_build::discovery::set_agent_enabled(!no_agent);
+            ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
             // `build https://github.com/owner/repo` — the URL is the source and
@@ -952,6 +959,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                                         reporter.clone(),
                                                         base_reporter.clone(),
                                                         tui_ctrl.clone(),
+                                                        None,
                                                     )
                                                 })
                                             });
@@ -1004,6 +1012,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                             reporter.clone(),
                             base_reporter.clone(),
                             tui_ctrl.clone(),
+                            None,
                         )
                     });
                     if tui_ctrl.is_some() {
@@ -1038,24 +1047,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 RunOutcome::Failed
             };
             // Sum usage from all AgentReply events recorded during the run.
-            let total_usage =
-                memory
-                    .events()
-                    .iter()
-                    .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } =
-                            ev
-                        {
-                            acc.input_tokens += usage.input_tokens;
-                            acc.output_tokens += usage.output_tokens;
-                            acc.cost_usd += usage.cost_usd;
-                        }
-                        acc
-                    });
             reporter.report(&Event::RunFinished {
                 outcome,
                 elapsed: start.elapsed(),
-                usage: total_usage,
+                usage: memory.usage(),
             });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
@@ -1070,6 +1065,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 ));
             }
         }
+        Commands::UpdateProject(args) => update_project::run(args, summary)?,
         Commands::Notes { name, notes_dir } => {
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
             if ap_build::package_notes::path_for(&name).is_none() {
@@ -1097,10 +1093,12 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             max_attempts,
             budget_usd,
             no_agent,
+            unsafe_resolve,
             jobs,
             regen,
         } => {
             ap_build::discovery::set_agent_enabled(!no_agent);
+            ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
             let level: LogLevel = log
@@ -1225,24 +1223,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             } else {
                 RunOutcome::Failed
             };
-            let total_usage =
-                memory
-                    .events()
-                    .iter()
-                    .fold(ap_core::event::Usage::default(), |mut acc, ev| {
-                        if let Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } =
-                            ev
-                        {
-                            acc.input_tokens += usage.input_tokens;
-                            acc.output_tokens += usage.output_tokens;
-                            acc.cost_usd += usage.cost_usd;
-                        }
-                        acc
-                    });
             reporter.report(&Event::RunFinished {
                 outcome,
                 elapsed: start.elapsed(),
-                usage: total_usage,
+                usage: memory.usage(),
             });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
@@ -1330,7 +1314,90 @@ fn join_package(handle: std::thread::JoinHandle<PipelineResult>, rpm_name: &str)
     handle.join().unwrap_or_else(|p| PipelineResult::Failed {
         rpm_name: rpm_name.to_string(),
         reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
+        kind: FailureKind::Other,
     })
+}
+
+/// Why each dependency left the dependency queue without being built (or what
+/// became of it when it was), kept so that the message that finally gives up on
+/// a package can say why every one of its dependencies is out of reach instead
+/// of pointing at earlier output that never said.
+///
+/// Keyed by the name with its separators and `python-` prefix ignored, since
+/// the same project comes back spelled differently from one agent turn to the
+/// next. The first reason recorded for a dependency is kept: it is the reason
+/// it was dropped; later drops of the same name only repeat that it was seen
+/// before. [`DepDrops::note_outcome`] overwrites, as the outcome of a build.
+#[derive(Default)]
+struct DepDrops {
+    reasons: std::cell::RefCell<std::collections::HashMap<String, String>>,
+}
+
+impl DepDrops {
+    fn key(dep: &str) -> String {
+        ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(dep))
+    }
+
+    /// Record why `dep` is dropped from the queue and report it as a warning.
+    fn dropped(&self, reporter: &dyn Reporter, dep: &str, reason: impl Into<String>) {
+        let reason = reason.into();
+        reporter.report(&Event::Warning {
+            step: None,
+            message: format!("dependency {dep} dropped from the build queue: {reason}"),
+        });
+        self.reasons
+            .borrow_mut()
+            .entry(Self::key(dep))
+            .or_insert(reason);
+    }
+
+    /// Record what became of a dependency that was queued and built.
+    fn note_outcome(&self, dep: &str, outcome: impl Into<String>) {
+        self.reasons
+            .borrow_mut()
+            .insert(Self::key(dep), outcome.into());
+    }
+
+    /// The reason recorded for `dep`, if any.
+    fn reason(&self, dep: &str) -> Option<String> {
+        self.reasons.borrow().get(&Self::key(dep)).cloned()
+    }
+
+    /// `deps` with the reason each is out of reach, one per line, for a
+    /// message that gives up on the package needing them.
+    fn explain(&self, deps: &[String]) -> String {
+        deps.iter()
+            .map(|d| {
+                let why = self.reason(d).unwrap_or_else(|| {
+                    "queued earlier this run, but nothing was recorded about what \
+                     became of it"
+                        .to_string()
+                });
+                format!("  - {d}: {why}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// The error that ends a build when packages were given up on: each one with
+/// what actually blocked it, since "after N failed attempts" is false for a
+/// package given up on because the packages it needs cannot be built, and says
+/// nothing about which of them or why.
+fn build_incomplete_message(give_ups: &std::collections::BTreeMap<String, String>) -> String {
+    let mut out = format!(
+        "build incomplete — gave up on {} package(s), blocking everything left in the \
+         closure that needs them:",
+        give_ups.len()
+    );
+    for (pkg, why) in give_ups {
+        let mut lines = why.lines();
+        out.push_str(&format!("\n  - {pkg}: {}", lines.next().unwrap_or("")));
+        for line in lines {
+            out.push_str(&format!("\n    {}", line.trim_start()));
+        }
+    }
+    out
 }
 
 /// The version a package was last built at here, when its last outcome was a
@@ -1382,7 +1449,7 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
     // reported as queued, and a package listed twice is listed once.
     let mut latest: std::collections::BTreeMap<String, (String, PackageOutcome)> =
         Default::default();
-    for ev in memory.events() {
+    for ev in memory.finished() {
         if let Event::PackageFinished {
             pkg,
             version,
@@ -1432,7 +1499,10 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         distro,
         arch,
         ap_build::proc::Emit::quiet(),
-    );
+    )
+    // Only the "already built" extras come from this listing; without it the
+    // summary still lists everything this run built.
+    .unwrap_or_default();
     let built_lower: Vec<String> = built.iter().map(|p| p.to_lowercase()).collect();
     let mut cached: Vec<&String> = statuses
         .iter()
@@ -1448,6 +1518,40 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         let _ = writeln!(out, "  {name}");
     }
     out
+}
+
+/// The selected targets that are neither running nor already finished in this
+/// round: the ones the scheduler may start now, each with the name OBS lists
+/// the package under (see [`ap_build::osc::obs_name`]), which is how a running
+/// or finished package is tracked.
+fn unstarted_targets(
+    targets: Vec<ap_build::pipeline::TargetInfo>,
+    own_listing: &std::collections::HashSet<String>,
+    in_flight: &[String],
+    done_this_round: &std::collections::HashSet<String>,
+) -> Vec<(ap_build::pipeline::TargetInfo, String)> {
+    targets
+        .into_iter()
+        .map(|t| {
+            let rpm = ap_build::osc::obs_name(own_listing, &ap_build::osc::rpm_name(&t.name));
+            (t, rpm)
+        })
+        .filter(|(_, rpm)| !in_flight.contains(rpm) && !done_this_round.contains(rpm))
+        .collect()
+}
+
+/// Wait for every package still running, so none is left running unobserved
+/// when the build stops on an error. Their results are not used.
+fn drain_in_flight(
+    rx: &std::sync::mpsc::Receiver<(String, String, PipelineResult)>,
+    in_flight: &mut Vec<String>,
+) {
+    while !in_flight.is_empty() {
+        match rx.recv() {
+            Ok((rpm_name, _, _)) => in_flight.retain(|r| *r != rpm_name),
+            Err(_) => break,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1480,6 +1584,9 @@ fn cmd_build(
     reporter: Arc<dyn Reporter + Send + Sync>,
     base_reporter: Arc<dyn Reporter + Send + Sync>,
     tui_ctrl: Option<tui::TuiController>,
+    // Set by `update-project`, which builds in a branch project; `None` for
+    // every other command.
+    branch: Option<&update_project::BranchBuild>,
 ) -> color_eyre::Result<()> {
     // Reporter for events belonging to a single package: still delivered to
     // jsonl/memory like `reporter`, but tagged so the TUI can attribute
@@ -1561,6 +1668,14 @@ fn cmd_build(
     // A repository tells us two things we were only guessing at: whether it is
     // a Python project or a Rust crate, and what it actually calls itself. Ask
     // it before anything is named after the guess.
+    // The package's OBS name is the spelling `project` already lists for it,
+    // if it has one: OBS names are case-sensitive, and a lowercase guess would
+    // check out, and so duplicate, a package OBS has as `python-APScheduler`.
+    let own_listing = ap_build::osc::try_list_project_packages(
+        project,
+        ap_build::proc::Emit::run(reporter.as_ref()),
+    )
+    .map_err(|e| color_eyre::eyre::eyre!(e))?;
     let (name, rpm_name, subprojects) = match &source_repo {
         None => (name.to_string(), ap_build::osc::rpm_name(name), Vec::new()),
         Some(repo) => {
@@ -1605,7 +1720,24 @@ fn cmd_build(
             (effective_name, rpm, probe.subprojects)
         }
     };
+    let rpm_name = ap_build::osc::obs_name(&own_listing, &rpm_name);
+    // A package branched from another project already has a name, and the
+    // pipeline's guess at it (above) is only a guess. Only a repository package
+    // is a single named package; a PyPI one is named for each node of its
+    // closure, and `update-project` refuses those whose name would differ.
+    let rpm_name = match branch.and_then(|b| b.rpm_name.as_deref()) {
+        Some(own) if source_repo.is_some() => own.to_string(),
+        _ => rpm_name,
+    };
     let name = name.as_str();
+    // The binary names a Python dependency may be published under, for the
+    // search `update-project` does before building one (read once: it runs
+    // `rpmspec`).
+    let cover_flavors: Vec<String> = if branch.is_some_and(|b| b.resolver.is_some()) {
+        python_flavors.effective()
+    } else {
+        Vec::new()
+    };
 
     let config = PipelineConfig {
         pkg_name: name.to_string(),
@@ -1638,6 +1770,19 @@ fn cmd_build(
     let mut pending_deps: Vec<String> = Vec::new();
     // Tracks deps we have already attempted to avoid infinite retry loops.
     let mut attempted_deps: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Dependencies already put behind the packages OBS says they wait on (see
+    // the own-project check in the queue below). Each is deferred once, so a
+    // dependency whose blockers never get built is still tried afterwards.
+    let mut deferred_once: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Dependencies (by `fuzzy_key`) that are being run again on purpose. A
+    // local workspace left by their first run would otherwise read as
+    // "mid-build through the ordinary frontier" and drop them.
+    let mut retrying: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // How many rounds each dependency's own build has had without finishing
+    // (failed, or came back needing packages of its own), by `fuzzy_key`.
+    let mut dep_rounds: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Rounds a dependency gets before it is written off.
+    const MAX_DEP_ATTEMPTS: usize = 3;
     // Deps seeded below because OBS already reports them Unresolvable, Failed,
     // or Broken. These are by definition already present in the project's own
     // package list, so the "skip deps already present" filter a few lines
@@ -1692,7 +1837,7 @@ fn cmd_build(
             distro,
             arch,
             ap_build::proc::Emit::run(reporter.as_ref()),
-        )
+        )?
         .into_iter()
         .filter(|(_, status)| {
             matches!(
@@ -1743,17 +1888,48 @@ fn cmd_build(
     let mut rate_limited_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     const MAX_RATE_LIMITED_ROUNDS: usize = 200;
+    // Why each package in `permanently_failed` was given up on.
+    let mut give_ups: std::collections::BTreeMap<String, String> = Default::default();
     let mut permanently_failed: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Why each dependency left the queue, for the messages that give up.
+    let dep_drops = DepDrops::default();
 
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
     loop {
         // Before re-resolving, build any runtime-discovered deps (e.g. test-only
         // deps the agent found to be unresolvable).
-        while !pending_deps.is_empty() {
+        // Groups of dependencies set aside until what they wait on has had its
+        // batch (see `retry_group` below). The most recent group runs first
+        // once nothing else is pending: it waits on the newest packages, and a
+        // package queued behind it may wait on it in turn.
+        let mut retry_stack: Vec<Vec<String>> = Vec::new();
+        while !pending_deps.is_empty() || !retry_stack.is_empty() {
+            if pending_deps.is_empty() {
+                pending_deps = retry_stack.pop().unwrap_or_default();
+            }
             let batch = std::mem::take(&mut pending_deps);
             let mut newly_unbuildable: Vec<String> = Vec::new();
+            // (dependency, the packages it waits on) for each dependency OBS
+            // reports unresolvable in this repository/architecture.
+            let mut deferred: Vec<(String, Vec<String>)> = Vec::new();
+            // Everything the availability filter below needs is read once for
+            // the batch, up front. A listing that cannot be read stops the
+            // run: treated as empty, it would queue packages OBS already has.
+            let lookup_emit = ap_build::proc::Emit::run(reporter.as_ref());
+            let own_listing = ap_build::osc::try_list_project_packages(project, lookup_emit)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+            let own_statuses =
+                ap_build::osc::get_project_build_statuses(project, distro, arch, lookup_emit)?;
+            let mut linked_listings = Vec::new();
+            for (path_project, _repo) in
+                ap_build::osc::get_project_repo_paths(project, lookup_emit)?
+            {
+                let listing = ap_build::osc::try_list_project_packages(&path_project, lookup_emit)
+                    .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                linked_listings.push((path_project, listing));
+            }
             let handles: Vec<_> = batch
                 .into_iter()
                 // Convert RPM names to PyPI names: "python-foo" → "foo"
@@ -1770,8 +1946,10 @@ fn cmd_build(
                     // it does not meet is still visible.
                     match built_locally(state_root, &ap_build::osc::rpm_name(dep)) {
                         Some(version) => {
-                            ap_core::diag!(
-                                "dep queue: dropping {dep} (already built locally at {version})"
+                            dep_drops.dropped(
+                                reporter.as_ref(),
+                                dep,
+                                format!("it was already built locally at {version}"),
                             );
                             false
                         }
@@ -1787,10 +1965,11 @@ fn cmd_build(
                     // duplicate it — see `is_system_tool_alias`.
                     let keep = !ap_build::pipeline::is_system_tool_alias(dep);
                     if !keep {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (redistributes a \
-                             system package of the same name — see \
-                             SYSTEM_TOOL_ALIASES)"
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            "it redistributes a system package of the same name \
+                             (see SYSTEM_TOOL_ALIASES), which the distro already ships",
                         );
                     }
                     keep
@@ -1808,10 +1987,13 @@ fn cmd_build(
                     // making no progress instead of retrying forever.
                     let fresh = attempted_deps.insert(ap_build::osc::fuzzy_key(dep));
                     if !fresh {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (already attempted \
-                             this run — see earlier log lines for the \
-                             outcome)"
+                        let earlier = dep_drops
+                            .reason(dep)
+                            .unwrap_or_else(|| "no outcome was recorded for it".to_string());
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            format!("it was already attempted this run ({earlier})"),
                         );
                     }
                     fresh
@@ -1832,10 +2014,13 @@ fn cmd_build(
                     // from source".
                     let keep = !ap_build::osc::distro_provides(dep);
                     if !keep {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (the distro already \
-                             provides it — see `zypper search --provides \
-                             --match-exact {dep}`)"
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            format!(
+                                "the distro already provides it (see `zypper search \
+                                 --provides --match-exact {dep}`)"
+                            ),
                         );
                     }
                     keep
@@ -1877,14 +2062,10 @@ fn cmd_build(
                         return true;
                     }
                     let rpm_key = ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(dep));
-                    let emit = ap_build::proc::Emit::run(reporter.as_ref());
 
                     // Own-project packages: index by fuzzy key so a
                     // separator mismatch can't false-miss.
-                    // A failed listing is already warned about by osc.
-                    let own =
-                        ap_build::osc::list_project_packages(project, emit).unwrap_or_default();
-                    let own_match = own.iter().find(|p| {
+                    let own_match = own_listing.iter().find(|p| {
                         let k = ap_build::osc::fuzzy_key(p);
                         k == rpm_key || k == bare_key
                     });
@@ -1896,17 +2077,76 @@ fn cmd_build(
                         // Broken/Disabled/Excluded/Unknown or missing-
                         // status entry stays queued so the agent can look
                         // at it.
-                        let statuses =
-                            ap_build::osc::get_project_build_statuses(project, distro, arch, emit);
-                        let status = statuses.get(real_pkg);
+                        // The status is the one for the repository and
+                        // architecture being built (`own_statuses` was read
+                        // for exactly that pair): the same package being
+                        // excluded or unresolvable on another one says
+                        // nothing about this build.
+                        let status = own_statuses.get(real_pkg);
                         let skip = ap_build::pipeline::status_is_resolvable(status);
+                        if matches!(status, Some(ap_build::osc::BuildStatus::Excluded)) {
+                            // No rebuild changes a project/spec exclusion, and
+                            // whatever needs this package cannot be built
+                            // here either; say so instead of running a build
+                            // that can only report it.
+                            dep_drops.dropped(
+                                reporter.as_ref(),
+                                dep,
+                                format!(
+                                    "{real_pkg} is excluded for {distro}/{arch} in {project} \
+                                     (ExclusiveArch/ExcludeArch in its spec, or the project \
+                                     config), so nothing that needs it can be built for \
+                                     {arch}"
+                                ),
+                            );
+                            return false;
+                        }
+                        if matches!(status, Some(ap_build::osc::BuildStatus::Unresolvable))
+                            && !deferred_once.contains(&bare_key)
+                        {
+                            // The package exists but cannot build because
+                            // packages it needs are missing; OBS names them.
+                            // Build those first, then come back to it.
+                            let blockers: Vec<String> = ap_build::osc::unresolvable_blockers(
+                                project, real_pkg, distro, arch,
+                            )
+                            .into_iter()
+                            .filter(|b| {
+                                ap_build::osc::built_in_project(&own_listing, &own_statuses, b)
+                                    .is_none()
+                            })
+                            .collect();
+                            if !blockers.is_empty() {
+                                deferred_once.insert(bare_key.clone());
+                                reporter.report(&Event::Progress {
+                                    step: None,
+                                    message: format!(
+                                        "{dep} exists in {project} as {real_pkg} but is \
+                                         unresolvable for {distro}/{arch}: building what it \
+                                         waits on first ({})",
+                                        blockers.join(", ")
+                                    ),
+                                });
+                                deferred.push((dep.clone(), blockers));
+                                return false;
+                            }
+                        }
                         if skip {
-                            ap_core::diag!(
-                                "dep queue: dropping {dep} (already in \
-                                 {project} as {real_pkg}, status {:?} — \
-                                 treating as resolvable)",
+                            let mut reason = format!(
+                                "it is already in {project} as {real_pkg} with status \
+                                 {:?}, which counts as resolvable",
                                 status.map(|s| s.to_string()).unwrap_or_default()
                             );
+                            // Built is not the same as usable: a skeleton spec
+                            // "succeeds" with an empty RPM.
+                            if matches!(status, Some(ap_build::osc::BuildStatus::Succeeded))
+                                && let Some(unusable) = ap_build::osc::empty_package_warning(
+                                    project, real_pkg, distro, arch,
+                                )
+                            {
+                                reason = format!("{reason}, but {unusable}");
+                            }
+                            dep_drops.dropped(reporter.as_ref(), dep, reason);
                         } else {
                             ap_core::diag!(
                                 "dep queue: keeping {dep} (in {project} as \
@@ -1920,18 +2160,18 @@ fn cmd_build(
 
                     // Linked / build-path projects: trust presence (see
                     // comment above).
-                    for (path_project, _repo) in
-                        ap_build::osc::get_project_repo_paths(project, emit)
-                    {
-                        let linked = ap_build::osc::list_project_packages(&path_project, emit)
-                            .unwrap_or_default();
+                    for (path_project, linked) in &linked_listings {
                         if let Some(match_name) = linked.iter().find(|p| {
                             let k = ap_build::osc::fuzzy_key(p);
                             k == rpm_key || k == bare_key
                         }) {
-                            ap_core::diag!(
-                                "dep queue: dropping {dep} (available from \
-                                 linked project {path_project} as {match_name})"
+                            dep_drops.dropped(
+                                reporter.as_ref(),
+                                dep,
+                                format!(
+                                    "it is available from the linked project \
+                                     {path_project} as {match_name}"
+                                ),
                             );
                             return false;
                         }
@@ -1957,19 +2197,49 @@ fn cmd_build(
                         .state_root
                         .join(ap_core::run::sanitize_name(&ap_build::osc::rpm_name(dep)))
                         .join("state.json");
-                    let keep = !state_path.exists();
+                    let keep = !state_path.exists() || retrying.contains(&bare_key);
                     if !keep {
-                        ap_core::diag!(
-                            "dep queue: dropping {dep} (local workspace at \
-                             {} already exists — probably mid-build via the \
-                             frontier mechanism; it keeps retrying on its own)",
-                            state_path.display()
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            dep,
+                            format!(
+                                "a local workspace at {} already exists, so it is \
+                                 probably mid-build through the ordinary frontier, which \
+                                 keeps retrying it on its own",
+                                state_path.display()
+                            ),
                         );
                     }
                     keep
                 })
+                .filter(|dep| {
+                    // `update-project`: a dependency another project already
+                    // publishes becomes a build path of the branch project, or
+                    // is already reachable, instead of a second copy built here.
+                    let Some(resolver) = branch.and_then(|b| b.resolver.as_ref()) else {
+                        return true;
+                    };
+                    let mut candidates = vec![dep.clone(), ap_build::osc::rpm_name(dep)];
+                    candidates.extend(cover_flavors.iter().map(|f| format!("{f}-{dep}")));
+                    match resolver.cover_dependency(&candidates) {
+                        Ok(Some(note)) => {
+                            dep_drops.dropped(reporter.as_ref(), dep, note);
+                            false
+                        }
+                        Ok(None) => true,
+                        Err(e) => {
+                            reporter.report(&Event::Warning {
+                                step: None,
+                                message: format!(
+                                    "could not search OBS for {dep}: {e}; building it instead"
+                                ),
+                            });
+                            true
+                        }
+                    }
+                })
                 .filter_map(|dep| {
-                    let dep_config =
+                    let mut dep_config =
                         match resolve_dependency_config(&dep, &config, reporter.as_ref()) {
                             Some(c) => c,
                             None => {
@@ -1979,13 +2249,30 @@ fn cmd_build(
                                 // package needing it learns that from its next
                                 // prompt (convention 28 Exception 4) instead of
                                 // reporting it again forever.
+                                dep_drops.dropped(
+                                    reporter.as_ref(),
+                                    &dep,
+                                    "it is unresolvable: no PyPI release and no usable public \
+                                     source repository (the warning above lists what was tried)",
+                                );
                                 newly_unbuildable.push(dep);
                                 return None;
                             }
                         };
+                    // Build it under the spelling OBS already lists, if any.
+                    dep_config.rpm_name =
+                        ap_build::osc::obs_name(&own_listing, &dep_config.rpm_name);
                     let dep_rpm = dep_config.rpm_name.clone();
                     let dep_pkg_run = run_dir.pkg(&dep_rpm);
-                    if dep_pkg_run.ensure().is_err() {
+                    if let Err(e) = dep_pkg_run.ensure() {
+                        dep_drops.dropped(
+                            reporter.as_ref(),
+                            &dep,
+                            format!(
+                                "its run directory {} could not be created: {e}",
+                                dep_pkg_run.path.display()
+                            ),
+                        );
                         return None;
                     }
                     reporter.report(&Event::TargetSelected {
@@ -2012,7 +2299,7 @@ fn cmd_build(
                         });
                         result
                     });
-                    Some((dep_rpm, dep_version, handle))
+                    Some((dep_rpm, dep_version, handle, dep))
                 })
                 .collect();
 
@@ -2022,19 +2309,83 @@ fn cmd_build(
                 }
             }
 
-            for (dep_rpm, _version, handle) in handles {
+            // Dependencies to run again once what they wait on has had its
+            // batch: those OBS reports unresolvable, and (below) those that
+            // came back needing packages of their own.
+            let mut retry_group: Vec<String> = Vec::new();
+            for (dep, blockers) in deferred {
+                attempted_deps.remove(&ap_build::osc::fuzzy_key(&dep));
+                retrying.insert(ap_build::osc::fuzzy_key(&dep));
+                pending_deps.extend(blockers);
+                retry_group.push(dep);
+            }
+
+            for (dep_rpm, _version, handle, dep) in handles {
                 let result = join_package(handle, &dep_rpm);
+                let key = ap_build::osc::fuzzy_key(&dep);
                 match result {
                     PipelineResult::Built { .. } => {
                         ap_core::diag!("built dep {dep_rpm}");
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            "it was built this run, yet the package that needs it still \
+                             reports it missing (a name mismatch?)",
+                        );
                     }
                     PipelineResult::AlreadyBuilt { .. } => {
                         ap_core::diag!("dep {dep_rpm} already built");
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            "it was already built, yet the package that needs it still \
+                             reports it missing (a name mismatch?)",
+                        );
                     }
                     PipelineResult::MissingDeps { deps: more, .. } => {
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            format!("it could not be built until {} exist", more.join(", ")),
+                        );
+                        // It needs packages of its own: once those have had
+                        // their batch it is run again, instead of staying
+                        // "attempted" while the package waiting on it is
+                        // abandoned. Bounded like any other retry.
+                        let rounds = dep_rounds.entry(key.clone()).or_insert(0);
+                        *rounds += 1;
+                        if !more.is_empty() && *rounds < MAX_DEP_ATTEMPTS {
+                            attempted_deps.remove(&key);
+                            retrying.insert(key);
+                            retry_group.push(dep);
+                        }
                         pending_deps.extend(more);
                     }
-                    PipelineResult::Failed { reason, .. } => {
+                    PipelineResult::Failed { reason, kind, .. } => {
+                        // A dependency OBS or the pipeline failed is run
+                        // again through the normal pipeline when the package
+                        // needing it names it once more, rather than counted
+                        // as attempted and dropped after one go — unless it
+                        // used up its allowance, which a second round would
+                        // only repeat. Rounds are bounded and an attempt
+                        // within a round resumes the package's persisted
+                        // attempt count.
+                        let rounds = dep_rounds.entry(key.clone()).or_insert(0);
+                        *rounds += 1;
+                        let retry = *rounds < MAX_DEP_ATTEMPTS
+                            && !matches!(kind, FailureKind::Exhausted | FailureKind::RateLimited);
+                        if retry {
+                            attempted_deps.remove(&key);
+                            retrying.insert(key);
+                        }
+                        dep_drops.note_outcome(
+                            &dep_rpm,
+                            format!(
+                                "its build failed ({reason}){}",
+                                if retry {
+                                    "; it is tried once more if it is still needed"
+                                } else {
+                                    ""
+                                }
+                            ),
+                        );
                         pkg_reporter(&dep_rpm).report(&Event::Warning {
                             step: None,
                             message: format!(
@@ -2050,6 +2401,9 @@ fn cmd_build(
                         }
                     }
                 }
+            }
+            if !retry_group.is_empty() {
+                retry_stack.push(retry_group);
             }
         }
 
@@ -2117,9 +2471,8 @@ fn cmd_build(
                         return Err(color_eyre::eyre::eyre!(
                             "{rpm_name} needs {} but every one has already \
                              been attempted without success{}{}; cannot \
-                             build. Check the per-dep warnings above for \
-                             WHY each dep couldn't be queued (no PyPI \
-                             release AND no discoverable source repo is \
+                             build. Why each one is out of reach:\n{}\n\
+                             (no PyPI release AND no discoverable source repo is \
                              the usual answer — pass --source-url to \
                              point it at one).",
                             deps.join(", "),
@@ -2133,6 +2486,7 @@ fn cmd_build(
                             } else {
                                 format!(" (failed-to-build: {failed})")
                             },
+                            dep_drops.explain(&deps),
                         ));
                     }
                     pending_deps.extend(new_deps);
@@ -2144,101 +2498,122 @@ fn cmd_build(
             }
         }
 
-        // Select all currently buildable targets (the full frontier).
+        // Select the frontier and build it as a stream: a package starts as soon
+        // as everything it needs has been built, rather than when the whole
+        // round has finished. Each finished package is handled below and the
+        // frontier is selected again. A package that finished in this round is
+        // not started again until the next round, so a retry keeps the
+        // round-level pacing.
         //
         // `config.force` is passed down so `--force` (and `update`, which
         // always sets it) can override the "OBS says it's already green"
         // resolvability gate for the root -- see `select_target`'s doc
         // comment. Without this, the gate would skip the package before
         // `run_package`'s own force check could ever fire.
-        let targets = select_target(
-            name,
-            explicit_target,
-            pinned_version.as_deref(),
-            &config,
-            &permanently_failed,
-            config.force,
-            reporter.as_ref(),
-        )
-        .map_err(|e| color_eyre::eyre::eyre!(e))?;
-
-        if targets.is_empty() {
-            if permanently_failed.is_empty() {
-                ap_core::diag!("{name} and all dependencies are already built");
-                return Ok(());
-            }
-            let mut names: Vec<&String> = permanently_failed.iter().collect();
-            names.sort();
-            let names = names.into_iter().cloned().collect::<Vec<_>>().join(", ");
-            return Err(color_eyre::eyre::eyre!(
-                "build incomplete — gave up on {} after {max_target_retries} failed attempt(s) \
-                 each, blocking everything left in the closure that needs them: {names}",
-                permanently_failed.len()
-            ));
-        }
-
-        for t in &targets {
-            reporter.report(&Event::TargetSelected {
-                pkg: ap_build::osc::rpm_name(&t.name),
-                version: t.version.clone(),
-                reason: t.reason.clone(),
-                blocked_by: t.blocked_by.clone(),
-            });
-        }
-
-        // Spawn one thread per frontier package; OBS builds run concurrently.
-        let mut handles: Vec<(String, String, std::thread::JoinHandle<PipelineResult>)> =
-            Vec::new();
-        let mut spawn_error: Option<color_eyre::Report> = None;
-        for target_info in targets {
-            let rpm_name = ap_build::osc::rpm_name(&target_info.name);
-            let pkg_config = PipelineConfig {
-                pkg_name: target_info.name.clone(),
-                rpm_name: rpm_name.clone(),
-                version: target_info.version.clone(),
-                ..config.clone()
-            };
-            let pkg_run = run_dir.pkg(&rpm_name);
-            if let Err(e) = pkg_run.ensure() {
-                spawn_error = Some(color_eyre::eyre::eyre!(
-                    "cannot create the package run directory {}: {e}",
-                    pkg_run.path.display()
-                ));
-                break;
-            }
-            let r = pkg_reporter(&rpm_name);
-            let sem2 = sem.clone();
-            let finished_name = rpm_name.clone();
-            let finished_version = target_info.version.clone();
-            let handle = std::thread::spawn(move || {
-                let _permit = Permit::acquire(&sem2);
-                let result = run_package(&pkg_config, &pkg_run, r.as_ref());
-                // Reported as soon as this package is done. Reporting in join
-                // order let a slower sibling hold back every package finished
-                // after it, so their rows stayed on their last step.
-                r.report(&Event::PackageFinished {
-                    pkg: finished_name,
-                    version: finished_version,
-                    outcome: package_outcome(&result),
-                });
-                result
-            });
-            handles.push((rpm_name, target_info.version, handle));
-        }
-        if let Some(e) = spawn_error {
-            // Join the workers already spawned so none is left running
-            // unobserved once we return.
-            for (rpm_name, _version, handle) in handles {
-                join_package(handle, &rpm_name);
-            }
-            return Err(e);
-        }
-
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String, PipelineResult)>();
+        let mut in_flight: Vec<String> = Vec::new();
+        let mut done_this_round: std::collections::HashSet<String> = Default::default();
+        let mut spawned_any = false;
         let mut batch_pending: Vec<String> = Vec::new();
         let mut batch_failures: Vec<(String, String)> = Vec::new();
+        loop {
+            // The package names OBS lists are what builds and tracking use, so
+            // the listing is read with the frontier: a failure of either ends
+            // the build, after the packages already running have finished.
+            let selected = select_target(
+                name,
+                explicit_target,
+                pinned_version.as_deref(),
+                &config,
+                &permanently_failed,
+                config.force,
+                reporter.as_ref(),
+            )
+            .map_err(|e| color_eyre::eyre::eyre!(e))
+            .and_then(|targets| {
+                let listing = ap_build::osc::try_list_project_packages(
+                    project,
+                    ap_build::proc::Emit::run(reporter.as_ref()),
+                )
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                Ok((targets, listing))
+            });
+            let (targets, own_listing) = match selected {
+                Ok(v) => v,
+                Err(e) => {
+                    // Packages already running are not abandoned: let them
+                    // finish (their results land in state as usual) first.
+                    drain_in_flight(&rx, &mut in_flight);
+                    return Err(e);
+                }
+            };
+            let fresh = unstarted_targets(targets, &own_listing, &in_flight, &done_this_round);
+            if fresh.is_empty() && in_flight.is_empty() {
+                break;
+            }
 
-        for (rpm_name, version, handle) in handles {
-            let result = join_package(handle, &rpm_name);
+            for (t, rpm_name) in &fresh {
+                reporter.report(&Event::TargetSelected {
+                    pkg: rpm_name.clone(),
+                    version: t.version.clone(),
+                    reason: t.reason.clone(),
+                    blocked_by: t.blocked_by.clone(),
+                });
+            }
+
+            // One thread per package; OBS builds run concurrently.
+            for (target_info, rpm_name) in fresh {
+                let pkg_config = PipelineConfig {
+                    pkg_name: target_info.name.clone(),
+                    rpm_name: rpm_name.clone(),
+                    version: target_info.version.clone(),
+                    ..config.clone()
+                };
+                let pkg_run = run_dir.pkg(&rpm_name);
+                if let Err(e) = pkg_run.ensure() {
+                    // Join the workers already spawned so none is left running
+                    // unobserved once we return.
+                    drain_in_flight(&rx, &mut in_flight);
+                    return Err(color_eyre::eyre::eyre!(
+                        "cannot create the package run directory {}: {e}",
+                        pkg_run.path.display()
+                    ));
+                }
+                let r = pkg_reporter(&rpm_name);
+                let sem2 = sem.clone();
+                let tx = tx.clone();
+                let version = target_info.version.clone();
+                in_flight.push(rpm_name.clone());
+                std::thread::spawn(move || {
+                    let _permit = Permit::acquire(&sem2);
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_package(&pkg_config, &pkg_run, r.as_ref())
+                    }))
+                    .unwrap_or_else(|p| PipelineResult::Failed {
+                        rpm_name: rpm_name.clone(),
+                        reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
+                        kind: FailureKind::Other,
+                    });
+                    // Reported as soon as this package is done, not when the
+                    // scheduler gets to its result, so a slower sibling never
+                    // holds back the row of one that already finished.
+                    r.report(&Event::PackageFinished {
+                        pkg: rpm_name.clone(),
+                        version: version.clone(),
+                        outcome: package_outcome(&result),
+                    });
+                    let _ = tx.send((rpm_name, version, result));
+                });
+                spawned_any = true;
+            }
+
+            // Wait for one package to finish, then select again: its result may
+            // have unblocked others.
+            let (rpm_name, version, result) =
+                rx.recv().expect("package thread ended without reporting");
+            in_flight.retain(|r| *r != rpm_name);
+            done_this_round.insert(rpm_name.clone());
+
             match result {
                 PipelineResult::Built { .. } => {
                     ap_core::diag!("built {rpm_name} {version}");
@@ -2289,22 +2664,50 @@ fn cmd_build(
                         let count = fail_counts.entry(rpm_name.clone()).or_insert(0);
                         *count += 1;
                         permanently_failed.insert(rpm_name.clone());
+                        give_ups.insert(
+                            rpm_name.clone(),
+                            format!(
+                                "it needs {} and none of them can be queued again:\n{}",
+                                deps.join(", "),
+                                dep_drops.explain(&deps)
+                            ),
+                        );
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
                             message: format!(
                                 "giving up on {rpm_name}: it needs {} and each of those was \
-                                 already attempted and dropped (see the dep queue warnings \
-                                 above for why); anything depending on it stays blocked",
-                                deps.join(", ")
+                                 already attempted and dropped; anything depending on it \
+                                 stays blocked. Why each one is out of reach:\n{}",
+                                deps.join(", "),
+                                dep_drops.explain(&deps)
                             ),
                         });
                     }
                     batch_pending.extend(deps);
                 }
-                PipelineResult::Failed { reason, .. } => {
+                PipelineResult::Failed { reason, kind, .. } => {
                     batch_failures.push((rpm_name.clone(), reason.clone()));
-                    let rate_limited = is_rate_limit_failure(&reason);
-                    let exhausted = is_budget_or_attempt_exhausted(&reason);
+                    if kind == FailureKind::Busy {
+                        // Another process is building this package, so nothing
+                        // was tried here. It is deferred to a later round and
+                        // does not count toward giving up.
+                        pkg_reporter(&rpm_name).report(&Event::Warning {
+                            step: None,
+                            message: format!(
+                                "{rpm_name} is being built by another process ({reason}); \
+                                 deferred to a later round"
+                            ),
+                        });
+                        continue;
+                    }
+                    let rate_limited = kind == FailureKind::RateLimited;
+                    // A package that already spent its *entire* budget or attempt
+                    // allowance on this round gives up at once, instead of
+                    // getting a fresh budget for each of `max_target_retries`
+                    // rounds. `max_target_retries` reuses `max_attempts` as the
+                    // whole-round retry count, so without this a package that
+                    // burned its budget would repeat the same loop over and over.
+                    let exhausted = kind == FailureKind::Exhausted;
                     let count = if rate_limited {
                         rate_limited_counts.entry(rpm_name.clone()).or_insert(0)
                     } else {
@@ -2318,6 +2721,14 @@ fn cmd_build(
                     };
                     if exhausted || *count >= limit {
                         permanently_failed.insert(rpm_name.clone());
+                        give_ups.insert(
+                            rpm_name.clone(),
+                            if exhausted {
+                                format!("it spent its full budget/attempt allowance ({reason})")
+                            } else {
+                                format!("it failed {count} times in a row (last: {reason})")
+                            },
+                        );
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
                             message: if exhausted {
@@ -2347,6 +2758,21 @@ fn cmd_build(
                     }
                 }
             }
+        }
+
+        // Nothing was started this round: the closure is either built or
+        // blocked, which is the terminal state checked here.
+        if !spawned_any {
+            if permanently_failed.is_empty() {
+                ap_core::diag!("{name} and all dependencies are already built");
+                return Ok(());
+            }
+            for pkg in &permanently_failed {
+                give_ups
+                    .entry(pkg.clone())
+                    .or_insert_with(|| "no reason was recorded".to_string());
+            }
+            return Err(color_eyre::eyre::eyre!(build_incomplete_message(&give_ups)));
         }
 
         // Compute what, if anything, from `batch_pending` is actually new
@@ -2387,8 +2813,9 @@ fn cmd_build(
                     .join(", ");
                 return Err(color_eyre::eyre::eyre!(
                     "{name} needs {} but every one has already been attempted \
-                     without success; cannot build",
-                    names
+                     without success; cannot build. Why each one is out of reach:\n{}",
+                    names,
+                    dep_drops.explain(&pending_deps)
                 ));
             }
             if pending_deps.is_empty() {
@@ -2443,7 +2870,8 @@ fn cmd_update(
     tui_ctrl: Option<tui::TuiController>,
 ) -> color_eyre::Result<()> {
     let emit = ap_build::proc::Emit::run(reporter.as_ref());
-    let candidates = ap_build::update::plan(project, only, emit);
+    let candidates =
+        ap_build::update::plan(project, only, emit).map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     if candidates.is_empty() {
         reporter.report(&Event::Progress {
@@ -2532,6 +2960,7 @@ fn cmd_update(
             reporter.clone(),
             base_reporter.clone(),
             tui_ctrl.clone(),
+            None,
         );
         if let Err(e) = r {
             failures.push((name, e.to_string()));
@@ -2610,34 +3039,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_429_failure_is_recognised_by_the_pipelines_message() {
-        assert!(is_rate_limit_failure(
-            "the model API rejected the turn with a quota/rate limit (429): API Error"
+    fn unsafe_resolve_is_off_unless_asked_for_on_build_and_update() {
+        let unsafe_resolve = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Commands::Build { unsafe_resolve, .. } | Commands::Update { unsafe_resolve, .. } => {
+                unsafe_resolve
+            }
+            _ => panic!("not build or update"),
+        };
+        let build = ["auto-package", "build", "httpx", "--project", "home:u"];
+        let update = ["auto-package", "update", "--project", "home:u"];
+        assert!(!unsafe_resolve(&build));
+        assert!(!unsafe_resolve(&update));
+        assert!(unsafe_resolve(
+            &[&build[..], &["--unsafe-resolve"]].concat()
         ));
-        assert!(!is_rate_limit_failure("claude exited 1"));
-        assert!(!is_rate_limit_failure(
-            "budget exhausted ($4.00 spent of $4.00)"
+        assert!(unsafe_resolve(
+            &[&update[..], &["--unsafe-resolve"]].concat()
         ));
     }
 
-    /// The python-chromadb case: `run_package_inner`'s exact two
-    /// "gave up" message shapes must be recognized so a package that
-    /// already burned its full budget/attempt allowance doesn't get
-    /// re-selected for `max_target_retries` more full-budget rounds.
     #[test]
-    fn budget_or_attempt_exhaustion_is_recognised_by_the_pipelines_message() {
-        assert!(is_budget_or_attempt_exhausted(
-            "gave up after 12 attempt(s): budget exhausted ($13.94 spent of $10.00); log: x"
-        ));
-        assert!(is_budget_or_attempt_exhausted(
-            "gave up after 10 attempt(s): attempt limit 10 reached; log: x"
-        ));
-        assert!(!is_budget_or_attempt_exhausted(
-            "build failed; log: x/build.log"
-        ));
-        assert!(!is_budget_or_attempt_exhausted(
-            "the model API rejected the turn with a quota/rate limit (429): API Error"
-        ));
+    fn a_running_or_finished_package_is_not_started_again() {
+        use ap_core::event::SelectionReason;
+        let target = |name: &str| ap_build::pipeline::TargetInfo {
+            name: name.to_string(),
+            version: "1.0".to_string(),
+            reason: SelectionReason::FirstUnbuiltDependency,
+            blocked_by: vec![],
+        };
+        let targets = vec![target("alpha"), target("beta"), target("gamma")];
+        let in_flight = vec![ap_build::osc::rpm_name("beta")];
+        let done: std::collections::HashSet<String> =
+            [ap_build::osc::rpm_name("gamma")].into_iter().collect();
+        let fresh: Vec<String> = unstarted_targets(targets, &Default::default(), &in_flight, &done)
+            .into_iter()
+            .map(|(t, _)| t.name)
+            .collect();
+        assert_eq!(fresh, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn a_package_is_tracked_under_the_spelling_obs_lists() {
+        use ap_core::event::SelectionReason;
+        let target = ap_build::pipeline::TargetInfo {
+            name: "apscheduler".to_string(),
+            version: "1.0".to_string(),
+            reason: SelectionReason::FirstUnbuiltDependency,
+            blocked_by: vec![],
+        };
+        let listing: std::collections::HashSet<String> =
+            ["python-APScheduler".to_string()].into_iter().collect();
+        let running = vec!["python-APScheduler".to_string()];
+        let fresh = unstarted_targets(vec![target], &listing, &running, &Default::default());
+        assert!(fresh.is_empty());
     }
 
     #[test]
@@ -2772,6 +3226,155 @@ mod tests {
         assert_eq!(
             repo_package_name("https://gitlab.com/group/sub/thing"),
             "thing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dep_drops_tests {
+    use super::*;
+
+    /// Keeps the warnings a drop reports.
+    #[derive(Default)]
+    struct Warnings(Mutex<Vec<String>>);
+
+    impl Reporter for Warnings {
+        fn report(&self, event: &Event) {
+            if let Event::Warning { message, .. } = event {
+                self.0.lock().unwrap().push(message.clone());
+            }
+        }
+    }
+
+    /// A dependency dropped for a concrete reason says so in a warning, and the
+    /// message that later gives up on a package that needs it repeats that
+    /// reason instead of pointing at output that never gave one.
+    #[test]
+    fn a_dropped_dependency_is_reported_and_explained_when_giving_up() {
+        let reporter = Warnings::default();
+        let drops = DepDrops::default();
+        drops.dropped(
+            &reporter,
+            "vllm-flash-attn",
+            "it is unresolvable: no PyPI release and no usable public source repository",
+        );
+        let warnings = reporter.0.lock().unwrap().clone();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("vllm-flash-attn"), "{warnings:?}");
+        assert!(warnings[0].contains("no PyPI release"), "{warnings:?}");
+
+        let why = drops.explain(&["python-vllm_flash_attn".to_string()]);
+        assert!(why.contains("python-vllm_flash_attn"), "{why}");
+        assert!(why.contains("no PyPI release"), "{why}");
+    }
+
+    /// The reason a dependency was dropped is the first one; seeing it dropped
+    /// again as "already attempted" quotes it rather than replacing it, and the
+    /// outcome of a build replaces a reason because it is newer evidence.
+    #[test]
+    fn the_first_reason_is_kept_and_a_build_outcome_replaces_it() {
+        let reporter = Warnings::default();
+        let drops = DepDrops::default();
+        drops.dropped(&reporter, "foo", "the distro already provides it");
+        drops.dropped(&reporter, "foo", "it was already attempted this run");
+        assert_eq!(
+            drops.reason("foo").as_deref(),
+            Some("the distro already provides it")
+        );
+        // Every drop is reported, even a repeat.
+        assert_eq!(reporter.0.lock().unwrap().len(), 2);
+
+        drops.note_outcome("python-foo", "its build failed (boom)");
+        assert_eq!(
+            drops.reason("foo").as_deref(),
+            Some("its build failed (boom)")
+        );
+    }
+
+    #[test]
+    fn a_dependency_with_nothing_recorded_is_still_named() {
+        let drops = DepDrops::default();
+        let why = drops.explain(&["mystery".to_string(), "other".to_string()]);
+        assert!(why.contains("mystery") && why.contains("other"), "{why}");
+        assert!(why.contains("nothing was recorded"), "{why}");
+        assert_eq!(why.lines().count(), 2);
+    }
+
+    /// The vllm run's three given-up packages: the message names each with
+    /// the reason its dependency is out of reach, and says nothing about
+    /// "failed attempts" that never happened.
+    #[test]
+    fn the_give_up_message_states_each_packages_blocking_reason() {
+        let reporter = Warnings::default();
+        let drops = DepDrops::default();
+        drops.dropped(
+            &reporter,
+            "fastapi-cloud-cli",
+            "it is already in home:dspinella:open-webui as python-fastapi-cloud-cli with \
+             status \"succeeded\", which counts as resolvable",
+        );
+        drops.dropped(
+            &reporter,
+            "cuda-bindings",
+            "it is already in home:dspinella:open-webui as python-cuda-bindings with status \
+             \"succeeded\", which counts as resolvable, but python-cuda-bindings is built \
+             in home:dspinella:open-webui, but its spec there is an unfinished skeleton",
+        );
+        drops.dropped(
+            &reporter,
+            "nvidia-cutlass-dsl-libs-base",
+            "python-nvidia-cutlass-dsl-libs-base is excluded for openSUSE_Tumbleweed/i586",
+        );
+        let mut give_ups = std::collections::BTreeMap::new();
+        for (pkg, dep) in [
+            ("python-fastapi-cli", "fastapi-cloud-cli"),
+            ("python-humming-kernels", "cuda-bindings"),
+            (
+                "python-nvidia-cutlass-dsl-libs-cu12",
+                "nvidia-cutlass-dsl-libs-base",
+            ),
+        ] {
+            let deps = [dep.to_string()];
+            give_ups.insert(
+                pkg.to_string(),
+                format!(
+                    "it needs {dep} and none of them can be queued again:\n{}",
+                    drops.explain(&deps)
+                ),
+            );
+        }
+        let msg = build_incomplete_message(&give_ups);
+        assert!(
+            msg.starts_with("build incomplete — gave up on 3 package(s)"),
+            "{msg}"
+        );
+        assert!(!msg.contains("failed attempt"), "{msg}");
+        for needle in [
+            "- python-fastapi-cli: it needs fastapi-cloud-cli",
+            "- python-humming-kernels: it needs cuda-bindings",
+            "- python-nvidia-cutlass-dsl-libs-cu12: it needs nvidia-cutlass-dsl-libs-base",
+            "status \"succeeded\", which counts as resolvable",
+            "unfinished skeleton",
+            "is excluded for openSUSE_Tumbleweed/i586",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in:\n{msg}");
+        }
+        // A multi-line reason stays under its package.
+        let blocks: Vec<&str> = msg.split("\n  - ").skip(1).collect();
+        assert_eq!(blocks.len(), 3, "{msg}");
+        assert!(blocks[0].contains("\n    - fastapi-cloud-cli:"), "{msg}");
+    }
+
+    #[test]
+    fn a_failure_reason_is_reported_as_given() {
+        let give_ups = std::collections::BTreeMap::from([(
+            "python-foo".to_string(),
+            "it failed 10 times in a row (last: spec invalid)".to_string(),
+        )]);
+        let msg = build_incomplete_message(&give_ups);
+        assert!(
+            msg.ends_with("- python-foo: it failed 10 times in a row (last: spec invalid)"),
+            "{msg}"
         );
     }
 }

@@ -205,7 +205,8 @@ pub fn distro_info(pkg: &str) -> DistroInfo {
     let Ok(out) = crate::proc::capture_with_timeout(
         "osc",
         &["cat", "openSUSE:Factory", &name, &spec_file],
-        &std::env::temp_dir(),
+        // `osc` looks for a working copy in the directory it starts in.
+        crate::proc::private_dir(),
         crate::proc::Emit::quiet(),
         Duration::from_secs(45),
     ) else {
@@ -249,14 +250,27 @@ pub fn search_codeberg(pkg: &str) -> Vec<String> {
 /// distro spec's own forge upstream, then GitLab, then Codeberg), without
 /// duplicates; plus the distro evidence itself.
 pub fn search_other_forges(pkg: &str) -> (Vec<String>, DistroInfo) {
-    let distro = distro_info(pkg);
+    // The three lookups are independent network calls: run them side by side,
+    // and keep the order the results are merged in below.
+    let (distro, gitlab, codeberg) = std::thread::scope(|s| {
+        let distro = s.spawn(|| distro_info(pkg));
+        let gitlab = s.spawn(|| search_gitlab(pkg));
+        let codeberg = search_codeberg(pkg);
+        let distro = distro
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        let gitlab = gitlab
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        (distro, gitlab, codeberg)
+    });
     let mut out: Vec<String> = Vec::new();
     for url in distro
         .forge_repos
         .iter()
         .cloned()
-        .chain(search_gitlab(pkg))
-        .chain(search_codeberg(pkg))
+        .chain(gitlab)
+        .chain(codeberg)
     {
         if !out.contains(&url) {
             out.push(url);
@@ -293,7 +307,7 @@ fn same_repo(a: &str, b: &str) -> bool {
 // ── last resort: ask the agent ─────────────────────────────────────────────────
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -316,6 +330,19 @@ pub fn set_agent_enabled(enabled: bool) {
 fn agent_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
+}
+
+/// The lock that callers looking up `key` queue on. One per distinct name
+/// asked about, so the map stays a few entries per run and is never pruned.
+fn in_flight_slot(key: &str) -> Arc<Mutex<()>> {
+    static SLOTS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let slots = SLOTS.get_or_init(Default::default);
+    slots
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(key.to_string())
+        .or_default()
+        .clone()
 }
 
 /// Evidence handed to the agent so it checks rather than starts from scratch.
@@ -349,6 +376,48 @@ fn reachable(url: &str) -> bool {
     crate::http::head(url).call().is_ok() || crate::http::get(url).call().is_ok()
 }
 
+/// Package indexes and release hosts the agent may name, besides the forges that
+/// `ap_ecosystem::forge` knows. Subdomains of an entry are accepted too.
+const TRUSTED_SOURCE_HOSTS: &[&str] = &[
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "rubygems.org",
+    "registry.npmjs.org",
+    "metacpan.org",
+    "hackage.haskell.org",
+    "ftp.gnu.org",
+    "download.gnu.org",
+    "download.savannah.gnu.org",
+    "sourceforge.net",
+    "downloads.sourceforge.net",
+    "kernel.org",
+    "download.kde.org",
+    "download.gnome.org",
+];
+
+/// Whether sources may be fetched from `host`: a known forge, a trusted index or
+/// release host, or a host listed in `AUTO_PACKAGE_SOURCE_HOSTS` (comma
+/// separated, for a private mirror).
+fn host_allowed(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if ap_ecosystem::forge::is_known_host(&host) {
+        return true;
+    }
+    let extra = std::env::var("AUTO_PACKAGE_SOURCE_HOSTS").unwrap_or_default();
+    TRUSTED_SOURCE_HOSTS
+        .iter()
+        .copied()
+        .chain(extra.split(',').map(str::trim).filter(|h| !h.is_empty()))
+        .any(|domain| host_is_under(&host, &domain.to_ascii_lowercase()))
+}
+
+/// `host` is `domain` or one of its subdomains.
+fn host_is_under(host: &str, domain: &str) -> bool {
+    host == domain || host.strip_suffix(domain).is_some_and(|h| h.ends_with('.'))
+}
+
 /// Accept the agent's URL only if the pipeline can actually use it. The model
 /// can name a plausible but wrong or dead URL; nothing it says is trusted
 /// until it has been checked the same way a guessed candidate would be.
@@ -361,6 +430,15 @@ pub fn validate_found_url(url: &str) -> Result<String, String> {
     // lets anyone on the path swap the source.
     if !url.to_ascii_lowercase().starts_with("https://") {
         return Err(format!("{url} is not an https URL"));
+    }
+    // The agent can name any host it finds, and the answer is fetched, so the
+    // host must be one the pipeline already trusts to serve sources.
+    let host = crate::http::host_of(url).unwrap_or_default();
+    if !host_allowed(&host) {
+        return Err(format!(
+            "{url} is on {host}, which is not a known forge or package host; \
+             set AUTO_PACKAGE_SOURCE_HOSTS={host} to allow it"
+        ));
     }
     match source_kind(url) {
         SourceKind::Forge => {
@@ -444,12 +522,18 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     if !AGENT_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
-    // One lookup at a time: with the cache check and the insert separated by a
-    // slow model call, concurrent callers asking about the same name each
-    // spawned the CLI and each spent one of the per-process lookups.
-    static LOOKUP_LOCK: Mutex<()> = Mutex::new(());
-    let _one_at_a_time = LOOKUP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let key = normalize(name);
+    // A name already answered comes straight from the cache, without waiting
+    // behind model calls in flight for other names.
+    if let Some(hit) = agent_cache().lock().ok()?.get(&key) {
+        return hit.clone();
+    }
+    // Callers asking about the same name queue on that name's slot, so the
+    // model is asked once and the rest read the cache; other names proceed in
+    // parallel.
+    let slot = in_flight_slot(&key);
+    let _turn = slot.lock().unwrap_or_else(|e| e.into_inner());
+    // Another caller may have answered this name while we were queued.
     if let Some(hit) = agent_cache().lock().ok()?.get(&key) {
         return hit.clone();
     }
@@ -461,6 +545,11 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     ap_core::diag!("  no source found by search — asking the agent to look for {name}");
     // Quotas are per model: when one answers 429, the next may still have room.
     let mut found = None;
+    // A private, empty working directory: the CLI reads project settings from
+    // its cwd, and the shared temp directory could hold a planted file.
+    let Ok(cwd) = tempfile::tempdir() else {
+        return None;
+    };
     // Only a model actually answering is definitive. A rate limit, timeout or
     // spawn failure says nothing about the package, so it must not be cached
     // as "no source" for the rest of the process.
@@ -471,7 +560,7 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
             "WebSearch,WebFetch",
             AGENT_LOOKUP_BUDGET_USD,
             &agent_prompt(name, hints),
-            &std::env::temp_dir(),
+            cwd.path(),
             AGENT_LOOKUP_TIMEOUT,
         ) {
             Ok(o) => o,
@@ -633,6 +722,26 @@ mod tests {
     fn name_matching_ignores_case_and_separators() {
         let h = hits(&[("Yaml_Cpp", "u/y"), ("yamlcpp", "u/z")]);
         assert_eq!(rank_name_matches(&h, "yaml-cpp"), ["u/y", "u/z"]);
+    }
+
+    #[test]
+    fn source_hosts_are_matched_by_domain() {
+        assert!(host_allowed("github.com"));
+        assert!(host_allowed("gitlab.gnome.org"));
+        assert!(host_allowed("pypi.org"));
+        assert!(host_allowed("test.pypi.org"));
+        assert!(!host_allowed("example.com"));
+        assert!(!host_allowed("pypi.org.example.com"));
+        assert!(!host_allowed("notpypi.org"));
+    }
+
+    #[test]
+    fn an_unknown_host_is_refused_before_any_request() {
+        let err = validate_found_url("https://example.com/pkg-1.0.tar.gz").unwrap_err();
+        assert!(
+            err.contains("AUTO_PACKAGE_SOURCE_HOSTS=example.com"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -815,6 +924,13 @@ Source3:        %name.keyring
             None
         );
         set_agent_enabled(true);
+    }
+
+    #[test]
+    fn lookups_for_one_name_share_a_slot_and_different_names_do_not() {
+        let a = in_flight_slot("zz-slot-probe-a");
+        assert!(Arc::ptr_eq(&a, &in_flight_slot("zz-slot-probe-a")));
+        assert!(!Arc::ptr_eq(&a, &in_flight_slot("zz-slot-probe-b")));
     }
 
     #[test]

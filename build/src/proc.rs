@@ -1,10 +1,6 @@
-//! Subprocess execution with single-fd log capture and event emission.
-//!
-//! Both stdout and stderr are redirected to the same file descriptor so
-//! the combined log is strictly chronological.
+//! Subprocess execution with captured output and event emission.
 
-use std::collections::HashMap;
-use std::fs::File;
+use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -93,151 +89,55 @@ impl<'a> Emit<'a> {
     }
 }
 
-pub struct ProcessOutput {
-    pub code: i32,
-    pub log_path: PathBuf,
-    /// Bytes kept in `combined` (stdout+stderr merged); at most the last
-    /// 64 MiB, so it can be smaller than the log file.
-    pub stdout_bytes: u64,
-    /// Always 0 — stderr is merged into stdout_bytes.
-    pub stderr_bytes: u64,
-    pub elapsed: Duration,
-    /// Tail of the combined stdout+stderr: the last 64 MiB of `log_path`
-    /// (all of it when smaller). Read the file for the full log.
-    pub combined: Vec<u8>,
-}
-
-impl ProcessOutput {
-    pub fn combined_str(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.combined)
-    }
-
-    pub fn success(&self) -> bool {
-        self.code == 0
-    }
-}
-
-/// Limit for [`run`] (package builds): long enough for the biggest compile,
-/// finite so a wedged child cannot hold the run forever.
-const RUN_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
-
-/// The last `cap` bytes of `path` (all of it when smaller); empty on error.
-fn read_tail(path: &Path, cap: u64) -> Vec<u8> {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = File::open(path) else {
-        return Vec::new();
-    };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if len > cap {
-        let _ = f.seek(SeekFrom::Start(len - cap));
-    }
-    let mut buf = Vec::new();
-    let _ = f.read_to_end(&mut buf);
-    buf
-}
-
-/// Run a subprocess, capturing stdout+stderr to a single log file.
-///
-/// Both file descriptors share the same underlying file description so
-/// writes are interleaved in arrival order. Emits `Event::Command` before
-/// launch and `Event::CommandDone` after completion.
-pub fn run(
-    program: &str,
-    args: &[impl AsRef<std::ffi::OsStr>],
-    cwd: &Path,
-    env: &HashMap<String, String>,
-    log_path: &Path,
-    emit: Emit<'_>,
-) -> Result<ProcessOutput, ProcessError> {
-    let argv: Vec<String> = args
-        .iter()
-        .map(|a| a.as_ref().to_string_lossy().into_owned())
-        .collect();
-
-    emit.started(program, &argv, cwd, Some(log_path));
-
-    // Both stdout and stderr go to the same file; try_clone shares the offset.
-    let log_file = File::create(log_path)?;
-    let log_clone = log_file.try_clone()?;
-
-    let start = Instant::now();
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .envs(env.iter())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_clone))
-        .stderr(Stdio::from(log_file));
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|e| ProcessError::Launch {
-        program: program.to_string(),
-        source: e,
-    })?;
-    let _group = match track_group(child.id()) {
-        Ok(g) => g,
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(e.into());
-        }
-    };
-    let status = loop {
-        let polled = match child.try_wait() {
-            Ok(polled) => polled,
-            Err(e) => {
-                // Don't leave the child (and its descendants) running.
-                kill_process_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.into());
-            }
-        };
-        match polled {
-            Some(status) => break status,
-            None if start.elapsed() >= RUN_TIMEOUT => {
-                kill_process_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                emit.done(-1, start.elapsed(), 0, 0);
-                return Err(ProcessError::Timeout {
-                    program: program.to_string(),
-                    secs: RUN_TIMEOUT.as_secs(),
-                });
-            }
-            None => std::thread::sleep(Duration::from_millis(100)),
-        }
-    };
-    // Same as `capture`: a descendant the child left behind must not outlive
-    // the step (it could keep writing to the log or holding resources).
-    kill_process_group(child.id());
-    let elapsed = start.elapsed();
-
-    let combined = read_tail(log_path, MAX_CAPTURE_BYTES);
-    let total_bytes = combined.len() as u64;
-    let code = status.code().unwrap_or(-1);
-
-    emit.done(code, elapsed, total_bytes, 0);
-
-    Ok(ProcessOutput {
-        code,
-        log_path: log_path.to_path_buf(),
-        stdout_bytes: total_bytes,
-        stderr_bytes: 0,
-        elapsed,
-        combined,
-    })
-}
-
 /// Wall-clock limit applied by [`capture`] when the caller has no tighter one:
 /// generous enough for `osc service ra` or a large `osc ci`, finite so a
 /// stalled connection cannot hang the run forever.
 pub const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Cap on what one captured stream keeps. A chatty child is still drained
-/// (so it never blocks on a full pipe) but the excess is discarded.
+/// (so it never blocks on a full pipe) but only the last this-many bytes are
+/// kept: a failing build's cause is at the end of its log.
 const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A directory only this process can use, for scratch files and as the working
+/// directory of helpers that read configuration from the directory they start
+/// in (`gh` and `git` look for `.git`, `osc` for `.osc`).
+///
+/// The shared temporary directory is writable by every local user, so a path
+/// there can be pre-created by someone else (a predictable name, a planted
+/// `.git`), and a symlink or a hostile file in it is read as if it were ours.
+/// This one is created once, with a random name and mode 0700. If it cannot be
+/// created the root directory is returned, which holds nothing of that kind
+/// and nobody else can write to.
+pub fn private_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt;
+        tempfile::Builder::new()
+            .prefix("auto-package-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .map(tempfile::TempDir::keep)
+            .unwrap_or_else(|_| PathBuf::from("/"))
+    })
+}
+
+/// Remove [`private_dir`] and everything in it. Best effort, for process exit.
+pub fn remove_private_dir() {
+    let dir = private_dir();
+    if dir != Path::new("/") {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Append `chunk` to `buf`, then drop from the front so at most `cap` bytes
+/// remain — the tail of everything written so far.
+fn push_tail(buf: &mut VecDeque<u8>, chunk: &[u8], cap: usize) {
+    buf.extend(chunk);
+    if buf.len() > cap {
+        buf.drain(..buf.len() - cap);
+    }
+}
 
 /// Run a subprocess and capture stdout/stderr separately as strings.
 ///
@@ -316,17 +216,11 @@ pub fn kill_all_groups() {
     }
 }
 
-#[cfg(unix)]
+/// SIGKILL the group `pid` leads. Only while the leader is still unreaped (see
+/// [`ap_core::pgroup`]): after that the number may belong to another group.
 pub(crate) fn kill_process_group(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    ap_core::pgroup::kill_group(pid);
 }
-
-#[cfg(not(unix))]
-pub(crate) fn kill_process_group(_pid: u32) {}
 
 /// [`capture`] with a wall-clock limit: the child is killed if it has not
 /// exited after `timeout`.
@@ -384,7 +278,7 @@ pub fn capture_with_timeout_env(
             program: program.to_string(),
             source: e,
         })?;
-    let _group = match track_group(child.id()) {
+    let group = match track_group(child.id()) {
         Ok(g) => g,
         Err(e) => {
             let _ = child.kill();
@@ -395,64 +289,81 @@ pub fn capture_with_timeout_env(
 
     // Drain both pipes on their own threads so a chatty child can't fill a
     // pipe buffer and deadlock against our `try_wait` polling. Each keeps at
-    // most MAX_CAPTURE_BYTES and discards the rest, and reports back over a
+    // most MAX_CAPTURE_BYTES, the tail of the stream, and reports back over a
     // channel so the join below can have a deadline.
     // The bool is true when a read failed, i.e. the bytes are incomplete.
     fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::sync::mpsc::Receiver<(Vec<u8>, bool)> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
+            let mut buf = VecDeque::new();
             let mut cut_short = false;
             if let Some(mut r) = r {
                 let mut chunk = [0u8; 16 * 1024];
+                let mut read_errors = 0u32;
                 loop {
                     match r.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(n) => {
-                            let room = (MAX_CAPTURE_BYTES as usize).saturating_sub(buf.len());
-                            buf.extend_from_slice(&chunk[..n.min(room)]);
+                            read_errors = 0;
+                            push_tail(&mut buf, &chunk[..n], MAX_CAPTURE_BYTES as usize);
                         }
                         // A signal is not the end of the stream.
                         Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        // Keep draining: stopping would leave the child blocked
+                        // on a full pipe. The bytes are still marked incomplete,
+                        // and only a run of errors ends the drain.
                         Err(_) => {
                             cut_short = true;
-                            break;
+                            read_errors += 1;
+                            if read_errors >= 16 {
+                                break;
+                            }
                         }
                     }
                 }
             }
-            let _ = tx.send((buf, cut_short));
+            let _ = tx.send((Vec::from(buf), cut_short));
         });
         rx
     }
     let out_rx = drain(child.stdout.take());
     let err_rx = drain(child.stderr.take());
 
+    // The exit is noticed without reaping the child, and the group is swept
+    // and unregistered before it is reaped: until then the child still owns
+    // its pid, so the sweep cannot hit an unrelated group that was handed the
+    // number, and neither can a shutdown sweep that still lists it.
+    let mut group = Some(group);
     let status = loop {
-        let polled = match child.try_wait() {
-            Ok(polled) => polled,
-            Err(e) => {
-                // Don't leave the child (and its descendants) running.
+        match ap_core::pgroup::has_exited(child.id()) {
+            // A descendant it left behind can still hold the pipes open: reap
+            // the group, then wait only briefly for the readers.
+            Ok(true) => {
                 kill_process_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.into());
+                drop(group.take());
+                match child.wait() {
+                    Ok(status) => break Some(status),
+                    Err(e) => return Err(e.into()),
+                }
             }
-        };
-        match polled {
-            Some(status) => break Some(status),
-            None if start.elapsed() >= timeout => {
+            Ok(false) if start.elapsed() >= timeout => {
                 kill_process_group(child.id());
+                drop(group.take());
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
             }
-            None => std::thread::sleep(Duration::from_millis(25)),
+            Ok(false) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => {
+                // Don't leave the child (and its descendants) running.
+                kill_process_group(child.id());
+                drop(group.take());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
         }
     };
-    // The child is gone, but a descendant it left behind can still hold the
-    // pipes open: reap the group, then wait only briefly for the readers.
-    kill_process_group(child.id());
     // `None` when the reader never reported back or its read failed: empty
     // output then means "unknown", not "the child printed nothing".
     // One shared deadline: a second full wait would let a slow descendant
@@ -566,6 +477,20 @@ mod capture_timeout_tests {
         assert!(t.elapsed() < Duration::from_secs(10));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn kill_process_group_sigkills_a_child_started_in_its_own_group() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        kill_process_group(child.id());
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+    }
+
     #[test]
     fn unreadable_output_is_an_error_not_an_empty_success() {
         // The child exits at once but a background descendant in another
@@ -596,6 +521,40 @@ mod capture_timeout_tests {
         .expect("complete stdout of a clean exit is returned");
         assert_eq!(out.code, 0);
         assert_eq!(out.stdout, "hi\n");
+    }
+
+    /// Scratch files and the working directory of `gh`/`osc` live in a
+    /// directory only this user can enter, not at a predictable shared path.
+    #[test]
+    fn private_dir_is_a_fresh_mode_0700_directory_under_the_temp_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_dir();
+        let meta = std::fs::symlink_metadata(dir).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        assert!(dir.starts_with(std::env::temp_dir()));
+        // The same directory every time within one process.
+        assert_eq!(dir, private_dir());
+    }
+
+    #[test]
+    fn push_tail_keeps_only_the_last_cap_bytes() {
+        let mut buf = VecDeque::new();
+        push_tail(&mut buf, b"abcdef", 4);
+        push_tail(&mut buf, b"gh", 4);
+        assert_eq!(Vec::from(buf.clone()), b"efgh");
+        push_tail(&mut buf, b"ij", 4);
+        assert_eq!(Vec::from(buf), b"ghij");
+    }
+
+    #[test]
+    fn a_stream_larger_than_the_cap_keeps_its_end() {
+        let mut buf = VecDeque::new();
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        for chunk in data.chunks(777) {
+            push_tail(&mut buf, chunk, 1_000);
+        }
+        assert_eq!(Vec::from(buf), &data[data.len() - 1_000..]);
     }
 
     #[test]

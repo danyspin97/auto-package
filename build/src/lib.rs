@@ -2,6 +2,7 @@
 //! and the validation gate.
 
 pub mod agent;
+pub mod depreach;
 pub mod discovery;
 pub mod flavors;
 pub mod http;
@@ -15,4 +16,5 @@ pub mod sources;
 pub mod spec;
 pub mod step;
 pub mod update;
+pub mod update_project;
 pub mod workspace;

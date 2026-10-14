@@ -3,13 +3,16 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ap_core::event::Event;
 
 use crate::obs_status;
 use crate::proc::{self, Captured, Emit};
+
+mod branch;
+pub use branch::*;
 
 /// Where `osc` runs when the command is not scoped to a checkout.
 fn anywhere() -> PathBuf {
@@ -60,12 +63,21 @@ pub enum Error {
         stderr: String,
     },
 
+    #[error("nothing to publish in {0}: no spec or archive found")]
+    NothingToPublish(PathBuf),
+
     #[error("rpmspec --parse {spec} failed (exit {code}):\n{stderr}")]
     RpmspecFailed {
         spec: String,
         code: i32,
         stderr: String,
     },
+
+    #[error(
+        "refusing to run rpmspec on {spec}: it contains `{marker}`, which runs code or reads \
+         files while expanding, and no sandbox (bubblewrap) is available to contain it"
+    )]
+    UnsandboxedMacro { spec: String, marker: String },
 
     #[error("osc build failed for {spec} (exit {code}); log at {log}")]
     BuildFailed {
@@ -210,27 +222,67 @@ fn classify_build_failure(log: &str) -> FailureKind {
     FailureKind::BuildFailed
 }
 
+/// The `nothing provides` requirements named on one line of a build log or of
+/// OBS's `<details>` text, each without the marker and without any
+/// `needed by ...` clause.
+///
+/// OBS's `<details>` for an `unresolvable` package joins every missing
+/// requirement onto ONE line (`nothing provides python314-fastar, nothing
+/// provides python313-fastar, ...`), while a build log has one per line, so a
+/// line may hold several. Reading only the first, as this used to, queued
+/// `python314-fastar,` (comma included) and lost everything after it.
+fn nothing_provides_segments(line: &str) -> Vec<String> {
+    const MARKER: &str = "nothing provides ";
+    let line = line.trim();
+    let line = line
+        .strip_prefix("unresolvable:")
+        .unwrap_or(line)
+        .trim_start();
+    // Only a line that starts with the phrase names requirements: one that
+    // merely mentions it somewhere in prose must not count.
+    let Some(mut rest) = line.strip_prefix(MARKER) else {
+        return Vec::new();
+    };
+    let mut segments = Vec::new();
+    loop {
+        let (segment, next) = match rest.find(MARKER) {
+            Some(i) => (&rest[..i], Some(&rest[i + MARKER.len()..])),
+            None => (rest, None),
+        };
+        let segment = segment.trim().trim_end_matches(',').trim_end();
+        let segment = segment
+            .split(" needed by ")
+            .next()
+            .unwrap_or(segment)
+            .trim();
+        if !segment.is_empty() {
+            segments.push(segment.to_string());
+        }
+        match next {
+            Some(n) => rest = n,
+            None => break,
+        }
+    }
+    segments
+}
+
 /// Extract RPM package names from "nothing provides <pkg>" lines in a build log.
 ///
 /// Handles both bare `nothing provides <pkg>` and `unresolvable: nothing provides <pkg>`,
-/// strips any trailing `needed by ...` clause, and deduplicates.
+/// several requirements joined onto one line (OBS's `<details>` form), strips
+/// any trailing `needed by ...` clause and any version constraint, and
+/// deduplicates.
 fn extract_unresolvable(log: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
-    for raw_line in log.lines() {
-        let line = raw_line.trim();
-        let pkg_str = if let Some(rest) = line.strip_prefix("unresolvable: nothing provides ") {
-            rest.trim()
-        } else if let Some(rest) = line.strip_prefix("nothing provides ") {
-            rest.trim()
-        } else {
-            continue;
-        };
-        // Take just the package name; drop " needed by ..." suffix.
-        let pkg = pkg_str.split_whitespace().next().unwrap_or(pkg_str);
-        let pkg = clean_unresolvable_name(pkg);
-        if !pkg.is_empty() && seen.insert(pkg.to_string()) {
-            result.push(pkg.to_string());
+    for line in log.lines() {
+        for segment in nothing_provides_segments(line) {
+            // Take just the package name; drop any version constraint.
+            let pkg = segment.split_whitespace().next().unwrap_or(&segment);
+            let pkg = clean_unresolvable_name(pkg);
+            if !pkg.is_empty() && seen.insert(pkg.to_string()) {
+                result.push(pkg.to_string());
+            }
         }
     }
     result
@@ -266,12 +318,23 @@ fn extract_unresolvable_detail(log: &str) -> Vec<String> {
     let lines: Vec<&str> = log.lines().collect();
     for (i, raw_line) in lines.iter().enumerate() {
         let line = raw_line.trim();
-        if !line.starts_with("nothing provides")
-            && !line.starts_with("unresolvable: nothing provides")
-        {
+        let bare = line
+            .strip_prefix("unresolvable:")
+            .unwrap_or(line)
+            .trim_start();
+        // The solver's other complaints name no package to queue, but they
+        // are what separates "needs building" from "the spec asks for the
+        // impossible", so they travel with the detail.
+        if bare.starts_with("have choice for ") || bare.starts_with("conflict for providers of ") {
+            result.push(line.to_string());
             continue;
         }
-        result.push(line.to_string());
+        let segments = nothing_provides_segments(line);
+        match segments.as_slice() {
+            [] => continue,
+            [_] => result.push(line.to_string()),
+            many => result.extend(many.iter().map(|s| format!("nothing provides {s}"))),
+        }
         if let Some(next) = lines.get(i + 1) {
             let next = next.trim();
             if next.starts_with('(') {
@@ -318,6 +381,248 @@ nothing provides (python313-foo
             clean_unresolvable_name("python314-duckdb"),
             "python314-duckdb"
         );
+    }
+
+    /// The `<details>` of python-fastapi-cloud-cli on i586 in
+    /// home:dspinella:open-webui, verbatim: every requirement on one line.
+    const FASTAPI_CLOUD_CLI_DETAILS: &str = "nothing provides python314-fastar, nothing provides python313-fastar, nothing provides python314-rignore, nothing provides python313-rignore, nothing provides python314-sentry-sdk, nothing provides python313-sentry-sdk";
+
+    /// A joined details line used to yield only `python314-fastar,` (comma
+    /// attached), so five of the six names never reached the queue.
+    #[test]
+    fn reads_every_requirement_on_a_joined_details_line() {
+        assert_eq!(
+            extract_unresolvable(FASTAPI_CLOUD_CLI_DETAILS),
+            vec![
+                "python314-fastar",
+                "python313-fastar",
+                "python314-rignore",
+                "python313-rignore",
+                "python314-sentry-sdk",
+                "python313-sentry-sdk",
+            ]
+        );
+        let detail = extract_unresolvable_detail(FASTAPI_CLOUD_CLI_DETAILS);
+        assert_eq!(detail.len(), 6);
+        assert_eq!(detail[0], "nothing provides python314-fastar");
+    }
+
+    #[test]
+    fn joined_requirements_keep_needed_by_and_version_out_of_the_name() {
+        let line = "unresolvable: nothing provides python314-a >= 2 needed by python314-x, \
+                    nothing provides python314-b needed by python314-y";
+        assert_eq!(
+            extract_unresolvable(line),
+            vec!["python314-a", "python314-b"]
+        );
+        // A line that only mentions the phrase is not a requirement.
+        assert!(extract_unresolvable("error: nothing provides python314-a").is_empty());
+    }
+
+    #[test]
+    fn solver_conflicts_travel_with_the_detail_but_name_no_package() {
+        let log = "\
+unresolvable: have choice for python3-foo needed by python314-bar: python314-foo python313-foo
+unresolvable: nothing provides python314-setuptools < 70.0.0
+(got version 80.9.0-3.3)
+conflict for providers of python314-baz needed by python314-qux
+";
+        assert_eq!(extract_unresolvable(log), vec!["python314-setuptools"]);
+        assert_eq!(
+            extract_unresolvable_detail(log),
+            vec![
+                "unresolvable: have choice for python3-foo needed by python314-bar: python314-foo python313-foo",
+                "unresolvable: nothing provides python314-setuptools < 70.0.0",
+                "(got version 80.9.0-3.3)",
+                "conflict for providers of python314-baz needed by python314-qux",
+            ]
+        );
+    }
+
+    #[test]
+    fn blockers_collapse_flavors_to_one_package_each() {
+        assert_eq!(
+            blockers_from_details(FASTAPI_CLOUD_CLI_DETAILS),
+            vec!["fastar", "rignore", "sentry-sdk"]
+        );
+    }
+
+    #[test]
+    fn blockers_skip_version_conflicts_and_interpreter_pieces() {
+        let details = "nothing provides python314-setuptools < 70.0.0, \
+                       nothing provides python3-devel, \
+                       nothing provides python-rpm-macros, \
+                       nothing provides python314-ninja, \
+                       nothing provides libfoo-devel, \
+                       nothing provides python313-Foo_Bar, \
+                       nothing provides python314-foo-bar";
+        assert_eq!(blockers_from_details(details), vec!["Foo_Bar", "foo"]);
+    }
+
+    /// The spec OBS holds for python-cuda-bindings (13.4.3-2.1), verbatim
+    /// apart from the licence header: the monorepo skeleton, never finished.
+    /// Its build "succeeded" and published two ~11 KB RPMs with no modules.
+    const CUDA_BINDINGS_SPEC: &str = "\
+Name:           python-cuda-bindings
+Version:        13.4.3
+Release:        0
+Summary:        Python bindings for CUDA
+License:        Apache-2.0
+BuildRequires:  python-rpm-macros
+BuildRequires:  %{python_module pip}
+%python_subpackages
+
+# This is a monorepo: all subprojects below must become %%package sections.
+# TODO: add %package -n python-%{name}-cuda-bindings for cuda_bindings/
+%description
+Python bindings for CUDA
+
+%prep
+%autosetup -p1 -n cuda-python-13.4.3
+
+%build
+# TODO: build each subproject in dependency order
+
+%install
+# TODO: install each subproject
+
+%check
+# TODO: check each subproject
+
+%files %{python_files}
+%license LICENSE
+
+%changelog
+";
+
+    #[test]
+    fn the_unfinished_cuda_bindings_skeleton_is_recognised() {
+        let reason = unfinished_spec_reason(CUDA_BINDINGS_SPEC).unwrap();
+        assert!(
+            reason.contains("%files lists nothing but %license/%doc"),
+            "{reason}"
+        );
+        assert!(reason.contains("%install has no commands"), "{reason}");
+    }
+
+    #[test]
+    fn a_finished_spec_is_not_flagged() {
+        let spec = "\
+Name:           python-foo
+%description
+Foo
+%prep
+%autosetup
+%build
+%pyproject_wheel
+%install
+%pyproject_install
+%python_expand %fdupes %{buildroot}%{$python_sitelib}
+%files %{python_files}
+%license LICENSE
+%{python_sitelib}/foo
+%{python_sitelib}/foo-%{version}.dist-info
+%changelog
+- A TODO in the changelog is history, not a placeholder
+";
+        assert_eq!(unfinished_spec_reason(spec), None);
+    }
+
+    #[test]
+    fn the_warning_names_the_package_the_evidence_and_the_way_out() {
+        let sizes = vec![
+            (
+                "python313-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                11053,
+            ),
+            (
+                "python314-cuda-bindings-13.4.3-2.1.x86_64.rpm".to_string(),
+                10925,
+            ),
+        ];
+        let reason = unfinished_spec_reason(CUDA_BINDINGS_SPEC).unwrap();
+        let msg = empty_package_message("python-cuda-bindings", "home:u:p", &reason, &sizes);
+        assert!(
+            msg.contains("python-cuda-bindings is built in home:u:p"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("python314-cuda-bindings-13.4.3-2.1.x86_64.rpm: 10925 bytes"),
+            "{msg}"
+        );
+        assert!(msg.contains("--force"), "{msg}");
+    }
+
+    #[test]
+    fn only_a_succeeded_package_of_this_arch_counts_as_built() {
+        let listing: std::collections::HashSet<String> =
+            ["python-fastapi-cloud-cli", "python-Foo_Bar", "python-bad"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let statuses: HashMap<String, BuildStatus> = [
+            ("python-fastapi-cloud-cli", BuildStatus::Succeeded),
+            ("python-Foo_Bar", BuildStatus::Succeeded),
+            ("python-bad", BuildStatus::Unresolvable),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(
+            built_in_project(&listing, &statuses, "fastapi-cloud-cli").as_deref(),
+            Some("python-fastapi-cloud-cli")
+        );
+        assert_eq!(
+            built_in_project(&listing, &statuses, "foo-bar").as_deref(),
+            Some("python-Foo_Bar")
+        );
+        assert_eq!(built_in_project(&listing, &statuses, "bad"), None);
+        assert_eq!(built_in_project(&listing, &statuses, "nothing"), None);
+    }
+
+    #[test]
+    fn missing_names_collapse_flavors_and_drop_what_is_not_built() {
+        let names: Vec<String> = [
+            "python313-cuda-bindings",
+            "python314-cuda-bindings",
+            "python3-cuda-bindings",
+            "python3-devel",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(missing_package_names(&names), vec!["cuda-bindings"]);
+    }
+
+    /// Both repositories' results arrive in one document; only the one asked
+    /// for may count.
+    const MULTI_REPO: &str = r#"<resultlist state="bfdf69d7aa217ca87031d1aff55605f2">
+  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+    <status package="python-fastapi-cloud-cli" code="unresolvable">
+      <details>nothing provides python314-fastar, nothing provides python313-fastar</details>
+    </status>
+  </result>
+  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
+    <status package="python-fastapi-cloud-cli" code="succeeded"/>
+  </result>
+</resultlist>"#;
+
+    #[test]
+    fn unresolvable_details_come_from_the_requested_arch_only() {
+        let details = |arch| {
+            unresolvable_details_from_xml(
+                MULTI_REPO,
+                "openSUSE_Tumbleweed",
+                arch,
+                "python-fastapi-cloud-cli",
+            )
+        };
+        assert_eq!(
+            details("i586").as_deref(),
+            Some("nothing provides python314-fastar, nothing provides python313-fastar")
+        );
+        assert_eq!(details("x86_64"), None);
+        assert_eq!(details("aarch64"), None);
     }
 }
 
@@ -603,7 +908,7 @@ static DISTRO_PROVIDES_CACHE: Mutex<Option<HashMap<String, bool>>> = Mutex::new(
 /// trusts.
 ///
 /// This exists because the queue-filter checks elsewhere in this crate
-/// (`list_project_packages` / `get_project_repo_paths`, matched by
+/// (`try_list_project_packages` / `get_project_repo_paths`, matched by
 /// [`fuzzy_key`]) only ever compare against *source package names* in OBS
 /// projects — and a C library's RPM package name routinely embeds its
 /// SONAME version (`libpng16`, `libopenssl3`) where the bare upstream
@@ -776,38 +1081,37 @@ mod distro_provides_tests {
 ///
 /// The repository half of each pair is deliberately not used by either
 /// caller to filter further ([`select_target`]'s resolvability check and
-/// [`get_available_packages`] both just list every package name in
+/// the CLI's queue filter both just list every package name in
 /// `path_project`, regardless of that package's build status *in* the named
 /// repository) — a package whose build in the linked repo is disabled or
 /// broken there is currently still treated as available here. Narrowing that
 /// would need a per-repo build-status query in addition to this one; nothing
 /// does that today.
-pub fn get_project_repo_paths(project: &str, emit: Emit<'_>) -> Vec<(String, String)> {
-    let out = match proc::capture_with_timeout(
+///
+/// A failed query is an `Err`, never an empty list: empty reads as "no build
+/// paths", which widens the set of packages reported missing.
+pub fn get_project_repo_paths(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<Vec<(String, String)>, Error> {
+    let cmd = format!("meta prj {project}");
+    let out = proc::capture_with_timeout(
         "osc",
         &["meta", "prj", project],
         &anywhere(),
         emit,
         OSC_QUERY_TIMEOUT,
-    ) {
-        Ok(out) if out.success() => out,
-        // Empty means "no build paths", which widens the set of packages
-        // reported missing — say so rather than letting it pass silently.
-        Ok(out) => {
-            ap_core::diag!(
-                "  osc meta prj {project}: exit {}: {}",
-                out.code,
-                first_line(&out.stderr)
-            );
-            return vec![];
-        }
-        Err(e) => {
-            ap_core::diag!("  osc meta prj {project}: {e}");
-            return vec![];
-        }
-    };
+    )
+    .map_err(during(cmd.clone()))?;
+    if !out.success() {
+        return Err(Error::OscFailed {
+            cmd,
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
 
-    parse_project_repo_paths(&out.stdout)
+    Ok(parse_project_repo_paths(&out.stdout))
 }
 
 /// Parsing half of [`get_project_repo_paths`], split out so it is testable
@@ -873,28 +1177,9 @@ fn extract_xml_attr(tag: &str, attr: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
-/// Return the union of source packages in `project` and all its configured
-/// build/path projects (from `osc meta prj`).
-///
-/// This is the correct set to check for resolvability: a package is available
-/// for building if it exists in the user's own project OR in any project that
-/// the user's project is configured to build against.
-///
-/// Fails when any listing fails: a partial union would make packages that
-/// do exist look absent.
-pub fn get_available_packages(
-    project: &str,
-    emit: Emit<'_>,
-) -> Result<std::collections::HashSet<String>, String> {
-    let mut all = try_list_project_packages(project, emit)?;
-    for (path_project, _repo) in get_project_repo_paths(project, emit) {
-        all.extend(try_list_project_packages(&path_project, emit)?);
-    }
-    Ok(all)
-}
-
-static PROJECT_PACKAGES_CACHE: OnceLock<Mutex<HashMap<String, std::collections::HashSet<String>>>> =
-    OnceLock::new();
+static PROJECT_PACKAGES_CACHE: OnceLock<
+    Mutex<HashMap<String, Arc<std::collections::HashSet<String>>>>,
+> = OnceLock::new();
 
 /// Per-project count of invalidations. A fetch that started before an
 /// invalidation holds a listing that may predate the package just committed;
@@ -916,21 +1201,24 @@ fn project_generation(project: &str) -> u64 {
 /// was read. The generation is checked under the cache lock, and
 /// invalidation bumps it before taking that lock, so no interleaving lets a
 /// stale set land after the removal.
-fn insert_if_current(project: &str, generation: u64, pkgs: &std::collections::HashSet<String>) {
+fn insert_if_current(
+    project: &str,
+    generation: u64,
+    pkgs: &Arc<std::collections::HashSet<String>>,
+) {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if project_generation(project) == generation {
-        guard.insert(project.to_owned(), pkgs.clone());
+        guard.insert(project.to_owned(), Arc::clone(pkgs));
     }
 }
 
 /// Return the set of package names that exist in `project`.
 ///
 /// The result is cached per project name so repeated calls within a process
-/// skip the network round-trip — this is called once per dependency in the
-/// CLI's `pending_deps` availability filter, so without caching a single
-/// batch can mean dozens of `osc ls` round-trips. Callers that successfully
-/// commit a *new* package into `project` MUST call
+/// skip the network round-trip — callers look names up once per dependency,
+/// so without caching a single batch can mean dozens of `osc ls` round-trips.
+/// Callers that successfully commit a *new* package into `project` MUST call
 /// [`invalidate_project_packages_cache`] afterward: a long `auto-package
 /// build` run adds packages to the same project continuously, and this
 /// cache has no TTL and no other invalidation path. Without that call, the
@@ -944,13 +1232,13 @@ fn insert_if_current(project: &str, generation: u64, pkgs: &std::collections::Ha
 pub fn try_list_project_packages(
     project: &str,
     emit: Emit<'_>,
-) -> Result<std::collections::HashSet<String>, String> {
+) -> Result<Arc<std::collections::HashSet<String>>, String> {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     {
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pkgs) = guard.get(project) {
-            return Ok(pkgs.clone());
+            return Ok(Arc::clone(pkgs));
         }
     }
 
@@ -960,33 +1248,15 @@ pub fn try_list_project_packages(
     // report the error so the next call tries again.
     let pkgs = fetch_project_packages(project, emit)
         .or_else(|_| fetch_project_packages(project, Emit::quiet()))
+        .map(Arc::new)
         .map_err(|e| format!("could not list packages of {project}: {e}"))?;
     insert_if_current(project, generation, &pkgs);
     Ok(pkgs)
 }
 
-/// [`try_list_project_packages`] for callers that can only act on a known
-/// answer: warns and returns `None` on failure, which they must not treat as
-/// "the package is absent".
-pub fn list_project_packages(
-    project: &str,
-    emit: Emit<'_>,
-) -> Option<std::collections::HashSet<String>> {
-    match try_list_project_packages(project, emit) {
-        Ok(pkgs) => Some(pkgs),
-        Err(e) => {
-            emit.reporter.report(&Event::Warning {
-                step: emit.step,
-                message: e,
-            });
-            None
-        }
-    }
-}
-
-/// Drop `project`'s cached package listing so the next [`list_project_packages`]
+/// Drop `project`'s cached package listing so the next [`try_list_project_packages`]
 /// call re-fetches it. Call this right after successfully building/committing
-/// a package into `project` — see [`list_project_packages`]'s doc comment for
+/// a package into `project` — see [`try_list_project_packages`]'s doc comment for
 /// why skipping this silently breaks every later availability check for the
 /// rest of the run, not just the one for the package just built.
 pub fn invalidate_project_packages_cache(project: &str) {
@@ -1019,10 +1289,10 @@ mod project_packages_cache_tests {
     fn invalidate_drops_the_cached_entry() {
         let project = "ap-test-cache-invalidation-project";
         let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        cache
-            .lock()
-            .unwrap()
-            .insert(project.to_string(), std::collections::HashSet::new());
+        cache.lock().unwrap().insert(
+            project.to_string(),
+            Arc::new(std::collections::HashSet::new()),
+        );
         assert!(cache.lock().unwrap().contains_key(project));
 
         invalidate_project_packages_cache(project);
@@ -1038,12 +1308,12 @@ mod project_packages_cache_tests {
         let generation = project_generation(project);
         // ...fetch happens here, then another worker commits and invalidates...
         invalidate_project_packages_cache(project);
-        insert_if_current(project, generation, &std::collections::HashSet::new());
+        insert_if_current(project, generation, &Arc::default());
         let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         assert!(!cache.lock().unwrap().contains_key(project));
 
         // A fetch that started after the invalidation is cached normally.
-        insert_if_current(project, project_generation(project), &Default::default());
+        insert_if_current(project, project_generation(project), &Arc::default());
         assert!(cache.lock().unwrap().contains_key(project));
     }
 
@@ -1120,23 +1390,47 @@ fn fetch_project_packages(
     Ok(parse_package_listing(&out.stdout))
 }
 
-/// Package names from `osc ls <project>`, lowercased. A multibuild package is
-/// listed as `<source>:<flavor>` (`apache-arrow:python-pyarrow`) and its flavor
-/// is itself a package that gets built and published (python313-pyarrow), so
-/// the flavor name counts as available too — otherwise a dependency Factory
+/// Package names from `osc ls <project>`, in the spelling OBS stores them
+/// (OBS names are case-sensitive: `python-APScheduler`). A multibuild package
+/// is listed as `<source>:<flavor>` (`apache-arrow:python-pyarrow`) and its
+/// flavor is itself a package that gets built and published (python313-pyarrow),
+/// so the flavor name counts as available too — otherwise a dependency Factory
 /// already ships looks absent and gets queued to be built again.
 fn parse_package_listing(stdout: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    for line in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        let name = line.to_lowercase();
+    for name in stdout.lines().map(str::trim).filter(|s| !s.is_empty()) {
         if let Some((_, flavor)) = name.split_once(':')
             && flavor.starts_with("python")
         {
             out.insert(flavor.to_string());
         }
-        out.insert(name);
+        out.insert(name.to_string());
     }
     out
+}
+
+/// The name OBS lists for the package `guess` refers to, or `guess` itself
+/// when nothing listed matches.
+///
+/// `guess` is an [`rpm_name`] guess, which is lowercase and may spell the
+/// separators differently from the real package. A listed name matches when
+/// its [`fuzzy_key`] equals the guess's, so `python-apscheduler` finds
+/// `python-APScheduler`. Anything that checks out, builds or names a package
+/// in `project` must use this spelling, not the guess: osc, the checkout
+/// directory and the spec file all follow the real name.
+pub fn obs_name(listing: &std::collections::HashSet<String>, guess: &str) -> String {
+    if listing.contains(guess) {
+        return guess.to_string();
+    }
+    let key = fuzzy_key(guess);
+    // Several listed spellings can share a key; take the first in sort order
+    // so the answer does not depend on hash iteration order.
+    listing
+        .iter()
+        .filter(|p| fuzzy_key(p) == key)
+        .min()
+        .cloned()
+        .unwrap_or_else(|| guess.to_string())
 }
 
 /// Create an initial `.changes` entry for a new package using `osc vc`.
@@ -1201,6 +1495,31 @@ pub fn ensure_package(
 
     if check.success() {
         return Ok(());
+    }
+    // Only a 404 means "not there yet". Any other failure (network, auth,
+    // a 5xx) says nothing about existence, and pushing meta then could
+    // overwrite the title/description of a package that is in fact there.
+    if !is_not_found(&check.stderr) {
+        return Err(Error::OscFailed {
+            cmd: format!("ls {project}/{pkg_name}"),
+            code: check.code,
+            stderr: check.stderr,
+        });
+    }
+    // OBS names are case-sensitive, so the failed lookup above does not rule
+    // out a package that differs only in case or separators
+    // (`python-apscheduler` vs. `python-APScheduler`). Creating one would
+    // leave the project with two packages for one upstream, so refuse and let
+    // the caller use the existing name.
+    let listing = try_list_project_packages(project, emit).map_err(Error::NotActionable)?;
+    if let Some(existing) = listing
+        .iter()
+        .filter(|p| fuzzy_key(p) == fuzzy_key(pkg_name))
+        .min()
+    {
+        return Err(Error::NotActionable(format!(
+            "{project} already has {existing}; refusing to create {pkg_name} next to it"
+        )));
     }
 
     let meta = format!(
@@ -1368,63 +1687,74 @@ fn is_benign_up_output(text: &str) -> bool {
 /// caller can keep interpreting failure (which stderr patterns are benign,
 /// whether 404 is a non-error) in its own, different way.
 fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Error> {
+    // Each recovery runs at most once per call, so a checkout that keeps
+    // failing the same way is reported, not retried forever.
+    let mut repaired = false;
+    let mut moved_aside = false;
     let up = || {
         proc::capture_with_timeout("osc", &["up"], checkout_dir, emit, OSC_TRANSFER_TIMEOUT)
             .map_err(during(format!("up in {}", checkout_dir.display())))
     };
-    let out = up()?;
-    if out.success() {
-        return Ok(out);
-    }
-
-    if is_inconsistent_wc_error(&out.stderr) {
-        repair_wc(checkout_dir, emit)?;
-        return up();
-    }
-
-    if let Some(name) = changes_conflict_file(&out.stderr)
-        .filter(|n| !n.contains('/') && !n.contains("..") && !n.starts_with('-'))
-    {
-        // osc only raises this when `name` is untracked in this working
-        // copy's `.osc/_files` (see `Package.__update`'s check against
-        // `filenamelist_unvers`), so it is always safe to move aside — it
-        // was never osc's file to begin with. The usual cause here is our
-        // own `create_initial_changes` writing `<pkg>.changes` directly
-        // before that revision's commit reached the server, and the
-        // server later gaining its own file of the same name in the
-        // meantime (e.g. a prior interrupted run that got further).
-        let name = name.to_string();
-        let conflicting = checkout_dir.join(&name);
-        // This checkout can legitimately go through this recovery more than
-        // once across retried pipeline attempts — `fs::rename` overwrites
-        // silently on Unix, so without the existence check a second recovery
-        // would clobber whatever the first one had moved aside with no trace
-        // either backup ever existed.
-        let mut backup = checkout_dir.join(format!("{name}.preexisting"));
-        let mut n = 1;
-        while backup.exists() {
-            n += 1;
-            backup = checkout_dir.join(format!("{name}.preexisting.{n}"));
+    let mut out = up()?;
+    loop {
+        if out.success() {
+            return Ok(out);
         }
-        if let Err(e) = std::fs::rename(&conflicting, &backup) {
-            ap_core::diag!(
-                "  could not move '{name}' aside in {}: {e}",
-                checkout_dir.display()
-            );
+        if !repaired && is_inconsistent_wc_error(&out.stderr) {
+            repair_wc(checkout_dir, emit)?;
+            repaired = true;
+        } else if !moved_aside && let Some(name) = changes_conflict_file(&out.stderr) {
+            // osc only raises this when `name` is untracked in this working
+            // copy's `.osc/_files` (see `Package.__update`'s check against
+            // `filenamelist_unvers`), so it is always safe to move aside — it
+            // was never osc's file to begin with. The usual cause here is our
+            // own `create_initial_changes` writing `<pkg>.changes` directly
+            // before that revision's commit reached the server, and the
+            // server later gaining its own file of the same name in the
+            // meantime (e.g. a prior interrupted run that got further).
+            // If the move fails the checkout is not usable: that is the
+            // error to report, not a retry that will hit the same conflict.
+            let backup = move_aside(checkout_dir, name)?;
+            emit.reporter.report(&Event::Warning {
+                step: emit.step,
+                message: format!(
+                    "osc up: untracked local '{name}' conflicted with a newer revision's \
+                     file of the same name; moved it aside as '{}' and retrying",
+                    backup.display()
+                ),
+            });
+            moved_aside = true;
+        } else {
+            return Ok(out);
         }
-        let backup_name = backup.file_name().map(|n| n.to_string_lossy().into_owned());
-        emit.reporter.report(&Event::Warning {
-            step: emit.step,
-            message: format!(
-                "osc up: untracked local '{name}' conflicted with a newer revision's \
-                 file of the same name; moved it aside as '{}' and retrying",
-                backup_name.as_deref().unwrap_or("<unknown>")
-            ),
-        });
-        return up();
+        out = up()?;
     }
+}
 
-    Ok(out)
+/// Move the untracked `name` out of `checkout_dir` so `osc up` can add the
+/// server's file in its place, and return where it went.
+///
+/// The backup goes beside the checkout (`<project>/.preexisting/<pkg>/`), not
+/// inside it: `osc addremove` runs on the package directory and would commit
+/// a backup left there. A backup already present is never overwritten (a
+/// checkout can go through this more than once), so each one gets a numbered
+/// name instead.
+fn move_aside(checkout_dir: &Path, name: &str) -> Result<PathBuf, Error> {
+    let pkg = checkout_dir.file_name().unwrap_or(checkout_dir.as_os_str());
+    let dir = checkout_dir
+        .parent()
+        .unwrap_or(checkout_dir)
+        .join(".preexisting")
+        .join(pkg);
+    fs::create_dir_all(&dir)?;
+    let mut backup = dir.join(name);
+    let mut n = 1;
+    while backup.exists() {
+        n += 1;
+        backup = dir.join(format!("{name}.{n}"));
+    }
+    fs::rename(checkout_dir.join(name), &backup)?;
+    Ok(backup)
 }
 
 /// Extract the filename osc names in its uncaught `PackageFileConflict`
@@ -1434,12 +1764,22 @@ fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Er
 /// working copy while the server's newer revision also adds a file with the
 /// same name — an unhandled exception in osc itself, not one of its usual
 /// "inconsistent working copy" messages, so `repairwc` does not apply here.
+///
+/// Only a `.changes` file (a bare name, not a path) is returned: that is the
+/// one file this tool writes into a checkout itself, so the only conflict it
+/// is safe to resolve by moving the local copy aside. Any other conflict is
+/// left for the caller to report.
 fn changes_conflict_file(stderr: &str) -> Option<&str> {
-    stderr
+    let name = stderr
         .split("failed to add file '")
         .nth(1)?
         .split('\'')
-        .next()
+        .next()?;
+    (name.ends_with(".changes")
+        && !name.contains('/')
+        && !name.contains("..")
+        && !name.starts_with('-'))
+    .then_some(name)
 }
 
 #[cfg(test)]
@@ -1457,6 +1797,35 @@ mod changes_conflict_tests {
     fn returns_none_for_unrelated_errors() {
         assert_eq!(changes_conflict_file("404 Not Found"), None);
     }
+
+    #[test]
+    fn a_moved_aside_changes_file_lands_outside_the_checkout_and_is_never_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("proj").join("python-foo");
+        fs::create_dir_all(&checkout).unwrap();
+        fs::write(checkout.join("python-foo.changes"), "local").unwrap();
+
+        let first = move_aside(&checkout, "python-foo.changes").unwrap();
+        assert!(!first.starts_with(&checkout));
+        assert!(!checkout.join("python-foo.changes").exists());
+        assert_eq!(fs::read_to_string(&first).unwrap(), "local");
+
+        fs::write(checkout.join("python-foo.changes"), "again").unwrap();
+        let second = move_aside(&checkout, "python-foo.changes").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(&first).unwrap(), "local");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "again");
+    }
+
+    #[test]
+    fn only_a_changes_file_is_ever_moved_aside() {
+        let spec = "osc: failed to add file 'python-foo.spec' \
+                    file/dir with the same name already exists\n";
+        assert_eq!(changes_conflict_file(spec), None);
+        let path = "osc: failed to add file 'sub/python-foo.changes' \
+                    file/dir with the same name already exists\n";
+        assert_eq!(changes_conflict_file(path), None);
+    }
 }
 
 #[cfg(test)]
@@ -1473,6 +1842,17 @@ mod not_found_tests {
     fn a_bare_number_containing_404_is_not_a_missing_resource() {
         assert!(!is_not_found("request id 1404 timed out"));
         assert!(!is_not_found("Skipping foo: conflict"));
+    }
+
+    /// `ensure_package` creates a package only when `osc ls` says 404; a
+    /// network, auth or server failure must not read as "missing".
+    #[test]
+    fn other_failures_are_not_a_missing_package() {
+        assert!(!is_not_found(
+            "Server returned an error: HTTP Error 500: Internal Server Error"
+        ));
+        assert!(!is_not_found("Name or service not known"));
+        assert!(!is_not_found("HTTP Error 401: Unauthorized"));
     }
 }
 
@@ -1542,6 +1922,73 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Macro forms that run a program or read a file while `rpmspec` expands them.
+/// The spec may come from upstream or from the agent, so these are only
+/// expanded inside the sandbox.
+const CODE_MACRO_MARKERS: &[&str] = &["%(", "%{lua:", "%lua", "%{expand:", "%{load:", "%{getenv:"];
+
+/// The first code-running macro form in `text`, if any.
+fn code_macro_marker(text: &str) -> Option<&'static str> {
+    CODE_MACRO_MARKERS
+        .iter()
+        .copied()
+        .find(|m| text.contains(m))
+}
+
+/// Whether `rpmspec` can run inside bubblewrap here. Probed once: `bwrap`
+/// installed is not enough, unprivileged user namespaces are often disabled.
+fn rpmspec_sandbox_works() -> bool {
+    static WORKS: OnceLock<bool> = OnceLock::new();
+    *WORKS.get_or_init(|| {
+        let mut args = sandbox_prefix(None);
+        args.extend(["rpmspec".to_string(), "--version".to_string()]);
+        proc::capture("bwrap", &args, &anywhere(), Emit::quiet()).is_ok_and(|out| out.success())
+    })
+}
+
+/// bubblewrap options for one `rpmspec` run, up to the program name. The
+/// system is read-only, the home directory is not mounted, the environment is
+/// cleared, and there is no network. `spec_dir`, when given, is the only user
+/// directory mounted, read-only.
+fn sandbox_prefix(spec_dir: Option<&str>) -> Vec<String> {
+    let mut args = ap_core::sandbox::system_ro_binds();
+    args.extend(
+        [
+            "--ro-bind",
+            "/etc",
+            "/etc",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--die-with-parent",
+            "--new-session",
+            "--clearenv",
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/tmp",
+            "--setenv",
+            "LANG",
+            "C.UTF-8",
+        ]
+        .map(String::from),
+    );
+    let dir = spec_dir.unwrap_or("/tmp");
+    if spec_dir.is_some() {
+        args.extend(["--ro-bind", dir, dir].map(String::from));
+    }
+    args.extend(["--chdir", dir].map(String::from));
+    args
+}
+
 /// Run `rpmspec --parse` on a spec file and check for syntax errors.
 ///
 /// Judges on exit status only (warnings in stderr are not treated as failures).
@@ -1557,15 +2004,32 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 /// pre-flight syntax check; the one-shot [`emit_host_macro_warning`] call
 /// below surfaces the gap to the user. A durable fix would require
 /// containerized validation against the target repo's rpm-config.
+///
+/// Expanding a spec can run code (`%(...)`, `%{lua:...}`), so it runs inside
+/// bubblewrap when that works. Without a sandbox, a spec containing such a
+/// macro is refused rather than expanded on the host.
 pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> {
     emit_host_macro_warning(emit);
 
-    let out = proc::capture(
-        "rpmspec",
-        &["--parse", &spec_path.to_string_lossy()],
-        &anywhere(),
-        emit,
-    )?;
+    let spec = spec_path.to_string_lossy().into_owned();
+    let out = if rpmspec_sandbox_works() {
+        let dir = spec_path.parent().unwrap_or(Path::new("/"));
+        let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let file = dir.join(spec_path.file_name().unwrap_or_default());
+        let mut args = sandbox_prefix(Some(&dir.to_string_lossy()));
+        let file = file.to_string_lossy().into_owned();
+        args.extend(["rpmspec".to_string(), "--parse".to_string(), file]);
+        proc::capture("bwrap", &args, &anywhere(), emit)?
+    } else {
+        let text = fs::read(spec_path).unwrap_or_default();
+        if let Some(marker) = code_macro_marker(&String::from_utf8_lossy(&text)) {
+            return Err(Error::UnsandboxedMacro {
+                spec,
+                marker: marker.to_string(),
+            });
+        }
+        proc::capture("rpmspec", &["--parse", &spec], &anywhere(), emit)?
+    };
 
     if !out.success() {
         return Err(Error::RpmspecFailed {
@@ -1578,15 +2042,119 @@ pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> 
     Ok(out.stdout)
 }
 
+/// What a checkout publishes to OBS, split by [`publish_plan`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PublishPlan {
+    /// Checkout-relative names to stage and commit.
+    pub files: Vec<String>,
+    /// Names present in the checkout that are not part of the package.
+    pub skipped: Vec<String>,
+}
+
+/// Decide which files of a checkout belong in the commit.
+///
+/// Only the spec, the archives, the service files, the changelog and rpmlint
+/// config, and the quilt patches are published: a patch when `series` or the
+/// spec names it. Anything else in the directory (backups such as
+/// `*.preexisting`, a build directory, a stray file) is left out, so it never
+/// reaches OBS. Dot-entries such as `.osc` are not part of the package and are
+/// not listed.
+pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
+    let mut names: Vec<String> = fs::read_dir(checkout_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort();
+
+    let spec_text: String = names
+        .iter()
+        .filter(|n| n.ends_with(".spec"))
+        .filter_map(|n| fs::read_to_string(checkout_dir.join(n)).ok())
+        .collect();
+    let series: Vec<String> = fs::read_to_string(checkout_dir.join("series"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+
+    let mut plan = PublishPlan::default();
+    for name in names {
+        if is_publishable(&name, &spec_text, &series) {
+            plan.files.push(name);
+        } else {
+            plan.skipped.push(name);
+        }
+    }
+    plan
+}
+
+fn is_publishable(name: &str, spec_text: &str, series: &[String]) -> bool {
+    const FIXED: &[&str] = &[
+        "_service",
+        "_servicedata",
+        "_multibuild",
+        "_constraints",
+        "_link",
+        "series",
+        // The audit trail of a Cargo workspace repair (see the pipeline).
+        "cargo-workspace-fix.txt",
+    ];
+    const SUFFIXES: &[&str] = &[
+        ".spec",
+        ".changes",
+        ".rpmlintrc",
+        ".obsinfo",
+        ".tar.gz",
+        ".tar.bz2",
+        ".tar.xz",
+        ".tar.zst",
+        ".tar",
+        ".tgz",
+        ".tbz",
+        ".txz",
+        ".zip",
+        ".crate",
+        // A prebuilt wheel used as the source, and the pristine copy of an
+        // archive the pipeline rewrote (kept so its provenance is auditable).
+        ".whl",
+        ".orig",
+        // Detached signatures and keyrings that ship beside a source archive.
+        ".sig",
+        ".asc",
+        ".keyring",
+    ];
+    if FIXED.contains(&name) || SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
+    let is_patch = name.ends_with(".patch") || name.ends_with(".diff");
+    is_patch && (series.iter().any(|s| s == name) || spec_text.contains(name))
+}
+
 /// Commit the package to OBS, triggering a remote build.
 ///
-/// Runs `osc addremove` first to track any new or deleted files, then
-/// `osc ci` to push the changes to OBS.
-pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), Error> {
-    // Sync tracked files with directory contents. A failure is not fatal (a
-    // new package may have nothing to add), but `ci` then commits without
-    // them, so say so.
-    match proc::capture("osc", &["addremove"], checkout_dir, emit) {
+/// Only `files` are staged and committed. `osc addremove` and `osc ci` both
+/// take file arguments, so a file outside the list is neither tracked nor
+/// pushed, even when it is modified.
+pub fn commit(
+    checkout_dir: &Path,
+    message: &str,
+    files: &[String],
+    emit: Emit<'_>,
+) -> Result<(), Error> {
+    if files.is_empty() {
+        return Err(Error::NothingToPublish(checkout_dir.to_path_buf()));
+    }
+
+    // Track new and deleted files among the listed ones. A failure is not
+    // fatal (a new package may have nothing to add), but `ci` then commits
+    // without them, so say so.
+    let mut add = vec!["addremove".to_string()];
+    add.extend(files.iter().cloned());
+    match proc::capture("osc", &add, checkout_dir, emit) {
         Ok(out) if !out.success() => ap_core::diag!(
             "  osc addremove in {}: exit {}: {}",
             checkout_dir.display(),
@@ -1597,14 +2165,10 @@ pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), 
         Ok(_) => {}
     }
 
-    let out = proc::capture_with_timeout(
-        "osc",
-        &["ci", "-m", message],
-        checkout_dir,
-        emit,
-        OSC_TRANSFER_TIMEOUT,
-    )
-    .map_err(during(format!("ci in {}", checkout_dir.display())))?;
+    let mut ci = vec!["ci".to_string(), "-m".to_string(), message.to_string()];
+    ci.extend(files.iter().cloned());
+    let out = proc::capture_with_timeout("osc", &ci, checkout_dir, emit, OSC_TRANSFER_TIMEOUT)
+        .map_err(during(format!("ci in {}", checkout_dir.display())))?;
 
     if !out.success() {
         // "nothing to do" means files are already committed — not an error.
@@ -1659,10 +2223,20 @@ fn get_build_status_from_results_table(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    let cmd = format!("results -r {repo} -a {arch} {project} {pkg_name}");
+    let cmd = format!("results --verbose -r {repo} -a {arch} {project} {pkg_name}");
+    // `--verbose` is what carries a `finished` result's verdict.
     let out = proc::capture_with_timeout(
         "osc",
-        &["results", "-r", repo, "-a", arch, project, pkg_name],
+        &[
+            "results",
+            "--verbose",
+            "-r",
+            repo,
+            "-a",
+            arch,
+            project,
+            pkg_name,
+        ],
         &anywhere(),
         emit,
         OSC_QUERY_TIMEOUT,
@@ -1677,7 +2251,7 @@ fn get_build_status_from_results_table(
         });
     }
 
-    Ok(parse_single_build_status(&out.stdout, arch))
+    Ok(parse_single_build_status(&out.stdout, pkg_name, repo, arch))
 }
 
 /// Per-call limit for the short, network-bound `osc` queries used while
@@ -1764,41 +2338,87 @@ fn get_build_status_xml(
     Some(obs_status::resolve(&entry, &evidence))
 }
 
-/// Parsing half of [`get_build_status`], split out so it is testable without
-/// shelling out to `osc`.
-fn parse_single_build_status(stdout: &str, arch: &str) -> BuildStatus {
+/// Parsing half of the `osc results` fallback in [`get_build_status`], split
+/// out so it is testable without shelling out to `osc`.
+///
+/// `osc results --verbose -r <repo> -a <arch> <project> <pkg>` prints one line
+/// per result as `<repo> <arch> <pkg> <status>` (osc's `get_results` format,
+/// columns in that order). The status is the rest of the line:
+/// - a plain code (`succeeded`, `failed`, `scheduled`, ...), optionally with
+///   `: <details>` after it, and `(unpublished)` for a build that succeeded
+///   but is not published yet;
+/// - `finished: <verdict>`: OBS hides the verdict behind the bare `finished`
+///   code, and `--verbose` prints it as the details;
+/// - `outdated (was: ...)` when the repository is dirty, or a trailing `*` in
+///   the non-verbose form: the result may be for an older source revision.
+///
+/// Multi-line `unresolvable:` details only add lines that do not start with
+/// the repo, so reading the first matching line is enough.
+fn parse_single_build_status(stdout: &str, pkg_name: &str, repo: &str, arch: &str) -> BuildStatus {
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        // A result line is `<pkg> <repo> <arch> <status>`. Anything else (an
-        // error message that happens to contain words) must not be read as a
-        // status word.
-        if parts.len() >= 3 && parts[parts.len() - 2] == arch {
-            let raw = parts[parts.len() - 1];
-            let word = raw.trim_end_matches('*');
-            // OBS suffixes the status word with `*` when this result is for
-            // an older source revision than what's on the server now (e.g. a
-            // revision was committed while this result was already showing,
-            // or right after). Reporting the stripped word as plain
-            // `Succeeded` would make the `AlreadyBuilt` fast path in
-            // pipeline.rs believe a since-superseded result still verifies
-            // the current revision, and skip a rebuild that result was never
-            // actually for — `has_local_changes` and `spec_version_differs`
-            // both check the local checkout, so neither one catches "the
-            // server has a newer committed revision than this result
-            // covers". Reporting `Unknown` here forces that fast path to
-            // fall through and resync instead of trusting a stale verdict.
-            if raw != word {
-                return BuildStatus::Unknown(format!("stale: {word}"));
-            }
-            return BuildStatus::from(word);
+        let mut rest = line.trim_start();
+        let mut columns = [""; 3];
+        for col in &mut columns {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            *col = &rest[..end];
+            rest = rest[end..].trim_start();
         }
+        if columns != [repo, arch, pkg_name] {
+            continue;
+        }
+        return status_from_osc_text(rest.trim());
     }
     BuildStatus::Unknown("no results".to_string())
+}
+
+/// The status part of one `osc results` line (see [`parse_single_build_status`]).
+fn status_from_osc_text(text: &str) -> BuildStatus {
+    // OBS marks a result as possibly older than the sources on the server:
+    // the dirty-repository form, which `--verbose` spells `outdated (was: ..)`
+    // and the plain form spells with a trailing `*`. Never trust those as-is:
+    // reporting the stripped word as plain `Succeeded` would make the
+    // `AlreadyBuilt` fast path in pipeline.rs believe a since-superseded
+    // result still verifies the current revision. `Unknown` makes that path
+    // fall through and resync instead.
+    if text.starts_with("outdated") {
+        return BuildStatus::Unknown(format!("stale: {text}"));
+    }
+    let (head, details) = match text.split_once(':') {
+        Some((head, details)) => (head.trim(), Some(details.trim())),
+        None => (text, None),
+    };
+    let starred = head.ends_with('*');
+    let word = head.trim_end_matches('*').trim_end_matches("(unpublished)");
+    if starred {
+        return BuildStatus::Unknown(format!("stale: {word}"));
+    }
+    if word == "finished" {
+        // The verdict is the first word of the details, if osc printed it.
+        return match details.and_then(|d| d.split_whitespace().next()) {
+            Some(verdict) => BuildStatus::from(verdict),
+            None => BuildStatus::Unknown("finished".to_string()),
+        };
+    }
+    BuildStatus::from(word)
 }
 
 #[cfg(test)]
 mod single_build_status_tests {
     use super::*;
+
+    const REPO: &str = "openSUSE_Tumbleweed";
+    const ARCH: &str = "x86_64";
+
+    fn parse(stdout: &str) -> BuildStatus {
+        parse_single_build_status(stdout, "python-foo", REPO, ARCH)
+    }
+
+    #[test]
+    fn a_plain_status_is_read_from_the_last_column() {
+        // Real `osc results -r .. -a .. prj pkg` line: repo, arch, package, status.
+        let stdout = "openSUSE_Tumbleweed  x86_64  python-foo  succeeded\n";
+        assert_eq!(parse(stdout), BuildStatus::Succeeded);
+    }
 
     #[test]
     fn a_starred_status_is_unknown_not_its_unstarred_meaning() {
@@ -1806,28 +2426,58 @@ mod single_build_status_tests {
         // and immediately watching build status used to report `Succeeded`
         // from the *previous* revision's still-displayed, now-stale result,
         // before OBS had even started rebuilding the new one.
-        let stdout = "python-foo  openSUSE_Tumbleweed  x86_64  succeeded*\n";
+        let stdout = "openSUSE_Tumbleweed  x86_64  python-foo  succeeded*\n";
         assert_eq!(
-            parse_single_build_status(stdout, "x86_64"),
+            parse(stdout),
             BuildStatus::Unknown("stale: succeeded".to_string())
         );
     }
 
     #[test]
-    fn an_unstarred_status_is_read_normally() {
-        let stdout = "python-foo  openSUSE_Tumbleweed  x86_64  succeeded\n";
-        assert_eq!(
-            parse_single_build_status(stdout, "x86_64"),
-            BuildStatus::Succeeded
-        );
+    fn a_verbose_outdated_result_is_stale() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo outdated (was: finished: succeeded)\n";
+        assert!(matches!(parse(stdout), BuildStatus::Unknown(s) if s.starts_with("stale: ")));
     }
 
     #[test]
-    fn a_line_for_another_arch_or_a_message_is_not_a_status() {
-        let stdout = "python-foo  openSUSE_Tumbleweed  aarch64  failed\n\
-                      osc: E001: package not found here\n";
+    fn a_bare_finished_takes_its_verdict_from_the_details() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo finished: failed\n";
+        assert_eq!(parse(stdout), BuildStatus::Failed);
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo finished: succeeded\n";
+        assert_eq!(parse(stdout), BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn a_finished_without_a_verdict_is_not_terminal() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo finished\n";
+        let status = parse(stdout);
+        assert_eq!(status, BuildStatus::Unknown("finished".to_string()));
+        assert!(!status.is_terminal());
+    }
+
+    #[test]
+    fn verbose_details_after_a_code_are_ignored() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo failed: some details\n";
+        assert_eq!(parse(stdout), BuildStatus::Failed);
+    }
+
+    #[test]
+    fn an_unpublished_success_counts_as_succeeded() {
+        let stdout = "openSUSE_Tumbleweed x86_64 python-foo succeeded(unpublished)\n";
+        assert_eq!(parse(stdout), BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn lines_for_other_repos_arches_and_packages_are_skipped() {
+        let stdout = "\
+openSUSE_Leap x86_64 python-foo failed
+openSUSE_Tumbleweed aarch64 python-foo failed
+openSUSE_Tumbleweed x86_64 python-foo:flavor failed
+openSUSE_Tumbleweed x86_64 python-foo building
+";
+        assert_eq!(parse(stdout), BuildStatus::Building);
         assert_eq!(
-            parse_single_build_status(stdout, "x86_64"),
+            parse_single_build_status("", "python-foo", REPO, ARCH),
             BuildStatus::Unknown("no results".to_string())
         );
     }
@@ -1851,7 +2501,7 @@ pub fn get_project_build_statuses(
     repo: &str,
     arch: &str,
     emit: Emit<'_>,
-) -> HashMap<String, BuildStatus> {
+) -> Result<HashMap<String, BuildStatus>, Error> {
     // XML first: one entry per package with a named code, instead of the
     // positional letter table below (which depends on terminal width and
     // `osc`'s padding). Fall back to the table if the API path yields nothing.
@@ -1861,12 +2511,8 @@ pub fn get_project_build_statuses(
         enc(repo),
         enc(arch)
     )) {
-        let statuses: HashMap<String, BuildStatus> = match obs_status::try_parse_results(&xml) {
-            Ok(entries) => entries
-                .into_iter()
-                .filter(|e| e.repo == repo && e.arch == arch)
-                .map(|e| (e.pkg.to_lowercase(), obs_status::resolve_lenient(&e)))
-                .collect(),
+        let statuses = match project_statuses_from_xml(&xml, repo, arch) {
+            Ok(statuses) => statuses,
             Err(e) => {
                 // A cut-off listing must not read as a partial set of statuses.
                 ap_core::diag!("  cannot read the OBS results listing: {e}");
@@ -1874,35 +2520,50 @@ pub fn get_project_build_statuses(
             }
         };
         if !statuses.is_empty() {
-            return statuses;
+            return Ok(statuses);
         }
     }
 
     // An empty map reads as "no package has a status", so a failed listing
-    // is reported here instead of passing silently.
-    let out = match proc::capture_with_timeout(
+    // is an error rather than an empty answer.
+    let cmd = format!("results -r {repo} -a {arch} {project}");
+    let out = proc::capture_with_timeout(
         "osc",
         &["results", "-r", repo, "-a", arch, project],
         &anywhere(),
         emit,
         OSC_ARTIFACT_TIMEOUT,
-    ) {
-        Ok(out) if out.success() => out,
-        Ok(out) => {
-            ap_core::diag!(
-                "  osc results -r {repo} -a {arch} {project}: exit {}: {}",
-                out.code,
-                first_line(&out.stderr)
-            );
-            return HashMap::new();
-        }
-        Err(e) => {
-            ap_core::diag!("  osc results -r {repo} -a {arch} {project}: {e}");
-            return HashMap::new();
-        }
-    };
+    )
+    .map_err(during(cmd.clone()))?;
+    if !out.success() {
+        return Err(Error::OscFailed {
+            cmd,
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
 
-    parse_project_build_statuses(&out.stdout, repo, arch)
+    Ok(parse_project_build_statuses(&out.stdout, repo, arch))
+}
+
+/// Every package's status in ONE repository/architecture of a `_result`
+/// document.
+///
+/// The document carries a `<result>` per repository/architecture the project
+/// builds for, and the same package is routinely `succeeded` in one and
+/// `excluded` or `unresolvable` in another (an `i586` repository next to
+/// `x86_64`); only the pair asked for may contribute, or one package's state
+/// somewhere else would stand in for the state of the build being made.
+fn project_statuses_from_xml(
+    xml: &str,
+    repo: &str,
+    arch: &str,
+) -> Result<HashMap<String, BuildStatus>, String> {
+    Ok(obs_status::try_parse_results(xml)?
+        .into_iter()
+        .filter(|e| e.repo == repo && e.arch == arch)
+        .map(|e| (e.pkg.clone(), obs_status::resolve_lenient(&e)))
+        .collect())
 }
 
 /// Parsing half of [`get_project_build_statuses`], split out so it is
@@ -1951,7 +2612,7 @@ fn parse_project_build_statuses(
         }
         let name = line.trim_start_matches([' ', '|']).trim();
         if !name.is_empty() {
-            pending_pkgs.push(name.to_lowercase());
+            pending_pkgs.push(name.to_string());
         }
     }
 
@@ -2141,6 +2802,16 @@ pub fn current_unresolvable(
     log_path: &Path,
     emit: Emit<'_>,
 ) -> (Vec<String>, Vec<String>) {
+    // The `_result` document is what OBS says about the current revision in
+    // exactly this repository and architecture; a build log may be left over
+    // from an older revision, and the `osc results` text is a rendering of
+    // that same document, so both only run when it gives nothing.
+    if let Some(details) = unresolvable_details(project, pkg_name, repo, arch) {
+        let names = extract_unresolvable(&details);
+        if !names.is_empty() {
+            return (names, extract_unresolvable_detail(&details));
+        }
+    }
     let log_text = fs::read_to_string(log_path).unwrap_or_default();
     let mut names = extract_unresolvable(&log_text);
     let mut detail = extract_unresolvable_detail(&log_text);
@@ -2150,11 +2821,258 @@ pub fn current_unresolvable(
     (names, detail)
 }
 
+/// The `<details>` text of `pkg_name`'s `unresolvable` status in this one
+/// repository/architecture, or `None` when it is not unresolvable there (or
+/// the status cannot be read). Other repositories' results in the same
+/// document are never looked at: a package can be `unresolvable` on `i586`
+/// and `succeeded` on `x86_64` at once.
+pub fn unresolvable_details(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+) -> Option<String> {
+    let xml = osc_api(&format!(
+        "/build/{project}/_result?package={}&repository={}&arch={}",
+        enc(pkg_name),
+        enc(repo),
+        enc(arch)
+    ))?;
+    unresolvable_details_from_xml(&xml, repo, arch, pkg_name)
+}
+
+fn unresolvable_details_from_xml(xml: &str, repo: &str, arch: &str, pkg: &str) -> Option<String> {
+    let entry = obs_status::find_entry(xml, repo, arch, pkg)?;
+    (BuildStatus::from(entry.code.as_str()) == BuildStatus::Unresolvable)
+        .then_some(entry.details)
+        .flatten()
+}
+
+/// The packages that must be built before the unresolvable `pkg_name` can
+/// build, read from OBS's own `nothing provides` details for this
+/// repository/architecture and mapped back to package names by
+/// [`missing_package_names`]. Empty when OBS names none (not unresolvable
+/// here, a version conflict, or an unreadable status).
+pub fn unresolvable_blockers(project: &str, pkg_name: &str, repo: &str, arch: &str) -> Vec<String> {
+    match unresolvable_details(project, pkg_name, repo, arch) {
+        Some(details) => blockers_from_details(&details),
+        None => Vec::new(),
+    }
+}
+
+fn blockers_from_details(details: &str) -> Vec<String> {
+    // A requirement with a version bound is the spec's own constraint failing
+    // against the one version the repository has, which building the named
+    // package cannot fix; only unconstrained ones are packages to build.
+    let unconstrained: Vec<String> = details
+        .lines()
+        .flat_map(nothing_provides_segments)
+        .filter(|segment| segment.split_whitespace().nth(1).is_none())
+        .map(|segment| format!("nothing provides {segment}"))
+        .collect();
+    missing_package_names(&extract_unresolvable(&unconstrained.join("\n")))
+}
+
+/// The name `dep` has in `listing` when the project has it built
+/// (`succeeded`) in the repository/architecture `statuses` was read for, else
+/// `None`. Names are matched by [`fuzzy_key`], with or without the `python-`
+/// prefix, and the listing's own spelling is returned.
+pub fn built_in_project(
+    listing: &std::collections::HashSet<String>,
+    statuses: &HashMap<String, BuildStatus>,
+    dep: &str,
+) -> Option<String> {
+    let bare = fuzzy_key(dep);
+    let rpm = fuzzy_key(&rpm_name(dep));
+    listing
+        .iter()
+        .filter(|p| {
+            let k = fuzzy_key(p);
+            k == bare || k == rpm
+        })
+        .find(|p| statuses.get(*p).is_some_and(BuildStatus::is_success))
+        .cloned()
+}
+
+/// Section headers of an RPM spec, for [`spec_section`].
+const SPEC_SECTIONS: &[&str] = &[
+    "%package",
+    "%description",
+    "%prep",
+    "%conf",
+    "%generate_buildrequires",
+    "%build",
+    "%install",
+    "%check",
+    "%pre",
+    "%post",
+    "%preun",
+    "%postun",
+    "%pretrans",
+    "%posttrans",
+    "%files",
+    "%changelog",
+];
+
+/// The lines of every `name` section (`%files`, `%install`, ...) of `spec`,
+/// header lines excluded.
+fn spec_section<'a>(spec: &'a str, name: &str) -> Vec<&'a str> {
+    let mut inside = false;
+    let mut lines = Vec::new();
+    for line in spec.lines() {
+        let word = line.split_whitespace().next().unwrap_or("");
+        if SPEC_SECTIONS.contains(&word) {
+            inside = word == name;
+            continue;
+        }
+        if inside {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// Whether `spec` is an unfinished skeleton whose package builds but ships
+/// next to nothing, and why: a `%files` that lists only `%license`/`%doc`
+/// (nothing the build installed is packaged), or an `%install` that is empty
+/// apart from comments next to a `TODO`. Both are what the skeleton
+/// generators leave for a monorepo or a wheel they could not lay out, and OBS
+/// builds either one "successfully".
+pub fn unfinished_spec_reason(spec: &str) -> Option<String> {
+    let body = spec.split("\n%changelog").next().unwrap_or(spec);
+    let is_code = |l: &&str| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#')
+    };
+    let files: Vec<&str> = spec_section(body, "%files")
+        .into_iter()
+        .filter(is_code)
+        .collect();
+    let files_listed = files.iter().any(|l| {
+        let t = l.trim_start();
+        !["%license", "%doc", "%defattr", "%dir"]
+            .iter()
+            .any(|p| t.starts_with(p))
+    });
+    let mut reasons = Vec::new();
+    if body.contains("\n%files") && !files_listed {
+        reasons.push("its %files lists nothing but %license/%doc".to_string());
+    }
+    if !spec_section(body, "%install").iter().any(is_code)
+        && body
+            .lines()
+            .any(|l| l.trim_start().starts_with('#') && l.contains("TODO"))
+    {
+        reasons.push("its %install has no commands, only TODO comments".to_string());
+    }
+    (!reasons.is_empty()).then(|| reasons.join(" and "))
+}
+
+/// A warning for a package OBS reports `succeeded` whose result a dependent
+/// cannot use, or `None` when nothing is wrong or it cannot be told. The test
+/// is deterministic: the spec OBS holds is an unfinished skeleton (see
+/// [`unfinished_spec_reason`]), and the RPMs it published are listed with
+/// their sizes as evidence. A dependent installs such a package and still
+/// finds its modules missing, which reads as "the dependency is missing".
+pub fn empty_package_warning(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+) -> Option<String> {
+    let spec = osc_api(&format!(
+        "/source/{}/{}/{}.spec",
+        enc(project),
+        enc(pkg_name),
+        enc(pkg_name)
+    ))?;
+    let reason = unfinished_spec_reason(&spec)?;
+    let sizes = osc_api(&format!(
+        "/build/{}/{}/{}/{}",
+        enc(project),
+        enc(repo),
+        enc(arch),
+        enc(pkg_name)
+    ))
+    .map(|xml| obs_status::parse_binary_rpm_sizes(&xml))
+    .unwrap_or_default();
+    Some(empty_package_message(pkg_name, project, &reason, &sizes))
+}
+
+fn empty_package_message(
+    pkg: &str,
+    project: &str,
+    reason: &str,
+    sizes: &[(String, u64)],
+) -> String {
+    let published = if sizes.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = sizes
+            .iter()
+            .map(|(f, b)| format!("{f}: {b} bytes"))
+            .collect();
+        format!(" (published: {})", list.join(", "))
+    };
+    format!(
+        "{pkg} is built in {project}, but its spec there is an unfinished skeleton: {reason}, \
+         so the RPMs it published are effectively empty{published}. A package that needs it \
+         installs it and still cannot import it. Finish {pkg}'s spec, then rebuild it with \
+         `auto-package build --project {project} --force <name>`"
+    )
+}
+
+/// Stems of the interpreter's own subpackages (`python3-devel`,
+/// `python-rpm-macros`, ...): the distro ships them, and no PyPI project of
+/// that name is what the requirement means.
+const PYTHON_INTERPRETER_STEMS: &[&str] = &[
+    "base",
+    "curses",
+    "devel",
+    "doc",
+    "idle",
+    "rpm-generators",
+    "rpm-macros",
+    "testsuite",
+    "tk",
+    "tools",
+    "xml",
+];
+
+/// Package names to queue for building, from the RPM names a build or an
+/// agent reports missing: the `python313-`/`python314-`/`python3-`/`python-`
+/// prefix and any `lib...-devel` wrapping are stripped, every flavor of one
+/// package (`python313-fastar`, `python314-fastar`) collapses to one name
+/// (compared by [`fuzzy_key`], first spelling kept), and requirements that
+/// are not something to build are left out: the interpreter's own
+/// subpackages and system tools a PyPI package merely redistributes.
+pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in rpm_names {
+        let rpm = raw.trim();
+        let stripped = strip_rpm_prefix(rpm);
+        if stripped != rpm && PYTHON_INTERPRETER_STEMS.contains(&stripped) {
+            continue;
+        }
+        let name = strip_devel_wrapping(stripped);
+        if name.is_empty() || crate::pipeline::is_system_tool_alias(name) {
+            continue;
+        }
+        if seen.insert(fuzzy_key(name)) {
+            out.push(name.to_string());
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 /// Wait for the OBS remote build to complete, fetch the log, and download
 /// built RPMs on success.
 ///
 /// The caller must commit the package to OBS before calling this (see `commit`).
-/// Polls `osc results` every 15 seconds, up to 30 minutes. Emits a `Warning`
+/// Polls the OBS build status every 15 seconds, for at most two hours (the
+/// `MAX_WAIT` below), then gives up with a timeout error. Emits a `Progress`
 /// event each time the build status changes so the user can see progress.
 pub fn obs_build(
     project: &str,
@@ -2178,8 +3096,6 @@ pub fn obs_build(
     // the build away: tolerate a few consecutive poll failures, then give up.
     const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 8;
     let mut poll_errors: u32 = 0;
-    const STALE_PATIENCE: Duration = Duration::from_secs(600);
-    let mut stale_since: Option<Instant> = None;
 
     // The previous mechanism only ever broke silence for one specific case
     // (an `Unknown("stale: ...")` verdict). A plain non-terminal status
@@ -2308,31 +3224,11 @@ pub fn obs_build(
             break status;
         }
 
-        // `stale: <verdict>` means "a terminal result I couldn't confirm is
-        // for the current sources". Normally the scheduler catches up within
-        // a minute or two; if it stays like that this long the repo is stuck
-        // dirty, so take the verdict at face value instead of idling until
-        // the overall timeout.
-        if let BuildStatus::Unknown(s) = &status
-            && let Some(word) = s.strip_prefix("stale: ")
-        {
-            let since = *stale_since.get_or_insert_with(Instant::now);
-            let verdict = BuildStatus::from(word);
-            if since.elapsed() >= STALE_PATIENCE && verdict.is_terminal() {
-                reporter.report(&Event::Warning {
-                    step,
-                    message: format!(
-                        "OBS result has been unconfirmed for {}s (repository stuck dirty?); \
-                         taking its verdict, {verdict}, at face value",
-                        STALE_PATIENCE.as_secs()
-                    ),
-                });
-                break verdict;
-            }
-        } else {
-            stale_since = None;
-        }
-
+        // `stale: <verdict>` is not a final answer: that terminal result is
+        // from a source revision the server may already have superseded, so
+        // keep polling. Only a verdict confirmed for the current sources
+        // (see `obs_status::resolve`) ends the wait; if none arrives, the
+        // MAX_WAIT check above reports a timeout error.
         std::thread::sleep(POLL_INTERVAL);
     };
 
@@ -2432,8 +3328,6 @@ pub fn obs_build(
         stderr_bytes: 0,
     });
 
-    let log_text = fs::read_to_string(log_path).unwrap_or_default();
-
     Err(match status {
         BuildStatus::Unresolvable => {
             let (names, detail) =
@@ -2447,22 +3341,44 @@ pub fn obs_build(
         BuildStatus::Excluded => {
             Error::NotActionable("OBS: build is excluded in project config".to_string())
         }
-        _ => match classify_build_failure(&log_text) {
-            FailureKind::NoRepositories => Error::NotActionable(
-                "OBS project has no build repositories — configure them in OBS first".to_string(),
-            ),
-            FailureKind::NotWorkingCopy => {
-                Error::NotActionable("osc checkout is not server-backed".to_string())
+        _ => {
+            // The log is the only evidence for what went wrong. One that
+            // cannot be read, or is empty (a failed `osc buildlog` leaves an
+            // empty file behind), is an environment problem: classifying it
+            // would send the package to the fix agent as a BuildFailed.
+            let log_text = fs::read_to_string(log_path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| {
+                    if text.trim().is_empty() {
+                        Err("the file is empty".to_string())
+                    } else {
+                        Ok(text)
+                    }
+                })
+                .map_err(|why| {
+                    Error::Io(std::io::Error::other(format!(
+                        "no usable build log at {}: {why}",
+                        log_path.display()
+                    )))
+                })?;
+            match classify_build_failure(&log_text) {
+                FailureKind::NoRepositories => Error::NotActionable(
+                    "OBS project has no build repositories — configure them in OBS first"
+                        .to_string(),
+                ),
+                FailureKind::NotWorkingCopy => {
+                    Error::NotActionable("osc checkout is not server-backed".to_string())
+                }
+                FailureKind::UnresolvableDeps { names, detail } => {
+                    Error::UnresolvableDeps { names, detail }
+                }
+                FailureKind::BuildFailed => Error::BuildFailed {
+                    spec: format!("{pkg_name}.spec"),
+                    code: 1,
+                    log: log_path.to_owned(),
+                },
             }
-            FailureKind::UnresolvableDeps { names, detail } => {
-                Error::UnresolvableDeps { names, detail }
-            }
-            FailureKind::BuildFailed => Error::BuildFailed {
-                spec: format!("{pkg_name}.spec"),
-                code: 1,
-                log: log_path.to_owned(),
-            },
-        },
+        }
     })
 }
 
@@ -2498,7 +3414,7 @@ mod package_listing_tests {
         assert!(pkgs.contains("python-pyarrow"));
         assert!(pkgs.contains("apache-arrow:python-pyarrow"));
         assert!(pkgs.contains("apache-arrow"));
-        assert!(pkgs.contains("python-foo"));
+        assert!(pkgs.contains("Python-Foo"));
     }
 
     #[test]
@@ -2506,6 +3422,46 @@ mod package_listing_tests {
         let pkgs = parse_package_listing("gcc15:bootstrap\nfoo:test\n");
         assert!(!pkgs.contains("bootstrap"));
         assert!(!pkgs.contains("test"));
+    }
+
+    /// OBS names are case-sensitive: the listing must keep the spelling it
+    /// has, or the name passed back to osc points at a package that does not
+    /// exist (`python-apscheduler` for `python-APScheduler`).
+    #[test]
+    fn the_listing_keeps_each_package_in_its_own_case() {
+        let pkgs = parse_package_listing("python-APScheduler\n");
+        assert!(pkgs.contains("python-APScheduler"));
+        assert!(!pkgs.contains("python-apscheduler"));
+    }
+
+    #[test]
+    fn obs_name_returns_the_listed_spelling_for_a_lowercase_guess() {
+        let listing = parse_package_listing("python-APScheduler\npython-pydantic_core\n");
+        assert_eq!(
+            obs_name(&listing, "python-apscheduler"),
+            "python-APScheduler"
+        );
+        // A separator difference between the guess and the listing still finds it.
+        assert_eq!(
+            obs_name(&listing, "python-pydantic-core"),
+            "python-pydantic_core"
+        );
+    }
+
+    #[test]
+    fn obs_name_keeps_the_guess_when_nothing_is_listed() {
+        let listing = parse_package_listing("python-APScheduler\n");
+        assert_eq!(obs_name(&listing, "python-croniter"), "python-croniter");
+        assert_eq!(
+            obs_name(&listing, "python-APScheduler"),
+            "python-APScheduler"
+        );
+    }
+
+    #[test]
+    fn obs_name_is_stable_when_several_spellings_match() {
+        let listing = parse_package_listing("python-Foo\npython-foo\n");
+        assert_eq!(obs_name(&listing, "python-FOO"), "python-Foo");
     }
 }
 
@@ -2562,6 +3518,64 @@ mod count_rpms_tests {
 #[cfg(test)]
 mod project_build_statuses_tests {
     use super::*;
+
+    /// `/build/home:dspinella:open-webui/_result` as OBS returned it for the
+    /// three dependencies of the vllm run, trimmed to their statuses: every
+    /// one is fine on x86_64 and broken or excluded on i586.
+    const TWO_ARCHES: &str = r#"<resultlist state="a89fd62d90378c6fa375e52c78300d1c">
+  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+    <status package="python-fastapi-cloud-cli" code="unresolvable">
+      <details>nothing provides python314-fastar, nothing provides python313-fastar</details>
+    </status>
+    <status package="python-nvidia-cutlass-dsl-libs-base" code="excluded"/>
+    <status package="python-cuda-bindings" code="succeeded"/>
+  </result>
+  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
+    <status package="python-fastapi-cloud-cli" code="succeeded"/>
+    <status package="python-nvidia-cutlass-dsl-libs-base" code="succeeded"/>
+    <status package="python-cuda-bindings" code="succeeded"/>
+  </result>
+</resultlist>"#;
+
+    #[test]
+    fn a_package_excluded_on_one_arch_is_not_excluded_on_the_one_being_built() {
+        let x86 = project_statuses_from_xml(TWO_ARCHES, "openSUSE_Tumbleweed", "x86_64").unwrap();
+        assert_eq!(x86.len(), 3);
+        assert!(x86.values().all(|s| *s == BuildStatus::Succeeded));
+        let i586 = project_statuses_from_xml(TWO_ARCHES, "openSUSE_Tumbleweed", "i586").unwrap();
+        assert_eq!(
+            i586.get("python-nvidia-cutlass-dsl-libs-base"),
+            Some(&BuildStatus::Excluded)
+        );
+        assert_eq!(
+            i586.get("python-fastapi-cloud-cli"),
+            Some(&BuildStatus::Unresolvable)
+        );
+        assert_eq!(
+            i586.get("python-cuda-bindings"),
+            Some(&BuildStatus::Succeeded)
+        );
+    }
+
+    #[test]
+    fn a_repository_or_arch_the_project_does_not_build_for_yields_nothing() {
+        for (repo, arch) in [
+            ("openSUSE_Tumbleweed", "aarch64"),
+            ("openSUSE_Leap_16.0", "x86_64"),
+        ] {
+            assert!(
+                project_statuses_from_xml(TWO_ARCHES, repo, arch)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn a_cut_off_listing_is_an_error_not_a_partial_map() {
+        let cut = &TWO_ARCHES[..TWO_ARCHES.find("arch=\"x86_64\"").unwrap() + 20];
+        assert!(project_statuses_from_xml(cut, "openSUSE_Tumbleweed", "i586").is_err());
+    }
 
     /// Regression test for the off-by-one that used to read the separator
     /// space between status codes instead of the code itself, silently
@@ -2729,5 +3743,137 @@ mod project_repo_paths_tests {
             paths,
             vec![("openSUSE:Factory".to_string(), "snapshot".to_string())]
         );
+    }
+}
+
+#[cfg(test)]
+mod rpmspec_sandbox_tests {
+    use super::*;
+
+    #[test]
+    fn code_running_macros_are_recognised() {
+        assert_eq!(code_macro_marker("Summary: %(id -u)"), Some("%("));
+        assert_eq!(
+            code_macro_marker("%global x %{lua: print(1)}"),
+            Some("%{lua:")
+        );
+        assert_eq!(
+            code_macro_marker("%description\nuse %{name} and %{python_module foo}"),
+            None
+        );
+    }
+
+    /// A spec whose `Summary` runs `touch` on expansion must not create the
+    /// marker on the host. With bubblewrap the expansion runs in a sandbox
+    /// where the marker's directory does not exist; without it the spec is
+    /// refused before rpmspec sees it.
+    #[test]
+    fn spec_macro_cannot_touch_a_marker_on_the_host() {
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("pwned");
+        let work = tempfile::tempdir().unwrap();
+        let spec = work.path().join("demo.spec");
+        let text = format!(
+            "Name: demo\nVersion: 1.0\nRelease: 0\nSummary: %(touch {}; echo x)\n\
+             License: MIT\n%description\nx\n%files\n",
+            marker.display()
+        );
+        fs::write(&spec, text).unwrap();
+
+        let result = rpmspec_check(&spec, Emit::quiet());
+
+        assert!(!marker.exists(), "spec macro ran on the host");
+        if rpmspec_sandbox_works() {
+            let out = result.expect("rpmspec should expand inside the sandbox");
+            assert!(out.contains("Summary: x"), "{out}");
+        }
+    }
+
+    #[test]
+    fn refusal_names_the_macro_and_the_spec() {
+        let err = Error::UnsandboxedMacro {
+            spec: "/co/demo.spec".into(),
+            marker: "%(".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/co/demo.spec") && msg.contains("`%(`"),
+            "{msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod publish_plan_tests {
+    use super::*;
+
+    /// Backups, build directories and stray files stay out of the commit.
+    /// The referenced patch goes in; the unreferenced one does not.
+    #[test]
+    fn only_the_package_files_are_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Name: pkg\nVersion: 1.0\nPatch0: 0001-fix.patch\n";
+        for (name, body) in [
+            ("pkg.spec", spec),
+            ("pkg-1.0.tar.gz", ""),
+            ("_service", ""),
+            ("pkg.changes", ""),
+            ("pkg.rpmlintrc", ""),
+            ("0001-fix.patch", ""),
+            ("extra.patch", ""),
+            ("pkg.spec.preexisting", spec),
+            ("pkg.changes.preexisting", ""),
+            ("stray.txt", ""),
+        ] {
+            fs::write(dir.path().join(name), body).unwrap();
+        }
+        fs::create_dir(dir.path().join(".osc")).unwrap();
+        fs::create_dir(dir.path().join("build")).unwrap();
+
+        let plan = publish_plan(dir.path());
+
+        assert_eq!(
+            plan.files,
+            [
+                "0001-fix.patch",
+                "_service",
+                "pkg-1.0.tar.gz",
+                "pkg.changes",
+                "pkg.rpmlintrc",
+                "pkg.spec",
+            ]
+        );
+        assert_eq!(
+            plan.skipped,
+            [
+                "build",
+                "extra.patch",
+                "pkg.changes.preexisting",
+                "pkg.spec.preexisting",
+                "stray.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_patch_named_by_the_series_file_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pkg.spec"), "Name: pkg\n").unwrap();
+        fs::write(dir.path().join("series"), "# quilt\n0002-quilt.patch\n").unwrap();
+        fs::write(dir.path().join("0002-quilt.patch"), "").unwrap();
+
+        let plan = publish_plan(dir.path());
+
+        assert!(
+            plan.files.contains(&"0002-quilt.patch".to_string()),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_committed_without_a_file_to_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = commit(dir.path(), "msg", &[], Emit::quiet()).unwrap_err();
+        assert!(matches!(err, Error::NothingToPublish(_)), "{err}");
     }
 }

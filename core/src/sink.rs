@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use owo_colors::{OwoColorize, Stream::Stderr, Style};
 use serde::Serialize;
 
-use crate::event::{Event, PackageOutcome, RunOutcome, StepOutcome};
+use crate::event::{Event, PackageOutcome, RunOutcome, StepOutcome, Usage};
 
 /// Set while a full-screen UI (the TUI) owns the terminal. Any diagnostic
 /// output that isn't routed through a `Reporter` — ad hoc `eprintln!`s
@@ -32,9 +32,59 @@ pub fn is_quiet() -> bool {
 macro_rules! diag {
     ($($arg:tt)*) => {
         if !$crate::sink::is_quiet() {
-            eprintln!($($arg)*);
+            eprintln!("{}", $crate::sink::printable(&format!($($arg)*)));
         }
     };
+}
+
+/// `text` with control characters removed, keeping newlines and tabs.
+///
+/// Text printed to the terminal can come from upstream: a build log line or
+/// a package's own message. An escape sequence in it (a title change, a
+/// cursor move, OSC 52 clipboard writes) would act on the user's terminal, so
+/// C0, DEL and C1 controls, ESC included, are dropped before printing.
+pub fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(is_stripped_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(strip_controls(text, false))
+}
+
+fn is_stripped_control(c: char) -> bool {
+    c.is_control() && c != '\n' && c != '\t'
+}
+
+/// [`printable`], except that SGR colour sequences (`ESC [ <digits> m`) are
+/// kept. The human sink colours its own output with them; upstream text can
+/// still set a colour, which is harmless, but cannot move the cursor, set a
+/// title or write the clipboard.
+fn strip_controls(text: &str, keep_sgr: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if keep_sgr && c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            let mut params = String::new();
+            while let Some(&p) = chars.peek() {
+                if !(p.is_ascii_digit() || p == ';') {
+                    break;
+                }
+                params.push(p);
+                chars.next();
+            }
+            if chars.peek() == Some(&'m') {
+                chars.next();
+                out.push_str("\u{1b}[");
+                out.push_str(&params);
+                out.push('m');
+            }
+            continue;
+        }
+        if !is_stripped_control(c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -549,7 +599,7 @@ impl Reporter for HumanSink {
             return;
         }
         if let Some(msg) = self.format(event) {
-            eprintln!("{msg}");
+            eprintln!("{}", strip_controls(&msg, true));
         }
     }
 }
@@ -559,6 +609,8 @@ pub struct JsonlSink {
     /// Set after the first write failure so the diagnostic prints once, not
     /// once per event.
     warned: AtomicBool,
+    /// Likewise for an event that could not be serialized.
+    serialize_warned: AtomicBool,
 }
 
 impl JsonlSink {
@@ -567,6 +619,7 @@ impl JsonlSink {
         Ok(Self {
             writer: Mutex::new(BufWriter::new(file)),
             warned: AtomicBool::new(false),
+            serialize_warned: AtomicBool::new(false),
         })
     }
 }
@@ -591,36 +644,65 @@ impl Reporter for JsonlSink {
             pkg: current_pkg(),
             event,
         };
-        if let Ok(line) = serde_json::to_string(&envelope) {
-            // A panic in another thread mid-write poisons the lock; the
-            // buffer is still usable, so keep logging.
-            let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-            let res = writeln!(w, "{line}").and_then(|()| w.flush());
-            if let Err(e) = res
-                && !self.warned.swap(true, Ordering::Relaxed)
-            {
-                diag!("warning: run.jsonl write failed ({e}); events may be missing");
+        let line = match serde_json::to_string(&envelope) {
+            Ok(line) => line,
+            Err(e) => {
+                // The event is missing from the log, so say so, once.
+                if !self.serialize_warned.swap(true, Ordering::Relaxed) {
+                    diag!(
+                        "warning: run.jsonl could not record an event ({e}); events may be missing"
+                    );
+                }
+                return;
             }
+        };
+        // A panic in another thread mid-write poisons the lock; the
+        // buffer is still usable, so keep logging.
+        let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        // Flushed per event on purpose: the CLI's exit paths call
+        // `process::exit`, which skips the BufWriter's drop, and a crash must
+        // not lose the events before it. The cost is a write per event.
+        let res = writeln!(w, "{line}").and_then(|()| w.flush());
+        if let Err(e) = res
+            && !self.warned.swap(true, Ordering::Relaxed)
+        {
+            diag!("warning: run.jsonl write failed ({e}); events may be missing");
         }
     }
 }
 
+/// What the CLI's summaries need from a run, not every event. A long run emits
+/// many events, and keeping them all only to add up a few fields grew without
+/// bound. So this keeps running usage totals and the `PackageFinished` events.
 pub struct MemorySink {
-    events: Mutex<Vec<Event>>,
+    state: Mutex<MemoryState>,
+}
+
+#[derive(Default)]
+struct MemoryState {
+    usage: Usage,
+    finished: Vec<Event>,
 }
 
 impl MemorySink {
     pub fn new() -> Self {
         Self {
-            events: Mutex::new(Vec::new()),
+            state: Mutex::new(MemoryState::default()),
         }
     }
 
-    pub fn events(&self) -> Vec<Event> {
-        self.events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    fn lock(&self) -> std::sync::MutexGuard<'_, MemoryState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Tokens and cost of every agent reply and notes turn so far.
+    pub fn usage(&self) -> Usage {
+        self.lock().usage.clone()
+    }
+
+    /// The `PackageFinished` events so far, in order.
+    pub fn finished(&self) -> Vec<Event> {
+        self.lock().finished.clone()
     }
 }
 
@@ -632,10 +714,16 @@ impl Default for MemorySink {
 
 impl Reporter for MemorySink {
     fn report(&self, event: &Event) {
-        self.events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(event.clone());
+        match event {
+            Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } => {
+                let mut st = self.lock();
+                st.usage.input_tokens += usage.input_tokens;
+                st.usage.output_tokens += usage.output_tokens;
+                st.usage.cost_usd += usage.cost_usd;
+            }
+            Event::PackageFinished { .. } => self.lock().finished.push(event.clone()),
+            _ => {}
+        }
     }
 }
 
@@ -699,12 +787,39 @@ mod tests {
         let sink = Arc::new(MemorySink::new());
         let s2 = sink.clone();
         let _ = std::thread::spawn(move || {
-            let _g = s2.events.lock().unwrap();
+            let _g = s2.state.lock().unwrap();
             panic!("poison");
         })
         .join();
+        sink.report(&Event::PackageFinished {
+            pkg: "x".into(),
+            version: "1".into(),
+            outcome: PackageOutcome::Built,
+        });
+        assert_eq!(sink.finished().len(), 1);
+    }
+
+    #[test]
+    fn memory_sink_keeps_usage_totals_and_finished_packages_only() {
+        let sink = MemorySink::new();
+        let usage = Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+            cost_usd: 0.5,
+        };
         sink.report(&Event::ResolveStarted { root: "x".into() });
-        assert_eq!(sink.events().len(), 1);
+        sink.report(&Event::NotesUsage {
+            step: crate::event::StepId(1),
+            usage: usage.clone(),
+        });
+        sink.report(&Event::NotesUsage {
+            step: crate::event::StepId(2),
+            usage,
+        });
+        assert_eq!(sink.finished().len(), 0);
+        let total = sink.usage();
+        assert_eq!((total.input_tokens, total.output_tokens), (6, 8));
+        assert!((total.cost_usd - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -813,5 +928,40 @@ mod tests {
         // Can't downcast the Arc<dyn Reporter> to Probe easily; just verify
         // the ambient pkg was fully torn down after the whole call ends.
         assert_eq!(current_pkg(), None);
+    }
+}
+
+#[cfg(test)]
+mod printable_tests {
+    use super::*;
+
+    #[test]
+    fn escape_sequences_from_upstream_are_not_printed() {
+        // An OSC title change and a clipboard write, as a build log might carry.
+        let text = "ok\u{1b}]0;pwned\u{7}\n\tnext\u{1b}]52;c;ZGF0YQ==\u{1b}\\";
+        let out = printable(text);
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}'), "{out:?}");
+        assert_eq!(out, "ok]0;pwned\n\tnext]52;c;ZGF0YQ==\\");
+    }
+
+    #[test]
+    fn c1_controls_are_dropped_too() {
+        // U+009B is the single-character CSI.
+        assert_eq!(printable("a\u{9b}2Jb"), "a2Jb");
+    }
+
+    #[test]
+    fn plain_text_is_borrowed_unchanged() {
+        assert!(matches!(
+            printable("plain\ttext\n"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn human_output_keeps_its_own_colours_only() {
+        let msg = "\u{1b}[31mred\u{1b}[0m \u{1b}[2J\u{1b}]0;x\u{7}";
+        let out = strip_controls(msg, true);
+        assert_eq!(out, "\u{1b}[31mred\u{1b}[0m J]0;x");
     }
 }
