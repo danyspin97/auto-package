@@ -2425,9 +2425,20 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         &mut st.step_attempts,
         ctx.rpm_name.clone()
     );
+    let plan = osc::publish_plan(&ctx.checkout_dir);
+    for name in &plan.skipped {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: format!(
+                "not committing '{name}': it is not part of the package \
+                 (spec, archives, service files, changelog, rpmlint config or patches)"
+            ),
+        });
+    }
     if let Err(e) = osc::commit(
         &ctx.checkout_dir,
         "Automated packaging",
+        &plan.files,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
         return Err(ctx.failed(e.to_string()));

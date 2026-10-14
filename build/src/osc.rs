@@ -60,6 +60,9 @@ pub enum Error {
         stderr: String,
     },
 
+    #[error("nothing to publish in {0}: no spec or archive found")]
+    NothingToPublish(PathBuf),
+
     #[error("rpmspec --parse {spec} failed (exit {code}):\n{stderr}")]
     RpmspecFailed {
         spec: String,
@@ -1756,15 +1759,119 @@ pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> 
     Ok(out.stdout)
 }
 
+/// What a checkout publishes to OBS, split by [`publish_plan`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PublishPlan {
+    /// Checkout-relative names to stage and commit.
+    pub files: Vec<String>,
+    /// Names present in the checkout that are not part of the package.
+    pub skipped: Vec<String>,
+}
+
+/// Decide which files of a checkout belong in the commit.
+///
+/// Only the spec, the archives, the service files, the changelog and rpmlint
+/// config, and the quilt patches are published: a patch when `series` or the
+/// spec names it. Anything else in the directory (backups such as
+/// `*.preexisting`, a build directory, a stray file) is left out, so it never
+/// reaches OBS. Dot-entries such as `.osc` are not part of the package and are
+/// not listed.
+pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
+    let mut names: Vec<String> = fs::read_dir(checkout_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort();
+
+    let spec_text: String = names
+        .iter()
+        .filter(|n| n.ends_with(".spec"))
+        .filter_map(|n| fs::read_to_string(checkout_dir.join(n)).ok())
+        .collect();
+    let series: Vec<String> = fs::read_to_string(checkout_dir.join("series"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+
+    let mut plan = PublishPlan::default();
+    for name in names {
+        if is_publishable(&name, &spec_text, &series) {
+            plan.files.push(name);
+        } else {
+            plan.skipped.push(name);
+        }
+    }
+    plan
+}
+
+fn is_publishable(name: &str, spec_text: &str, series: &[String]) -> bool {
+    const FIXED: &[&str] = &[
+        "_service",
+        "_servicedata",
+        "_multibuild",
+        "_constraints",
+        "_link",
+        "series",
+        // The audit trail of a Cargo workspace repair (see the pipeline).
+        "cargo-workspace-fix.txt",
+    ];
+    const SUFFIXES: &[&str] = &[
+        ".spec",
+        ".changes",
+        ".rpmlintrc",
+        ".obsinfo",
+        ".tar.gz",
+        ".tar.bz2",
+        ".tar.xz",
+        ".tar.zst",
+        ".tar",
+        ".tgz",
+        ".tbz",
+        ".txz",
+        ".zip",
+        ".crate",
+        // A prebuilt wheel used as the source, and the pristine copy of an
+        // archive the pipeline rewrote (kept so its provenance is auditable).
+        ".whl",
+        ".orig",
+        // Detached signatures and keyrings that ship beside a source archive.
+        ".sig",
+        ".asc",
+        ".keyring",
+    ];
+    if FIXED.contains(&name) || SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
+    let is_patch = name.ends_with(".patch") || name.ends_with(".diff");
+    is_patch && (series.iter().any(|s| s == name) || spec_text.contains(name))
+}
+
 /// Commit the package to OBS, triggering a remote build.
 ///
-/// Runs `osc addremove` first to track any new or deleted files, then
-/// `osc ci` to push the changes to OBS.
-pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), Error> {
-    // Sync tracked files with directory contents. A failure is not fatal (a
-    // new package may have nothing to add), but `ci` then commits without
-    // them, so say so.
-    match proc::capture("osc", &["addremove"], checkout_dir, emit) {
+/// Only `files` are staged and committed. `osc addremove` and `osc ci` both
+/// take file arguments, so a file outside the list is neither tracked nor
+/// pushed, even when it is modified.
+pub fn commit(
+    checkout_dir: &Path,
+    message: &str,
+    files: &[String],
+    emit: Emit<'_>,
+) -> Result<(), Error> {
+    if files.is_empty() {
+        return Err(Error::NothingToPublish(checkout_dir.to_path_buf()));
+    }
+
+    // Track new and deleted files among the listed ones. A failure is not
+    // fatal (a new package may have nothing to add), but `ci` then commits
+    // without them, so say so.
+    let mut add = vec!["addremove".to_string()];
+    add.extend(files.iter().cloned());
+    match proc::capture("osc", &add, checkout_dir, emit) {
         Ok(out) if !out.success() => ap_core::diag!(
             "  osc addremove in {}: exit {}: {}",
             checkout_dir.display(),
@@ -1775,14 +1882,10 @@ pub fn commit(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), 
         Ok(_) => {}
     }
 
-    let out = proc::capture_with_timeout(
-        "osc",
-        &["ci", "-m", message],
-        checkout_dir,
-        emit,
-        OSC_TRANSFER_TIMEOUT,
-    )
-    .map_err(during(format!("ci in {}", checkout_dir.display())))?;
+    let mut ci = vec!["ci".to_string(), "-m".to_string(), message.to_string()];
+    ci.extend(files.iter().cloned());
+    let out = proc::capture_with_timeout("osc", &ci, checkout_dir, emit, OSC_TRANSFER_TIMEOUT)
+        .map_err(during(format!("ci in {}", checkout_dir.display())))?;
 
     if !out.success() {
         // "nothing to do" means files are already committed — not an error.
@@ -3084,5 +3187,80 @@ mod rpmspec_sandbox_tests {
             msg.contains("/co/demo.spec") && msg.contains("`%(`"),
             "{msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod publish_plan_tests {
+    use super::*;
+
+    /// Backups, build directories and stray files stay out of the commit.
+    /// The referenced patch goes in; the unreferenced one does not.
+    #[test]
+    fn only_the_package_files_are_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Name: pkg\nVersion: 1.0\nPatch0: 0001-fix.patch\n";
+        for (name, body) in [
+            ("pkg.spec", spec),
+            ("pkg-1.0.tar.gz", ""),
+            ("_service", ""),
+            ("pkg.changes", ""),
+            ("pkg.rpmlintrc", ""),
+            ("0001-fix.patch", ""),
+            ("extra.patch", ""),
+            ("pkg.spec.preexisting", spec),
+            ("pkg.changes.preexisting", ""),
+            ("stray.txt", ""),
+        ] {
+            fs::write(dir.path().join(name), body).unwrap();
+        }
+        fs::create_dir(dir.path().join(".osc")).unwrap();
+        fs::create_dir(dir.path().join("build")).unwrap();
+
+        let plan = publish_plan(dir.path());
+
+        assert_eq!(
+            plan.files,
+            [
+                "0001-fix.patch",
+                "_service",
+                "pkg-1.0.tar.gz",
+                "pkg.changes",
+                "pkg.rpmlintrc",
+                "pkg.spec",
+            ]
+        );
+        assert_eq!(
+            plan.skipped,
+            [
+                "build",
+                "extra.patch",
+                "pkg.changes.preexisting",
+                "pkg.spec.preexisting",
+                "stray.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_patch_named_by_the_series_file_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pkg.spec"), "Name: pkg\n").unwrap();
+        fs::write(dir.path().join("series"), "# quilt\n0002-quilt.patch\n").unwrap();
+        fs::write(dir.path().join("0002-quilt.patch"), "").unwrap();
+
+        let plan = publish_plan(dir.path());
+
+        assert!(
+            plan.files.contains(&"0002-quilt.patch".to_string()),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_committed_without_a_file_to_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = commit(dir.path(), "msg", &[], Emit::quiet()).unwrap_err();
+        assert!(matches!(err, Error::NothingToPublish(_)), "{err}");
     }
 }
