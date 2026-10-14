@@ -1188,6 +1188,177 @@ fn parse_project_repo_paths(xml: &str) -> Vec<(String, String)> {
     paths
 }
 
+/// What a published-binary search matches a name by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameMatch {
+    Exactly,
+    Containing,
+}
+
+/// The OBS `match` expression for binaries published by one of `projects`
+/// (any repository: the `snapshot` repository a project builds against is not
+/// searchable, but the `standard` one it is made from is) for `arch`.
+fn published_binary_match(projects: &[String], name: &str, by: NameMatch, arch: &str) -> String {
+    let quote = |s: &str| s.replace('\'', "");
+    let name_clause = match by {
+        NameMatch::Exactly => format!("@name='{}'", quote(name)),
+        NameMatch::Containing => format!("contains(@name,'{}')", quote(name)),
+    };
+    let projects = projects
+        .iter()
+        .map(|p| format!("@project='{}'", quote(p)))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!("{name_clause} and ({projects}) and @arch='{}'", quote(arch))
+}
+
+/// The distinct binary names in a `/search/published/binary/id` answer.
+fn parse_published_binary_names(xml: &str) -> Vec<String> {
+    let mut names: Vec<String> = xml
+        .split("<binary ")
+        .skip(1)
+        .filter_map(|chunk| {
+            extract_xml_attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "name")
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+static PUBLISHED_BINARIES_CACHE: std::sync::Mutex<Option<HashMap<String, Vec<String>>>> =
+    std::sync::Mutex::new(None);
+
+/// The names of binaries the projects `project` builds against publish for
+/// `arch` that match `name`. `None` when the search could not be made (no
+/// answer is not "nothing published").
+fn published_binaries(
+    project: &str,
+    arch: &str,
+    name: &str,
+    by: NameMatch,
+    emit: Emit<'_>,
+) -> Option<Vec<String>> {
+    let paths = get_project_repo_paths(project, emit).ok()?;
+    let mut projects: Vec<String> = paths.into_iter().map(|(p, _)| p).collect();
+    projects.sort();
+    projects.dedup();
+    if projects.is_empty() {
+        return None;
+    }
+    let expr = published_binary_match(&projects, name, by, arch);
+    if let Some(hit) = PUBLISHED_BINARIES_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|c| c.get(&expr).cloned())
+    {
+        return Some(hit);
+    }
+    let xml = osc_api(&format!("/search/published/binary/id?match={}", enc(&expr)))?;
+    // A document without a collection is not an answer.
+    if !xml.contains("<collection") {
+        return None;
+    }
+    let names = parse_published_binary_names(&xml);
+    PUBLISHED_BINARIES_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(expr, names.clone());
+    Some(names)
+}
+
+/// Whether a project `project` builds against publishes a binary package called
+/// exactly `name` for `arch`. This is what a build there can install, which the
+/// host's own repositories (Packman, a different snapshot) are not. `None`
+/// when the search failed.
+pub fn project_ships_binary(project: &str, arch: &str, name: &str, emit: Emit<'_>) -> Option<bool> {
+    if name.trim().is_empty() || name.contains('\'') {
+        return Some(false);
+    }
+    published_binaries(project, arch, name, NameMatch::Exactly, emit).map(|n| !n.is_empty())
+}
+
+/// Whether `name` is something the projects `project` builds against provide.
+/// A package name is asked of what those projects publish, which is what a
+/// build there can install; the host's repositories (Packman's ffmpeg, another
+/// snapshot) say nothing about it. A capability (a soname, `pkgconfig(x)`) is
+/// not a binary name, so the host answers it, as does a failed search.
+pub fn available_to_project(project: &str, arch: &str, name: &str, emit: Emit<'_>) -> bool {
+    if is_rpm_capability(name) {
+        return distro_provides(name);
+    }
+    match project_ships_binary(project, arch, name, emit) {
+        Some(shipped) => shipped,
+        None => distro_provides(name),
+    }
+}
+
+/// Binaries those projects publish with a name that merely contains the stem of
+/// `name` (`ffmpeg-8-devel` -> `ffmpeg-8-mini-devel`, `ffmpeg-8-libavcodec-devel`):
+/// what exists when the exact name does not. Empty when nothing is similar or
+/// the search failed. `name` itself and debug packages are left out.
+pub fn similar_published_binaries(
+    project: &str,
+    arch: &str,
+    name: &str,
+    emit: Emit<'_>,
+) -> Vec<String> {
+    let stem = name
+        .trim_end_matches("-devel-static")
+        .trim_end_matches("-devel");
+    if stem.len() < 3 || stem.contains('\'') {
+        return Vec::new();
+    }
+    let mut found: Vec<String> =
+        published_binaries(project, arch, stem, NameMatch::Containing, emit).unwrap_or_default();
+    found.retain(|n| {
+        n != name && !n.ends_with("-debuginfo") && !n.ends_with("-debugsource") && n.contains(stem)
+    });
+    // The names with the same suffix as the missing one come first.
+    let wants_devel = name.ends_with("-devel");
+    found.sort_by_key(|n| (n.ends_with("-devel") != wants_devel, n.len()));
+    found.truncate(12);
+    found
+}
+
+#[cfg(test)]
+mod published_binary_tests {
+    use super::*;
+
+    #[test]
+    fn the_match_names_the_projects_and_the_arch() {
+        let m = published_binary_match(
+            &["openSUSE:Factory".to_string(), "devel:x".to_string()],
+            "ffmpeg-8-devel",
+            NameMatch::Exactly,
+            "x86_64",
+        );
+        assert_eq!(
+            m,
+            "@name='ffmpeg-8-devel' and (@project='openSUSE:Factory' or @project='devel:x') and @arch='x86_64'"
+        );
+        assert!(
+            published_binary_match(&["p".into()], "a'b", NameMatch::Containing, "x86_64")
+                .contains("contains(@name,'ab')")
+        );
+    }
+
+    #[test]
+    fn binary_names_are_distinct_and_sorted() {
+        let xml = r#"<collection matches="3">
+  <binary name="b-devel" project="p" arch="x86_64"/>
+  <binary name="a" project="p" arch="x86_64"/>
+  <binary name="b-devel" project="q" arch="x86_64"/>
+</collection>"#;
+        assert_eq!(parse_published_binary_names(xml), ["a", "b-devel"]);
+        assert!(
+            parse_published_binary_names("<collection matches=\"0\">\n</collection>").is_empty()
+        );
+    }
+}
+
 /// Does the OBS project meta list at least one `<repository>` element?
 ///
 /// A project with no repositories cannot build anything — every `osc build`

@@ -1445,6 +1445,31 @@ fn branch_for_patch(
     })
 }
 
+/// Dependencies known to be native (C/C++) libraries, by `fuzzy_key`, as the
+/// pipeline reported them: a translated name no longer shows it, and the queue
+/// would look it up on PyPI first.
+#[derive(Default)]
+struct NativeNames {
+    keys: std::cell::RefCell<std::collections::HashSet<String>>,
+}
+
+impl NativeNames {
+    fn record(&self, names: &[String]) {
+        let mut keys = self.keys.borrow_mut();
+        for n in names {
+            keys.insert(ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(n)));
+        }
+    }
+
+    fn contains(&self, dep: &str) -> bool {
+        self.keys
+            .borrow()
+            .contains(&ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(
+                dep,
+            )))
+    }
+}
+
 /// The dependencies a package asked to have patched instead of built
 /// (convention 62), by the name's `fuzzy_key` without its `python-` prefix, so
 /// the dependency queue can tell them from the ones it builds.
@@ -2049,6 +2074,7 @@ fn cmd_build(
     let dep_drops = DepDrops::default();
     // Dependencies to branch and patch rather than build.
     let patch_requests = PatchRequests::default();
+    let native_names = NativeNames::default();
 
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
@@ -2194,9 +2220,13 @@ fn cmd_build(
             // Names `triage` found to be native libraries, by `fuzzy_key`.
             let mut native_keys: std::collections::HashSet<String> = Default::default();
             for raw in batch {
-                match ap_build::depclass::triage(&raw, &|c| ap_build::osc::distro_provides(c)) {
+                match ap_build::depclass::triage(&raw, &|c| {
+                    ap_build::osc::available_to_project(project, arch, c, lookup_emit)
+                }) {
                     ap_build::depclass::Triage::Build { name, kind } => {
-                        if kind == ap_build::depclass::PackageKind::Native {
+                        if kind == ap_build::depclass::PackageKind::Native
+                            || native_names.contains(&name)
+                        {
                             native_keys.insert(ap_build::osc::fuzzy_key(&name));
                         }
                         if in_batch.insert(ap_build::osc::fuzzy_key(&name)) {
@@ -2213,6 +2243,36 @@ fn cmd_build(
                     }
                 }
             }
+            // A native library the projects do not publish under this name but
+            // do publish under similar ones (`ffmpeg` against `ffmpeg-8`,
+            // `ffmpeg-8-mini-devel`) is the distro's own package: building it
+            // from source here would be a second, worse copy.
+            triaged.retain(|dep| {
+                if !native_keys.contains(&ap_build::osc::fuzzy_key(dep)) {
+                    return true;
+                }
+                if ap_build::osc::project_ships_binary(project, arch, dep, lookup_emit)
+                    != Some(false)
+                {
+                    return true;
+                }
+                let similar =
+                    ap_build::osc::similar_published_binaries(project, arch, dep, lookup_emit);
+                if similar.is_empty() {
+                    return true;
+                }
+                attempted_deps.insert(ap_build::osc::fuzzy_key(dep));
+                dep_drops.dropped(
+                    reporter.as_ref(),
+                    dep,
+                    format!(
+                        "the distro ships it under other names ({}), which a package \
+                         requires instead of building a copy from source",
+                        similar.join(", ")
+                    ),
+                );
+                false
+            });
             // Dependencies dropped only because a build of them is already
             // underway: a later request for one must not be refused as "already
             // attempted" if that build then fails.
@@ -2563,9 +2623,11 @@ fn cmd_build(
                     PipelineResult::MissingDeps {
                         deps: more,
                         patches,
+                        native,
                         ..
                     } => {
                         patch_requests.record(&patches);
+                        native_names.record(&native);
                         dep_drops.note_outcome(
                             &dep_rpm,
                             format!("it could not be built until {} exist", more.join(", ")),
@@ -2667,8 +2729,14 @@ fn cmd_build(
             });
             match result {
                 PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => return Ok(()),
-                PipelineResult::MissingDeps { deps, patches, .. } => {
+                PipelineResult::MissingDeps {
+                    deps,
+                    patches,
+                    native,
+                    ..
+                } => {
                     patch_requests.record(&patches);
+                    native_names.record(&native);
                     // Only queue deps we haven't tried yet; if every dep was
                     // already attempted we cannot make progress. Compared by
                     // `fuzzy_key`, not the raw string — see its doc comment.
@@ -2878,8 +2946,14 @@ fn cmd_build(
                     ap_core::diag!("{rpm_name} {version} already built");
                     fail_counts.remove(&rpm_name);
                 }
-                PipelineResult::MissingDeps { deps, patches, .. } => {
+                PipelineResult::MissingDeps {
+                    deps,
+                    patches,
+                    native,
+                    ..
+                } => {
                     patch_requests.record(&patches);
+                    native_names.record(&native);
                     // No-progress detection (review finding #15 in the Sep
                     // report; still open in Oct). A package that keeps
                     // surfacing MissingDeps on names already in

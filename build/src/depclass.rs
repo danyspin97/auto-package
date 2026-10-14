@@ -172,6 +172,43 @@ fn soname_stem(name: &str) -> Option<&str> {
     plain.then_some(stem)
 }
 
+/// The names among `names` that stand for a native (C/C++) library reported in
+/// `originals`: a translated name (`trantor`, from `libtrantor-devel`) loses the
+/// spelling that said it was a library, and without that it would be looked up
+/// on PyPI first. A name is native when the key of a native original contains
+/// it or it contains that key.
+pub fn native_among(originals: &[String], names: &[String]) -> Vec<String> {
+    let native_keys: Vec<String> = originals
+        .iter()
+        .filter_map(|raw| match classify_reported(raw) {
+            Reported::Package {
+                name,
+                kind: PackageKind::Native,
+            }
+            | Reported::Capability {
+                fallback:
+                    Fallback::Package {
+                        name,
+                        kind: PackageKind::Native,
+                    },
+                ..
+            } => Some(osc::fuzzy_key(&name)),
+            _ => None,
+        })
+        .collect();
+    names
+        .iter()
+        .filter(|n| {
+            let key = osc::fuzzy_key(n);
+            !key.is_empty()
+                && native_keys
+                    .iter()
+                    .any(|nk| nk.contains(&key) || key.contains(nk.as_str()))
+        })
+        .cloned()
+        .collect()
+}
+
 /// What `raw` is by its spelling alone: nothing here asks the distro or OBS.
 pub fn classify_reported(raw: &str) -> Reported {
     let raw = raw.trim();
@@ -430,6 +467,16 @@ mod tests {
             Triage::Skip(s) => s,
             Triage::Build { name, .. } => panic!("{raw} would build {name}"),
         }
+    }
+
+    #[test]
+    fn a_translated_name_keeps_the_native_kind_of_its_original() {
+        let originals = vec!["libtrantor-devel".to_string(), "python313-foo".to_string()];
+        let names = vec!["trantor".to_string(), "foo".to_string()];
+        assert_eq!(native_among(&originals, &names), ["trantor"]);
+        let ffmpeg = vec!["ffmpeg-8-devel".to_string()];
+        assert_eq!(native_among(&ffmpeg, &["ffmpeg".to_string()]), ["ffmpeg"]);
+        assert!(native_among(&[], &names).is_empty());
     }
 
     #[test]

@@ -146,6 +146,9 @@ pub enum PipelineResult {
         /// The part of `deps` that is a distro package to branch and patch
         /// rather than a package to build (convention 62).
         patches: Vec<crate::agent::PatchRequest>,
+        /// The part of `deps` that is a native (C/C++) library: never looked up
+        /// on PyPI, whatever a translation made of its spelling.
+        native: Vec<String>,
     },
     Failed {
         rpm_name: String,
@@ -2551,8 +2554,14 @@ fn missing_deps_from_turn(
     // The turn's names are triaged (python<ver>- prefix stripped, capabilities
     // and interpreter packages set aside), then the ones the project or a
     // linked project already has are dropped: those are not missing.
-    let (named, skipped) =
-        crate::depclass::triage_all(&outcome.unresolvable_packages, &|c| osc::distro_provides(c));
+    let (named, skipped) = crate::depclass::triage_all(&outcome.unresolvable_packages, &|c| {
+        osc::available_to_project(
+            &ctx.config.project,
+            &ctx.config.arch,
+            c,
+            Emit::new(ctx.reporter, step),
+        )
+    });
     warn_skipped(ctx, step, &skipped);
     let mut to_build = without_available_deps(ctx, step, named, DepScope::Anywhere);
     // A patched dependency is one the distro ships by definition: only the
@@ -2592,10 +2601,12 @@ fn missing_deps_from_turn(
     if to_build.is_empty() {
         return None;
     }
+    let native = crate::depclass::native_among(&outcome.unresolvable_packages, &to_build);
     Some(PipelineResult::MissingDeps {
         rpm_name: ctx.rpm_name.clone(),
         deps: to_build,
         patches,
+        native,
     })
 }
 
@@ -3140,7 +3151,7 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
         }
         Err(osc::Error::BuildFailed { .. }) => {
             let build_step = build_step.finish(StepOutcome::Failed);
-            fix_after_build(ctx, st, &build_step, &build_log)
+            fix_after_build(ctx, st, &build_step, &build_log, None)
         }
         // Only a build OBS actually failed is something the agent can fix
         // from its log. A poll that timed out or kept erroring, a launch or
@@ -3230,6 +3241,67 @@ fn unresolvable_deps_round(
             !satisfied
         })
         .collect();
+
+    // A name nothing publishes for this target, while similar names are
+    // published (`ffmpeg-8-devel` against `ffmpeg-8-mini-devel`), is a package
+    // the distro has under another name or flavor, not one to build: the spec
+    // asked for the wrong one. The agent is told what exists.
+    let mut alternatives: Vec<(String, Vec<String>)> = Vec::new();
+    let unresolvable_deps: Vec<String> = unresolvable_deps
+        .into_iter()
+        .filter(|dep| {
+            if osc::is_rpm_capability(dep) {
+                return true;
+            }
+            let emit = Emit::new(reporter, build_step.id);
+            if osc::project_ships_binary(&config.project, &config.arch, dep, emit) != Some(false) {
+                return true;
+            }
+            let similar = osc::similar_published_binaries(&config.project, &config.arch, dep, emit);
+            if similar.is_empty() {
+                return true;
+            }
+            alternatives.push((dep.clone(), similar));
+            false
+        })
+        .collect();
+    if !alternatives.is_empty() && unresolvable_deps.is_empty() {
+        let lines: Vec<String> = alternatives
+            .iter()
+            .map(|(dep, similar)| {
+                format!(
+                    "{dep} is not published for {}/{} by the projects {} builds against, \
+                     but these are: {}",
+                    config.distro,
+                    config.arch,
+                    config.project,
+                    similar.join(", ")
+                )
+            })
+            .collect();
+        reporter.report(&Event::Warning {
+            step: Some(build_step.id),
+            message: format!(
+                "not queuing {} as missing: the distro has it under another name\n{}",
+                alternatives
+                    .iter()
+                    .map(|(d, _)| d.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                lines.join("\n")
+            ),
+        });
+        let context = format!(
+            "OBS cannot install what the spec asks for, but the distro has it under another \
+             name or flavor; it is not a package to build. Change the BuildRequires/Requires \
+             to a name that is published, or drop the requirement if nothing published \
+             serves it (a codec-complete ffmpeg, for example, is not in the distro: use the \
+             `-mini` flavor and skip what needs the rest). Do not report these in \
+             `unresolvable_packages`.\n\n{}",
+            crate::agent::fenced_data(&lines.join("\n"))
+        );
+        return fix_after_build(ctx, st, build_step, build_log, Some(&context));
+    }
 
     if unresolvable_deps.is_empty() {
         // Every dep has a local RPM, so OBS should pick them up on
@@ -3378,10 +3450,12 @@ fn unresolvable_deps_round(
             why.join("\n")
         )));
     }
+    let native = crate::depclass::native_among(&unresolvable_deps, &to_build);
     Err(PipelineResult::MissingDeps {
         rpm_name: rpm_name.clone(),
         deps: to_build,
         patches: Vec::new(),
+        native,
     })
 }
 
@@ -3392,6 +3466,7 @@ fn fix_after_build(
     st: &mut RunState,
     build_step: &StepDir,
     build_log: &Path,
+    context: Option<&str>,
 ) -> Result<RoundEnd, PipelineResult> {
     let RunCtx {
         config,
@@ -3478,7 +3553,7 @@ fn fix_after_build(
             checkout_dir: Some(checkout_dir),
             from_repo_archive: st.from_repo_archive,
             resume: true,
-            context: None,
+            context,
         },
         ctx.turn_env(),
         &mut st.spent_usd,
