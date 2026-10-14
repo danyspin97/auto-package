@@ -93,7 +93,10 @@ mod tests {
             other => panic!("expected Held, got {other:?}"),
         }
         drop(first);
-        try_lock(&path).unwrap();
+        // Not `try_lock`: another test in this process may be mid-`fork`, and
+        // the child holds a copy of the descriptor (and so the lock) until it
+        // execs. That window is brief, so wait it out.
+        lock_with_wait(&path, std::time::Duration::from_secs(5)).unwrap();
     }
 
     /// A symlink at the lock path must not be followed: the lock file is
