@@ -1961,10 +1961,31 @@ fn queued_lines(state: &TuiState) -> Vec<String> {
             if p.waiting_on.is_empty() {
                 n.clone()
             } else {
-                format!("{n} <- {}", p.waiting_on.join(", "))
+                let deps: Vec<String> = p
+                    .waiting_on
+                    .iter()
+                    .map(|dep| waiting_label(state, dep))
+                    .collect();
+                format!("{n} <- {}", deps.join(", "))
             }
         })
         .collect()
+}
+
+/// A dependency a package waits on, as the table knows it: the same package
+/// has a row under its RPM name (`python-logfire` for `logfire`), so without
+/// its status here it would read as a second entry for one package.
+fn waiting_label(state: &TuiState, dep: &str) -> String {
+    let key = ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(dep));
+    let row = state
+        .order
+        .iter()
+        .filter_map(|n| state.packages.get(n.as_str()).map(|p| (n, p)))
+        .find(|(n, _)| ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(n)) == key);
+    match row {
+        Some((_, p)) => format!("{dep} ({})", p.status.label()),
+        None => dep.to_string(),
+    }
 }
 
 /// `name version` for each package that is built, in table order.
@@ -2249,6 +2270,19 @@ mod step_state_tests {
             version: "1.0".to_string(),
             outcome,
         }
+    }
+
+    #[test]
+    fn a_waited_on_package_with_a_row_shows_its_status_not_a_second_entry() {
+        let mut state = TuiState::new();
+        state.pkg_mut("python-logfire").status = PkgStatus::Running;
+        let waiting = state.pkg_mut("python-mcp");
+        waiting.status = PkgStatus::MissingDeps;
+        waiting.waiting_on = vec!["logfire".to_string(), "typing-inspection".to_string()];
+        assert_eq!(
+            queued_lines(&state),
+            ["python-mcp <- logfire (running), typing-inspection"]
+        );
     }
 
     #[test]
@@ -2819,5 +2853,49 @@ mod render_smoke_tests {
                 render(f, &state, &mut table_state, None, &browse);
             })
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod replay {
+    use super::*;
+
+    /// Feeds a recorded run (`AP_REPLAY=<run.jsonl>`) through the table state and
+    /// prints what the screen would list. Ignored: it needs a recorded run.
+    #[test]
+    #[ignore]
+    fn replay_a_recorded_run() {
+        let Ok(path) = std::env::var("AP_REPLAY") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut state = TuiState::new();
+        let mut skipped = 0;
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let ambient = value
+                .get("pkg")
+                .and_then(|p| p.as_str())
+                .map(str::to_string);
+            match serde_json::from_value::<Event>(value) {
+                Ok(event) => state.apply(Msg {
+                    pkg: ambient,
+                    event,
+                }),
+                Err(_) => skipped += 1,
+            }
+        }
+        eprintln!("rows: {} (skipped {skipped} lines)", state.order.len());
+        let mut seen = std::collections::HashSet::new();
+        for n in &state.order {
+            if !seen.insert(n.clone()) {
+                eprintln!("DUPLICATE ROW {n}");
+            }
+        }
+        eprintln!("order: {:?}", state.order);
+        eprintln!("queued: {:#?}", queued_lines(&state));
+        eprintln!("built: {}", built_lines(&state).len());
     }
 }
