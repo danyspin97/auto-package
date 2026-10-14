@@ -4564,6 +4564,8 @@ fn generate_from_repo(
     ));
 
     let url = fetch_release_archive(repo_url, &config.version, &tarball)?;
+    let digest = sha256_file(&tarball)
+        .map_err(|e| GenSpecError::Other(format!("hashing {}: {e}", tarball.display())))?;
 
     // Same preference the probe used, so generation and naming agree on which
     // subproject of a monorepo is being built.
@@ -4665,7 +4667,10 @@ fn generate_from_repo(
                 String::new()
             }
         };
-        return generate_repo_python_spec(config, &tarball, &info, &pypi_json, spec_path, step);
+        let result =
+            generate_repo_python_spec(config, &tarball, &info, &pypi_json, spec_path, step)?;
+        record_archive_digest(spec_path, &url, &digest);
+        return Ok(result);
     }
 
     if info.cargo_manifest {
@@ -4697,6 +4702,7 @@ fn generate_from_repo(
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
         ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
+        record_archive_digest(spec_path, &url, &digest);
         write_or_warn(step.file("spec.generated"), &spec_text);
         return Ok(GenSpecResult {
             sdist_top_level: top_level,
@@ -4713,6 +4719,40 @@ fn generate_from_repo(
         "{url} contains no pyproject.toml, setup.py, Cargo.toml, CMakeLists.txt \
          or configure.ac, so auto-package cannot tell how to build it"
     )))
+}
+
+/// SHA-256 of a file, lowercase hex, read in chunks.
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Record which archive a spec was generated from, so the commit to OBS keeps
+/// a digest of what was used.
+fn record_archive_digest(spec_path: &Path, url: &str, digest: &str) {
+    use std::io::Write;
+    let note = format!("\n# Source archive: {url}\n# Source archive sha256: {digest}\n");
+    let appended = std::fs::OpenOptions::new()
+        .append(true)
+        .open(spec_path)
+        .and_then(|mut spec| spec.write_all(note.as_bytes()));
+    if let Err(e) = appended {
+        ap_core::diag!(
+            "  could not record the archive digest in {}: {e}",
+            spec_path.display()
+        );
+    }
 }
 
 /// Put the first release archive that exists at `dest`, returning its URL.
@@ -6345,6 +6385,32 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             .sort_by_key(|c| !distro.forge_repos.iter().any(|r| c.eq_ignore_ascii_case(r)));
     }
 
+    // A repository that exists is not thereby the project's source. Only one
+    // the project or its vendor vouches for is used without confirmation: a
+    // curated mapping, the repository PyPI records for this project, the
+    // upstream another distribution's spec records, or an NVIDIA-org
+    // repository derived from the name. Anything else (typically a name
+    // search hit) is kept as a guess, and is built only when the user
+    // confirms it with `--source-url`.
+    let recorded = recorded_upstream(pkg_name);
+    let vouched = |url: &str| {
+        is_vouched_for(
+            url,
+            known_mappings,
+            recorded.as_deref(),
+            distro_evidence.as_ref(),
+        )
+    };
+    let (trusted, unvetted): (Vec<String>, Vec<String>) =
+        verified_candidates.into_iter().partition(|u| vouched(u));
+    let mut verified_candidates = trusted;
+    for url in unvetted {
+        ap_core::diag!("  not used automatically (not the project's recorded upstream): {url}");
+        if !candidates.contains(&url) {
+            candidates.insert(0, url);
+        }
+    }
+
     if verified_candidates.is_empty() {
         ap_core::diag!(
             "  ✗ no verified repositories found after trying {} URLs",
@@ -6356,7 +6422,12 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     // web (Savannah, SourceForge, project sites, renamed projects) when there
     // is nothing, or when what there is contradicts what other distributions
     // record (a name collision — see `candidates_unconfirmed`). Its answer is
-    // validated before it is used, and goes first.
+    // validated before it is used (`validate_found_url`: a repository or
+    // release index on a known host that really exists), and goes first, but
+    // it is only a model's pick from the web: it is used without confirmation
+    // only when it is on a host the project itself records (a distro spec's
+    // upstream addresses, or PyPI's project URLs). Otherwise it joins the
+    // guesses for the user to confirm.
     let unconfirmed = distro_evidence
         .as_ref()
         .is_some_and(|r| crate::discovery::candidates_unconfirmed(&verified_candidates, r));
@@ -6369,8 +6440,25 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             candidates: verified_candidates.clone(),
         };
         if let Some(url) = crate::discovery::agent_find_source(pkg_name, &hints) {
-            verified_candidates.retain(|c| c != &url);
-            verified_candidates.insert(0, url);
+            let recorded_hosts: Vec<String> = distro_evidence
+                .iter()
+                .flat_map(|d| d.homepages.iter())
+                .chain(recorded.iter())
+                .filter_map(|u| crate::http::host_of(u))
+                .collect();
+            let host_recorded =
+                crate::http::host_of(&url).is_some_and(|h| recorded_hosts.contains(&h));
+            if vouched(&url) || host_recorded {
+                verified_candidates.retain(|c| c != &url);
+                verified_candidates.insert(0, url);
+            } else {
+                ap_core::diag!(
+                    "  agent suggested {url}, which no record of the project mentions: \
+                     not used automatically"
+                );
+                candidates.retain(|c| c != &url);
+                candidates.insert(0, url);
+            }
         }
     }
     if !verified_candidates.is_empty() {
@@ -6383,6 +6471,51 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
         verified: verified_candidates,
         guessed: candidates,
     }
+}
+
+/// The source repository PyPI records for `pkg_name`, from its project URLs.
+fn recorded_upstream(pkg_name: &str) -> Option<String> {
+    let url = format!(
+        "https://pypi.org/pypi/{}/json",
+        urlencoding::encode(pkg_name)
+    );
+    let body = crate::http::read_text(crate::http::get(&url).call().ok()?).ok()?;
+    ap_ecosystem::pypi::source_url_from_json(&body)
+}
+
+/// Whether two repository URLs name the same repository, ignoring case, a
+/// trailing slash and a `.git` suffix.
+fn same_repo_url(a: &str, b: &str) -> bool {
+    let norm = |u: &str| {
+        u.trim()
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+/// Whether discovery may use `url` without confirmation: a curated mapping,
+/// the repository PyPI records for the project, what another distribution's
+/// spec records as its upstream, or an NVIDIA-org repository (the vendor's own
+/// org, which discovery derives from the package name).
+fn is_vouched_for(
+    url: &str,
+    known: &[(&str, &str)],
+    recorded: Option<&str>,
+    distro: Option<&crate::discovery::DistroInfo>,
+) -> bool {
+    known.iter().any(|(_, k)| same_repo_url(k, url))
+        || recorded.is_some_and(|r| same_repo_url(r, url))
+        || distro.is_some_and(|d| {
+            d.forge_repos
+                .iter()
+                .chain(&d.index_candidates)
+                .any(|r| same_repo_url(r, url))
+        })
+        || url
+            .to_ascii_lowercase()
+            .starts_with("https://github.com/nvidia/")
 }
 
 /// Search GitHub for repositories matching the package name.
@@ -7758,5 +7891,91 @@ mod workspace_link_tests {
             .find(|e| e.path().unwrap().ends_with("leak"))
             .expect("link entry is packed");
         assert!(leak.header().entry_type().is_symlink());
+    }
+}
+
+#[cfg(test)]
+mod discovery_vouching_tests {
+    use super::*;
+
+    /// A search hit that is not the project's recorded upstream is not used
+    /// automatically; the project's own repository, the curated mappings, the
+    /// distro-recorded upstream and the NVIDIA org are.
+    #[test]
+    fn only_a_vouched_repository_is_used_without_confirmation() {
+        let known: &[(&str, &str)] = &[("cuda-python", "https://github.com/NVIDIA/cuda-python")];
+        let recorded = Some("https://github.com/acme/widget");
+        let distro = crate::discovery::DistroInfo {
+            forge_repos: vec!["https://gitlab.com/acme/gadget".to_string()],
+            homepages: Vec::new(),
+            index_candidates: vec!["https://ftp.gnu.org/gnu/lzip/".to_string()],
+        };
+
+        assert!(is_vouched_for(
+            "https://github.com/acme/widget/",
+            known,
+            recorded,
+            None
+        ));
+        assert!(is_vouched_for(
+            "https://github.com/acme/widget.git",
+            known,
+            recorded,
+            None
+        ));
+        assert!(is_vouched_for(
+            "https://github.com/NVIDIA/cuda-python",
+            known,
+            None,
+            None
+        ));
+        assert!(is_vouched_for(
+            "https://github.com/NVIDIA/nvjitlink-python",
+            known,
+            None,
+            None
+        ));
+        assert!(is_vouched_for(
+            "https://gitlab.com/Acme/Gadget",
+            known,
+            None,
+            Some(&distro)
+        ));
+        assert!(is_vouched_for(
+            "https://ftp.gnu.org/gnu/lzip",
+            known,
+            None,
+            Some(&distro)
+        ));
+        assert!(!is_vouched_for(
+            "https://github.com/attacker/widget",
+            known,
+            recorded,
+            None
+        ));
+        assert!(!is_vouched_for(
+            "https://github.com/attacker/widget",
+            known,
+            None,
+            Some(&distro)
+        ));
+    }
+
+    #[test]
+    fn archive_digest_is_the_sha256_of_the_file_and_lands_in_the_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.tar.gz");
+        std::fs::write(&archive, b"").unwrap();
+        let digest = sha256_file(&archive).unwrap();
+        assert_eq!(
+            digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let spec = dir.path().join("a.spec");
+        std::fs::write(&spec, "Name: a\n").unwrap();
+        record_archive_digest(&spec, "https://example.org/a.tar.gz", &digest);
+        let text = std::fs::read_to_string(&spec).unwrap();
+        assert!(text.contains("# Source archive: https://example.org/a.tar.gz"));
+        assert!(text.contains(&format!("# Source archive sha256: {digest}")));
     }
 }

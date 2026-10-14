@@ -513,7 +513,9 @@ fn resolve_dependency_config(
              cuda-devel/cuda-runtime), it must already be provided by \
              the target project's own repository configuration; this \
              tool has no way to manufacture one. Otherwise, pass \
-             --source-url {dep}=<url> to point it at the upstream repo."
+             --source-url {dep}=<url> to point it at the upstream repo \
+             (a repository found only by a name search is not used \
+             without that confirmation)."
         ),
     });
     None
