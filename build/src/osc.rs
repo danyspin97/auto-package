@@ -2516,20 +2516,23 @@ fn get_build_status_after_commit(
 /// What every repository/arch of `pkg_name` says, as one status: `Succeeded`
 /// only when each result of the package (all repositories and architectures,
 /// multibuild flavors included) is succeeded, excluded or disabled; otherwise
-/// the first result that is not. For deciding whether the package may be
-/// submitted, where a build that is green on `repo`/`arch` but failed on
-/// another architecture is not a good update. `repo`/`arch` is read the
-/// careful way ([`get_build_status`]); the others by their plain verdict.
+/// the first result that is not, with the `repo/arch` it is from. For
+/// deciding whether the package may be submitted, where a build that is green
+/// on `repo`/`arch` but failed on another architecture is not a good update.
+/// `repo`/`arch` is read the careful way ([`get_build_status`]); the others
+/// by their plain verdict, polled for a bounded time while any is still
+/// scheduled, blocked or building.
 pub fn get_overall_build_status(
     project: &str,
     pkg_name: &str,
     repo: &str,
     arch: &str,
     emit: Emit<'_>,
-) -> Result<BuildStatus, Error> {
+) -> Result<(BuildStatus, Option<String>), Error> {
+    const MAX_WAIT: Duration = Duration::from_secs(1800);
     let own = get_build_status(project, pkg_name, repo, arch, emit)?;
     if !own.is_success() {
-        return Ok(own);
+        return Ok((own, Some(format!("{repo}/{arch}"))));
     }
     check_obs_name("project", project)?;
     check_obs_name("pkg_name", pkg_name)?;
@@ -2538,41 +2541,75 @@ pub fn get_overall_build_status(
         enc(project),
         enc(pkg_name)
     );
-    let xml = osc_api_checked(&path).map_err(|e| match e {
-        ApiFailure::Http(code, msg) => Error::OscFailed {
-            cmd: format!("api {path}"),
-            code: i32::from(code),
-            stderr: msg,
-        },
-        ApiFailure::Other(msg) => Error::NotActionable(msg),
-    })?;
-    let entries =
-        obs_status::try_parse_results(&xml).map_err(|e| Error::NotActionable(e.to_string()))?;
-    Ok(overall_status(&entries, pkg_name))
+    let start = Instant::now();
+    let mut unchanged: u32 = 0;
+    let mut last: Option<(BuildStatus, Option<String>)> = None;
+    loop {
+        let xml = osc_api_checked(&path).map_err(|e| match e {
+            ApiFailure::Http(code, msg) => Error::OscFailed {
+                cmd: format!("api {path}"),
+                code: i32::from(code),
+                stderr: msg,
+            },
+            ApiFailure::Other(msg) => Error::NotActionable(msg),
+        })?;
+        let entries =
+            obs_status::try_parse_results(&xml).map_err(|e| Error::NotActionable(e.to_string()))?;
+        let overall = overall_status(&entries, pkg_name);
+        let active = matches!(
+            overall.0,
+            BuildStatus::Scheduled | BuildStatus::Blocked | BuildStatus::Building
+        ) || overall.0 == BuildStatus::Unknown("finished".to_string());
+        if !active || start.elapsed() >= MAX_WAIT || crate::proc::shutting_down() {
+            return Ok(overall);
+        }
+        unchanged = if last.as_ref() == Some(&overall) {
+            unchanged.saturating_add(1)
+        } else {
+            0
+        };
+        last = Some(overall);
+        sleep_interruptible(poll_delay(unchanged, 0, jitter()));
+    }
 }
 
 /// The aggregate of [`get_overall_build_status`], from a `_result` document's
 /// entries: only the package and its `<package>:<flavor>` multibuild entries
-/// count.
-fn overall_status(entries: &[obs_status::ResultEntry], pkg_name: &str) -> BuildStatus {
+/// count. A result that failed outranks one still going, since waiting on the
+/// latter cannot change the outcome. Excluded and disabled results are out of
+/// scope; the `repo/arch` of the blocking result comes with the status.
+fn overall_status(
+    entries: &[obs_status::ResultEntry],
+    pkg_name: &str,
+) -> (BuildStatus, Option<String>) {
     let flavor_prefix = format!("{pkg_name}:");
-    let statuses: Vec<BuildStatus> = entries
+    let statuses: Vec<(BuildStatus, String)> = entries
         .iter()
         .filter(|e| e.pkg == pkg_name || e.pkg.starts_with(&flavor_prefix))
-        .map(obs_status::resolve_lenient)
+        .map(|e| {
+            (
+                obs_status::resolve_lenient(e),
+                format!("{}/{}", e.repo, e.arch),
+            )
+        })
         .collect();
-    if let Some(bad) = statuses.iter().find(|s| {
+    let blocks = |s: &BuildStatus| {
         !matches!(
             s,
             BuildStatus::Succeeded | BuildStatus::Excluded | BuildStatus::Disabled
         )
-    }) {
-        return bad.clone();
+    };
+    if let Some((bad, at)) = statuses
+        .iter()
+        .find(|(s, _)| blocks(s) && s.is_terminal())
+        .or_else(|| statuses.iter().find(|(s, _)| blocks(s)))
+    {
+        return (bad.clone(), Some(at.clone()));
     }
-    if statuses.iter().any(BuildStatus::is_success) {
-        BuildStatus::Succeeded
+    if statuses.iter().any(|(s, _)| s.is_success()) {
+        (BuildStatus::Succeeded, None)
     } else {
-        BuildStatus::Unknown("no result built".to_string())
+        (BuildStatus::Unknown("no result built".to_string()), None)
     }
 }
 
@@ -4821,7 +4858,7 @@ mod overall_status_tests {
     use super::*;
 
     fn overall(xml: &str) -> BuildStatus {
-        overall_status(&obs_status::parse_results(xml), "foo")
+        overall_status(&obs_status::parse_results(xml), "foo").0
     }
 
     #[test]
@@ -4839,6 +4876,26 @@ mod overall_status_tests {
         assert_eq!(overall(&doc("disabled")), BuildStatus::Succeeded);
         assert_eq!(overall(&doc("failed")), BuildStatus::Failed);
         assert_eq!(overall(&doc("building")), BuildStatus::Building);
+    }
+
+    #[test]
+    fn the_blocking_repository_and_arch_is_named_and_a_failure_outranks_a_wait() {
+        let xml = r#"<resultlist>
+  <result repository="r" arch="x86_64"><status package="foo" code="building"/></result>
+  <result repository="r" arch="i586"><status package="foo" code="failed"/></result>
+</resultlist>"#;
+        assert_eq!(
+            overall_status(&obs_status::parse_results(xml), "foo"),
+            (BuildStatus::Failed, Some("r/i586".to_string()))
+        );
+        let xml = r#"<resultlist>
+  <result repository="r" arch="x86_64"><status package="foo" code="succeeded"/></result>
+  <result repository="r" arch="i586"><status package="foo" code="scheduled"/></result>
+</resultlist>"#;
+        assert_eq!(
+            overall_status(&obs_status::parse_results(xml), "foo"),
+            (BuildStatus::Scheduled, Some("r/i586".to_string()))
+        );
     }
 
     #[test]

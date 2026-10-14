@@ -553,6 +553,11 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
         let build = updated
             .then(|| {
                 osc::get_overall_build_status(branch, &r.item.pkg, &a.distro, &a.arch, emit)
+                    // Name the repository/arch that blocks, not just its status.
+                    .map(|(status, at)| match (&status, at) {
+                        (osc::BuildStatus::Succeeded, _) | (_, None) => status,
+                        (_, Some(at)) => osc::BuildStatus::Unknown(format!("{status} on {at}")),
+                    })
                     .map_err(|e| {
                         ctx.warn(format!(
                             "could not read the build status of {}: {e}",

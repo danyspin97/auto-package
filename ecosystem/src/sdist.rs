@@ -1722,7 +1722,8 @@ build-backend = "flit_core.buildapi"
                 h.set_size(1);
                 h.set_mode(0o644);
                 h.set_cksum();
-                ar.append_data(&mut h, "pkg/sub/f", b"x".as_slice()).unwrap();
+                ar.append_data(&mut h, "pkg/sub/f", b"x".as_slice())
+                    .unwrap();
                 let mut h = tar::Header::new_gnu();
                 h.set_entry_type(tar::EntryType::Link);
                 h.set_size(0);
@@ -1732,15 +1733,17 @@ build-backend = "flit_core.buildapi"
             }
             let dir = tempfile::tempdir().unwrap();
             let tgz = dir.path().join("a.tar.gz");
-            let mut enc =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             std::io::Write::write_all(&mut enc, &buf).unwrap();
             std::fs::write(&tgz, enc.finish().unwrap()).unwrap();
             let dest = dir.path().join("out");
             (extract(&tgz, &dest), dir, dest)
         };
         let (result, _dir, _) = build("pkg/d/f");
-        assert!(matches!(result, Err(Error::LinkEscapes { .. })), "{result:?}");
+        assert!(
+            matches!(result, Err(Error::LinkEscapes { .. })),
+            "{result:?}"
+        );
         let (result, _dir, dest) = build("pkg/sub/f");
         result.unwrap();
         assert!(dest.join("pkg/h").is_file());
