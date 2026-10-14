@@ -975,7 +975,10 @@ mod tests {
         // The branch would build against Base:System, so Factory is reached
         // through it, and libfoo's project is not.
         assert!(matches!(state(&v, "cmake"), DepState::Reachable { .. }));
-        assert!(matches!(state(&v, "libfoo-devel"), DepState::Missing { .. }));
+        assert!(matches!(
+            state(&v, "libfoo-devel"),
+            DepState::Missing { .. }
+        ));
         let adds = choose_paths(&v);
         assert_eq!(adds.len(), 2);
         assert!(r.add_paths(&adds).is_err());
@@ -983,14 +986,14 @@ mod tests {
 
     #[test]
     fn the_synthetic_meta_points_each_repository_at_the_source() {
-        let info = osc::parse_project_info(&meta(
-            "S",
-            &[("r1", &[("x", "y")]), ("r2", &[])],
-        ));
+        let info = osc::parse_project_info(&meta("S", &[("r1", &[("x", "y")]), ("r2", &[])]));
         let xml = synthetic_branch_meta("B", "S", &info);
         let got = osc::parse_project_info(&xml);
         assert_eq!(got.repositories.len(), 2);
-        assert_eq!(got.repositories[0].paths, [("S".to_string(), "r1".to_string())]);
+        assert_eq!(
+            got.repositories[0].paths,
+            [("S".to_string(), "r1".to_string())]
+        );
         assert_eq!(got.repositories[1].arches, ["x86_64"]);
     }
 

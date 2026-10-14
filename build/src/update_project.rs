@@ -112,7 +112,10 @@ pub fn dry_run_lines(d: &DryRun<'_>) -> Vec<String> {
             "would be created by the first branch"
         }
     ));
-    out.push(format!("packages to branch and update ({}):", d.items.len()));
+    out.push(format!(
+        "packages to branch and update ({}):",
+        d.items.len()
+    ));
     for i in d.items {
         out.push(format!(
             "  {}  {} -> {}  (from {}{})",
@@ -191,6 +194,117 @@ pub fn any_failed(results: &[ItemResult]) -> bool {
         .any(|r| matches!(r.outcome, ItemOutcome::Failed(_)))
 }
 
+/// Whether two version strings name the same release (`1.0` and `1.0.0` do).
+fn same_version(a: &str, b: &str) -> bool {
+    use ap_ecosystem::pypi::{VersionCompare, compare_pep440};
+    a == b
+        || (compare_pep440(a, b) == VersionCompare::NotNewer
+            && compare_pep440(b, a) == VersionCompare::NotNewer)
+}
+
+/// Why a package must not get a submit request, or `Ok` when it may.
+///
+/// A request is only for a package that built in the branch project, from a
+/// spec that is at the new version: a build that succeeded on the old sources
+/// (the update never landed) is not an update to submit. `build` is what OBS
+/// reports for the package, `None` when it could not be read; `spec_version`
+/// the version in the branch project's spec.
+pub fn sr_eligibility(
+    item: &Item,
+    outcome: &ItemOutcome,
+    build: Option<&osc::BuildStatus>,
+    spec_version: Option<&str>,
+) -> Result<(), String> {
+    match outcome {
+        ItemOutcome::Updated => {}
+        ItemOutcome::Failed(_) => return Err("its update failed".to_string()),
+        ItemOutcome::Skipped(_) => return Err("it was skipped".to_string()),
+    }
+    match build {
+        Some(osc::BuildStatus::Succeeded) => {}
+        Some(other) => {
+            return Err(format!(
+                "its build in the branch project is {other}, not succeeded"
+            ));
+        }
+        None => return Err("its build status in the branch project could not be read".to_string()),
+    }
+    match spec_version {
+        Some(v) if same_version(v, &item.new_version) => Ok(()),
+        Some(v) => Err(format!(
+            "the branch project's spec says {v}, not {}",
+            item.new_version
+        )),
+        None => Err("the branch project's spec could not be read".to_string()),
+    }
+}
+
+/// The newest entry of a `.changes` file, without its date and author line,
+/// shortened to something a request description can carry.
+pub fn latest_changes_entry(changes: &str) -> Option<String> {
+    const MAX: usize = 1200;
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    // The file starts with a separator; skip anything before it.
+    let mut lines: Vec<&str> = Vec::new();
+    let mut started = false;
+    for line in changes.split('\n').map(str::trim_end) {
+        if is_separator(line) {
+            if started && !lines.iter().all(|l| l.trim().is_empty()) {
+                break;
+            }
+            started = true;
+            lines.clear();
+        } else if started {
+            lines.push(line);
+        }
+    }
+    // The first line of an entry is `date - author <mail>`.
+    let body: Vec<&str> = lines
+        .into_iter()
+        .skip_while(|l| l.trim().is_empty())
+        .skip(1)
+        .collect();
+    let text = body.join("\n");
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if text.chars().count() <= MAX {
+        return Some(text.to_string());
+    }
+    let cut: String = text.chars().take(MAX).collect();
+    // End on a whole line.
+    let cut = cut.rsplit_once('\n').map_or(cut.as_str(), |(head, _)| head);
+    Some(format!("{}\n[...]", cut.trim_end()))
+}
+
+/// The description of the submit request for `item`.
+pub fn sr_description(item: &Item, changes: Option<&str>) -> String {
+    let mut out = format!(
+        "Update {} to {} (was {}).",
+        item.pkg, item.new_version, item.old_version
+    );
+    if let Some(c) = changes {
+        out.push_str("\n\nChangelog:\n");
+        out.push_str(c);
+    }
+    out.push_str("\n\nBuilt in the branch project by auto-package.");
+    out
+}
+
+/// The list shown before submit requests are created, one line each.
+pub fn sr_confirmation_lines(branch_project: &str, items: &[&Item]) -> Vec<String> {
+    items
+        .iter()
+        .map(|i| {
+            format!(
+                "{}/{} -> {}/{}  ({} -> {})",
+                branch_project, i.pkg, i.origin, i.pkg, i.old_version, i.new_version
+            )
+        })
+        .collect()
+}
+
 /// The end-of-run summary.
 pub fn summary_text(
     branch_project: &str,
@@ -214,7 +328,12 @@ pub fn summary_text(
         results
             .iter()
             .filter(|r| r.outcome == ItemOutcome::Updated)
-            .map(|r| format!("{} {} -> {}", r.item.pkg, r.item.old_version, r.item.new_version))
+            .map(|r| {
+                format!(
+                    "{} {} -> {}",
+                    r.item.pkg, r.item.old_version, r.item.new_version
+                )
+            })
             .collect(),
     );
     section(
@@ -417,12 +536,112 @@ mod tests {
         }
     }
 
+    const CHANGES: &str = "-------------------------------------------------------------------\n\
+Tue Oct 14 10:00:00 UTC 2026 - Dev <dev@example.org>\n\
+\n\
+- Update to 2.0:\n  * new thing\n  * fixed bug\n\
+\n\
+-------------------------------------------------------------------\n\
+Mon Sep  1 09:00:00 UTC 2026 - Dev <dev@example.org>\n\
+\n\
+- Update to 1.0\n";
+
+    #[test]
+    fn the_newest_changes_entry_loses_its_header_and_older_entries() {
+        assert_eq!(
+            latest_changes_entry(CHANGES).as_deref(),
+            Some("- Update to 2.0:\n  * new thing\n  * fixed bug")
+        );
+        assert_eq!(latest_changes_entry(""), None);
+        assert_eq!(latest_changes_entry("no separator here\n"), None);
+    }
+
+    #[test]
+    fn a_long_changes_entry_is_cut_on_a_line_boundary() {
+        let body: String = (0..400).map(|i| format!("- line number {i}\n")).collect();
+        let changes = format!("{}\nDate - Who\n\n{body}", "-".repeat(67));
+        let entry = latest_changes_entry(&changes).unwrap();
+        assert!(entry.ends_with("\n[...]"), "{entry}");
+        assert!(entry.chars().count() < 1300);
+        assert!(
+            entry
+                .lines()
+                .rev()
+                .nth(1)
+                .unwrap()
+                .starts_with("- line number")
+        );
+        assert!(!entry.lines().rev().nth(1).unwrap().ends_with("numb"));
+    }
+
+    #[test]
+    fn the_description_names_the_versions_and_carries_the_changelog() {
+        let mut i = item("foo");
+        i.old_version = "1.0".into();
+        i.new_version = "2.0".into();
+        let d = sr_description(&i, Some("- Update to 2.0"));
+        assert!(d.starts_with("Update foo to 2.0 (was 1.0).\n\nChangelog:\n- Update to 2.0"));
+        assert!(!sr_description(&i, None).contains("Changelog"));
+    }
+
+    #[test]
+    fn only_a_built_package_at_the_new_version_may_be_submitted() {
+        use osc::BuildStatus::*;
+        let i = item("foo");
+        let ok = ItemOutcome::Updated;
+        assert_eq!(sr_eligibility(&i, &ok, Some(&Succeeded), Some("2")), Ok(()));
+        // 2 and 2.0 are the same release.
+        assert_eq!(
+            sr_eligibility(&i, &ok, Some(&Succeeded), Some("2.0")),
+            Ok(())
+        );
+        let why = |o: &ItemOutcome, b: Option<&osc::BuildStatus>, v: Option<&str>| {
+            sr_eligibility(&i, o, b, v).unwrap_err()
+        };
+        assert!(
+            why(
+                &ItemOutcome::Failed("x".into()),
+                Some(&Succeeded),
+                Some("2")
+            )
+            .contains("failed")
+        );
+        assert!(why(&ItemOutcome::Skipped("x".into()), None, None).contains("skipped"));
+        assert!(why(&ok, Some(&Failed), Some("2")).contains("failed"));
+        assert!(why(&ok, Some(&Building), Some("2")).contains("building"));
+        assert!(why(&ok, None, Some("2")).contains("could not be read"));
+        assert!(why(&ok, Some(&Succeeded), Some("1")).contains("says 1, not 2"));
+        assert!(why(&ok, Some(&Succeeded), None).contains("spec could not be read"));
+    }
+
+    #[test]
+    fn the_confirmation_lists_each_request_with_its_origin() {
+        let a = item("foo");
+        let mut b = item("bar");
+        b.origin = "devel:x".into();
+        assert_eq!(
+            sr_confirmation_lines("home:u:b", &[&a, &b]),
+            [
+                "home:u:b/foo -> Base:System/foo  (1 -> 2)",
+                "home:u:b/bar -> devel:x/bar  (1 -> 2)"
+            ]
+        );
+    }
+
     #[test]
     fn the_summary_counts_every_outcome_and_a_failure_fails_the_run() {
         let results = vec![
             result("a", ItemOutcome::Updated, SrOutcome::Created("42".into())),
-            result("b", ItemOutcome::Failed("build".into()), SrOutcome::NotEligible("failed".into())),
-            result("c", ItemOutcome::Skipped("name".into()), SrOutcome::NotRequested),
+            result(
+                "b",
+                ItemOutcome::Failed("build".into()),
+                SrOutcome::NotEligible("failed".into()),
+            ),
+            result(
+                "c",
+                ItemOutcome::Skipped("name".into()),
+                SrOutcome::NotRequested,
+            ),
             result("d", ItemOutcome::Updated, SrOutcome::Existing("7".into())),
         ];
         assert!(any_failed(&results));

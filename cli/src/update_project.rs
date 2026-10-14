@@ -498,9 +498,133 @@ fn cmd_update_project(
     }
 
     if a.submit {
-        ctx.warn("--submit does nothing yet");
+        submit_requests(a, branch, &mut report.results, ctx);
     }
     Ok(())
+}
+
+/// The newest `.changes` entry of a package in the branch project.
+fn newest_changes(branch: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+    let files = osc::list_package_files(branch, pkg, emit)?;
+    let own = format!("{pkg}.changes");
+    let name = files
+        .iter()
+        .find(|f| **f == own)
+        .or_else(|| files.iter().find(|f| f.ends_with(".changes")))?;
+    up::latest_changes_entry(&osc::cat_file(branch, pkg, name, emit)?)
+}
+
+/// Ask a yes/no question on the terminal. Without a terminal there is nobody
+/// to ask, which counts as no.
+fn confirm(question: &str, ctx: &Ctx<'_>) -> bool {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        ctx.warn("cannot ask for confirmation without a terminal; pass --yes to submit unasked");
+        return false;
+    }
+    eprint!("{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Create a submit request, to its origin project, for each package that
+/// built at the new version in the branch project.
+///
+/// Conservative at every step: a package whose build or version cannot be
+/// confirmed gets no request; one with an open request from the branch
+/// project already gets none either (and a request list that cannot be read
+/// counts as unknown, not as empty); and nothing is created before the list
+/// is shown and confirmed, unless `--yes`.
+fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResult], ctx: &Ctx<'_>) {
+    let emit = Emit::run(ctx.reporter.as_ref());
+    let mut pending: Vec<(usize, osc::SubmitRequest)> = Vec::new();
+    for (idx, r) in results.iter_mut().enumerate() {
+        let updated = r.outcome == ItemOutcome::Updated;
+        let build = updated
+            .then(|| osc::get_build_status(branch, &r.item.pkg, &a.distro, &a.arch, emit).ok())
+            .flatten();
+        let spec_version = updated
+            .then(|| update::spec_for_package(branch, &r.item.pkg, emit))
+            .flatten()
+            .and_then(|spec| ap_build::spec::parse_header(&spec))
+            .map(|h| h.version);
+        if let Err(why) =
+            up::sr_eligibility(&r.item, &r.outcome, build.as_ref(), spec_version.as_deref())
+        {
+            ctx.say(format!("no request for {}: {why}", r.item.pkg));
+            r.sr = SrOutcome::NotEligible(why);
+            continue;
+        }
+        match osc::open_submit_requests(branch, &r.item.pkg, &r.item.origin, emit) {
+            Ok(open) => {
+                if let Some(first) = open.first() {
+                    ctx.say(format!(
+                        "no request for {}: request {} from {branch} to {} is already open",
+                        r.item.pkg, first.id, r.item.origin
+                    ));
+                    r.sr = SrOutcome::Existing(first.id.clone());
+                    continue;
+                }
+            }
+            Err(e) => {
+                ctx.warn(format!(
+                    "no request for {}: could not check for an open one: {e}",
+                    r.item.pkg
+                ));
+                r.sr = SrOutcome::Failed(format!("could not check for an open request: {e}"));
+                continue;
+            }
+        }
+        pending.push((
+            idx,
+            osc::SubmitRequest {
+                source_project: branch.to_string(),
+                source_package: r.item.pkg.clone(),
+                target_project: r.item.origin.clone(),
+                target_package: r.item.pkg.clone(),
+                description: up::sr_description(
+                    &r.item,
+                    newest_changes(branch, &r.item.pkg, emit).as_deref(),
+                ),
+            },
+        ));
+    }
+    if pending.is_empty() {
+        return;
+    }
+
+    let items: Vec<&Item> = pending.iter().map(|(i, _)| &results[*i].item).collect();
+    ctx.say(format!("submit requests to create ({}):", items.len()));
+    for line in up::sr_confirmation_lines(branch, &items) {
+        ctx.say(format!("  {line}"));
+    }
+    if !a.yes && !confirm(&format!("Create {} submit request(s)?", pending.len()), ctx) {
+        for (idx, _) in &pending {
+            results[*idx].sr = SrOutcome::Declined;
+        }
+        return;
+    }
+
+    for (idx, sr) in pending {
+        results[idx].sr = match osc::create_submit_request(&sr, emit) {
+            Ok(id) => {
+                ctx.say(format!(
+                    "created request {id}: {}/{} -> {}/{}",
+                    sr.source_project, sr.source_package, sr.target_project, sr.target_package
+                ));
+                SrOutcome::Created(id)
+            }
+            Err(e) => {
+                ctx.warn(format!(
+                    "could not create the request for {}: {e}",
+                    sr.source_package
+                ));
+                SrOutcome::Failed(e.to_string())
+            }
+        };
+    }
 }
 
 fn visit_key(item: &Item) -> String {
