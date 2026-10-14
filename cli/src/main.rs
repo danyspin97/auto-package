@@ -97,6 +97,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         no_agent: bool,
 
+        /// Resolve dependencies without the sandbox: pip runs on the host and
+        /// may build sdists, running their build backends as you. Without
+        /// this, pip runs in bubblewrap, or resolves wheels only when
+        /// bubblewrap is unusable. Same as AUTO_PACKAGE_UNSAFE_RESOLVE=1.
+        #[arg(long, default_value_t = false)]
+        unsafe_resolve: bool,
+
         /// Remove the work directory before building.
         #[arg(long, default_value_t = false)]
         cleanup: bool,
@@ -189,6 +196,13 @@ enum Commands {
         /// Build only; never call the model.
         #[arg(long, default_value_t = false)]
         no_agent: bool,
+
+        /// Resolve dependencies without the sandbox: pip runs on the host and
+        /// may build sdists, running their build backends as you. Without
+        /// this, pip runs in bubblewrap, or resolves wheels only when
+        /// bubblewrap is unusable. Same as AUTO_PACKAGE_UNSAFE_RESOLVE=1.
+        #[arg(long, default_value_t = false)]
+        unsafe_resolve: bool,
 
         /// Maximum number of packages to rebuild concurrently (0 = unlimited).
         /// Each rebuild still runs its own dep closure, so this bounds the
@@ -641,6 +655,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             regen,
             agent_backend,
             no_agent,
+            unsafe_resolve,
             cleanup,
             jobs,
             url,
@@ -656,6 +671,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // `--no-agent` promises no model calls at all, including the
             // web-search fallback that locates an upstream for unknown names.
             ap_build::discovery::set_agent_enabled(!no_agent);
+            ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
             // `build https://github.com/owner/repo` — the URL is the source and
@@ -1062,10 +1078,12 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             max_attempts,
             budget_usd,
             no_agent,
+            unsafe_resolve,
             jobs,
             regen,
         } => {
             ap_build::discovery::set_agent_enabled(!no_agent);
+            ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
 
             let level: LogLevel = log
@@ -2788,6 +2806,26 @@ fn report_update_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsafe_resolve_is_off_unless_asked_for_on_build_and_update() {
+        let unsafe_resolve = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Commands::Build { unsafe_resolve, .. } | Commands::Update { unsafe_resolve, .. } => {
+                unsafe_resolve
+            }
+            _ => panic!("not build or update"),
+        };
+        let build = ["auto-package", "build", "httpx", "--project", "home:u"];
+        let update = ["auto-package", "update", "--project", "home:u"];
+        assert!(!unsafe_resolve(&build));
+        assert!(!unsafe_resolve(&update));
+        assert!(unsafe_resolve(
+            &[&build[..], &["--unsafe-resolve"]].concat()
+        ));
+        assert!(unsafe_resolve(
+            &[&update[..], &["--unsafe-resolve"]].concat()
+        ));
+    }
 
     #[test]
     fn a_running_or_finished_package_is_not_started_again() {

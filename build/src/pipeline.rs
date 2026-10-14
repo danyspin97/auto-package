@@ -442,6 +442,21 @@ mod resolvable_tests {
     }
 }
 
+/// Tell the user, once per run, when pip does not run in its sandbox: either
+/// no sandbox works here and sdists are skipped, or `--unsafe-resolve` turned
+/// the sandbox off.
+fn warn_unsandboxed_resolve_once(reporter: &dyn Reporter) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        if let Some(message) = ap_ecosystem::pip::resolve_mode().notice() {
+            reporter.report(&Event::Warning {
+                step: None,
+                message,
+            });
+        }
+    });
+}
+
 /// Resolve the dependency closure and return all currently buildable targets
 /// (the "frontier" — nodes whose declared deps in the closure are all resolved).
 ///
@@ -484,6 +499,7 @@ pub fn select_target(
     reporter.report(&Event::ResolveStarted {
         root: name.to_string(),
     });
+    warn_unsandboxed_resolve_once(reporter);
 
     // Kick off the package availability fetch concurrently with pip resolve.
     // Checked separately, not merged: whether a build-status check applies
