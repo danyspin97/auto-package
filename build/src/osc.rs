@@ -357,9 +357,45 @@ fn extract_unresolvable_detail(log: &str) -> Vec<String> {
     result
 }
 
+/// The packages OBS has, but at a version older than a constraint asks for:
+/// the `nothing provides <name> >= V` lines of `detail` that are followed by
+/// `(got version W)`. Such a package is not missing; it has to be brought up to
+/// date (a sibling of a release family pinned to `==0.66b1` while the project
+/// builds `0.66b0`). Bare names, collapsed across flavors.
+pub fn outdated_packages(detail: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for pair in detail.windows(2) {
+        let (line, next) = (pair[0].trim(), pair[1].trim());
+        if !next.starts_with("(got version") {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("nothing provides ") else {
+            continue;
+        };
+        let name = rest.split_whitespace().next().unwrap_or("");
+        names.push(name.to_string());
+    }
+    missing_package_names(&names)
+}
+
 #[cfg(test)]
 mod extract_unresolvable_tests {
     use super::*;
+
+    #[test]
+    fn a_package_at_an_older_version_is_outdated_not_missing() {
+        let detail = vec![
+            "nothing provides python313-opentelemetry-instrumentation >= 0.66b1".to_string(),
+            "(got version 0.66b0-1.1)".to_string(),
+            "nothing provides python314-opentelemetry-instrumentation >= 0.66b1".to_string(),
+            "(got version 0.66b0-1.1)".to_string(),
+            "nothing provides python313-logfire".to_string(),
+        ];
+        assert_eq!(
+            outdated_packages(&detail),
+            ["opentelemetry-instrumentation"]
+        );
+    }
 
     /// Regression test: a rich `(A or B)` requires group leaves a stray `)`
     /// on the last alternative's "nothing provides" line, and a multibuild

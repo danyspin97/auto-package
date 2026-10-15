@@ -149,6 +149,9 @@ pub enum PipelineResult {
         /// The part of `deps` that is a native (C/C++) library: never looked up
         /// on PyPI, whatever a translation made of its spelling.
         native: Vec<String>,
+        /// The part of `deps` the repository has at a version older than a
+        /// constraint wants: updated in place, not built as a new package.
+        outdated: Vec<String>,
     },
     Failed {
         rpm_name: String,
@@ -2610,6 +2613,7 @@ fn missing_deps_from_turn(
         deps: to_build,
         patches,
         native,
+        outdated: Vec::new(),
     })
 }
 
@@ -3565,11 +3569,20 @@ fn unresolvable_deps_round(
         )));
     }
     let native = crate::depclass::native_among(&unresolvable_deps, &to_build);
+    let outdated: Vec<String> = osc::outdated_packages(&detail)
+        .into_iter()
+        .filter(|n| {
+            to_build
+                .iter()
+                .any(|b| osc::fuzzy_key(b) == osc::fuzzy_key(n))
+        })
+        .collect();
     Err(PipelineResult::MissingDeps {
         rpm_name: rpm_name.clone(),
         deps: to_build,
         patches: Vec::new(),
         native,
+        outdated,
     })
 }
 

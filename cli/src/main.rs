@@ -1499,6 +1499,80 @@ impl NativeNames {
     }
 }
 
+/// Dependencies the repository has at a version older than a package's
+/// constraint wants, by `fuzzy_key`: they are updated, not built from scratch
+/// or dropped as available.
+#[derive(Default)]
+struct OutdatedNames {
+    keys: std::cell::RefCell<std::collections::HashSet<String>>,
+}
+
+impl OutdatedNames {
+    fn record(&self, names: &[String]) {
+        let mut keys = self.keys.borrow_mut();
+        for n in names {
+            keys.insert(ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(n)));
+        }
+    }
+
+    fn contains(&self, dep: &str) -> bool {
+        self.keys
+            .borrow()
+            .contains(&ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(
+                dep,
+            )))
+    }
+}
+
+/// The config to bring `dep`, which the repository has at an older version than
+/// a dependent needs, up to the newest PyPI release: its existing recipe is
+/// carried forward (a package of this project as it is, a distro package after
+/// the pipeline branches it). The error says why that is not possible.
+fn update_config_for_outdated(
+    dep: &str,
+    project: &str,
+    config: &PipelineConfig,
+    own_listing: &std::collections::HashSet<String>,
+    reporter: &dyn Reporter,
+    emit: ap_build::proc::Emit<'_>,
+) -> Result<PipelineConfig, String> {
+    let rpm = ap_build::osc::rpm_name(dep);
+    let real = own_listing
+        .iter()
+        .find(|p| {
+            let k = ap_build::osc::fuzzy_key(p);
+            k == ap_build::osc::fuzzy_key(&rpm) || k == ap_build::osc::fuzzy_key(dep)
+        })
+        .cloned()
+        .unwrap_or(rpm);
+    let newest = pypi_latest_version(dep, reporter)
+        .ok_or_else(|| "it has no PyPI release to update to".to_string())?;
+    let current = ap_build::update::spec_for_package(project, &real, emit)
+        .and_then(|text| ap_build::spec::parse_header(&text))
+        .map(|h| h.version);
+    if current.as_deref() == Some(newest.as_str()) {
+        return Err(format!(
+            "{real} is already at the newest release ({newest}); a newer one than PyPI has \
+             cannot be built"
+        ));
+    }
+    ap_core::diag!(
+        "  updating {real} from {} to {newest} for a dependent that needs a newer one",
+        current.as_deref().unwrap_or("the distro's version")
+    );
+    Ok(PipelineConfig {
+        pkg_name: dep.to_string(),
+        rpm_name: real,
+        version: newest,
+        source_repo: None,
+        subprojects: Vec::new(),
+        force: true,
+        regen: false,
+        patch_request: None,
+        ..config.clone()
+    })
+}
+
 /// The dependencies a package asked to have patched instead of built
 /// (convention 62), by the name's `fuzzy_key` without its `python-` prefix, so
 /// the dependency queue can tell them from the ones it builds.
@@ -2104,6 +2178,7 @@ fn cmd_build(
     // Dependencies to branch and patch rather than build.
     let patch_requests = PatchRequests::default();
     let native_names = NativeNames::default();
+    let outdated_names = OutdatedNames::default();
 
     // Packages that are running, and where their results arrive. These outlive
     // one pass of the loop below: a package that reports missing dependencies
@@ -2227,6 +2302,39 @@ fn cmd_build(
                     Err(why) => {
                         dep_drops.dropped(reporter.as_ref(), &dep, why);
                     }
+                }
+            }
+            // A dependency the repository has at an older version than a
+            // dependent needs is updated, not dropped as available.
+            let (outdated_batch, batch): (Vec<String>, Vec<String>) =
+                batch.into_iter().partition(|d| outdated_names.contains(d));
+            for rpm_dep in outdated_batch {
+                let dep = ap_build::osc::strip_rpm_prefix(&rpm_dep).to_string();
+                if !attempted_deps.insert(ap_build::osc::fuzzy_key(&dep)) {
+                    let earlier = dep_drops
+                        .reason(&dep)
+                        .unwrap_or_else(|| "no outcome was recorded for it".to_string());
+                    dep_drops.dropped(
+                        reporter.as_ref(),
+                        &dep,
+                        format!("it was already attempted this run ({earlier})"),
+                    );
+                    continue;
+                }
+                match update_config_for_outdated(
+                    &dep,
+                    project,
+                    &config,
+                    &own_listing,
+                    reporter.as_ref(),
+                    lookup_emit,
+                ) {
+                    Ok(dep_config) => {
+                        if let Some(h) = spawn_dep_build(dep_config, dep.clone()) {
+                            patch_handles.push(h);
+                        }
+                    }
+                    Err(why) => dep_drops.dropped(reporter.as_ref(), &dep, why),
                 }
             }
             // Every reported name is triaged once (see `depclass::triage`):
@@ -2646,10 +2754,12 @@ fn cmd_build(
                         deps: more,
                         patches,
                         native,
+                        outdated,
                         ..
                     } => {
                         patch_requests.record(&patches);
                         native_names.record(&native);
+                        outdated_names.record(&outdated);
                         dep_drops.note_outcome(
                             &dep_rpm,
                             format!("it could not be built until {} exist", more.join(", ")),
@@ -2755,10 +2865,12 @@ fn cmd_build(
                     deps,
                     patches,
                     native,
+                    outdated,
                     ..
                 } => {
                     patch_requests.record(&patches);
                     native_names.record(&native);
+                    outdated_names.record(&outdated);
                     // Only queue deps we haven't tried yet; if every dep was
                     // already attempted we cannot make progress. Compared by
                     // `fuzzy_key`, not the raw string — see its doc comment.
@@ -2971,10 +3083,12 @@ fn cmd_build(
                     deps,
                     patches,
                     native,
+                    outdated,
                     ..
                 } => {
                     patch_requests.record(&patches);
                     native_names.record(&native);
+                    outdated_names.record(&outdated);
                     // No-progress detection (review finding #15 in the Sep
                     // report; still open in Oct). A package that keeps
                     // surfacing MissingDeps on names already in
