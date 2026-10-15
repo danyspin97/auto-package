@@ -4,7 +4,7 @@
 
 Checked against 0.4.0 on openSUSE_Tumbleweed, x86_64.
 
-- The upstream sdist builds a C++ pybind11 extension, so it needs a C++ compiler and the package is architecture-specific, not noarch.
+- The upstream sdist builds a C++ pybind11 extension, so it needs a C++ compiler (gcc-c++) and the package is architecture-specific, not noarch.
 - On openSUSE_Tumbleweed only, the pybind11 headers are not under the pip-style include path the build passes; they ship in the pybind11-devel subpackage. Build requires both the pybind11 module and pybind11-devel.
 - typer is a declared runtime dependency that the package never imports.
 - tqdm and the 3FS reader are guarded or lazy imports, so they are Recommends, not Requires.
@@ -19,7 +19,7 @@ Checked against 0.4.0 on openSUSE_Tumbleweed, x86_64.
 
 Checked against 0.4.0 on openSUSE_Tumbleweed, x86_64.
 
-- Duplicate-file cleanup targets the sitelib tree, not sitearch.
+- Duplicate-file cleanup must run on the sitearch tree, where the compiled extension is installed. An older spec pointed it at sitelib instead.
 - The changelog entry is written by hand, because the changelog generation tool fails in the build sandbox on keyring and D-Bus access. A recent fix to session-bus handling may have removed the cause; recheck whether the hand-written entry is still needed.
 
 ## Failure history

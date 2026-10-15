@@ -2,7 +2,7 @@
 
 ## Build requirements
 - The package is a metapackage. The upstream wheel for the build architecture holds only its dist-info directory, and every NVIDIA component is an optional extra. So there is no module, no console script, and no base Requires.
-- The license is LicenseRef-NVIDIA-Proprietary, because the NVIDIA license has no SPDX identifier.
+- The upstream metadata has no License field, so the License tag is set by hand. The license is LicenseRef-NVIDIA-Proprietary, because the NVIDIA license has no SPDX identifier.
 - %files lists only the dist-info directory, since nothing else is installed.
 Checked against 13.0.3.0 on openSUSE_Tumbleweed, x86_64.
 

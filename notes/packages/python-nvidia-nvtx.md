@@ -1,5 +1,9 @@
 # python-nvidia-nvtx
 
+## Test changes
+- The %check section loads the packaged shared object with dlopen, to confirm the prebuilt library can be loaded.
+Checked against 13.0.85 on openSUSE_Tumbleweed, x86_64.
+
 ## Workarounds
 - The package repackages the prebuilt upstream wheel for the build architecture instead of building from source.
 - The wheel is installed into the site-packages directory, not the platform-specific one, because its metadata marks it as purelib-rooted.

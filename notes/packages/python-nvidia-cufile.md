@@ -7,9 +7,6 @@
 - The wheel's dist-info license file is listed with %license.
 Checked against 1.15.1.6 on openSUSE_Tumbleweed, x86_64.
 
-## Test changes
-None recorded.
-
 ## Workarounds
 - The headers shipped in the wheel are left out of the package, and their RECORD entry is dropped from %files. This is a packaging choice, not a build fix.
 Checked against 1.15.1.6 on openSUSE_Tumbleweed, x86_64.

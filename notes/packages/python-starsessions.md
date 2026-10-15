@@ -1,10 +1,12 @@
 # python-starsessions notes
 
 ## Build requirements
-- BuildRequires starlette and itsdangerous, so that the import check can load the package's dependencies. The review planned this; the journal does not show the exact Requires list.
-- Runtime Requires: the review added the dependencies that were missing from the spec. Confirm the list against the package's declared dependencies before changing it.
+- The build backend is poetry-core, declared in pyproject.toml.
+- starlette and itsdangerous are required (non-optional) runtime dependencies. Add them as BuildRequires as well, because the %check imports the package, which loads them.
+- redis is an optional extra: Recommends it, do not Require it.
+- Runtime Requires should match the non-optional entries of the pyproject dependency table.
 Checked against 2.2.1 on openSUSE_Tumbleweed, x86_64.
 
 ## Test changes
-- Added a real %check in place of skipping tests. The journal does not record which tests it runs or whether any were deselected.
+- The sdist has no tests directory, although pyproject declares a pytest config. The %check is therefore an import smoke test of the starsessions package, not the upstream test suite. The build passed with it.
 Checked against 2.2.1 on openSUSE_Tumbleweed, x86_64.
