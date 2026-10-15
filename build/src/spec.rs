@@ -323,6 +323,56 @@ pub fn fix_stray_dollar_macros(spec: &str) -> String {
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
 }
 
+/// Put the parentheses RPM needs around a conditional dependency.
+///
+/// `Requires:  python-tomli >= 2.0.0 if python-base < 3.11` is not a
+/// conditional dependency: without parentheses RPM reads three requirements, and
+/// OBS then reports `nothing provides if` (python-fastapi-cli never built). The
+/// valid form is `(python-tomli >= 2.0.0 if python-base < 3.11)`. A `%{...}`
+/// macro item (`%{python_module x if %python-base < 3.11}`) brings its own and is
+/// left alone, as is an item already in parentheses.
+pub fn parenthesize_conditional_dependencies(spec: &str) -> String {
+    const TAGS: [&str; 6] = [
+        "Requires",
+        "BuildRequires",
+        "Recommends",
+        "Suggests",
+        "Supplements",
+        "Enhances",
+    ];
+    let out: Vec<String> = spec
+        .lines()
+        .map(|line| {
+            let t = line.trim_start();
+            let is_dep_line = TAGS.iter().any(|tag| {
+                t.strip_prefix(tag)
+                    .is_some_and(|r| r.starts_with(':') || r.starts_with('('))
+            });
+            let Some((head, value)) = line.split_once(':').filter(|_| is_dep_line) else {
+                return line.to_string();
+            };
+            if !value.contains(" if ") && !value.contains(" unless ") {
+                return line.to_string();
+            }
+            let items: Vec<String> = value
+                .split(',')
+                .map(|item| {
+                    let trimmed = item.trim();
+                    let conditional = trimmed.contains(" if ") || trimmed.contains(" unless ");
+                    if conditional && !trimmed.starts_with('(') && !trimmed.starts_with("%{") {
+                        format!("({trimmed})")
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .collect();
+            let pad = &value[..value.len() - value.trim_start().len()];
+            format!("{head}:{pad}{}", items.join(", "))
+        })
+        .collect();
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
 /// Add `Requires(post)`/`Requires(postun): update-alternatives` when the
 /// spec registers an alternative but doesn't already declare them.
 ///
@@ -4438,5 +4488,21 @@ mod add_build_requires_tests {
         );
         assert!(add_build_requires(&out, "%{python_module nvidia-nccl-cu13}").is_none());
         assert!(add_build_requires("Name: x\n", "a").is_none());
+    }
+}
+
+#[cfg(test)]
+mod conditional_dependency_tests {
+    use super::parenthesize_conditional_dependencies;
+
+    #[test]
+    fn a_bare_conditional_dependency_gets_its_parentheses() {
+        let spec = "Requires:       python-tomli >= 2.0.0 if python-base < 3.11\nRequires:       python-a, python-b if python-base < 3.12\nBuildRequires:  %{python_module tomli >= 2.0.0 if %python-base < 3.11}\nRequires:       (python-x if python-base < 3.11)\nRequires:       python-plain >= 1\n# Requires: a if b\n";
+        let out = parenthesize_conditional_dependencies(spec);
+        assert_eq!(
+            out,
+            "Requires:       (python-tomli >= 2.0.0 if python-base < 3.11)\nRequires:       python-a, (python-b if python-base < 3.12)\nBuildRequires:  %{python_module tomli >= 2.0.0 if %python-base < 3.11}\nRequires:       (python-x if python-base < 3.11)\nRequires:       python-plain >= 1\n# Requires: a if b\n"
+        );
+        assert_eq!(parenthesize_conditional_dependencies(&out), out);
     }
 }
