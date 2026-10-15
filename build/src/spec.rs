@@ -3015,3 +3015,75 @@ mod normalizer_tests {
         assert!(has_license_file_entry("Name: x\n"));
     }
 }
+
+/// Whether the spec's `%check` does nothing but test that a file exists
+/// (`test -e`, `test -x`, `ls`, also behind `%python_expand`): it has at least
+/// one such command and no other. A package that ships Python modules is
+/// imported instead (convention 67).
+pub fn check_is_file_probe_only(spec: &str) -> bool {
+    let body = spec.split("\n%changelog").next().unwrap_or(spec);
+    let mut in_check = false;
+    let mut probes = 0;
+    for line in body.lines() {
+        let t = line.trim();
+        if t == "%check" {
+            in_check = true;
+            continue;
+        }
+        const SECTIONS: &[&str] = &[
+            "%files",
+            "%changelog",
+            "%install",
+            "%prep",
+            "%build",
+            "%package",
+            "%description",
+            "%post",
+            "%pre",
+            "%preun",
+            "%postun",
+            "%conf",
+            "%generate_buildrequires",
+        ];
+        if in_check
+            && SECTIONS
+                .iter()
+                .any(|h| t == *h || t.starts_with(&format!("{h} ")))
+        {
+            break;
+        }
+        if !in_check || t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let command = t.strip_prefix("%python_expand").map(str::trim).unwrap_or(t);
+        if command.starts_with("test -e")
+            || command.starts_with("test -x")
+            || command.starts_with("test -f")
+            || command.starts_with("ls ")
+        {
+            probes += 1;
+        } else if t.starts_with("%if") || t.starts_with("%endif") || t.starts_with("%else") {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    probes > 0
+}
+
+#[cfg(test)]
+mod check_probe_tests {
+    use super::check_is_file_probe_only;
+
+    #[test]
+    fn only_file_probes_are_weak() {
+        let weak =
+            "%check\n%python_expand test -e %{buildroot}%{$python_sitearch}/x/y.so\n\n%files\n";
+        assert!(check_is_file_probe_only(weak));
+        let real = "%check\n%python_expand test -e a\n%pytest_arch tests/\n";
+        assert!(!check_is_file_probe_only(real));
+        let import = "%check\n%python_expand $python -c 'import x'\n";
+        assert!(!check_is_file_probe_only(import));
+        assert!(!check_is_file_probe_only("%install\nx\n"));
+    }
+}

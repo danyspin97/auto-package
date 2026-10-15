@@ -1218,6 +1218,23 @@ pub fn run_package(
         }
         Err(_) => None,
     };
+    // The package is being worked on again: its recorded outcome is no longer
+    // about the run that is under way. A `missing_deps` or `failed` left from
+    // an earlier run read as current while the package built, and when the run
+    // was stopped it stayed that way (torchcodec "waiting on ffmpeg" while it
+    // was past that).
+    if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
+        let prior = PkgState::load(&ws);
+        if matches!(
+            prior.last_outcome.as_deref(),
+            Some("missing_deps" | "failed" | "interrupted")
+        ) {
+            update_state(&ws, reporter, |state| {
+                state.last_outcome = Some("running".to_string());
+                state.last_failure_reason = None;
+            });
+        }
+    }
     let result = run_package_inner(config, pkg_run, reporter);
     // Once the run is aborted, whatever else was in flight died of the abort
     // (killed children, refused spawns): report it as the abort, not as the
@@ -3123,6 +3140,17 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             if let Some(why) = missing_license_entry(ws, spec_path) {
                 style.push(why);
             }
+            if crate::spec::check_is_file_probe_only(&spec_text_now(spec_path))
+                && ships_python_modules(&ws.dir().join("source"))
+            {
+                style.push(
+                    "its %check only tests that a file exists, but the package ships Python \
+                     modules: import them (and, for a wheel other packages import, the chain \
+                     they import); `test -e` alone is for a package with no module \
+                     (conventions 67, 76)"
+                        .to_string(),
+                );
+            }
             if !style.is_empty() {
                 let validate_step = validate_step.finish(StepOutcome::Failed);
                 reporter.report(&Event::SpecRejected {
@@ -3291,6 +3319,35 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     }
     commit_step.finish(StepOutcome::Ok);
     Ok(())
+}
+
+/// Whether the unpacked source has a Python package (an `__init__.py`) within a
+/// few levels, outside any `.dist-info`/`tests` directory.
+fn ships_python_modules(root: &Path) -> bool {
+    fn walk(dir: &Path, depth: usize) -> bool {
+        if depth > 4 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            if path.is_dir() {
+                if name.ends_with(".dist-info") || name == "tests" || name == "test" {
+                    continue;
+                }
+                if walk(&path, depth + 1) {
+                    return true;
+                }
+            } else if name == "__init__.py" {
+                return true;
+            }
+        }
+        false
+    }
+    walk(root, 0)
 }
 
 fn spec_text_now(spec_path: &Path) -> String {
