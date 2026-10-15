@@ -2,8 +2,9 @@
 
 ## Build requirements
 - The package is a maturin-built Rust extension (PyO3), so the Cargo/Rust build environment is needed; maturin is listed once in BuildRequires.
+- PyO3 uses the stable ABI from Python 3.8 (abi3-py38), so one built extension covers later Python 3 versions.
 - ExclusiveArch restricts the package to tier1 architectures.
-- pydantic is in both BuildRequires and Requires; the reason is not recorded.
+- pydantic is declared as a runtime dependency (pyproject requires 2.11.7 or newer) and is also in BuildRequires; the notes do not record why the build needs it.
 - The module is installed to the sitearch path and listed in files under its real module name, openai_harmony.
 - License is Apache-2.0.
 Checked against 0.0.11 on openSUSE_Tumbleweed, x86_64.
@@ -13,8 +14,8 @@ Checked against 0.0.11 on openSUSE_Tumbleweed, x86_64.
 Checked against 0.0.11 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds
-- Cargo crates come from an offline registry archive shipped as an extra source; the checkout already carries it, so the build does not fetch crates from the network.
-- PYO3_PYTHON is exported inside the same per-flavor expansion as the wheel build, so each multibuild flavor builds against its own interpreter.
+- Cargo crates come from an offline registry archive shipped as an extra source; the build uses it and does not fetch crates from the network.
+- PYO3_PYTHON is set per multibuild flavor, so each flavor builds against its own interpreter.
 - The changelog entry was written by hand because the automatic changelog helper failed on keyring access.
 Checked against 0.0.11 on openSUSE_Tumbleweed, x86_64.
 

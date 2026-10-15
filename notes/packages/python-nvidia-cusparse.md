@@ -3,7 +3,7 @@
 ## Build requirements
 - The spec repackages the upstream wheel for the build architecture; it does not compile from source.
 - Requires nvidia-nvjitlink, because the bundled libraries need nvJitLink at runtime.
-- ExclusiveArch is x86_64, matching the wheel. Files go to sitelib because the wheel declares Root-Is-Purelib: true.
+- ExclusiveArch matches the architecture of the upstream wheel, since the package only repackages it. Files go to sitelib because the wheel declares Root-Is-Purelib: true.
 Checked against 12.6.3.3 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds

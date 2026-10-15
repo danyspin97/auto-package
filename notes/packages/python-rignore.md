@@ -2,8 +2,9 @@
 
 ## Build requirements
 - The package is a maturin project with a Rust extension, so the build needs cargo and PyO3 available offline. The maturin BuildRequires appears once; a duplicate was removed.
+- The pyproject build requirement pins maturin to at least 1.14.1 and below 2.0. The upper bound must stay outside the %{python_module} macro: inside it the `< 2.0` is not parsed as intended.
 - git-core is a BuildRequires because the walk tests in the test suite run the git executable. Without it they fail with FileNotFoundError for 'git'.
-- The spec uses ExclusiveArch and arch-specific sitearch paths, following the maturin shape for Rust extensions. Only x86_64 has been built.
+- Because the package builds a compiled extension, it is not noarch. The spec uses arch-specific sitearch paths, following the maturin shape for Rust extensions.
 Checked against 0.8.1 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds

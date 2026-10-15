@@ -2,8 +2,8 @@
 
 ## Build requirements
 - The package is noarch and setup.py-only: no pyproject.toml, no compiled code, no runtime dependencies, so no runtime Requires are needed.
-- The four console scripts need update-alternatives wiring; the generator omitted it, so the spec adds it by hand.
-- Checked against 4.3.0 on openSUSE_Tumbleweed, x86_64.
+- The four console scripts need update-alternatives wiring; the generator does not emit it. This is a gap for the tool to fill, not something to patch by hand in the spec.
+- Checked against 4.3.0 on openSUSE_Tumbleweed, x86_64. The review confirmed noarch, no ext_modules, four console_scripts and an empty install_requires.
 
 ## Test changes
 - No tests are deselected or patched; the upstream test suite passes (1370 tests) for both flavors.

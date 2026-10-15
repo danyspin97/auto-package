@@ -1,13 +1,13 @@
 # python-opensearch-protobufs
 
 ## Build requirements
-- The protobuf sources are compiled with grpcio-tools instead of Bazel. This was the pre-build plan; the journal does not record a separate check of it.
+- The protobuf sources are compiled to Python with grpcio-tools in %build instead of Bazel, which the upstream archive ships a BUILD.bazel for. The build interpreter (python3) must be able to import grpcio-tools.
 Checked against 1.2.0 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds
-- pyproject.toml is written out in %prep instead of being shipped as an untracked Source1 file. Reason: the untracked extra source was replaced so the build uses only tracked inputs.
+- The upstream archive has no pyproject.toml, setup.py or setup.cfg at any depth, so the packaging metadata is written out in %prep.
 Checked against 1.2.0 on openSUSE_Tumbleweed, x86_64.
 
 ## Failure history
-- A build failure after the first attempt was traced to the untracked pyproject.toml Source1; fixed by writing the file in %prep. The exact error is not recorded in the journal.
+- The protoc call in %build used the bare python variable, which is only defined inside %python_expand, so the call failed with a command-not-found error. Fixed by calling python3 in %build.
 Checked against 1.2.0 on openSUSE_Tumbleweed, x86_64.
