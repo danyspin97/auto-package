@@ -2080,8 +2080,10 @@ fn cmd_build(
     // How many rounds each dependency's own build has had without finishing
     // (failed, or came back needing packages of its own), by `fuzzy_key`.
     let mut dep_rounds: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    // Rounds a dependency gets before it is written off.
-    const MAX_DEP_ATTEMPTS: usize = 3;
+    // Rounds a dependency gets before it is written off: `--max-attempts`, like
+    // a package named on the command line (see `max_target_retries`), not a
+    // smaller number that gives up on it first.
+    let max_dep_attempts = max_attempts;
     // Deps seeded below because OBS already reports them Unresolvable, Failed,
     // or Broken. These are by definition already present in the project's own
     // package list, so the "skip deps already present" filter a few lines
@@ -2723,7 +2725,7 @@ fn cmd_build(
             for key in mid_build.into_inner() {
                 let rounds = dep_rounds.entry(key.clone()).or_insert(0);
                 *rounds += 1;
-                if *rounds < MAX_DEP_ATTEMPTS {
+                if *rounds < max_dep_attempts {
                     attempted_deps.remove(&key);
                 }
             }
@@ -2789,7 +2791,7 @@ fn cmd_build(
                         // abandoned. Bounded like any other retry.
                         let rounds = dep_rounds.entry(key.clone()).or_insert(0);
                         *rounds += 1;
-                        if !more.is_empty() && *rounds < MAX_DEP_ATTEMPTS {
+                        if !more.is_empty() && *rounds < max_dep_attempts {
                             attempted_deps.remove(&key);
                             retrying.insert(key);
                             retry_group.push(dep);
@@ -2807,11 +2809,15 @@ fn cmd_build(
                         // attempt count.
                         let rounds = dep_rounds.entry(key.clone()).or_insert(0);
                         *rounds += 1;
-                        let retry = *rounds < MAX_DEP_ATTEMPTS
+                        let retry = *rounds < max_dep_attempts
                             && !matches!(kind, FailureKind::Exhausted | FailureKind::RateLimited);
                         if retry {
                             attempted_deps.remove(&key);
                             retrying.insert(key);
+                            // Run again once the rest of this batch has had its
+                            // turn, whether or not a dependent names it again:
+                            // the dependent may have given up on seeing it failed.
+                            retry_group.push(dep.clone());
                         }
                         dep_drops.note_outcome(
                             &dep_rpm,
