@@ -315,6 +315,11 @@ pub struct WheelLayout {
     /// The SPDX `License-Expression:` of the wheel's own METADATA, for a
     /// release whose PyPI record carries no usable licence.
     pub license_expression: Option<String>,
+    /// The free-text `License:` header of the METADATA (first line, bounded),
+    /// and its `License ::` trove classifiers: the licence of a wheel built
+    /// before `License-Expression` existed.
+    pub license_text: Option<String>,
+    pub license_classifiers: Vec<String>,
     /// Shortest path (relative to site-packages) of a shared library in the
     /// wheel, for a file-existence check when there is nothing to import.
     pub first_shared_lib: Option<String>,
@@ -643,6 +648,14 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
     let license_expression = headers("License-Expression:")
         .into_iter()
         .find(|v| !v.is_empty());
+    let license_text = headers("License:")
+        .into_iter()
+        .map(|v| v.lines().next().unwrap_or("").trim().to_string())
+        .find(|v| !v.is_empty() && !v.eq_ignore_ascii_case("unknown") && v.len() <= 200);
+    let license_classifiers: Vec<String> = headers("Classifier:")
+        .into_iter()
+        .filter(|c| c.starts_with("License ::"))
+        .collect();
     let files: Vec<String> = names
         .iter()
         .filter(|n| !n.ends_with('/'))
@@ -734,6 +747,8 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         importable,
         namespace_module,
         license_expression,
+        license_text,
+        license_classifiers,
         first_shared_lib,
         header_dirs,
         files,
@@ -2700,6 +2715,45 @@ build-backend = "flit_core.buildapi"
     /// python-triton's shape: `proton`/`proton-viewer` are generated into
     /// `/usr/bin` from `entry_points.txt`, and only `[console_scripts]` (and
     /// `[gui_scripts]`) name files there — other groups are plugins.
+    /// A wheel from before `License-Expression`: the free-text header and the
+    /// trove classifiers are read, `UNKNOWN` and a body line are not a licence.
+    #[test]
+    fn wheel_layout_reads_the_legacy_licence_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.whl");
+        write_wheel_with(
+            &old,
+            &[
+                ("pkg/__init__.py", b""),
+                (
+                    "pkg-1.0.dist-info/METADATA",
+                    b"Metadata-Version: 2.1\nName: pkg\nLicense: 3-Clause BSD\n\
+                      Classifier: License :: OSI Approved :: BSD License\n\
+                      Classifier: Programming Language :: Python\n\nLicense: not a header\n",
+                ),
+            ],
+        );
+        let l = wheel_layout(&old).unwrap();
+        assert_eq!(l.license_text.as_deref(), Some("3-Clause BSD"));
+        assert_eq!(l.license_classifiers, vec!["License :: OSI Approved :: BSD License"]);
+        assert_eq!(l.license_expression, None);
+
+        let new = dir.path().join("new.whl");
+        write_wheel_with(
+            &new,
+            &[
+                ("pkg/__init__.py", b""),
+                (
+                    "pkg-1.0.dist-info/METADATA",
+                    b"Name: pkg\nLicense: UNKNOWN\nLicense-Expression: MIT\n\n",
+                ),
+            ],
+        );
+        let l = wheel_layout(&new).unwrap();
+        assert_eq!(l.license_expression.as_deref(), Some("MIT"));
+        assert_eq!(l.license_text, None);
+    }
+
     #[test]
     fn wheel_layout_reads_console_scripts_from_entry_points() {
         let dir = tempfile::tempdir().unwrap();

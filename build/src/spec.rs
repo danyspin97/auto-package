@@ -2340,13 +2340,11 @@ pub fn wheel_binary_skeleton(
         .summary
         .as_deref()
         .unwrap_or("FIXME: add package summary");
-    // The release's own licence, or, when PyPI has none the tool can use, the SPDX
-    // expression the wheel's METADATA declares (a `License: FIXME` is a turn the
-    // review spends reading the wheel for what the generator already read).
+    // The release's own licence, or, when PyPI has none the tool can use, what the
+    // wheel's METADATA declares (a `License: FIXME` is a turn the review spends
+    // reading the wheel for what the generator already read).
     let license = match license_tag(&release.license) {
-        tag if tag == "FIXME" => layout
-            .and_then(|l| l.license_expression.clone())
-            .unwrap_or(tag),
+        tag if tag == "FIXME" => layout.and_then(wheel_license).unwrap_or(tag),
         tag => tag,
     };
     let url = release.homepage.as_deref().unwrap_or("FIXME");
@@ -2659,6 +2657,55 @@ fn classifier_spdx(name: &str) -> Option<&'static str> {
         "The Unlicense (Unlicense)" => "Unlicense",
         _ => return None,
     })
+}
+
+/// The `License:` value a wheel's own METADATA supports, or `None`: the SPDX
+/// `License-Expression`, else the `License ::` classifiers that map to one SPDX
+/// id, else a free-text `License:` that is a known SPDX id or spelling of one
+/// (`MIT`, `Apache 2.0`, `3-clause BSD`) or NVIDIA's proprietary redistribution
+/// text. Anything else stays `FIXME` for a person: a guessed licence is worse
+/// than a flagged one.
+fn wheel_license(layout: &ap_ecosystem::sdist::WheelLayout) -> Option<String> {
+    if let Some(expr) = &layout.license_expression {
+        return Some(expr.clone());
+    }
+    if !layout.license_classifiers.is_empty() {
+        let tag = license_tag(&License::Classifiers(layout.license_classifiers.clone()));
+        if tag != "FIXME" {
+            return Some(tag);
+        }
+    }
+    let text = layout.license_text.as_deref()?;
+    let key: String = text
+        .to_ascii_lowercase()
+        .replace(['_', ',', '.'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let spdx = match key.as_str() {
+        "mit" | "mit license" => "MIT",
+        "mit-0" => "MIT-0",
+        "apache 2 0" | "apache-2 0" | "apache license 2 0" | "apache license version 2 0"
+        | "apache software license" | "apache software license 2 0" | "apache 2" => "Apache-2.0",
+        "bsd-3-clause" | "bsd 3-clause" | "bsd 3 clause" | "3-clause bsd" | "3 clause bsd"
+        | "new bsd" | "modified bsd" | "bsd-3" => "BSD-3-Clause",
+        "bsd-2-clause" | "bsd 2-clause" | "bsd 2 clause" | "2-clause bsd" | "simplified bsd"
+        | "freebsd" => "BSD-2-Clause",
+        "isc" | "isc license" => "ISC",
+        "mpl-2 0" | "mpl 2 0" | "mozilla public license 2 0" => "MPL-2.0",
+        "psf" | "psf-2 0" | "python software foundation license" => "PSF-2.0",
+        "unlicense" | "the unlicense" => "Unlicense",
+        "zlib" => "Zlib",
+        "0bsd" => "0BSD",
+        _ => {
+            let nvidia = key.contains("nvidia")
+                && ["proprietary", "license agreement", "software license"]
+                    .iter()
+                    .any(|w| key.contains(w));
+            return nvidia.then(|| NVIDIA_PROPRIETARY.to_string());
+        }
+    };
+    Some(spdx.to_string())
 }
 
 fn license_tag(license: &License) -> String {
@@ -3203,6 +3250,28 @@ BuildRequires:  %{python_module pip}
             "{spec}"
         );
         assert!(!check_is_file_probe_only(&spec));
+        // Older wheels: classifiers, then free text; an unknown text is not guessed.
+        let from = |classifiers: &[&str], text: Option<&str>| {
+            let l = WheelLayout {
+                license_classifiers: classifiers.iter().map(|c| c.to_string()).collect(),
+                license_text: text.map(str::to_string),
+                ..Default::default()
+            };
+            wheel_license(&l)
+        };
+        assert_eq!(
+            from(&["License :: OSI Approved :: MIT License"], None).as_deref(),
+            Some("MIT")
+        );
+        // `BSD License` does not say 2 or 3 clauses: the free text may.
+        assert_eq!(
+            from(&["License :: OSI Approved :: BSD License"], Some("3-Clause BSD")).as_deref(),
+            Some("BSD-3-Clause")
+        );
+        assert_eq!(from(&[], Some("Apache License, Version 2.0")).as_deref(), Some("Apache-2.0"));
+        assert_eq!(from(&[], Some("NVIDIA Proprietary Software")).as_deref(), Some("SUSE-NonFree"));
+        assert_eq!(from(&[], Some("Custom terms, see LICENSE")), None);
+        assert_eq!(from(&[], None), None);
         // The release's own licence wins over the wheel's.
         let own = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
         let spec = wheel_binary_skeleton("p", "1", "p-1-py3-none-any.whl", &own, Some(true), Some(&layout));
