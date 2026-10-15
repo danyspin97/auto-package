@@ -195,15 +195,48 @@ const MAX_TOTAL_BYTES: u64 = 4 << 30;
 const MAX_FILE_BYTES: u64 = 2 << 30;
 /// Cap on a manifest read during inspection.
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+/// Largest unpacked-to-compressed ratio accepted, past a fixed allowance: gzip
+/// can expand about 1000:1, so a small upload can ask for gigabytes of disk.
+const MAX_EXPANSION: u64 = 200;
+const EXPANSION_ALLOWANCE: u64 = 64 << 20;
 
 /// Running totals checked against the extraction caps.
 #[derive(Default)]
 struct Budget {
     entries: usize,
     bytes: u64,
+    /// Size of the archive on disk; 0 means unknown and turns the ratio check off.
+    compressed: u64,
 }
 
 impl Budget {
+    /// A budget for reading `archive`, whose size on disk bounds how much it
+    /// may expand to.
+    fn for_file(archive: &Path) -> Self {
+        Budget {
+            compressed: std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0),
+            ..Default::default()
+        }
+    }
+
+    /// The expansion-ratio cap: more than [`MAX_EXPANSION`] times the archive's
+    /// size (after [`EXPANSION_ALLOWANCE`]) is a decompression bomb.
+    fn check_ratio(&self) -> Result<(), Error> {
+        if self.compressed > 0
+            && self.bytes
+                > self
+                    .compressed
+                    .saturating_mul(MAX_EXPANSION)
+                    .saturating_add(EXPANSION_ALLOWANCE)
+        {
+            return Err(Error::LimitExceeded(
+                "unpacked size is far larger than the archive (possible decompression bomb)"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn charge(&mut self, size: u64) -> Result<(), Error> {
         self.entries += 1;
         self.bytes = self.bytes.saturating_add(size);
@@ -222,7 +255,7 @@ impl Budget {
                 "more than {MAX_TOTAL_BYTES} uncompressed bytes"
             )));
         }
-        Ok(())
+        self.check_ratio()
     }
 
     /// Copy one entry's content to `out`, bounded by what the budget still
@@ -254,7 +287,7 @@ impl Budget {
             )));
         }
         self.bytes = before.saturating_add(written.max(declared));
-        Ok(())
+        self.check_ratio()
     }
 }
 
@@ -513,7 +546,7 @@ fn extract_into(tarball: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Re
                 path: dest.to_path_buf(),
                 source: e,
             })?;
-            let mut budget = Budget::default();
+            let mut budget = Budget::for_file(tarball);
             // `unpack_in` keeps tar-rs's traversal and symlink protections.
             for entry in archive.entries().map_err(Error::Tar)? {
                 let mut entry = entry.map_err(Error::Tar)?;
@@ -629,7 +662,7 @@ fn extract_zip(archive: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Res
         path: dest.to_path_buf(),
         source: e,
     })?;
-    let mut budget = Budget::default();
+    let mut budget = Budget::for_file(archive);
     for i in 0..zip_archive.len() {
         let mut entry = zip_archive.by_index(i).map_err(|e| Error::Io {
             path: archive.to_path_buf(),
@@ -754,7 +787,7 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
     let mut out = Vec::new();
     // Same caps as extraction: inspect must not be the cheaper way to make a
     // hostile archive burn memory (the entry list) or time.
-    let mut budget = Budget::default();
+    let mut budget = Budget::for_file(path);
     for entry in archive.entries().map_err(Error::Tar)? {
         let mut entry = entry.map_err(Error::Tar)?;
         budget.charge(entry.size())?;
@@ -797,7 +830,7 @@ fn collect_zip_entries(path: &Path) -> Result<Vec<InspectEntry>, Error> {
         source: std::io::Error::other(e.to_string()),
     })?;
     let mut out = Vec::new();
-    let mut budget = Budget::default();
+    let mut budget = Budget::for_file(path);
     for i in 0..zip_archive.len() {
         let mut entry = zip_archive.by_index(i).map_err(|e| Error::Io {
             path: path.to_path_buf(),
@@ -2086,6 +2119,20 @@ build-backend = "flit_core.buildapi"
             ..Default::default()
         };
         assert!(matches!(b.charge(1), Err(Error::LimitExceeded(_))));
+    }
+
+    #[test]
+    fn archive_budget_refuses_a_decompression_bomb() {
+        // A 1 MiB archive may expand to 64 MiB + 200 MiB, not to gigabytes.
+        let mut b = Budget {
+            compressed: 1 << 20,
+            ..Default::default()
+        };
+        assert!(b.charge(100 << 20).is_ok());
+        assert!(matches!(b.charge(300 << 20), Err(Error::LimitExceeded(_))));
+        // An unknown archive size turns the ratio check off.
+        let mut unknown = Budget::default();
+        assert!(unknown.charge(1 << 30).is_ok());
     }
 
     #[cfg(unix)]

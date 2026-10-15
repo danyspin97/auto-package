@@ -923,9 +923,9 @@ fn first_line(s: &str) -> &str {
 /// A bare `404` would also match unrelated digits, so the HTTP wording is
 /// required; `osc` goes through urllib, which prints `HTTP Error 404: Not Found`.
 fn is_not_found(text: &str) -> bool {
-    text.contains("HTTP Error 404")
-        || text.contains("404 Client Error")
-        || text.contains("Not Found")
+    // Not a bare `Not Found`: that phrase turns up in a 500 body or a message
+    // about a missing file, and a package would be created over it.
+    text.contains("HTTP Error 404: Not Found")
 }
 
 fn check_obs_name(what: &str, name: &str) -> Result<(), Error> {
@@ -2296,7 +2296,18 @@ mod not_found_tests {
     #[test]
     fn recognizes_osc_http_not_found_wording() {
         assert!(is_not_found("urllib: HTTP Error 404: Not Found\n"));
-        assert!(is_not_found("404 Client Error: Not Found for url"));
+        assert!(is_not_found(
+            "Server returned an error: HTTP Error 404: Not Found\n"
+        ));
+    }
+
+    #[test]
+    fn a_not_found_phrase_without_the_http_wording_is_not_a_404() {
+        assert!(!is_not_found("404 Client Error: Not Found for url"));
+        assert!(!is_not_found("config file Not Found, using defaults"));
+        assert!(!is_not_found(
+            "HTTP Error 500: Internal Server Error: Not Found in cache"
+        ));
     }
 
     #[test]
