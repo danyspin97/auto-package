@@ -327,6 +327,31 @@ pub(crate) fn model_for_attempt(attempt: usize, rotation: usize) -> &'static str
 
 // ── conventions ───────────────────────────────────────────────────────────────
 
+/// What the agent is optimising for, ahead of every convention. Kept apart
+/// from [`CONVENTIONS`] so it is not one more numbered rule among a hundred:
+/// it frames how all of them are weighed.
+const PRIORITIES: &str = r#"
+# What matters in this turn
+
+1. **The goal is a package that builds AND works.** A green build of a package
+   that cannot be imported, whose binary does not start, or whose tests were
+   switched off to get past a failure is not done. Never trade correctness for
+   a green build: do not delete or skip tests, drop `%check`, loosen
+   `Requires`, or strip files from `%files` just to make an error go away
+   unless the convention for that exact case says it is the right fix.
+2. **Time matters.** Every turn is a build cycle somebody is waiting on, and
+   the packages queued behind this one wait with it. Make the fix that the
+   evidence already supports, in this turn, instead of opening broad
+   investigations. Read the failing log line first, then only the files that
+   line points to. Fix every problem you can see in one turn rather than one
+   per turn, and do not re-verify what the build log or an earlier turn has
+   already shown.
+3. **Speed never beats rule 1.** If the quick fix would leave the package
+   broken at runtime, take the longer correct one. If you cannot make it
+   work, say so (`blocked`, with the reason) instead of reporting a hollow
+   success.
+"#;
+
 const CONVENTIONS: &str = r#"
 openSUSE spec conventions to keep in mind:
 
@@ -2868,7 +2893,7 @@ fn static_system_prompt() -> &'static str {
     // never changes within the process, so compute it once and hand out the
     // same allocation instead of re-formatting and recopying it every call.
     static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PROMPT.get_or_init(|| format!("{CONVENTIONS}\n\n{STATIC_WORKFLOW}"))
+    PROMPT.get_or_init(|| format!("{PRIORITIES}\n{CONVENTIONS}\n\n{STATIC_WORKFLOW}"))
 }
 
 /// [`static_system_prompt`] written to a file for `--append-system-prompt-file`.
@@ -5222,6 +5247,20 @@ mod tests {
         assert!(combined.contains("29. Missing source code"));
         assert!(combined.contains("### Finding Missing C Headers and Libraries"));
         assert!(combined.contains("## Workflow"));
+    }
+
+    /// The priorities frame every convention, so they must come first, and
+    /// must name both halves of the goal: time, and building AND working.
+    #[test]
+    fn static_system_prompt_opens_with_the_priorities() {
+        let combined = static_system_prompt();
+        assert!(combined.trim_start().starts_with("# What matters in this turn"));
+        assert!(combined.contains("**Time matters.**"));
+        assert!(combined.contains("builds AND works"));
+        assert!(
+            combined.find("**Time matters.**") < combined.find("openSUSE spec conventions"),
+            "the priorities must precede the conventions"
+        );
     }
 
     /// Real shape from a `drogon` build where the claude CLI hit its budget
