@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ap_core::event::Event;
@@ -1850,6 +1850,8 @@ pub fn try_list_project_packages(
 /// why skipping this silently breaks every later availability check for the
 /// rest of the run, not just the one for the package just built.
 pub fn invalidate_project_packages_cache(project: &str) {
+    // The sources changed, so the shared build results of the project may too.
+    RESULTS_CACHE.invalidate(project);
     // Bump first: a fetch in flight must see the change even if it reaches
     // `insert_if_current` before the removal below.
     *PROJECT_PACKAGES_GENERATION
@@ -3472,7 +3474,7 @@ pub fn get_build_status(
     arch: &str,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, false)? {
+    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, false, None)? {
         return Ok(status);
     }
     get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
@@ -3483,15 +3485,19 @@ pub fn get_build_status(
 /// revision now on the server (see [`obs_status::Evidence::confirm`]), so the
 /// previous revision's `failed`/`succeeded` is never mistaken for the result.
 /// Without the XML answer there is no job history to check, so the table
-/// fallback applies as usual.
+/// fallback applies as usual. `committed` is when the commit was done: the
+/// `_result` document is never older than that (see [`ResultsCache::get`]).
 fn get_build_status_after_commit(
     project: &str,
     pkg_name: &str,
     repo: &str,
     arch: &str,
+    committed: Instant,
     emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, true)? {
+    if let Some(status) =
+        get_build_status_xml(project, pkg_name, repo, arch, true, Some(committed))?
+    {
         return Ok(status);
     }
     get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
@@ -3669,6 +3675,7 @@ fn osc_query(args: &[&str], emit: Emit<'_>, what: &str) -> Option<Captured> {
 }
 
 /// Why an `osc api` read gave no document.
+#[derive(Clone)]
 enum ApiFailure {
     /// The server answered with this HTTP status (401, 429, 503, ...): asking
     /// again through another `osc` command will not get a different answer.
@@ -3740,12 +3747,251 @@ fn enc(s: &str) -> std::borrow::Cow<'_, str> {
     urlencoding::encode(s)
 }
 
+/// How long a project-wide `_result` document is shared between waiters.
+const RESULTS_TTL: Duration = Duration::from_secs(5);
+
+/// How long a failed fetch is served to the waiters that ask right after it,
+/// so a refusing server is asked once, not once per waiter.
+const RESULTS_ERROR_TTL: Duration = Duration::from_secs(1);
+
+/// The longest a waiter sits behind another waiter's fetch before fetching
+/// itself (a little over [`OSC_QUERY_TIMEOUT`]).
+const RESULTS_FLIGHT_WAIT: Duration = Duration::from_secs(70);
+
+type ResultsKey = (String, String, String);
+
+enum Slot {
+    /// A fetch is running; `id` tells it apart from a later takeover.
+    Fetching { id: u64 },
+    /// The outcome of a fetch that began at `started` and ended at `at`.
+    Ready {
+        started: Instant,
+        at: Instant,
+        result: Result<Arc<str>, ApiFailure>,
+    },
+}
+
+#[derive(Default)]
+struct CacheState {
+    slots: HashMap<ResultsKey, Slot>,
+    next_flight: u64,
+    /// Bumped per project by [`ResultsCache::invalidate`]: a fetch that began
+    /// under an older epoch is not stored.
+    epochs: HashMap<String, u64>,
+}
+
+/// The project-wide `_result` documents, one per (project, repository, arch),
+/// shared by every waiter of the process. Every OBS call is an `osc`
+/// subprocess, so tens of waiters polling their own package would start tens
+/// of Python interpreters per interval; here they trigger one fetch per
+/// [`RESULTS_TTL`] and read their package out of the same document.
+struct ResultsCache {
+    state: Mutex<CacheState>,
+    done: std::sync::Condvar,
+}
+
+/// Clears a flight's `Fetching` slot if the fetch unwinds, so the waiters
+/// behind it neither hang nor wait for a result that will never come.
+struct Flight<'a> {
+    cache: &'a ResultsCache,
+    key: &'a ResultsKey,
+    id: u64,
+    landed: bool,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        if self.landed {
+            return;
+        }
+        let mut st = self.cache.lock();
+        if matches!(st.slots.get(self.key), Some(Slot::Fetching { id, .. }) if *id == self.id) {
+            st.slots.remove(self.key);
+        }
+        drop(st);
+        self.cache.done.notify_all();
+    }
+}
+
+impl ResultsCache {
+    fn new() -> Self {
+        ResultsCache {
+            state: Mutex::new(CacheState::default()),
+            done: std::sync::Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CacheState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The document for `key`, from `fetch` unless a shared one is at most
+    /// `ttl` old. Waiters for a key whose fetch is running wait for it instead
+    /// of starting another. `newer_than` demands a document whose fetch began
+    /// at or after that instant (a waiter that has just committed cannot use
+    /// what was asked before): an older one is not served, and an older fetch
+    /// in flight is waited out and then replaced.
+    fn get(
+        &self,
+        key: &ResultsKey,
+        ttl: Duration,
+        newer_than: Option<Instant>,
+        fetch: impl FnOnce() -> Result<String, ApiFailure>,
+    ) -> Result<Arc<str>, ApiFailure> {
+        let deadline = Instant::now() + RESULTS_FLIGHT_WAIT;
+        let mut st = self.lock();
+        let (id, started, epoch) = loop {
+            let fresh_enough = |started: &Instant| newer_than.is_none_or(|t| *started >= t);
+            match st.slots.get(key) {
+                Some(Slot::Ready {
+                    started,
+                    at,
+                    result,
+                }) if fresh_enough(started)
+                    && at.elapsed()
+                        < if result.is_ok() {
+                            ttl
+                        } else {
+                            ttl.min(RESULTS_ERROR_TTL)
+                        } =>
+                {
+                    return result.clone();
+                }
+                Some(Slot::Fetching { .. }) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if !left.is_zero() {
+                        st = self
+                            .done
+                            .wait_timeout(st, left)
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            let id = st.next_flight;
+            st.next_flight += 1;
+            let started = Instant::now();
+            st.slots.insert(key.clone(), Slot::Fetching { id });
+            break (id, started, st.epochs.get(&key.0).copied().unwrap_or(0));
+        };
+        drop(st);
+
+        let mut flight = Flight {
+            cache: self,
+            key,
+            id,
+            landed: false,
+        };
+        let result = fetch().map(|doc| Arc::from(doc.as_str()));
+        let mut st = self.lock();
+        if matches!(st.slots.get(key), Some(Slot::Fetching { id: i, .. }) if *i == id) {
+            if st.epochs.get(&key.0).copied().unwrap_or(0) == epoch {
+                st.slots.insert(
+                    key.clone(),
+                    Slot::Ready {
+                        started,
+                        at: Instant::now(),
+                        result: result.clone(),
+                    },
+                );
+            } else {
+                st.slots.remove(key);
+            }
+        }
+        flight.landed = true;
+        drop(st);
+        self.done.notify_all();
+        result
+    }
+
+    /// Forget `project`'s documents: its sources changed, so what was fetched
+    /// so far describes the old state. A fetch in flight is not stored.
+    fn invalidate(&self, project: &str) {
+        let mut st = self.lock();
+        *st.epochs.entry(project.to_string()).or_insert(0) += 1;
+        st.slots
+            .retain(|k, slot| k.0 != project || matches!(slot, Slot::Fetching { .. }));
+    }
+}
+
+static RESULTS_CACHE: LazyLock<ResultsCache> = LazyLock::new(ResultsCache::new);
+
+/// Every entry of the `_result` document for `pkg`'s repository/arch, when the
+/// document has `pkg` in it. The project-wide document comes from `cache`;
+/// one that is cut off, or lacks the package (not scheduled yet, or fetched
+/// before it was added), is replaced by `fetch_package`, the document of the
+/// package alone (with its multibuild flavors). A failure of the shared fetch
+/// is returned as is: asking again another way meets the same refusal.
+#[allow(clippy::too_many_arguments)]
+fn package_entries(
+    cache: &ResultsCache,
+    project: &str,
+    repo: &str,
+    arch: &str,
+    pkg: &str,
+    fresh_since: Option<Instant>,
+    fetch_project: impl FnOnce() -> Result<String, ApiFailure>,
+    fetch_package: impl FnOnce() -> Result<String, ApiFailure>,
+) -> Result<Option<Vec<obs_status::ResultEntry>>, ApiFailure> {
+    let key = (project.to_string(), repo.to_string(), arch.to_string());
+    let doc = cache.get(&key, RESULTS_TTL, fresh_since, fetch_project)?;
+    if let Ok(entries) = obs_status::try_parse_results(&doc)
+        && obs_status::entry_in(&entries, repo, arch, pkg).is_some()
+    {
+        return Ok(Some(entries));
+    }
+    let xml = fetch_package()?;
+    let entries = obs_status::parse_results(&xml);
+    let found = obs_status::entry_in(&entries, repo, arch, pkg).is_some();
+    Ok(found.then_some(entries))
+}
+
+/// [`package_entries`] against OBS. The names must be valid OBS names.
+fn obs_package_entries(
+    project: &str,
+    repo: &str,
+    arch: &str,
+    pkg: &str,
+    fresh_since: Option<Instant>,
+) -> Result<Option<Vec<obs_status::ResultEntry>>, ApiFailure> {
+    // `multibuild=1` adds the package's `<pkg>:<flavor>` entries to the
+    // single-package document; the project-wide one lists them anyway.
+    let (project_path, package_path) = (
+        format!(
+            "/build/{project}/_result?repository={}&arch={}",
+            enc(repo),
+            enc(arch)
+        ),
+        format!(
+            "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
+            enc(pkg),
+            enc(repo),
+            enc(arch)
+        ),
+    );
+    package_entries(
+        &RESULTS_CACHE,
+        project,
+        repo,
+        arch,
+        pkg,
+        fresh_since,
+        || osc_api_checked(&project_path),
+        || osc_api_checked(&package_path),
+    )
+}
+
+/// `fresh_since`: only a document fetched after that instant may be used
+/// (see [`ResultsCache::get`]); `None` accepts one a few seconds old.
 fn get_build_status_xml(
     project: &str,
     pkg_name: &str,
     repo: &str,
     arch: &str,
     confirm: bool,
+    fresh_since: Option<Instant>,
 ) -> Result<Option<BuildStatus>, Error> {
     if ![project, pkg_name, repo, arch]
         .iter()
@@ -3753,22 +3999,15 @@ fn get_build_status_xml(
     {
         return Ok(None);
     }
-    // `multibuild=1` adds the package's `<pkg>:<flavor>` entries: the package
-    // is only done when every flavor is.
-    let path = format!(
-        "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
-        enc(pkg_name),
-        enc(repo),
-        enc(arch)
-    );
-    let xml = match osc_api_checked(&path) {
-        Ok(xml) => xml,
+    let entries = match obs_package_entries(project, repo, arch, pkg_name, fresh_since) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => return Ok(None),
         // An HTTP error (login, rate limit, outage) would repeat through the
         // `osc results` fallback, which only adds another request to a
         // server that is already refusing: report it.
         Err(ApiFailure::Http(code, msg)) => {
             return Err(Error::OscFailed {
-                cmd: format!("api {path}"),
+                cmd: format!("api /build/{project}/_result"),
                 code: i32::from(code),
                 stderr: msg,
             });
@@ -3778,7 +4017,7 @@ fn get_build_status_xml(
             return Ok(None);
         }
     };
-    let Some(entry) = obs_status::find_entry(&xml, repo, arch, pkg_name) else {
+    let Some(entry) = obs_status::entry_in(&entries, repo, arch, pkg_name) else {
         return Ok(None);
     };
     // The source revision is the package's; every flavor builds from it.
@@ -3809,12 +4048,318 @@ fn get_build_status_xml(
         };
         obs_status::resolve(entry, &evidence)
     };
-    let base = resolve_entry(&entry);
-    let flavors: Vec<BuildStatus> = obs_status::flavor_entries(&xml, repo, arch, pkg_name)
+    let base = resolve_entry(entry);
+    let flavors: Vec<BuildStatus> = obs_status::flavors_in(&entries, repo, arch, pkg_name)
         .iter()
         .map(&mut resolve_entry)
         .collect();
     Ok(Some(obs_status::combine(base, &flavors)))
+}
+
+#[cfg(test)]
+mod results_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LONG: Duration = Duration::from_secs(60);
+
+    fn key(project: &str) -> ResultsKey {
+        (project.to_string(), "repo".to_string(), "x86_64".to_string())
+    }
+
+    fn doc(body: &str) -> Result<String, ApiFailure> {
+        Ok(body.to_string())
+    }
+
+    #[test]
+    fn concurrent_waiters_trigger_one_fetch() {
+        let cache = ResultsCache::new();
+        let fetches = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        cache.get(&key("p"), LONG, None, || {
+                            fetches.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(150));
+                            doc("<resultlist/>")
+                        })
+                    })
+                })
+                .collect();
+            for h in handles {
+                assert_eq!(&*h.join().unwrap().ok().unwrap(), "<resultlist/>");
+            }
+        });
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_document_is_shared_until_it_expires() {
+        let cache = ResultsCache::new();
+        let fetches = AtomicUsize::new(0);
+        let fetch = || {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            doc("d")
+        };
+        for _ in 0..3 {
+            cache.get(&key("p"), LONG, None, fetch).ok().unwrap();
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        // With no lifetime every read is a new fetch.
+        cache.get(&key("p"), Duration::ZERO, None, fetch).ok().unwrap();
+        cache.get(&key("p"), Duration::ZERO, None, fetch).ok().unwrap();
+        assert_eq!(fetches.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn keys_do_not_share_documents() {
+        let cache = ResultsCache::new();
+        let a = cache.get(&key("a"), LONG, None, || doc("a")).ok().unwrap();
+        let b = cache.get(&key("b"), LONG, None, || doc("b")).ok().unwrap();
+        let mut other_arch = key("a");
+        other_arch.2 = "aarch64".to_string();
+        let c = cache.get(&other_arch, LONG, None, || doc("c")).ok().unwrap();
+        assert_eq!((&*a, &*b, &*c), ("a", "b", "c"));
+    }
+
+    #[test]
+    fn a_fresh_read_skips_a_document_fetched_before_it() {
+        let cache = ResultsCache::new();
+        cache.get(&key("p"), LONG, None, || doc("old")).ok().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let committed = Instant::now();
+        let fresh = cache
+            .get(&key("p"), LONG, Some(committed), || doc("new"))
+            .ok()
+            .unwrap();
+        assert_eq!(&*fresh, "new");
+        // That document is itself fresh enough for the next such waiter.
+        let again = cache
+            .get(&key("p"), LONG, Some(committed), || doc("never"))
+            .ok()
+            .unwrap();
+        assert_eq!(&*again, "new");
+    }
+
+    #[test]
+    fn a_fresh_read_waits_out_an_older_fetch_and_then_fetches_itself() {
+        let cache = ResultsCache::new();
+        let fetches = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let slow = scope.spawn(|| {
+                cache.get(&key("p"), LONG, None, || {
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(200));
+                    doc("before the commit")
+                })
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            let committed = Instant::now();
+            let fresh = cache
+                .get(&key("p"), LONG, Some(committed), || {
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    doc("after the commit")
+                })
+                .ok()
+                .unwrap();
+            assert_eq!(&*fresh, "after the commit");
+            assert_eq!(&*slow.join().unwrap().ok().unwrap(), "before the commit");
+        });
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalidation_drops_the_documents_of_one_project() {
+        let cache = ResultsCache::new();
+        cache.get(&key("p"), LONG, None, || doc("p1")).ok().unwrap();
+        cache.get(&key("q"), LONG, None, || doc("q1")).ok().unwrap();
+        cache.invalidate("p");
+        let p = cache.get(&key("p"), LONG, None, || doc("p2")).ok().unwrap();
+        let q = cache.get(&key("q"), LONG, None, || doc("q2")).ok().unwrap();
+        assert_eq!((&*p, &*q), ("p2", "q1"));
+    }
+
+    #[test]
+    fn a_fetch_in_flight_during_an_invalidation_is_not_stored() {
+        let cache = ResultsCache::new();
+        let first = cache
+            .get(&key("p"), LONG, None, || {
+                cache.invalidate("p");
+                doc("pre-commit")
+            })
+            .ok()
+            .unwrap();
+        // The fetcher still gets what it fetched, but nobody else does.
+        assert_eq!(&*first, "pre-commit");
+        let next = cache.get(&key("p"), LONG, None, || doc("post-commit")).ok().unwrap();
+        assert_eq!(&*next, "post-commit");
+    }
+
+    #[test]
+    fn a_failure_is_shared_briefly_and_not_kept() {
+        let cache = ResultsCache::new();
+        let fetches = AtomicUsize::new(0);
+        let failing = || {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            Err(ApiFailure::Http(503, "down".to_string()))
+        };
+        for _ in 0..3 {
+            assert!(matches!(
+                cache.get(&key("p"), LONG, None, failing),
+                Err(ApiFailure::Http(503, _))
+            ));
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        // Once the (short) error lifetime is over, it is asked again.
+        let again = cache.get(&key("p"), Duration::ZERO, None, || doc("up")).ok().unwrap();
+        assert_eq!(&*again, "up");
+    }
+
+    #[test]
+    fn a_fetch_that_panics_does_not_block_the_next_one() {
+        let cache = ResultsCache::new();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cache.get(&key("p"), LONG, None, || panic!("osc exploded"));
+        }));
+        assert!(crashed.is_err());
+        let next = cache.get(&key("p"), LONG, None, || doc("fine")).ok().unwrap();
+        assert_eq!(&*next, "fine");
+    }
+
+    const PROJECT_DOC: &str = r#"<resultlist>
+  <result project="p" repository="repo" arch="x86_64" dirty="true">
+    <status package="foo" code="building"/>
+    <status package="foo:mini" code="succeeded"/>
+    <status package="bar" code="blocked"><details>waiting for foo</details></status>
+  </result>
+</resultlist>"#;
+
+    fn entries_of(
+        cache: &ResultsCache,
+        pkg: &str,
+        project: &AtomicUsize,
+        single: &AtomicUsize,
+        project_doc: &'static str,
+        package_doc: &'static str,
+    ) -> Result<Option<Vec<obs_status::ResultEntry>>, ApiFailure> {
+        package_entries(
+            cache,
+            "p",
+            "repo",
+            "x86_64",
+            pkg,
+            None,
+            || {
+                project.fetch_add(1, Ordering::SeqCst);
+                doc(project_doc)
+            },
+            || {
+                single.fetch_add(1, Ordering::SeqCst);
+                doc(package_doc)
+            },
+        )
+    }
+
+    #[test]
+    fn every_package_reads_its_entries_from_the_one_project_document() {
+        let cache = ResultsCache::new();
+        let (project, single) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let foo = entries_of(&cache, "foo", &project, &single, PROJECT_DOC, "").ok().unwrap().unwrap();
+        let bar = entries_of(&cache, "bar", &project, &single, PROJECT_DOC, "").ok().unwrap().unwrap();
+        assert_eq!(project.load(Ordering::SeqCst), 1);
+        assert_eq!(single.load(Ordering::SeqCst), 0);
+        // Multibuild flavors come with the package, as with a per-package read.
+        let flavors = obs_status::flavors_in(&foo, "repo", "x86_64", "foo");
+        assert_eq!(flavors.len(), 1);
+        assert_eq!(flavors[0].pkg, "foo:mini");
+        let entry = obs_status::entry_in(&bar, "repo", "x86_64", "bar").unwrap();
+        assert_eq!(entry.details.as_deref(), Some("waiting for foo"));
+        assert!(entry.dirty);
+    }
+
+    #[test]
+    fn a_package_missing_from_the_shared_document_is_read_on_its_own() {
+        let cache = ResultsCache::new();
+        let (project, single) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let own = r#"<resultlist><result project="p" repository="repo" arch="x86_64">
+            <status package="new" code="scheduled"/></result></resultlist>"#;
+        let entries = entries_of(&cache, "new", &project, &single, PROJECT_DOC, own)
+            .ok()
+            .unwrap()
+            .unwrap();
+        assert_eq!(single.load(Ordering::SeqCst), 1);
+        assert_eq!(entries[0].code, "scheduled");
+        // Missing there too: no entry, the caller falls back to `osc results`.
+        let none = entries_of(&cache, "ghost", &project, &single, PROJECT_DOC, "<resultlist/>");
+        assert!(none.ok().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_cut_off_shared_document_is_not_trusted() {
+        let cache = ResultsCache::new();
+        let (project, single) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let cut = &PROJECT_DOC[..PROJECT_DOC.len() - 30];
+        let own = r#"<resultlist><result project="p" repository="repo" arch="x86_64">
+            <status package="bar" code="failed"/></result></resultlist>"#;
+        let entries = entries_of(&cache, "bar", &project, &single, cut, own)
+            .ok()
+            .unwrap()
+            .unwrap();
+        assert_eq!(entries[0].code, "failed");
+        assert_eq!(single.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_refusal_of_the_shared_fetch_is_passed_on_without_another_request() {
+        let cache = ResultsCache::new();
+        let single = AtomicUsize::new(0);
+        let result = package_entries(
+            &cache,
+            "p",
+            "repo",
+            "x86_64",
+            "foo",
+            None,
+            || Err(ApiFailure::Http(429, "slow down".to_string())),
+            || {
+                single.fetch_add(1, Ordering::SeqCst);
+                doc("")
+            },
+        );
+        assert!(matches!(result, Err(ApiFailure::Http(429, _))));
+        assert_eq!(single.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod wait_pacing_tests {
+    use super::*;
+
+    const SECS: fn(u64) -> Duration = Duration::from_secs;
+
+    #[test]
+    fn a_stale_status_is_checked_after_thirty_seconds_then_every_minute() {
+        assert!(!recheck_due(true, SECS(29), None));
+        assert!(recheck_due(true, SECS(30), None));
+        assert!(!recheck_due(true, SECS(200), Some(SECS(59))));
+        assert!(recheck_due(true, SECS(200), Some(SECS(60))));
+    }
+
+    #[test]
+    fn any_other_unchanged_status_is_checked_once_after_five_minutes() {
+        assert!(!recheck_due(false, SECS(299), None));
+        assert!(recheck_due(false, SECS(300), None));
+        assert!(!recheck_due(false, SECS(900), Some(SECS(600))));
+    }
+
+    #[test]
+    fn a_status_awaiting_the_new_revision_never_backs_off_past_thirty_seconds() {
+        assert_eq!(wait_polls(40, true), 7);
+        assert_eq!(poll_delay(wait_polls(40, true), 0, 0.5), SECS(30));
+        assert_eq!(wait_polls(2, true), 2);
+        assert_eq!(poll_delay(wait_polls(40, false), 0, 0.5), SECS(60));
+    }
 }
 
 /// Parsing half of the `osc results` fallback in [`get_build_status`], split
@@ -4841,6 +5386,46 @@ fn poll_delay(unchanged_polls: u32, errors: u32, jitter: f64) -> Duration {
     Duration::from_secs_f64(secs as f64 * (0.8 + 0.4 * jitter))
 }
 
+/// The unchanged-poll count that sets the delay while waiting for a build. A
+/// status that only awaits the new revision (see
+/// [`obs_status::awaiting_new_revision`]) is not "holding still": the build is
+/// about to start, so it never backs off past the 30s tier.
+fn wait_polls(unchanged_polls: u32, awaiting_new_revision: bool) -> u32 {
+    if awaiting_new_revision {
+        unchanged_polls.min(7)
+    } else {
+        unchanged_polls
+    }
+}
+
+/// How long an unchanged status holds before the independent `osc results`
+/// cross-check, asked once per stuck period (see [`recheck_due`]).
+const NO_PROGRESS_RECHECK: Duration = Duration::from_secs(300);
+// A `stale`/`unconfirmed` status is the previous revision's verdict served
+// while OBS has not taken up the commit (or has, and the document has not
+// caught up): the independent read says which, so it is asked early and again
+// at this pace, instead of once after minutes.
+const STALE_RECHECK_FIRST: Duration = Duration::from_secs(30);
+const STALE_RECHECK_EVERY: Duration = Duration::from_secs(60);
+
+/// Whether the independent `osc results` cross-check of a non-terminal status
+/// is due: `since_change` is how long the status has not changed,
+/// `since_recheck` how long ago the last check of this stuck period was. A
+/// status that awaits the new revision is checked after 30s and then every
+/// 60s; any other unchanged status once, after 300s.
+fn recheck_due(
+    awaiting_new_revision: bool,
+    since_change: Duration,
+    since_recheck: Option<Duration>,
+) -> bool {
+    match (awaiting_new_revision, since_recheck) {
+        (true, None) => since_change >= STALE_RECHECK_FIRST,
+        (true, Some(last)) => last >= STALE_RECHECK_EVERY,
+        (false, None) => since_change >= NO_PROGRESS_RECHECK,
+        (false, Some(_)) => false,
+    }
+}
+
 /// A pseudo-random value in `[0, 1)` from the clock, enough to de-synchronise
 /// pollers without a randomness dependency.
 fn jitter() -> f64 {
@@ -4859,13 +5444,14 @@ fn build_details(project: &str, pkg_name: &str, repo: &str, arch: &str) -> Optio
     {
         return None;
     }
-    let xml = osc_api(&format!(
-        "/build/{project}/_result?package={}&repository={}&arch={}",
-        enc(pkg_name),
-        enc(repo),
-        enc(arch)
-    ))?;
-    obs_status::find_entry(&xml, repo, arch, pkg_name)?.details
+    let entries = obs_package_entries(project, repo, arch, pkg_name, None)
+        .map_err(|e| match e {
+            ApiFailure::Http(_, m) | ApiFailure::Other(m) => ap_core::diag!("  {m}"),
+        })
+        .ok()??;
+    obs_status::entry_in(&entries, repo, arch, pkg_name)?
+        .details
+        .clone()
 }
 
 /// Sleep for `total`, waking each second to notice a shutdown request, so a
@@ -4900,6 +5486,9 @@ pub fn obs_build(
 ) -> Result<(), Error> {
     let reporter = emit.reporter;
     let step = emit.step;
+    // The caller has committed already: no `_result` document fetched before
+    // this may be used for the status (see `get_build_status_after_commit`).
+    let committed = Instant::now();
     ensure_builds_for(project, repo, arch)?;
     const MAX_WAIT: Duration = Duration::from_secs(7200);
     // Time spent `blocked` (waiting for other packages to build) does not
@@ -4932,10 +5521,10 @@ pub fn obs_build(
     // unchanging "building" for 1000+ seconds while OBS itself showed
     // nothing in progress.
     const NO_PROGRESS_WARNING: Duration = Duration::from_secs(120);
-    const NO_PROGRESS_RECHECK: Duration = Duration::from_secs(300);
     let mut last_change = Instant::now();
     let mut last_warning = Instant::now();
-    let mut rechecked_since_change = false;
+    let mut last_recheck: Option<Instant> = None;
+    let mut last_table_label = String::new();
     const UNRESOLVABLE_CONFIRM: Duration = Duration::from_secs(15);
     let mut unresolvable_since: Option<Instant> = None;
     // A repository/arch the project does not build for has no result at all,
@@ -4996,6 +5585,7 @@ pub fn obs_build(
             pkg_name,
             repo,
             arch,
+            committed,
             Emit::quiet(),
         ) {
             Ok(s) => {
@@ -5099,7 +5689,7 @@ pub fn obs_build(
             prev_status = label;
             last_change = Instant::now();
             last_warning = Instant::now();
-            rechecked_since_change = false;
+            last_recheck = None;
         } else if !status.is_terminal() {
             // Non-terminal and unchanged: make sure the user can always
             // tell this is still alive and polling, not silently wedged.
@@ -5113,13 +5703,19 @@ pub fn obs_build(
                 });
                 last_warning = Instant::now();
             }
-            // One independent cross-check per stuck period, via a
-            // different OBS endpoint than whichever one produced `status`
-            // (see `get_build_status_from_results_table`'s doc comment) —
-            // catches one of them silently serving a stale snapshot while
-            // the other has already moved on.
-            if !rechecked_since_change && last_change.elapsed() >= NO_PROGRESS_RECHECK {
-                rechecked_since_change = true;
+            // An independent cross-check, via a different OBS endpoint than
+            // whichever one produced `status` (see
+            // `get_build_status_from_results_table`'s doc comment) — catches
+            // one of them silently serving a stale snapshot while the other
+            // has already moved on. Once per stuck period, or, while the
+            // status only says the newest sources are not built yet, soon
+            // and then every minute (see `recheck_due`).
+            if recheck_due(
+                obs_status::awaiting_new_revision(&status),
+                last_change.elapsed(),
+                last_recheck.map(|t| t.elapsed()),
+            ) {
+                last_recheck = Some(Instant::now());
                 if let Ok(table_status) = get_build_status_from_results_table(
                     project,
                     pkg_name,
@@ -5128,25 +5724,43 @@ pub fn obs_build(
                     Emit::quiet(),
                 ) {
                     let table_str = table_status.to_string();
-                    if table_str != status_str {
-                        reporter.report(&Event::Warning {
-                            step,
-                            message: format!(
-                                "OBS status disagreement after {}s of no change: the API \
-                                 document says {status_str}, but `osc results` says \
-                                 {table_str} — trusting the independent read",
-                                last_change.elapsed().as_secs()
-                            ),
-                        });
-                        reporter.report(&Event::Progress {
-                            step,
-                            message: format!("OBS build status: {table_str}"),
-                        });
-                        prev_status = table_str;
-                        last_change = Instant::now();
-                        last_warning = Instant::now();
-                        rechecked_since_change = false;
-                        status = table_status;
+                    match obs_status::cross_check(&status, &table_status) {
+                        obs_status::CrossCheck::Agrees | obs_status::CrossCheck::Ignore => {}
+                        obs_status::CrossCheck::NewRevisionSeen => {
+                            // The scheduler works on the new revision: the
+                            // wait is progressing, so it polls briskly again.
+                            unchanged_polls = 0;
+                            if table_str != last_table_label {
+                                reporter.report(&Event::Progress {
+                                    step,
+                                    message: format!(
+                                        "OBS has taken up the new revision: {table_str}"
+                                    ),
+                                });
+                                last_table_label = table_str;
+                            }
+                        }
+                        obs_status::CrossCheck::Adopt => {
+                            reporter.report(&Event::Warning {
+                                step,
+                                message: format!(
+                                    "OBS status disagreement after {}s of no change: the API \
+                                     document says {status_str}, but `osc results` says \
+                                     {table_str} — trusting the independent read",
+                                    last_change.elapsed().as_secs()
+                                ),
+                            });
+                            reporter.report(&Event::Progress {
+                                step,
+                                message: format!("OBS build status: {table_str}"),
+                            });
+                            prev_status = table_str;
+                            last_change = Instant::now();
+                            last_warning = Instant::now();
+                            last_recheck = None;
+                            unchanged_polls = 0;
+                            status = table_status;
+                        }
                     }
                 }
             }
@@ -5173,7 +5787,11 @@ pub fn obs_build(
         // keep polling. Only a verdict confirmed for the current sources
         // (see `obs_status::resolve`) ends the wait; if none arrives, the
         // MAX_WAIT check above reports a timeout error.
-        sleep_interruptible(poll_delay(unchanged_polls, 0, jitter()));
+        sleep_interruptible(poll_delay(
+            wait_polls(unchanged_polls, obs_status::awaiting_new_revision(&status)),
+            0,
+            jitter(),
+        ));
     };
 
     // Fetch the log regardless of outcome — partial logs help diagnose failures.
@@ -5247,6 +5865,14 @@ pub fn obs_build(
             let listing = binary_rpm_listing(project, name, repo, arch);
             if let Some(names) = &listing {
                 remove_superseded_rpms(rpms_dir, names);
+            }
+            if let Err(stderr) = crate::workspace::await_disk_space(rpms_dir, reporter, step) {
+                fetch_result = Err(Error::OscFailed {
+                    cmd: format!("getbinaries {project} {name} {repo} {arch}"),
+                    code: 28,
+                    stderr,
+                });
+                break;
             }
             if let Err(e) = get_binaries(project, name, repo, arch, rpms_dir, emit) {
                 fetch_result = Err(e);

@@ -284,19 +284,81 @@ pub fn parse_binary_rpm_sizes(xml: &str) -> Vec<(String, u64)> {
 
 /// The entry for one package in one repository/arch, if present.
 pub fn find_entry(xml: &str, repo: &str, arch: &str, pkg: &str) -> Option<ResultEntry> {
-    parse_results(xml)
-        .into_iter()
+    entry_in(&parse_results(xml), repo, arch, pkg).cloned()
+}
+
+/// [`find_entry`] over entries that are already parsed, for a document shared
+/// by several packages.
+pub fn entry_in<'a>(
+    entries: &'a [ResultEntry],
+    repo: &str,
+    arch: &str,
+    pkg: &str,
+) -> Option<&'a ResultEntry> {
+    entries
+        .iter()
         .find(|e| e.repo == repo && e.arch == arch && e.pkg == pkg)
 }
 
 /// The multibuild flavor entries of `pkg` (`pkg:flavor`) in one
 /// repository/arch.
 pub fn flavor_entries(xml: &str, repo: &str, arch: &str, pkg: &str) -> Vec<ResultEntry> {
+    flavors_in(&parse_results(xml), repo, arch, pkg)
+}
+
+/// [`flavor_entries`] over entries that are already parsed.
+pub fn flavors_in(entries: &[ResultEntry], repo: &str, arch: &str, pkg: &str) -> Vec<ResultEntry> {
     let prefix = format!("{pkg}:");
-    parse_results(xml)
-        .into_iter()
+    entries
+        .iter()
         .filter(|e| e.repo == repo && e.arch == arch && e.pkg.starts_with(&prefix))
+        .cloned()
         .collect()
+}
+
+/// Whether a status says the package's newest sources have not been built
+/// yet: a verdict of an older revision (`stale: ..`) or one no job history
+/// could vouch for (`unconfirmed: ..`). Such a status is never an answer; the
+/// wait goes on, and checks sooner and more often what the scheduler says.
+pub fn awaiting_new_revision(s: &BuildStatus) -> bool {
+    matches!(s, BuildStatus::Unknown(t) if t.starts_with("stale:") || t.starts_with("unconfirmed:"))
+}
+
+/// What an independent `osc results` read (`table`) means for the status the
+/// API document gave (`api`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossCheck {
+    /// The same answer: nothing to learn.
+    Agrees,
+    /// The API status is stale or unconfirmed and the table is not: the
+    /// scheduler has taken up the new revision (`outdated`, `scheduled`,
+    /// `blocked`, `building`), so the wait is progressing and polls briskly.
+    NewRevisionSeen,
+    /// The table's answer replaces the API's: the API document is stuck on
+    /// a status the table has moved past.
+    Adopt,
+    /// A verdict from the table while the API says the newest sources are
+    /// not built yet. The table cannot tell which revision a plain `failed`
+    /// or `succeeded` belongs to, so it never settles the question.
+    Ignore,
+}
+
+pub fn cross_check(api: &BuildStatus, table: &BuildStatus) -> CrossCheck {
+    if api == table {
+        CrossCheck::Agrees
+    } else if awaiting_new_revision(api) {
+        let scheduler_has_it = matches!(
+            table,
+            BuildStatus::Scheduled | BuildStatus::Blocked | BuildStatus::Building
+        ) || awaiting_new_revision(table);
+        if scheduler_has_it {
+            CrossCheck::NewRevisionSeen
+        } else {
+            CrossCheck::Ignore
+        }
+    } else {
+        CrossCheck::Adopt
+    }
 }
 
 /// One status for a package and its multibuild flavors: still going while any
@@ -993,5 +1055,94 @@ mod tests {
             parse_binary_rpms(xml),
             ["python313-Events-0.5-2.1.noarch.rpm"]
         );
+    }
+
+    fn unknown(s: &str) -> BuildStatus {
+        BuildStatus::Unknown(s.to_string())
+    }
+
+    #[test]
+    fn stale_and_unconfirmed_await_a_new_revision() {
+        assert!(awaiting_new_revision(&unknown("stale: failed")));
+        assert!(awaiting_new_revision(&unknown("stale: outdated (was: blocked)")));
+        assert!(awaiting_new_revision(&unknown("unconfirmed: broken")));
+        assert!(!awaiting_new_revision(&unknown("finished")));
+        assert!(!awaiting_new_revision(&unknown("no results")));
+        assert!(!awaiting_new_revision(&BuildStatus::Failed));
+        assert!(!awaiting_new_revision(&BuildStatus::Building));
+    }
+
+    #[test]
+    fn a_table_verdict_never_settles_a_stale_status() {
+        // The previous revision's `failed` is what a clean repository's table
+        // shows right after a commit: it must not become the new verdict.
+        for api in ["stale: failed", "stale: succeeded", "unconfirmed: broken"] {
+            for table in [BuildStatus::Failed, BuildStatus::Succeeded, BuildStatus::Broken] {
+                assert_eq!(cross_check(&unknown(api), &table), CrossCheck::Ignore);
+            }
+        }
+        assert_eq!(
+            cross_check(&unknown("stale: failed"), &unknown("no results")),
+            CrossCheck::Ignore
+        );
+    }
+
+    #[test]
+    fn a_scheduler_state_in_the_table_means_the_new_revision_was_taken() {
+        for table in [
+            BuildStatus::Scheduled,
+            BuildStatus::Blocked,
+            BuildStatus::Building,
+            unknown("stale: outdated (was: blocked: ffmpeg-8-mini-libs)"),
+        ] {
+            assert_eq!(
+                cross_check(&unknown("stale: succeeded"), &table),
+                CrossCheck::NewRevisionSeen
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_that_moved_past_a_live_status_replaces_it() {
+        assert_eq!(
+            cross_check(&BuildStatus::Building, &BuildStatus::Succeeded),
+            CrossCheck::Adopt
+        );
+        assert_eq!(
+            cross_check(&BuildStatus::Blocked, &unknown("stale: outdated (was: blocked)")),
+            CrossCheck::Adopt
+        );
+        assert_eq!(
+            cross_check(&BuildStatus::Blocked, &BuildStatus::Blocked),
+            CrossCheck::Agrees
+        );
+        assert_eq!(
+            cross_check(&unknown("stale: failed"), &unknown("stale: failed")),
+            CrossCheck::Agrees
+        );
+    }
+
+    #[test]
+    fn parsed_entries_serve_the_package_and_its_flavors() {
+        let xml = r#"<resultlist>
+  <result project="p" repository="r" arch="a">
+    <status package="foo" code="succeeded"/>
+    <status package="foo:mini" code="failed"/>
+    <status package="foobar" code="building"/>
+  </result>
+  <result project="p" repository="r" arch="b">
+    <status package="foo" code="blocked"/>
+  </result>
+</resultlist>"#;
+        let entries = parse_results(xml);
+        assert_eq!(entry_in(&entries, "r", "a", "foo").unwrap().code, "succeeded");
+        assert_eq!(entry_in(&entries, "r", "b", "foo").unwrap().code, "blocked");
+        assert!(entry_in(&entries, "r", "a", "foo:mini").is_some());
+        assert!(entry_in(&entries, "r", "c", "foo").is_none());
+        let flavors = flavors_in(&entries, "r", "a", "foo");
+        assert_eq!(flavors.len(), 1);
+        assert_eq!(flavors[0].pkg, "foo:mini");
+        assert_eq!(find_entry(xml, "r", "a", "foo"), entry_in(&entries, "r", "a", "foo").cloned());
+        assert_eq!(flavor_entries(xml, "r", "a", "foo"), flavors);
     }
 }
