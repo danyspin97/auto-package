@@ -560,6 +560,32 @@ fn any_origin_runpath<R: Read + std::io::Seek>(
     })
 }
 
+/// Whether a wheel's file names show auditwheel-bundled libraries: a
+/// `<name>.libs/` directory or a hash-suffixed `.so`.
+fn names_have_hashed_libs(names: &[String]) -> bool {
+    names.iter().any(|n| {
+        let top = n.split('/').next().unwrap_or("");
+        let file = n.rsplit('/').next().unwrap_or("");
+        let skipped =
+            top.ends_with(".dist-info") || top.ends_with(".data") || top == "__pycache__";
+        !skipped && n.contains('/') && (top.ends_with(".libs") || is_hashed_soname(file))
+    })
+}
+
+/// [`WheelLayout::has_hashed_libs`] alone, from the zip's file names only: no
+/// metadata is read and no library opened, so it is cheap enough to ask of
+/// every wheel in a project.
+pub fn wheel_has_hashed_libs(wheel: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(wheel) else {
+        return false;
+    };
+    let Ok(zip_archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    let names: Vec<String> = zip_archive.file_names().map(str::to_string).collect();
+    names_have_hashed_libs(&names)
+}
+
 /// Inspect a wheel's file list. `None` when it cannot be read as a zip.
 pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
     let file = std::fs::File::open(wheel).ok()?;
@@ -657,11 +683,7 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         })
         .map(|text| console_scripts_from_entry_points(&text))
         .unwrap_or_default();
-    let has_hashed_libs = names.iter().any(|n| {
-        let top = top_of(n);
-        let file = n.rsplit('/').next().unwrap_or("");
-        !skip(&top) && n.contains('/') && (top.ends_with(".libs") || is_hashed_soname(file))
-    });
+    let has_hashed_libs = names_have_hashed_libs(&names);
     let shared_libs: Vec<&str> = names
         .iter()
         .filter(|n| {
@@ -2707,6 +2729,11 @@ build-backend = "flit_core.buildapi"
             ],
         );
         assert!(!wheel_layout(&plain).unwrap().has_hashed_libs);
+        // The names-only check agrees, and reads no wheel that is not one.
+        assert!(wheel_has_hashed_libs(&in_libs));
+        assert!(wheel_has_hashed_libs(&inline));
+        assert!(!wheel_has_hashed_libs(&plain));
+        assert!(!wheel_has_hashed_libs(&dir.path().join("absent.whl")));
     }
 
     /// libcusparseLt.so.0 (RUNPATH: $ORIGIN:): found in a `DT_RUNPATH` or a

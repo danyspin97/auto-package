@@ -827,7 +827,17 @@ pub fn select_target(
             let rpm = osc::rpm_name(&n.name);
             let key = osc::fuzzy_key(&rpm);
             if let Some(&real) = own_fuzzy.get(&key) {
-                return if status_is_resolvable(build_statuses.get(real)) {
+                // A package OBS built that its dependents cannot install (see
+                // `spec_with_published_defects_fixed`) is not resolved: it is
+                // selected again, repaired and rebuilt.
+                let spec = config
+                    .work_dir
+                    .join(&config.project)
+                    .join(real)
+                    .join(format!("{real}.spec"));
+                return if status_is_resolvable(build_statuses.get(real))
+                    && !spec_has_published_defects(&spec)
+                {
                     Resolution::Built
                 } else {
                     Resolution::No
@@ -1757,13 +1767,12 @@ fn preflight<'a>(
     let prior = PkgState::load(&ws);
     // A package whose checked-out spec is an unfinished skeleton is not done,
     // whatever an earlier build of it reported.
-    let unfinished = spec_has_placeholders(
-        &config
-            .work_dir
-            .join(&config.project)
-            .join(&rpm_name)
-            .join(format!("{rpm_name}.spec")),
-    );
+    let local_spec = config
+        .work_dir
+        .join(&config.project)
+        .join(&rpm_name)
+        .join(format!("{rpm_name}.spec"));
+    let unfinished = spec_has_placeholders(&local_spec) || spec_has_published_defects(&local_spec);
     if !config.force && prior.is_built(&config.version) && !unfinished {
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
     }
@@ -1915,6 +1924,7 @@ fn checkout_stage(
         && !has_local_changes
         && !spec_version_differs(spec_path, &config.version)
         && !spec_has_placeholders(spec_path)
+        && !spec_has_published_defects(spec_path)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
         && PkgState::load(ws).policy_current()
     {
@@ -2935,6 +2945,31 @@ fn linked_bound_conflicts(
         .collect()
 }
 
+/// `spec` with the defects repaired that make a package build and still be
+/// unusable by what needs it: a conditional dependency without parentheses
+/// (OBS: `nothing provides if`) and the auditwheel-hashed libraries of a wheel
+/// left in its Requires. A package built before these were repaired stays
+/// green in OBS while its dependents are unresolvable, so `preflight` also
+/// asks this whether an already built package still needs a new revision.
+fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path) -> String {
+    let mut fixed = crate::spec::parenthesize_conditional_dependencies(spec);
+    if !fixed.contains("[0-9a-f]{8}")
+        && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
+        && ap_ecosystem::sdist::wheel_has_hashed_libs(&wheel)
+    {
+        fixed = crate::spec::with_hashed_libs_requires_exclude(&fixed);
+    }
+    fixed
+}
+
+/// Whether the spec checked out at `spec_path` carries such a defect.
+fn spec_has_published_defects(spec_path: &Path) -> bool {
+    std::fs::read_to_string(spec_path).is_ok_and(|text| {
+        let dir = spec_path.parent().unwrap_or(Path::new("."));
+        spec_with_published_defects_fixed(&text, dir) != text
+    })
+}
+
 /// The prebuilt wheel a spec's `Source` names, when it is in the checkout.
 fn local_wheel_source(spec: &str, checkout_dir: &Path) -> Option<PathBuf> {
     spec.lines()
@@ -3206,12 +3241,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
         let mut fixed = fixed;
-        if !fixed.contains("[0-9a-f]{8}")
-            && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
-            && ap_ecosystem::sdist::wheel_layout(&wheel).is_some_and(|l| l.has_hashed_libs)
-        {
-            fixed = crate::spec::with_hashed_libs_requires_exclude(&fixed);
-        }
+        fixed = spec_with_published_defects_fixed(&fixed, checkout_dir);
         for (dep, shipped) in &PkgState::load(ws).relaxed_dependencies {
             fixed = crate::spec::relax_dependency_bounds(&fixed, dep, shipped);
         }
@@ -10034,5 +10064,25 @@ mod discovery_vouching_tests {
         let text = std::fs::read_to_string(&spec).unwrap();
         assert!(text.contains("# Source archive: https://example.org/a.tar.gz"));
         assert!(text.contains(&format!("# Source archive sha256: {digest}")));
+    }
+}
+
+#[cfg(test)]
+mod published_defect_tests {
+    use super::*;
+
+    /// python-fastapi-cloud-cli built in OBS with `Requires: x if y` and every
+    /// dependent was unresolvable on `nothing provides if`; the resolver has to
+    /// see such a package as not done.
+    #[test]
+    fn a_built_package_with_a_bare_conditional_dependency_is_defective() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("python-x.spec");
+        std::fs::write(&spec, "Requires:  python-tomli >= 2 if python-base < 3.11\n").unwrap();
+        assert!(spec_has_published_defects(&spec));
+        std::fs::write(&spec, "Requires:  (python-tomli >= 2 if python-base < 3.11)\n").unwrap();
+        assert!(!spec_has_published_defects(&spec));
+        // No spec checked out: nothing to repair.
+        assert!(!spec_has_published_defects(&dir.path().join("absent.spec")));
     }
 }
