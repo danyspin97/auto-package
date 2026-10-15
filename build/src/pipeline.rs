@@ -568,6 +568,86 @@ fn warn_unsandboxed_resolve_once(reporter: &dyn Reporter) {
     });
 }
 
+/// What each root of this process resolved a package to, per OBS project:
+/// `(project, fuzzy_key) -> [(root, version)]`.
+type Claims = std::collections::HashMap<(String, String), Vec<(String, String)>>;
+
+fn claims() -> &'static std::sync::Mutex<(Claims, std::collections::HashSet<String>)> {
+    static CLAIMS: std::sync::OnceLock<
+        std::sync::Mutex<(Claims, std::collections::HashSet<String>)>,
+    > = std::sync::OnceLock::new();
+    CLAIMS.get_or_init(Default::default)
+}
+
+/// Warnings for the packages `root`'s closure needs at a version another root
+/// built into the same `project` resolved differently (open-webui pins
+/// `mcp==1.27.2`, vllm needs `mcp>=2`). A project holds one release of a
+/// package, so the roots would rebuild it over each other in turn and one of
+/// them would end with a requirement nothing satisfies. Each conflict is
+/// reported once.
+fn version_conflicts(project: &str, root: &str, nodes: &[ap_ecosystem::pip::Node]) -> Vec<String> {
+    let mut guard = claims().lock().unwrap_or_else(|e| e.into_inner());
+    let (claimed, warned) = &mut *guard;
+    let mut out = Vec::new();
+    for node in nodes {
+        let key = osc::fuzzy_key(&node.name);
+        let holders = claimed
+            .entry((project.to_string(), key.clone()))
+            .or_default();
+        holders.retain(|(r, _)| r != root);
+        for (other, version) in holders.iter() {
+            if *version == node.version {
+                continue;
+            }
+            let id = format!(
+                "{project}\0{key}\0{other}\0{root}\0{version}\0{}",
+                node.version
+            );
+            if !warned.insert(id) {
+                continue;
+            }
+            let requirers: Vec<String> = nodes
+                .iter()
+                .flat_map(|n| {
+                    n.requires_dist
+                        .iter()
+                        .filter(move |r| {
+                            let name_end = r
+                                .find(|c: char| {
+                                    !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                                })
+                                .unwrap_or(r.len());
+                            osc::fuzzy_key(&r[..name_end]) == osc::fuzzy_key(&node.name)
+                                && r.contains("==")
+                        })
+                        .map(move |r| {
+                            format!(
+                                "{} requires {}",
+                                n.name,
+                                r.split(';').next().unwrap_or(r).trim()
+                            )
+                        })
+                })
+                .collect();
+            out.push(format!(
+                "{name} resolves to {version} for {other} but to {mine} for {root}{pins}: {project} holds one \
+                 release of it, so the two roots would rebuild it over each other and one of them would \
+                 be left with a requirement nothing satisfies. Build them in separate OBS projects \
+                 (--project), or relax the pin that holds {root} back.",
+                name = node.name,
+                mine = node.version,
+                pins = if requirers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", requirers.join("; "))
+                },
+            ));
+        }
+        holders.push((root.to_string(), node.version.clone()));
+    }
+    out
+}
+
 /// Resolve the dependency closure and return all currently buildable targets
 /// (the "frontier" — nodes whose declared deps in the closure are all resolved).
 ///
@@ -656,6 +736,12 @@ pub fn select_target(
     let build_statuses = build_statuses??;
 
     let total = nodes.len();
+    for message in version_conflicts(&config.project, name, &nodes) {
+        reporter.report(&Event::Warning {
+            step: None,
+            message,
+        });
+    }
 
     // A node already present in the user's own project is resolvable unless
     // OBS reports its own build as actually failing there, in which case it
@@ -8207,6 +8293,49 @@ fn verify_repos_exist(urls: &[String]) -> Vec<bool> {
             .map(|p| p.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
             .collect()
     })
+}
+
+#[cfg(test)]
+mod version_conflict_tests {
+    use super::*;
+
+    fn node(name: &str, version: &str, requires: &[&str]) -> ap_ecosystem::pip::Node {
+        ap_ecosystem::pip::Node {
+            name: name.into(),
+            version: version.into(),
+            sha256: String::new(),
+            requires_dist: requires.iter().map(|s| s.to_string()).collect(),
+            requires_python: None,
+            is_requested: false,
+            is_yanked: false,
+        }
+    }
+
+    #[test]
+    fn two_roots_in_one_project_that_resolve_a_package_differently_are_warned_once() {
+        let vllm = [
+            node("vllm", "0.31.0", &["mcp<3.0.0,>=2.0.0"]),
+            node("mcp", "2.3.0", &[]),
+        ];
+        let webui = [
+            node("open-webui", "0.12.2", &["mcp==1.27.2"]),
+            node("mcp", "1.27.2", &[]),
+        ];
+        assert!(version_conflicts("p:conflict", "vllm", &vllm).is_empty());
+        let warnings = version_conflicts("p:conflict", "open-webui", &webui);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("mcp resolves to 2.3.0 for vllm but to 1.27.2 for open-webui")
+        );
+        assert!(
+            warnings[0].contains("open-webui requires mcp==1.27.2"),
+            "{}",
+            warnings[0]
+        );
+        // Resolving again says nothing new; another project is no conflict.
+        assert!(version_conflicts("p:conflict", "open-webui", &webui).is_empty());
+        assert!(version_conflicts("p:other", "open-webui", &webui).is_empty());
+    }
 }
 
 #[cfg(test)]
