@@ -465,6 +465,21 @@ pub fn resolve(entry: &ResultEntry, evidence: &Evidence) -> BuildStatus {
             _ => status,
         };
     }
+    // `broken: no source uploaded` is what the scheduler says about a package
+    // it has not rescanned since the package was created, and the caller
+    // waits on sources it has just committed: the verdict is old, whatever
+    // the job history (a broken package never has a job) can or cannot say.
+    // Accepting it as unconfirmed would fail a package whose build OBS starts
+    // a minute later.
+    if status == BuildStatus::Broken
+        && (entry.dirty || evidence.confirm)
+        && entry
+            .details
+            .as_deref()
+            .is_some_and(|d| d.to_ascii_lowercase().contains("no source uploaded"))
+    {
+        return BuildStatus::Unknown(format!("stale: {word}"));
+    }
     let must_confirm = (entry.dirty && revision_dependent(&status))
         || (evidence.confirm && is_built(&status, word));
     if !must_confirm {
@@ -666,6 +681,31 @@ mod tests {
     fn dirty_repo_without_evidence_is_stale() {
         let s = resolve(&entry("succeeded", None, true), &Evidence::default());
         assert_eq!(s, BuildStatus::Unknown("unconfirmed: succeeded".into()));
+    }
+
+    /// Seen on every package of a 60-package run: OBS answered `broken: no
+    /// source uploaded` for minutes after the commit, then built them.
+    #[test]
+    fn broken_no_source_uploaded_after_a_commit_is_stale_and_never_accepted() {
+        let confirm = Evidence {
+            confirm: true,
+            ..Evidence::default()
+        };
+        for dirty in [false, true] {
+            let s = resolve(&entry("broken", Some("no source uploaded"), dirty), &confirm);
+            assert_eq!(s, BuildStatus::Unknown("stale: broken".into()));
+            assert_eq!(accept_unconfirmed(&s), None);
+        }
+        // A project-wide scan (no commit, clean repository) takes it at face value.
+        assert_eq!(
+            resolve_lenient(&entry("broken", Some("no source uploaded"), true)),
+            BuildStatus::Broken
+        );
+        // Any other broken reason is a real verdict.
+        assert_eq!(
+            resolve(&entry("broken", Some("bad build configuration"), false), &confirm),
+            BuildStatus::Broken
+        );
     }
 
     #[test]

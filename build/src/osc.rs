@@ -5170,7 +5170,12 @@ pub fn obs_build(
                 current_unresolvable(project, &log_pkg, repo, arch, log_path, emit);
             Error::UnresolvableDeps { names, detail }
         }
-        BuildStatus::Broken => Error::NotActionable("OBS: package source is broken".to_string()),
+        BuildStatus::Broken => Error::NotActionable(
+            match build_details(project, &log_pkg, repo, arch) {
+                Some(d) => format!("OBS: package source is broken: {d}"),
+                None => "OBS: package source is broken".to_string(),
+            },
+        ),
         BuildStatus::Disabled => {
             Error::NotActionable("OBS: build is disabled in project config".to_string())
         }
