@@ -2335,6 +2335,55 @@ fn changes_conflict_file(stderr: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
+mod failing_result_tests {
+    use super::*;
+
+    const XML: &str = r#"<resultlist state="x">
+  <result project="p" repository="openSUSE_Tumbleweed" arch="x86_64" code="published" state="published">
+    <status package="python-mcp" code="succeeded"/>
+    <status package="python-mcp:test" code="failed"/>
+  </result>
+  <result project="p" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+    <status package="python-mcp" code="failed"/>
+  </result>
+</resultlist>"#;
+
+    #[test]
+    fn a_failed_flavor_is_the_result_whose_log_explains_the_failure() {
+        let name = failing_entry_name(
+            XML,
+            "openSUSE_Tumbleweed",
+            "x86_64",
+            "python-mcp",
+            &BuildStatus::Failed,
+        );
+        assert_eq!(name.as_deref(), Some("python-mcp:test"));
+    }
+
+    #[test]
+    fn the_package_itself_wins_when_it_has_the_status() {
+        let name = failing_entry_name(
+            XML,
+            "openSUSE_Tumbleweed",
+            "i586",
+            "python-mcp",
+            &BuildStatus::Failed,
+        );
+        assert_eq!(name.as_deref(), Some("python-mcp"));
+        assert_eq!(
+            failing_entry_name(
+                XML,
+                "openSUSE_Tumbleweed",
+                "x86_64",
+                "python-mcp",
+                &BuildStatus::Unresolvable
+            ),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod respelling_tests {
     use super::respelling_among;
 
@@ -3992,6 +4041,52 @@ fn remove_superseded_rpms(rpms_dir: &Path, current: &[String]) {
     }
 }
 
+/// The result a non-successful `status` of `pkg_name` comes from: the package
+/// itself, or the `<pkg>:<flavor>` multibuild entry that failed while the
+/// package built (`python-mcp:test`'s `%check`). The status of a multibuild
+/// package is the worst of its entries, so the log that explains it is that
+/// entry's, not the package's own, which can be a clean success.
+fn failing_result(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    status: &BuildStatus,
+) -> String {
+    if ![project, pkg_name, repo, arch]
+        .iter()
+        .all(|n| is_valid_obs_name(n))
+    {
+        return pkg_name.to_string();
+    }
+    osc_api(&format!(
+        "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
+        enc(pkg_name),
+        enc(repo),
+        enc(arch)
+    ))
+    .and_then(|xml| failing_entry_name(&xml, repo, arch, pkg_name, status))
+    .unwrap_or_else(|| pkg_name.to_string())
+}
+
+/// [`failing_result`] over a `_result` document: the package if its own entry
+/// has `status`, else the first flavor entry that does.
+fn failing_entry_name(
+    xml: &str,
+    repo: &str,
+    arch: &str,
+    pkg_name: &str,
+    status: &BuildStatus,
+) -> Option<String> {
+    let base = obs_status::find_entry(xml, repo, arch, pkg_name);
+    std::iter::once(base)
+        .flatten()
+        .chain(obs_status::flavor_entries(xml, repo, arch, pkg_name))
+        .find(|e| obs_status::resolve_lenient(e) == *status)
+        .map(|e| e.pkg)
+        .filter(|name| is_valid_obs_name(name))
+}
+
 /// The `<pkg>:<flavor>` names of `pkg_name`'s multibuild flavors built for
 /// `repo`/`arch`; empty for a plain package or when the listing cannot be read.
 fn multibuild_flavors(project: &str, pkg_name: &str, repo: &str, arch: &str) -> Vec<String> {
@@ -4833,23 +4928,41 @@ pub fn obs_build(
     // A missing or stale log leaves the failure without its cause, so say so.
     // Announce the command that really writes `log_path`; the polling above
     // goes through the API and runs no `osc results --watch`.
+    //
+    // A multibuild package whose own entry built but whose flavor did not has
+    // the flavor's log as the evidence: the package's would show a success and
+    // send the fix agent after a failure it cannot see.
+    let log_pkg = if status.is_success() {
+        pkg_name.to_string()
+    } else {
+        failing_result(project, pkg_name, repo, arch, &status)
+    };
+    if log_pkg != pkg_name {
+        reporter.report(&Event::Warning {
+            step,
+            message: format!(
+                "{pkg_name} itself built, but its multibuild flavor {log_pkg} did not: \
+                 the build log is {log_pkg}'s"
+            ),
+        });
+    }
     reporter.report(&Event::Command {
         step,
         program: "osc".to_string(),
         argv: vec![
             "buildlog".to_string(),
             project.to_string(),
-            pkg_name.to_string(),
+            log_pkg.clone(),
             repo.to_string(),
             arch.to_string(),
         ],
         cwd: anywhere(),
         log: Some(log_path.to_path_buf()),
     });
-    if let Err(e) = fetch_buildlog(project, pkg_name, repo, arch, log_path, Emit::quiet()) {
+    if let Err(e) = fetch_buildlog(project, &log_pkg, repo, arch, log_path, Emit::quiet()) {
         reporter.report(&Event::Warning {
             step,
-            message: format!("could not fetch the OBS build log for {pkg_name}: {e}"),
+            message: format!("could not fetch the OBS build log for {log_pkg}: {e}"),
         });
     }
     let log_bytes = log_path.metadata().map(|m| m.len()).unwrap_or(0);
@@ -4949,7 +5062,7 @@ pub fn obs_build(
     Err(match status {
         BuildStatus::Unresolvable => {
             let (names, detail) =
-                current_unresolvable(project, pkg_name, repo, arch, log_path, emit);
+                current_unresolvable(project, &log_pkg, repo, arch, log_path, emit);
             Error::UnresolvableDeps { names, detail }
         }
         BuildStatus::Broken => Error::NotActionable("OBS: package source is broken".to_string()),
