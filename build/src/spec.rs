@@ -3903,6 +3903,43 @@ pub fn license_guard_overrides(spec: &str) -> Vec<(usize, String)> {
     found
 }
 
+/// The comment a spec carries when a licence-confirmation variable was set
+/// after checking what the guard asks about (see
+/// [`unverified_license_guards`]).
+pub const LICENSE_GUARD_EVIDENCE_TAG: &str = "licence-guard-verified:";
+
+/// The guards of [`license_guard_overrides`] that are not backed by a check.
+///
+/// A guard that asks the builder to CONFIRM A FACT (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION`:
+/// the FFmpeg linked is not GPL-licensed) is satisfied honestly by checking the
+/// fact: the spec then carries a `# licence-guard-verified: <what was checked,
+/// where>` comment of some substance, and the build goes ahead (a package that
+/// cannot build is the worst result; a confirmation nobody checked is the other
+/// one). A guard that asks to ACCEPT TERMS (`ACCEPT_EULA`, `AGREE_*_TERMS`) is a
+/// person's decision, evidence or not, and is always returned.
+pub fn unverified_license_guards(spec: &str) -> Vec<(usize, String)> {
+    let evidence = spec
+        .lines()
+        .take_while(|l| l.trim_end() != "%changelog")
+        .filter_map(|l| l.trim_start().strip_prefix('#'))
+        .filter_map(|c| {
+            let c = c.trim();
+            let at = c.to_ascii_lowercase().find(LICENSE_GUARD_EVIDENCE_TAG)?;
+            Some(c[at + LICENSE_GUARD_EVIDENCE_TAG.len()..].trim().len())
+        })
+        .any(|len| len >= 30);
+    license_guard_overrides(spec)
+        .into_iter()
+        .filter(|(_, line)| {
+            let upper = line.to_ascii_uppercase();
+            let terms = ["EULA", "ACCEPT_", "AGREE_", "TERMS"]
+                .iter()
+                .any(|t| upper.contains(t));
+            terms || !evidence
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod sdist_files_tests {
     use super::*;
@@ -3966,7 +4003,28 @@ mod sdist_files_tests {
 
 #[cfg(test)]
 mod license_guard_tests {
-    use super::license_guard_overrides;
+    use super::{license_guard_overrides, unverified_license_guards};
+
+    /// torchcodec: the guard asks whether the FFmpeg linked is licence-compatible;
+    /// a spec that says what was checked builds, one that does not, or one that
+    /// accepts terms, stops.
+    #[test]
+    fn a_confirmation_backed_by_a_check_is_allowed_but_terms_never_are() {
+        let guard = "export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1\n";
+        assert_eq!(unverified_license_guards(guard).len(), 1);
+        let ok = format!(
+            "# licence-guard-verified: ffmpeg-8 spec configures without --enable-gpl/--enable-nonfree (LGPL-2.1+)\n{guard}"
+        );
+        assert!(unverified_license_guards(&ok).is_empty());
+        // Too little to be a check.
+        let thin = format!("# licence-guard-verified: ok\n{guard}");
+        assert_eq!(unverified_license_guards(&thin).len(), 1);
+        // Accepting terms is a person's decision, whatever the comment says.
+        let eula = format!("{ok}ACCEPT_EULA=Y make\n");
+        let left = unverified_license_guards(&eula);
+        assert_eq!(left.len(), 1);
+        assert!(left[0].1.contains("ACCEPT_EULA"));
+    }
 
     #[test]
     fn a_variable_that_confirms_a_licence_is_found_outside_comments() {

@@ -176,10 +176,14 @@ deliberately conservative:
 
 ### Licence guards
 
-A spec that sets a variable overriding an upstream licence guard
-(`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1`, `ACCEPT_EULA=Y`) is not built or
-committed: the package fails with the line named, since that is a person's
-decision. After reviewing the licence, run again with
+A package that cannot build is the worst outcome, so a guard is answered, not
+obeyed blindly. A guard that asks the builder to *confirm a fact*
+(`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1`, as torchcodec's wheel-state
+check does about the FFmpeg it links) is satisfied after the agent checks the
+fact, and the spec records the check in a `# licence-guard-verified: <what was
+checked>` comment. Without that comment the package fails with the line named.
+A variable that *accepts terms* (`ACCEPT_EULA=Y`) is a person's decision and is
+never set by the tool; after reviewing the terms, run again with
 `AUTO_PACKAGE_ALLOW_LICENSE_OVERRIDES=1`.
 
 ## Architecture
