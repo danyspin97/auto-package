@@ -1194,6 +1194,9 @@ pub struct SdistFacts {
     pub has_c_extensions: bool,
     /// See `ap_ecosystem::sdist::SdistInfo::top_level_tests_dir`.
     pub top_level_tests_dir: Option<String>,
+    /// What the project installs into site-packages, from [`sdist_files_entries`];
+    /// `None` when the sdist's layout does not say it unambiguously.
+    pub install_entries: Option<Vec<String>>,
 }
 
 /// Re-run post-processing once the tarball has been inspected.
@@ -1312,6 +1315,10 @@ fn post_process(
     let out = normalize_python_module_versions(&out);
     let out = dedupe_build_requires(&out);
     let out = normalize_files_paths(&out, &release.name);
+    let out = match &facts.install_entries {
+        Some(entries) => apply_install_entries(&out, entries),
+        None => out,
+    };
     let out = fix_bare_source_filename(&out, release);
     if facts.has_c_extensions {
         fix_c_extension_arch(&out)
@@ -1429,6 +1436,189 @@ pub fn add_runtime_dependencies(spec: &str, requires_dist: &[String], own_name: 
         && let Some(at) = out.find("%python_subpackages")
     {
         out.insert_str(at, &requires_lines);
+    }
+    out
+}
+
+/// The `%files` entries for what a Python source tree installs into
+/// site-packages, read from the sdist's file list, with `@SITE@` standing for
+/// the site directory. `None` unless the tree says it without guessing: one
+/// import tree under the project root (or its `src/`), no loose top-level module.
+///
+/// The generator guessed `%{python_sitelib}/<pypi_name>/`, which was wrong for
+/// every PEP 420 namespace distribution (`opentelemetry-instrumentation-flask`
+/// installs `opentelemetry/instrumentation/flask/`) and wherever the import name
+/// differs (`python-docx` -> `docx`, `z3-solver` -> `z3`); the review corrected
+/// it on a dozen packages.
+pub fn sdist_files_entries(
+    files: &[String],
+    top_level_dir: &str,
+    project_dir: Option<&str>,
+) -> Option<Vec<String>> {
+    use std::collections::BTreeMap;
+
+    const NOT_INSTALLED: &[&str] = &[
+        "tests",
+        "test",
+        "testing",
+        "docs",
+        "doc",
+        "examples",
+        "example",
+        "scripts",
+        "script",
+        "benchmarks",
+        "benchmark",
+        "tools",
+        "build",
+        "dist",
+        "ci",
+        "typings",
+        "stubs",
+        "tasks",
+        "noxfile.py",
+        "setup.py",
+        "conftest.py",
+        "fabfile.py",
+        "docs_src",
+        "bench",
+        "dev",
+    ];
+    let prefix = match project_dir {
+        Some(d) => format!("{top_level_dir}/{d}/"),
+        None => format!("{top_level_dir}/"),
+    };
+    let rel: Vec<&str> = files
+        .iter()
+        .filter_map(|f| f.strip_prefix(prefix.as_str()))
+        .filter(|f| f.ends_with(".py"))
+        .collect();
+    // A `src/` layout when the Python lives there.
+    let root = if rel
+        .iter()
+        .any(|f| f.starts_with("src/") && f.matches('/').count() >= 2)
+    {
+        "src/"
+    } else {
+        ""
+    };
+    #[derive(Default)]
+    struct Dir {
+        files: Vec<String>,
+        dirs: BTreeMap<String, Dir>,
+    }
+    let mut tree = Dir::default();
+    for f in rel.iter().filter_map(|f| f.strip_prefix(root)) {
+        let first = f.split('/').next().unwrap_or("");
+        if first.starts_with('.') || NOT_INSTALLED.contains(&first) {
+            continue;
+        }
+        if f.chars()
+            .any(|c| c.is_whitespace() || matches!(c, '%' | '$' | '*' | '?' | '['))
+        {
+            return None;
+        }
+        let mut node = &mut tree;
+        let mut parts = f.split('/').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_some() {
+                node = node.dirs.entry(part.to_string()).or_default();
+            } else {
+                node.files.push(part.to_string());
+            }
+        }
+    }
+    // A loose module (`six.py`) brings its own `__pycache__` entry: not guessed.
+    if !tree.files.is_empty() || tree.dirs.len() != 1 {
+        return None;
+    }
+    fn emit(dir: &Dir, path: &str, out: &mut Vec<String>) {
+        let own_files = dir.files.iter().any(|f| f == "__init__.py");
+        if own_files || dir.dirs.is_empty() {
+            out.push(format!("@SITE@/{path}/"));
+            return;
+        }
+        out.push(format!("%dir @SITE@/{path}"));
+        let mut files = dir.files.clone();
+        files.sort();
+        for f in files {
+            out.push(format!("@SITE@/{path}/{f}"));
+        }
+        for (name, child) in &dir.dirs {
+            emit(child, &format!("{path}/{name}"), out);
+        }
+    }
+    let mut out = Vec::new();
+    for (name, child) in &tree.dirs {
+        emit(child, name, &mut out);
+    }
+    Some(out)
+}
+
+/// Replace the module-directory entry of the generated `%files` with the
+/// entries read from the sdist, when the generated one names a directory that
+/// is not part of the install tree. The site directory the line used is kept.
+fn apply_install_entries(spec: &str, entries: &[String]) -> String {
+    let real_tops: std::collections::HashSet<&str> = entries
+        .iter()
+        .filter_map(|e| {
+            let path = e.strip_prefix("%dir ").unwrap_or(e);
+            path.strip_prefix("@SITE@/")?.split('/').next()
+        })
+        .collect();
+    let mut out = String::with_capacity(spec.len());
+    let mut replaced = false;
+    let mut in_files = false;
+    for line in spec.lines() {
+        const SECTIONS: &[&str] = &[
+            "%files",
+            "%description",
+            "%prep",
+            "%build",
+            "%install",
+            "%check",
+            "%changelog",
+            "%package",
+            "%pre",
+            "%post",
+            "%preun",
+            "%postun",
+            "%pretrans",
+            "%posttrans",
+        ];
+        if let Some(section) = SECTIONS.iter().find(|s| {
+            line.strip_prefix(**s)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        }) {
+            in_files = *section == "%files";
+        }
+        let trimmed = line.trim().trim_end_matches('/');
+        let guessed_site =
+            if in_files && !replaced && trimmed.starts_with('%') && !trimmed.contains(".dist-info")
+            {
+                trimmed
+                    .rsplit_once('/')
+                    .filter(|(site, last)| {
+                        (site.contains("sitelib") || site.contains("sitearch"))
+                            && !real_tops.contains(last)
+                    })
+                    .map(|(site, _)| site)
+            } else {
+                None
+            };
+        if let Some(site) = guessed_site {
+            for e in entries {
+                out.push_str(&e.replace("@SITE@", site));
+                out.push('\n');
+            }
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !spec.ends_with('\n') {
+        out.pop();
     }
     out
 }
@@ -2654,6 +2844,7 @@ BuildRequires:  %{python_module pip}
                 has_tests: true,
                 has_c_extensions: false,
                 top_level_tests_dir: Some("tests".to_string()),
+                install_entries: None,
             },
         );
         assert!(scoped.contains("%check\n%pytest tests/\n"), "{scoped}");
@@ -2666,6 +2857,7 @@ BuildRequires:  %{python_module pip}
                 has_tests: true,
                 has_c_extensions: false,
                 top_level_tests_dir: None,
+                install_entries: None,
             },
         );
         assert!(unscoped.contains("%check\n%pytest\n"), "{unscoped}");
@@ -3296,6 +3488,67 @@ pub fn license_guard_overrides(spec: &str) -> Vec<(usize, String)> {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod sdist_files_tests {
+    use super::*;
+
+    fn files(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_namespace_distribution_lists_its_real_directory() {
+        let f = files(&[
+            "otel_flask-0.66b1/src/opentelemetry/instrumentation/flask/__init__.py",
+            "otel_flask-0.66b1/src/opentelemetry/instrumentation/flask/package.py",
+            "otel_flask-0.66b1/tests/test_flask.py",
+            "otel_flask-0.66b1/pyproject.toml",
+        ]);
+        let entries = sdist_files_entries(&f, "otel_flask-0.66b1", None).unwrap();
+        assert_eq!(
+            entries,
+            [
+                "%dir @SITE@/opentelemetry",
+                "%dir @SITE@/opentelemetry/instrumentation",
+                "@SITE@/opentelemetry/instrumentation/flask/"
+            ]
+        );
+        let spec = "%files %{python_files}\n%license LICENSE\n%{python_sitelib}/opentelemetry_instrumentation_flask/\n%{python_sitelib}/opentelemetry_instrumentation_flask-%{version}.dist-info/\n\n%changelog\n";
+        let out = apply_install_entries(spec, &entries);
+        assert_eq!(
+            out,
+            "%files %{python_files}\n%license LICENSE\n%dir %{python_sitelib}/opentelemetry\n%dir %{python_sitelib}/opentelemetry/instrumentation\n%{python_sitelib}/opentelemetry/instrumentation/flask/\n%{python_sitelib}/opentelemetry_instrumentation_flask-%{version}.dist-info/\n\n%changelog\n"
+        );
+    }
+
+    #[test]
+    fn a_different_import_name_replaces_the_pypi_guess_and_a_right_guess_is_kept() {
+        let f = files(&[
+            "python-docx-1.2.0/src/docx/__init__.py",
+            "python-docx-1.2.0/src/docx/x.py",
+            "python-docx-1.2.0/tests/t.py",
+        ]);
+        let entries = sdist_files_entries(&f, "python-docx-1.2.0", None).unwrap();
+        assert_eq!(entries, ["@SITE@/docx/"]);
+        let wrong = "%files %{python_files}\n%{python_sitelib}/python_docx/\n";
+        assert_eq!(
+            apply_install_entries(wrong, &entries),
+            "%files %{python_files}\n%{python_sitelib}/docx/\n"
+        );
+        let right = "%files %{python_files}\n%{python_sitearch}/docx/\n";
+        assert_eq!(apply_install_entries(right, &entries), right);
+    }
+
+    #[test]
+    fn an_ambiguous_layout_is_left_to_the_review() {
+        // a loose module, or two import trees
+        let module = files(&["x-1/six.py", "x-1/tests/t.py"]);
+        assert_eq!(sdist_files_entries(&module, "x-1", None), None);
+        let two = files(&["x-1/a/__init__.py", "x-1/b/__init__.py"]);
+        assert_eq!(sdist_files_entries(&two, "x-1", None), None);
+    }
 }
 
 #[cfg(test)]
