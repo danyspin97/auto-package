@@ -2984,6 +2984,32 @@ fn local_wheel_source(spec: &str, checkout_dir: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// How a linked project spells the package for `dep` (a bare name), when it is
+/// spelled differently: the source package `python-PyYAML` for `pyyaml`. The
+/// binary search is case-sensitive and cannot enumerate every mixed-case name, so
+/// the project listing (matched by `fuzzy_key`) settles what it cannot.
+fn linked_package_spelling(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    dep: &str,
+) -> Option<String> {
+    let emit = Emit::new(ctx.reporter, step);
+    let mut linked = Vec::new();
+    for (path_project, _repo) in osc::get_project_repo_paths(&ctx.config.project, emit).ok()? {
+        let l = osc::try_list_project_packages(&path_project, emit).ok()?;
+        linked.push((path_project, l));
+    }
+    let none = Default::default();
+    let no_statuses = std::collections::HashMap::new();
+    let crate::depclass::Availability::InLinked { pkg, .. } =
+        crate::depclass::availability(dep, &none, &no_statuses, &linked)
+    else {
+        return None;
+    };
+    let spelled = osc::strip_rpm_prefix(&pkg).to_string();
+    (spelled != dep && osc::fuzzy_key(&spelled) == osc::fuzzy_key(dep)).then_some(spelled)
+}
+
 /// The version a linked project ships of `dep` (a bare upstream name), or `None`
 /// when none does or the projects cannot be read.
 fn linked_shipped_version(
@@ -3903,11 +3929,12 @@ fn unresolvable_deps_round(
             {
                 continue;
             }
+            let from = osc::strip_rpm_prefix(dep).to_string();
             let Some(to) = osc::published_respelling(&config.project, &config.arch, dep, emit)
+                .or_else(|| linked_package_spelling(ctx, build_step.id, &from))
             else {
                 continue;
             };
-            let from = osc::strip_rpm_prefix(dep).to_string();
             if !found.iter().any(|(f, _)| *f == from) {
                 found.push((from, to));
             }

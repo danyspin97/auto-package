@@ -1462,7 +1462,14 @@ fn published_binary_match(projects: &[String], name: &str, by: NameMatch, arch: 
         .map(|p| format!("@project='{}'", quote(p)))
         .collect::<Vec<_>>()
         .join(" or ");
-    format!("{name_clause} and ({projects}) and @arch='{}'", quote(arch))
+    // A pure-Python (or any other noarch) RPM is published as `arch="noarch"`, so
+    // `@arch='x86_64'` alone never finds it: every noarch package looked "not
+    // shipped", and `python313-huggingface_hub` was queued as a new package while
+    // `python313-huggingface-hub` was published.
+    format!(
+        "{name_clause} and ({projects}) and (@arch='{0}' or @arch='noarch')",
+        quote(arch)
+    )
 }
 
 /// The distinct binary names in a `/search/published/binary/id` answer.
@@ -1593,7 +1600,38 @@ pub fn published_respelling(
         .split(['-', '_', '.'])
         .max_by_key(|part| part.len())
         .filter(|part| part.len() >= 3 && !part.contains('\''))?;
-    let published = published_binaries(project, arch, term, NameMatch::Containing, emit)?;
+    // `contains()` is case-sensitive and the distro spells some names with capitals
+    // (`python313-Brotli`, asked for as `brotli`): look for the usual variants too.
+    let mut cased: Vec<String> = Vec::new();
+    let mut chars = term.chars();
+    let capitalized: String = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    for variant in [
+        term.to_string(),
+        term.to_lowercase(),
+        capitalized,
+        term.to_uppercase(),
+    ] {
+        if !cased.contains(&variant) {
+            cased.push(variant);
+        }
+    }
+    let mut published: Vec<String> = Vec::new();
+    let mut answered = false;
+    for variant in &cased {
+        if let Some(names) = published_binaries(project, arch, variant, NameMatch::Containing, emit)
+        {
+            answered = true;
+            published.extend(names);
+        }
+    }
+    if !answered {
+        return None;
+    }
+    published.sort();
+    published.dedup();
     respelling_among(name, &published)
 }
 
@@ -1653,7 +1691,7 @@ mod published_binary_tests {
         );
         assert_eq!(
             m,
-            "@name='ffmpeg-8-devel' and (@project='openSUSE:Factory' or @project='devel:x') and @arch='x86_64'"
+            "@name='ffmpeg-8-devel' and (@project='openSUSE:Factory' or @project='devel:x') and (@arch='x86_64' or @arch='noarch')"
         );
         assert!(
             published_binary_match(&["p".into()], "a'b", NameMatch::Containing, "x86_64")
