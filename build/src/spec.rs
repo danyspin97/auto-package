@@ -3268,6 +3268,56 @@ pub fn todo_placeholders(spec: &str) -> Vec<(usize, String)> {
     found
 }
 
+/// Lines of the spec that set a variable whose only purpose is to tell an
+/// upstream build "I accept the licence terms" or "this is not a licence
+/// violation" (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1`,
+/// `ACCEPT_EULA=Y`). A guard like that exists because a person has to decide;
+/// the review turn set torchcodec's to get its build past a wheel-state check
+/// that protects against shipping FFmpeg builds with a different licence. Comments
+/// and `%changelog` are not searched.
+pub fn license_guard_overrides(spec: &str) -> Vec<(usize, String)> {
+    use std::sync::LazyLock;
+    static GUARD: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\b[A-Z0-9_]*(?:I_CONFIRM|NOT_A_LICENSE_VIOLATION|LICEN[SC]E_VIOLATION|ACCEPT_[A-Z0-9_]*(?:LICEN[SC]E|EULA|TERMS)|AGREE_[A-Z0-9_]*(?:LICEN[SC]E|EULA|TERMS)|ACCEPT_EULA)[A-Z0-9_]*\s*=",
+        )
+        .expect("static pattern")
+    });
+    let mut found = Vec::new();
+    for (i, line) in spec.lines().enumerate() {
+        if line.trim_end() == "%changelog" {
+            break;
+        }
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if GUARD.is_match(line) {
+            found.push((i + 1, line.trim().to_string()));
+        }
+    }
+    found
+}
+
+#[cfg(test)]
+mod license_guard_tests {
+    use super::license_guard_overrides;
+
+    #[test]
+    fn a_variable_that_confirms_a_licence_is_found_outside_comments() {
+        let spec = "%build
+# I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 would bypass it
+                    export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1
+                    ACCEPT_EULA=Y make
+                    export CMAKE_ARGS=\"-DLICENSE_FILE=x\"
+%changelog
+- ACCEPT_EULA=Y\n";
+        let found = license_guard_overrides(spec);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].0, 3);
+        assert_eq!(found[1].1, "ACCEPT_EULA=Y make");
+    }
+}
+
 #[cfg(test)]
 mod todo_placeholder_tests {
     use super::todo_placeholders;

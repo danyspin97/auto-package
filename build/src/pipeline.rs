@@ -3281,6 +3281,27 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                 return Ok(Flow::Retry);
             }
 
+            // A switch that tells an upstream build "this is not a licence violation"
+            // is a person's decision, not the review's: the package stops here
+            // unless the operator has said they reviewed it.
+            let guards = crate::spec::license_guard_overrides(&spec_text_now(spec_path));
+            if !guards.is_empty()
+                && std::env::var_os("AUTO_PACKAGE_ALLOW_LICENSE_OVERRIDES").is_none()
+            {
+                let lines: Vec<String> = guards
+                    .iter()
+                    .map(|(n, text)| format!("{n}: {text}"))
+                    .collect();
+                validate_step.finish(StepOutcome::Failed);
+                return Err(ctx.failed(format!(
+                    "the spec sets a variable that overrides an upstream licence guard, which \
+                     needs a person's review before anything is built or committed ({}). Review \
+                     the licence the guard protects, then run again with \
+                     AUTO_PACKAGE_ALLOW_LICENSE_OVERRIDES=1",
+                    lines.join("; ")
+                )));
+            }
+
             // What a reviewer sends back at once: an emoji, a description that
             // only repeats the Summary, a `%files` with no `%license` although
             // the source ships a licence file (convention 66, 69).
