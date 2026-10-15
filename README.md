@@ -163,6 +163,17 @@ deliberately conservative:
 - the description gives the old and new version and the newest `.changes`
   entry. Created request ids are printed and listed in the summary.
 
+### Exit codes
+
+- `0`: success.
+- `1`: the run failed (a package failed to build, bad arguments, ...).
+- `2`: the agent is unavailable: the `claude` CLI is not logged in. The whole
+  run stops at once (running children are killed, queued packages are not
+  started, in-flight packages are recorded as interrupted) instead of retrying
+  every package. Run `claude` and `/login`, then re-run. `build` and
+  `update-project` check `claude auth status` (free) before starting.
+- `130`: interrupted (Ctrl-C or SIGTERM).
+
 ## Architecture
 
 The project is organized as a Rust workspace:
