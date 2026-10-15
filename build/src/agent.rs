@@ -4915,9 +4915,15 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "## Dependencies that failed to build\n\n\
              This run already tried to build these and could not:\n{}\n\n\
              Do NOT put them in `unresolvable_packages` again — that is the retry \
-             cycle convention 15 Step B exists to break. Work around them instead: \
-             skip the tests that need them, or build without the feature that needs \
-             them, and say in your reasoning which one you did and why.\n\n",
+             cycle convention 15 Step B exists to break. Work around them only where \
+             the package does not need them: skip the tests that need them, or build \
+             without the optional feature that needs them, and say in your reasoning \
+             which one you did and why. Never drop a `Requires`/`BuildRequires` the \
+             package imports unconditionally (at module level, or from every test \
+             module): the result is an RPM that installs and cannot be imported, \
+             packaged to look green. Return `blocked` and name the dependency \
+             instead; the pipeline runs a failed dependency again, and this package \
+             with it once that builds.\n\n",
             bullets(req.failed_deps),
         )
     };
