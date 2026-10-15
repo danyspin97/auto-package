@@ -357,6 +357,38 @@ fn extract_unresolvable_detail(log: &str) -> Vec<String> {
     result
 }
 
+/// One `have choice for <capability> needed by <package>: <provider> ...` line
+/// of the solver: it names no missing package, only several that could provide
+/// what a package needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderChoice {
+    pub capability: String,
+    pub needed_by: String,
+    pub providers: Vec<String>,
+}
+
+/// The provider choices in `detail`.
+pub fn provider_choices(detail: &[String]) -> Vec<ProviderChoice> {
+    detail
+        .iter()
+        .filter_map(|line| {
+            let line = line.trim();
+            let line = line
+                .strip_prefix("unresolvable:")
+                .unwrap_or(line)
+                .trim_start();
+            let rest = line.strip_prefix("have choice for ")?;
+            let (capability, rest) = rest.split_once(" needed by ")?;
+            let (needed_by, providers) = rest.split_once(':')?;
+            Some(ProviderChoice {
+                capability: capability.trim().to_string(),
+                needed_by: needed_by.trim().to_string(),
+                providers: providers.split_whitespace().map(str::to_string).collect(),
+            })
+        })
+        .collect()
+}
+
 /// A package OBS has at a version that misses a constraint a spec wrote
 /// (`nothing provides <name> >= V` followed by `(got version W)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,6 +471,21 @@ pub fn outdated_packages(detail: &[String]) -> Vec<(String, Option<String>)> {
 #[cfg(test)]
 mod extract_unresolvable_tests {
     use super::*;
+
+    #[test]
+    fn a_provider_choice_line_is_read() {
+        let detail = vec![
+            "have choice for libnccl.so.2()(64bit) needed by python314-nccl-extensions: python313-nvidia-nccl-cu13 python314-nvidia-nccl-cu13".to_string(),
+        ];
+        let c = provider_choices(&detail);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].capability, "libnccl.so.2()(64bit)");
+        assert_eq!(c[0].needed_by, "python314-nccl-extensions");
+        assert_eq!(
+            c[0].providers,
+            ["python313-nvidia-nccl-cu13", "python314-nvidia-nccl-cu13"]
+        );
+    }
 
     #[test]
     fn a_package_at_an_older_version_is_outdated_not_missing() {
@@ -1418,6 +1465,30 @@ pub fn similar_published_binaries(
     found.sort_by_key(|n| (n.ends_with("-devel") != wants_devel, n.len()));
     found.truncate(12);
     found
+}
+
+#[cfg(test)]
+mod tracked_stray_tests {
+    use super::*;
+
+    #[test]
+    fn a_tracked_file_missing_from_the_checkout_is_committed_as_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".osc")).unwrap();
+        fs::write(
+            dir.path().join(".osc/_files"),
+            r#"<directory name="python-mcp">
+  <entry name="mcp-1.28.1.tar.gz" md5="a" size="1"/>
+  <entry name="mcp-2.3.0.tar.gz" md5="b" size="1"/>
+  <entry name="python-mcp.spec" md5="c" size="1"/>
+</directory>"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("mcp-2.3.0.tar.gz"), b"").unwrap();
+        fs::write(dir.path().join("python-mcp.spec"), b"").unwrap();
+        let removed = remove_tracked_strays(dir.path(), &[], Emit::quiet());
+        assert_eq!(removed, ["mcp-1.28.1.tar.gz"]);
+    }
 }
 
 #[cfg(test)]
@@ -2805,6 +2876,15 @@ pub fn remove_tracked_strays(
             Ok(out) if out.success() => removed.push(name.clone()),
             Ok(out) => ap_core::diag!("  osc rm {name}: {}", first_line(&out.stderr)),
             Err(e) => ap_core::diag!("  osc rm {name}: {e}"),
+        }
+    }
+    // A tracked file that is gone from the checkout was deleted on purpose (the
+    // old release's tarball when a package moves to a new version): the commit
+    // must carry the deletion, or OBS keeps both releases' archives. `osc
+    // addremove <name>` marks it, `osc ci <name>` commits it.
+    for name in &tracked {
+        if !checkout_dir.join(name).exists() && !removed.contains(name) && !skipped.contains(name) {
+            removed.push(name.clone());
         }
     }
     removed

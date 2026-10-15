@@ -2655,8 +2655,13 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
 72. **`rpmlintrc` filters exist only for a warning OBS actually reported.**
    `unused-rpmlintrc-filter` is an error, so a filter nothing matches fails the
    package. Start with no `rpmlintrc` and add `addFilter("<regex>")` lines for
-   the warnings the build log names, each with a comment saying why it is
-   harmless. Anchor path filters with `/usr/lib(64)?/python`, never a bare
+   the warnings the build log names. Fix the cause in the package first
+   (`shared-library-not-executable`: `chmod 0755` the libraries in `%install`;
+   `no-dependency-on python-base`: `Requires: python-base`;
+   `devel-file-in-non-devel-package`: delete the header); a filter is only for
+   what cannot be fixed (a vendor binary without a hash section, a bundled
+   library no ldconfig cache applies to), and then a comment in the rpmlintrc
+   says why it cannot be fixed. Anchor path filters with `/usr/lib(64)?/python`, never a bare
    `/usr/lib/python`: the sitearch is under `lib64`. Delete the file, and its
    `Source99`, when the last filter goes. A filter must not hide a real defect:
    `devel-file-in-non-devel-package` is fixed by deleting the header in
@@ -2707,7 +2712,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `https://github.com/org/proj/archive/refs/tags/v%{version}.tar.gz#/proj-%{version}.tar.gz`),
    never a bare file name that only exists in this checkout. A change to the
    upstream source (a workspace member removed from `Cargo.toml`, a file fixed
-   in the sdist) is a `Patch:` with a comment, not an edited tarball. The upstream
+   in the sdist) is a `Patch:` with a comment, not an edited tarball. A package
+   holds ONE release: the archive of the version it replaces is deleted from the
+   checkout (the commit then deletes it from OBS) and never sits next to the new
+   one (`mcp-1.28.1.tar.gz` beside `mcp-2.3.0.tar.gz`). The upstream
    archive a wheel switch replaced is deleted (the pipeline removes it from OBS at
    the commit) and its leftovers (`*.pre-wheel-switch`, `wheel-origin.txt`,
    `series` with no patch) stay out of the package.

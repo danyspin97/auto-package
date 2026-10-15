@@ -1638,38 +1638,29 @@ pub(crate) fn is_prebuilt_binary_wheel(
     !is_pure && layout.is_some_and(|l| l.first_shared_lib.is_some())
 }
 
-/// Baseline `addFilter` set for a prebuilt/vendor-binary wheel (see
-/// [`is_prebuilt_binary_wheel`]) — the same five rpmlint findings observed
-/// independently, by separate build attempts, on nvidia-cublas,
-/// nvidia-cuda-runtime, nvidia-nccl-cu13, and nvidia-nvtx. Pre-seeding this
-/// at spec-generation time saves the agent from re-deriving it from a failed
-/// build every single time this wheel shape recurs.
+/// The `rpmlintrc` of a prebuilt/vendor-binary wheel (see
+/// [`is_prebuilt_binary_wheel`]): only the findings that cannot be fixed in the
+/// package, each with the reason it stays. What can be fixed is fixed in the
+/// spec instead, by [`wheel_binary_skeleton`]: the executable bit on the
+/// libraries, the dependency on `python-base`, the bundled headers.
 ///
-/// `header_dirs` (from [`ap_ecosystem::sdist::WheelLayout::header_dirs`], the
-/// same already-unpacked wheel this function's caller already has on disk)
-/// adds one `devel-file-in-non-devel-package` filter per directory of
-/// bundled C/C++ headers — the sixth finding this shape produces, previously
-/// only ever caught by an agent turn re-deriving it from a failed build
-/// (observed on nvidia-nccl-cu13: 100 rpmlint errors for `nccl.h` and
-/// friends under `nvidia/nccl/include/`) and written as prose in the agent's
-/// own prompt instead of pre-seeded here like the other five. Every CUDA
-/// wheel bundling its own public API headers (cublas, cudnn, cufft, …) hits
-/// this the same way, so it belongs here, not in a prompt an agent has to
-/// remember to apply.
-pub fn prebuilt_wheel_rpmlintrc(header_dirs: &[String]) -> String {
-    let mut out = String::from(
-        "addFilter(\"missing-hash-section\")\n\
-         addFilter(\"shared-library-not-executable\")\n\
+/// - `missing-hash-section`: the libraries are upstream's prebuilt binaries,
+///   linked without a build-id/hash section; they cannot be relinked here.
+/// - `library-without-ldconfig-postin/postun`: the bundled libraries sit in
+///   site-packages and are loaded by the Python modules from their own
+///   directory, not from the ldconfig path, so there is no cache to refresh.
+pub fn prebuilt_wheel_rpmlintrc() -> String {
+    String::from(
+        "# The libraries are upstream's prebuilt binaries, linked without a hash\n\
+         # section; they cannot be relinked here.\n\
+         addFilter(\"missing-hash-section\")\n\
+         \n\
+         # The bundled libraries live in site-packages and are loaded from their own\n\
+         # directory by the Python modules, not from the ldconfig path: there is no\n\
+         # ldconfig cache for a scriptlet to refresh.\n\
          addFilter(\"library-without-ldconfig-postin\")\n\
-         addFilter(\"library-without-ldconfig-postun\")\n\
-         addFilter(\"no-dependency-on python-base\")\n",
-    );
-    for dir in header_dirs {
-        out.push_str(&format!(
-            "addFilter(\"devel-file-in-non-devel-package.*/usr/lib(64)?/python.*/site-packages/{dir}/\")\n"
-        ));
-    }
-    out
+         addFilter(\"library-without-ldconfig-postun\")\n",
+    )
 }
 
 pub fn wheel_binary_skeleton(
@@ -1736,6 +1727,22 @@ pub fn wheel_binary_skeleton(
               # %python_expand PYTHONPATH=%{buildroot}%{$python_sitelib} $python -c \"import <name>\"\n"
             .to_string(),
     };
+    // What rpmlint would otherwise be told to ignore is fixed here: the wheel's
+    // libraries lose their missing executable bit, and the bundled C headers
+    // (not needed at run time) are removed.
+    let mut install_extra = String::new();
+    if layout.is_some_and(|l| l.first_shared_lib.is_some()) {
+        install_extra.push_str(&format!(
+            "# the wheel ships its libraries without the executable bit\n\
+             %python_expand find %{{buildroot}}%{{${sitedir}}} -name '*.so*' -type f -exec chmod 0755 {{}} +\n"
+        ));
+    }
+    for dir in layout.map(|l| l.header_dirs.as_slice()).unwrap_or(&[]) {
+        install_extra.push_str(&format!(
+            "# bundled headers are not needed at run time\n\
+             %python_expand rm -rf %{{buildroot}}%{{${sitedir}}}/{dir}\n"
+        ));
+    }
 
     format!(
         "#\n\
@@ -1768,6 +1775,7 @@ pub fn wheel_binary_skeleton(
          BuildRequires:  python-rpm-macros\n\
          BuildRequires:  %{{python_module pip}}\n\
          BuildRequires:  fdupes\n\
+         Requires:       python-base\n\
          %python_subpackages\n\
          \n\
          %description\n\
@@ -1788,6 +1796,7 @@ pub fn wheel_binary_skeleton(
          \n\
          %install\n\
          %pyproject_install %{{SOURCE0}}\n\
+         {install_extra}\
          %python_expand %fdupes %{{buildroot}}/%{{${sitedir}}}\n\
          \n\
          {check_block}\
@@ -2558,25 +2567,17 @@ BuildRequires:  %{python_module pip}
         assert!(!spec.contains("Source99"), "{spec}");
     }
 
-    /// The nvidia-nccl-cu13 case: bundled C headers under the wheel's own
-    /// `include/` get a `devel-file-in-non-devel-package` filter pre-seeded
-    /// at generation time, so the agent doesn't have to re-derive it from
-    /// 100 rpmlint errors on the first real build.
+    /// The rpmlintrc keeps only what the package cannot fix, with the reason;
+    /// the executable bit, `python-base` and bundled headers are fixed in the spec.
     #[test]
-    fn bundled_headers_get_a_pre_seeded_devel_file_filter() {
-        let rc = prebuilt_wheel_rpmlintrc(&["nvidia/nccl/include".to_string()]);
-        assert!(
-            rc.contains(
-                "addFilter(\"devel-file-in-non-devel-package.*/usr/lib(64)?/python.*/site-packages/nvidia/nccl/include/\")"
-            ),
-            "{rc}"
-        );
-        // The five baseline filters are still there regardless.
+    fn the_wheel_rpmlintrc_has_only_unfixable_filters_with_reasons() {
+        let rc = prebuilt_wheel_rpmlintrc();
         assert!(rc.contains("addFilter(\"missing-hash-section\")"), "{rc}");
-
-        // No bundled headers: no sixth filter, baseline unchanged.
-        let rc = prebuilt_wheel_rpmlintrc(&[]);
+        assert!(rc.contains("library-without-ldconfig-postin"), "{rc}");
+        assert!(!rc.contains("shared-library-not-executable"), "{rc}");
+        assert!(!rc.contains("no-dependency-on python-base"), "{rc}");
         assert!(!rc.contains("devel-file-in-non-devel-package"), "{rc}");
+        assert!(rc.matches('#').count() >= 2, "{rc}");
     }
 
     #[test]
@@ -3239,5 +3240,44 @@ mod relax_bound_tests {
         assert!(out.contains("python-y >= 1"));
         let same = "Requires: python-x >= 1\n";
         assert_eq!(relax_dependency_bounds(same, "x", "2.0"), same);
+    }
+}
+
+/// `spec` with `BuildRequires:  <requirement>` added after the last
+/// `BuildRequires:` line, or `None` when it is already there. Used to settle a
+/// provider the solver cannot choose between.
+pub fn add_build_requires(spec: &str, requirement: &str) -> Option<String> {
+    let wanted = requirement.trim();
+    let has = spec.lines().any(|l| {
+        l.trim_start()
+            .strip_prefix("BuildRequires:")
+            .is_some_and(|v| v.trim() == wanted)
+    });
+    if has {
+        return None;
+    }
+    let lines: Vec<&str> = spec.lines().collect();
+    let at = lines
+        .iter()
+        .rposition(|l| l.trim_start().starts_with("BuildRequires:"))?;
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    out.insert(at + 1, format!("BuildRequires:  {wanted}"));
+    Some(out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" })
+}
+
+#[cfg(test)]
+mod add_build_requires_tests {
+    use super::add_build_requires;
+
+    #[test]
+    fn the_line_goes_after_the_last_build_requires_once() {
+        let spec = "Name: x\nBuildRequires:  a\nBuildRequires:  b\nRequires: c\n";
+        let out = add_build_requires(spec, "%{python_module nvidia-nccl-cu13}").unwrap();
+        assert_eq!(
+            out,
+            "Name: x\nBuildRequires:  a\nBuildRequires:  b\nBuildRequires:  %{python_module nvidia-nccl-cu13}\nRequires: c\n"
+        );
+        assert!(add_build_requires(&out, "%{python_module nvidia-nccl-cu13}").is_none());
+        assert!(add_build_requires("Name: x\n", "a").is_none());
     }
 }

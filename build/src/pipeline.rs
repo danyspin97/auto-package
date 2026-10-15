@@ -264,6 +264,11 @@ pub struct PkgState {
     /// validation, so a bound the agent writes back is dropped again.
     #[serde(default)]
     pub relaxed_dependencies: Vec<(String, String)>,
+    /// Hashes of the problems patched into this package for another package
+    /// (`patch_request`): a request with the same text is not made again, but a
+    /// new one, from a dependent that still fails, is.
+    #[serde(default)]
+    pub patched_problems: Vec<u64>,
 }
 
 impl PkgState {
@@ -2464,9 +2469,15 @@ fn review_stage(
                 )));
             }
             let spec_hash = hash_spec(&std::fs::read_to_string(spec_path).unwrap_or_default());
+            let patched = patching.map(hash_spec);
             update_state(ws, reporter, |state| {
                 state.reviewed_version = Some(config.version.clone());
                 state.reviewed_spec_hash = Some(spec_hash);
+                if let Some(h) = patched
+                    && !state.patched_problems.contains(&h)
+                {
+                    state.patched_problems.push(h);
+                }
             });
         }
     }
@@ -2681,7 +2692,7 @@ fn missing_deps_from_turn(
             .any(|d| osc::fuzzy_key(d) == osc::fuzzy_key(n))
     };
     let named: Vec<String> = named.into_iter().filter(|n| !scheduled(n)).collect();
-    let mut to_build = without_available_deps(ctx, step, named, DepScope::Anywhere);
+    let mut to_build = without_available_deps(ctx, step, named);
     // A patched dependency is one the distro ships by definition: only the
     // project's own build of it ends the request.
     let patch_names: Vec<String> = outcome
@@ -2689,20 +2700,24 @@ fn missing_deps_from_turn(
         .iter()
         .map(|p| p.name.clone())
         .collect();
-    let still_patched = without_available_deps(
-        ctx,
-        step,
-        crate::depclass::triage_all(&patch_names, &|_| false).0,
-        DepScope::OwnProject,
-    );
+    let _ = &patch_names;
+    // A request is over when that package was already patched for this very
+    // problem: a package this project built (the distro's, branched, or one of
+    // its own that a dependent found wrong) is not a reason to drop it, since
+    // being built is exactly what the defect is about.
+    let already_patched = |p: &crate::agent::PatchRequest| {
+        Workspace::open(&ctx.config.state_root, &osc::rpm_name(&p.name))
+            .map(|w| {
+                PkgState::load(&w)
+                    .patched_problems
+                    .contains(&hash_spec(&p.problem))
+            })
+            .unwrap_or(false)
+    };
     let mut patches: Vec<crate::agent::PatchRequest> = outcome
         .patch_dependencies
         .iter()
-        .filter(|p| {
-            still_patched
-                .iter()
-                .any(|n| osc::fuzzy_key(n) == osc::fuzzy_key(osc::strip_rpm_prefix(&p.name)))
-        })
+        .filter(|p| !already_patched(p))
         .map(|p| crate::agent::PatchRequest {
             name: osc::strip_rpm_prefix(&p.name).to_string(),
             problem: p.problem.clone(),
@@ -2826,17 +2841,6 @@ fn abi_symptom(ctx: &RunCtx) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-/// Where a name an agent reported missing is looked for before it is queued.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DepScope {
-    /// The project's own build only (what a dependency the distro ships and
-    /// that is to be patched needs: the shipped one is not the answer).
-    OwnProject,
-    /// The project and the projects it builds against: a package a linked
-    /// project ships is installable, so it is not missing either.
-    Anywhere,
-}
-
 /// Say, one warning per name, why `skipped` names are not queued.
 fn warn_skipped(
     ctx: &RunCtx,
@@ -2852,8 +2856,7 @@ fn warn_skipped(
 }
 
 /// `deps`, minus the ones the project already has built for this repository
-/// and architecture (and, for [`DepScope::Anywhere`], the ones a linked
-/// project ships).
+/// and architecture and the ones a linked project ships.
 ///
 /// An agent that is told a build failed decides what is missing from the log
 /// and from what it can see on the host, and the host's repositories are not
@@ -2872,7 +2875,6 @@ fn without_available_deps(
     ctx: &RunCtx,
     step: ap_core::event::StepId,
     deps: Vec<String>,
-    scope: DepScope,
 ) -> Vec<String> {
     if deps.is_empty() {
         return deps;
@@ -2886,16 +2888,14 @@ fn without_available_deps(
         return deps;
     };
     let mut linked = Vec::new();
-    if scope == DepScope::Anywhere {
-        let Ok(paths) = osc::get_project_repo_paths(&config.project, emit) else {
+    let Ok(paths) = osc::get_project_repo_paths(&config.project, emit) else {
+        return deps;
+    };
+    for (path_project, _repo) in paths {
+        let Ok(l) = osc::try_list_project_packages(&path_project, emit) else {
             return deps;
         };
-        for (path_project, _repo) in paths {
-            let Ok(l) = osc::try_list_project_packages(&path_project, emit) else {
-                return deps;
-            };
-            linked.push((path_project, l));
-        }
+        linked.push((path_project, l));
     }
     deps.into_iter()
         .filter(|dep| {
@@ -3595,6 +3595,59 @@ fn unresolvable_deps_round(
         names: deps.clone(),
         source: ap_core::event::MissingSource::BuildLog,
     });
+    // "have choice for libnccl.so.2 needed by X: python313-nvidia-nccl-cu13
+    // python314-nvidia-nccl-cu13" names nothing missing: the solver cannot pick
+    // between the flavors of one package that all provide what is needed. An
+    // explicit BuildRequires for that package settles it. (This is what kept
+    // flashinfer retrying the same spec eleven times.)
+    let choice_requires: Vec<String> = {
+        let mut stems: Vec<String> = Vec::new();
+        for c in osc::provider_choices(&detail) {
+            let mut bare = c.providers.iter().map(|p| osc::strip_rpm_prefix(p));
+            let Some(first) = bare.next() else { continue };
+            if first.is_empty() || !bare.all(|b| b == first) {
+                continue;
+            }
+            let req = format!("%{{python_module {first}}}");
+            if !stems.contains(&req) {
+                stems.push(req);
+            }
+        }
+        stems
+    };
+    if !choice_requires.is_empty()
+        && let Ok(mut text) = std::fs::read_to_string(spec_path)
+    {
+        let mut added = Vec::new();
+        for req in &choice_requires {
+            if let Some(next) = crate::spec::add_build_requires(&text, req) {
+                text = next;
+                added.push(req.clone());
+            }
+        }
+        if !added.is_empty() {
+            write_or_warn(spec_path, &text);
+            reporter.report(&Event::Warning {
+                step: Some(build_step.id),
+                message: format!(
+                    "OBS cannot choose between the flavors that provide what the build needs; \
+                     adding BuildRequires {} to settle it",
+                    added.join(", ")
+                ),
+            });
+            st.attempts += 1;
+            persist_attempts(ws, &config.run_id, st.attempts);
+            if st.attempts > config.max_attempts {
+                return Err(ctx.failed(format!(
+                    "OBS still cannot choose a provider after {} attempt(s); log: {}",
+                    st.attempts,
+                    build_log.display()
+                )));
+            }
+            return Ok(RoundEnd::Retry);
+        }
+    }
+
     // Filter out deps already satisfied by an RPM in rpms_dir so the
     // agent only sees packages that are genuinely not available yet.
     let unresolvable_deps: Vec<String> = deps
@@ -6771,14 +6824,7 @@ fn generate_multi_flavor_wheel_spec(
                 "python-{}.rpmlintrc",
                 config.pkg_name.to_lowercase()
             ));
-            let header_dirs = layout
-                .as_ref()
-                .map(|l| l.header_dirs.as_slice())
-                .unwrap_or(&[]);
-            write_or_warn(
-                &rpmlintrc_path,
-                crate::spec::prebuilt_wheel_rpmlintrc(header_dirs),
-            );
+            write_or_warn(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
         }
         let first_wheel = picked.into_iter().next().map(|(_, w)| w).ok_or_else(|| {
             GenSpecError::Other(format!(
@@ -6860,14 +6906,7 @@ fn generate_wheel_binary_spec(
             "python-{}.rpmlintrc",
             config.pkg_name.to_lowercase()
         ));
-        let header_dirs = layout
-            .as_ref()
-            .map(|l| l.header_dirs.as_slice())
-            .unwrap_or(&[]);
-        write_or_warn(
-            &rpmlintrc_path,
-            crate::spec::prebuilt_wheel_rpmlintrc(header_dirs),
-        );
+        write_or_warn(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
     }
 
     Ok(GenSpecResult {
