@@ -56,7 +56,7 @@ pub enum Error {
         source: proc::ProcessError,
     },
 
-    #[error("osc {cmd} failed (exit {code}):\n{stderr}")]
+    #[error("osc {cmd} failed (exit {code}):\n{}", osc_error_text(.stderr))]
     OscFailed {
         cmd: String,
         code: i32,
@@ -2024,6 +2024,28 @@ pub fn ensure_package(
     Ok(())
 }
 
+/// What an osc failure says, for a message: an uncaught Python exception is
+/// reduced to its last lines (the traceback names osc's own source, not the
+/// cause), and a full disk is called what it is, since every package that
+/// downloads or checks out then fails the same way.
+fn osc_error_text(stderr: &str) -> String {
+    let text = match stderr.find("Traceback (most recent call last):") {
+        Some(at) => {
+            let lines: Vec<&str> = stderr[at..]
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            lines[lines.len().saturating_sub(2)..].join("\n")
+        }
+        None => stderr.trim_end().to_string(),
+    };
+    if text.contains("No space left on device") {
+        format!("{text}\nthe disk is full: free space under the work directory and run again")
+    } else {
+        text
+    }
+}
+
 /// Check out `project/pkg_name` into `into_dir`.
 ///
 /// Returns the path of the checkout directory, which is
@@ -2037,6 +2059,11 @@ pub fn checkout(
     check_obs_name("project", project)?;
     check_obs_name("package", pkg_name)?;
     let checkout_dir = into_dir.join(project).join(pkg_name);
+
+    // A checkout osc never finished (killed, or out of disk space mid-download)
+    // tracks nothing, and `osc up` on it cannot recover: it trips over the files
+    // the half-run already wrote. It is checked out again instead.
+    discard_unfinished_checkout(&checkout_dir, emit);
 
     // Re-use an existing checkout rather than re-cloning every run.
     if checkout_dir.exists() {
@@ -2077,6 +2104,9 @@ pub fn checkout(
     .map_err(during(format!("co {project}/{pkg_name}")))?;
 
     if !out.success() {
+        // Whatever osc wrote before it failed would make the next run's `osc up`
+        // fail on it.
+        discard_unfinished_checkout(&checkout_dir, emit);
         return Err(Error::OscFailed {
             cmd: format!("co {project}/{pkg_name}"),
             code: out.code,
@@ -2085,6 +2115,28 @@ pub fn checkout(
     }
 
     Ok(checkout_dir)
+}
+
+/// Remove `checkout_dir` when it is a checkout that was never completed: osc
+/// leaves `.osc/_in_update` while it downloads and removes it at the end, and
+/// `.osc/_files` lists nothing until the download has been recorded. A working
+/// copy that tracks files was completed once and keeps its local changes.
+fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
+    if !checkout_dir.join(".osc").join("_in_update").exists()
+        || !tracked_files(checkout_dir).is_empty()
+    {
+        return;
+    }
+    match fs::remove_dir_all(checkout_dir) {
+        Ok(()) => emit.reporter.report(&Event::Warning {
+            step: emit.step,
+            message: format!(
+                "{} is the remains of a checkout osc never finished; checking it out again",
+                checkout_dir.display()
+            ),
+        }),
+        Err(e) => ap_core::diag!("  could not remove {}: {e}", checkout_dir.display()),
+    }
 }
 
 /// Run `osc up` from `checkout_dir` to update the working copy.
@@ -2241,6 +2293,61 @@ fn changes_conflict_file(stderr: &str) -> Option<&str> {
         && !name.contains("..")
         && !name.starts_with('-'))
     .then_some(name)
+}
+
+#[cfg(test)]
+mod osc_error_text_tests {
+    use super::osc_error_text;
+
+    #[test]
+    fn a_traceback_is_reduced_to_the_exception_and_a_full_disk_is_named() {
+        let stderr = "/x/rpms/a.rpm\nTraceback (most recent call last):\n  File \"/usr/bin/osc\", line 6, in <module>\n    o.write(buf)\nOSError: [Errno 28] No space left on device\n";
+        let text = osc_error_text(stderr);
+        assert!(
+            text.starts_with("    o.write(buf)\nOSError: [Errno 28]"),
+            "{text}"
+        );
+        assert!(text.contains("the disk is full"), "{text}");
+        assert!(!text.contains("/usr/bin/osc"), "{text}");
+        assert_eq!(osc_error_text("404 Not Found\n"), "404 Not Found");
+    }
+}
+
+#[cfg(test)]
+mod unfinished_checkout_tests {
+    use super::*;
+
+    fn checkout_with(files_xml: &str, in_update: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".osc")).unwrap();
+        fs::write(dir.path().join(".osc/_files"), files_xml).unwrap();
+        if in_update {
+            fs::create_dir(dir.path().join(".osc/_in_update")).unwrap();
+        }
+        fs::write(dir.path().join("_service"), "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_checkout_that_tracks_nothing_and_was_mid_update_is_discarded() {
+        let dir = checkout_with("<directory />", true);
+        discard_unfinished_checkout(dir.path(), Emit::quiet());
+        assert!(!dir.path().exists());
+    }
+
+    #[test]
+    fn a_completed_or_tracking_checkout_is_kept() {
+        let tracking = checkout_with(
+            r#"<directory name="p"><entry name="p.spec" md5="a" size="1"/></directory>"#,
+            true,
+        );
+        discard_unfinished_checkout(tracking.path(), Emit::quiet());
+        assert!(tracking.path().join("_service").exists());
+
+        let finished = checkout_with("<directory />", false);
+        discard_unfinished_checkout(finished.path(), Emit::quiet());
+        assert!(finished.path().join("_service").exists());
+    }
 }
 
 #[cfg(test)]
@@ -4719,12 +4826,19 @@ pub fn obs_build(
                 stdout_bytes: log_bytes,
                 stderr_bytes: 0,
             });
+            let advice = if e.to_string().contains("the disk is full") {
+                // The build is fine; only this machine could not take the files.
+                "The build itself succeeded: free disk space and run again."
+            } else {
+                "A green source without downloadable artifacts is not a usable \
+                 build — a dependent package would see every BuildRequires as \
+                 unresolvable. Re-check the OBS project's binary publishing config \
+                 for repo={repo}/arch={arch}."
+            };
             return Err(Error::NotActionable(format!(
                 "OBS reported {pkg_name} succeeded but downloading the built RPMs \
-                 failed: {e}. A green source without downloadable artifacts is not \
-                 a usable build — a dependent package would see every \
-                 BuildRequires as unresolvable. Re-check the OBS project's binary \
-                 publishing config for repo={repo}/arch={arch}."
+                 failed: {e}. {}",
+                advice.replace("{repo}", repo).replace("{arch}", arch)
             )));
         }
         if downloaded_count == 0 {
@@ -5331,7 +5445,10 @@ mod publish_plan_tests {
         assert!(matches_source_name("pkg-%{version}.dat", "pkg-1.0.dat"));
         assert!(matches_source_name("%{name}-%version.dat", "x-1.dat"));
         assert!(matches_source_name("LICENSE", "LICENSE"));
-        assert!(!matches_source_name("pkg-%{version}.dat", "pkg-1.0.dat.bak"));
+        assert!(!matches_source_name(
+            "pkg-%{version}.dat",
+            "pkg-1.0.dat.bak"
+        ));
         assert!(!matches_source_name("pkg-%{version}.dat", "other-1.0.dat"));
         assert!(!matches_source_name("LICENSE", "LICENSE.bak"));
         assert!(!matches_source_name("a%{x}a", "a"));
