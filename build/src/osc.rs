@@ -2677,6 +2677,42 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String]) -> bool {
     is_patch && (series.iter().any(|s| s == name) || spec_text.contains(name))
 }
 
+/// Names OBS already tracks for this checkout (`.osc/_files`).
+fn tracked_files(checkout_dir: &Path) -> Vec<String> {
+    let xml = fs::read_to_string(checkout_dir.join(".osc").join("_files")).unwrap_or_default();
+    xml.split("<entry ")
+        .skip(1)
+        .filter_map(|chunk| {
+            extract_xml_attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "name")
+        })
+        .collect()
+}
+
+/// Files OBS tracks that [`publish_plan`] says are not part of the package (an
+/// archive no `Source:` names any more, a dropped rpmlintrc, a leftover),
+/// scheduled for removal with `osc rm`. They stay on OBS otherwise, as the
+/// 42 MB sdist a wheel switch replaced. Returns the names removed, which the
+/// commit must list.
+pub fn remove_tracked_strays(
+    checkout_dir: &Path,
+    skipped: &[String],
+    emit: Emit<'_>,
+) -> Vec<String> {
+    let tracked = tracked_files(checkout_dir);
+    let mut removed = Vec::new();
+    for name in skipped {
+        if !tracked.contains(name) {
+            continue;
+        }
+        match proc::capture("osc", &["rm", "--force", name.as_str()], checkout_dir, emit) {
+            Ok(out) if out.success() => removed.push(name.clone()),
+            Ok(out) => ap_core::diag!("  osc rm {name}: {}", first_line(&out.stderr)),
+            Err(e) => ap_core::diag!("  osc rm {name}: {e}"),
+        }
+    }
+    removed
+}
+
 /// Commit the package to OBS, triggering a remote build.
 ///
 /// Only `files` are staged and committed. `osc addremove` and `osc ci` both

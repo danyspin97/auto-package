@@ -1666,7 +1666,7 @@ pub fn prebuilt_wheel_rpmlintrc(header_dirs: &[String]) -> String {
     );
     for dir in header_dirs {
         out.push_str(&format!(
-            "addFilter(\"devel-file-in-non-devel-package.*/usr/lib/python.*/site-packages/{dir}/\")\n"
+            "addFilter(\"devel-file-in-non-devel-package.*/usr/lib(64)?/python.*/site-packages/{dir}/\")\n"
         ));
     }
     out
@@ -2041,6 +2041,203 @@ mod prebuilt_library_tests {
     }
 }
 
+/// Runtime dependency tags that must come before `%python_subpackages`: after
+/// it they belong to no subpackage (or end up in the description).
+const DEPENDENCY_TAGS: &[&str] = &[
+    "Requires",
+    "Recommends",
+    "Suggests",
+    "Supplements",
+    "Conflicts",
+    "Obsoletes",
+    "Provides",
+];
+
+fn is_dependency_tag_line(line: &str) -> bool {
+    let t = line.trim_start();
+    DEPENDENCY_TAGS.iter().any(|tag| {
+        t.strip_prefix(tag).is_some_and(|rest| {
+            let rest = rest
+                .strip_prefix('(')
+                .and_then(|r| r.split_once(')'))
+                .map(|(_, after)| after)
+                .unwrap_or(rest);
+            rest.starts_with(':')
+        })
+    })
+}
+
+/// A runtime `Requires:`/`Recommends:` written with `%{python_module X}` names
+/// every flavor's package, so the python314 RPM requires python313-X as well.
+/// The runtime form is flavor-neutral, `python-X`, which `%python_subpackages`
+/// rewrites per flavor; `%{python_module}` is for `BuildRequires`. Rewrites the
+/// simple forms (`%{python_module name}` with an optional version bound) and
+/// leaves conditional ones alone. Idempotent.
+pub fn normalize_runtime_python_module(spec: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for line in spec.lines() {
+        let t = line.trim_start();
+        let runtime = ["Requires", "Recommends", "Suggests", "Supplements"]
+            .iter()
+            .any(|tag| {
+                t.strip_prefix(tag)
+                    .is_some_and(|r| r.starts_with(':') || r.starts_with('('))
+            });
+        if runtime && line.contains("%{python_module ") && !line.contains(" if ") {
+            let mut rewritten = line.to_string();
+            while let Some(start) = rewritten.find("%{python_module ") {
+                let Some(end) = rewritten[start..].find('}') else {
+                    break;
+                };
+                let inner = rewritten[start + "%{python_module ".len()..start + end].to_string();
+                if inner.contains('%') || inner.contains('{') {
+                    break;
+                }
+                rewritten.replace_range(start..start + end + 1, &format!("python-{inner}"));
+            }
+            out.push(rewritten);
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// Dependency tags written after `%python_subpackages` (up to the next section)
+/// moved above it.
+pub fn hoist_dependency_tags(spec: &str) -> String {
+    let lines: Vec<&str> = spec.lines().collect();
+    let Some(sub) = lines.iter().position(|l| l.trim() == "%python_subpackages") else {
+        return spec.to_string();
+    };
+    let mut moved: Vec<&str> = Vec::new();
+    let mut kept_after: Vec<&str> = Vec::new();
+    let mut in_preamble = true;
+    for line in &lines[sub + 1..] {
+        if in_preamble
+            && line.trim_start().starts_with('%')
+            && !line.trim_start().starts_with("%global")
+            && !line.trim_start().starts_with("%define")
+        {
+            in_preamble = false;
+        }
+        if in_preamble && is_dependency_tag_line(line) {
+            moved.push(line);
+        } else {
+            kept_after.push(line);
+        }
+    }
+    if moved.is_empty() {
+        return spec.to_string();
+    }
+    let mut out: Vec<&str> = lines[..sub].to_vec();
+    out.extend(moved);
+    out.push(lines[sub]);
+    out.extend(kept_after);
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// The one spelling of NVIDIA's proprietary licence reference used across the
+/// project, for the variants that crept in (`LicenseRef-NvidiaProprietary`,
+/// `NVIDIA Proprietary Software`).
+pub const NVIDIA_PROPRIETARY: &str = "LicenseRef-NVIDIA-Proprietary";
+
+pub fn normalize_nvidia_license(spec: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for line in spec.lines() {
+        if let Some(rest) = line.strip_prefix("License:") {
+            let mut value = rest.trim().to_string();
+            for variant in [
+                "LicenseRef-NvidiaProprietary",
+                "LicenseRef-Nvidia-Proprietary",
+                "LicenseRef-NVIDIA-proprietary",
+                "NVIDIA Proprietary Software",
+                "LicenseRef-NVIDIAProprietary",
+            ] {
+                value = value.replace(variant, NVIDIA_PROPRIETARY);
+            }
+            out.push(format!("License:        {value}"));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// A second `%changelog` line (the file ends `%changelog` twice) removed.
+pub fn dedupe_changelog_header(spec: &str) -> String {
+    let mut seen = false;
+    let mut out: Vec<&str> = Vec::new();
+    for line in spec.lines() {
+        if line.trim_end() == "%changelog" {
+            if seen {
+                continue;
+            }
+            seen = true;
+        }
+        out.push(line);
+    }
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// Style problems a reviewer would send back: an emoji, or a `%description`
+/// that only repeats the `Summary:`. One line each, empty when the spec is fine.
+pub fn description_problems(spec: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let body = spec.split("\n%changelog").next().unwrap_or(spec);
+    let is_emoji =
+        |c: char| matches!(c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF | 0x1F000..=0x1F2FF);
+    if body.chars().any(is_emoji) {
+        problems.push("the spec contains an emoji (Summary, description or a comment)".to_string());
+    }
+    let summary = tag_value(body, "Summary:").map(|s| s.trim().to_string());
+    let mut description = String::new();
+    let mut in_desc = false;
+    for line in body.lines() {
+        let t = line.trim_end();
+        if t.starts_with("%description") && (t == "%description" || t.starts_with("%description "))
+        {
+            if in_desc {
+                break;
+            }
+            in_desc = true;
+            continue;
+        }
+        if in_desc {
+            if t.starts_with('%') {
+                break;
+            }
+            if !t.is_empty() {
+                if !description.is_empty() {
+                    description.push(' ');
+                }
+                description.push_str(t.trim());
+            }
+        }
+    }
+    if let Some(summary) = summary
+        && !summary.is_empty()
+        && description.trim_end_matches('.') == summary.trim_end_matches('.')
+    {
+        problems.push(
+            "the %description only repeats the Summary: say what the package does and \
+             what it is for, in a sentence or two"
+                .to_string(),
+        );
+    }
+    problems
+}
+
+/// Whether the spec's `%files` names a `%license` (or `%doc` of a licence
+/// file). Specs with no `%files` count as having one.
+pub fn has_license_file_entry(spec: &str) -> bool {
+    let body = spec.split("\n%changelog").next().unwrap_or(spec);
+    if !body.contains("%files") {
+        return true;
+    }
+    body.lines().any(|l| l.trim_start().starts_with("%license"))
+}
+
 #[cfg(test)]
 mod generator_tests {
     use super::*;
@@ -2359,7 +2556,7 @@ BuildRequires:  %{python_module pip}
         let rc = prebuilt_wheel_rpmlintrc(&["nvidia/nccl/include".to_string()]);
         assert!(
             rc.contains(
-                "addFilter(\"devel-file-in-non-devel-package.*/usr/lib/python.*/site-packages/nvidia/nccl/include/\")"
+                "addFilter(\"devel-file-in-non-devel-package.*/usr/lib(64)?/python.*/site-packages/nvidia/nccl/include/\")"
             ),
             "{rc}"
         );
@@ -2734,5 +2931,76 @@ mod set_version_tests {
     #[test]
     fn a_computed_version_is_refused() {
         assert!(set_version("Name: x\nVersion: %(echo 1)\n", "2").is_none());
+    }
+}
+
+#[cfg(test)]
+mod normalizer_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_requires_become_flavor_neutral_and_build_requires_stay() {
+        let spec = "BuildRequires:  %{python_module pip}\nRequires:       %{python_module click >= 8.1}\nRequires:       %{python_module python-dotenv}\nRecommends:     %{python_module torch}\nRequires:       %{python_module x if %python-base < 3.11}\n";
+        let out = normalize_runtime_python_module(spec);
+        assert!(out.contains("BuildRequires:  %{python_module pip}"));
+        assert!(out.contains("Requires:       python-click >= 8.1"), "{out}");
+        assert!(
+            out.contains("Requires:       python-python-dotenv"),
+            "{out}"
+        );
+        assert!(out.contains("Recommends:     python-torch"), "{out}");
+        assert!(out.contains("%{python_module x if"), "{out}");
+        assert_eq!(normalize_runtime_python_module(&out), out);
+    }
+
+    #[test]
+    fn dependency_tags_after_the_subpackages_macro_move_above_it() {
+        let spec = "Name: x\n%python_subpackages\nRequires:  python-foo\nRecommends: python-bar\n\n%description\nText\n";
+        let out = hoist_dependency_tags(spec);
+        let sub = out.find("%python_subpackages").unwrap();
+        assert!(out.find("Requires:  python-foo").unwrap() < sub, "{out}");
+        assert!(out.find("Recommends: python-bar").unwrap() < sub, "{out}");
+        assert!(out.contains("%description\nText"));
+        assert_eq!(hoist_dependency_tags(&out), out);
+    }
+
+    #[test]
+    fn the_nvidia_licence_spelling_is_unified() {
+        let out =
+            normalize_nvidia_license("Name: x\nLicense:        LicenseRef-NvidiaProprietary\n");
+        assert!(out.contains("License:        LicenseRef-NVIDIA-Proprietary"));
+        let out = normalize_nvidia_license("License: NVIDIA Proprietary Software\n");
+        assert!(out.contains(NVIDIA_PROPRIETARY));
+        assert_eq!(
+            normalize_nvidia_license("License: MIT\n"),
+            "License:        MIT\n"
+        );
+    }
+
+    #[test]
+    fn a_second_changelog_line_is_dropped() {
+        assert_eq!(
+            dedupe_changelog_header("a\n%changelog\n\n%changelog\n"),
+            "a\n%changelog\n\n"
+        );
+    }
+
+    #[test]
+    fn description_problems_catch_a_repeated_summary_and_an_emoji() {
+        let spec = "Summary: A tool\n\n%description\nA tool\n\n%prep\n";
+        assert_eq!(description_problems(spec).len(), 1);
+        let spec = "Summary: A tool\n\n%description\nFast CLI \u{1F680}\n";
+        assert_eq!(description_problems(spec).len(), 1);
+        let spec = "Summary: A tool\n\n%description\nA tool that does things well.\n";
+        assert!(description_problems(spec).is_empty());
+    }
+
+    #[test]
+    fn the_licence_entry_check_reads_files() {
+        assert!(has_license_file_entry(
+            "%files\n%license LICENSE\n%doc README\n"
+        ));
+        assert!(!has_license_file_entry("%files\n%doc README\n"));
+        assert!(has_license_file_entry("Name: x\n"));
     }
 }

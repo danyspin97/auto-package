@@ -2837,6 +2837,12 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         let fixed = crate::spec::normalize_python_module_versions(&current);
         let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
         let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
+        // Flavor-neutral runtime dependencies, before `%python_subpackages`,
+        // one spelling of the NVIDIA licence, one `%changelog` (conventions 65, 69).
+        let fixed = crate::spec::normalize_runtime_python_module(&fixed);
+        let fixed = crate::spec::hoist_dependency_tags(&fixed);
+        let fixed = crate::spec::normalize_nvidia_license(&fixed);
+        let fixed = crate::spec::dedupe_changelog_header(&fixed);
         if fixed != current {
             write_or_warn(spec_path, &fixed);
         }
@@ -2963,6 +2969,57 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                 return Ok(Flow::Retry);
             }
 
+            // What a reviewer sends back at once: an emoji, a description that
+            // only repeats the Summary, a `%files` with no `%license` although
+            // the source ships a licence file (convention 66, 69).
+            let mut style = crate::spec::description_problems(&spec_text_now(spec_path));
+            if let Some(why) = missing_license_entry(ws, spec_path) {
+                style.push(why);
+            }
+            if !style.is_empty() {
+                let validate_step = validate_step.finish(StepOutcome::Failed);
+                reporter.report(&Event::SpecRejected {
+                    step: validate_step.id,
+                    reason: ap_core::event::SpecRejection::Placeholders {
+                        lines: style.clone(),
+                    },
+                    restored_from: spec_path.clone(),
+                });
+                if config.no_agent
+                    || st.attempts >= config.max_attempts
+                    || st.spent_usd >= config.budget_usd
+                {
+                    // Style alone never fails a package that otherwise builds.
+                    ap_core::diag!(
+                        "  not fixing spec style problems without an agent turn: {}",
+                        style.join("; ")
+                    );
+                    return Ok(Flow::Proceed);
+                }
+                let context = format!(
+                    "A reviewer would send this spec back before it is built:\n\n{}\n\n\
+                     Fix each point (conventions 66 and 69).",
+                    style
+                        .iter()
+                        .map(|s| format!("- {s}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                // Once per package run: a turn that cannot satisfy a point must
+                // not loop here.
+                if st.step_attempts.round <= 1 {
+                    fix_after_validation(
+                        ctx,
+                        st,
+                        Some(&context),
+                        "spec style",
+                        "spec style and agent failed: ",
+                    )?;
+                    return Ok(Flow::Retry);
+                }
+                return Ok(Flow::Proceed);
+            }
+
             validate_step.finish(StepOutcome::Ok);
             Ok(Flow::Proceed)
         }
@@ -3063,16 +3120,70 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
             ),
         });
     }
+    // What OBS holds that the package no longer names goes with this commit.
+    let removed = osc::remove_tracked_strays(
+        &ctx.checkout_dir,
+        &plan.skipped,
+        Emit::new(ctx.reporter, commit_step.id),
+    );
+    for name in &removed {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: format!("removing '{name}' from OBS: the package does not use it"),
+        });
+    }
+    let mut files = plan.files.clone();
+    files.extend(removed);
     if let Err(e) = osc::commit(
         &ctx.checkout_dir,
         "Automated packaging",
-        &plan.files,
+        &files,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
         return Err(ctx.failed(e.to_string()));
     }
     commit_step.finish(StepOutcome::Ok);
     Ok(())
+}
+
+fn spec_text_now(spec_path: &Path) -> String {
+    std::fs::read_to_string(spec_path).unwrap_or_default()
+}
+
+/// A `%files` without `%license` while the unpacked source ships a licence file
+/// (`LICENSE*`, `COPYING*`, or one under a `.dist-info/licenses`).
+fn missing_license_entry(ws: &Workspace, spec_path: &Path) -> Option<String> {
+    let spec = spec_text_now(spec_path);
+    if crate::spec::has_license_file_entry(&spec) {
+        return None;
+    }
+    let source = ws.dir().join("source");
+    let names: Vec<String> = std::fs::read_dir(&source)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    let is_license = |n: &str| {
+        let u = n.to_ascii_uppercase();
+        ["LICENSE", "LICENCE", "COPYING", "LICENSES"]
+            .iter()
+            .any(|p| u.starts_with(p))
+    };
+    let found = names.iter().find(|n| is_license(n)).cloned().or_else(|| {
+        names
+            .iter()
+            .filter(|n| n.ends_with(".dist-info"))
+            .find_map(|d| {
+                std::fs::read_dir(source.join(d).join("licenses"))
+                    .ok()?
+                    .flatten()
+                    .next()
+                    .map(|e| format!("{d}/licenses/{}", e.file_name().to_string_lossy()))
+            })
+    })?;
+    Some(format!(
+        "the source ships a licence file ({found}) but `%files` has no `%license` entry for it"
+    ))
 }
 
 /// Why the checkout must not be committed to OBS yet, or `Ok`: the spec is
