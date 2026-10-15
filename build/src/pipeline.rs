@@ -2935,6 +2935,20 @@ fn linked_bound_conflicts(
         .collect()
 }
 
+/// The prebuilt wheel a spec's `Source` names, when it is in the checkout.
+fn local_wheel_source(spec: &str, checkout_dir: &Path) -> Option<PathBuf> {
+    spec.lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let (tag, value) = l.split_once(':')?;
+            (tag.starts_with("Source") && !tag.contains('(')).then(|| value.trim())
+        })
+        .map(|v| v.rsplit('/').next().unwrap_or(v))
+        .filter(|f| f.ends_with(".whl") && !f.contains('%'))
+        .map(|f| checkout_dir.join(f))
+        .find(|p| p.is_file())
+}
+
 /// The version a linked project ships of `dep` (a bare upstream name), or `None`
 /// when none does or the projects cannot be read.
 fn linked_shipped_version(
@@ -3192,6 +3206,12 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
         let mut fixed = fixed;
+        if !fixed.contains("[0-9a-f]{8}")
+            && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
+            && ap_ecosystem::sdist::wheel_layout(&wheel).is_some_and(|l| l.has_hashed_libs)
+        {
+            fixed = crate::spec::with_hashed_libs_requires_exclude(&fixed);
+        }
         for (dep, shipped) in &PkgState::load(ws).relaxed_dependencies {
             fixed = crate::spec::relax_dependency_bounds(&fixed, dep, shipped);
         }

@@ -2146,6 +2146,56 @@ fn wheel_requires_exclude_line(layout: Option<&ap_ecosystem::sdist::WheelLayout>
     }
 }
 
+/// `spec` with the hashed-library `__requires_exclude` of a wheel that bundles
+/// such libraries (see [`HASHED_LIBS_REQUIRES_EXCLUDE`]), for a spec written
+/// before the generator knew to: python-opencv-python-headless was built, was
+/// uninstallable, and every package needing it stayed unresolvable. An existing
+/// `%global __requires_exclude` is folded into one regex with `|` (rpm honours
+/// only one); the line is otherwise added before `%python_subpackages`, or
+/// `%description`. A spec that already carries the pattern is returned as is.
+pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
+    if spec.contains(HASHED_LIBS_REQUIRES_EXCLUDE) {
+        return spec.to_string();
+    }
+    let inner = |p: &str| -> String {
+        p.trim()
+            .trim_start_matches('^')
+            .trim_end_matches('$')
+            .to_string()
+    };
+    let tail = if spec.ends_with('\n') { "\n" } else { "" };
+    let lines: Vec<&str> = spec.lines().collect();
+    if let Some(at) = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("%global __requires_exclude "))
+    {
+        let existing = lines[at]
+            .trim_start()
+            .trim_start_matches("%global __requires_exclude ");
+        let folded = format!(
+            "%global __requires_exclude ^({}|{})$",
+            inner(existing),
+            inner(HASHED_LIBS_REQUIRES_EXCLUDE)
+        );
+        let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        out[at] = folded;
+        return out.join("\n") + tail;
+    }
+    let Some(at) = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("%python_subpackages"))
+        .or_else(|| lines.iter().position(|l| l.trim_start().starts_with("%description")))
+    else {
+        return spec.to_string();
+    };
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    out.insert(
+        at,
+        format!("%global __requires_exclude {HASHED_LIBS_REQUIRES_EXCLUDE}"),
+    );
+    out.join("\n") + tail
+}
+
 /// Spec fragments that give a wheel's console scripts the openSUSE
 /// multi-flavor `update-alternatives` handling a source build gets (convention
 /// 18): `(requires, clone, scriptlets, files)`, each empty when the wheel
@@ -4504,5 +4554,28 @@ mod conditional_dependency_tests {
             "Requires:       (python-tomli >= 2.0.0 if python-base < 3.11)\nRequires:       python-a, (python-b if python-base < 3.12)\nBuildRequires:  %{python_module tomli >= 2.0.0 if %python-base < 3.11}\nRequires:       (python-x if python-base < 3.11)\nRequires:       python-plain >= 1\n# Requires: a if b\n"
         );
         assert_eq!(parenthesize_conditional_dependencies(&out), out);
+    }
+}
+
+#[cfg(test)]
+mod hashed_libs_exclude_tests {
+    use super::*;
+
+    #[test]
+    fn the_exclude_is_added_before_the_subpackages_once() {
+        let spec = "Name: python-x\n%global __provides_exclude_from ^x$\n%python_subpackages\n\n%description\nd\n";
+        let out = with_hashed_libs_requires_exclude(spec);
+        assert!(out.contains(&format!(
+            "%global __requires_exclude {HASHED_LIBS_REQUIRES_EXCLUDE}\n%python_subpackages"
+        )));
+        assert_eq!(with_hashed_libs_requires_exclude(&out), out);
+    }
+
+    #[test]
+    fn an_existing_exclude_is_folded_into_one_regex() {
+        let spec = "%global __requires_exclude ^lib(mpi|ucp)\\.so.*$\n%python_subpackages\n";
+        let out = with_hashed_libs_requires_exclude(spec);
+        assert_eq!(out.matches("__requires_exclude").count(), 1, "{out}");
+        assert!(out.contains(r"^(lib(mpi|ucp)\.so.*|lib.*-[0-9a-f]{8}.*\.so.*)$"), "{out}");
     }
 }
