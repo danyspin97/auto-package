@@ -40,6 +40,9 @@ pub struct Release {
     /// PEP 440 specifier such as `>=3.9`, verbatim. Translating it to
     /// `%{?sle15_python_module_pythons}` conditionals is the generator's job.
     pub requires_python: Option<String>,
+    /// The release's `Requires-Dist` lines (PEP 508), verbatim; empty when
+    /// PyPI has none (`null`). Markers and extras are left for the reader.
+    pub requires_dist: Vec<String>,
     /// A yanked release is one upstream withdrew. Packaging one is almost
     /// always wrong, so it is surfaced rather than silently accepted.
     pub yanked: bool,
@@ -392,6 +395,7 @@ pub fn parse_release(json: &str) -> Result<Release, Error> {
         version: info.version,
         summary: info.summary,
         requires_python: info.requires_python,
+        requires_dist: info.requires_dist,
     })
 }
 
@@ -716,6 +720,8 @@ struct RawInfo {
     classifiers: Vec<String>,
     #[serde(default)]
     requires_python: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    requires_dist: Vec<String>,
     #[serde(default)]
     home_page: Option<String>,
     #[serde(default)]
@@ -773,6 +779,7 @@ pub fn parse_release_with_tarball(json: &str, tarball_filename: &str) -> Result<
         version: info.version,
         summary: info.summary,
         requires_python: info.requires_python,
+        requires_dist: info.requires_dist,
     })
 }
 

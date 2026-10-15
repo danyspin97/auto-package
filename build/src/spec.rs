@@ -1308,6 +1308,7 @@ fn post_process(
     // Each one exists because the review agent was making the identical edit
     // on nearly every package (see the notes.md journals): a deterministic
     // rule here is a turn the model does not have to spend.
+    let out = add_runtime_dependencies(&out, &release.requires_dist, &release.name);
     let out = normalize_python_module_versions(&out);
     let out = dedupe_build_requires(&out);
     let out = normalize_files_paths(&out, &release.name);
@@ -1317,6 +1318,119 @@ fn post_process(
     } else {
         out
     }
+}
+
+/// A runtime dependency read from a release's `Requires-Dist`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDep {
+    pub name: String,
+    /// `>= 1.2`, when the release names a lower bound.
+    pub bound: Option<String>,
+}
+
+/// The dependencies a release needs on every install: its `Requires-Dist`
+/// entries without a marker (an extra, a Python version or a platform narrows
+/// an entry down, and which narrowing applies is a decision for the review).
+///
+/// Only a lower bound is kept: an exact pin (`==1.2`) and a compatible release
+/// (`~=1.2`) become `>= 1.2`, and `<`, `<=` and `!=` are dropped, because a
+/// rolling distro ships one release and an upper bound would make the package
+/// unresolvable the day it moves on (convention 59). The review agent was
+/// writing exactly this by hand on package after package.
+pub fn runtime_dependencies(requires_dist: &[String], own_name: &str) -> Vec<RuntimeDep> {
+    let own = crate::osc::fuzzy_key(own_name);
+    let mut seen = std::collections::HashSet::new();
+    let mut deps = Vec::new();
+    for entry in requires_dist {
+        let (spec, marker) = match entry.split_once(';') {
+            Some((spec, marker)) => (spec, marker.trim()),
+            None => (entry.as_str(), ""),
+        };
+        if !marker.is_empty() {
+            continue;
+        }
+        let spec = spec.trim();
+        let Some(m) = leading_name_re().find(spec) else {
+            continue;
+        };
+        let name = m.as_str().to_string();
+        let key = crate::osc::fuzzy_key(&name);
+        if key == own || !seen.insert(key) {
+            continue;
+        }
+        // `[extra]` selects extras of the dependency; its own pins follow.
+        let rest = spec[m.end()..].trim();
+        let rest = match (rest.starts_with('['), rest.find(']')) {
+            (true, Some(close)) => &rest[close + 1..],
+            _ => rest,
+        };
+        let rest = rest.trim().trim_start_matches('(').trim_end_matches(')');
+        let bound = rest.split(',').map(str::trim).find_map(|clause| {
+            let version = ["===", "==", "~=", ">=", ">"]
+                .iter()
+                .find_map(|op| clause.strip_prefix(op))?
+                .trim();
+            let usable = !version.is_empty()
+                && !version.contains('*')
+                && version
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '!' | '+' | '-' | '_'));
+            usable.then(|| format!(">= {version}"))
+        });
+        deps.push(RuntimeDep {
+            name: recase_python_module_name(&name),
+            bound,
+        });
+    }
+    deps
+}
+
+/// Add the release's runtime dependencies as `Requires` (before
+/// `%python_subpackages`, as plain `python-<name>` so a flavor requires its own
+/// build) and as `BuildRequires` (the tests and `%check` import them). A
+/// dependency the spec already names in either place is left as it is.
+pub fn add_runtime_dependencies(spec: &str, requires_dist: &[String], own_name: &str) -> String {
+    let deps = runtime_dependencies(requires_dist, own_name);
+    if deps.is_empty() {
+        return spec.to_string();
+    }
+    let names = |tag: &str| -> std::collections::HashSet<String> {
+        spec.lines()
+            .filter_map(|l| l.trim_start().strip_prefix(tag))
+            .flat_map(|v| {
+                v.replace(['{', '}'], " ")
+                    .split_whitespace()
+                    .map(|t| crate::osc::fuzzy_key(crate::osc::strip_rpm_prefix(t)))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let (have_requires, have_build) = (names("Requires:"), names("BuildRequires:"));
+    let mut out = spec.to_string();
+    let mut requires_lines = String::new();
+    for dep in &deps {
+        let key = crate::osc::fuzzy_key(&dep.name);
+        let bound = dep
+            .bound
+            .as_deref()
+            .map(|b| format!(" {b}"))
+            .unwrap_or_default();
+        if !have_requires.contains(&key) {
+            requires_lines.push_str(&format!("Requires:       python-{}{bound}\n", dep.name));
+        }
+        if !have_build.contains(&key)
+            && let Some(next) =
+                add_build_requires(&out, &format!("%{{python_module {}{bound}}}", dep.name))
+        {
+            out = next;
+        }
+    }
+    if !requires_lines.is_empty()
+        && let Some(at) = out.find("%python_subpackages")
+    {
+        out.insert_str(at, &requires_lines);
+    }
+    out
 }
 
 /// Point a bare-filename `Source:` at the archive actually in the checkout.
@@ -2446,6 +2560,7 @@ BuildRequires:  %{python_module pip}
             homepage: Some(homepage.to_string()),
             license,
             requires_python: None,
+            requires_dist: Vec::new(),
             yanked: false,
             sdist: ap_ecosystem::pypi::Sdist {
                 filename: String::new(),
@@ -2730,6 +2845,7 @@ BuildRequires:  %{python_module pip}
             homepage: None,
             license: ap_ecosystem::pypi::License::Unknown,
             requires_python: None,
+            requires_dist: Vec::new(),
             yanked: false,
             sdist: ap_ecosystem::pypi::Sdist {
                 filename: "events-0.5.tar.gz".into(),
@@ -3338,6 +3454,83 @@ pub fn add_build_requires(spec: &str, requirement: &str) -> Option<String> {
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     out.insert(at + 1, format!("BuildRequires:  {wanted}"));
     Some(out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" })
+}
+
+#[cfg(test)]
+mod runtime_dependency_tests {
+    use super::*;
+
+    fn dist(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// fastapi-cli: PyPI lists its dependencies, and the generated spec had
+    /// none of them (the review added them by hand).
+    #[test]
+    fn only_unconditional_dependencies_with_a_lower_bound_are_kept() {
+        let deps = runtime_dependencies(
+            &dist(&[
+                "typer>=0.16.0",
+                "uvicorn[standard]>=0.15.0",
+                "tomli>=2.0.0; python_version < \"3.11\"",
+                "fastapi-cloud-cli>=0.1.1; extra == \"standard\"",
+                "rich-toolkit==0.14.8",
+                "mcp<3.0.0,>=2.0.0",
+                "pydantic (>=2,<3)",
+                "idna!=3.0",
+                "fastapi-cli",
+                "Fastapi_CLI>=1",
+            ]),
+            "fastapi-cli",
+        );
+        let shown: Vec<String> = deps
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}{}",
+                    d.name,
+                    d.bound
+                        .as_deref()
+                        .map(|b| format!(" {b}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "typer >= 0.16.0",
+                "uvicorn >= 0.15.0",
+                "rich-toolkit >= 0.14.8",
+                "mcp >= 2.0.0",
+                "pydantic >= 2",
+                "idna"
+            ]
+        );
+    }
+
+    #[test]
+    fn requires_go_before_the_subpackages_and_are_mirrored_into_build_requires() {
+        let spec = "Name: python-x\nBuildRequires:  python-rpm-macros\nBuildRequires:  %{python_module pip}\nRequires:       python-click\n%python_subpackages\n\n%description\nx\n";
+        let out = add_runtime_dependencies(spec, &dist(&["click>=8", "rich>=13.0"]), "x");
+        assert!(
+            out.contains("Requires:       python-click\nRequires:       python-rich >= 13.0\n%python_subpackages"),
+            "{out}"
+        );
+        assert!(
+            out.contains("BuildRequires:  %{python_module rich >= 13.0}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("BuildRequires:  %{python_module click >= 8}"),
+            "{out}"
+        );
+        // Nothing to add twice.
+        assert_eq!(
+            add_runtime_dependencies(&out, &dist(&["click>=8", "rich>=13.0"]), "x"),
+            out
+        );
+    }
 }
 
 #[cfg(test)]

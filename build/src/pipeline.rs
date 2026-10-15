@@ -6423,6 +6423,7 @@ fn synthesize_release_without_pypi(
         homepage: None,
         license: ap_ecosystem::pypi::License::Unknown,
         requires_python: None,
+        requires_dist: Vec::new(),
         yanked: false,
         sdist: ap_ecosystem::pypi::Sdist {
             filename: tarball_filename,
