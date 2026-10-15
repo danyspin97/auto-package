@@ -2592,7 +2592,12 @@ fn review_stage(
             };
             // A patch an earlier run already made (the turn finds nothing left
             // to do) is not a failure to patch.
-            if patching.is_some() && effect != TurnEffect::Edited && !already_reviewed {
+            if patch_turn_failed(
+                patching.is_some(),
+                effect,
+                already_reviewed,
+                &outcome.action,
+            ) {
                 return Err(ctx.failed(format!(
                     "the agent did not patch {rpm_name} ({}): the package that needs the \
                      change cannot be built",
@@ -2755,11 +2760,41 @@ fn missing_deps_from_turn(
     step: ap_core::event::StepId,
     outcome: &crate::agent::TurnOutcome,
 ) -> Option<PipelineResult> {
-    if outcome.unresolvable_packages.is_empty() && outcome.patch_dependencies.is_empty() {
+    // A request to rebuild a package that takes hours (torch, llvm, qt...) to
+    // dodge one test or import is refused: the dependent works around the defect
+    // in its own spec. The refusal goes in the journal the next turn reads.
+    let patch_dependencies: Vec<crate::agent::PatchRequest> = outcome
+        .patch_dependencies
+        .iter()
+        .filter(|p| {
+            if !is_heavy_package(&p.name) {
+                return true;
+            }
+            let why = format!(
+                "refused: rebuilding {} takes hours and gigabytes, so it is never patched to \
+                 spare one test or import (requested: {}). Work around the defect in THIS spec: \
+                 deselect or ignore the failing test with a comment naming the defect, or drop \
+                 the import, and say so in `reasoning`; lost coverage is recorded, not bought \
+                 with a rebuild.",
+                p.name, p.problem
+            );
+            ctx.reporter.report(&Event::Warning {
+                step: Some(step),
+                message: format!("not patching {}: {why}", p.name),
+            });
+            append_notes(
+                ctx.ws.notes(),
+                &format!("\n## Patch request for {} — {why}\n", p.name),
+            );
+            false
+        })
+        .cloned()
+        .collect();
+    if outcome.unresolvable_packages.is_empty() && patch_dependencies.is_empty() {
         return None;
     }
     let mut reported = outcome.unresolvable_packages.clone();
-    reported.extend(outcome.patch_dependencies.iter().map(|p| p.name.clone()));
+    reported.extend(patch_dependencies.iter().map(|p| p.name.clone()));
     ctx.reporter.report(&Event::MissingPackages {
         step,
         names: reported,
@@ -2838,11 +2873,7 @@ fn missing_deps_from_turn(
     let mut to_build = without_available_deps(ctx, step, named);
     // A patched dependency is one the distro ships by definition: only the
     // project's own build of it ends the request.
-    let patch_names: Vec<String> = outcome
-        .patch_dependencies
-        .iter()
-        .map(|p| p.name.clone())
-        .collect();
+    let patch_names: Vec<String> = patch_dependencies.iter().map(|p| p.name.clone()).collect();
     let _ = &patch_names;
     // A request is over when that package was already patched for this very
     // problem: a package this project built (the distro's, branched, or one of
@@ -2857,8 +2888,7 @@ fn missing_deps_from_turn(
             })
             .unwrap_or(false)
     };
-    let mut patches: Vec<crate::agent::PatchRequest> = outcome
-        .patch_dependencies
+    let mut patches: Vec<crate::agent::PatchRequest> = patch_dependencies
         .iter()
         .filter(|p| !already_patched(p))
         .map(|p| crate::agent::PatchRequest {
@@ -4857,6 +4887,17 @@ fn agent_turn(
 
     let notes = tail_for_prompt(&std::fs::read_to_string(ws.notes()).unwrap_or_default());
     let package_notes = package_notes_for_prompt(&crate::package_notes::read(&config.rpm_name));
+    // What convention 78 asks a turn to check, read here: the agent's own tools
+    // cannot fetch another project's recipe (`osc cat`, `zypper info` are refused),
+    // so torchcodec's turns could only answer `blocked`.
+    let licence_facts = ctx
+        .checkout_dir
+        .and_then(|dir| licence_guard_facts(config, &ws.build_log(), dir));
+    let base_context: Option<String> = match (ctx.context, licence_facts) {
+        (Some(c), Some(f)) => Some(format!("{c}\n\n{f}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, f) => f,
+    };
     let on_tool_use = |tool: &str, input: &str| {
         reporter.report(&Event::AgentToolUse {
             step: step.id,
@@ -4902,7 +4943,7 @@ fn agent_turn(
             None
         },
         checkout_dir: ctx.checkout_dir,
-        context: nudge.get().map(String::as_str).or(ctx.context),
+        context: nudge.get().map(String::as_str).or(base_context.as_deref()),
         rpms_dir: Some(&config.rpms_dir),
         model_rotation: model_rotation.get(),
         on_tool_use: Some(&on_tool_use),
@@ -5934,6 +5975,136 @@ enum TurnEffect {
     NoChange,
     Edited,
     SwitchedToWheel,
+}
+
+/// Whether a patch turn (convention 62) failed to deliver what a dependent asked
+/// for. Not when it edited, not when an earlier run already did, and not when it
+/// answered `no_change`: that is the turn finding the change already in the
+/// recipe (the project's `ffmpeg-8` was licence-clean already), and the dependent
+/// is waiting on a package that is built, not on an edit. Failing it re-queued
+/// the same request ten times. A `blocked` or other answer is still a failure.
+fn patch_turn_failed(
+    patching: bool,
+    effect: TurnEffect,
+    already_reviewed: bool,
+    action: &crate::agent::Action,
+) -> bool {
+    patching
+        && effect != TurnEffect::Edited
+        && !already_reviewed
+        && !matches!(action, crate::agent::Action::NoChange)
+}
+
+/// Packages whose rebuild takes hours: a turn may not have one branched and
+/// patched to avoid a test or an import (python-accelerate asked for python-torch
+/// over `torch.utils.benchmark` and started a multi-hour build).
+fn is_heavy_package(name: &str) -> bool {
+    let key = osc::fuzzy_key(osc::strip_rpm_prefix(name));
+    ["torch", "pytorch", "libtorch", "tensorflow", "llvm", "clang", "gcc", "qt5", "qt6",
+     "chromium", "firefox", "libreoffice", "rustc", "ghc"]
+        .iter()
+        .any(|h| key == *h || (key.starts_with(h) && key[h.len()..].starts_with(|c: char| c.is_ascii_digit())))
+}
+
+/// The lines of a recipe that say what licence its build has: the `License:`
+/// tags and the `./configure` switches that make a FFmpeg GPL or non-free
+/// (`--enable-gpl`, `--enable-version3`, `--enable-nonfree`), with their line
+/// numbers. `%if` conditions are not evaluated: the reader sees the raw lines.
+fn recipe_licence_lines(spec: &str) -> Vec<String> {
+    spec.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let t = l.trim_start();
+            !t.starts_with('#')
+                && (t.starts_with("License:")
+                    || t.contains("--enable-gpl")
+                    || t.contains("--enable-nonfree")
+                    || t.contains("--enable-version3")
+                    || t.starts_with("%if") && (t.contains("gpl") || t.contains("nonfree")))
+        })
+        .map(|(i, l)| format!("  line {}: {}", i + 1, l.trim()))
+        .collect()
+}
+
+/// For a package whose build log shows an upstream licence guard
+/// (`...LICENSE_VIOLATION`) and whose spec builds against an `ffmpeg-<N>` recipe:
+/// that recipe's licence lines from this project, else from a project it builds
+/// against, as the evidence convention 78 asks for. `None` when there is no
+/// guard or no recipe could be read. Cached per recipe for the process.
+fn licence_guard_facts(config: &PipelineConfig, build_log: &Path, checkout_dir: &Path) -> Option<String> {
+    let guard = |text: &str| text.contains("LICENSE_VIOLATION");
+    let log = std::fs::read_to_string(build_log).unwrap_or_default();
+    let spec = std::fs::read_to_string(checkout_dir.join(format!("{}.spec", config.rpm_name)))
+        .unwrap_or_default();
+    if !guard(&log) && !guard(&spec) {
+        return None;
+    }
+    let mut majors: Vec<String> = Vec::new();
+    for word in spec.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        if let Some(n) = word.strip_prefix("ffmpeg-") {
+            let n: String = n.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !n.is_empty() && !majors.contains(&n) {
+                majors.push(n);
+            }
+        }
+    }
+    if majors.is_empty() {
+        return None;
+    }
+    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, Option<String>>>> =
+        std::sync::Mutex::new(None);
+    let emit = Emit::quiet();
+    let mut projects = vec![config.project.clone()];
+    if let Ok(paths) = osc::get_project_repo_paths(&config.project, emit) {
+        for (p, _) in paths {
+            if !projects.contains(&p) {
+                projects.push(p);
+            }
+        }
+    }
+    let mut blocks: Vec<String> = Vec::new();
+    for n in majors {
+        let pkg = format!("ffmpeg-{n}");
+        let key = format!("{}/{pkg}", config.project);
+        let cached = CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|c| c.get(&key).cloned());
+        let block = match cached {
+            Some(b) => b,
+            None => {
+                let found = projects.iter().find_map(|proj| {
+                    let text = crate::update::spec_for_package(proj, &pkg, emit)?;
+                    let lines = recipe_licence_lines(&text);
+                    (!lines.is_empty()).then(|| {
+                        format!(
+                            "The recipe of `{pkg}` as {proj} has it:\n{}",
+                            lines.join("\n")
+                        )
+                    })
+                });
+                CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_or_insert_with(Default::default)
+                    .insert(key, found.clone());
+                found
+            }
+        };
+        blocks.extend(block);
+    }
+    (!blocks.is_empty()).then(|| {
+        format!(
+            "## Licence facts (read by the pipeline)\n\nThis package's build hit an upstream \
+             licence guard. These are the licence lines of the FFmpeg recipe it builds \
+             against, read from OBS for you: this is the evidence convention 78 asks you to \
+             check (no `--enable-gpl`/`--enable-nonfree`, an LGPL `License:` means the check \
+             holds; a `%if` line may switch a switch off, so read it with its condition). \
+             Cite it in the `# licence-guard-verified:` comment.\n\n{}",
+            blocks.join("\n\n")
+        )
+    })
 }
 
 /// The one-line `.changes` bullet for an agent turn: the first sentence of its
@@ -10571,5 +10742,59 @@ mod published_defect_tests {
         assert!(!spec_has_published_defects(&spec));
         // No spec checked out: nothing to repair.
         assert!(!spec_has_published_defects(&dir.path().join("absent.spec")));
+    }
+}
+
+#[cfg(test)]
+mod patch_turn_tests {
+    use super::*;
+    use crate::agent::Action;
+
+    #[test]
+    fn a_patch_turn_that_finds_nothing_to_change_is_satisfied_not_failed() {
+        let blocked = Action::Blocked { why: "no".into() };
+        // ffmpeg-8 was already licence-clean: no_change.
+        assert!(!patch_turn_failed(true, TurnEffect::NoChange, false, &Action::NoChange));
+        // It edited, an earlier run did, or this is not a patch turn.
+        assert!(!patch_turn_failed(true, TurnEffect::Edited, false, &Action::Edited));
+        assert!(!patch_turn_failed(true, TurnEffect::NoChange, true, &blocked));
+        assert!(!patch_turn_failed(false, TurnEffect::NoChange, false, &blocked));
+        // Blocked is still a failure to patch.
+        assert!(patch_turn_failed(true, TurnEffect::NoChange, false, &blocked));
+    }
+}
+
+#[cfg(test)]
+mod licence_fact_tests {
+    use super::recipe_licence_lines;
+
+    #[test]
+    fn the_licence_lines_of_a_recipe_are_listed_with_their_numbers() {
+        let spec = "Name: ffmpeg-8\nLicense:        LGPL-2.1-or-later\n# --enable-gpl is a comment\n%if %{with gpl}\n\t--enable-gpl \\\n%endif\n\t--enable-version3 \\\n\t--enable-shared \\\n";
+        let lines = recipe_licence_lines(spec);
+        assert_eq!(
+            lines,
+            [
+                "  line 2: License:        LGPL-2.1-or-later",
+                "  line 4: %if %{with gpl}",
+                "  line 5: --enable-gpl \\",
+                "  line 7: --enable-version3 \\",
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod heavy_package_tests {
+    use super::is_heavy_package;
+
+    #[test]
+    fn packages_that_take_hours_to_rebuild_are_recognised() {
+        for n in ["python-torch", "torch", "python313-pytorch", "llvm20", "gcc15", "qt6", "chromium"] {
+            assert!(is_heavy_package(n), "{n}");
+        }
+        for n in ["ffmpeg-8", "python-torchvision", "torchcodec", "python-accelerate", "gcc-fortran-lib", "llvmlite"] {
+            assert!(!is_heavy_package(n), "{n}");
+        }
     }
 }

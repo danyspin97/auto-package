@@ -2534,7 +2534,13 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `blocked`. The rest of this entry is written for case (a); for (b) the
    `problem` text gives the RPM, the missing files or module, and the error line,
    and the dependency's own recipe is fixed in place. This is
-   rare; use it only after the other options fail. The signs: the package
+   rare; use it only after the other options fail. **Never for a package whose
+   rebuild takes hours** (`torch`, `tensorflow`, `llvm`, `gcc`, `qt5`/`qt6`,
+   `chromium`: the pipeline refuses it): when a distro package has a defect your
+   package can avoid, avoid it HERE. A test that fails because the distro's
+   `torch` lacks `torch/utils/benchmark/utils` is deselected with a comment naming
+   the defect, not bought back with a rebuild of `torch`; losing that coverage is
+   the cheaper outcome and the goal is a package that builds and works. The signs: the package
    declares an upper bound on a dependency (`apache-tvm-ffi < 0.1.12`), the
    distro (or this project) ships a newer release, and the build or `%check`
    shows a concrete incompatibility, such as `undefined symbol:
@@ -2792,7 +2798,9 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    by guessing, and never leave the package unbuilt over it.** A build that
    refuses to run until a variable says "this is not a licence violation"
    (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1`) wants you to CONFIRM A FACT.
-   Read the guard in the source, find the fact it names, and check it:
+   Read the guard in the source, find the fact it names, and check it (when
+   the prompt has a "Licence facts" section, the pipeline has already read the
+   recipe's licence lines for you: that is your evidence, cite it):
    - torchcodec's wheel-state guard (`src/torchcodec/_core/CMakeLists.txt`)
      protects against shipping an FFmpeg built with GPL or non-free components.
      The distro's FFmpeg is the library this package links, so the fact is that
@@ -3761,7 +3769,8 @@ fn turn_usage(
 /// pipeline runs it itself on the turn's result.
 const CHECKOUT_TOOLS: &str = concat!(
     "Grep,Skill,Bash(osc status),Bash(ls *),Bash(zypper search *),",
-    "Bash(zypper what-provides *),WebFetch(domain:pypi.org),",
+    "Bash(zypper what-provides *),Bash(zypper info *),Bash(osc cat *),Bash(readelf *),",
+    "WebFetch(domain:pypi.org),",
     "Bash(quilt push *),",
     "Bash(quilt pop *),",
     "Bash(quilt refresh *),",
@@ -3826,7 +3835,7 @@ fn turn_allowed_tools(
         }
     } else {
         (
-            "Grep,Skill,Bash(osc status),Bash(ls *),Bash(zypper search *),Bash(zypper what-provides *),WebFetch(domain:pypi.org)",
+            "Grep,Skill,Bash(osc status),Bash(ls *),Bash(zypper search *),Bash(zypper what-provides *),Bash(zypper info *),Bash(osc cat *),Bash(readelf *),WebFetch(domain:pypi.org)",
             vec![workspace],
         )
     };
