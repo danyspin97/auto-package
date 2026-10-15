@@ -174,6 +174,14 @@ deliberately conservative:
   `update-project` check `claude auth status` (free) before starting.
 - `130`: interrupted (Ctrl-C or SIGTERM).
 
+### Licence guards
+
+A spec that sets a variable overriding an upstream licence guard
+(`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1`, `ACCEPT_EULA=Y`) is not built or
+committed: the package fails with the line named, since that is a person's
+decision. After reviewing the licence, run again with
+`AUTO_PACKAGE_ALLOW_LICENSE_OVERRIDES=1`.
+
 ## Architecture
 
 The project is organized as a Rust workspace:
