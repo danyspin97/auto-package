@@ -151,7 +151,8 @@ pub enum PipelineResult {
         native: Vec<String>,
         /// The part of `deps` the repository has at a version older than a
         /// constraint wants: updated in place, not built as a new package.
-        outdated: Vec<String>,
+        /// With the release the constraint names, when it names one.
+        outdated: Vec<(String, Option<String>)>,
     },
     Failed {
         rpm_name: String,
@@ -2628,10 +2629,12 @@ fn missing_deps_from_turn(
     // break (an `undefined symbol`), it is patched (convention 62).
     let conflicts = linked_bound_conflicts(ctx, step, &named);
     let mut conflict_patches: Vec<crate::agent::PatchRequest> = Vec::new();
-    let mut conflict_outdated: Vec<String> = Vec::new();
+    let mut conflict_outdated: Vec<(String, Option<String>)> = Vec::new();
     for c in &conflicts {
         match c.kind {
-            crate::distro_bounds::Kind::DistroTooOld => conflict_outdated.push(c.dep.clone()),
+            crate::distro_bounds::Kind::DistroTooOld => {
+                conflict_outdated.push((c.dep.clone(), None))
+            }
             crate::distro_bounds::Kind::DistroTooNew => match abi_symptom(ctx) {
                 Some(symptom) => conflict_patches.push(crate::agent::PatchRequest {
                     name: c.dep.clone(),
@@ -2673,6 +2676,7 @@ fn missing_deps_from_turn(
     let scheduled = |n: &str| {
         conflict_outdated
             .iter()
+            .map(|(d, _)| d)
             .chain(conflict_patches.iter().map(|p| &p.name))
             .any(|d| osc::fuzzy_key(d) == osc::fuzzy_key(n))
     };
@@ -2705,7 +2709,7 @@ fn missing_deps_from_turn(
         })
         .collect();
     patches.extend(conflict_patches);
-    for dep in &conflict_outdated {
+    for (dep, _) in &conflict_outdated {
         if !to_build
             .iter()
             .any(|d| osc::fuzzy_key(d) == osc::fuzzy_key(dep))
@@ -3856,9 +3860,9 @@ fn unresolvable_deps_round(
         )));
     }
     let native = crate::depclass::native_among(&unresolvable_deps, &to_build);
-    let outdated: Vec<String> = osc::outdated_packages(&detail)
+    let outdated: Vec<(String, Option<String>)> = osc::outdated_packages(&detail)
         .into_iter()
-        .filter(|n| {
+        .filter(|(n, _)| {
             to_build
                 .iter()
                 .any(|b| osc::fuzzy_key(b) == osc::fuzzy_key(n))
@@ -6147,7 +6151,7 @@ fn pypi_json_url(name: &str, version: &str) -> String {
 /// PyPI's JSON for a release: `Ok(None)` when the project/version is simply not
 /// on PyPI (404), `Err` for anything else (network, 5xx, oversized body) so the
 /// caller can tell "not published" from "could not ask".
-fn fetch_pypi_json(name: &str, version: &str) -> Result<Option<String>, String> {
+pub fn fetch_pypi_json(name: &str, version: &str) -> Result<Option<String>, String> {
     match crate::http::get_with_retries(&pypi_json_url(name, version)) {
         Ok(resp) => crate::http::read_text(resp)
             .map(Some)

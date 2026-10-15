@@ -368,6 +368,10 @@ pub struct VersionMiss {
     /// `true` when it is newer than an upper bound or a pin allows; `false` when
     /// older than a lower bound or a pin.
     pub too_new: bool,
+    /// The version the constraint names when it is a lower bound or a pin
+    /// (`>= 0.66b1`, `= 0.66b1`): the release to bring the package to, so a
+    /// family of packages pinned together stays in step.
+    pub required: Option<String>,
 }
 
 /// The version misses in `detail`. A package here is not missing: too old, it
@@ -405,11 +409,17 @@ pub fn version_misses(detail: &[String]) -> Vec<VersionMiss> {
         else {
             continue;
         };
+        let required = ["<=", ">=", "==", "<", ">", "="]
+            .iter()
+            .find_map(|op| constraint.strip_prefix(op).map(|r| (*op, r.trim())))
+            .filter(|(op, _)| matches!(*op, ">=" | "==" | "="))
+            .map(|(_, r)| r.split(['-', ' ']).next().unwrap_or(r).to_string());
         if !out.iter().any(|m| fuzzy_key(&m.name) == fuzzy_key(&bare)) {
             out.push(VersionMiss {
                 name: bare,
                 got,
                 too_new,
+                required,
             });
         }
     }
@@ -418,11 +428,11 @@ pub fn version_misses(detail: &[String]) -> Vec<VersionMiss> {
 
 /// The packages in `detail` OBS has at a version older than a constraint asks
 /// for.
-pub fn outdated_packages(detail: &[String]) -> Vec<String> {
+pub fn outdated_packages(detail: &[String]) -> Vec<(String, Option<String>)> {
     version_misses(detail)
         .into_iter()
         .filter(|m| !m.too_new)
-        .map(|m| m.name)
+        .map(|m| (m.name, m.required))
         .collect()
 }
 
@@ -441,7 +451,10 @@ mod extract_unresolvable_tests {
         ];
         assert_eq!(
             outdated_packages(&detail),
-            ["opentelemetry-instrumentation"]
+            [(
+                "opentelemetry-instrumentation".to_string(),
+                Some("0.66b1".to_string())
+            )]
         );
     }
 

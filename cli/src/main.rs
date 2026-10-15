@@ -1504,23 +1504,28 @@ impl NativeNames {
 /// or dropped as available.
 #[derive(Default)]
 struct OutdatedNames {
-    keys: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// By `fuzzy_key`, with the release the constraint names, when it names one.
+    keys: std::cell::RefCell<std::collections::HashMap<String, Option<String>>>,
 }
 
 impl OutdatedNames {
-    fn record(&self, names: &[String]) {
+    fn key(dep: &str) -> String {
+        ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(dep))
+    }
+
+    fn record(&self, names: &[(String, Option<String>)]) {
         let mut keys = self.keys.borrow_mut();
-        for n in names {
-            keys.insert(ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(n)));
+        for (n, required) in names {
+            keys.insert(Self::key(n), required.clone());
         }
     }
 
     fn contains(&self, dep: &str) -> bool {
-        self.keys
-            .borrow()
-            .contains(&ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(
-                dep,
-            )))
+        self.keys.borrow().contains_key(&Self::key(dep))
+    }
+
+    fn required(&self, dep: &str) -> Option<String> {
+        self.keys.borrow().get(&Self::key(dep)).cloned().flatten()
     }
 }
 
@@ -1530,6 +1535,7 @@ impl OutdatedNames {
 /// the pipeline branches it). The error says why that is not possible.
 fn update_config_for_outdated(
     dep: &str,
+    required: Option<&str>,
     project: &str,
     config: &PipelineConfig,
     own_listing: &std::collections::HashSet<String>,
@@ -1545,8 +1551,20 @@ fn update_config_for_outdated(
         })
         .cloned()
         .unwrap_or(rpm);
-    let newest = pypi_latest_version(dep, reporter)
-        .ok_or_else(|| "it has no PyPI release to update to".to_string())?;
+    // The release the constraint names, when PyPI has it: the packages of one
+    // release family are pinned to each other, and the newest of one may not
+    // match the rest. Otherwise the newest release.
+    let named = required.filter(|v| {
+        ap_build::pipeline::fetch_pypi_json(dep, v)
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    let newest = match named {
+        Some(v) => v.to_string(),
+        None => pypi_latest_version(dep, reporter)
+            .ok_or_else(|| "it has no PyPI release to update to".to_string())?,
+    };
     let current = ap_build::update::spec_for_package(project, &real, emit)
         .and_then(|text| ap_build::spec::parse_header(&text))
         .map(|h| h.version);
@@ -2323,6 +2341,7 @@ fn cmd_build(
                 }
                 match update_config_for_outdated(
                     &dep,
+                    outdated_names.required(&dep).as_deref(),
                     project,
                     &config,
                     &own_listing,
