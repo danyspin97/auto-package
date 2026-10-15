@@ -235,8 +235,7 @@ pub fn rewrite_dependency_name(spec: &str, from: &str, to: &str) -> String {
         return spec.to_string();
     }
     let from_key = crate::osc::fuzzy_key(from);
-    let rewritten = spec
-        .split_inclusive('\n')
+    spec.split_inclusive('\n')
         .map(|line| {
             if !TAG.is_match(line) {
                 return line.to_string();
@@ -254,8 +253,7 @@ pub fn rewrite_dependency_name(spec: &str, from: &str, to: &str) -> String {
                 })
                 .into_owned()
         })
-        .collect::<String>();
-    rewritten
+        .collect()
 }
 
 /// Fix architecture-related lines when a package has C extensions.
