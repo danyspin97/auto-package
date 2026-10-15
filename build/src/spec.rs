@@ -1852,6 +1852,112 @@ pub fn prebuilt_wheel_rpmlintrc() -> String {
     )
 }
 
+/// The `%files` entries for a prebuilt wheel, from its own file list, or `None`
+/// when the layout is not one this can list without guessing (a `.data`
+/// directory, a top-level module, an odd file name): the review then fills the
+/// section in. Convention 15 forbids globs, so every entry is an exact path or
+/// a package directory.
+///
+///  * a directory with an `__init__.py` is a package: the directory is listed;
+///  * a directory without one is a namespace shared with other wheels
+///    (`nvidia/`, `cuda/`): it is `%dir`, and its children are listed;
+///  * a directory that holds only files is listed as a whole (`nvidia/cu13/lib/`);
+///  * what `%install` removes (bundled headers) is left out;
+///  * the dist-info directory is listed with its licence files split off as
+///    `%exclude` + `%license`, so each is owned once.
+fn wheel_files_entries(layout: &ap_ecosystem::sdist::WheelLayout, sitedir: &str) -> Option<String> {
+    use std::collections::BTreeMap;
+
+    let dist_info = layout.dist_info.as_deref()?;
+    let header_dirs = &layout.header_dirs;
+    let removed = |path: &str| {
+        header_dirs
+            .iter()
+            .any(|d| path == d || path.starts_with(&format!("{d}/")))
+    };
+    let odd = |path: &str| {
+        path.chars().any(|c| {
+            c.is_whitespace() || matches!(c, '%' | '*' | '?' | '[' | ']' | '$' | '"' | '\'' | '\\')
+        })
+    };
+    let mut payload: Vec<&str> = Vec::new();
+    let mut licenses: Vec<&str> = Vec::new();
+    for file in &layout.files {
+        let file = file.as_str();
+        if odd(file) {
+            return None;
+        }
+        let top = file.split('/').next().unwrap_or("");
+        if top == dist_info {
+            let rel = &file[dist_info.len() + 1..];
+            let leaf = rel.rsplit('/').next().unwrap_or(rel).to_ascii_uppercase();
+            let is_license = rel.starts_with("licenses/")
+                || ["LICENSE", "LICENCE", "COPYING", "NOTICE"]
+                    .iter()
+                    .any(|p| leaf.starts_with(p));
+            if is_license {
+                licenses.push(file);
+            }
+        } else if top.ends_with(".data") || top == "__pycache__" || !file.contains('/') {
+            // Scripts and data land outside site-packages; a top-level module
+            // brings its own `__pycache__`: neither is listed blind.
+            return None;
+        } else if !removed(file) && !file.ends_with(".pyc") {
+            payload.push(file);
+        }
+    }
+    if payload.is_empty() {
+        return None;
+    }
+
+    // Directory tree of the payload: dir -> (direct files, child dirs).
+    #[derive(Default)]
+    struct Dir {
+        files: Vec<String>,
+        dirs: BTreeMap<String, Dir>,
+    }
+    let mut root = Dir::default();
+    for path in &payload {
+        let mut node = &mut root;
+        let mut parts = path.split('/').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_some() {
+                node = node.dirs.entry(part.to_string()).or_default();
+            } else {
+                node.files.push(part.to_string());
+            }
+        }
+    }
+    fn emit(dir: &Dir, path: &str, sitedir: &str, out: &mut Vec<String>) {
+        if dir.files.iter().any(|f| f == "__init__.py") || dir.dirs.is_empty() {
+            out.push(format!("%{{{sitedir}}}/{path}/"));
+            return;
+        }
+        out.push(format!("%dir %{{{sitedir}}}/{path}"));
+        let mut files = dir.files.clone();
+        files.sort();
+        for f in files {
+            out.push(format!("%{{{sitedir}}}/{path}/{f}"));
+        }
+        for (name, child) in &dir.dirs {
+            emit(child, &format!("{path}/{name}"), sitedir, out);
+        }
+    }
+    let mut lines = Vec::new();
+    for (name, child) in &root.dirs {
+        emit(child, name, sitedir, &mut lines);
+    }
+    licenses.sort();
+    for l in &licenses {
+        lines.push(format!("%exclude %{{{sitedir}}}/{l}"));
+    }
+    for l in &licenses {
+        lines.push(format!("%license %{{{sitedir}}}/{l}"));
+    }
+    lines.push(format!("%{{{sitedir}}}/{dist_info}/"));
+    Some(lines.join("\n") + "\n")
+}
+
 pub fn wheel_binary_skeleton(
     pkg_name: &str,
     version: &str,
@@ -1933,7 +2039,16 @@ pub fn wheel_binary_skeleton(
         ));
     }
 
-    format!(
+    let files_block = layout
+        .and_then(|l| wheel_files_entries(l, sitedir))
+        .unwrap_or_else(|| {
+            "# TODO: list the exact paths %%pyproject_install put in the buildroot\n\
+             # (see source/ for the unpacked wheel's real layout) — convention 15\n\
+             # forbids globs here.\n"
+                .to_string()
+        });
+
+    let spec = format!(
         "#\n\
          # spec file for package python-{name}\n\
          #\n\
@@ -1991,9 +2106,7 @@ pub fn wheel_binary_skeleton(
          {check_block}\
          \n\
          %files %{{python_files}}\n\
-         # TODO: list the exact paths %%pyproject_install put in the buildroot\n\
-         # (see source/ for the unpacked wheel's real layout) — convention 15\n\
-         # forbids globs here.\n\
+         {files_block}\
          \n\
          %changelog\n",
         name = name,
@@ -2005,7 +2118,13 @@ pub fn wheel_binary_skeleton(
         arch_line = arch_line,
         sitedir = sitedir,
         check_block = check_block,
-    )
+        files_block = files_block,
+    );
+    // What the wheel's own metadata requires at run time.
+    match layout {
+        Some(l) => add_runtime_dependencies(&spec, &l.requires_dist, pkg_name),
+        None => spec,
+    }
 }
 
 /// Which native build system a plain C/C++ project uses. Decided by
@@ -2717,6 +2836,109 @@ BuildRequires:  %{python_module pip}
     /// A prebuilt vendor `.so` wheel (nvidia-cublas's real shape) gets a
     /// pre-seeded `Source99:`/rpmlintrc baseline instead of making the agent
     /// re-derive the same five rpmlint false positives from a failed build —
+    fn layout_of(files: &[&str], requires: &[&str]) -> ap_ecosystem::sdist::WheelLayout {
+        ap_ecosystem::sdist::WheelLayout {
+            files: files.iter().map(|f| f.to_string()).collect(),
+            dist_info: files
+                .iter()
+                .find_map(|f| f.split('/').next().filter(|t| t.ends_with(".dist-info")))
+                .map(str::to_string),
+            requires_dist: requires.iter().map(|r| r.to_string()).collect(),
+            importable: Some("x".into()),
+            ..Default::default()
+        }
+    }
+
+    /// NVIDIA's shape (cublas, cufft, nvjitlink ...): a namespace shared with
+    /// other wheels, headers removed in %install, one licence in the dist-info.
+    /// Every one of those specs had its %files written by hand.
+    #[test]
+    fn a_namespace_wheel_lists_its_files_without_a_todo() {
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let mut layout = layout_of(
+            &[
+                "nvidia/cu13/lib/libnvJitLink.so.13",
+                "nvidia/cu13/include/nvJitLink.h",
+                "nvidia_nvjitlink-1.0.dist-info/METADATA",
+                "nvidia_nvjitlink-1.0.dist-info/RECORD",
+                "nvidia_nvjitlink-1.0.dist-info/licenses/License.txt",
+            ],
+            &["nvidia-cuda-nvrtc", "nvidia-foo (>=2.0); extra == \"x\""],
+        );
+        layout.header_dirs = vec!["nvidia/cu13/include".into()];
+        let spec = wheel_binary_skeleton(
+            "nvidia-nvjitlink",
+            "1.0",
+            "nvidia_nvjitlink-1.0-py3-none-manylinux_2_27_x86_64.whl",
+            &release,
+            Some(true),
+            Some(&layout),
+        );
+        let files = spec.split("%files %{python_files}\n").nth(1).unwrap();
+        let files = files.split("%changelog").next().unwrap();
+        assert_eq!(
+            files.trim(),
+            "%dir %{python_sitelib}/nvidia\n\
+             %dir %{python_sitelib}/nvidia/cu13\n\
+             %{python_sitelib}/nvidia/cu13/lib/\n\
+             %exclude %{python_sitelib}/nvidia_nvjitlink-1.0.dist-info/licenses/License.txt\n\
+             %license %{python_sitelib}/nvidia_nvjitlink-1.0.dist-info/licenses/License.txt\n\
+             %{python_sitelib}/nvidia_nvjitlink-1.0.dist-info/"
+        );
+        assert!(!spec.contains("TODO"), "{spec}");
+        // The wheel's own unconditional dependency, and not its extra.
+        assert!(
+            spec.contains("Requires:       python-nvidia-cuda-nvrtc\n"),
+            "{spec}"
+        );
+        assert!(!spec.contains("nvidia-foo"), "{spec}");
+    }
+
+    #[test]
+    fn a_package_directory_is_listed_whole_and_an_odd_layout_keeps_the_todo() {
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let pkg = layout_of(
+            &[
+                "pkg/__init__.py",
+                "pkg/sub/x.py",
+                "pkg-1.0.dist-info/METADATA",
+            ],
+            &[],
+        );
+        let spec = wheel_binary_skeleton(
+            "pkg",
+            "1.0",
+            "pkg-1.0-py3-none-any.whl",
+            &release,
+            Some(true),
+            Some(&pkg),
+        );
+        assert!(
+            spec.contains("%files %{python_files}\n%{python_sitelib}/pkg/\n%{python_sitelib}/pkg-1.0.dist-info/\n"),
+            "{spec}"
+        );
+        // A top-level module (its own __pycache__) or a .data tree is not listed blind.
+        for odd in [
+            &["mod.py", "mod-1.0.dist-info/METADATA"][..],
+            &[
+                "pkg/__init__.py",
+                "pkg-1.0.data/scripts/tool",
+                "pkg-1.0.dist-info/METADATA",
+            ][..],
+        ] {
+            let layout = layout_of(odd, &[]);
+            let spec = wheel_binary_skeleton(
+                "pkg",
+                "1.0",
+                "pkg-1.0-py3-none-any.whl",
+                &release,
+                Some(true),
+                Some(&layout),
+            );
+            assert!(spec.contains("# TODO: list the exact paths"), "{spec}");
+        }
+    }
+
     /// see `is_prebuilt_binary_wheel`/`prebuilt_wheel_rpmlintrc`.
     #[test]
     fn a_binary_wheel_with_a_shared_lib_gets_a_pre_seeded_rpmlintrc() {

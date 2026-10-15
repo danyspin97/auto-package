@@ -320,6 +320,12 @@ pub struct WheelLayout {
     /// never gets a `-devel` split, since nothing in this build environment
     /// ever compiles against them. Sorted and deduplicated.
     pub header_dirs: Vec<String>,
+    /// Every file of the wheel (no directory entries), as stored.
+    pub files: Vec<String>,
+    /// The `<name>-<version>.dist-info` directory.
+    pub dist_info: Option<String>,
+    /// The `Requires-Dist` lines of the wheel's `METADATA`, verbatim.
+    pub requires_dist: Vec<String>,
 }
 
 impl WheelLayout {
@@ -334,8 +340,33 @@ impl WheelLayout {
 /// Inspect a wheel's file list. `None` when it cannot be read as a zip.
 pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
     let file = std::fs::File::open(wheel).ok()?;
-    let zip_archive = zip::ZipArchive::new(file).ok()?;
+    let mut zip_archive = zip::ZipArchive::new(file).ok()?;
     let names: Vec<String> = zip_archive.file_names().map(str::to_string).collect();
+    let dist_info = names
+        .iter()
+        .filter_map(|n| n.split('/').next())
+        .find(|top| top.ends_with(".dist-info"))
+        .map(str::to_string);
+    let requires_dist: Vec<String> = dist_info
+        .as_ref()
+        .and_then(|d| {
+            let mut entry = zip_archive.by_name(&format!("{d}/METADATA")).ok()?;
+            read_manifest(&mut entry)
+        })
+        .map(|text| {
+            // Core metadata is RFC 822: headers end at the first blank line.
+            text.lines()
+                .take_while(|l| !l.trim().is_empty())
+                .filter_map(|l| l.strip_prefix("Requires-Dist:"))
+                .map(|v| v.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let files: Vec<String> = names
+        .iter()
+        .filter(|n| !n.ends_with('/'))
+        .cloned()
+        .collect();
     let top_of = |n: &str| n.split('/').next().unwrap_or("").to_string();
     let skip =
         |top: &str| top.ends_with(".dist-info") || top.ends_with(".data") || top == "__pycache__";
@@ -398,6 +429,9 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         importable,
         first_shared_lib,
         header_dirs,
+        files,
+        dist_info,
+        requires_dist,
     })
 }
 
@@ -2192,6 +2226,30 @@ build-backend = "flit_core.buildapi"
             zw.write_all(b"x").unwrap();
         }
         zw.finish().unwrap();
+    }
+
+    #[test]
+    fn wheel_layout_reads_the_files_dist_info_and_requires_dist() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("m.whl");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&w).unwrap());
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        zw.start_file("pkg/__init__.py", opts).unwrap();
+        zw.start_file("pkg-1.0.dist-info/METADATA", opts).unwrap();
+        write!(
+            zw,
+            "Metadata-Version: 2.4\nName: pkg\nRequires-Dist: numpy>=1.20\nRequires-Dist: tomli; python_version < \"3.11\"\n\nRequires-Dist: not-a-header\n"
+        )
+        .unwrap();
+        zw.finish().unwrap();
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(l.dist_info.as_deref(), Some("pkg-1.0.dist-info"));
+        assert_eq!(l.files, ["pkg/__init__.py", "pkg-1.0.dist-info/METADATA"]);
+        assert_eq!(
+            l.requires_dist,
+            ["numpy>=1.20", "tomli; python_version < \"3.11\""]
+        );
     }
 
     #[test]
