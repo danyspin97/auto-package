@@ -410,6 +410,19 @@ pub struct VersionMiss {
 /// is brought up to date; too new, the bound in the spec is what is wrong.
 pub fn version_misses(detail: &[String]) -> Vec<VersionMiss> {
     let mut out: Vec<VersionMiss> = Vec::new();
+    // `osc results --verbose` puts the `(got version ...)` on the same line as
+    // its `nothing provides` (`nothing provides x < 1, (got version 2-1.4)`),
+    // a build log on the next one: read both as two lines.
+    let detail: Vec<String> = detail
+        .iter()
+        .flat_map(|l| match l.find("(got version") {
+            Some(at) if at > 0 => vec![
+                l[..at].trim().trim_end_matches(',').trim().to_string(),
+                l[at..].trim().to_string(),
+            ],
+            _ => vec![l.clone()],
+        })
+        .collect();
     for pair in detail.windows(2) {
         let (line, next) = (pair[0].trim(), pair[1].trim());
         let Some(got_text) = next.strip_prefix("(got version") else {
@@ -503,6 +516,23 @@ mod extract_unresolvable_tests {
                 Some("0.66b1".to_string())
             )]
         );
+    }
+
+    /// `osc results --verbose` (no build log exists yet) joins the constraint
+    /// and the version OBS has on one line; python-detect-installer looped on
+    /// `uv-build < 0.10.0` against the distro's 0.11.7 because that form was
+    /// not read.
+    #[test]
+    fn a_version_miss_on_one_line_is_read_like_one_on_two() {
+        let detail = vec![
+            "nothing provides python314-uv-build < 0.10.0, (got version 0.11.7-1.4)".to_string(),
+            "nothing provides python313-uv-build < 0.10.0, (got version 0.11.7-1.4)".to_string(),
+        ];
+        let misses = version_misses(&detail);
+        assert_eq!(misses.len(), 1);
+        assert_eq!(misses[0].name, "uv-build");
+        assert_eq!(misses[0].got, "0.11.7");
+        assert!(misses[0].too_new);
     }
 
     /// Regression test: a rich `(A or B)` requires group leaves a stray `)`
