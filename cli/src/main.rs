@@ -131,7 +131,12 @@ enum Commands {
         /// the command line. Repeatable, and remembered in
         /// `<work-dir>/sources.toml` so dependencies resolved in later runs
         /// pick it up without being asked again.
-        #[arg(long, value_name = "[PKG=]URL")]
+        ///
+        /// `<package>=wheel` is not a URL: it repackages the package from its
+        /// upstream wheel instead of building it from source, replacing a
+        /// source recipe already in the project (the CUDA `torch` wheel
+        /// instead of a multi-hour source build).
+        #[arg(long, value_name = "[PKG=]URL|PKG=wheel")]
         source_url: Vec<String>,
 
         /// Also retry every other package that OBS currently reports as

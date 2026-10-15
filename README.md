@@ -63,6 +63,7 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--budget-usd`: USD budget cap for AI calls (default: 2.0)
 - `--no-agent`: Build only, never call the AI model
 - `--unsafe-resolve`: Run pip without its sandbox (see the threat model)
+- `--source-url [PKG=]URL`: Source repository for a wheel-only package; `PKG=wheel` repackages the upstream wheel instead of building from source (e.g. `--source-url torch=wheel`), replacing an existing source recipe
 - `--force`: Rebuild even if already built
 - `--regen`: Regenerate spec from scratch
 - `--cleanup`: Remove work directory before building

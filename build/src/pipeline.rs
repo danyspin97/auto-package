@@ -94,7 +94,17 @@ pub struct PipelineConfig {
     pub patch_request: Option<String>,
 }
 
+/// The reserved `--source-url <package>=wheel` value: package this one from the
+/// upstream wheel, not from source (torch, whose Factory recipe is a multi-hour
+/// source build and whose PyPI release is the CUDA wheel).
+pub const WHEEL_SOURCE: &str = "wheel";
+
 impl PipelineConfig {
+    /// Whether this package is to be repackaged from its upstream wheel.
+    pub fn prefers_wheel(&self) -> bool {
+        self.source_urls.get(&self.pkg_name) == Some(WHEEL_SOURCE)
+    }
+
     /// The CPython ABI tag to pass as `pypi::pick_wheel_from_json`'s
     /// `single_locked_flavor_abi`, derived from `python_flavors`. `None`
     /// unless this project is configured for exactly one Python flavor and
@@ -837,6 +847,7 @@ pub fn select_target(
                     .join(format!("{real}.spec"));
                 return if status_is_resolvable(build_statuses.get(real))
                     && !spec_has_published_defects(&spec)
+                    && !wheel_policy_pending(&config.source_urls, &n.name, &spec)
                 {
                     Resolution::Built
                 } else {
@@ -1784,7 +1795,9 @@ fn preflight<'a>(
         .join(&config.project)
         .join(&rpm_name)
         .join(format!("{rpm_name}.spec"));
-    let unfinished = spec_has_placeholders(&local_spec) || spec_has_published_defects(&local_spec);
+    let unfinished = spec_has_placeholders(&local_spec)
+        || spec_has_published_defects(&local_spec)
+        || wheel_policy_pending(&config.source_urls, &config.pkg_name, &local_spec);
     if !config.force && prior.is_built(&config.version) && !unfinished {
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
     }
@@ -1937,6 +1950,7 @@ fn checkout_stage(
         && !spec_version_differs(spec_path, &config.version)
         && !spec_has_placeholders(spec_path)
         && !spec_has_published_defects(spec_path)
+        && !wheel_policy_pending(&config.source_urls, &config.pkg_name, spec_path)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
         && PkgState::load(ws).policy_current()
     {
@@ -1978,7 +1992,10 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
     let spec_existed_before_generation = spec_path.exists();
     let version_bump =
         spec_existed_before_generation && spec_version_differs(spec_path, &config.version);
-    let need_spec = config.regen || !spec_existed_before_generation || version_bump;
+    // A wheel is asked for and the checked-out recipe builds from source.
+    let wheel_switch = wheel_policy_pending(&config.source_urls, &config.pkg_name, spec_path);
+    let need_spec =
+        config.regen || !spec_existed_before_generation || version_bump || wheel_switch;
     // A bump keeps the recipe the package already has (its patches,
     // BuildRequires, `%check` skips, a distro package's whole layout) unless
     // `--regen` asks to start over; only the version and the source change.
@@ -1987,7 +2004,7 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
         .flatten()
         .and_then(|t| crate::spec::parse_header(&t))
         .map(|h| h.version);
-    let carry_forward = version_bump && !config.regen;
+    let carry_forward = version_bump && !config.regen && !config.prefers_wheel();
     let mut carried_from: Option<String> = None;
 
     let (sdist_top_level, is_maturin, from_repo_archive, is_rust) = if need_spec {
@@ -6504,12 +6521,86 @@ fn carry_forward_spec(
     })
 }
 
+/// The PyPI JSON of this package's version.
+fn release_json_for(config: &PipelineConfig) -> Result<String, GenSpecError> {
+    let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
+    crate::http::read_text(crate::http::get_with_retries(&pypi_url).map_err(|e| {
+        GenSpecError::Other(format!(
+            "PyPI fetch failed for {} {}: {e}",
+            config.pkg_name, config.version
+        ))
+    })?)
+    .map_err(|e| {
+        GenSpecError::Other(format!(
+            "PyPI read failed for {} {}: {e}",
+            config.pkg_name, config.version
+        ))
+    })
+}
+
+/// What a source recipe leaves in a checkout that a wheel repackage must not
+/// keep: the service that fetched the sources, the flavors and build
+/// constraints of a compile, the patches and archives of the old source, and
+/// the Factory recipe's own rpmlint file. They are deleted here and go from OBS
+/// with the commit. `_link` stays (it only ties the package to its origin).
+fn purge_source_recipe(checkout_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(checkout_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.path().is_file() {
+            continue;
+        }
+        let recipe_only = matches!(
+            name.as_str(),
+            "_service" | "_servicedata" | "_multibuild" | "_constraints" | "series"
+        ) || name.ends_with(".patch")
+            || name.ends_with(".diff")
+            || name.ends_with(".obscpio")
+            || name.ends_with(".orig")
+            || [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".zip", ".crate"]
+                .iter()
+                .any(|s| name.ends_with(s))
+            // Factory's `<pkg>-rpmlintrc`; the wheel's own is `<pkg>.rpmlintrc`.
+            || name.ends_with("-rpmlintrc");
+        if recipe_only {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether `--source-url <pkg>=wheel` asks for a wheel repackage and the checked
+/// out spec still builds from source: such a package is not done, whatever OBS
+/// shows for it.
+fn wheel_policy_pending(
+    source_urls: &crate::sources::SourceMap,
+    pkg_name: &str,
+    spec_path: &Path,
+) -> bool {
+    source_urls.get(pkg_name) == Some(WHEEL_SOURCE)
+        && std::fs::read_to_string(spec_path).is_ok_and(|text| {
+            !text
+                .lines()
+                .any(|l| l.trim_start().starts_with("Source") && l.contains(".whl"))
+        })
+}
+
 fn generate_spec(
     config: &PipelineConfig,
     checkout_dir: &Path,
     spec_path: &Path,
     step: &StepDir,
 ) -> Result<GenSpecResult, GenSpecError> {
+    // `--source-url <package>=wheel`: the upstream wheel, whatever else exists.
+    if config.prefers_wheel() {
+        let json = release_json_for(config)?;
+        let result = wheel_or_wheel_only(config, &json, checkout_dir, spec_path, step, Vec::new());
+        if result.is_ok() {
+            purge_source_recipe(checkout_dir);
+        }
+        return result;
+    }
     // An explicit repository bypasses PyPI entirely: there may be no PyPI
     // project at all, and if there is, the user asked for the repo anyway.
     if let Some(ref repo_url) = config.source_repo {
@@ -6528,19 +6619,7 @@ fn generate_spec(
     use ap_ecosystem::pypi;
     use ap_ecosystem::sdist;
 
-    let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
-    let json = crate::http::read_text(crate::http::get_with_retries(&pypi_url).map_err(|e| {
-        GenSpecError::Other(format!(
-            "PyPI fetch failed for {} {}: {e}",
-            config.pkg_name, config.version
-        ))
-    })?)
-    .map_err(|e| {
-        GenSpecError::Other(format!(
-            "PyPI read failed for {} {}: {e}",
-            config.pkg_name, config.version
-        ))
-    })?;
+    let json = release_json_for(config)?;
     let release = match pypi::parse_release(&json) {
         Ok(r) => r,
         Err(pypi::Error::NoSdist { .. }) => {
@@ -10769,5 +10848,58 @@ mod rollback_note_tests {
         assert!(note.contains("Unterminated {"));
         assert!(note.contains("redo every change"));
         assert!(rollback_note(&"x".repeat(5000)).len() < 900);
+    }
+}
+
+#[cfg(test)]
+mod wheel_policy_tests {
+    use super::*;
+
+    fn urls(pairs: &[(&str, &str)]) -> crate::sources::SourceMap {
+        let mut m = crate::sources::SourceMap::default();
+        for (p, u) in pairs {
+            m.insert(p, u);
+        }
+        m
+    }
+
+    #[test]
+    fn a_source_recipe_is_pending_when_a_wheel_is_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("python-torch.spec");
+        std::fs::write(&spec, "Name: python-torch\nSource: torch-%{version}.tar.gz\n").unwrap();
+        let wheel = urls(&[("torch", "wheel")]);
+        assert!(wheel_policy_pending(&wheel, "torch", &spec));
+        assert!(wheel_policy_pending(&wheel, "Torch", &spec));
+        // Another package, an ordinary URL, or no entry: nothing pending.
+        assert!(!wheel_policy_pending(&wheel, "numpy", &spec));
+        assert!(!wheel_policy_pending(&urls(&[("torch", "https://github.com/pytorch/pytorch")]), "torch", &spec));
+        // The wheel spec is done.
+        std::fs::write(&spec, "Name: python-torch\nSource0:        torch-2.14.1-cp313.whl\n").unwrap();
+        assert!(!wheel_policy_pending(&wheel, "torch", &spec));
+        assert!(!wheel_policy_pending(&wheel, "torch", &dir.path().join("absent.spec")));
+    }
+
+    #[test]
+    fn switching_to_a_wheel_clears_the_source_recipe_and_keeps_the_wheel_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [
+            "_service", "_multibuild", "_constraints", "a.patch", "pytorch-v2.14.0.tar.gz",
+            "python-torch-rpmlintrc", "python-torch.spec", "python-torch.changes",
+            "python-torch.rpmlintrc", "torch-2.14.1-cp313.whl", "_link",
+        ] {
+            std::fs::write(dir.path().join(f), "x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("pytorch")).unwrap();
+        purge_source_recipe(dir.path());
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["_link", "python-torch.changes", "python-torch.rpmlintrc", "python-torch.spec", "pytorch", "torch-2.14.1-cp313.whl"]
+        );
     }
 }
