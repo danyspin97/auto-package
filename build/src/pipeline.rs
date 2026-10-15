@@ -4939,7 +4939,15 @@ fn changes_message(reasoning: &str) -> String {
         .map(|(s, _)| s)
         .unwrap_or(&flat)
         .trim_end_matches('.');
-    let mut line: String = first.chars().take(200).collect();
+    // A changelog line is read at a glance: past 120 characters it is cut at a
+    // word, not in the middle of one, and says so.
+    let mut line: String = if first.chars().count() > 120 {
+        let cut: String = first.chars().take(120).collect();
+        let cut = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
+        format!("{}...", cut.trim_end_matches([',', ';', ':', ' ']))
+    } else {
+        first.to_string()
+    };
     if line.is_empty() {
         line = "Update the packaging".to_string();
     }
@@ -7705,7 +7713,8 @@ mod tests {
             "Relax the numpy bound"
         );
         assert_eq!(changes_message("   "), "Update the packaging");
-        assert_eq!(changes_message(&"x".repeat(500)).chars().count(), 200);
+        assert!(changes_message(&"word ".repeat(100)).ends_with("..."));
+        assert!(changes_message(&"word ".repeat(100)).chars().count() <= 123);
     }
 
     #[test]

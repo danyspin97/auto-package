@@ -2538,6 +2538,175 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    report a vendor library (`libcuda`, `libnccl`, `libcudnn`, `libcublas`, ...)
    as a package to build.
 
+65. **Runtime dependencies are flavor-neutral: `Requires: python-<name>`, never
+   `%{python_module <name>}`.** `%{python_module X}` expands to the name of
+   EVERY Python flavor, so `Requires: %{python_module click}` makes the python314
+   RPM require `python313-click` as well, and the other way round. It is correct
+   only in `BuildRequires`. For runtime lines write the plain name and let
+   `%python_subpackages` rewrite it per flavor: `Requires: python-click >= 8.1`,
+   `Requires: python-python-dotenv` (a distribution called `python-dotenv` is
+   `python-python-dotenv`; the wrong form made `python314-python314-dotenv`). A
+   conditional dependency is `Requires: python-backports.strenum if python-base
+   < 3.11`. Put every `Requires`, `Recommends`, `Suggests`, `Provides`, `Conflicts`
+   and `Obsoletes` line ABOVE `%python_subpackages`: after it the line belongs to
+   no subpackage or lands in the description. The pipeline rewrites the simple
+   forms and moves misplaced lines, but a conditional form you write is yours to
+   get right.
+
+66. **Summary and `%description` say something.** The `Summary:` is one line
+   without a trailing period, capitalized, no emoji. The `%description` adds
+   what the package does and what it is for, in one to three sentences; it is
+   not the Summary again and not a marketing slogan or an emoji (`FastAPI CLI. 🚀`
+   is not a description). Take it from the upstream README's first paragraph,
+   rewritten plainly. A prebuilt vendor wheel states in the description that it
+   redistributes upstream's binaries and that it is not built from source. The
+   pipeline sends a spec back once if it has an emoji or a description equal to
+   its Summary.
+
+67. **A `%check` that needs a GPU, a driver or a device is not run.** A test
+   suite that needs CUDA, a display server or a network (the whole of
+   `flashinfer`'s `tests/`, a kernel library's GPU tests) cannot pass on an OBS
+   worker, and a `-k 'not (...)'` list of dozens of names to skip it is
+   unmaintainable. Run only what can pass: an import smoke test that needs no
+   device (`import <module>` of the package, or of a submodule that does not open
+   a device), plus the CPU-safe tests selected by a marker or by directory
+   (`--ignore=tests/gpu`, `-m "not gpu"`). Say in a spec comment, without a `%`
+   character, why the rest is skipped. `test -e <file>.so` alone is the last
+   resort for a package whose every module needs the device, and only after you
+   tried a driver-free import and quote the failure; a package that ships Python
+   modules is imported. Never leave the whole upstream GPU suite in `%check`.
+   Tests run against the installed tree, from a clean working directory (not
+   from the unpacked source, where the build tree's own copy and its
+   `build/lib/*.so` shadow the package: `tilelang`'s 282 collection errors).
+
+68. **Bundled shared libraries in a prebuilt wheel must not leak into RPM
+   dependencies.** RPM turns every `.so` under site-packages into `Provides:` and
+   every `NEEDED` entry into `Requires:`. For a wheel that bundles its own
+   libraries, add before `%description`:
+     %global __provides_exclude_from ^%{python_sitearch}/.*$
+   (use `%{python_sitelib}` for a purelib wheel) so `libavcodec.so.62` or
+   `libz3.so.4.15` inside the wheel does not shadow the distro's. For the sonames
+   a wheel links against only through OPTIONAL plugins (NVSHMEM's MPI, UCX,
+   fabric and PMIx transports: `libmpi`, `liboshmem`, `libpmix`, `libucp`,
+   `libucs`, `libfabric`, `libmlx5`), add `%global __requires_exclude
+   ^lib(mpi|oshmem|pmix|ucp|ucs|fabric|mlx5)\.so.*$`: otherwise installing the
+   package drags in OpenMPI and UCX for a feature nobody asked for. For a soname
+   another package of this project supplies (`libnccl.so.2` from
+   `python-nvidia-nccl-cu13`), exclude the auto-Requires and write the explicit
+   `Requires: python-nvidia-nccl-cu13`, so the choice between flavors is not left
+   to OBS (`have choice for libnccl.so.2`), and add it to `BuildRequires` too when
+   OBS reports that choice. Also delete what the runtime does not need from the
+   buildroot in `%install`: `include/` headers, `*.a` static archives, test
+   libraries, and the stubs of another architecture (`aarch64-unknown-linux-gnu`
+   in an x86_64 package), and list the remaining files in `%files` explicitly.
+   `%{_prefix}/external` and other non-FHS directories are not created.
+
+69. **`%license` and the licence expression are exact.** Every licence file the
+   source or wheel ships (`LICENSE*`, `COPYING*`, `licenses/*` in the dist-info)
+   is listed with `%license`, including the second and third of a multi-licence
+   project; a dist-info directory listed whole is not a licence entry. The
+   `License:` tag covers what the package ships, not only what PyPI's metadata
+   says: a wheel that bundles NVIDIA's `ptxas`, `cuobjdump`, `nvdisasm`,
+   `libcupti*`, `libcudart` or `libcublas` adds `AND SUSE-NonFree` (openSUSE's
+   tag for redistributable proprietary binaries; every `LicenseRef-...` spelling,
+   `LicenseRef-NVIDIA-Proprietary` and `LicenseRef-NvidiaProprietary` included,
+   is `invalid-license` in rpmlint, and so is `NVIDIA Proprietary Software`); a vendored third-party tree (`3rdparty/cutlass`, `spdlog`, Rust crates
+   in a cargo build) adds its licence, as `Apache-2.0 AND BSD-3-Clause AND MIT`;
+   a statically linked LLVM adds `Apache-2.0 WITH LLVM-exception`. Read the files
+   in `source/` to decide; when the metadata and the shipped licence file
+   disagree, follow the file and say so in a comment. The pipeline sends a spec
+   back once when `%files` has no `%license` while the source ships a licence
+   file.
+
+70. **Optional dependencies are not `Requires`; undeclared runtime imports are.**
+   A requirement that PyPI lists only under an extra (`extra == "instruments"`,
+   `test`, a `cu13` extra) is not a hard `Requires`: it is a `BuildRequires` when
+   `%check` needs it and at most `Recommends` or `Suggests` at run time
+   (`mysql-connector-python` for the MySQL instrumentation, `psycopg` for the
+   psycopg one). The opposite also happens: a dependency the code imports
+   unconditionally at top level but upstream never declares (`torch` in
+   `fastsafetensors/frameworks/_torch.py`, a library loaded with `dlopen` from a
+   sibling package). Grep the top-level imports of the package's modules and
+   compare them with the declared dependencies; add what is imported as `Requires`
+   (or `Recommends` when only one optional backend uses it) and say why in a
+   comment. A requirement with an extra, `nvidia-cutlass-dsl[cu13]>=4.6.2`, needs
+   the packages of that extra as well (`python-nvidia-cutlass-dsl-libs-cu13`), and
+   a bound that upstream gives only for some Python versions (`anyio>=4.10` for
+   3.14) is applied for the flavors the project builds.
+
+71. **A package the distro already ships is not shipped twice.** Before you finish
+   a package, check that no Factory package installs the same files:
+   `osc ls openSUSE:Factory | grep -i <import name>` and, for a hit,
+   `osc cat openSUSE:Factory <pkg> <pkg>.spec` and compare its `%files` module
+   directory with yours. When both install the same directory (`python-z3`
+   and `z3-solver`'s `z3/`, `python-openai-harmony` and `oss-harmony`'s
+   `openai_harmony/`) the two cannot be installed together: add `Conflicts:
+   python-<other>` above `%python_subpackages` (the macro makes it per flavor)
+   and say in the description that it is a fork or a bundled copy, or report it
+   with `blocked` and name the distro package, because depending on the distro
+   package is usually the right answer. A bundled copy of a distro library
+   (`libz3.so`) also needs convention 68's `__provides_exclude_from`.
+
+72. **`rpmlintrc` filters exist only for a warning OBS actually reported.**
+   `unused-rpmlintrc-filter` is an error, so a filter nothing matches fails the
+   package. Start with no `rpmlintrc` and add `addFilter("<regex>")` lines for
+   the warnings the build log names, each with a comment saying why it is
+   harmless. Anchor path filters with `/usr/lib(64)?/python`, never a bare
+   `/usr/lib/python`: the sitearch is under `lib64`. Delete the file, and its
+   `Source99`, when the last filter goes. A filter must not hide a real defect:
+   `devel-file-in-non-devel-package` is fixed by deleting the header in
+   `%install` (convention 68), `zero-length` by a documented filter for the one
+   file, `non-executable-script` by `chmod 0755` or removing the shebang,
+   `summary-not-capitalized` by fixing the Summary. Treat every `E:` line in
+   the rpmlint output as something to fix or to filter with a reason, not only
+   a badness over the limit.
+
+73. **A bound that the project cannot satisfy is not written, and sibling
+   packages are built first.** Upstream pins its own sibling packages with
+   `==X` (`opentelemetry-instrumentation == 0.66b1`). If the repository has an
+   older version of the sibling (`0.66b0`) a `>= 0.66b1` BuildRequires makes the
+   package unresolvable. Check the version OBS has (`osc ls`/`osc results`, the
+   spec of the sibling in this project). When the sibling is a package of the
+   same release family that this project is about to build or update, keep the
+   bound and report the sibling in `unresolvable_packages` so it is built first;
+   when it is not (a test helper, a distro package), relax the bound to what the
+   repository has (convention 59). Never leave a bound in `BuildRequires` that
+   nothing can provide, and do not add a test-only helper's `>=` bound at all.
+
+74. **Write the changelog line for a reader.** The pipeline writes the `.changes`
+   entry from the first sentence of your `reasoning` (convention 40). Keep that
+   sentence under 100 characters, in the imperative, one thing (`Relax the numpy
+   upper bound to build with numpy 2`), with no attempt numbers, no
+   `after the build failed` narrative, and no `TODO`.
+
+75. **Keep upstream's bounds, and say when one is relaxed.** Copy the bounds of
+   `requires_dist` into `Requires` and `BuildRequires`, upper bounds included
+   (`apache-tvm-ffi <= 0.1.11`), unless convention 59 or 62 applies; then relax or
+   patch deliberately and put the reason in a comment. Dropping an upper bound
+   silently is how `tilelang` built against a tvm-ffi whose ABI it cannot load.
+
+76. **The files of one Python package come from one tree.** When several wheels
+   of this project install parts of the same package (`cutlass` in
+   `python-nvidia-cutlass-dsl-libs-base`, `-core`, `-cu13`), they must put it in
+   the same directory: a `.pth` that inserts only the first namespace portion on
+   `sys.path` sees `/usr/lib64/...` and never `/usr/lib/.../cutlass/__init__.py`.
+   Use `%{python_sitearch}` for all of them (every one is x86_64-only anyway) or
+   `%{python_sitelib}` for all. `%check` of such a wheel imports the chain its
+   dependents import (`import cutlass.cutlass_dsl, cutlass._mlir`), not a
+   `test -e` of one library, and a package that fails on a sibling's layout
+   reports the sibling with `patch_dependencies` (convention 62, case b).
+
+77. **Sources are reproducible.** A `Source:` for a wheel or a GitHub archive
+   carries its URL with the file name as a fragment
+   (`https://files.pythonhosted.org/packages/.../x-1.0-py3-none-any.whl#/x-1.0-py3-none-any.whl`,
+   `https://github.com/org/proj/archive/refs/tags/v%{version}.tar.gz#/proj-%{version}.tar.gz`),
+   never a bare file name that only exists in this checkout. A change to the
+   upstream source (a workspace member removed from `Cargo.toml`, a file fixed
+   in the sdist) is a `Patch:` with a comment, not an edited tarball. The upstream
+   archive a wheel switch replaced is deleted (the pipeline removes it from OBS at
+   the commit) and its leftovers (`*.pre-wheel-switch`, `wheel-origin.txt`,
+   `series` with no patch) stay out of the package.
+
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
 A standalone Rust package (binary/library built entirely with Cargo — a
@@ -4313,7 +4482,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 The generator sometimes copies test/optional dependencies faithfully but drops \
                 the package's own main dependencies entirely. Add any missing ones as \
                 `BuildRequires: %{python_module <name>}` (needed so %check can import them) \
-                AND `Requires: %{python_module <name>}` (needed at install time). Do NOT copy \
+                AND `Requires: python-<name>` (needed at install time; flavor-neutral, see convention 65). Do NOT copy \
                 the name's casing verbatim from the dependency list — convention 2 explains \
                 why that is frequently wrong (e.g. a lowercase `pillow` entry in \
                 pyproject.toml still needs `%{python_module Pillow}`) and how to verify the \

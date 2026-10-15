@@ -1982,9 +1982,15 @@ pub fn license_is_proprietary(license: &License) -> bool {
         License::Classifiers(c) => c.join(" ").to_lowercase(),
         License::Unknown => return false,
     };
-    ["proprietary", "nvidia", "license agreement", "eula"]
-        .iter()
-        .any(|w| text.contains(w))
+    [
+        "proprietary",
+        "nvidia",
+        "license agreement",
+        "eula",
+        "nonfree",
+    ]
+    .iter()
+    .any(|w| text.contains(w))
 }
 
 /// `spec` with a sentence added to the `%description`, saying the package is a
@@ -2035,6 +2041,9 @@ mod prebuilt_library_tests {
     fn nvidia_licence_text_is_proprietary() {
         assert!(license_is_proprietary(&License::FreeText(
             "LicenseRef-NVIDIA-Proprietary".into()
+        )));
+        assert!(license_is_proprietary(&License::Spdx(
+            NVIDIA_PROPRIETARY.into()
         )));
         assert!(!license_is_proprietary(&License::Spdx("MIT".into())));
         assert!(!license_is_proprietary(&License::Unknown));
@@ -2137,10 +2146,11 @@ pub fn hoist_dependency_tags(spec: &str) -> String {
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
 }
 
-/// The one spelling of NVIDIA's proprietary licence reference used across the
-/// project, for the variants that crept in (`LicenseRef-NvidiaProprietary`,
-/// `NVIDIA Proprietary Software`).
-pub const NVIDIA_PROPRIETARY: &str = "LicenseRef-NVIDIA-Proprietary";
+/// The licence tag for NVIDIA's redistributable proprietary binaries: openSUSE
+/// uses `SUSE-NonFree`, and rpmlint reports every `LicenseRef-...` spelling that
+/// crept in (`LicenseRef-NVIDIA-Proprietary`, `LicenseRef-NvidiaProprietary`,
+/// `NVIDIA Proprietary Software`) as `invalid-license`.
+pub const NVIDIA_PROPRIETARY: &str = "SUSE-NonFree";
 
 pub fn normalize_nvidia_license(spec: &str) -> String {
     let mut out: Vec<String> = Vec::new();
@@ -2148,6 +2158,7 @@ pub fn normalize_nvidia_license(spec: &str) -> String {
         if let Some(rest) = line.strip_prefix("License:") {
             let mut value = rest.trim().to_string();
             for variant in [
+                "LicenseRef-NVIDIA-Proprietary",
                 "LicenseRef-NvidiaProprietary",
                 "LicenseRef-Nvidia-Proprietary",
                 "LicenseRef-NVIDIA-proprietary",
@@ -2968,7 +2979,7 @@ mod normalizer_tests {
     fn the_nvidia_licence_spelling_is_unified() {
         let out =
             normalize_nvidia_license("Name: x\nLicense:        LicenseRef-NvidiaProprietary\n");
-        assert!(out.contains("License:        LicenseRef-NVIDIA-Proprietary"));
+        assert!(out.contains("License:        SUSE-NonFree"));
         let out = normalize_nvidia_license("License: NVIDIA Proprietary Software\n");
         assert!(out.contains(NVIDIA_PROPRIETARY));
         assert_eq!(

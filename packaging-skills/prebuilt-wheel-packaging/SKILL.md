@@ -140,3 +140,23 @@ file name in `Source<N>:` with no URL cannot be fetched by the service.
 Delete the source tarball the earlier recipe used from the checkout (a spec
 that no longer lists it must not leave it behind to be built from source).
 If the service fails, the error is shown to you on the next turn.
+
+## Checks that every prebuilt-wheel spec passes
+
+- `License:` is `SUSE-NonFree` for NVIDIA's redistributable binaries, joined with
+  `AND` to the open licences of what else is in the wheel; no `LicenseRef-...`
+  spelling (rpmlint: `invalid-license`). Every licence file in the dist-info is a
+  `%license` line.
+- Bundled libraries do not leak into dependencies: `%global
+  __provides_exclude_from ^%{python_sitearch}/.*$` (`%{python_sitelib}` for a
+  purelib wheel), and `%global __requires_exclude` for the sonames only an
+  optional plugin needs (MPI, UCX, fabric) or that another package of the
+  project supplies (then write the explicit `Requires: python-<pkg>`).
+- Delete headers, `*.a` archives, test libraries and other architectures' stubs
+  in `%install`; list the remaining files in `%files`.
+- `%check` imports the module when there is one, and a package whose payload other
+  packages import checks that import chain; `test -e <lib>.so` is only for a
+  wheel with no module.
+- Runtime `Requires:` are `python-<name>`, never `%{python_module <name>}`.
+- `rpmlintrc` filters only for warnings the build log names, anchored with
+  `/usr/lib(64)?/python`.
