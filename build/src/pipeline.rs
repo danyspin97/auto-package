@@ -2569,6 +2569,52 @@ fn missing_deps_from_turn(
         )
     });
     warn_skipped(ctx, step, &skipped);
+    // A package a linked project ships is only "available" when its version
+    // meets what this package declares for it. One that misses the bound is not
+    // dropped: too old, it is updated; too new and the build shows an ABI
+    // break (an `undefined symbol`), it is patched (convention 62).
+    let conflicts = linked_bound_conflicts(ctx, step, &named);
+    let mut conflict_patches: Vec<crate::agent::PatchRequest> = Vec::new();
+    let mut conflict_outdated: Vec<String> = Vec::new();
+    for c in &conflicts {
+        match c.kind {
+            crate::distro_bounds::Kind::DistroTooOld => conflict_outdated.push(c.dep.clone()),
+            crate::distro_bounds::Kind::DistroTooNew => match abi_symptom(ctx) {
+                Some(symptom) => conflict_patches.push(crate::agent::PatchRequest {
+                    name: c.dep.clone(),
+                    problem: format!(
+                        "{} {} declares `{} {}`, and {} ships {} {} ({}), which is newer than \
+                         that allows. The build fails with what looks like the ABI of the \
+                         newer release:\n{symptom}\nFind in the upstream repository what the \
+                         newer release removed or changed, and restore it with a patch.",
+                        ctx.config.pkg_name,
+                        ctx.config.version,
+                        c.dep,
+                        c.specifier,
+                        c.linked_project,
+                        c.dep,
+                        c.shipped,
+                        c.linked_pkg
+                    ),
+                }),
+                None => ctx.reporter.report(&Event::Warning {
+                    step: Some(step),
+                    message: format!(
+                        "{} {} ({}) is newer than the bound `{}` that {} declares, and the \
+                         build shows no ABI break: relax the bound in the spec (convention 59)",
+                        c.dep, c.shipped, c.linked_project, c.specifier, ctx.config.pkg_name
+                    ),
+                }),
+            },
+        }
+    }
+    let scheduled = |n: &str| {
+        conflict_outdated
+            .iter()
+            .chain(conflict_patches.iter().map(|p| &p.name))
+            .any(|d| osc::fuzzy_key(d) == osc::fuzzy_key(n))
+    };
+    let named: Vec<String> = named.into_iter().filter(|n| !scheduled(n)).collect();
     let mut to_build = without_available_deps(ctx, step, named, DepScope::Anywhere);
     // A patched dependency is one the distro ships by definition: only the
     // project's own build of it ends the request.
@@ -2583,7 +2629,7 @@ fn missing_deps_from_turn(
         crate::depclass::triage_all(&patch_names, &|_| false).0,
         DepScope::OwnProject,
     );
-    let patches: Vec<crate::agent::PatchRequest> = outcome
+    let mut patches: Vec<crate::agent::PatchRequest> = outcome
         .patch_dependencies
         .iter()
         .filter(|p| {
@@ -2596,6 +2642,15 @@ fn missing_deps_from_turn(
             problem: p.problem.clone(),
         })
         .collect();
+    patches.extend(conflict_patches);
+    for dep in &conflict_outdated {
+        if !to_build
+            .iter()
+            .any(|d| osc::fuzzy_key(d) == osc::fuzzy_key(dep))
+        {
+            to_build.push(dep.clone());
+        }
+    }
     for p in &patches {
         if !to_build
             .iter()
@@ -2613,8 +2668,96 @@ fn missing_deps_from_turn(
         deps: to_build,
         patches,
         native,
-        outdated: Vec::new(),
+        outdated: conflict_outdated,
     })
+}
+
+/// A package a linked project ships whose version misses a bound this package
+/// declares for it.
+struct LinkedConflict {
+    dep: String,
+    kind: crate::distro_bounds::Kind,
+    specifier: String,
+    shipped: String,
+    linked_project: String,
+    linked_pkg: String,
+}
+
+/// For each of `names` a linked project ships, whether the shipped version meets
+/// the bound this package's `Requires-Dist` puts on it.
+fn linked_bound_conflicts(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    names: &[String],
+) -> Vec<LinkedConflict> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let config = ctx.config;
+    let emit = Emit::new(ctx.reporter, step);
+    let requires: Vec<String> = fetch_pypi_json(&config.pkg_name, &config.version)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|v| {
+            v["info"]["requires_dist"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    if requires.is_empty() {
+        return Vec::new();
+    }
+    let Ok(paths) = osc::get_project_repo_paths(&config.project, emit) else {
+        return Vec::new();
+    };
+    let mut linked = Vec::new();
+    for (path_project, _repo) in paths {
+        let Ok(l) = osc::try_list_project_packages(&path_project, emit) else {
+            return Vec::new();
+        };
+        linked.push((path_project, l));
+    }
+    let none = Default::default();
+    let no_statuses = std::collections::HashMap::new();
+    names
+        .iter()
+        .filter_map(|dep| {
+            let crate::depclass::Availability::InLinked { project, pkg } =
+                crate::depclass::availability(dep, &none, &no_statuses, &linked)
+            else {
+                return None;
+            };
+            let shipped = osc::source_version(&project, &pkg)?;
+            let (kind, specifier) =
+                crate::distro_bounds::bound_violation(&requires, dep, &shipped)?;
+            Some(LinkedConflict {
+                dep: dep.clone(),
+                kind,
+                specifier,
+                shipped,
+                linked_project: project,
+                linked_pkg: pkg,
+            })
+        })
+        .collect()
+}
+
+/// The lines of this package's last build log that look like an ABI mismatch
+/// with a library it links (`undefined symbol`), or `None`.
+fn abi_symptom(ctx: &RunCtx) -> Option<String> {
+    let log = std::fs::read_to_string(ctx.ws.build_log()).ok()?;
+    let lines: Vec<String> = log
+        .lines()
+        .filter(|l| l.contains("undefined symbol"))
+        .map(|l| l.trim().chars().take(300).collect::<String>())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .take(3)
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Where a name an agent reported missing is looked for before it is queued.

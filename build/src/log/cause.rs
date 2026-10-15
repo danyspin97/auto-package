@@ -50,6 +50,11 @@ pub enum CauseKind {
     PytestFailures {
         failed: usize,
     },
+    /// A shared library fails to load because a symbol it needs is not there:
+    /// built against one release of a library, run against another.
+    UndefinedSymbol {
+        symbol: String,
+    },
 }
 
 /// A recognised cause, ready to be put in front of the agent.
@@ -63,6 +68,10 @@ pub struct ProbableCause {
     /// The few log lines that justify the diagnosis, including where it was hit.
     pub evidence: Vec<String>,
 }
+
+static UNDEFINED_SYMBOL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"undefined symbol: (?<s>[A-Za-z0-9_@.$]+)").expect("static pattern")
+});
 
 static NO_MODULE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:ModuleNotFoundError|ImportError): No module named '(?<m>[A-Za-z0-9_.]+)'")
@@ -393,6 +402,34 @@ pub fn detect(log: &ExtractedLog, own_module: &str, spec: &str) -> Option<Probab
         return Some(digest);
     }
 
+    // A library that cannot be loaded for want of a symbol: the ABI of a
+    // dependency differs from the one it was built for. This is not a missing
+    // package, and dropping the dependency's upper bound hides it.
+    if let Some(line) = haystack.iter().find(|l| UNDEFINED_SYMBOL.is_match(l)) {
+        let symbol = UNDEFINED_SYMBOL
+            .captures(line)
+            .map(|c| c["s"].to_string())
+            .unwrap_or_default();
+        return Some(ProbableCause {
+            summary: format!(
+                "A shared library fails to load: `undefined symbol: {symbol}`. It was built \
+                 against one release of a library it links and is run against another; \
+                 nothing is missing from the repositories."
+            ),
+            action: "Find which dependency's release removed or changed the symbol (the \
+                     package's own metadata bounds that dependency: an upper bound such as \
+                     `<= 0.1.11` is the hint). Keep the bound. If the distro ships a newer \
+                     release, report that dependency in `patch_dependencies` (convention 62) \
+                     with this error line, the symbol, the version that still had it, the \
+                     version that dropped it and the upstream repository, so it is branched \
+                     and the code restored from upstream's history. Do not drop the bound to \
+                     make the error go away."
+                .to_string(),
+            evidence: vec![line.trim().chars().take(300).collect()],
+            kind: CauseKind::UndefinedSymbol { symbol },
+        });
+    }
+
     // Python import of something that is not installed.
     if let Some(module) = haystack
         .iter()
@@ -711,6 +748,19 @@ mod tests {
         let c = detect(&log, "foo", "").unwrap();
         assert!(matches!(c.kind, CauseKind::RemovedStdlibModule { .. }));
         assert!(c.action.contains("convention 38"));
+    }
+
+    #[test]
+    fn an_undefined_symbol_points_at_a_dependency_abi_not_a_missing_package() {
+        let l = log_from(&[
+            "OSError: /build/tilelang/lib/libtvm_runtime.so: undefined symbol: _ZN3tvm3ffi4json9StringifyERKN",
+        ]);
+        let cause = detect(&l, "tilelang", "").unwrap();
+        match cause.kind {
+            CauseKind::UndefinedSymbol { symbol } => assert!(symbol.starts_with("_ZN3tvm")),
+            k => panic!("{k:?}"),
+        }
+        assert!(cause.action.contains("patch_dependencies"));
     }
 
     #[test]

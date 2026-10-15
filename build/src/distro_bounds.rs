@@ -133,6 +133,37 @@ fn clause_applies(clause: &str) -> bool {
     (ours == value) == (op == "==")
 }
 
+/// How `shipped` (a version a linked project has) misses the bound that
+/// `requires_dist` (a package's `Requires-Dist` lines) declares on `dependency`,
+/// with the bound as written; `None` when it meets it, there is no bound, or
+/// the bound only applies to an extra or another platform.
+pub fn bound_violation(
+    requires_dist: &[String],
+    dependency: &str,
+    shipped: &str,
+) -> Option<(Kind, String)> {
+    let version = parse_version(shipped)?;
+    let wanted = fuzzy_key(dependency);
+    for line in requires_dist {
+        let Some((name, spec, marker)) = parse_requirement(line) else {
+            continue;
+        };
+        if fuzzy_key(&name) != wanted || spec.is_empty() {
+            continue;
+        }
+        if marker.as_deref().is_some_and(|m| !marker_applies(m)) {
+            continue;
+        }
+        let Some(bound) = parse_specifier(&spec) else {
+            continue;
+        };
+        if let Some(kind) = violation(&bound, &version) {
+            return Some((kind, spec));
+        }
+    }
+    None
+}
+
 /// A dependency whose distro version misses a bound a dependent declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundConflict {
@@ -600,5 +631,37 @@ mod tests {
         assert_eq!(got[&3], "v3");
         assert_eq!(got[&7], "v7");
         assert!(fetch_parallel(&[], 4, |_| Some(String::new())).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bound_violation_tests {
+    use super::*;
+
+    fn lines(l: &[&str]) -> Vec<String> {
+        l.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_newer_version_than_the_upper_bound_is_too_new() {
+        let req = lines(&["apache-tvm-ffi<=0.1.11,>=0.1.10", "numpy>=1.23"]);
+        let (kind, spec) = bound_violation(&req, "apache-tvm-ffi", "0.1.14.post1").unwrap();
+        assert_eq!(kind, Kind::DistroTooNew);
+        assert_eq!(spec, "<=0.1.11,>=0.1.10");
+    }
+
+    #[test]
+    fn an_older_version_than_the_lower_bound_is_too_old() {
+        let req = lines(&["opentelemetry-instrumentation==0.66b1"]);
+        let (kind, _) = bound_violation(&req, "opentelemetry_instrumentation", "0.66b0").unwrap();
+        assert_eq!(kind, Kind::DistroTooOld);
+    }
+
+    #[test]
+    fn a_met_bound_an_extra_and_no_bound_are_none() {
+        let req = lines(&["a>=1", "b>=5; extra == \"test\"", "c"]);
+        assert!(bound_violation(&req, "a", "2.0").is_none());
+        assert!(bound_violation(&req, "b", "1.0").is_none());
+        assert!(bound_violation(&req, "c", "1.0").is_none());
     }
 }
