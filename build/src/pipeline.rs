@@ -5148,6 +5148,16 @@ fn apply_turn_outcome(
                 snap.restore(reporter, step);
             }
             restore_spec(spec_path, before, step, reporter);
+            // Journaled like an edit: a turn that changed nothing is still what
+            // the next turn, and whoever reads the notes, needs to know about
+            // (python-chromadb's ten identical turns left no trace in them).
+            append_notes(
+                notes_path,
+                &format!(
+                    "\n## Attempt {attempt} — {label} — blocked\nReasoning: {}\n",
+                    brief(why)
+                ),
+            );
             Err(format!("{label}: agent blocked: {why}"))
         }
         crate::agent::Action::NoChange => {
@@ -5156,6 +5166,13 @@ fn apply_turn_outcome(
             if let Some(snap) = snapshot {
                 snap.restore(reporter, step);
             }
+            append_notes(
+                notes_path,
+                &format!(
+                    "\n## Attempt {attempt} — {label} — no change\nReasoning: {}\n",
+                    brief(&outcome.reasoning)
+                ),
+            );
             Ok(TurnEffect::NoChange)
         }
         crate::agent::Action::Edited => {
@@ -7287,6 +7304,15 @@ fn is_cargo_workspace_member(root_cargo_toml: &Path, manifest_rel: &str) -> bool
             Some(prefix) => member_dir.parent() == Some(Path::new(prefix)),
             None => Path::new(pattern) == member_dir,
         })
+}
+
+/// A turn's reasoning on one line of at most 400 characters, for the notes.
+fn brief(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(400) {
+        Some((at, _)) => format!("{}...", &flat[..at]),
+        None => flat,
+    }
 }
 
 fn append_notes(notes_path: PathBuf, section: &str) {
