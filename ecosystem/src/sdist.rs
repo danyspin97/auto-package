@@ -307,6 +307,14 @@ pub struct WheelLayout {
     /// directory or a `<mod>.py` module. `None` for namespace-only or
     /// binary-only wheels (NVIDIA's `nvidia/` with just `lib/*.so`).
     pub importable: Option<String>,
+    /// For a wheel with no top-level `__init__.py` or module (a PEP 420
+    /// namespace: `cuda/bindings/__init__.py`, `nccl/ep/__init__.py`): the dotted
+    /// name of its shallowest regular package (`cuda.bindings`). Only its parents
+    /// are namespaces, so `importlib.util.find_spec` on it runs no package code.
+    pub namespace_module: Option<String>,
+    /// The SPDX `License-Expression:` of the wheel's own METADATA, for a
+    /// release whose PyPI record carries no usable licence.
+    pub license_expression: Option<String>,
     /// Shortest path (relative to site-packages) of a shared library in the
     /// wheel, for a file-existence check when there is nothing to import.
     pub first_shared_lib: Option<String>,
@@ -560,6 +568,28 @@ fn any_origin_runpath<R: Read + std::io::Seek>(
     })
 }
 
+/// The shallowest regular package of a wheel that has none at its top level: the
+/// directory with an `__init__.py` closest to the root, as a dotted name
+/// (`cuda/bindings/__init__.py` is `cuda.bindings`). Every component must be a
+/// plain identifier, and test directories are not offered.
+fn namespace_module_of(names: &[String], skip: &dyn Fn(&str) -> bool) -> Option<String> {
+    let is_ident = |c: &str| {
+        !c.is_empty()
+            && !c.starts_with(|ch: char| ch.is_ascii_digit())
+            && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    };
+    names
+        .iter()
+        .filter_map(|n| n.strip_suffix("/__init__.py"))
+        .filter(|dir| dir.contains('/') && !skip(dir.split('/').next().unwrap_or("")))
+        .filter(|dir| {
+            dir.split('/')
+                .all(|c| is_ident(c) && !matches!(c, "tests" | "test" | "testing"))
+        })
+        .min_by_key(|dir| (dir.matches('/').count(), dir.len()))
+        .map(|dir| dir.replace('/', "."))
+}
+
 /// Whether a wheel's file names show auditwheel-bundled libraries: a
 /// `<name>.libs/` directory or a hash-suffixed `.so`.
 fn names_have_hashed_libs(names: &[String]) -> bool {
@@ -596,21 +626,23 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         .filter_map(|n| n.split('/').next())
         .find(|top| top.ends_with(".dist-info"))
         .map(str::to_string);
-    let requires_dist: Vec<String> = dist_info
-        .as_ref()
-        .and_then(|d| {
-            let mut entry = zip_archive.by_name(&format!("{d}/METADATA")).ok()?;
-            read_manifest(&mut entry)
-        })
-        .map(|text| {
-            // Core metadata is RFC 822: headers end at the first blank line.
-            text.lines()
-                .take_while(|l| !l.trim().is_empty())
-                .filter_map(|l| l.strip_prefix("Requires-Dist:"))
-                .map(|v| v.trim().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+    let metadata = dist_info.as_ref().and_then(|d| {
+        let mut entry = zip_archive.by_name(&format!("{d}/METADATA")).ok()?;
+        read_manifest(&mut entry)
+    });
+    // Core metadata is RFC 822: headers end at the first blank line.
+    let headers = |name: &'static str| -> Vec<String> {
+        metadata
+            .iter()
+            .flat_map(|text| text.lines().take_while(|l| !l.trim().is_empty()))
+            .filter_map(move |l| l.strip_prefix(name))
+            .map(|v| v.trim().to_string())
+            .collect()
+    };
+    let requires_dist = headers("Requires-Dist:");
+    let license_expression = headers("License-Expression:")
+        .into_iter()
+        .find(|v| !v.is_empty());
     let files: Vec<String> = names
         .iter()
         .filter(|n| !n.ends_with('/'))
@@ -635,6 +667,11 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
             importable = Some(n.trim_end_matches(".py").to_string());
         }
     }
+    let namespace_module = if importable.is_none() {
+        namespace_module_of(&names, &skip)
+    } else {
+        None
+    };
     let first_shared_lib = names
         .iter()
         .filter(|n| {
@@ -695,6 +732,8 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
     let origin_runpath = any_origin_runpath(&mut zip_archive, &shared_libs);
     Some(WheelLayout {
         importable,
+        namespace_module,
+        license_expression,
         first_shared_lib,
         header_dirs,
         files,
@@ -2734,6 +2773,35 @@ build-backend = "flit_core.buildapi"
         assert!(wheel_has_hashed_libs(&inline));
         assert!(!wheel_has_hashed_libs(&plain));
         assert!(!wheel_has_hashed_libs(&dir.path().join("absent.whl")));
+    }
+
+    /// cuda-bindings, nccl4py: no `cuda/__init__.py`, a regular package below it.
+    #[test]
+    fn a_namespace_wheel_offers_its_shallowest_regular_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let ns = dir.path().join("a.whl");
+        write_wheel(
+            &ns,
+            &[
+                "cuda/bindings/__init__.py",
+                "cuda/bindings/_internal/__init__.py",
+                "cuda/bindings/tests/__init__.py",
+                "cuda_bindings-1.dist-info/METADATA",
+            ],
+        );
+        let l = wheel_layout(&ns).unwrap();
+        assert_eq!(l.importable, None);
+        assert_eq!(l.namespace_module.as_deref(), Some("cuda.bindings"));
+        // A regular top-level package is the importable name, no namespace needed.
+        let reg = dir.path().join("b.whl");
+        write_wheel(&reg, &["pkg/__init__.py", "pkg/sub/__init__.py"]);
+        let l = wheel_layout(&reg).unwrap();
+        assert_eq!(l.importable.as_deref(), Some("pkg"));
+        assert_eq!(l.namespace_module, None);
+        // Only libraries: nothing to find.
+        let libs = dir.path().join("c.whl");
+        write_wheel(&libs, &["nvidia/cu13/lib/libx.so.1"]);
+        assert_eq!(wheel_layout(&libs).unwrap().namespace_module, None);
     }
 
     /// libcusparseLt.so.0 (RUNPATH: $ORIGIN:): found in a `DT_RUNPATH` or a

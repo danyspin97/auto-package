@@ -2340,7 +2340,15 @@ pub fn wheel_binary_skeleton(
         .summary
         .as_deref()
         .unwrap_or("FIXME: add package summary");
-    let license = license_tag(&release.license);
+    // The release's own licence, or, when PyPI has none the tool can use, the SPDX
+    // expression the wheel's METADATA declares (a `License: FIXME` is a turn the
+    // review spends reading the wheel for what the generator already read).
+    let license = match license_tag(&release.license) {
+        tag if tag == "FIXME" => layout
+            .and_then(|l| l.license_expression.clone())
+            .unwrap_or(tag),
+        tag => tag,
+    };
     let url = release.homepage.as_deref().unwrap_or("FIXME");
     // Two independent facts about a wheel:
     //  * is the PACKAGE arch-specific? Only the platform tag says so:
@@ -2382,6 +2390,15 @@ pub fn wheel_binary_skeleton(
         Some(l) if l.importable.is_some() => format!(
             "%check\n%python_expand PYTHONPATH=%{{buildroot}}%{{${sitedir}}} $python -c \"import {}\"\n",
             l.importable.as_deref().unwrap_or_default()
+        ),
+        // A PEP 420 namespace wheel (`cuda/bindings/`): nothing to `import` at
+        // the top, and the regular package below it may need a device library
+        // at import. `find_spec` locates it, through namespace parents only,
+        // without running its code, which still proves the files are where the
+        // interpreter looks.
+        Some(l) if l.namespace_module.is_some() => format!(
+            "%check\n%python_expand PYTHONPATH=%{{buildroot}}%{{${sitedir}}} $python -c \"import importlib.util as u, sys; sys.exit(0 if u.find_spec('{}') else 1)\"\n",
+            l.namespace_module.as_deref().unwrap_or_default()
         ),
         Some(l) if l.first_shared_lib.is_some() => format!(
             "%check\n%python_expand test -e %{{buildroot}}%{{${sitedir}}}/{}\n",
@@ -3152,6 +3169,44 @@ BuildRequires:  %{python_module pip}
         assert!(!spec.contains("%pyproject_install %{SOURCE0}"), "{spec}");
         assert!(spec.contains("ExclusiveArch:  x86_64"), "{spec}");
         assert!(spec.contains("%{buildroot}/%{$python_sitearch}"), "{spec}");
+    }
+
+    /// cuda-bindings / nccl4py: a namespace wheel with modules is not given the
+    /// `test -e` probe the validator rejects, and its licence comes from the
+    /// wheel when PyPI has none.
+    #[test]
+    fn a_namespace_wheel_gets_a_find_spec_check_and_the_wheels_licence() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = dummy_release("https://example.org", License::Unknown);
+        let layout = WheelLayout {
+            namespace_module: Some("cuda.bindings".into()),
+            first_shared_lib: Some("cuda/bindings/_internal/x.so".into()),
+            license_expression: Some("LicenseRef-NVIDIA-SOFTWARE-LICENSE".into()),
+            ..Default::default()
+        };
+        let spec = wheel_binary_skeleton(
+            "cuda-bindings",
+            "1.0",
+            "cuda_bindings-1.0-cp313-abi3-manylinux_2_27_x86_64.whl",
+            &release,
+            Some(false),
+            Some(&layout),
+        );
+        assert!(
+            spec.contains("u.find_spec('cuda.bindings')"),
+            "{spec}"
+        );
+        assert!(!spec.contains("test -e"), "{spec}");
+        assert!(!spec.contains("smoke-test the import name"), "{spec}");
+        assert!(
+            spec.contains("License:        LicenseRef-NVIDIA-SOFTWARE-LICENSE"),
+            "{spec}"
+        );
+        assert!(!check_is_file_probe_only(&spec));
+        // The release's own licence wins over the wheel's.
+        let own = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let spec = wheel_binary_skeleton("p", "1", "p-1-py3-none-any.whl", &own, Some(true), Some(&layout));
+        assert!(spec.contains("License:        MIT"), "{spec}");
     }
 
     /// The generated `%check` must be one that works first time: importable
