@@ -1498,6 +1498,11 @@ struct RunState {
     attempts: usize,
     spent_usd: f64,
     session_id: Option<String>,
+    /// SHA-256 of the build log the last fix turn was given, to tell a new
+    /// build from OBS handing back the one it already had.
+    last_log_digest: Option<String>,
+    /// Consecutive fix rounds that were given a log identical to the one before.
+    identical_logs: usize,
 }
 
 /// The linked project that ships `rpm_name`, when the own project does not
@@ -1581,6 +1586,8 @@ fn run_stages(
         attempts: 0,
         spent_usd: 0.0,
         session_id: None,
+        last_log_digest: None,
+        identical_logs: 0,
     };
 
     let obs_status = checkout_stage(&ctx, &mut st)?;
@@ -4027,6 +4034,70 @@ fn fix_after_build(
         );
         return Err(ctx.failed(format!("build failed; log: {}", build_log.display())));
     }
+
+    // The agent can only act on what the log says. The same log twice is OBS
+    // handing back the build it already had (nothing new reached it, or its
+    // verdict was read before the rebuild started), so a turn on it would only
+    // repeat the last one: python-chromadb and python-torchcodec spent five to
+    // ten turns on one stale log. A rebuild is asked for once; the same log
+    // again ends the package with the reason.
+    let digest = sha256_file(build_log).ok();
+    let previous = std::mem::replace(&mut st.last_log_digest, digest.clone());
+    let mut fresh_note: Option<String> = None;
+    if digest.is_some() && previous == digest {
+        st.identical_logs += 1;
+        if st.identical_logs > 1 {
+            return Err(ctx.failed(format!(
+                "OBS returned the same build log {} times for the same sources even after a \
+                 rebuild was requested; nothing the agent can change explains it; log: {}",
+                st.identical_logs + 1,
+                build_log.display()
+            )));
+        }
+        let emit = Emit::new(reporter, build_step.id);
+        let started = osc::rebuild(
+            &config.project,
+            &ctx.rpm_name,
+            &config.distro,
+            &config.arch,
+            emit,
+        );
+        reporter.report(&Event::Warning {
+            step: Some(build_step.id),
+            message: match &started {
+                Ok(true) => "the build log is identical to the last attempt's: asked OBS for a rebuild".to_string(),
+                Ok(false) => "the build log is identical to the last attempt's: asked OBS for a rebuild, \
+                              but it had not started after 90 s".to_string(),
+                Err(e) => format!("the build log is identical to the last attempt's, and the rebuild request failed: {e}"),
+            },
+        });
+        st.attempts += 1;
+        persist_attempts(ws, &config.run_id, st.attempts);
+        if st.attempts > config.max_attempts {
+            return Err(ctx.failed(format!(
+                "attempt limit {} reached while OBS kept returning the same build log; log: {}",
+                config.max_attempts,
+                build_log.display()
+            )));
+        }
+        return Ok(RoundEnd::Retry);
+    } else if digest.is_some() && previous.is_some() {
+        st.identical_logs = 0;
+        // Said as a fact, because the turns that called a new log stale were
+        // reading timestamps, not comparing it with the last one.
+        fresh_note = Some(
+            "This build.log is NOT the one the previous attempt saw: it differs from it, so a new \
+             build ran against the current sources. Do not call it stale; read it as the current \
+             result of your last change."
+                .to_string(),
+        );
+    }
+    let context_owned: Option<String> = match (context, fresh_note) {
+        (Some(c), Some(f)) => Some(format!("{c}\n\n{f}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, f) => f,
+    };
+    let context = context_owned.as_deref();
 
     st.attempts += 1;
     persist_attempts(ws, &config.run_id, st.attempts);

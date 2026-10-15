@@ -4032,6 +4032,51 @@ pub fn fetch_buildlog(
     Ok(())
 }
 
+/// Ask OBS to build `pkg_name` again from the sources it already has, and wait
+/// (at most 90 s) until its status is no longer a final one. Without that wait
+/// the build wait that follows would read the previous build's verdict, which
+/// matches the current sources, as the answer. Returns whether the new build
+/// was seen to start.
+pub fn rebuild(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    emit: Emit<'_>,
+) -> Result<bool, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("pkg_name", pkg_name)?;
+    check_obs_name("repo", repo)?;
+    check_obs_name("arch", arch)?;
+    let out = proc::capture_with_timeout(
+        "osc",
+        &["rebuild", project, pkg_name, repo, arch],
+        &anywhere(),
+        emit,
+        OSC_QUERY_TIMEOUT,
+    )
+    .map_err(during(format!(
+        "rebuild {project} {pkg_name} {repo} {arch}"
+    )))?;
+    if !out.success() {
+        return Err(Error::OscFailed {
+            cmd: format!("rebuild {project} {pkg_name} {repo} {arch}"),
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(90) && !crate::proc::shutting_down() {
+        if get_build_status(project, pkg_name, repo, arch, Emit::quiet())
+            .is_ok_and(|s| !s.is_terminal())
+        {
+            return Ok(true);
+        }
+        sleep_interruptible(Duration::from_secs(5));
+    }
+    Ok(false)
+}
+
 /// Download built binaries from OBS into `dest_dir`.
 ///
 /// How many of the binary RPMs OBS lists for `pkg_name` are now in `rpms_dir`.
