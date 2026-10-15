@@ -113,6 +113,11 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         jobs: usize,
 
+        /// Wait for this many GiB free on the work directory's disk before a
+        /// package starts its heavy stages (0 = never wait).
+        #[arg(long, default_value_t = 3)]
+        min_free_gb: u64,
+
         /// GitHub URL for Rust packages (e.g. https://github.com/BurntSushi/ripgrep).
         /// When provided, triggers the Rust build path: writes `_service` and
         /// runs `osc service ra` to vendor Cargo dependencies before building.
@@ -694,6 +699,15 @@ fn main() -> color_eyre::Result<()> {
     result
 }
 
+/// Set the free-space minimum and warn once, before any TUI takes the
+/// terminal, when the work directory's disk is short of room.
+pub(crate) fn init_disk_guard(work_dir: &Path, min_free_gb: u64) {
+    ap_build::workspace::set_min_free_gb(min_free_gb);
+    if let Some(warning) = ap_build::workspace::low_space_warning(work_dir) {
+        eprintln!("warning: {warning}");
+    }
+}
+
 fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
     match cli.command {
         Commands::Build {
@@ -716,6 +730,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             unsafe_resolve,
             cleanup,
             jobs,
+            min_free_gb,
             url,
             source_url,
             sweep,
@@ -870,6 +885,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                     .map_err(|e| color_eyre::eyre::eyre!(e))?,
             );
 
+            init_disk_guard(&project_dir, min_free_gb);
             let run_dir = RunDir::allocate(&project_dir)?;
             let work_dir = project_dir;
 
@@ -3554,6 +3570,22 @@ mod tests {
         assert!(unsafe_resolve(
             &[&update[..], &["--unsafe-resolve"]].concat()
         ));
+    }
+
+    #[test]
+    fn build_takes_min_free_gb_defaulting_to_three() {
+        let min_free = |extra: &[&str]| {
+            let base = ["auto-package", "build", "httpx", "--project", "home:u"];
+            match Cli::try_parse_from([&base[..], extra].concat())
+                .unwrap()
+                .command
+            {
+                Commands::Build { min_free_gb, .. } => min_free_gb,
+                _ => panic!("not build"),
+            }
+        };
+        assert_eq!(min_free(&[]), 3);
+        assert_eq!(min_free(&["--min-free-gb", "0"]), 0);
     }
 
     #[test]

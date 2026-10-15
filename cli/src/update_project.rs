@@ -123,6 +123,11 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = 1)]
     pub jobs: usize,
 
+    /// Wait for this many GiB free on the work directory's disk before a
+    /// package starts its heavy stages (0 = never wait).
+    #[arg(long, default_value_t = 3)]
+    pub min_free_gb: u64,
+
     /// Regenerate each package's spec from scratch instead of carrying the
     /// existing recipe forward (see `update --regen`).
     #[arg(long, default_value_t = false)]
@@ -223,6 +228,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     std::fs::create_dir_all(&project_dir)?;
     let _project_lock = ProjectLock::acquire(&project_dir)?;
     let work_dir = project_dir.canonicalize()?;
+    crate::init_disk_guard(&work_dir, a.min_free_gb);
     let rpms_dir = work_dir.join("rpms");
     std::fs::create_dir_all(&rpms_dir)?;
     let state_root = work_dir.join("state");
@@ -933,5 +939,11 @@ mod tests {
         let a = args(&[]);
         assert!(!a.submit && !a.yes && !a.dry_run && !a.update_deps);
         assert_eq!(a.branch_project, None);
+    }
+
+    #[test]
+    fn min_free_gb_defaults_to_three_and_zero_disables() {
+        assert_eq!(args(&[]).min_free_gb, 3);
+        assert_eq!(args(&["--min-free-gb", "0"]).min_free_gb, 0);
     }
 }
