@@ -4537,6 +4537,11 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 subpackage layout now, before the first build, because it changes \
                 %build, %install and every %files section (convention 30).\n\
              \n\
+             11. **%description** — the generator writes the Summary into it, and the pipeline \
+                sends the spec back for a whole extra turn when it still equals the Summary \
+                (most packages so far). Write a real one now, in one to three plain \
+                sentences taken from the README's first paragraph (convention 66).\n\
+             \n\
              If a check does not apply, say so in one clause; do not invent work."
         }
         Task::FixAfterBuild => {
@@ -4569,10 +4574,13 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              undone this way before the staleness was caught."
         }
         Task::FixAfterValidation => {
-            "Fix the spec after a failed `rpmspec --parse`.\n\
+            "Fix the spec after it was rejected before any build.\n\
              \n\
-             The spec does not parse, so there is no build log. `rpmspec.txt` holds the stderr from the \
-             failure that triggered this turn."
+             There is no build log. When the spec failed `rpmspec --parse`, `rpmspec.txt` holds \
+             the stderr of that failure. When `rpmspec.txt` is absent the spec parsed fine and was \
+             rejected for something else (a TODO placeholder, a Summary-only description, a missing \
+             `%license`): the problem is the one given under \"Context\" below, so do not look for \
+             the file or try to run rpmspec yourself."
         }
         Task::PatchDependency => {
             "This package is a distro package that was branched into the project \
