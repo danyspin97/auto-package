@@ -2777,7 +2777,9 @@ pub struct PublishPlan {
 ///
 /// Only the spec, the archives, the service files, the changelog and rpmlint
 /// config, and the quilt patches are published: a patch when `series` or the
-/// spec names it. Anything else in the directory (backups such as
+/// spec names it. A file a `Source:` or `Patch:` line of the spec names is
+/// published whatever its extension (a `LICENSE` fetched from the upstream
+/// tag): `%prep` fails without it. Anything else in the directory (backups such as
 /// `*.preexisting`, a build directory, a stray file) is left out, so it never
 /// reaches OBS. Dot-entries such as `.osc` are not part of the package and are
 /// not listed.
@@ -2796,6 +2798,7 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
         .filter(|n| n.ends_with(".spec"))
         .filter_map(|n| fs::read_to_string(checkout_dir.join(n)).ok())
         .collect();
+    let sources = spec_source_names(&spec_text);
     let series: Vec<String> = fs::read_to_string(checkout_dir.join("series"))
         .unwrap_or_default()
         .lines()
@@ -2805,7 +2808,7 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
 
     let mut plan = PublishPlan::default();
     for name in names {
-        if is_publishable(&name, &spec_text, &series) {
+        if is_publishable(&name, &spec_text, &series, &sources) {
             plan.files.push(name);
         } else {
             plan.skipped.push(name);
@@ -2814,7 +2817,64 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
     plan
 }
 
-fn is_publishable(name: &str, spec_text: &str, series: &[String]) -> bool {
+/// The file names the spec's `Source:`/`Patch:` lines stand for: a URL's last
+/// segment, or the name a `#/name` fragment gives it. A name that holds a macro
+/// keeps it, as a pattern [`matches_source_name`] reads.
+fn spec_source_names(spec_text: &str) -> Vec<String> {
+    spec_text
+        .lines()
+        .filter_map(|line| {
+            let (tag, value) = line.split_once(':')?;
+            let tag = tag.trim().to_ascii_lowercase();
+            let numbered = |prefix: &str| {
+                tag.strip_prefix(prefix)
+                    .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()))
+            };
+            if !(numbered("source") || numbered("patch")) {
+                return None;
+            }
+            let value = value.trim();
+            let name = match value.split_once("#/") {
+                Some((_, renamed)) => renamed,
+                None => value.rsplit('/').next().unwrap_or(value),
+            };
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Whether `name` is the file a source `pattern` stands for. Each macro in the
+/// pattern (`%{version}`, `%version`) matches any text.
+fn matches_source_name(pattern: &str, name: &str) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut rest = pattern;
+    while let Some(at) = rest.find('%') {
+        parts.push(&rest[..at]);
+        let after = &rest[at + 1..];
+        rest = if let Some(body) = after.strip_prefix('{') {
+            body.split_once('}').map_or("", |(_, tail)| tail)
+        } else {
+            after.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        };
+    }
+    parts.push(rest);
+    let (first, tail) = parts.split_first().expect("parts is never empty");
+    let Some(mut remaining) = name.strip_prefix(first) else {
+        return false;
+    };
+    let Some((last, middle)) = tail.split_last() else {
+        return remaining.is_empty();
+    };
+    for part in middle {
+        match remaining.find(part) {
+            Some(at) => remaining = &remaining[at + part.len()..],
+            None => return false,
+        }
+    }
+    remaining.ends_with(last) && remaining.len() >= last.len()
+}
+
+fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[String]) -> bool {
     const FIXED: &[&str] = &[
         "_service",
         "_servicedata",
@@ -2849,7 +2909,10 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String]) -> bool {
         ".asc",
         ".keyring",
     ];
-    if FIXED.contains(&name) || SUFFIXES.iter().any(|s| name.ends_with(s)) {
+    if FIXED.contains(&name)
+        || SUFFIXES.iter().any(|s| name.ends_with(s))
+        || sources.iter().any(|p| matches_source_name(p, name))
+    {
         return true;
     }
     let is_patch = name.ends_with(".patch") || name.ends_with(".diff");
@@ -5230,6 +5293,48 @@ mod publish_plan_tests {
                 "stray.txt",
             ]
         );
+    }
+
+    /// A `Source:` the service fetched (the upstream `LICENSE`) is published,
+    /// by its URL's last segment, its `#/` rename, or a macro pattern.
+    #[test]
+    fn a_file_a_source_line_names_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Name: pkg\n\
+            Source0: https://example.org/pkg-%{version}.tar.gz\n\
+            Source2: https://raw.githubusercontent.com/o/r/%{version}/LICENSE\n\
+            Source3: https://example.org/dl?id=7#/pkg-data.json\n\
+            Source4: data-%{version}.bin\n\
+            # Source5: commented.txt\n";
+        for (name, body) in [
+            ("pkg.spec", spec),
+            ("LICENSE", ""),
+            ("pkg-data.json", ""),
+            ("data-1.2.bin", ""),
+            ("commented.txt", ""),
+            ("LICENSE.bak", ""),
+        ] {
+            fs::write(dir.path().join(name), body).unwrap();
+        }
+
+        let plan = publish_plan(dir.path());
+
+        assert_eq!(
+            plan.files,
+            ["LICENSE", "data-1.2.bin", "pkg-data.json", "pkg.spec"]
+        );
+        assert_eq!(plan.skipped, ["LICENSE.bak", "commented.txt"]);
+    }
+
+    #[test]
+    fn a_macro_in_a_source_name_matches_any_text() {
+        assert!(matches_source_name("pkg-%{version}.dat", "pkg-1.0.dat"));
+        assert!(matches_source_name("%{name}-%version.dat", "x-1.dat"));
+        assert!(matches_source_name("LICENSE", "LICENSE"));
+        assert!(!matches_source_name("pkg-%{version}.dat", "pkg-1.0.dat.bak"));
+        assert!(!matches_source_name("pkg-%{version}.dat", "other-1.0.dat"));
+        assert!(!matches_source_name("LICENSE", "LICENSE.bak"));
+        assert!(!matches_source_name("a%{x}a", "a"));
     }
 
     #[test]
