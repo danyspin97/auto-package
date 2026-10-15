@@ -2534,13 +2534,14 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `blocked`. The rest of this entry is written for case (a); for (b) the
    `problem` text gives the RPM, the missing files or module, and the error line,
    and the dependency's own recipe is fixed in place. This is
-   rare; use it only after the other options fail. **Never for a package whose
-   rebuild takes hours** (`torch`, `tensorflow`, `llvm`, `gcc`, `qt5`/`qt6`,
-   `chromium`: the pipeline refuses it): when a distro package has a defect your
-   package can avoid, avoid it HERE. A test that fails because the distro's
-   `torch` lacks `torch/utils/benchmark/utils` is deselected with a comment naming
-   the defect, not bought back with a rebuild of `torch`; losing that coverage is
-   the cheaper outcome and the goal is a package that builds and works. The signs: the package
+   rare; use it only after the other options fail. Weigh the cost: a patch to a
+   big package (`torch`, `llvm`, `qt6`) costs hours of OBS build time, so ask for
+   it only when the defect is real for every user of that package at run time
+   (a module its own `__init__` imports is not shipped: `torch/utils/benchmark`
+   needing `torch/utils/benchmark/utils`), and put the exact import error in the
+   `problem`. When the defect only breaks one of YOUR tests of a feature nobody
+   needs here, deselect that test with a comment naming the defect instead; a
+   package that builds and works beats complete coverage. The signs: the package
    declares an upper bound on a dependency (`apache-tvm-ffi < 0.1.12`), the
    distro (or this project) ships a newer release, and the build or `%check`
    shows a concrete incompatibility, such as `undefined symbol:

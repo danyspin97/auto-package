@@ -1699,6 +1699,24 @@ mod published_binary_tests {
         );
     }
 
+    /// python-torch: the Factory recipe's `_multibuild` stayed after the spec became a
+    /// wheel repackage that has no flavor of its own.
+    #[test]
+    fn a_multibuild_the_spec_does_not_use_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_multibuild"), "<multibuild/>").unwrap();
+        std::fs::write(dir.path().join("python-x.spec"), "Name: python-x\n%python_subpackages\n").unwrap();
+        let plan = publish_plan(dir.path());
+        assert!(plan.skipped.contains(&"_multibuild".to_string()), "{plan:?}");
+        assert!(plan.files.contains(&"python-x.spec".to_string()));
+        std::fs::write(
+            dir.path().join("python-x.spec"),
+            "Name: python-x\n%if \"%{flavor}\" == \"openmpi4\"\n%endif\n",
+        )
+        .unwrap();
+        assert!(publish_plan(dir.path()).files.contains(&"_multibuild".to_string()));
+    }
+
     #[test]
     fn binary_names_are_distinct_and_sorted() {
         let xml = r#"<collection matches="3">
@@ -3277,6 +3295,16 @@ fn matches_source_name(pattern: &str, name: &str) -> bool {
 }
 
 fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[String]) -> bool {
+    // `_multibuild` declares flavors that only a spec which reads `%flavor` builds
+    // differently. One left behind when a source recipe is swapped for a wheel
+    // repackage (python-torch: `standard` and `openmpi4`) makes OBS build the same
+    // spec once per flavor, so it goes, and is removed from OBS with the commit.
+    if name == "_multibuild" && !["%{flavor}", "%flavor", "%{?flavor", "%{!?flavor"]
+        .iter()
+        .any(|m| spec_text.contains(m))
+    {
+        return false;
+    }
     const FIXED: &[&str] = &[
         "_service",
         "_servicedata",

@@ -2760,36 +2760,7 @@ fn missing_deps_from_turn(
     step: ap_core::event::StepId,
     outcome: &crate::agent::TurnOutcome,
 ) -> Option<PipelineResult> {
-    // A request to rebuild a package that takes hours (torch, llvm, qt...) to
-    // dodge one test or import is refused: the dependent works around the defect
-    // in its own spec. The refusal goes in the journal the next turn reads.
-    let patch_dependencies: Vec<crate::agent::PatchRequest> = outcome
-        .patch_dependencies
-        .iter()
-        .filter(|p| {
-            if !is_heavy_package(&p.name) {
-                return true;
-            }
-            let why = format!(
-                "refused: rebuilding {} takes hours and gigabytes, so it is never patched to \
-                 spare one test or import (requested: {}). Work around the defect in THIS spec: \
-                 deselect or ignore the failing test with a comment naming the defect, or drop \
-                 the import, and say so in `reasoning`; lost coverage is recorded, not bought \
-                 with a rebuild.",
-                p.name, p.problem
-            );
-            ctx.reporter.report(&Event::Warning {
-                step: Some(step),
-                message: format!("not patching {}: {why}", p.name),
-            });
-            append_notes(
-                ctx.ws.notes(),
-                &format!("\n## Patch request for {} — {why}\n", p.name),
-            );
-            false
-        })
-        .cloned()
-        .collect();
+    let patch_dependencies: Vec<crate::agent::PatchRequest> = outcome.patch_dependencies.clone();
     if outcome.unresolvable_packages.is_empty() && patch_dependencies.is_empty() {
         return None;
     }
@@ -5632,6 +5603,7 @@ fn accept_or_restore_with_snapshot(
         if let Some(snap) = snapshot {
             snap.restore(reporter, step);
         }
+        append_notes(notes_path, &rollback_note(&e.to_string()));
         return false;
     }
 
@@ -5682,6 +5654,19 @@ fn accept_or_restore_with_snapshot(
     });
     append_notes(notes_path, notes_entry);
     true
+}
+
+/// The journal entry for a turn whose edit was rejected before any build and
+/// rolled back with all of its changes: without it the next turn sees an edit
+/// listed nowhere and re-applies the same text (python-torch: ten identical
+/// rejected turns).
+fn rollback_note(problem: &str) -> String {
+    let problem: String = problem.trim().chars().take(600).collect();
+    format!(
+        "\n## Edit rejected — rpmspec failed, rolled back\n{problem}\n\
+         The whole edit of that turn was undone, not only the line that failed. Do not \
+         re-apply the same text; redo every change of the turn together with the corrected one.\n"
+    )
 }
 
 /// Everything [`apply_turn_outcome`] needs besides the outcome itself and the
@@ -5993,17 +5978,6 @@ fn patch_turn_failed(
         && effect != TurnEffect::Edited
         && !already_reviewed
         && !matches!(action, crate::agent::Action::NoChange)
-}
-
-/// Packages whose rebuild takes hours: a turn may not have one branched and
-/// patched to avoid a test or an import (python-accelerate asked for python-torch
-/// over `torch.utils.benchmark` and started a multi-hour build).
-fn is_heavy_package(name: &str) -> bool {
-    let key = osc::fuzzy_key(osc::strip_rpm_prefix(name));
-    ["torch", "pytorch", "libtorch", "tensorflow", "llvm", "clang", "gcc", "qt5", "qt6",
-     "chromium", "firefox", "libreoffice", "rustc", "ghc"]
-        .iter()
-        .any(|h| key == *h || (key.starts_with(h) && key[h.len()..].starts_with(|c: char| c.is_ascii_digit())))
 }
 
 /// The lines of a recipe that say what licence its build has: the `License:`
@@ -10785,16 +10759,15 @@ mod licence_fact_tests {
 }
 
 #[cfg(test)]
-mod heavy_package_tests {
-    use super::is_heavy_package;
+mod rollback_note_tests {
+    use super::rollback_note;
 
     #[test]
-    fn packages_that_take_hours_to_rebuild_are_recognised() {
-        for n in ["python-torch", "torch", "python313-pytorch", "llvm20", "gcc15", "qt6", "chromium"] {
-            assert!(is_heavy_package(n), "{n}");
-        }
-        for n in ["ffmpeg-8", "python-torchvision", "torchcodec", "python-accelerate", "gcc-fortran-lib", "llvmlite"] {
-            assert!(!is_heavy_package(n), "{n}");
-        }
+    fn a_rejected_edit_is_written_down_for_the_next_turn() {
+        let note = rollback_note("  error: Unterminated {: {python_expand\n ");
+        assert!(note.contains("Edit rejected"));
+        assert!(note.contains("Unterminated {"));
+        assert!(note.contains("redo every change"));
+        assert!(rollback_note(&"x".repeat(5000)).len() < 900);
     }
 }
