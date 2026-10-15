@@ -3087,3 +3087,157 @@ mod check_probe_tests {
         assert!(!check_is_file_probe_only("%install\nx\n"));
     }
 }
+
+/// Parse `op version` (`>= 0.1.10`, `< 0.1.12`, `= 2.0`) of one RPM dependency
+/// item and say how `shipped` stands against it: `Some(None)` when it meets it,
+/// `Some(Some(true))` when it is too new, `Some(Some(false))` when too old.
+/// `None` when it is not a constraint this reads.
+pub(crate) fn rpm_constraint_miss(
+    constraint: &str,
+    shipped: &pep440_rs::Version,
+) -> Option<Option<bool>> {
+    use std::str::FromStr;
+    let c = constraint.trim();
+    let (op, rest) = ["<=", ">=", "==", "<", ">", "="]
+        .iter()
+        .find_map(|op| c.strip_prefix(op).map(|r| (*op, r.trim())))?;
+    // An RPM version may carry an epoch or a release: only the upstream part.
+    let ver = rest.split(['-', ' ']).next().unwrap_or(rest);
+    let ver = ver.rsplit_once(':').map(|(_, v)| v).unwrap_or(ver);
+    let wanted = pep440_rs::Version::from_str(ver).ok()?;
+    let met = match op {
+        "<=" => shipped <= &wanted,
+        ">=" => shipped >= &wanted,
+        "<" => shipped < &wanted,
+        ">" => shipped > &wanted,
+        _ => shipped == &wanted,
+    };
+    if met {
+        return Some(None);
+    }
+    Some(Some(match op {
+        "<=" | "<" => true,
+        ">=" | ">" => false,
+        _ => shipped > &wanted,
+    }))
+}
+
+/// The dependency lines of `spec` for `dependency` with every version
+/// constraint the version `shipped` misses removed, the name kept: a package the
+/// distro ships is used as it is, and the bound that excludes it (an upstream
+/// `<= 0.1.11`, an exact `==` pin) is dropped instead of the dependency
+/// (convention 59). Constraints it meets stay. Duplicate lines this leaves are
+/// merged.
+pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> String {
+    use std::str::FromStr;
+    let Ok(shipped_v) = pep440_rs::Version::from_str(shipped.trim()) else {
+        return spec.to_string();
+    };
+    let wanted = crate::osc::fuzzy_key(dependency);
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for line in spec.lines() {
+        let t = line.trim_start();
+        let is_dep_line = ["BuildRequires", "Requires", "Recommends", "Suggests"]
+            .iter()
+            .any(|tag| {
+                t.strip_prefix(tag)
+                    .is_some_and(|r| r.starts_with(':') || r.starts_with('('))
+            });
+        if !is_dep_line {
+            out.push(line.to_string());
+            continue;
+        }
+        let (head, value) = line.split_once(':').unwrap_or((line, ""));
+        let items: Vec<String> = value
+            .split(',')
+            .map(|item| {
+                let item = item.trim();
+                // `%{python_module name >= v}` or `python-name >= v`.
+                let (open, inner, close) = match item
+                    .strip_prefix("%{python_module ")
+                    .and_then(|r| r.strip_suffix('}'))
+                {
+                    Some(inner) => ("%{python_module ", inner, "}"),
+                    None => ("", item, ""),
+                };
+                let name_end = inner
+                    .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '='))
+                    .unwrap_or(inner.len());
+                let name = &inner[..name_end];
+                let key = crate::osc::fuzzy_key(
+                    name.strip_prefix("python-")
+                        .or_else(|| name.strip_prefix("python3-"))
+                        .unwrap_or(name),
+                );
+                let key_plain = crate::osc::fuzzy_key(name);
+                if key != wanted && key_plain != wanted {
+                    return item.to_string();
+                }
+                let constraint = inner[name_end..].trim();
+                if constraint.is_empty() || constraint.contains(" if ") {
+                    return item.to_string();
+                }
+                match rpm_constraint_miss(constraint, &shipped_v) {
+                    Some(Some(_)) => format!("{open}{name}{close}"),
+                    _ => item.to_string(),
+                }
+            })
+            .collect();
+        let rebuilt = format!(
+            "{head}:{}{}",
+            if value.starts_with(' ') || value.starts_with('\t') {
+                &value[..value.len() - value.trim_start().len()]
+            } else {
+                " "
+            },
+            items.join(", ")
+        );
+        // A line that reads the same as one already kept is not repeated.
+        if rebuilt != line && !seen.insert(rebuilt.trim().to_string()) {
+            continue;
+        }
+        seen.insert(rebuilt.trim().to_string());
+        out.push(rebuilt);
+    }
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+#[cfg(test)]
+mod relax_bound_tests {
+    use super::relax_dependency_bounds;
+
+    #[test]
+    fn a_bound_the_shipped_version_misses_is_dropped_the_name_kept() {
+        let spec = "BuildRequires:  %{python_module apache-tvm-ffi >= 0.1.10}\nBuildRequires:  %{python_module apache-tvm-ffi < 0.1.12}\nRequires:       python-apache-tvm-ffi >= 0.1.10, python-apache-tvm-ffi <= 0.1.11\nRequires:       python-numpy < 1\n";
+        let out = relax_dependency_bounds(spec, "apache-tvm-ffi", "0.1.14.post1");
+        assert!(
+            out.contains("BuildRequires:  %{python_module apache-tvm-ffi >= 0.1.10}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("BuildRequires:  %{python_module apache-tvm-ffi}"),
+            "{out}"
+        );
+        assert!(!out.contains("< 0.1.12"), "{out}");
+        assert!(
+            out.contains("python-apache-tvm-ffi >= 0.1.10, python-apache-tvm-ffi"),
+            "{out}"
+        );
+        assert!(!out.contains("<= 0.1.11"), "{out}");
+        assert!(out.contains("python-numpy < 1"), "{out}");
+    }
+
+    #[test]
+    fn an_exact_pin_is_relaxed_and_a_met_bound_stays() {
+        let out = relax_dependency_bounds(
+            "Requires: python-x = 1.0\nRequires: python-y >= 1\n",
+            "x",
+            "2.0",
+        );
+        assert!(out.contains("Requires: python-x\n"), "{out}");
+        assert!(out.contains("python-y >= 1"));
+        let same = "Requires: python-x >= 1\n";
+        assert_eq!(relax_dependency_bounds(same, "x", "2.0"), same);
+    }
+}

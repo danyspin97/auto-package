@@ -2408,6 +2408,11 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    package's tests or build fail against the newer release). Only if the
    build then fails with a real API break, patch the package for the newer
    dependency, or as a last resort report that specific incompatibility.
+   The pipeline does this for you when the distro ships a release that misses a
+   bound: it keeps the dependency and drops the bound from your spec before the
+   build, so do not report such a package as missing and do not give up because
+   a bound is not met; the build then tells whether the newer release works
+   (convention 62 is for when it does not).
    Applies equally to `setuptools==`, `cython==`, `numpy==` pins; for
    `numpy` pins in `[build-system] requires`, upstream commonly pins the
    OLDEST ABI it supports (`oldest-supported-numpy`) — the distro's current

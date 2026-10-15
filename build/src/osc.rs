@@ -357,25 +357,73 @@ fn extract_unresolvable_detail(log: &str) -> Vec<String> {
     result
 }
 
-/// The packages OBS has, but at a version older than a constraint asks for:
-/// the `nothing provides <name> >= V` lines of `detail` that are followed by
-/// `(got version W)`. Such a package is not missing; it has to be brought up to
-/// date (a sibling of a release family pinned to `==0.66b1` while the project
-/// builds `0.66b0`). Bare names, collapsed across flavors.
-pub fn outdated_packages(detail: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+/// A package OBS has at a version that misses a constraint a spec wrote
+/// (`nothing provides <name> >= V` followed by `(got version W)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionMiss {
+    /// Bare package name, flavors collapsed.
+    pub name: String,
+    /// The version OBS has, without its release.
+    pub got: String,
+    /// `true` when it is newer than an upper bound or a pin allows; `false` when
+    /// older than a lower bound or a pin.
+    pub too_new: bool,
+}
+
+/// The version misses in `detail`. A package here is not missing: too old, it
+/// is brought up to date; too new, the bound in the spec is what is wrong.
+pub fn version_misses(detail: &[String]) -> Vec<VersionMiss> {
+    let mut out: Vec<VersionMiss> = Vec::new();
     for pair in detail.windows(2) {
         let (line, next) = (pair[0].trim(), pair[1].trim());
-        if !next.starts_with("(got version") {
+        let Some(got_text) = next.strip_prefix("(got version") else {
             continue;
-        }
+        };
         let Some(rest) = line.strip_prefix("nothing provides ") else {
             continue;
         };
-        let name = rest.split_whitespace().next().unwrap_or("");
-        names.push(name.to_string());
+        let (name, constraint) = rest
+            .split_once(char::is_whitespace)
+            .map(|(n, c)| (n, c.trim()))
+            .unwrap_or((rest, ""));
+        let got = got_text
+            .trim()
+            .trim_end_matches(')')
+            .split(['-', ' '])
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let Ok(got_v) = got.parse::<pep440_rs::Version>() else {
+            continue;
+        };
+        let Some(Some(too_new)) = crate::spec::rpm_constraint_miss(constraint, &got_v) else {
+            continue;
+        };
+        let Some(bare) = missing_package_names(&[name.to_string()])
+            .into_iter()
+            .next()
+        else {
+            continue;
+        };
+        if !out.iter().any(|m| fuzzy_key(&m.name) == fuzzy_key(&bare)) {
+            out.push(VersionMiss {
+                name: bare,
+                got,
+                too_new,
+            });
+        }
     }
-    missing_package_names(&names)
+    out
+}
+
+/// The packages in `detail` OBS has at a version older than a constraint asks
+/// for.
+pub fn outdated_packages(detail: &[String]) -> Vec<String> {
+    version_misses(detail)
+        .into_iter()
+        .filter(|m| !m.too_new)
+        .map(|m| m.name)
+        .collect()
 }
 
 #[cfg(test)]
