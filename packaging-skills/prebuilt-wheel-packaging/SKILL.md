@@ -152,6 +152,14 @@ If the service fails, the error is shown to you on the next turn.
   purelib wheel), and `%global __requires_exclude` for the sonames only an
   optional plugin needs (MPI, UCX, fabric) or that another package of the
   project supplies (then write the explicit `Requires: python-<pkg>`).
+- Console scripts and hashed libraries: the pipeline's skeleton reads the
+  wheel. Each `[console_scripts]` entry of its `entry_points.txt` already has
+  convention 18's `%python_clone`, `update-alternatives`, `%post`/`%postun` and
+  `%python_alternative` lines (otherwise `/usr/bin/<script>` is unpackaged), and
+  a wheel with auditwheel libraries (`<name>.libs/`, `libfoo-<8 hex>.so.N`)
+  already has `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\.so.*$`. Check
+  them, do not duplicate them; rpm honours one `__requires_exclude`, so fold
+  another pattern into that line with `|`.
 - Delete headers, `*.a` archives, test libraries and other architectures' stubs
   in `%install`; list the remaining files in `%files`.
 - `%check` imports the module when there is one, and a package whose payload other

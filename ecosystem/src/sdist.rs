@@ -326,6 +326,27 @@ pub struct WheelLayout {
     pub dist_info: Option<String>,
     /// The `Requires-Dist` lines of the wheel's `METADATA`, verbatim.
     pub requires_dist: Vec<String>,
+    /// Script names from the `[console_scripts]`/`[gui_scripts]` sections of
+    /// the wheel's `*.dist-info/entry_points.txt`: pip generates one
+    /// `/usr/bin/<name>` wrapper for each, which a spec that lists only
+    /// site-packages leaves unpackaged (python-triton's `proton`, python-
+    /// cuda-tile's `cutile-cache`). Names that are not a plain file name are
+    /// dropped — they end up in a generated spec. In file order, deduplicated.
+    pub console_scripts: Vec<String>,
+    /// The wheel bundles auditwheel-style libraries: a `<name>.libs/`
+    /// directory, or a shared library whose name carries the 8-hex-digit hash
+    /// auditwheel appends (`libavcodec-f34387fd.so.62.11.100`). The RPM's
+    /// auto-generated `Requires` then name those hashed sonames, which nothing
+    /// provides (the matching `Provides` are not exported), so the package
+    /// cannot be installed unless the spec excludes them.
+    pub has_hashed_libs: bool,
+    /// A bundled shared library carries a `DT_RUNPATH`/`DT_RPATH` containing
+    /// `$ORIGIN` (vendor libraries find their siblings that way). rpmlint's
+    /// `binary-or-shlib-defines-rpath` is badness 10000 for it, so one hit
+    /// aborts the check — and, since an `rpmlintrc` filter nothing matches is
+    /// itself an error (`unused-rpmlintrc-filter`), the filter may only be
+    /// written when this is true.
+    pub origin_runpath: bool,
 }
 
 impl WheelLayout {
@@ -335,6 +356,208 @@ impl WheelLayout {
     pub fn is_library_only(&self) -> bool {
         self.importable.is_none() && self.first_shared_lib.is_some()
     }
+}
+
+/// Whether `file` is a shared library named `<stem>-<8 hex digits>.<rest>.so…`
+/// the way auditwheel renames a vendored library. The hash must include a
+/// letter, so a date-stamped `libfoo-20240101.so.1` is not taken for one.
+fn is_hashed_soname(file: &str) -> bool {
+    if !(file.ends_with(".so") || file.contains(".so.")) {
+        return false;
+    }
+    file.match_indices('-').any(|(i, _)| {
+        let hash = file.as_bytes().get(i + 1..i + 9);
+        hash.is_some_and(|h| {
+            h.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                && h.iter().any(u8::is_ascii_lowercase)
+                && file.as_bytes().get(i + 9) == Some(&b'.')
+        })
+    })
+}
+
+/// Script names declared in an `entry_points.txt` body (see
+/// [`WheelLayout::console_scripts`]). INI-shaped: `[section]` headers, then
+/// `name = module:func [extras]` lines; `#`/`;` start a comment.
+fn console_scripts_from_entry_points(text: &str) -> Vec<String> {
+    let mut scripts: Vec<String> = Vec::new();
+    let mut in_scripts = false;
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_scripts = matches!(section.trim(), "console_scripts" | "gui_scripts");
+            continue;
+        }
+        if !in_scripts {
+            continue;
+        }
+        let Some((name, _)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let plain = !name.is_empty()
+            && !name.starts_with(['-', '.'])
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'));
+        if plain && !scripts.iter().any(|s| s == name) {
+            scripts.push(name.to_string());
+        }
+    }
+    scripts
+}
+
+/// Most bytes read from one shared library to look at its dynamic section:
+/// `.dynamic` and `.dynstr` sit near the start of an ELF file, far before
+/// the code of a library that can be hundreds of megabytes.
+const MAX_ELF_BYTES: u64 = 16 * 1024 * 1024;
+/// Most shared libraries of one wheel looked at for an `$ORIGIN` RUNPATH.
+const MAX_ELF_FILES: usize = 256;
+
+/// The leading bytes of a stream, read on demand and never past
+/// [`MAX_ELF_BYTES`], so a parser can ask for any range without the whole
+/// (possibly compressed, so not seekable) file being read for it.
+struct Prefix<R> {
+    reader: R,
+    buf: Vec<u8>,
+}
+
+impl<R: Read> Prefix<R> {
+    /// Up to `len` bytes at `off`: fewer when the stream ends first, `None`
+    /// when the range starts past its end or past the cap.
+    fn upto(&mut self, off: u64, len: u64) -> Option<&[u8]> {
+        let end = off.checked_add(len)?.min(MAX_ELF_BYTES);
+        let (off, end) = (usize::try_from(off).ok()?, usize::try_from(end).ok()?);
+        if let Some(missing) = end.checked_sub(self.buf.len()) {
+            (&mut self.reader)
+                .take(missing as u64)
+                .read_to_end(&mut self.buf)
+                .ok()?;
+        }
+        let end = end.min(self.buf.len());
+        self.buf.get(off..end)
+    }
+
+    /// Exactly `len` bytes at `off`, or `None`.
+    fn exact(&mut self, off: u64, len: u64) -> Option<&[u8]> {
+        self.upto(off, len).filter(|b| b.len() as u64 == len)
+    }
+}
+
+fn le_u16(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?)))
+}
+
+fn le_u32(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?)))
+}
+
+fn le_u64(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// Whether an ELF64 little-endian file has a `DT_RUNPATH` or `DT_RPATH`
+/// containing `$ORIGIN`. Reads the program headers, the `PT_DYNAMIC` array and
+/// the string table it points at, every range bounds-checked and capped;
+/// anything unexpected (not ELF, 32-bit, big-endian, truncated, a bad offset)
+/// is `false`.
+fn elf_has_origin_runpath(reader: impl Read) -> bool {
+    elf_origin_runpath(&mut Prefix {
+        reader,
+        buf: Vec::new(),
+    })
+    .unwrap_or(false)
+}
+
+fn elf_origin_runpath<R: Read>(file: &mut Prefix<R>) -> Option<bool> {
+    const PT_LOAD: u64 = 1;
+    const PT_DYNAMIC: u64 = 2;
+    const PHDR_MIN: u64 = 56;
+    const DT_STRTAB: u64 = 5;
+    const DT_STRSZ: u64 = 10;
+    const DT_RPATH: u64 = 15;
+    const DT_RUNPATH: u64 = 29;
+    // A library has a handful of program headers and one `.dynamic` of a few
+    // dozen entries; these bounds are far above that.
+    const MAX_PHNUM: u64 = 256;
+    const MAX_DYNAMIC_BYTES: u64 = 64 * 1024;
+    const MAX_RUNPATH_BYTES: u64 = 4096;
+
+    let header = file.exact(0, 64)?;
+    // ELF magic, ELFCLASS64, ELFDATA2LSB.
+    if header[..4] != *b"\x7fELF" || header[4] != 2 || header[5] != 1 {
+        return None;
+    }
+    let (phoff, phentsize, phnum) = (
+        le_u64(header, 32)?,
+        le_u16(header, 54)?,
+        le_u16(header, 56)?,
+    );
+    if phentsize < PHDR_MIN || phnum == 0 || phnum > MAX_PHNUM {
+        return None;
+    }
+    let phdrs = file.exact(phoff, phentsize * phnum)?;
+    // (file offset, virtual address, size in file) per segment.
+    let mut loads: Vec<(u64, u64, u64)> = Vec::new();
+    let mut dynamic = None;
+    for ph in phdrs.chunks_exact(phentsize as usize) {
+        let segment = (le_u64(ph, 8)?, le_u64(ph, 16)?, le_u64(ph, 32)?);
+        match le_u32(ph, 0)? {
+            PT_LOAD => loads.push(segment),
+            PT_DYNAMIC => dynamic = Some(segment),
+            _ => {}
+        }
+    }
+    let (dyn_off, _, dyn_size) = dynamic?;
+    let entries = file.upto(dyn_off, dyn_size.min(MAX_DYNAMIC_BYTES))?;
+    let (mut strtab, mut strsz, mut runpaths) = (None, None, Vec::new());
+    for entry in entries.chunks_exact(16) {
+        let (tag, val) = (le_u64(entry, 0)?, le_u64(entry, 8)?);
+        match tag {
+            0 => break,
+            DT_STRTAB => strtab = Some(val),
+            DT_STRSZ => strsz = Some(val),
+            DT_RPATH | DT_RUNPATH => runpaths.push(val),
+            _ => {}
+        }
+    }
+    if runpaths.is_empty() {
+        return Some(false);
+    }
+    // `DT_STRTAB` is a virtual address: find the segment holding it.
+    let strtab = strtab?;
+    let strtab_off = loads.iter().find_map(|&(off, vaddr, size)| {
+        let rel = strtab.checked_sub(vaddr).filter(|rel| *rel < size)?;
+        off.checked_add(rel)
+    })?;
+    for val in runpaths {
+        // The string lies inside the table when its size is known.
+        let room = strsz.map_or(MAX_RUNPATH_BYTES, |sz| sz.saturating_sub(val));
+        let at = strtab_off.checked_add(val)?;
+        let Some(bytes) = file.upto(at, room.min(MAX_RUNPATH_BYTES)) else {
+            continue;
+        };
+        let bytes = bytes.split(|b| *b == 0).next().unwrap_or(&[]);
+        if bytes.windows(7).any(|w| w == b"$ORIGIN") {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// Whether any shared library among `names` of the zip has an `$ORIGIN`
+/// RUNPATH/RPATH (see [`WheelLayout::origin_runpath`]). Unreadable entries
+/// count as not having one.
+fn any_origin_runpath<R: Read + std::io::Seek>(
+    zip_archive: &mut zip::ZipArchive<R>,
+    names: &[&str],
+) -> bool {
+    names.iter().take(MAX_ELF_FILES).any(|name| {
+        zip_archive
+            .by_name(name)
+            .is_ok_and(|entry| entry.size() >= 64 && elf_has_origin_runpath(entry))
+    })
 }
 
 /// Inspect a wheel's file list. `None` when it cannot be read as a zip.
@@ -425,6 +648,29 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         }
         kept
     };
+    // An unreadable `entry_points.txt` just means no scripts are reported.
+    let console_scripts = dist_info
+        .as_ref()
+        .and_then(|d| {
+            let mut entry = zip_archive.by_name(&format!("{d}/entry_points.txt")).ok()?;
+            read_manifest(&mut entry)
+        })
+        .map(|text| console_scripts_from_entry_points(&text))
+        .unwrap_or_default();
+    let has_hashed_libs = names.iter().any(|n| {
+        let top = top_of(n);
+        let file = n.rsplit('/').next().unwrap_or("");
+        !skip(&top) && n.contains('/') && (top.ends_with(".libs") || is_hashed_soname(file))
+    });
+    let shared_libs: Vec<&str> = names
+        .iter()
+        .filter(|n| {
+            let file = n.rsplit('/').next().unwrap_or("");
+            !n.ends_with('/') && !skip(&top_of(n)) && (file.ends_with(".so") || file.contains(".so."))
+        })
+        .map(String::as_str)
+        .collect();
+    let origin_runpath = any_origin_runpath(&mut zip_archive, &shared_libs);
     Some(WheelLayout {
         importable,
         first_shared_lib,
@@ -432,6 +678,9 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         files,
         dist_info,
         requires_dist,
+        console_scripts,
+        has_hashed_libs,
+        origin_runpath,
     })
 }
 
@@ -2336,6 +2585,208 @@ build-backend = "flit_core.buildapi"
         );
         let l = wheel_layout(&w).unwrap();
         assert_eq!(l.header_dirs, vec!["nvidia/nccl/include".to_string()]);
+    }
+
+    fn write_wheel_with(path: &Path, files: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        for (name, body) in files {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(body).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    /// A minimal ELF64 little-endian shared object: header, a `PT_LOAD` over the
+    /// whole file, a `PT_DYNAMIC`, a `.dynamic` with `DT_STRTAB`/`DT_STRSZ` and
+    /// one `dyn_tag` entry (`DT_RUNPATH` = 29, `DT_RPATH` = 15) naming `value`
+    /// (`None`: no such entry), and the string table. The string table is
+    /// mapped at a virtual address unlike its file offset, as in real files.
+    fn elf_with_dynamic(dyn_tag: u64, value: Option<&str>) -> Vec<u8> {
+        const BASE: u64 = 0x40_0000;
+        let strtab = format!("\0{}\0", value.unwrap_or(""));
+        let (phoff, dynoff, stroff) = (64u64, 64 + 2 * 56, 64 + 2 * 56 + 64);
+        let total = stroff + strtab.len() as u64;
+        let mut out = vec![0u8; 64];
+        out[..4].copy_from_slice(b"\x7fELF");
+        out[4] = 2;
+        out[5] = 1;
+        out[32..40].copy_from_slice(&phoff.to_le_bytes());
+        out[54..56].copy_from_slice(&56u16.to_le_bytes());
+        out[56..58].copy_from_slice(&2u16.to_le_bytes());
+        for (ty, off, vaddr, size) in [(1u32, 0, BASE, total), (2, dynoff, BASE + dynoff, 64)] {
+            out.extend(ty.to_le_bytes());
+            out.extend(4u32.to_le_bytes());
+            for v in [off, vaddr, vaddr, size, size, 8] {
+                out.extend(u64::to_le_bytes(v));
+            }
+        }
+        let tag = if value.is_some() { dyn_tag } else { 1 };
+        for (t, v) in [
+            (5, BASE + stroff),
+            (10, strtab.len() as u64),
+            (tag, 1),
+            (0, 0),
+        ] {
+            out.extend(u64::to_le_bytes(t));
+            out.extend(u64::to_le_bytes(v));
+        }
+        out.extend(strtab.as_bytes());
+        out
+    }
+
+    /// python-triton's shape: `proton`/`proton-viewer` are generated into
+    /// `/usr/bin` from `entry_points.txt`, and only `[console_scripts]` (and
+    /// `[gui_scripts]`) name files there — other groups are plugins.
+    #[test]
+    fn wheel_layout_reads_console_scripts_from_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("e.whl");
+        write_wheel_with(
+            &w,
+            &[
+                ("pkg/__init__.py", b""),
+                (
+                    "pkg-1.0.dist-info/entry_points.txt",
+                    b"# generated\n[console_scripts]\nproton = proton.profile:main\n\
+                      proton-viewer=proton.viewer:main [viewer]\nproton = dup:main\n\
+                      ; skipped\n\n[gui_scripts]\npkg-gui = pkg.gui:run\n\
+                      [pkg.plugins]\nnot-a-script = pkg.plug:Plugin\n",
+                ),
+            ],
+        );
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(l.console_scripts, vec!["proton", "proton-viewer", "pkg-gui"]);
+
+        let n = dir.path().join("n.whl");
+        write_wheel(&n, &["pkg/__init__.py", "pkg-1.0.dist-info/RECORD"]);
+        assert!(wheel_layout(&n).unwrap().console_scripts.is_empty());
+    }
+
+    /// Script names go into a generated spec, so anything that is not a plain
+    /// file name (option-looking, a path, a macro, whitespace) is dropped.
+    #[test]
+    fn console_scripts_drop_names_that_are_not_plain_file_names() {
+        let text = "[console_scripts]\n--evil = a:b\n../x = a:b\n%{foo} = a:b\n\
+                    a b = a:b\n.hidden = a:b\nok.name_1+2-x = a:b\nno-equals\n";
+        assert_eq!(
+            console_scripts_from_entry_points(text),
+            vec!["ok.name_1+2-x"]
+        );
+    }
+
+    /// opencv-python-headless' shape: auditwheel's `<name>.libs/` directory of
+    /// hash-suffixed libraries, and hash-suffixed names found elsewhere.
+    #[test]
+    fn wheel_layout_detects_auditwheel_hashed_libs() {
+        let dir = tempfile::tempdir().unwrap();
+        let in_libs = dir.path().join("a.whl");
+        write_wheel(
+            &in_libs,
+            &[
+                "cv2/__init__.py",
+                "opencv_python_headless.libs/libavcodec-f34387fd.so.62.11.100",
+            ],
+        );
+        assert!(wheel_layout(&in_libs).unwrap().has_hashed_libs);
+        let inline = dir.path().join("b.whl");
+        write_wheel(&inline, &["numpy/_core/libopenblasp-r0-37b5f859.3.3.so"]);
+        assert!(wheel_layout(&inline).unwrap().has_hashed_libs);
+        // Ordinary sonames, a date stamp, and a hash outside a library are not.
+        let plain = dir.path().join("c.whl");
+        write_wheel(
+            &plain,
+            &[
+                "p/libcuda.so.1",
+                "p/libz3.so.4.15",
+                "p/libfoo-1.2.so",
+                "p/libbar-20240101.so.1",
+                "p/data-f34387fd.json",
+                "pkg-1.0.dist-info/libx-f34387fd.so.1",
+            ],
+        );
+        assert!(!wheel_layout(&plain).unwrap().has_hashed_libs);
+    }
+
+    /// libcusparseLt.so.0 (RUNPATH: $ORIGIN:): found in a `DT_RUNPATH` or a
+    /// `DT_RPATH`, not for another value, no entry, or a non-ELF file.
+    #[test]
+    fn origin_runpath_is_read_from_the_dynamic_section() {
+        let found = |bytes: &[u8]| elf_has_origin_runpath(std::io::Cursor::new(bytes));
+        assert!(found(&elf_with_dynamic(29, Some("$ORIGIN:"))));
+        assert!(found(&elf_with_dynamic(15, Some("/opt/x:$ORIGIN/../lib"))));
+        assert!(!found(&elf_with_dynamic(29, Some("/opt/lib"))));
+        assert!(!found(&elf_with_dynamic(29, None)));
+
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("o.whl");
+        write_wheel_with(
+            &w,
+            &[
+                ("nvidia/lib/libnotelf.so.1", &[b'x'; 200]),
+                (
+                    "nvidia/lib/libcusparseLt.so.0",
+                    &elf_with_dynamic(29, Some("$ORIGIN:")),
+                ),
+            ],
+        );
+        assert!(wheel_layout(&w).unwrap().origin_runpath);
+        let w = dir.path().join("p.whl");
+        write_wheel_with(
+            &w,
+            &[("nvidia/lib/libfoo.so.1", &elf_with_dynamic(29, Some("/opt")))],
+        );
+        assert!(!wheel_layout(&w).unwrap().origin_runpath);
+        // A library under .dist-info is not part of the payload.
+        let w = dir.path().join("q.whl");
+        write_wheel_with(
+            &w,
+            &[(
+                "p-1.dist-info/libx.so",
+                &elf_with_dynamic(29, Some("$ORIGIN")),
+            )],
+        );
+        assert!(!wheel_layout(&w).unwrap().origin_runpath);
+    }
+
+    /// Malformed input is `false`, never a panic: every prefix of a valid file,
+    /// a flipped byte at each position, 32-bit and big-endian classes, absurd
+    /// offsets and sizes.
+    #[test]
+    fn origin_runpath_survives_malformed_elf_files() {
+        let good = elf_with_dynamic(29, Some("$ORIGIN:"));
+        let found = |bytes: &[u8]| elf_has_origin_runpath(std::io::Cursor::new(bytes));
+        assert!(found(&good));
+        // The string table starts at 240; cut inside `$ORIGIN` is still a hit.
+        for len in 0..good.len() {
+            assert_eq!(found(&good[..len]), len >= 248, "truncated to {len}");
+        }
+        for at in 0..good.len() {
+            for flip in [0x00u8, 0xff] {
+                let mut bad = good.clone();
+                bad[at] = flip;
+                let _ = found(&bad);
+            }
+        }
+        let mut bad = good.clone();
+        bad[4] = 1; // ELFCLASS32
+        assert!(!found(&bad));
+        let mut bad = good.clone();
+        bad[5] = 2; // big-endian
+        assert!(!found(&bad));
+        let mut bad = good.clone();
+        bad[32..40].copy_from_slice(&u64::MAX.to_le_bytes()); // e_phoff
+        assert!(!found(&bad));
+        let mut bad = good.clone();
+        bad[56..58].copy_from_slice(&u16::MAX.to_le_bytes()); // e_phnum
+        assert!(!found(&bad));
+        // PT_DYNAMIC at an offset far past the end of the file.
+        let mut bad = good.clone();
+        bad[64 + 56 + 8..64 + 56 + 16].copy_from_slice(&(u64::MAX - 8).to_le_bytes());
+        assert!(!found(&bad));
+        assert!(!found(b""));
+        assert!(!found(&[0x7f; 4096]));
     }
 
     #[test]

@@ -2028,8 +2028,15 @@ pub(crate) fn is_prebuilt_binary_wheel(
 /// - `library-without-ldconfig-postin/postun`: the bundled libraries sit in
 ///   site-packages and are loaded by the Python modules from their own
 ///   directory, not from the ldconfig path, so there is no cache to refresh.
-pub fn prebuilt_wheel_rpmlintrc() -> String {
-    String::from(
+/// - `binary-or-shlib-defines-rpath` for `$ORIGIN`: vendor libraries find
+///   their siblings that way, and the rule is badness 10000, so one hit aborts
+///   rpmlint (`libcusparseLt.so.0 (RUNPATH: $ORIGIN:)`). Only written when a
+///   bundled library really has such a RUNPATH
+///   ([`ap_ecosystem::sdist::WheelLayout::origin_runpath`]): a filter nothing
+///   matches is `unused-rpmlintrc-filter`, an error of its own (convention
+///   72). Any other RPATH value still fails the check.
+pub fn prebuilt_wheel_rpmlintrc(layout: &ap_ecosystem::sdist::WheelLayout) -> String {
+    let mut out = String::from(
         "# The libraries are upstream's prebuilt binaries, linked without a hash\n\
          # section; they cannot be relinked here.\n\
          addFilter(\"missing-hash-section\")\n\
@@ -2039,6 +2046,78 @@ pub fn prebuilt_wheel_rpmlintrc() -> String {
          # ldconfig cache for a scriptlet to refresh.\n\
          addFilter(\"library-without-ldconfig-postin\")\n\
          addFilter(\"library-without-ldconfig-postun\")\n",
+    );
+    if layout.origin_runpath {
+        out.push_str(
+            "\n\
+             # The bundled libraries find each other through an $ORIGIN RUNPATH, which\n\
+             # is how a self-contained vendor wheel has to be laid out.\n\
+             addFilter(\"binary-or-shlib-defines-rpath.*[$]ORIGIN\")\n",
+        );
+    }
+    out
+}
+
+/// Write `python-<name>.rpmlintrc` next to the spec for a vendor-binary wheel
+/// (the spec's `Source99:` names it); nothing for any other wheel.
+pub(crate) fn wheel_rpmlintrc(
+    pkg_name: &str,
+    wheel_filename: &str,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+) -> Option<(String, String)> {
+    let layout = layout.filter(|_| is_prebuilt_binary_wheel(wheel_filename, layout))?;
+    Some((
+        format!("python-{}.rpmlintrc", pkg_name.to_lowercase()),
+        prebuilt_wheel_rpmlintrc(layout),
+    ))
+}
+
+/// The `__requires_exclude` regex for a wheel bundling auditwheel-style
+/// libraries (`libavcodec-f34387fd.so.62.11.100`): the generated `Requires`
+/// name those hashed sonames, and nothing can provide them. Requires 8 hex
+/// digits after a `-` in a `lib*` name, so `libcuda.so.1`, `libz3.so.4.15`
+/// and `libfoo-1.2.so` are left alone. Keep in step with the reason text of
+/// `depclass.rs` and convention 68 of the agent prompt.
+const HASHED_LIBS_REQUIRES_EXCLUDE: &str = r"^lib.*-[0-9a-f]{8}.*\.so.*$";
+
+/// The `%global __requires_exclude` line for a wheel that bundles hashed
+/// libraries, empty otherwise. rpm honours only ONE such global: the patterns
+/// to exclude are folded into a single regex with `|`, which is what a second
+/// pattern added to this skeleton has to do.
+fn wheel_requires_exclude_line(layout: Option<&ap_ecosystem::sdist::WheelLayout>) -> String {
+    let mut patterns: Vec<&str> = Vec::new();
+    if layout.is_some_and(|l| l.has_hashed_libs) {
+        patterns.push(HASHED_LIBS_REQUIRES_EXCLUDE);
+    }
+    if patterns.is_empty() {
+        String::new()
+    } else {
+        format!("%global __requires_exclude {}\n", patterns.join("|"))
+    }
+}
+
+/// Spec fragments that give a wheel's console scripts the openSUSE
+/// multi-flavor `update-alternatives` handling a source build gets (convention
+/// 18): `(requires, clone, scriptlets, files)`, each empty when the wheel
+/// declares no script. pip generates `/usr/bin/<script>` per flavor, so it
+/// must be cloned to `<script>-<pyver>` and owned through
+/// `%python_alternative`, or the build fails with `Installed (but unpackaged)
+/// file(s) found` (python-triton's `proton`, python-cuda-tile's
+/// `cutile-cache`).
+fn wheel_alternatives_fragments(scripts: &[String]) -> (&'static str, String, String, String) {
+    if scripts.is_empty() {
+        return ("", String::new(), String::new(), String::new());
+    }
+    let each = |line: &dyn Fn(&str) -> String| -> String { scripts.iter().map(|s| line(s)).collect() };
+    (
+        "Requires(post):   update-alternatives\nRequires(postun): update-alternatives\n",
+        each(&|s| format!("%python_clone -a %{{buildroot}}%{{_bindir}}/{s}\n")),
+        format!(
+            "%post\n{}\n%postun\n{}\n",
+            each(&|s| format!("%python_install_alternative {s}\n")),
+            each(&|s| format!("%python_uninstall_alternative {s}\n")),
+        ),
+        each(&|s| format!("%python_alternative %{{_bindir}}/{s}\n")),
     )
 }
 
@@ -2229,6 +2308,10 @@ pub fn wheel_binary_skeleton(
         ));
     }
 
+    let (alt_requires, alt_clone, alt_scriptlets, alt_files) =
+        wheel_alternatives_fragments(layout.map_or(&[][..], |l| l.console_scripts.as_slice()));
+    let requires_exclude = wheel_requires_exclude_line(layout);
+
     let files_block = layout
         .and_then(|l| wheel_files_entries(l, sitedir))
         .unwrap_or_else(|| {
@@ -2270,6 +2353,8 @@ pub fn wheel_binary_skeleton(
          BuildRequires:  %{{python_module pip}}\n\
          BuildRequires:  fdupes\n\
          Requires:       python-base\n\
+         {alt_requires}\
+         {requires_exclude}\
          %python_subpackages\n\
          \n\
          %description\n\
@@ -2291,12 +2376,15 @@ pub fn wheel_binary_skeleton(
          %install\n\
          %pyproject_install %{{SOURCE0}}\n\
          {install_extra}\
+         {alt_clone}\
          %python_expand %fdupes %{{buildroot}}/%{{${sitedir}}}\n\
          \n\
          {check_block}\
          \n\
+         {alt_scriptlets}\
          %files %{{python_files}}\n\
          {files_block}\
+         {alt_files}\
          \n\
          %changelog\n",
         name = name,
@@ -3175,13 +3263,238 @@ BuildRequires:  %{python_module pip}
     /// the executable bit, `python-base` and bundled headers are fixed in the spec.
     #[test]
     fn the_wheel_rpmlintrc_has_only_unfixable_filters_with_reasons() {
-        let rc = prebuilt_wheel_rpmlintrc();
+        use ap_ecosystem::sdist::WheelLayout;
+        let rc = prebuilt_wheel_rpmlintrc(&WheelLayout::default());
         assert!(rc.contains("addFilter(\"missing-hash-section\")"), "{rc}");
         assert!(rc.contains("library-without-ldconfig-postin"), "{rc}");
         assert!(!rc.contains("shared-library-not-executable"), "{rc}");
         assert!(!rc.contains("no-dependency-on python-base"), "{rc}");
         assert!(!rc.contains("devel-file-in-non-devel-package"), "{rc}");
+        assert!(!rc.contains("no-binary"), "{rc}");
         assert!(rc.matches('#').count() >= 2, "{rc}");
+    }
+
+    /// `libcusparseLt.so.0 (RUNPATH: $ORIGIN:)` is `binary-or-shlib-defines-rpath`
+    /// at badness 10000 and aborts rpmlint; but an `unused-rpmlintrc-filter` is an
+    /// error too, so the filter is written only for a wheel that has such a RUNPATH.
+    #[test]
+    fn the_origin_runpath_filter_is_written_only_when_a_library_has_one() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let with = prebuilt_wheel_rpmlintrc(&WheelLayout {
+            first_shared_lib: Some("nvidia/cusparselt/lib/libcusparseLt.so.0".into()),
+            origin_runpath: true,
+            ..Default::default()
+        });
+        assert!(
+            with.contains("addFilter(\"binary-or-shlib-defines-rpath.*[$]ORIGIN\")\n"),
+            "{with}"
+        );
+        // It matches the `$ORIGIN` finding and no other RPATH value.
+        let re = regex::Regex::new("binary-or-shlib-defines-rpath.*[$]ORIGIN").unwrap();
+        assert!(re.is_match(
+            "binary-or-shlib-defines-rpath /usr/lib/python3.13/site-packages/nvidia/libcusparseLt.so.0 $ORIGIN:"
+        ));
+        assert!(!re.is_match("binary-or-shlib-defines-rpath /usr/bin/x /opt/evil"));
+
+        let without = prebuilt_wheel_rpmlintrc(&WheelLayout {
+            first_shared_lib: Some("nvidia/cusparselt/lib/libcusparseLt.so.0".into()),
+            ..Default::default()
+        });
+        assert!(!without.contains("rpath"), "{without}");
+    }
+
+    /// The pipeline writes the file only for a prebuilt binary wheel, and it
+    /// carries the layout's filters.
+    #[test]
+    fn the_rpmlintrc_file_follows_the_wheel_shape() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let layout = WheelLayout {
+            first_shared_lib: Some("p/libx.so.1".into()),
+            origin_runpath: true,
+            ..Default::default()
+        };
+        let (file, text) = wheel_rpmlintrc(
+            "Nvidia-Foo",
+            "nvidia_foo-1.0-py3-none-manylinux_2_27_x86_64.whl",
+            Some(&layout),
+        )
+        .unwrap();
+        assert_eq!(file, "python-nvidia-foo.rpmlintrc");
+        assert!(text.contains("[$]ORIGIN"), "{text}");
+        assert!(wheel_rpmlintrc("p", "p-1.0-py3-none-any.whl", Some(&layout)).is_none());
+        assert!(
+            wheel_rpmlintrc(
+                "p",
+                "p-1-py3-none-manylinux_2_27_x86_64.whl",
+                Some(&WheelLayout::default())
+            )
+            .is_none()
+        );
+        assert!(wheel_rpmlintrc("p", "p-1-py3-none-manylinux_2_27_x86_64.whl", None).is_none());
+    }
+
+    /// python-triton's `proton`/`proton-viewer` and python-cuda-tile's
+    /// `cutile-cache`: the skeleton carries all of convention 18's pieces for
+    /// each wheel console script from the start, not after a failed build.
+    #[test]
+    fn wheel_console_scripts_get_the_alternatives_handling() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let layout = WheelLayout {
+            importable: Some("triton".into()),
+            console_scripts: vec!["proton".into(), "proton-viewer".into()],
+            ..Default::default()
+        };
+        let spec = wheel_binary_skeleton(
+            "triton",
+            "3.0",
+            "triton-3.0-py3-none-any.whl",
+            &release,
+            Some(true),
+            Some(&layout),
+        );
+        for want in [
+            "Requires:       python-base\nRequires(post):   update-alternatives\n\
+             Requires(postun): update-alternatives\n%python_subpackages\n",
+            "%pyproject_install %{SOURCE0}\n%python_clone -a %{buildroot}%{_bindir}/proton\n\
+             %python_clone -a %{buildroot}%{_bindir}/proton-viewer\n%python_expand %fdupes",
+            "%post\n%python_install_alternative proton\n%python_install_alternative proton-viewer\n\n\
+             %postun\n%python_uninstall_alternative proton\n%python_uninstall_alternative proton-viewer\n\n\
+             %files %{python_files}\n",
+            "%python_alternative %{_bindir}/proton\n%python_alternative %{_bindir}/proton-viewer\n\n%changelog",
+        ] {
+            assert!(spec.contains(want), "missing {want:?} in\n{spec}");
+        }
+
+        // Multi-flavor: the clone lines follow the per-flavor installs.
+        let wheels = vec![
+            (
+                "python313".to_string(),
+                "t-3.0-cp313-cp313-manylinux_2_17_x86_64.whl".to_string(),
+            ),
+            (
+                "python314".to_string(),
+                "t-3.0-cp314-cp314-manylinux_2_17_x86_64.whl".to_string(),
+            ),
+        ];
+        let multi =
+            wheel_multi_flavor_skeleton("t", "3.0", &wheels, &release, Some(false), Some(&layout));
+        for want in [
+            "%python313_pyproject_install %{SOURCE0}\n%python314_pyproject_install %{SOURCE1}\n\
+             %python_clone -a %{buildroot}%{_bindir}/proton\n",
+            "Requires(post):   update-alternatives\n",
+            "%python_install_alternative proton-viewer\n",
+            "%python_alternative %{_bindir}/proton\n",
+        ] {
+            assert!(multi.contains(want), "missing {want:?} in\n{multi}");
+        }
+
+        // No scripts: none of it appears, in either skeleton.
+        let plain = WheelLayout::default();
+        for spec in [
+            wheel_binary_skeleton(
+                "plain",
+                "1.0",
+                "plain-1.0-py3-none-any.whl",
+                &release,
+                Some(true),
+                Some(&plain),
+            ),
+            wheel_binary_skeleton("plain", "1.0", "p-1.0-py3-none-any.whl", &release, None, None),
+            wheel_multi_flavor_skeleton("t", "3.0", &wheels, &release, Some(false), Some(&plain)),
+        ] {
+            for absent in [
+                "update-alternatives",
+                "python_clone",
+                "%post",
+                "python_alternative",
+            ] {
+                assert!(!spec.contains(absent), "{absent} in\n{spec}");
+            }
+        }
+    }
+
+    /// opencv-python-headless: auditwheel's hashed libraries are vendored under
+    /// `<name>.libs/`, so the generated Requires for their sonames must be
+    /// excluded or the package is uninstallable.
+    #[test]
+    fn a_wheel_with_hashed_libs_excludes_their_requires() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let layout = WheelLayout {
+            importable: Some("cv2".into()),
+            first_shared_lib: Some(
+                "opencv_python_headless.libs/libavcodec-f34387fd.so.62.11.100".into(),
+            ),
+            has_hashed_libs: true,
+            ..Default::default()
+        };
+        let wheel = "opencv_python_headless-4.12-cp37-abi3-manylinux_2_28_x86_64.whl";
+        let spec = wheel_binary_skeleton(
+            "opencv-python-headless",
+            "4.12",
+            wheel,
+            &release,
+            Some(false),
+            Some(&layout),
+        );
+        let line = "%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\\.so.*$\n%python_subpackages\n";
+        assert!(spec.contains(line), "{spec}");
+        assert_eq!(spec.matches("__requires_exclude").count(), 1, "{spec}");
+        let multi = wheel_multi_flavor_skeleton(
+            "opencv-python-headless",
+            "4.12",
+            &[("python313".to_string(), wheel.to_string())],
+            &release,
+            Some(false),
+            Some(&layout),
+        );
+        assert!(multi.contains(line), "{multi}");
+
+        // The regex matches hashed sonames only.
+        let re = regex::Regex::new(HASHED_LIBS_REQUIRES_EXCLUDE).unwrap();
+        for hashed in [
+            "libavcodec-f34387fd.so.62.11.100()(64bit)",
+            "libopenblasp-r0-37b5f859.3.3.so",
+            "libaom-969ba5f6.so.3.13.1",
+        ] {
+            assert!(re.is_match(hashed), "{hashed}");
+        }
+        for ordinary in [
+            "libcuda.so.1()(64bit)",
+            "libz3.so.4.15",
+            "libfoo-1.2.so",
+            "libc.so.6",
+        ] {
+            assert!(!re.is_match(ordinary), "{ordinary}");
+        }
+
+        // No hashed libs: no exclude.
+        let spec = wheel_binary_skeleton(
+            "p",
+            "1.0",
+            "p-1.0-py3-none-any.whl",
+            &release,
+            Some(true),
+            Some(&WheelLayout::default()),
+        );
+        assert!(!spec.contains("__requires_exclude"), "{spec}");
+    }
+
+    /// The same regex is quoted in `depclass.rs`'s reason text (escaped for a
+    /// Rust string) and in the agent prompt's convention 68.
+    #[test]
+    fn the_hashed_libs_regex_is_the_same_everywhere_it_is_quoted() {
+        let depclass = include_str!("depclass.rs");
+        assert!(
+            depclass.contains(&HASHED_LIBS_REQUIRES_EXCLUDE.replace('\\', "\\\\")),
+            "depclass.rs quotes another regex"
+        );
+        let agent = include_str!("agent.rs");
+        assert!(
+            agent.contains(HASHED_LIBS_REQUIRES_EXCLUDE),
+            "convention 68 quotes another regex"
+        );
     }
 
     #[test]

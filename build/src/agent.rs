@@ -2620,7 +2620,18 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    fabric and PMIx transports: `libmpi`, `liboshmem`, `libpmix`, `libucp`,
    `libucs`, `libfabric`, `libmlx5`), add `%global __requires_exclude
    ^lib(mpi|oshmem|pmix|ucp|ucs|fabric|mlx5)\.so.*$`: otherwise installing the
-   package drags in OpenMPI and UCX for a feature nobody asked for. For a soname
+   package drags in OpenMPI and UCX for a feature nobody asked for. A wheel
+   repaired by auditwheel (a `<name>.libs/` directory, libraries named
+   `libavcodec-f34387fd.so.62.11.100` or `libopenblasp-r0-37b5f859.3.3.so`) is
+   worse: the `__provides_exclude_from` above removes the Provides of those
+   hashed names, yet the auto-generated Requires still name them, so the RPM
+   cannot be installed and every package depending on it is `unresolvable`; add
+   `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\.so.*$` (the pipeline's
+   wheel skeleton already writes it when it sees such libraries). rpm honours
+   only ONE `__requires_exclude`: a second line silently replaces the first, so
+   fold every pattern into one regex with `|`
+   (`^(lib.*-[0-9a-f]{8}.*\.so.*|lib(mpi|ucp)\.so.*)$`) and never add another
+   line. For a soname
    another package of this project supplies (`libnccl.so.2` from
    `python-nvidia-nccl-cu13`), exclude the auto-Requires and write the explicit
    `Requires: python-nvidia-nccl-cu13`, so the choice between flavors is not left

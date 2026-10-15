@@ -7144,13 +7144,7 @@ fn generate_multi_flavor_wheel_spec(
         ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
-        if crate::spec::is_prebuilt_binary_wheel(&wheels[0].1, layout.as_ref()) {
-            let rpmlintrc_path = checkout_dir.join(format!(
-                "python-{}.rpmlintrc",
-                config.pkg_name.to_lowercase()
-            ));
-            write_or_warn(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
-        }
+        write_wheel_rpmlintrc(checkout_dir, &config.pkg_name, &wheels[0].1, layout.as_ref());
         let first_wheel = picked.into_iter().next().map(|(_, w)| w).ok_or_else(|| {
             GenSpecError::Other(format!(
                 "no wheel picked for any flavor of {}",
@@ -7167,6 +7161,19 @@ fn generate_multi_flavor_wheel_spec(
             first_wheel,
         ))
     })())
+}
+
+/// Write the wheel's `python-<name>.rpmlintrc` next to the spec when it is a
+/// vendor-binary wheel (see [`crate::spec::wheel_rpmlintrc`]).
+fn write_wheel_rpmlintrc(
+    checkout_dir: &Path,
+    pkg_name: &str,
+    wheel_filename: &str,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+) {
+    if let Some((file, text)) = crate::spec::wheel_rpmlintrc(pkg_name, wheel_filename, layout) {
+        write_or_warn(&checkout_dir.join(file), text);
+    }
 }
 
 fn generate_wheel_binary_spec(
@@ -7226,13 +7233,7 @@ fn generate_wheel_binary_spec(
     ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     write_or_warn(step.file("spec.generated"), &spec_text);
-    if crate::spec::is_prebuilt_binary_wheel(&wheel.filename, layout.as_ref()) {
-        let rpmlintrc_path = checkout_dir.join(format!(
-            "python-{}.rpmlintrc",
-            config.pkg_name.to_lowercase()
-        ));
-        write_or_warn(&rpmlintrc_path, crate::spec::prebuilt_wheel_rpmlintrc());
-    }
+    write_wheel_rpmlintrc(checkout_dir, &config.pkg_name, &wheel.filename, layout.as_ref());
 
     Ok(GenSpecResult {
         // A wheel unpacks flat — no wrapping top-level directory.
