@@ -3668,6 +3668,64 @@ fn unresolvable_deps_round(
         })
         .collect();
 
+    // A name the distro publishes under another spelling (`huggingface_hub`
+    // against `huggingface-hub`) is not a package to build: the spec copied the
+    // PyPI spelling. It is respelled in place and the build runs again.
+    let respelled: Vec<(String, String)> = {
+        let emit = Emit::new(reporter, build_step.id);
+        let mut found: Vec<(String, String)> = Vec::new();
+        for dep in &unresolvable_deps {
+            if osc::is_rpm_capability(dep)
+                || osc::project_ships_binary(&config.project, &config.arch, dep, emit)
+                    != Some(false)
+            {
+                continue;
+            }
+            let Some(to) = osc::published_respelling(&config.project, &config.arch, dep, emit)
+            else {
+                continue;
+            };
+            let from = osc::strip_rpm_prefix(dep).to_string();
+            if !found.iter().any(|(f, _)| *f == from) {
+                found.push((from, to));
+            }
+        }
+        found
+    };
+    if !respelled.is_empty()
+        && let Ok(text) = std::fs::read_to_string(spec_path)
+    {
+        let mut next = text.clone();
+        for (from, to) in &respelled {
+            next = crate::spec::rewrite_dependency_name(&next, from, to);
+        }
+        if next != text {
+            write_or_warn(spec_path, &next);
+            reporter.report(&Event::Warning {
+                step: Some(build_step.id),
+                message: format!(
+                    "the distro publishes {} under another spelling; respelling the spec \
+                     instead of building a second copy",
+                    respelled
+                        .iter()
+                        .map(|(from, to)| format!("{from} as {to}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+            st.attempts += 1;
+            persist_attempts(ws, &config.run_id, st.attempts);
+            if st.attempts > config.max_attempts {
+                return Err(ctx.failed(format!(
+                    "OBS still reports a respelled dependency missing after {} attempt(s); log: {}",
+                    st.attempts,
+                    build_log.display()
+                )));
+            }
+            return Ok(RoundEnd::Retry);
+        }
+    }
+
     // A name nothing publishes for this target, while similar names are
     // published (`ffmpeg-8-devel` against `ffmpeg-8-mini-devel`), is a package
     // the distro has under another name or flavor, not one to build: the spec
@@ -3863,7 +3921,7 @@ fn unresolvable_deps_round(
                         .iter()
                         .find(|b| osc::fuzzy_key(b) == osc::fuzzy_key(t) && *b != t)
                     {
-                        rewritten = crate::spec::rewrite_python_module_name(&rewritten, bare, t);
+                        rewritten = crate::spec::rewrite_dependency_name(&rewritten, bare, t);
                     }
                 }
                 if rewritten != current {

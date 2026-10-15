@@ -1467,6 +1467,45 @@ pub fn similar_published_binaries(
     found
 }
 
+/// The spelling the projects publish for what `name` (an RPM name such as
+/// `python313-huggingface_hub`) asks for, when it is spelled differently: RPM
+/// names do not follow PyPI's rule, so the distro has `huggingface-hub` but
+/// `typing_extensions`, and a spec copying the PyPI name can be wrong either
+/// way. The answer is the bare name, without the `python313-` prefix.
+pub fn published_respelling(
+    project: &str,
+    arch: &str,
+    name: &str,
+    emit: Emit<'_>,
+) -> Option<String> {
+    // The search matches substrings, not across separators: ask for the
+    // longest run the spellings must share.
+    let term = strip_rpm_prefix(name)
+        .split(['-', '_', '.'])
+        .max_by_key(|part| part.len())
+        .filter(|part| part.len() >= 3 && !part.contains('\''))?;
+    let published = published_binaries(project, arch, term, NameMatch::Containing, emit)?;
+    respelling_among(name, &published)
+}
+
+/// The respelling of `name` among `published` binary names, if one is there
+/// under the same prefix and the exact spelling is not.
+fn respelling_among(name: &str, published: &[String]) -> Option<String> {
+    let bare = strip_rpm_prefix(name);
+    let prefix = &name[..name.len() - bare.len()];
+    let key = fuzzy_key(bare);
+    if published.iter().any(|p| p == name) {
+        return None;
+    }
+    let mut found: Vec<&str> = published
+        .iter()
+        .filter_map(|p| p.strip_prefix(prefix))
+        .filter(|p| *p != bare && fuzzy_key(p) == key && strip_rpm_prefix(p) == *p)
+        .collect();
+    found.sort_unstable();
+    found.first().map(|p| p.to_string())
+}
+
 #[cfg(test)]
 mod tracked_stray_tests {
     use super::*;
@@ -2293,6 +2332,38 @@ fn changes_conflict_file(stderr: &str) -> Option<&str> {
         && !name.contains("..")
         && !name.starts_with('-'))
     .then_some(name)
+}
+
+#[cfg(test)]
+mod respelling_tests {
+    use super::respelling_among;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_published_spelling_replaces_the_pypi_one() {
+        let published = names(&["python313-huggingface-hub", "python314-huggingface-hub"]);
+        assert_eq!(
+            respelling_among("python313-huggingface_hub", &published).as_deref(),
+            Some("huggingface-hub")
+        );
+    }
+
+    #[test]
+    fn an_exact_match_or_another_prefix_is_no_respelling() {
+        let published = names(&["python313-typing_extensions", "huggingface-hub"]);
+        assert_eq!(
+            respelling_among("python313-typing_extensions", &published),
+            None
+        );
+        assert_eq!(
+            respelling_among("python313-huggingface_hub", &published),
+            None
+        );
+        assert_eq!(respelling_among("python313-unrelated", &published), None);
+    }
 }
 
 #[cfg(test)]

@@ -211,6 +211,53 @@ pub fn rewrite_python_module_name(spec: &str, from: &str, to: &str) -> String {
         .into_owned()
 }
 
+/// Rewrite a dependency name in every dependency line of the spec
+/// (`BuildRequires`, `Requires`, `Recommends`, ...) to `to`, wherever its
+/// `fuzzy_key` matches `from`: inside `%{python_module ...}`, and as a plain
+/// `python-<name>` / `python3-<name>` / `<name>`. The prefix a token carries is
+/// kept and a version constraint is untouched.
+///
+/// [`rewrite_python_module_name`] alone left a runtime `Requires:
+/// python-huggingface_hub` behind when it respelled the BuildRequires, so the
+/// package built and then installed with a name nothing provides.
+pub fn rewrite_dependency_name(spec: &str, from: &str, to: &str) -> String {
+    use std::sync::LazyLock;
+    static TAG: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)^\s*(?:BuildRequires|Requires|Recommends|Suggests|Supplements|Enhances|Conflicts|BuildConflicts)(?:\([^)]*\))?\s*:",
+        )
+        .expect("static pattern")
+    });
+    static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"[A-Za-z0-9][A-Za-z0-9._+-]*").expect("static pattern")
+    });
+    if from == to {
+        return spec.to_string();
+    }
+    let from_key = crate::osc::fuzzy_key(from);
+    let rewritten = spec
+        .split_inclusive('\n')
+        .map(|line| {
+            if !TAG.is_match(line) {
+                return line.to_string();
+            }
+            let line = rewrite_python_module_name(line, from, to);
+            TOKEN
+                .replace_all(&line, |caps: &regex::Captures| {
+                    let token = &caps[0];
+                    let bare = crate::osc::strip_rpm_prefix(token);
+                    if bare != to && crate::osc::fuzzy_key(bare) == from_key {
+                        format!("{}{to}", &token[..token.len() - bare.len()])
+                    } else {
+                        token.to_string()
+                    }
+                })
+                .into_owned()
+        })
+        .collect::<String>();
+    rewritten
+}
+
 /// Fix architecture-related lines when a package has C extensions.
 ///
 /// - Removes `BuildArch: noarch`
@@ -880,6 +927,36 @@ Version:        3.0.3
             "{fixed}"
         );
         assert_eq!(fixed.matches("huggingface_hub").count(), 0, "{fixed}");
+    }
+
+    /// The sentence-transformers case: the BuildRequires was respelled but the
+    /// runtime `Requires: python-huggingface_hub` was not.
+    #[test]
+    fn a_respelled_dependency_is_rewritten_in_every_dependency_line() {
+        let spec = "BuildRequires:  %{python_module huggingface_hub >= 0.23.0}\n\
+                    Requires:       python-huggingface_hub >= 0.23.0\n\
+                    Recommends:     python3-huggingface_hub\n\
+                    Requires:       python-numpy\n\
+                    # python-huggingface_hub stays in a comment\n";
+        let fixed = rewrite_dependency_name(spec, "huggingface_hub", "huggingface-hub");
+        assert!(
+            fixed.contains("BuildRequires:  %{python_module huggingface-hub >= 0.23.0}"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("Requires:       python-huggingface-hub >= 0.23.0"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("Recommends:     python3-huggingface-hub\n"),
+            "{fixed}"
+        );
+        assert!(fixed.contains("Requires:       python-numpy\n"), "{fixed}");
+        assert!(fixed.contains("# python-huggingface_hub stays"), "{fixed}");
+        assert_eq!(
+            rewrite_dependency_name(&fixed, "huggingface_hub", "huggingface-hub"),
+            fixed
+        );
     }
 
     #[test]
