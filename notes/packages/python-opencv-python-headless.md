@@ -9,15 +9,15 @@
 Checked against 5.0.0.93 on openSUSE_Tumbleweed, x86_64.
 
 ## Test changes
-- %check is an import smoke test instead of %pytest, because the upstream test layout is expected to fail under %pytest. This was predicted at review, not seen in a test run.
+- %check is an import smoke test instead of %pytest, because the upstream test layout is expected to fail under %pytest. The build passed with it; the upstream test layout itself was not run.
 Checked against 5.0.0.93 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds
-- The CMake build tree leaked into the RUNPATH of the cv2 extension module. A quilt patch to setup.py turns off RPATH handling in CMake for both build and install; without it rpmlint reports binary-or-shlib-defines-rpath.
+- The cv2 extension module picks up the CMake build tree in its RUNPATH. The planned fix is a quilt patch to setup.py that turns off CMake's RPATH handling for both build and install; without it rpmlint reports binary-or-shlib-defines-rpath. In this build the spec had no such patch when it was read, and the journal does not record it being applied.
 - The changelog entry is written by hand, because the packaging tool's changelog command needs a session D-Bus that the build agent does not have.
 Checked against 5.0.0.93 on openSUSE_Tumbleweed, x86_64.
 
 ## Failure history
-- CMake compile failed because the cv2 bindings could not find the numpy C API header → added the numpy development BuildRequires.
-- rpmlint binary-or-shlib-defines-rpath on the cv2 extension module → RPATH patch under Workarounds.
+- CMake compile failed because the cv2 bindings could not find the numpy C API header → added the numpy development BuildRequires; compilation passes in this build.
+- rpmlint binary-or-shlib-defines-rpath on the cv2 extension module → RPATH patch under Workarounds; it was the only failure on the first run of this build, and the journal does not record its outcome after that.
 Checked against 5.0.0.93 on openSUSE_Tumbleweed, x86_64.
