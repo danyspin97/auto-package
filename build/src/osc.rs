@@ -406,6 +406,56 @@ pub struct VersionMiss {
     pub required: Option<String>,
 }
 
+/// A rich dependency (`nothing provides (python314-trio >= 0.25.1 with
+/// python314-trio < 0.34)`) names no version OBS has, so [`version_misses`]
+/// cannot see that the bound is what fails. Each such line whose package
+/// `shipped` knows a version of (the bare name in, the version out) and whose
+/// clauses that version misses is replaced by the plain form of the first clause
+/// it misses, with the `(got version ...)` line after it; every other line is
+/// kept as it was.
+pub fn annotate_rich_misses(
+    detail: Vec<String>,
+    shipped: &dyn Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(detail.len());
+    for line in detail {
+        match rich_miss(&line, shipped) {
+            Some((plain, got)) => {
+                out.push(plain);
+                out.push(got);
+            }
+            None => out.push(line),
+        }
+    }
+    out
+}
+
+fn rich_miss(line: &str, shipped: &dyn Fn(&str) -> Option<String>) -> Option<(String, String)> {
+    let line = line.trim();
+    let line = line.strip_prefix("unresolvable:").unwrap_or(line).trim_start();
+    let rest = line.strip_prefix("nothing provides ")?.trim_start();
+    let group = rest.split(" needed by ").next()?.trim();
+    let inner = group.strip_prefix('(')?.strip_suffix(')')?;
+    if inner.contains(" or ") {
+        return None;
+    }
+    let clauses: Vec<&str> = inner.split(" with ").map(str::trim).collect();
+    let (name, _) = clauses.first()?.split_once(char::is_whitespace)?;
+    let bare = missing_package_names(&[name.to_string()]).into_iter().next()?;
+    let got = shipped(&bare)?;
+    let got_v: pep440_rs::Version = got.parse().ok()?;
+    clauses.iter().find_map(|clause| {
+        let (clause_name, constraint) = clause.split_once(char::is_whitespace)?;
+        let Some(Some(_)) = crate::spec::rpm_constraint_miss(constraint, &got_v) else {
+            return None;
+        };
+        Some((
+            format!("nothing provides {clause_name} {}", constraint.trim()),
+            format!("(got version {got}-0)"),
+        ))
+    })
+}
+
 /// The version misses in `detail`. A package here is not missing: too old, it
 /// is brought up to date; too new, the bound in the spec is what is wrong.
 pub fn version_misses(detail: &[String]) -> Vec<VersionMiss> {
@@ -533,6 +583,35 @@ mod extract_unresolvable_tests {
         assert_eq!(misses[0].name, "uv-build");
         assert_eq!(misses[0].got, "0.11.7");
         assert!(misses[0].too_new);
+    }
+
+    /// python-pycrdt: OBS says `nothing provides (python314-trio >= 0.25.1 with
+    /// python314-trio < 0.34)` while the distro ships trio 0.34.0.
+    #[test]
+    fn a_rich_dependency_whose_bound_the_distro_misses_becomes_a_version_miss() {
+        let detail = vec![
+            "nothing provides (python314-trio >= 0.25.1 with python314-trio < 0.34)".to_string(),
+            "nothing provides python313-other".to_string(),
+        ];
+        let shipped = |n: &str| (n == "trio").then(|| "0.34.0".to_string());
+        let out = annotate_rich_misses(detail, &shipped);
+        assert_eq!(
+            out,
+            [
+                "nothing provides python314-trio < 0.34",
+                "(got version 0.34.0-0)",
+                "nothing provides python313-other",
+            ]
+        );
+        let misses = version_misses(&out);
+        assert_eq!(misses.len(), 1);
+        assert!(misses[0].too_new);
+        assert_eq!(misses[0].name, "trio");
+        // A version that meets every clause, or one that is unknown, leaves the line.
+        let met = |_: &str| Some("0.30.0".to_string());
+        let line = vec!["nothing provides (python314-trio >= 0.25.1 with python314-trio < 0.34)".to_string()];
+        assert_eq!(annotate_rich_misses(line.clone(), &met), line);
+        assert_eq!(annotate_rich_misses(line.clone(), &|_: &str| None), line);
     }
 
     /// Regression test: a rich `(A or B)` requires group leaves a stray `)`

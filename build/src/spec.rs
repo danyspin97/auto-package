@@ -3895,6 +3895,27 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
                 if constraint.is_empty() || constraint.contains(" if ") {
                     return item.to_string();
                 }
+                // `%{python_module trio >= 0.25.1 with %python-trio < 0.34}`:
+                // each clause is judged on its own, the ones met stay.
+                if !open.is_empty() && constraint.contains(" with ") {
+                    let clauses: Vec<&str> = constraint.split(" with ").collect();
+                    let kept: Vec<&str> = clauses
+                        .iter()
+                        .map(|c| c.trim_start_matches(|ch: char| !matches!(ch, '<' | '>' | '=')))
+                        .map(str::trim)
+                        .filter(|c| !matches!(rpm_constraint_miss(c, &shipped_v), Some(Some(_))))
+                        .collect();
+                    return if kept.len() == clauses.len() {
+                        item.to_string()
+                    } else if kept.is_empty() {
+                        format!("{open}{name}{close}")
+                    } else {
+                        format!(
+                            "{open}{name} {}{close}",
+                            kept.join(&format!(" with %python-{name} "))
+                        )
+                    };
+                }
                 match rpm_constraint_miss(constraint, &shipped_v) {
                     Some(Some(_)) => format!("{open}{name}{close}"),
                     _ => item.to_string(),
@@ -3943,6 +3964,38 @@ mod relax_bound_tests {
         );
         assert!(!out.contains("<= 0.1.11"), "{out}");
         assert!(out.contains("python-numpy < 1"), "{out}");
+    }
+
+    /// python-pycrdt: a rich `with` dependency whose upper clause the distro's
+    /// trio 0.34.0 misses; only the clause it misses goes.
+    #[test]
+    fn a_missed_clause_of_a_with_dependency_is_dropped_the_met_one_stays() {
+        let spec = "BuildRequires:  %{python_module trio >= 0.25.1 with %python-trio < 0.34}\n";
+        assert_eq!(
+            relax_dependency_bounds(spec, "trio", "0.34.0"),
+            "BuildRequires:  %{python_module trio >= 0.25.1}\n"
+        );
+        assert_eq!(
+            relax_dependency_bounds(
+                "BuildRequires:  %{python_module trio >= 1 with %python-trio < 2}\n",
+                "trio",
+                "3.0"
+            ),
+            "BuildRequires:  %{python_module trio >= 1}\n"
+        );
+        assert_eq!(
+            relax_dependency_bounds(
+                "BuildRequires:  %{python_module trio >= 5 with %python-trio < 6}\n",
+                "trio",
+                "3.0"
+            ),
+            "BuildRequires:  %{python_module trio < 6}\n"
+        );
+        // Both met: untouched.
+        assert_eq!(
+            relax_dependency_bounds(spec, "trio", "0.30.0"),
+            spec
+        );
     }
 
     #[test]

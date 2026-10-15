@@ -1589,6 +1589,10 @@ struct RunState {
     last_log_digest: Option<String>,
     /// Consecutive fix rounds that were given a log identical to the one before.
     identical_logs: usize,
+    /// SHA-256 of the spec an unresolvable build was retried for after a
+    /// bound was relaxed: the retry is only worth a build when the spec
+    /// then differs from this.
+    relaxed_from_spec: Option<String>,
 }
 
 /// The linked project that ships `rpm_name`, when the own project does not
@@ -1674,6 +1678,7 @@ fn run_stages(
         session_id: None,
         last_log_digest: None,
         identical_logs: 0,
+        relaxed_from_spec: None,
     };
 
     let obs_status = checkout_stage(&ctx, &mut st)?;
@@ -1697,6 +1702,17 @@ fn run_stages(
             continue;
         }
         commit_step(&ctx, &mut st)?;
+        // A build retried because a bound was to be relaxed, of a spec that is
+        // byte-for-byte the one OBS just called unresolvable, can only say the
+        // same again, and takes minutes to say it.
+        if let Some(before) = st.relaxed_from_spec.take()
+            && sha256_file(&ctx.spec_path).ok().as_deref() == Some(before.as_str())
+        {
+            return Err(ctx.failed(
+                "OBS reported the build dependencies unresolvable on a bound the tool meant to                  relax, but the spec is unchanged after the relaxation: rebuilding it cannot                  change the verdict"
+                    .to_string(),
+            ));
+        }
         match build_round(&ctx, &mut st)? {
             RoundEnd::Retry => continue,
             RoundEnd::Finished(result) => return Ok(result),
@@ -2919,6 +2935,29 @@ fn linked_bound_conflicts(
         .collect()
 }
 
+/// The version a linked project ships of `dep` (a bare upstream name), or `None`
+/// when none does or the projects cannot be read.
+fn linked_shipped_version(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    dep: &str,
+) -> Option<String> {
+    let emit = Emit::new(ctx.reporter, step);
+    let mut linked = Vec::new();
+    for (path_project, _repo) in osc::get_project_repo_paths(&ctx.config.project, emit).ok()? {
+        let l = osc::try_list_project_packages(&path_project, emit).ok()?;
+        linked.push((path_project, l));
+    }
+    let none = Default::default();
+    let no_statuses = std::collections::HashMap::new();
+    let crate::depclass::Availability::InLinked { project, pkg } =
+        crate::depclass::availability(dep, &none, &no_statuses, &linked)
+    else {
+        return None;
+    };
+    osc::source_version(&project, &pkg)
+}
+
 /// The lines of this package's last build log that look like an ABI mismatch
 /// with a library it links (`undefined symbol`), or `None`.
 fn abi_symptom(ctx: &RunCtx) -> Option<String> {
@@ -3718,6 +3757,12 @@ fn unresolvable_deps_round(
         names: deps.clone(),
         source: ap_core::event::MissingSource::BuildLog,
     });
+    // A rich dependency (`(x >= 1 with x < 2)`) carries no `(got version ...)`:
+    // read the distro's version into it, so a bound it misses is relaxed like
+    // any other (convention 59) instead of the package being queued as missing.
+    let detail = osc::annotate_rich_misses(detail, &|dep| {
+        linked_shipped_version(ctx, build_step.id, dep)
+    });
     // "have choice for libnccl.so.2 needed by X: python313-nvidia-nccl-cu13
     // python314-nvidia-nccl-cu13" names nothing missing: the solver cannot pick
     // between the flavors of one package that all provide what is needed. An
@@ -3960,6 +4005,9 @@ fn unresolvable_deps_round(
                 st.attempts,
                 build_log.display()
             )));
+        }
+        if !overshoot.is_empty() {
+            st.relaxed_from_spec = sha256_file(spec_path).ok();
         }
         return Ok(RoundEnd::Retry);
     }
