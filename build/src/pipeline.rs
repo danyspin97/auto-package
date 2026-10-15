@@ -903,10 +903,14 @@ pub fn select_target(
             reporter,
         );
         for conflict in &plan.conflicts {
-            reporter.report(&Event::Warning {
-                step: None,
-                message: conflict.message(&obs_project),
-            });
+            // Every round derives the same plan: say each conflict once.
+            let first = distro_bounds::reported().first_conflict(&obs_project, conflict);
+            if first {
+                reporter.report(&Event::Warning {
+                    step: None,
+                    message: conflict.message(&obs_project),
+                });
+            }
             // The distro's release is used and the dependent's bound dropped
             // from its spec (convention 59); an ABI break shows in its build
             // and goes to a patch (convention 62), not to a dependency that is
@@ -921,10 +925,12 @@ pub fn select_target(
             }
         }
         for note in &plan.notes {
-            reporter.report(&Event::Warning {
-                step: None,
-                message: note.clone(),
-            });
+            if distro_bounds::reported().first_note(&obs_project, note) {
+                reporter.report(&Event::Warning {
+                    step: None,
+                    message: note.clone(),
+                });
+            }
         }
         for &i in &plan.rebuild {
             resolution[i] = Resolution::No;
@@ -1437,6 +1443,9 @@ pub fn run_package(
     {
         package_notes_step(config, pkg_run, ws, reporter);
     }
+    if let (PipelineResult::Built { .. }, Some(ws)) = (&result, &ws) {
+        ws.release_wheel_tree(reporter);
+    }
     if let Some((outcome, reason)) = outcome
         && let Some(ws) = &ws
     {
@@ -1679,6 +1688,9 @@ fn run_stages(
     reporter: &dyn Reporter,
 ) -> Result<PipelineResult, PipelineResult> {
     let ctx = preflight(config, pkg_run, reporter)?;
+    if let Err(reason) = crate::workspace::await_disk_space(&config.work_dir, reporter, None) {
+        return Err(ctx.failed(reason));
+    }
     let mut st = RunState {
         step_attempts: Attempts::default(),
         sdist_top_level: String::new(),
@@ -2598,6 +2610,13 @@ fn review_stage(
                     state.patched_problems.push(h);
                 }
             });
+            // A dependency the review added is queued now, not after a build
+            // OBS rejects as unresolvable.
+            if effect == TurnEffect::Edited
+                && let Some(missing) = missing_deps_added_by_edit(ctx, review_step.id, &spec_before)
+            {
+                return Err(missing);
+            }
         }
     }
     Ok(())
@@ -2714,6 +2733,11 @@ fn prefix_stage(
             if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
                 st.attempts += 1;
                 persist_attempts(ws, &config.run_id, st.attempts);
+            }
+            if effect == TurnEffect::Edited
+                && let Some(missing) = missing_deps_added_by_edit(ctx, prefix_step.id, &clean)
+            {
+                return Err(missing);
             }
         }
     }
@@ -3062,6 +3086,175 @@ fn warn_skipped(
     }
 }
 
+/// What the own project and the projects it builds against ship, as the
+/// availability check reads it.
+struct ProjectView {
+    listing: std::sync::Arc<std::collections::HashSet<String>>,
+    statuses: std::collections::HashMap<String, osc::BuildStatus>,
+    linked: Vec<(String, std::sync::Arc<std::collections::HashSet<String>>)>,
+}
+
+/// The listings and build statuses of the own project and every linked one, or
+/// `None` when any of them cannot be read: the callers decide what not knowing
+/// means for them.
+fn project_view(ctx: &RunCtx, step: ap_core::event::StepId) -> Option<ProjectView> {
+    let config = ctx.config;
+    let emit = Emit::new(ctx.reporter, step);
+    let listing = osc::try_list_project_packages(&config.project, emit).ok()?;
+    let statuses =
+        osc::get_project_build_statuses(&config.project, &config.distro, &config.arch, emit)
+            .ok()?;
+    let mut linked = Vec::new();
+    for (path_project, _repo) in osc::get_project_repo_paths(&config.project, emit).ok()? {
+        let l = osc::try_list_project_packages(&path_project, emit).ok()?;
+        linked.push((path_project, l));
+    }
+    Some(ProjectView {
+        listing,
+        statuses,
+        linked,
+    })
+}
+
+/// A spec's `BuildRequires:` and `Requires:` entries: a `Requires:` line is
+/// read the way a `BuildRequires:` one is, so the splitting (bounds, `%{...}`,
+/// commas) is the one `spec::build_requires` already does.
+fn spec_dependency_entries(spec: &str) -> Vec<crate::spec::BuildRequire> {
+    let both: String = spec
+        .lines()
+        .map(|l| match l.trim_start() {
+            t if t.starts_with("Requires") => format!("Build{t}\n"),
+            _ => format!("{l}\n"),
+        })
+        .collect();
+    crate::spec::build_requires(&both)
+}
+
+/// `python-<x>` for a dependency entry that is clearly a Python package: a
+/// `python-`/`python3-`/`python313-` name or `%{python_module x}`. Everything
+/// else (a capability, a `-devel` package, a name with a macro in it) is `None`.
+fn python_dependency(entry: &crate::spec::BuildRequire) -> Option<String> {
+    use crate::spec::BuildRequire;
+    let name = match entry {
+        BuildRequire::Package(n) => {
+            let bare = osc::strip_rpm_prefix(n);
+            if bare == n || bare.ends_with("-devel") {
+                return None;
+            }
+            bare
+        }
+        BuildRequire::Capability(token) => token
+            .strip_prefix("%{python_module")
+            .and_then(|r| r.strip_suffix('}'))
+            .filter(|r| r.starts_with(char::is_whitespace))
+            .and_then(|r| r.split_whitespace().next())?,
+    };
+    let plain = name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    plain.then(|| format!("python-{name}"))
+}
+
+/// The Python packages `after` depends on and `before` did not, as
+/// `python-<x>`, compared by [`osc::fuzzy_key`] so a respelling is not an
+/// addition.
+fn added_python_dependencies(before: &str, after: &str) -> Vec<String> {
+    let known: std::collections::HashSet<String> = spec_dependency_entries(before)
+        .iter()
+        .filter_map(python_dependency)
+        .map(|d| osc::fuzzy_key(&d))
+        .collect();
+    let mut seen = known;
+    spec_dependency_entries(after)
+        .iter()
+        .filter_map(python_dependency)
+        .filter(|d| seen.insert(osc::fuzzy_key(d)))
+        .collect()
+}
+
+/// `names` minus the ones the own project (except a failed build) or a linked
+/// project ships.
+fn not_shipped(names: Vec<String>, view: &ProjectView) -> Vec<String> {
+    use crate::depclass::{Availability, availability};
+    names
+        .into_iter()
+        .filter(|n| {
+            matches!(
+                availability(n, &view.listing, &view.statuses, &view.linked),
+                Availability::Absent
+                    | Availability::InProject {
+                        status: Some(osc::BuildStatus::Failed),
+                        ..
+                    }
+            )
+        })
+        .collect()
+}
+
+/// The `MissingDeps` result for a Python package a turn's edit added to the spec
+/// that no project this one builds against ships, or `None` when there is none
+/// (or the listings cannot be read: not knowing does not block the build).
+///
+/// `before` is the spec the turn started from; the edited one is on disk and
+/// stays there, so it is applied when the dependency is built. Without this the
+/// package is committed and built, OBS reports the new dependency unresolvable
+/// after a full round (python-cuda-core added `cuda-bindings`), and only then
+/// is it queued.
+fn missing_deps_added_by_edit(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    before: &str,
+) -> Option<PipelineResult> {
+    let after = std::fs::read_to_string(&ctx.spec_path).ok()?;
+    let own = |d: &str| {
+        let key = osc::fuzzy_key(osc::strip_rpm_prefix(d));
+        [ctx.config.pkg_name.as_str(), ctx.rpm_name.as_str()]
+            .iter()
+            .any(|n| osc::fuzzy_key(osc::strip_rpm_prefix(n)) == key)
+    };
+    let added: Vec<String> = added_python_dependencies(before, &after)
+        .into_iter()
+        .filter(|d| !own(d))
+        .collect();
+    if added.is_empty() {
+        return None;
+    }
+    // Capabilities, interpreter packages and system tools are not packages to
+    // build; a PyPI name is never a bare capability of the distro, so nothing
+    // here asks it.
+    let (named, _skipped) = crate::depclass::triage_all(&added, &|_| false);
+    if named.is_empty() {
+        return None;
+    }
+    let to_build = not_shipped(named, &project_view(ctx, step)?);
+    if to_build.is_empty() {
+        return None;
+    }
+    ctx.reporter.report(&Event::MissingPackages {
+        step,
+        names: to_build.clone(),
+        source: ap_core::event::MissingSource::Agent,
+    });
+    ctx.reporter.report(&Event::Warning {
+        step: Some(step),
+        message: format!(
+            "the edit added {} to the spec and neither {} nor a project it builds against \
+             ships it: queuing it before the build instead of waiting for OBS to report it \
+             unresolvable",
+            to_build.join(", "),
+            ctx.config.project
+        ),
+    });
+    Some(PipelineResult::MissingDeps {
+        rpm_name: ctx.rpm_name.clone(),
+        deps: to_build,
+        patches: Vec::new(),
+        native: Vec::new(),
+        outdated: Vec::new(),
+    })
+}
+
 /// `deps`, minus the ones the project already has built for this repository
 /// and architecture and the ones a linked project ships.
 ///
@@ -3087,23 +3280,14 @@ fn without_available_deps(
         return deps;
     }
     let config = ctx.config;
-    let emit = Emit::new(ctx.reporter, step);
-    let (Ok(listing), Ok(statuses)) = (
-        osc::try_list_project_packages(&config.project, emit),
-        osc::get_project_build_statuses(&config.project, &config.distro, &config.arch, emit),
-    ) else {
+    let Some(ProjectView {
+        listing,
+        statuses,
+        linked,
+    }) = project_view(ctx, step)
+    else {
         return deps;
     };
-    let mut linked = Vec::new();
-    let Ok(paths) = osc::get_project_repo_paths(&config.project, emit) else {
-        return deps;
-    };
-    for (path_project, _repo) in paths {
-        let Ok(l) = osc::try_list_project_packages(&path_project, emit) else {
-            return deps;
-        };
-        linked.push((path_project, l));
-    }
     deps.into_iter()
         .filter(|dep| {
             use crate::depclass::{Availability, availability};
@@ -3193,7 +3377,7 @@ fn fix_after_validation(
 
     match turn {
         Ok((agent_step, outcome)) => {
-            if let Err(reason) = apply_turn_and_reset(
+            let effect = match apply_turn_and_reset(
                 ApplyTurnCtx {
                     config,
                     checkout_dir,
@@ -3211,7 +3395,13 @@ fn fix_after_validation(
                 &mut st.sdist_top_level,
                 &mut st.from_repo_archive,
             ) {
-                return Err(ctx.failed(reason));
+                Ok(effect) => effect,
+                Err(reason) => return Err(ctx.failed(reason)),
+            };
+            if effect == TurnEffect::Edited
+                && let Some(missing) = missing_deps_added_by_edit(ctx, agent_step.id, &clean)
+            {
+                return Err(missing);
             }
             Ok(())
         }
@@ -3268,9 +3458,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         // dependency stays); see `relaxed_dependencies`.
         let mut fixed = fixed;
         fixed = spec_with_published_defects_fixed(&fixed, checkout_dir);
-        for (dep, shipped) in &PkgState::load(ws).relaxed_dependencies {
-            fixed = crate::spec::relax_dependency_bounds(&fixed, dep, shipped);
-        }
+        fixed = crate::spec::relax_dependencies(&fixed, &PkgState::load(ws).relaxed_dependencies);
         if fixed != current {
             write_or_warn(spec_path, &fixed);
         }
@@ -3296,10 +3484,23 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             // Run it before calling the files missing, and keep its error
             // so the agent sees why a download did not happen.
             let mut service_error = None;
+            // A Source URL with no `_service` at all gets the `download_files` one
+            // written here; it is taken away again when it does not fetch, so the
+            // checkout is as the agent left it.
+            let generated = write_download_service(&expanded, &missing, checkout_dir);
             if !missing.is_empty() && checkout_dir.join("_service").is_file() {
                 match osc::run_service(checkout_dir, Emit::new(reporter, validate_step.id)) {
                     Ok(()) => missing = missing_source_files(&expanded, checkout_dir),
-                    Err(e) => service_error = Some(e.to_string()),
+                    Err(e) => {
+                        service_error = Some(if generated {
+                            format!("a generated `download_files` service failed: {e}")
+                        } else {
+                            e.to_string()
+                        })
+                    }
+                }
+                if generated && !missing.is_empty() {
+                    let _ = std::fs::remove_file(checkout_dir.join("_service"));
                 }
             }
             if !missing.is_empty() {
@@ -4420,7 +4621,7 @@ fn fix_after_build(
     // Everything the turn called missing is already built here: its edit
     // is applied below and the build runs again.
 
-    if let Err(reason) = apply_turn_and_reset(
+    let effect = match apply_turn_and_reset(
         ApplyTurnCtx {
             config,
             checkout_dir,
@@ -4438,7 +4639,15 @@ fn fix_after_build(
         &mut st.sdist_top_level,
         &mut st.from_repo_archive,
     ) {
-        return Err(ctx.failed(reason));
+        Ok(effect) => effect,
+        Err(reason) => return Err(ctx.failed(reason)),
+    };
+    // A dependency the fix added is queued now, not after another build OBS
+    // rejects as unresolvable.
+    if effect == TurnEffect::Edited
+        && let Some(missing) = missing_deps_added_by_edit(ctx, agent_step.id, &clean)
+    {
+        return Err(missing);
     }
     Ok(RoundEnd::Retry)
 }
@@ -4993,6 +5202,53 @@ fn missing_source_files(expanded_spec: &str, checkout_dir: &Path) -> Vec<String>
         }
     }
     missing
+}
+
+/// The `_service` that fetches every `SourceN: <url>` of the spec: the
+/// openSUSE `download_files` form, which reads the URLs (and `#/<name>` rename
+/// fragments) from the spec itself.
+const DOWNLOAD_FILES_SERVICE: &str = "<services>\n\
+     \x20 <service name=\"download_files\" mode=\"manual\"/>\n\
+     </services>\n";
+
+/// The `http(s)://` URLs of the `SourceN:` lines of `expanded_spec` whose file
+/// (the basename, or the `#/<name>` rename) is one of `missing`. A `Patch` line
+/// and a value that is not an http(s) URL are never listed.
+fn missing_source_urls(expanded_spec: &str, missing: &[String]) -> Vec<String> {
+    expanded_spec
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("Source")?;
+            let value = rest
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .strip_prefix(':')?
+                .trim();
+            let is_url = ["https://", "http://"]
+                .iter()
+                .any(|p| value.len() > p.len() && value.starts_with(p));
+            let name = value.rsplit('/').next().unwrap_or(value);
+            (is_url
+                && !value.contains(['%', ' ', '\t'])
+                && missing.iter().any(|m| m == name))
+            .then(|| value.to_string())
+        })
+        .collect()
+}
+
+/// Write a `download_files` `_service` when a missing Source is a URL and the
+/// checkout has no `_service` yet; `true` when it was written. An agent that
+/// adds `SourceN: <url>` cannot download it and often forgets the `_service`
+/// that does (python-instanttensor, python-brotlicffi), which costs a turn.
+/// An existing `_service` is the agent's or the pipeline's and is not touched.
+fn write_download_service(expanded_spec: &str, missing: &[String], checkout_dir: &Path) -> bool {
+    let service = checkout_dir.join("_service");
+    if missing.is_empty()
+        || service.exists()
+        || missing_source_urls(expanded_spec, missing).is_empty()
+    {
+        return false;
+    }
+    ap_core::fsx::write_atomic(&service, DOWNLOAD_FILES_SERVICE).is_ok()
 }
 
 /// Keep `checkout_dir/series` in sync with the spec's current `PatchN:`
@@ -8549,6 +8805,52 @@ mod version_conflict_tests {
         assert!(version_conflicts("p:conflict", "open-webui", &webui).is_empty());
         assert!(version_conflicts("p:other", "open-webui", &webui).is_empty());
     }
+
+    /// open-webui, the requested root, pins packages the distro ships newer
+    /// (`pydantic==2.13.4` against 2.13.5). The check records each pin in the
+    /// root's own state, and the validation of the root's spec, which runs
+    /// before its first build, drops it from BuildRequires and Requires alike.
+    #[test]
+    fn a_root_that_pins_distro_packages_has_the_pins_relaxed_in_its_spec() {
+        let mut root = node(
+            "open-webui",
+            "0.12.2",
+            &["pydantic==2.13.4", "redis==8.0.1", "mcp==1.27.2"],
+        );
+        root.is_requested = true;
+        let nodes = [
+            root,
+            node("pydantic", "2.13.4", &[]),
+            node("redis", "8.0.1", &[]),
+            node("mcp", "1.27.2", &[]),
+        ];
+        let distro = [false, true, true, false];
+        let needs_build = [true, false, false, true];
+        let shipped = |i: usize| match i {
+            1 => Some("2.13.5".to_string()),
+            2 => Some("8.0.1".to_string()),
+            _ => None,
+        };
+        let plan = distro_bounds::plan(&nodes, &distro, &needs_build, shipped);
+        assert_eq!(plan.conflicts.len(), 1, "{plan:?}");
+        let conflict = &plan.conflicts[0];
+        assert_eq!(conflict.dependent, "open-webui");
+        assert_eq!(conflict.kind, distro_bounds::Kind::DistroTooNew);
+
+        let mut state = PkgState::default();
+        state.relax_dependency(&conflict.dependency, &conflict.distro_version);
+        let spec = "BuildRequires:  %{python_module pydantic == 2.13.4}\n\
+                    BuildRequires:  %{python_module redis == 8.0.1}\n\
+                    Requires:       python-pydantic == 2.13.4\n\
+                    Requires:       python-redis == 8.0.1\n";
+        assert_eq!(
+            crate::spec::relax_dependencies(spec, &state.relaxed_dependencies),
+            "BuildRequires:  %{python_module pydantic}\n\
+             BuildRequires:  %{python_module redis == 8.0.1}\n\
+             Requires:       python-pydantic\n\
+             Requires:       python-redis == 8.0.1\n"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -9421,6 +9723,161 @@ mod tests {
         for name in dep_names_from_requires_dist(&reqs) {
             assert_eq!(name, normalize_pkg_name("ruamel.yaml"));
         }
+    }
+
+    #[test]
+    fn missing_source_urls_lists_http_sources_whose_file_is_missing() {
+        let spec = "\
+Name:           foo
+Source0:        https://github.com/o/r/archive/refs/tags/v1.2.tar.gz#/r-1.2.tar.gz
+Source1:        http://example.com/x/brotli-1.2.0.tar.gz
+Source2:        https://example.com/have-1.0.tar.gz
+Source3:        registry.tar.zst
+Source4:        ftp://example.com/old.tar.gz
+Source5:        file:///etc/passwd
+Patch0:         https://example.com/fix.patch
+";
+        let missing: Vec<String> = [
+            "r-1.2.tar.gz",
+            "brotli-1.2.0.tar.gz",
+            "registry.tar.zst",
+            "old.tar.gz",
+            "passwd",
+            "fix.patch",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            missing_source_urls(spec, &missing),
+            vec![
+                "https://github.com/o/r/archive/refs/tags/v1.2.tar.gz#/r-1.2.tar.gz",
+                "http://example.com/x/brotli-1.2.0.tar.gz",
+            ]
+        );
+    }
+
+    #[test]
+    fn download_service_is_written_for_a_missing_url_source_without_a_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Source0:        https://example.com/InstantTensor-0.2.2.tar.gz\n";
+        let missing = vec!["InstantTensor-0.2.2.tar.gz".to_string()];
+        assert!(write_download_service(spec, &missing, dir.path()));
+        let written = std::fs::read_to_string(dir.path().join("_service")).unwrap();
+        assert!(written.contains("name=\"download_files\""));
+        assert!(written.contains("mode=\"manual\""));
+        assert!(written.starts_with("<services>") && written.trim_end().ends_with("</services>"));
+    }
+
+    #[test]
+    fn download_service_leaves_an_existing_service_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("_service"), "mine").unwrap();
+        let spec = "Source0:        https://example.com/a-1.tar.gz\n";
+        let missing = vec!["a-1.tar.gz".to_string()];
+        assert!(!write_download_service(spec, &missing, dir.path()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("_service")).unwrap(),
+            "mine"
+        );
+    }
+
+    #[test]
+    fn download_service_is_not_written_for_a_source_that_is_not_a_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Source0:        a-1.tar.gz\nSource1:        ftp://example.com/b.tar.gz\n\
+                    Patch0:         https://example.com/c.patch\n";
+        let missing: Vec<String> = ["a-1.tar.gz", "b.tar.gz", "c.patch"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!write_download_service(spec, &missing, dir.path()));
+        assert!(!dir.path().join("_service").exists());
+        assert!(!write_download_service(spec, &[], dir.path()));
+    }
+
+    fn view(own: &[(&str, osc::BuildStatus)], linked: &[&str]) -> ProjectView {
+        ProjectView {
+            listing: std::sync::Arc::new(own.iter().map(|(n, _)| n.to_string()).collect()),
+            statuses: own
+                .iter()
+                .map(|(n, s)| (n.to_string(), s.clone()))
+                .collect(),
+            linked: vec![(
+                "devel:languages:python".to_string(),
+                std::sync::Arc::new(linked.iter().map(|n| n.to_string()).collect()),
+            )],
+        }
+    }
+
+    #[test]
+    fn added_python_dependencies_lists_only_new_python_packages() {
+        let before = "\
+BuildRequires:  %{python_module pip}
+BuildRequires:  python-old
+Requires:       python-runtime-dep
+";
+        let after = "\
+BuildRequires:  %{python_module pip}
+BuildRequires:  python-old
+BuildRequires:  %{python_module cuda_bindings >= 13}
+BuildRequires:  python3-newbuild
+BuildRequires:  python3-devel
+BuildRequires:  python-foo-devel
+BuildRequires:  gcc-c++
+BuildRequires:  pkgconfig(libfoo)
+BuildRequires:  %{python_module %{name}}
+Requires:       python-runtime-dep
+Requires:       python-added-runtime >= 1.0
+Requires:       python-Old
+";
+        assert_eq!(
+            added_python_dependencies(before, after),
+            vec![
+                "python-cuda_bindings",
+                "python-newbuild",
+                "python-devel",
+                "python-added-runtime"
+            ]
+        );
+        // Nothing changed, or something removed: nothing added.
+        assert!(added_python_dependencies(after, before).is_empty());
+        assert!(added_python_dependencies(after, after).is_empty());
+    }
+
+    #[test]
+    fn added_python_dependencies_triage_sets_aside_interpreter_packages() {
+        let added = vec!["python-devel".to_string(), "python-cuda_bindings".to_string()];
+        let (named, skipped) = crate::depclass::triage_all(&added, &|_| false);
+        assert_eq!(named, vec!["cuda_bindings"]);
+        assert_eq!(skipped.len(), 1);
+    }
+
+    #[test]
+    fn not_shipped_keeps_only_what_no_project_ships() {
+        use osc::BuildStatus::*;
+        let v = view(
+            &[
+                ("python-built", Succeeded),
+                ("python-failing", Failed),
+                ("python-building", Building),
+                ("python-blocked", Blocked),
+            ],
+            &["python-linked-one", "python-Mixed_Case"],
+        );
+        let names: Vec<String> = [
+            "built",
+            "failing",
+            "building",
+            "blocked",
+            "linked_one",
+            "mixed-case",
+            "cuda-bindings",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(not_shipped(names, &v), vec!["failing", "cuda-bindings"]);
     }
 
     #[test]

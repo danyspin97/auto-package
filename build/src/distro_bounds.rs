@@ -201,6 +201,38 @@ impl BoundConflict {
     }
 }
 
+/// The bound conflicts and notes of this run already written to the log.
+/// `select_target` runs every round and re-derives the same plan, so without
+/// this open-webui's forty `==` pins are logged forty times a round. A conflict
+/// is told once per (project, dependent, dependency); a note once per text.
+#[derive(Debug, Default)]
+pub struct Reported(HashSet<String>);
+
+impl Reported {
+    /// Whether `conflict` was not reported yet; marks it reported.
+    pub fn first_conflict(&mut self, project: &str, conflict: &BoundConflict) -> bool {
+        self.0.insert(format!(
+            "conflict\0{project}\0{}\0{}",
+            fuzzy_key(&conflict.dependent),
+            fuzzy_key(&conflict.dependency)
+        ))
+    }
+
+    /// Whether `note` was not reported yet; marks it reported.
+    pub fn first_note(&mut self, project: &str, note: &str) -> bool {
+        self.0.insert(format!("note\0{project}\0{note}"))
+    }
+}
+
+/// What this process has reported (one process is one run).
+pub fn reported() -> std::sync::MutexGuard<'static, Reported> {
+    static REPORTED: std::sync::OnceLock<std::sync::Mutex<Reported>> = std::sync::OnceLock::new();
+    REPORTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// What the check found.
 #[derive(Debug, Default)]
 pub struct Plan {
@@ -369,6 +401,34 @@ mod tests {
     fn meets(version: &str, spec: &str) -> bool {
         let clauses = parse_specifier(spec).unwrap_or_else(|| panic!("{spec} does not parse"));
         violation(&clauses, &v(version)).is_none()
+    }
+
+    fn conflict(dependent: &str, dependency: &str) -> BoundConflict {
+        BoundConflict {
+            dependency: dependency.into(),
+            distro_version: "2.13.5".into(),
+            resolved_version: "2.13.4".into(),
+            dependent: dependent.into(),
+            specifier: "==2.13.4".into(),
+            kind: Kind::DistroTooNew,
+        }
+    }
+
+    /// The same plan is derived every round; each (dependent, dependency) is
+    /// told once, however spelled, and notes once per text.
+    #[test]
+    fn a_conflict_is_reported_once_per_dependent_and_dependency() {
+        let mut reported = Reported::default();
+        assert!(reported.first_conflict("p:x", &conflict("open-webui", "pydantic")));
+        assert!(!reported.first_conflict("p:x", &conflict("open-webui", "pydantic")));
+        assert!(!reported.first_conflict("p:x", &conflict("Open_WebUI".replace("WebUI", "webui").as_str(), "Pydantic")));
+        // Another dependency, another dependent, another project: new.
+        assert!(reported.first_conflict("p:x", &conflict("open-webui", "redis")));
+        assert!(reported.first_conflict("p:x", &conflict("vllm", "pydantic")));
+        assert!(reported.first_conflict("p:y", &conflict("open-webui", "pydantic")));
+        assert!(reported.first_note("p:x", "numpy 2 is older"));
+        assert!(!reported.first_note("p:x", "numpy 2 is older"));
+        assert!(reported.first_note("p:y", "numpy 2 is older"));
     }
 
     #[test]

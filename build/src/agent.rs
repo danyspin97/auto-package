@@ -2761,7 +2761,15 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    the same directory: a `.pth` that inserts only the first namespace portion on
    `sys.path` sees `/usr/lib64/...` and never `/usr/lib/.../cutlass/__init__.py`.
    Use `%{python_sitearch}` for all of them (every one is x86_64-only anyway) or
-   `%{python_sitelib}` for all. `%check` of such a wheel imports the chain its
+   `%{python_sitelib}` for all. The symptom is `ModuleNotFoundError: No module
+   named '<pkg>._mlir'` (or `cannot import name ... (unknown location)`) although
+   the files are installed: the package with the `__init__.py` is in one tree, its
+   `_mlir` in the other. The wheel that owns that `__init__.py` decides: a
+   `py3-none-any` wheel (`-core`, `BuildArch: noarch`) installs into sitelib, so
+   every arch-specific sibling, `-base` (which holds `_mlir`) as much as `-cu13`,
+   moves its tree (and its dist-info) to sitelib in `%install` and lists it there
+   in `%files`: fix all siblings in the project, not only the one that failed,
+   since each one's `%check` is built on the others. `%check` of such a wheel imports the chain its
    dependents import (`import cutlass.cutlass_dsl, cutlass._mlir`), not a
    `test -e` of one library, and a package that fails on a sibling's layout
    reports the sibling with `patch_dependencies` (convention 62, case b).
@@ -5391,6 +5399,26 @@ mod tests {
         assert!(combined.contains("29. Missing source code"));
         assert!(combined.contains("### Finding Missing C Headers and Libraries"));
         assert!(combined.contains("## Workflow"));
+    }
+
+    /// python-nvidia-cutlass-dsl-libs-cu13 failed `%check` with `No module named
+    /// '...cutlass._mlir'`: the noarch `-core` (the `__init__.py`) is in sitelib,
+    /// its arch-specific siblings were in sitearch. Convention 76 names the
+    /// symptom and says which tree wins and which siblings move.
+    #[test]
+    fn convention_76_names_the_split_tree_symptom_and_the_fix() {
+        let combined = static_system_prompt();
+        let at = combined.find("76. **The files of one Python package come from one tree.**").unwrap();
+        let end = combined[at..].find("77. **").unwrap();
+        let text = &combined[at..at + end];
+        for want in [
+            "ModuleNotFoundError: No module",
+            "`py3-none-any` wheel",
+            "moves its tree",
+            "fix all siblings",
+        ] {
+            assert!(text.contains(want), "convention 76 lacks {want:?}");
+        }
     }
 
     /// The priorities frame every convention, so they must come first, and
