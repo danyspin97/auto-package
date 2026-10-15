@@ -172,6 +172,18 @@ fn soname_stem(name: &str) -> Option<&str> {
     plain.then_some(stem)
 }
 
+/// Whether a soname stem carries the 8-hex-digit hash auditwheel appends to the
+/// libraries it bundles into a wheel (`libavcodec-f34387fd`,
+/// `libopenblasp-r0-37b5f859.3.3`): such a library is never a package.
+fn is_hashed_bundled_library(stem: &str) -> bool {
+    stem.split('-').skip(1).any(|part| {
+        let hash = part.split('.').next().unwrap_or("");
+        hash.len() == 8
+            && hash.chars().all(|c| c.is_ascii_hexdigit())
+            && hash.chars().any(|c| c.is_ascii_digit())
+    })
+}
+
 /// The names among `names` that stand for a native (C/C++) library reported in
 /// `originals`: a translated name (`trantor`, from `libtrantor-devel`) loses the
 /// spelling that said it was a library, and without that it would be looked up
@@ -255,6 +267,13 @@ pub fn classify_reported(raw: &str) -> Reported {
         }
     }
     if let Some(stem) = soname_stem(raw) {
+        if is_hashed_bundled_library(stem) {
+            return not_a_package(
+                "a library a wheel bundles under a hashed name (auditwheel): no package \
+                 provides it, so the package that ships the wheel has to leave it out of its \
+                 Requires with `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\\.so.*$`",
+            );
+        }
         if VENDOR_LIBRARY_PREFIXES.iter().any(|p| stem.starts_with(p)) {
             return Reported::Capability {
                 capability: raw.to_string(),
@@ -540,6 +559,26 @@ mod tests {
             assert!(matches!(s, Skip::Vendor(_)), "{raw}");
             assert!(s.is_unbuildable());
         }
+    }
+
+    /// python-opencv-python-headless bundles `libavcodec-f34387fd.so.62...`;
+    /// dependents of it were reported missing `avcodec-f34387fd` and the like.
+    #[test]
+    fn a_hashed_library_bundled_in_a_wheel_is_never_a_package() {
+        for raw in [
+            "libavcodec-f34387fd.so.62.11.100()(64bit)",
+            "libavcodec-f34387fd.so.62.11.100(LIBAVCODEC_62)(64bit)",
+            "libopenblasp-r0-37b5f859.3.3.so()(64bit)",
+            "libquadmath-96973f99.so.0.0.0()(64bit)",
+        ] {
+            let s = skipped(raw);
+            assert!(matches!(s, Skip::NotAPackage { .. }), "{raw}");
+            assert!(s.is_unbuildable());
+        }
+        // Ordinary sonames are untouched.
+        assert!(built("libfoo-1.2.so.3()(64bit)").is_some());
+        assert!(built("libz3.so.4.15()(64bit)").is_some());
+        assert!(built("libdeadbeef-abcdefab.so.1()(64bit)").is_some());
     }
 
     #[test]
