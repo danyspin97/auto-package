@@ -5370,8 +5370,10 @@ fn apply_turn_outcome(
                 step,
                 reporter,
                 &format!(
-                    "\n## Attempt {attempt} — {label}\nReasoning: {}\nConfidence: {:?}\n",
-                    outcome.reasoning, outcome.confidence
+                    "\n## Attempt {attempt} — {label}\nReasoning: {}\n{}Confidence: {:?}\n",
+                    outcome.reasoning,
+                    evidence_lines(&outcome.evidence),
+                    outcome.confidence
                 ),
                 notes_path,
             );
@@ -7506,6 +7508,30 @@ fn is_cargo_workspace_member(root_cargo_toml: &Path, manifest_rel: &str) -> bool
         })
 }
 
+/// What the turn read to reach its edit (log lines, file excerpts), at most
+/// three items of 200 characters each, as an `Evidence:` line for the journal.
+/// The notes agent summarises the journal and otherwise has only the reasoning,
+/// so its notes say "the exact error is not recorded".
+fn evidence_lines(evidence: &[String]) -> String {
+    let shown: Vec<String> = evidence
+        .iter()
+        .take(3)
+        .map(|e| {
+            let flat = e.split_whitespace().collect::<Vec<_>>().join(" ");
+            match flat.char_indices().nth(200) {
+                Some((at, _)) => format!("{}...", &flat[..at]),
+                None => flat,
+            }
+        })
+        .filter(|e| !e.is_empty())
+        .collect();
+    if shown.is_empty() {
+        String::new()
+    } else {
+        format!("Evidence: {}\n", shown.join(" | "))
+    }
+}
+
 /// A turn's reasoning on one line of at most 400 characters, for the notes.
 fn brief(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -8327,6 +8353,29 @@ fn verify_repos_exist(urls: &[String]) -> Vec<bool> {
             .map(|p| p.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
             .collect()
     })
+}
+
+#[cfg(test)]
+mod evidence_line_tests {
+    use super::evidence_lines;
+
+    #[test]
+    fn at_most_three_short_items_on_one_line() {
+        assert_eq!(evidence_lines(&[]), "");
+        let long = "x".repeat(300);
+        let out = evidence_lines(&[
+            "build.log line 12:\n  error: boom".into(),
+            long,
+            "c".into(),
+            "d".into(),
+        ]);
+        assert!(
+            out.starts_with("Evidence: build.log line 12: error: boom | xxx"),
+            "{out}"
+        );
+        assert!(out.ends_with("... | c\n"), "{out}");
+        assert!(!out.contains(" | d"), "{out}");
+    }
 }
 
 #[cfg(test)]
