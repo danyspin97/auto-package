@@ -3048,6 +3048,31 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
 /// segment, or the name a `#/name` fragment gives it. A name that holds a macro
 /// keeps it, as a pattern [`matches_source_name`] reads.
 fn spec_source_names(spec_text: &str) -> Vec<String> {
+    // `Version`/`Name` are known, so a release archive of another version is
+    // not named by `foo-%{version}.tar.gz`; any other macro stays a wildcard.
+    let header = |tag: &str| {
+        spec_text.lines().find_map(|l| {
+            let (t, v) = l.split_once(':')?;
+            t.trim()
+                .eq_ignore_ascii_case(tag)
+                .then(|| v.trim().to_string())
+        })
+    };
+    let (name, version) = (header("Name"), header("Version"));
+    let expand = |value: &str| {
+        let mut out = value.to_string();
+        for (macros, known) in [
+            (["%{version}", "%version"], &version),
+            (["%{name}", "%name"], &name),
+        ] {
+            if let Some(known) = known.as_deref().filter(|k| !k.contains('%')) {
+                for m in macros {
+                    out = out.replace(m, known);
+                }
+            }
+        }
+        out
+    };
     spec_text
         .lines()
         .filter_map(|line| {
@@ -3060,7 +3085,8 @@ fn spec_source_names(spec_text: &str) -> Vec<String> {
             if !(numbered("source") || numbered("patch")) {
                 return None;
             }
-            let value = value.trim();
+            let value = expand(value.trim());
+            let value = value.as_str();
             let name = match value.split_once("#/") {
                 Some((_, renamed)) => renamed,
                 None => value.rsplit('/').next().unwrap_or(value),
@@ -3155,6 +3181,40 @@ fn tracked_files(checkout_dir: &Path) -> Vec<String> {
             extract_xml_attr(&chunk[..chunk.find('>').unwrap_or(chunk.len())], "name")
         })
         .collect()
+}
+
+/// Bring back what the spec names as a `Source:`/`Patch:` and OBS tracks but the
+/// checkout lost (an earlier run's `osc rm`, a file the agent deleted): without
+/// it `%prep` fails, and the commit would carry the deletion. Returns the names
+/// restored with `osc revert`.
+pub fn restore_named_sources(checkout_dir: &Path, emit: Emit<'_>) -> Vec<String> {
+    let spec_text: String = fs::read_dir(checkout_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".spec"))
+        .filter_map(|e| fs::read_to_string(e.path()).ok())
+        .collect();
+    // Only a name that is exact: a wildcard would also bring back the previous
+    // release's archive, which a version update removes on purpose.
+    let sources: Vec<String> = spec_source_names(&spec_text)
+        .into_iter()
+        .filter(|n| !n.contains('%'))
+        .collect();
+    let mut restored = Vec::new();
+    for name in tracked_files(checkout_dir) {
+        if checkout_dir.join(&name).exists()
+            || !sources.iter().any(|p| matches_source_name(p, &name))
+        {
+            continue;
+        }
+        match proc::capture("osc", &["revert", name.as_str()], checkout_dir, emit) {
+            Ok(out) if out.success() => restored.push(name),
+            Ok(out) => ap_core::diag!("  osc revert {name}: {}", first_line(&out.stderr)),
+            Err(e) => ap_core::diag!("  osc revert {name}: {e}"),
+        }
+    }
+    restored
 }
 
 /// Files OBS tracks that [`publish_plan`] says are not part of the package (an
@@ -5622,6 +5682,21 @@ mod publish_plan_tests {
             ["LICENSE", "data-1.2.bin", "pkg-data.json", "pkg.spec"]
         );
         assert_eq!(plan.skipped, ["LICENSE.bak", "commented.txt"]);
+    }
+
+    /// `Version` is known, so another release's archive is not "named by the
+    /// spec" just because the Source line says `%{version}`.
+    #[test]
+    fn the_spec_version_is_not_a_wildcard() {
+        let names = spec_source_names(
+            "Name: python-pkg\nVersion: 2.3.0\nSource: https://x/pkg-%{version}.tar.gz\n",
+        );
+        assert_eq!(names, ["pkg-2.3.0.tar.gz"]);
+        assert!(
+            !names
+                .iter()
+                .any(|p| matches_source_name(p, "pkg-1.27.2.tar.gz"))
+        );
     }
 
     #[test]

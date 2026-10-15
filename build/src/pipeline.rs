@@ -3340,6 +3340,15 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         commit_step.finish(StepOutcome::Failed);
         return Err(ctx.failed(reason));
     }
+    // A source the spec names must not be missing from what is published.
+    let restored =
+        osc::restore_named_sources(&ctx.checkout_dir, Emit::new(ctx.reporter, commit_step.id));
+    for name in &restored {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: format!("restored '{name}' from OBS: the spec names it as a source"),
+        });
+    }
     let plan = osc::publish_plan(&ctx.checkout_dir);
     for name in &plan.skipped {
         ctx.reporter.report(&Event::Warning {
