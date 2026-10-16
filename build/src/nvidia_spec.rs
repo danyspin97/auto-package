@@ -308,10 +308,82 @@ fn files_section(members: &[Member], owners: &BTreeMap<String, Role>, role: Role
     out
 }
 
-/// The `/etc/ld.so.conf.d` file name shared by every component of a release.
+/// The `/etc/ld.so.conf.d` file name of a release: owned by its
+/// [`filesystem_package`] alone.
 fn ld_conf_name(release: &str) -> String {
     let (maj, min) = major_minor(release);
     format!("cuda-{maj}-{min}.conf")
+}
+
+/// The package that owns the `ld.so.conf.d` file of one CUDA release,
+/// `cuda-13-4-filesystem`: every library component of that release `Requires`
+/// it, so the file is in one package instead of an identical copy in each.
+pub fn filesystem_package(release: &str) -> String {
+    let (maj, min) = major_minor(release);
+    format!("cuda-{maj}-{min}-filesystem")
+}
+
+/// The spec of [`filesystem_package`]: no archive, one text file naming the
+/// release's `lib64`. It is `noarch` (the file is the same on every
+/// architecture; `lib64` is NVIDIA's name on both).
+pub fn redist_filesystem_spec(release: &str, version: &str) -> String {
+    let name = filesystem_package(release);
+    let (maj, min) = major_minor(release);
+    format!(
+        "#\n\
+         # spec file for package {name}\n\
+         #\n\
+         # Copyright (c) 2026 SUSE LLC\n\
+         #\n\
+         # All modifications and additions to the file contributed by third parties\n\
+         # remain the property of their copyright owners, unless otherwise agreed\n\
+         # upon. The license for this file, and modifications and additions to the\n\
+         # file, is the same license as for the pristine package itself (unless the\n\
+         # license for the pristine package is not an Open Source License, in which\n\
+         # case the license is the MIT License). An \"Open Source License\" is a\n\
+         # license that conforms to the Open Source Definition (Version 1.9)\n\
+         # published by the Open Source Initiative.\n\
+         \n\
+         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
+         \n\
+         \n\
+         %global cuda_mm {maj}.{min}\n\
+         %global cuda_prefix /usr/local/cuda-%{{cuda_mm}}\n\
+         \n\
+         Name:           {name}\n\
+         Version:        {version}\n\
+         Release:        0\n\
+         Summary:        Library path of the NVIDIA CUDA {maj}.{min} components\n\
+         License:        MIT\n\
+         URL:            https://developer.nvidia.com/cuda-toolkit\n\
+         Source99:       {name}.rpmlintrc\n\
+         BuildArch:      noarch\n\
+         \n\
+         %description\n\
+         The ld.so configuration that adds the library directory of the NVIDIA CUDA\n\
+         {maj}.{min} tree, %{{cuda_prefix}}/lib64, to the dynamic linker's search path.\n\
+         The cuda-* library packages of that release require it so that the file is\n\
+         owned once.\n\
+         \n\
+         %prep\n\
+         \n\
+         %build\n\
+         \n\
+         %install\n\
+         mkdir -p %{{buildroot}}%{{_sysconfdir}}/ld.so.conf.d\n\
+         echo %{{cuda_prefix}}/lib64 > %{{buildroot}}%{{_sysconfdir}}/ld.so.conf.d/{conf}\n\
+         \n\
+         %files\n\
+         %config(noreplace) %{{_sysconfdir}}/ld.so.conf.d/{conf}\n\
+         \n\
+         %changelog\n",
+        conf = ld_conf_name(release),
+    )
+}
+
+/// The rpmlintrc of [`filesystem_package`]: nothing to filter.
+pub fn redist_filesystem_rpmlintrc() -> String {
+    "# nothing to filter: the package is one configuration file\n".to_string()
 }
 
 /// The components whose headers the headers of `key` include, so that a build
@@ -476,6 +548,13 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
     if !split {
         s.push_str("Provides:       %{name}-devel = %{version}-%{release}\n");
     }
+    if libs {
+        // The ld.so.conf.d file of the release is that package's alone.
+        s.push_str(&format!(
+            "Requires:       {}\n",
+            filesystem_package(&input.cuda_release)
+        ));
+    }
     if rdma_lib {
         s.push_str(
             "Recommends:     libmlx5-1\nRecommends:     librdmacm1\nRecommends:     libnuma1\n",
@@ -545,17 +624,6 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
         ));
     }
     if libs {
-        // Every library component owns the same `cuda-<ver>.conf` (identical
-        // content, which rpm accepts) rather than depending on a separate
-        // `cuda-<ver>-filesystem` package: the generator makes one spec per
-        // manifest component and has no package model for a component-less
-        // spec, so such a package would need its own source and release flow
-        // for one line of text.
-        s.push_str(&format!(
-            "mkdir -p %{{buildroot}}%{{_sysconfdir}}/ld.so.conf.d\n\
-             echo %{{cuda_prefix}}/lib64 > %{{buildroot}}%{{_sysconfdir}}/ld.so.conf.d/{}\n",
-            ld_conf_name(&input.cuda_release)
-        ));
         s.push_str("\n%ldconfig_scriptlets\n");
     }
 
@@ -566,12 +634,6 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
     };
     s.push_str("\n%files\n");
     lic(&mut s);
-    if libs {
-        s.push_str(&format!(
-            "%config(noreplace) %{{_sysconfdir}}/ld.so.conf.d/{}\n",
-            ld_conf_name(&input.cuda_release)
-        ));
-    }
     s.push_str(&files_section(&members, &owners, Role::Runtime));
     if split {
         s.push_str("\n%files devel\n");
@@ -870,14 +932,9 @@ bin/__nvcc_device_query
     fn library_component_gets_ldconfig_and_driver_excludes() {
         let spec = redist_component_spec(&cudart());
         assert!(spec.contains("\n%ldconfig_scriptlets\n"), "{spec}");
-        assert!(
-            spec.contains("echo %{cuda_prefix}/lib64 > %{buildroot}%{_sysconfdir}/ld.so.conf.d/cuda-13-4.conf"),
-            "{spec}"
-        );
-        assert!(
-            spec.contains("%config(noreplace) %{_sysconfdir}/ld.so.conf.d/cuda-13-4.conf\n"),
-            "{spec}"
-        );
+        // The conf file is the filesystem package's: required, never shipped.
+        assert!(spec.contains("\nRequires:       cuda-13-4-filesystem\n"), "{spec}");
+        assert!(!spec.contains("ld.so.conf.d"), "{spec}");
         assert!(
             spec.contains("%global __requires_exclude ^(libcuda\\.so\\.1|"),
             "{spec}"
@@ -888,6 +945,27 @@ bin/__nvcc_device_query
         );
         // /usr/local/cuda is a meta package's.
         assert!(!spec.contains("ln -s"), "{spec}");
+    }
+
+    #[test]
+    fn the_filesystem_package_owns_the_one_conf_file() {
+        let spec = redist_filesystem_spec("13.4.3", "13.4.3");
+        assert!(spec.contains("Name:           cuda-13-4-filesystem\n"), "{spec}");
+        assert!(spec.contains("BuildArch:      noarch\n"), "{spec}");
+        assert!(spec.contains("Version:        13.4.3\n"), "{spec}");
+        assert!(!spec.contains("Source0") && !spec.contains("%setup"), "{spec}");
+        assert!(
+            spec.contains("echo %{cuda_prefix}/lib64 > %{buildroot}%{_sysconfdir}/ld.so.conf.d/cuda-13-4.conf\n"),
+            "{spec}"
+        );
+        assert_eq!(
+            section(&spec, "%files"),
+            vec!["%config(noreplace) %{_sysconfdir}/ld.so.conf.d/cuda-13-4.conf"]
+        );
+        assert!(!spec.contains("TODO"), "{spec}");
+        // The package a library component requires is the one named here.
+        assert_eq!(filesystem_package("13.0"), "cuda-13-0-filesystem");
+        assert!(redist_filesystem_rpmlintrc().lines().all(|l| l.starts_with('#')));
     }
 
     #[test]

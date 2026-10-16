@@ -69,6 +69,19 @@ impl Drop for TestMode {
 /// archive per CUDA major).
 pub const CUDNN_CUDA_MAJOR: &str = "13";
 
+/// The synthetic component of a package that is no archive of NVIDIA's:
+/// `cuda-<major>-<minor>-filesystem`, which owns the `ld.so.conf.d` file of one
+/// CUDA release (see [`crate::nvidia_spec::filesystem_package`]).
+pub const FILESYSTEM_KEY: &str = "cuda_filesystem";
+
+/// `cuda-13-4-filesystem` -> `"13.4"`; `None` for any other name.
+fn filesystem_mm(name: &str) -> Option<String> {
+    let mm = name.trim().strip_prefix("cuda-")?.strip_suffix("-filesystem")?;
+    let (maj, min) = mm.split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(maj) && digits(min)).then(|| format!("{maj}.{min}"))
+}
+
 /// The manifest key of the component `name` stands for, when the mode is on: a
 /// PyPI name, a soname or a `cuda-<short>` package name. `None` for everything
 /// else, and always when the mode is off.
@@ -77,6 +90,9 @@ pub fn component(name: &str) -> Option<&'static str> {
         return None;
     }
     let name = name.trim();
+    if filesystem_mm(name).is_some() {
+        return Some(FILESYSTEM_KEY);
+    }
     nvidia_redist::component_for_package(name).or_else(|| {
         let short = name.strip_prefix("cuda-")?;
         nvidia_redist::COMPONENT_KEYS
@@ -88,6 +104,9 @@ pub fn component(name: &str) -> Option<&'static str> {
 
 /// `cuda-<short>`, the package for the component `name` stands for.
 pub fn package_name(name: &str) -> Option<String> {
+    if filesystem_mm(name).is_some() && enabled() {
+        return Some(name.trim().to_string());
+    }
     component(name).map(|key| format!("cuda-{}", short_name(key)))
 }
 
@@ -169,11 +188,24 @@ fn find_component<'a>(
 /// mode is off or `name` is not a component.
 pub fn latest_version(source: &dyn Source, name: &str) -> Option<Result<String, String>> {
     let key = component(name)?;
+    if key == FILESYSTEM_KEY {
+        return Some(filesystem_version(source, &filesystem_mm(name)?));
+    }
     Some(
         source
             .manifest(product_for(key))
             .and_then(|m| find_component(&m, key).map(|c| c.version.clone())),
     )
+}
+
+/// The version of the filesystem package of CUDA `mm` (`13.4`): the CUDA
+/// release the manifest names when it is that one, `<mm>.0` otherwise (the
+/// cuDNN prefix of a CUDA release whose manifest is another).
+fn filesystem_version(source: &dyn Source, mm: &str) -> Result<String, String> {
+    let label = source.manifest(Product::Cuda)?.release_label;
+    let mut parts = label.split('.');
+    let same = format!("{}.{}", parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    Ok(if same == mm { label } else { format!("{mm}.0") })
 }
 
 /// Replace the version of every node that is a component with the manifest's:
@@ -183,10 +215,53 @@ pub fn apply_manifest_versions(
     nodes: &mut [ap_ecosystem::pip::Node],
     source: &dyn Source,
 ) -> Result<(), String> {
-    for node in nodes {
+    for node in nodes.iter_mut() {
         if let Some(version) = latest_version(source, &node.name) {
             node.version = version?;
         }
+    }
+    Ok(())
+}
+
+/// The nodes of `nodes` that are CUDA components get the filesystem package of
+/// their release as a requirement, and the package itself is added as a node:
+/// the library specs `Require` it, so it has to be built first like any other
+/// dependency. Does nothing when the mode is off or no node is a component.
+pub fn add_filesystem_nodes(
+    nodes: &mut Vec<ap_ecosystem::pip::Node>,
+    source: &dyn Source,
+) -> Result<(), String> {
+    let mut added: Vec<String> = Vec::new();
+    for node in nodes.iter_mut() {
+        let Some(key) = component(&node.name) else {
+            continue;
+        };
+        if key == FILESYSTEM_KEY {
+            continue;
+        }
+        let release = cuda_release(source, product_for(key))?;
+        let fs = crate::nvidia_spec::filesystem_package(&release);
+        if !node.requires_dist.contains(&fs) {
+            node.requires_dist.push(fs.clone());
+        }
+        if !added.contains(&fs) {
+            added.push(fs);
+        }
+    }
+    for fs in added {
+        if nodes.iter().any(|n| n.name == fs) {
+            continue;
+        }
+        let version = latest_version(source, &fs).ok_or_else(|| format!("{fs} is not known"))??;
+        nodes.push(ap_ecosystem::pip::Node {
+            name: fs,
+            version,
+            sha256: String::new(),
+            requires_dist: Vec::new(),
+            requires_python: None,
+            is_requested: false,
+            is_yanked: false,
+        });
     }
     Ok(())
 }
@@ -253,6 +328,9 @@ pub fn generate(
     checkout_dir: &Path,
 ) -> Result<Generated, String> {
     let key = component(rpm_name).ok_or_else(|| format!("{rpm_name} is not a CUDA component"))?;
+    if key == FILESYSTEM_KEY {
+        return generate_filesystem(source, rpm_name, version, checkout_dir);
+    }
     let product = product_for(key);
     let platform = platform_for(arch)?;
     let manifest = source.manifest(product)?;
@@ -317,6 +395,33 @@ pub fn generate(
         archive: dest,
         url,
         sha256: archive.sha256.to_ascii_lowercase(),
+    })
+}
+
+/// The spec of a `cuda-<major>-<minor>-filesystem` package: no archive, so
+/// nothing is downloaded and `archive` names a file that is not there (no stale
+/// archive matches it).
+fn generate_filesystem(
+    source: &dyn Source,
+    rpm_name: &str,
+    version: &str,
+    checkout_dir: &Path,
+) -> Result<Generated, String> {
+    let mm = filesystem_mm(rpm_name).ok_or_else(|| format!("{rpm_name} is not a CUDA component"))?;
+    let have = filesystem_version(source, &mm)?;
+    if !version.is_empty() && have != version {
+        return Err(format!(
+            "{rpm_name} was to be built at {version}, but NVIDIA's current CUDA release is \
+             {have}: the version of a CUDA component is the manifest's"
+        ));
+    }
+    Ok(Generated {
+        spec: crate::nvidia_spec::redist_filesystem_spec(&mm, &have),
+        rpmlintrc_file: format!("{rpm_name}.rpmlintrc"),
+        rpmlintrc: crate::nvidia_spec::redist_filesystem_rpmlintrc(),
+        archive: checkout_dir.join("no-archive"),
+        url: String::new(),
+        sha256: String::new(),
     })
 }
 
@@ -507,6 +612,56 @@ pub(crate) mod tests {
         assert_eq!(nodes[0].version, "13.4.92");
         assert_eq!(nodes[1].version, "2.3.0");
         assert_eq!(*fake.manifests.borrow(), [Product::Cuda]);
+    }
+
+    #[test]
+    fn the_filesystem_package_is_a_component_a_node_and_a_spec() {
+        let _on = TestMode::set(true);
+        assert_eq!(component("cuda-13-4-filesystem"), Some(FILESYSTEM_KEY));
+        assert_eq!(package_name("cuda-13-4-filesystem").as_deref(), Some("cuda-13-4-filesystem"));
+        assert!(is_redist_package("cuda-13-4-filesystem"));
+        for no in ["cuda-13-filesystem", "cuda-x-4-filesystem", "cuda--4-filesystem", "cuda-13-4-filesystemx"] {
+            assert_eq!(component(no), None, "{no}");
+        }
+        {
+            let _off = TestMode::set(false);
+            assert_eq!(package_name("cuda-13-4-filesystem"), None);
+        }
+        let node = |name: &str| ap_ecosystem::pip::Node {
+            name: name.to_string(),
+            version: "1".to_string(),
+            sha256: String::new(),
+            requires_dist: Vec::new(),
+            requires_python: None,
+            is_requested: false,
+            is_yanked: false,
+        };
+        let fake = Fake::new("top");
+        let mut nodes = vec![node("nvidia-cuda-runtime"), node("nvidia-cublas"), node("numpy")];
+        add_filesystem_nodes(&mut nodes, &fake).unwrap();
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(nodes[0].requires_dist, ["cuda-13-4-filesystem"]);
+        assert_eq!(nodes[1].requires_dist, ["cuda-13-4-filesystem"]);
+        assert!(nodes[2].requires_dist.is_empty());
+        assert_eq!((nodes[3].name.as_str(), nodes[3].version.as_str()), ("cuda-13-4-filesystem", "13.4.3"));
+        // Once: a second pass adds neither the requirement nor the node.
+        add_filesystem_nodes(&mut nodes, &fake).unwrap();
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(nodes[0].requires_dist.len(), 1);
+        let mut none = vec![node("numpy")];
+        add_filesystem_nodes(&mut none, &fake).unwrap();
+        assert_eq!(none.len(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let g = generate(&fake, "cuda-13-4-filesystem", "13.4.3", "x86_64", dir.path()).unwrap();
+        assert!(g.spec.contains("Name:           cuda-13-4-filesystem\n"), "{}", g.spec);
+        assert!(fake.downloads.borrow().is_empty());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert!(generate(&fake, "cuda-13-4-filesystem", "13.4.9", "x86_64", dir.path()).is_err());
+        // The stale-archive sweep keeps its hands off the checkout.
+        std::fs::write(dir.path().join("cuda_cudart-linux-x86_64-1-archive.tar.xz"), "x").unwrap();
+        remove_stale_archives(dir.path(), &g.archive);
+        assert!(dir.path().join("cuda_cudart-linux-x86_64-1-archive.tar.xz").exists());
     }
 
     #[test]

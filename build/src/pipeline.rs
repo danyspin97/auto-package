@@ -952,6 +952,8 @@ pub fn select_target(
     // `--nvidia-redist`: a CUDA component is built at NVIDIA's version of it,
     // not at the wheel's.
     crate::redist::apply_manifest_versions(&mut nodes, &crate::redist::Network)?;
+    // The library packages require their release's filesystem package: queue it.
+    crate::redist::add_filesystem_nodes(&mut nodes, &crate::redist::Network)?;
     let own_packages = own_packages??;
     let linked_packages = linked_packages??;
     let build_statuses = build_statuses??;
