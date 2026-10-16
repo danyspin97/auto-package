@@ -1926,7 +1926,39 @@ fn package_outcome(result: &PipelineResult) -> PackageOutcome {
 /// Lists what this run built, what is queued and what the project already has
 /// built for this distro and arch, so the outcome is readable without
 /// scrolling the log.
-/// The error lines of the latest rpmlint section in `state/<pkg>/rpmlint.log`
+/// The sections of the last rpmlint run in a `rpmlint.log`: every section
+/// carrying the `unix time` of the last header, so each flavor of a multibuild
+/// package counts, not only the one written last.
+fn latest_rpmlint_run(text: &str) -> String {
+    const HEADER: &str = "=== rpmlint of";
+    let stamp = |section: &str| -> Option<String> {
+        let header = section.lines().next()?;
+        let at = header.rfind("unix time ")? + "unix time ".len();
+        Some(header[at..].trim_end_matches([')', ' ', '=']).to_string())
+    };
+    let mut sections: Vec<&str> = Vec::new();
+    let mut start = None;
+    for (at, _) in text.match_indices(HEADER) {
+        if at == 0 || text.as_bytes()[at - 1] == b'\n' {
+            if let Some(s) = start.replace(at) {
+                sections.push(&text[s..at]);
+            }
+        }
+    }
+    if let Some(s) = start {
+        sections.push(&text[s..]);
+    }
+    let Some(last) = sections.last().and_then(|s| stamp(s)) else {
+        return String::new();
+    };
+    sections
+        .iter()
+        .filter(|s| stamp(s).as_deref() == Some(last.as_str()))
+        .copied()
+        .collect()
+}
+
+/// The error lines of the latest rpmlint run (all its flavors) in `state/<pkg>/rpmlint.log`
 /// of each built package, as `pkg: line`.
 fn rpmlint_errors_of(state_root: &Path, built: &[&String]) -> Vec<String> {
     let mut out = Vec::new();
@@ -1936,11 +1968,9 @@ fn rpmlint_errors_of(state_root: &Path, built: &[&String]) -> Vec<String> {
             continue;
         };
         let text = std::fs::read_to_string(ws.dir().join("rpmlint.log")).unwrap_or_default();
-        // The sections of the last build: from the first header of the last
-        // run (the log of a package and its flavors share one `unix time`).
-        let last = text.rfind("=== rpmlint of").map_or("", |at| &text[at..]);
+        let last = latest_rpmlint_run(&text);
         out.extend(
-            ap_build::osc::rpmlint_errors(last)
+            ap_build::osc::rpmlint_errors(&last)
                 .into_iter()
                 .map(|l| format!("{pkg}: {l}")),
         );
@@ -4240,6 +4270,24 @@ mod blocked_summary_tests {
         assert_eq!(
             rpmlint_errors_of(root.path(), &[&pkg]),
             ["python-x: x.rpm: E: new-error b"]
+        );
+    }
+
+    #[test]
+    fn the_summary_lists_every_flavors_rpmlint_errors_of_the_latest_run() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = ap_build::workspace::Workspace::open(root.path(), "python-x").unwrap();
+        std::fs::write(
+            ws.dir().join("rpmlint.log"),
+            "=== rpmlint of python-x 1 (unix time 1) ===\nx.rpm: E: old-error a\n\n\
+             === rpmlint of python-x 2 (unix time 2) ===\nx.rpm: E: base-error\n\n\
+             === rpmlint of python-x:mpi 2 (unix time 2) ===\nm.rpm: E: mpi-error\n",
+        )
+        .unwrap();
+        let pkg = "python-x".to_string();
+        assert_eq!(
+            rpmlint_errors_of(root.path(), &[&pkg]),
+            ["python-x: x.rpm: E: base-error", "python-x: m.rpm: E: mpi-error"]
         );
     }
 
