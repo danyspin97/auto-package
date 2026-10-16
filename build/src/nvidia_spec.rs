@@ -80,13 +80,29 @@ pub(crate) fn short_name(component_key: &str) -> String {
     k.replace('_', "-")
 }
 
-/// The manifest name, prefixed with NVIDIA unless it already is.
+/// The manifest name, prefixed with NVIDIA unless it already is, as one line
+/// with every `%` doubled: it goes into `Summary:` and `%description`, where rpm
+/// expands macros.
 fn human_name(name: &str) -> String {
+    let name = spec_text(name);
     if name.starts_with("NVIDIA") {
-        name.to_string()
+        name
     } else {
         format!("NVIDIA {name}")
     }
+}
+
+/// `text` for a spec tag or description: one line, `%` doubled.
+fn spec_text(text: &str) -> String {
+    text.replace('%', "%%").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A name that is safe to put unquoted into a shell command and a macro-free
+/// spec line: the archive's directory names come from a member list.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
 }
 
 /// `13.4.3` -> `("13", "4")`.
@@ -103,6 +119,7 @@ fn top_dir(files: &[String]) -> Option<String> {
     files
         .iter()
         .find_map(|f| f.split('/').next().filter(|s| !s.is_empty()))
+        .filter(|t| is_plain_name(t))
         .map(str::to_string)
 }
 
@@ -196,6 +213,11 @@ fn analyse(files: &[String]) -> Option<Layout> {
             continue;
         }
         let first = rel.split('/').next().unwrap();
+        // Copied by `cp -a <first>` in `%install`: never an option or a name
+        // the shell would split or expand.
+        if !is_plain_name(first) {
+            return None;
+        }
         if !rel.contains('/') && !is_dir && is_license_name(rel) {
             licenses.push(rel.to_string());
             continue;
@@ -570,7 +592,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
         key = input.component_key,
         version = input.version,
         rel = input.cuda_release,
-        lic = input.license,
+        lic = spec_text(&input.license),
     ));
     if split {
         s.push_str(&format!(
@@ -945,6 +967,32 @@ bin/__nvcc_device_query
         );
         // /usr/local/cuda is a meta package's.
         assert!(!spec.contains("ln -s"), "{spec}");
+    }
+
+    #[test]
+    fn manifest_text_and_archive_names_cannot_inject_macros_or_commands() {
+        let mut i = cudart();
+        i.name = "cuBLAS 100% %{expand:x}".into();
+        i.license = "EULA %{_bindir}".into();
+        let spec = redist_component_spec(&i);
+        assert!(spec.contains("Summary:        NVIDIA cuBLAS 100%% %%{expand:x}\n"), "{spec}");
+        assert!(spec.contains("EULA %%{_bindir} licensed archive"), "{spec}");
+        // A member name the shell would act on makes the archive unusable.
+        let files: Vec<String> = ["top/lib/libx.so.1", "top/--help/y", "top/LICENSE"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(analyse(&files).is_none());
+        let files: Vec<String> = ["to p/lib/libx.so.1"].iter().map(|s| s.to_string()).collect();
+        assert!(analyse(&files).is_none());
+        let files: Vec<String> = ["top/lib/libx.so.1".to_string()].to_vec();
+        assert!(analyse(&files).is_some());
+        // No members at all is not a panic: an empty package.
+        let mut empty = cudart();
+        empty.files = Vec::new();
+        let spec = redist_component_spec(&empty);
+        assert!(spec.contains("%files\n"), "{spec}");
+        assert!(!redist_rpmlintrc(&empty).is_empty());
     }
 
     #[test]

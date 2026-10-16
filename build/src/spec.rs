@@ -2090,15 +2090,19 @@ pub fn monorepo_skeleton(
     release: Option<&ap_ecosystem::pypi::Release>,
 ) -> String {
     let name = pkg_name.to_lowercase();
-    let summary = release
-        .and_then(|r| r.summary.as_deref())
-        .unwrap_or("FIXME: add package summary");
+    let summary = rpm_text(
+        release
+            .and_then(|r| r.summary.as_deref())
+            .unwrap_or("FIXME: add package summary"),
+    );
     let license = release
         .map(|r| license_tag(&r.license))
         .unwrap_or_else(|| "FIXME".to_string());
-    let url = release
-        .and_then(|r| r.homepage.as_deref())
-        .unwrap_or("FIXME");
+    let url = rpm_text(
+        release
+            .and_then(|r| r.homepage.as_deref())
+            .unwrap_or("FIXME"),
+    );
 
     let sub_list: String = subprojects
         .iter()
@@ -2704,6 +2708,9 @@ pub fn wheel_binary_skeleton_shared(
         .summary
         .as_deref()
         .unwrap_or("FIXME: add package summary");
+    // rpm expands macros in `Summary:` and `URL:`: a `%` of upstream's text is
+    // doubled (`wheel_description` does the same for the description).
+    let summary_tag = rpm_text(summary);
     // The release's own licence, or, when PyPI has none the tool can use, what the
     // wheel's METADATA declares (a `License: FIXME` is a turn the review spends
     // reading the wheel for what the generator already read).
@@ -2713,7 +2720,7 @@ pub fn wheel_binary_skeleton_shared(
         None => license,
     };
     let description = wheel_description(layout.and_then(|l| l.description.as_deref()), summary);
-    let url = release.homepage.as_deref().unwrap_or("FIXME");
+    let url = rpm_text(release.homepage.as_deref().unwrap_or("FIXME"));
     // Two independent facts about a wheel:
     //  * is the PACKAGE arch-specific? Only the platform tag says so:
     //    `-none-any.whl` is noarch; anything else (`manylinux_*_x86_64`) is not,
@@ -2863,7 +2870,7 @@ pub fn wheel_binary_skeleton_shared(
          Name:           python-{name}\n\
          Version:        {version}\n\
          Release:        0\n\
-         Summary:        {summary}\n\
+         Summary:        {summary_tag}\n\
          License:        {license}\n\
          URL:            {url}\n\
          Source0:        {wheel_filename}\n\
@@ -2903,7 +2910,7 @@ pub fn wheel_binary_skeleton_shared(
          %changelog\n",
         name = name,
         version = version,
-        summary = summary,
+        summary_tag = summary_tag,
         description = description,
         license = license,
         url = url,
@@ -3163,6 +3170,12 @@ mod shared_wheel_tests {
         assert_eq!(site_package_files(listing), vec!["pk/a.py", "pk/sub/b.so"]);
         assert!(sibling_wheel_files(std::path::Path::new("/nonexistent-r2b"), "x").is_empty());
     }
+}
+
+/// `text` for a spec tag or description: one line, every `%` doubled so rpm does
+/// not expand a macro out of upstream's wording.
+fn rpm_text(text: &str) -> String {
+    text.replace('%', "%%").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The `%description` body of a wheel spec: the METADATA's first paragraph,
@@ -3600,12 +3613,37 @@ fn wheel_license(layout: &ap_ecosystem::sdist::WheelLayout) -> Option<String> {
 /// (`LicenseRef-NVIDIA-Proprietary`) is not a SPDX id and becomes the non-free
 /// tag; anything else is kept as declared.
 fn spdx_expression_for_spec(expr: &str) -> String {
-    let low = expr.to_ascii_lowercase();
-    if low.contains("nvidia") || low.contains("proprietary") {
-        NVIDIA_PROPRIETARY.to_string()
-    } else {
-        expr.to_string()
+    // Only the term that names the vendor licence is replaced: the rest of an
+    // expression (`MIT AND LicenseRef-NVIDIA-Proprietary`) stays.
+    let mut out = String::new();
+    let mut word = String::new();
+    let mut seen_vendor = false;
+    let mut flush = |word: &mut String, out: &mut String| {
+        if word.is_empty() {
+            return;
+        }
+        let low = word.to_ascii_lowercase();
+        if low.contains("nvidia") || low.contains("proprietary") {
+            // Two vendor terms are one.
+            if !seen_vendor {
+                out.push_str(NVIDIA_PROPRIETARY);
+            }
+            seen_vendor = true;
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in expr.chars() {
+        if c.is_whitespace() || c == '(' || c == ')' {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
     }
+    flush(&mut word, &mut out);
+    out
 }
 
 /// The SPDX id a free-text licence name spells (`MIT`, `Apache 2.0`,
@@ -3723,12 +3761,41 @@ fn with_license_terms(license: String, terms: &[&str]) -> String {
         if out.contains(term) {
             continue;
         }
-        if out.contains(" OR ") && !out.starts_with('(') {
+        // `AND` binds tighter than `OR`: an expression with an `OR` outside any
+        // parentheses has to be grouped before a term is added to all of it.
+        if has_top_level_or(&out) {
             out = format!("({out})");
         }
         out = format!("{out} AND {term}");
     }
     out
+}
+
+/// Whether an SPDX expression has an `OR` outside every pair of parentheses
+/// (`MIT OR Apache-2.0`, `(A OR B) AND C OR D`; not `(A OR B)`).
+fn has_top_level_or(expr: &str) -> bool {
+    let mut depth = 0i32;
+    let mut word = String::new();
+    let mut found = false;
+    for c in expr.chars().chain(std::iter::once(' ')) {
+        match c {
+            '(' | ')' => {
+                if depth == 0 && word == "OR" {
+                    found = true;
+                }
+                word.clear();
+                depth += if c == '(' { 1 } else { -1 };
+            }
+            c if c.is_whitespace() => {
+                if depth == 0 && word == "OR" {
+                    found = true;
+                }
+                word.clear();
+            }
+            c => word.push(c),
+        }
+    }
+    found
 }
 
 fn license_tag(license: &License) -> String {
@@ -5819,7 +5886,17 @@ pub fn check_quality_problems(spec: &str) -> Vec<String> {
     let ignores: usize = check_section(spec)
         .iter()
         .filter(|l| !l.trim_start().starts_with('#'))
-        .map(|l| l.matches("--ignore").count())
+        .map(|l| {
+            l.split_whitespace()
+                .filter(|t| {
+                    let t = t.trim_matches(|c| matches!(c, '\'' | '"'));
+                    t == "--ignore"
+                        || t == "--ignore-glob"
+                        || t.starts_with("--ignore=")
+                        || t.starts_with("--ignore-glob=")
+                })
+                .count()
+        })
         .sum();
     if ignores > MAX_CHECK_IGNORES {
         return vec![format!(
@@ -5845,8 +5922,17 @@ pub fn missing_check_paths(spec: &str, exists: &dyn Fn(&str) -> bool) -> Vec<Str
         if t.starts_with('#') {
             continue;
         }
+        let mut skip_next = false;
         for tok in t.split_whitespace() {
             let tok = tok.trim_matches(|c| matches!(c, '\'' | '"'));
+            // `--ignore tests/x` (the value in the next word) is not read either.
+            if std::mem::take(&mut skip_next) {
+                continue;
+            }
+            if matches!(tok, "--ignore" | "--ignore-glob" | "--deselect") {
+                skip_next = true;
+                continue;
+            }
             let tok = tok.strip_prefix("./").unwrap_or(tok);
             let path = tok.split("::").next().unwrap_or(tok).trim_end_matches('/');
             let under_tests = ["tests/", "test/", "testdata/", "test_data/"]
@@ -6089,6 +6175,89 @@ mod auto_fixture_source_tests {
         assert_eq!(auto_fixture_source(SPEC, &|_| false, PI, "", "1.2", &|_, _| None), None);
         assert_eq!(auto_fixture_source(SPEC, &|_| false, "", "", "1.2", &found), None);
         assert_eq!(auto_fixture_source(SPEC, &|_| true, PI, "", "1.2", &found), None);
+    }
+}
+
+#[cfg(test)]
+mod sharp_edge_tests {
+    use super::*;
+
+    #[test]
+    fn a_licence_term_is_added_to_the_whole_expression() {
+        let t = |l: &str| with_license_terms(l.to_string(), &["SUSE-NonFree"]);
+        assert_eq!(t("MIT"), "MIT AND SUSE-NonFree");
+        assert_eq!(t("MIT OR Apache-2.0"), "(MIT OR Apache-2.0) AND SUSE-NonFree");
+        // Parenthesised at the start is not parenthesised as a whole.
+        assert_eq!(
+            t("(A OR B) AND C OR D"),
+            "((A OR B) AND C OR D) AND SUSE-NonFree"
+        );
+        assert_eq!(t("(A OR B)"), "(A OR B) AND SUSE-NonFree");
+        assert_eq!(t("A AND (B OR C)"), "A AND (B OR C) AND SUSE-NonFree");
+        assert_eq!(t("SUSE-NonFree OR MIT"), "SUSE-NonFree OR MIT");
+        assert_eq!(t("FIXME"), "FIXME");
+        assert!(!has_top_level_or("ORACLE-1.0"));
+        assert!(has_top_level_or("A OR(B)"));
+    }
+
+    #[test]
+    fn only_the_vendor_term_of_a_licence_expression_is_replaced() {
+        assert_eq!(spdx_expression_for_spec("LicenseRef-NVIDIA-Proprietary"), "SUSE-NonFree");
+        assert_eq!(
+            spdx_expression_for_spec("MIT AND LicenseRef-NVIDIA-Proprietary"),
+            "MIT AND SUSE-NonFree"
+        );
+        assert_eq!(
+            spdx_expression_for_spec("(Apache-2.0 OR MIT) AND LicenseRef-Proprietary"),
+            "(Apache-2.0 OR MIT) AND SUSE-NonFree"
+        );
+        assert_eq!(spdx_expression_for_spec("MIT"), "MIT");
+        assert_eq!(spdx_expression_for_spec("MIT OR Apache-2.0"), "MIT OR Apache-2.0");
+    }
+
+    #[test]
+    fn a_percent_in_upstream_text_does_not_become_a_macro() {
+        let mut r = Release {
+            name: "x".into(),
+            version: "1".into(),
+            summary: Some("100% pure %{python_sitelib} tool".into()),
+            homepage: Some("https://example.org/%7Euser".into()),
+            license: License::Spdx("MIT".into()),
+            requires_python: None,
+            requires_dist: Vec::new(),
+            yanked: false,
+            sdist: ap_ecosystem::pypi::Sdist {
+                filename: String::new(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
+            },
+        };
+        let spec = wheel_binary_skeleton("x", "1", "x-1-py3-none-any.whl", &r, Some(true), None);
+        assert!(spec.contains("Summary:        100%% pure %%{python_sitelib} tool\n"), "{spec}");
+        assert!(spec.contains("URL:            https://example.org/%%7Euser\n"), "{spec}");
+        r.summary = Some("two\nlines".into());
+        let spec = wheel_binary_skeleton("x", "1", "x-1-py3-none-any.whl", &r, Some(true), None);
+        assert!(spec.contains("Summary:        two lines\n"), "{spec}");
+        let mono = monorepo_skeleton("x", "1", &[], Some(&r));
+        assert!(mono.contains("Summary:        two lines\n"), "{mono}");
+    }
+
+    #[test]
+    fn ignore_options_are_counted_as_options() {
+        let spec = format!(
+            "%check\npip install --ignore-installed x\n%pytest {}\n",
+            (0..6).map(|i| format!("--ignore=t/{i}.py")).collect::<Vec<_>>().join(" ")
+        );
+        assert!(check_quality_problems(&spec).is_empty());
+        let seven = format!("%check\n%pytest {} --ignore t/x\n", "--ignore-glob=a ".repeat(6));
+        assert_eq!(check_quality_problems(&seven).len(), 1);
+    }
+
+    #[test]
+    fn a_path_given_to_ignore_in_the_next_word_is_not_read() {
+        let spec = "%check\n%pytest --ignore tests/gone --deselect tests/x.py::t tests/real\n";
+        assert_eq!(missing_check_paths(spec, &|_| false), vec!["tests/real".to_string()]);
     }
 }
 
