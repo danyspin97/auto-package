@@ -2652,6 +2652,45 @@ fn review_turn_wanted(
         && !crate::redist::is_redist_package(rpm_name)
 }
 
+/// Directories under `<root>/third_party` (or `3rdparty`, `thirdparty`) that
+/// are empty: a git submodule a GitHub archive does not contain. A tree with
+/// several of them (torch: pybind11, XNNPACK, ...) cannot be built from that
+/// archive, and no spec edit changes that.
+fn empty_submodule_dirs(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for parent in ["third_party", "3rdparty", "thirdparty"] {
+        let Ok(rd) = std::fs::read_dir(root.join(parent)) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir()
+                && std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none())
+                && let Some(name) = e.file_name().to_str()
+            {
+                out.push(format!("{parent}/{name}"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Review-turn context when the source archive lacks its git submodules, or
+/// `None`. Two empty directories are the threshold: one can be a placeholder.
+fn empty_submodule_context(root: &Path) -> Option<String> {
+    let empty = empty_submodule_dirs(root);
+    (empty.len() >= 2).then(|| {
+        format!(
+            "The source archive is missing its git submodules: {} are empty directories. \
+             No spec edit supplies them, so do not try: this tree cannot be built from \
+             this archive. Return `use_upstream_wheel` now, quoting these directories as the \
+             reason, if the project publishes a wheel; otherwise return `blocked`.",
+            empty.join(", ")
+        )
+    })
+}
+
 /// Step: Review (freshly generated specs, or existing spec with no prior build).
 fn review_stage(
     ctx: &RunCtx,
@@ -2732,6 +2771,9 @@ fn review_stage(
                 crate::agent::fenced_data(problem)
             )
         });
+        let submodule_context = (patching.is_none() && st.from_repo_archive)
+            .then(|| empty_submodule_context(&ws.sdist_dir().join(&st.sdist_top_level)))
+            .flatten();
         let spec_before = std::fs::read_to_string(spec_path).unwrap_or_default();
         // Full-checkout snapshot taken BEFORE the agent runs so a reject /
         // blocked / no-change outcome can roll back every top-level
@@ -2764,6 +2806,8 @@ fn review_stage(
                 from_repo_archive: st.from_repo_archive,
                 resume: false,
                 context: if let Some(text) = patch_context.as_deref() {
+                    Some(text)
+                } else if let Some(text) = submodule_context.as_deref() {
                     Some(text)
                 } else if let Some(text) = carry_context.as_deref() {
                     Some(text)
@@ -11701,6 +11745,26 @@ mod settled_tests {
 #[cfg(test)]
 mod hygiene_tests {
     use super::*;
+
+    #[test]
+    fn empty_submodule_directories_are_found_in_a_source_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let tp = root.path().join("third_party");
+        for d in ["pybind11", "XNNPACK", "fmt"] {
+            std::fs::create_dir_all(tp.join(d)).unwrap();
+        }
+        std::fs::write(tp.join("fmt/CMakeLists.txt"), "x").unwrap();
+        assert_eq!(
+            empty_submodule_dirs(root.path()),
+            ["third_party/XNNPACK", "third_party/pybind11"]
+        );
+        let ctx = empty_submodule_context(root.path()).unwrap();
+        assert!(ctx.contains("use_upstream_wheel") && ctx.contains("third_party/pybind11"));
+        // One empty directory is not enough to give up on the tree.
+        std::fs::write(tp.join("XNNPACK/x"), "x").unwrap();
+        assert!(empty_submodule_context(root.path()).is_none());
+        assert!(empty_submodule_dirs(&root.path().join("missing")).is_empty());
+    }
 
     #[test]
     fn the_third_identical_spec_rejection_fails_the_step() {
