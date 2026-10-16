@@ -3323,4 +3323,42 @@ build-backend = "flit_core.buildapi"
         write_wheel(&w, &["six.py", "six-1.0.dist-info/METADATA"]);
         assert_eq!(wheel_layout(&w).unwrap().importable.as_deref(), Some("six"));
     }
+
+    /// Live resolution of an sdist's source repository from the Project-URL
+    /// entries PyPI serves for real projects: public GETs only. Run with
+    /// `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "network: GETs pypi.org"]
+    fn live_source_repo_from_the_metadata_pypi_serves() {
+        for (project, want) in [
+            ("flask", "https://github.com/pallets/flask"),
+            ("requests", "https://github.com/psf/requests"),
+            ("numpy", "https://github.com/numpy/numpy"),
+        ] {
+            let url = format!("https://pypi.org/pypi/{project}/json");
+            let body = crate::net::call_with_retries(|| {
+                crate::net::agent(ureq::Agent::config_builder()).get(&url)
+            })
+            .unwrap()
+            .into_body()
+            .read_to_string()
+            .unwrap();
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let info = &json["info"];
+            let mut pkg_info = String::from("Metadata-Version: 2.1\n");
+            if let Some(urls) = info["project_urls"].as_object() {
+                for (k, v) in urls {
+                    pkg_info.push_str(&format!("Project-URL: {k}, {}\n", v.as_str().unwrap_or("")));
+                }
+            }
+            if let Some(h) = info["home_page"].as_str().filter(|h| !h.is_empty()) {
+                pkg_info.push_str(&format!("Home-page: {h}\n"));
+            }
+            assert_eq!(
+                source_repo_from_metadata(&pkg_info, "").as_deref(),
+                Some(want),
+                "{project}: {pkg_info}"
+            );
+        }
+    }
 }

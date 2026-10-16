@@ -533,4 +533,44 @@ mod tests {
             assert_eq!(component_for_package(input), None, "{input}");
         }
     }
+
+    /// Live check of the manifests `--nvidia-redist` reads for cuSPARSELt and
+    /// NVSHMEM: public GETs only. Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "network: GETs developer.download.nvidia.com"]
+    fn live_cusparselt_and_nvshmem_manifests_parse() {
+        for (product, key) in [
+            (Product::Cusparselt, "libcusparse_lt"),
+            (Product::Nvshmem, "libnvshmem"),
+        ] {
+            let m = fetch_manifest(product, None).unwrap_or_else(|e| panic!("{product:?}: {e}"));
+            let c = m
+                .components
+                .iter()
+                .find(|c| c.key == key)
+                .unwrap_or_else(|| panic!("{product:?} has no {key}: {:?}", m.components.iter().map(|c| &c.key).collect::<Vec<_>>()));
+            assert!(!c.version.is_empty());
+            let a = c
+                .archive_for("linux-x86_64", None)
+                .unwrap_or_else(|| panic!("{key} has no linux-x86_64 archive"));
+            assert!(a.url(&m.base_url).starts_with(product.base_url()));
+            assert_eq!(a.sha256.len(), 64, "{key}");
+            assert!(a.size > 1 << 20, "{key} archive is {} bytes", a.size);
+            // The per-CUDA-major archives the generator picks between.
+            assert!(
+                c.archive_for("linux-x86_64", Some("13")).is_some()
+                    || c.archive_for("linux-x86_64", Some("12")).is_some(),
+                "{key}: no cuda12/cuda13 variant"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "network: GETs developer.download.nvidia.com"]
+    fn live_the_listing_names_a_latest_manifest_that_exists() {
+        let base = Product::Cusparselt.base_url();
+        let name = latest_manifest_name(&get(&format!("{base}/")).unwrap()).unwrap();
+        let m = parse(&get(&format!("{base}/{name}")).unwrap(), base).unwrap();
+        assert!(!m.components.is_empty());
+    }
 }

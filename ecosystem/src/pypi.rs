@@ -1617,4 +1617,30 @@ mod tests {
         let json = r#"{"info":{"name":"foo","version":"1.2.3"}}"#;
         assert_eq!(parse_version_only(json).unwrap(), "1.2.3");
     }
+
+    /// Live PyPI check of the wheel lookup `--nvidia-redist` and the wheel switch
+    /// use: public GETs only. Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "network: GETs pypi.org"]
+    fn live_pypi_wheel_lookup() {
+        // A wheel-only NVIDIA release: no sdist, one manylinux wheel per arch.
+        let json = get_json("https://pypi.org/pypi/nvidia-nvjitlink/json").unwrap();
+        let wheel = pick_wheel_from_json(&json, "x86_64", None).unwrap();
+        assert!(wheel.filename.ends_with(".whl") && wheel.filename.contains("x86_64"), "{}", wheel.filename);
+        assert_eq!(wheel.sha256.len(), 64);
+        assert!(wheel.url.starts_with("https://files.pythonhosted.org/"), "{}", wheel.url);
+        assert!(pypi_name_and_version_from_wheel_filename(&wheel.filename).is_some());
+        let aarch = pick_wheel_from_json(&json, "aarch64", None).unwrap();
+        assert!(aarch.filename.contains("aarch64"), "{}", aarch.filename);
+        // A CPython-locked family: one wheel per flavor.
+        let tri = get_json("https://pypi.org/pypi/nvidia-cutlass-dsl-libs-cu13/json").unwrap();
+        let abis = vec!["cp313".to_string(), "cp314".to_string()];
+        let per = pick_wheels_per_flavor(&tri, "x86_64", &abis).unwrap();
+        assert!(per[0].1.filename.contains("cp313") && per[1].1.filename.contains("cp314"));
+        // The release endpoints.
+        let release = fetch_latest_release("flask").unwrap();
+        assert!(!release.version.is_empty() && !release.sdist.url.is_empty());
+        assert!(fetch_latest_version("nvidia-nvjitlink").is_ok());
+        assert!(fetch_latest_release("this-package-does-not-exist-ap-r3a").unwrap_err().is_not_found());
+    }
 }

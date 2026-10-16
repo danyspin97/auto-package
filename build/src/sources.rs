@@ -2091,4 +2091,35 @@ mod tests {
         assert_eq!(latest_release(u).unwrap(), "3.1.4");
         assert_eq!(archive_urls(u, "3.1.4"), [u]);
     }
+
+    /// Live forge tag lookup: public, unauthenticated GETs of api.github.com and
+    /// gitlab.com. Run with `cargo test -- --ignored`, and without `gh` on PATH
+    /// (which would send the user's token) when that matters.
+    #[test]
+    #[ignore = "network: GETs the GitHub and GitLab APIs"]
+    fn live_tag_archive_url_finds_a_real_tag() {
+        // A tag that has existed for years, spelled with and without a `v`.
+        assert_eq!(
+            tag_archive_url("https://github.com/pallets/flask", "3.0.0").as_deref(),
+            Some("https://github.com/pallets/flask/archive/refs/tags/3.0.0.tar.gz")
+        );
+        assert_eq!(
+            tag_archive_url("https://github.com/psf/requests", "2.31.0").as_deref(),
+            Some("https://github.com/psf/requests/archive/refs/tags/v2.31.0.tar.gz")
+        );
+        // No such version: no guess.
+        assert_eq!(tag_archive_url("https://github.com/pallets/flask", "0.0.0.0.1"), None);
+        // GitLab's layout (`-/archive/<tag>/<repo>-<tag>.tar.gz`): whichever tag
+        // the API lists first must be found again by its own version.
+        let repo = "https://gitlab.com/gitlab-org/cli";
+        let tags = get_repo_tags(repo).unwrap();
+        let tag = tags.first().expect("gitlab-org/cli has tags");
+        let version = version_from_tag(tag, "cli");
+        let url = tag_archive_url(repo, &version).unwrap_or_else(|| panic!("{tag} -> {version}"));
+        assert!(url.starts_with("https://gitlab.com/gitlab-org/cli/-/archive/"), "{url}");
+        assert!(url.ends_with(".tar.gz"), "{url}");
+        // The URL it hands out exists (GET, headers only: the body is dropped).
+        let resp = crate::http::agent(crate::http::API_TIMEOUT, 5).get(&url).call().unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "{url}");
+    }
 }
