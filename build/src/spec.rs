@@ -2120,18 +2120,69 @@ pub fn prebuilt_wheel_rpmlintrc(layout: &ap_ecosystem::sdist::WheelLayout) -> St
     out
 }
 
-/// Write `python-<name>.rpmlintrc` next to the spec for a vendor-binary wheel
-/// (the spec's `Source99:` names it); nothing for any other wheel.
+/// The `zero-length` filters for the empty files a wheel ships (see
+/// [`ap_ecosystem::sdist::WheelLayout::empty_files`]), one per file with the
+/// reason. The files are upstream's own placeholders (`custom.css`,
+/// `loader.js`): making them non-empty would change the payload, so rpmlint is
+/// told instead. A name with a character outside the plain set is left out
+/// rather than written into a regex unescaped.
+fn wheel_empty_files_filters(layout: &ap_ecosystem::sdist::WheelLayout) -> String {
+    let mut out = String::new();
+    for name in &layout.empty_files {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/-@+~".contains(c))
+        {
+            continue;
+        }
+        if out.is_empty() {
+            out.push_str(
+                "# Empty placeholder files that upstream's wheel ships on purpose (a\n\
+                 # user-editable stylesheet or script): they must stay as they are.\n",
+            );
+        }
+        let escaped = name.replace('.', "\\.").replace('+', "\\+");
+        out.push_str(&format!(
+            "addFilter(r\"zero-length .*/site-packages/{escaped}$\")\n"
+        ));
+    }
+    out
+}
+
+/// Whether a repackaged wheel needs a `python-<name>.rpmlintrc`: it is a
+/// vendor-binary wheel, or it ships empty files rpmlint calls `zero-length`.
+pub(crate) fn wheel_needs_rpmlintrc(
+    wheel_filename: &str,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+) -> bool {
+    is_prebuilt_binary_wheel(wheel_filename, layout)
+        || layout.is_some_and(|l| !wheel_empty_files_filters(l).is_empty())
+}
+
+/// Write `python-<name>.rpmlintrc` next to the spec for a wheel that needs one
+/// (the spec's `Source99:` names it, see [`wheel_needs_rpmlintrc`]); nothing for
+/// any other wheel.
 pub(crate) fn wheel_rpmlintrc(
     pkg_name: &str,
     wheel_filename: &str,
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
 ) -> Option<(String, String)> {
-    let layout = layout.filter(|_| is_prebuilt_binary_wheel(wheel_filename, layout))?;
-    Some((
-        format!("python-{}.rpmlintrc", pkg_name.to_lowercase()),
-        prebuilt_wheel_rpmlintrc(layout),
-    ))
+    if !wheel_needs_rpmlintrc(wheel_filename, layout) {
+        return None;
+    }
+    let layout = layout?;
+    let mut text = String::new();
+    if is_prebuilt_binary_wheel(wheel_filename, Some(layout)) {
+        text.push_str(&prebuilt_wheel_rpmlintrc(layout));
+    }
+    let empties = wheel_empty_files_filters(layout);
+    if !empties.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&empties);
+    }
+    Some((format!("python-{}.rpmlintrc", pkg_name.to_lowercase()), text))
 }
 
 /// The `__requires_exclude` regex for a wheel bundling auditwheel-style
@@ -2506,7 +2557,7 @@ pub fn wheel_binary_skeleton(
     } else {
         "python_sitearch"
     };
-    let source99_line = if is_prebuilt_binary_wheel(wheel_filename, layout) {
+    let source99_line = if wheel_needs_rpmlintrc(wheel_filename, layout) {
         format!("Source99:       python-{name}.rpmlintrc\n")
     } else {
         String::new()
@@ -2565,6 +2616,13 @@ pub fn wheel_binary_skeleton(
              %python_expand find %{{buildroot}}%{{${sitedir}}} -name '*.so*' -type f -exec chmod 0755 {{}} +\n"
         ));
     }
+    // Upstream wheels carry the executable bit on files that are not programs
+    // (a Python module, a stylesheet): rpmlint's `script-without-shebang`, one
+    // error per file. Only an ELF file or a script with a `#!` line keeps it.
+    let mode_fix = format!(
+        "# files without a shebang or ELF header do not stay executable\n\
+         %python_expand find %{{buildroot}}%{{${sitedir}}} -type f -perm /111 -exec sh -c 'for f; do head -c4 \"$f\" | grep -aqE \"^#!|ELF\" || chmod 0644 \"$f\"; done' sh {{}} +\n"
+    );
     if layout.is_some_and(|l| !l.header_dirs.is_empty() && wheel_header_cleanups(l).is_empty()) {
         install_extra.push_str(
             "# the headers are this wheel's payload, so they are kept: put them in a\n\
@@ -2653,6 +2711,7 @@ pub fn wheel_binary_skeleton(
          %pyproject_install %{{SOURCE0}}\n\
          {install_extra}\
          {alt_clone}\
+         {mode_fix}\
          %python_expand %fdupes %{{buildroot}}/%{{${sitedir}}}\n\
          \n\
          {check_block}\
@@ -3542,6 +3601,47 @@ BuildRequires:  %{python_module pip}
         assert!(spec.contains("%{buildroot}/%{$python_sitelib}"), "{spec}");
     }
 
+    /// open-webui's wheel repack tripped 238 `script-without-shebang` and 5
+    /// `zero-length` errors: every wheel repack normalises the modes in
+    /// `%install`, and a wheel with empty files gets exactly their filters.
+    #[test]
+    fn a_pure_wheel_repack_normalises_modes_and_filters_empty_files() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let wheel = "open_webui-1.0-py3-none-any.whl";
+        let plain = wheel_binary_skeleton("open-webui", "1.0", wheel, &release, Some(true), None);
+        assert!(plain.contains("-type f -perm /111 -exec sh -c"), "{plain}");
+        assert!(
+            plain.contains("%python_expand find %{buildroot}%{$python_sitelib} "),
+            "{plain}"
+        );
+        assert!(plain.contains("ELF"), "{plain}");
+        assert!(!plain.contains("Source99"), "{plain}");
+        assert!(wheel_rpmlintrc("open-webui", wheel, None).is_none());
+
+        let layout = WheelLayout {
+            empty_files: vec![
+                "open_webui/static/custom.css".into(),
+                "open_webui/static/loader.js".into(),
+                "weird name/x".into(),
+            ],
+            ..Default::default()
+        };
+        let spec =
+            wheel_binary_skeleton("open-webui", "1.0", wheel, &release, Some(true), Some(&layout));
+        assert!(spec.contains("Source99:       python-open-webui.rpmlintrc
+"), "{spec}");
+        let (file, text) = wheel_rpmlintrc("open-webui", wheel, Some(&layout)).unwrap();
+        assert_eq!(file, "python-open-webui.rpmlintrc");
+        assert!(
+            text.contains(r#"addFilter(r"zero-length .*/site-packages/open_webui/static/custom\.css$")"#),
+            "{text}"
+        );
+        assert!(text.contains(r"loader\.js$"), "{text}");
+        assert!(!text.contains("weird"), "{text}");
+        assert!(!text.contains("missing-hash-section"), "{text}");
+    }
+
     /// A prebuilt vendor `.so` wheel (nvidia-cublas's real shape) gets a
     /// pre-seeded `Source99:`/rpmlintrc baseline instead of making the agent
     /// re-derive the same five rpmlint false positives from a failed build —
@@ -4052,7 +4152,7 @@ BuildRequires:  %{python_module pip}
             "Requires:       python-base\nRequires(post):   update-alternatives\n\
              Requires(postun): update-alternatives\n%python_subpackages\n",
             "%pyproject_install %{SOURCE0}\n%python_clone -a %{buildroot}%{_bindir}/proton\n\
-             %python_clone -a %{buildroot}%{_bindir}/proton-viewer\n%python_expand %fdupes",
+             %python_clone -a %{buildroot}%{_bindir}/proton-viewer\n# files without a shebang",
             "%post\n%python_install_alternative proton\n%python_install_alternative proton-viewer\n\n\
              %postun\n%python_uninstall_alternative proton\n%python_uninstall_alternative proton-viewer\n\n\
              %files %{python_files}\n",

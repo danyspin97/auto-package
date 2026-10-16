@@ -365,6 +365,13 @@ pub struct WheelLayout {
     /// itself an error (`unused-rpmlintrc-filter`), the filter may only be
     /// written when this is true.
     pub origin_runpath: bool,
+    /// Zero-byte files the wheel ships (relative to site-packages, sorted):
+    /// upstream's placeholder `custom.css`/`loader.js`. rpmlint's
+    /// `zero-length` is an error for them, they cannot be made non-empty
+    /// without changing the payload, so the spec filters exactly these. Not
+    /// listed: what rpmlint itself accepts empty (`__init__.py`, `py.typed`,
+    /// `.nosearch`) — a filter nothing matches is `unused-rpmlintrc-filter`.
+    pub empty_files: Vec<String>,
 }
 
 impl WheelLayout {
@@ -748,6 +755,15 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         .map(String::as_str)
         .collect();
     let origin_runpath = any_origin_runpath(&mut zip_archive, &shared_libs);
+    let mut empty_files: Vec<String> = (0..zip_archive.len())
+        .filter_map(|i| {
+            let entry = zip_archive.by_index_raw(i).ok()?;
+            let name = entry.name().to_string();
+            (!entry.is_dir() && entry.size() == 0 && !skip(&top_of(&name)) && !rpmlint_accepts_empty(&name))
+                .then_some(name)
+        })
+        .collect();
+    empty_files.sort_unstable();
     Some(WheelLayout {
         importable,
         namespace_module,
@@ -762,7 +778,15 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         console_scripts,
         has_hashed_libs,
         origin_runpath,
+        empty_files,
     })
+}
+
+/// Files rpmlint's `zero-length` check lets be empty (its
+/// `normal_zero_length_regex`).
+fn rpmlint_accepts_empty(name: &str) -> bool {
+    let file = name.rsplit('/').next().unwrap_or(name);
+    matches!(file, "__init__.py" | "py.typed" | ".nosearch")
 }
 
 /// The `Root-Is-Purelib` value from a wheel's `*.dist-info/WHEEL` file.
@@ -2954,6 +2978,29 @@ build-backend = "flit_core.buildapi"
 
     /// libcusparseLt.so.0 (RUNPATH: $ORIGIN:): found in a `DT_RUNPATH` or a
     /// `DT_RPATH`, not for another value, no entry, or a non-ELF file.
+    /// open-webui's wheel: empty `custom.css`/`loader.js` are listed (rpmlint's
+    /// `zero-length`), an empty `__init__.py` and dist-info files are not.
+    #[test]
+    fn empty_files_are_listed_except_those_rpmlint_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("e.whl");
+        write_wheel_with(
+            &w,
+            &[
+                ("pkg/__init__.py", b""),
+                ("pkg/static/loader.js", b""),
+                ("pkg/static/custom.css", b""),
+                ("pkg/static/full.css", b"a{}"),
+                ("pkg/py.typed", b""),
+                ("pkg-1.dist-info/EMPTY", b""),
+            ],
+        );
+        assert_eq!(
+            wheel_layout(&w).unwrap().empty_files,
+            ["pkg/static/custom.css", "pkg/static/loader.js"]
+        );
+    }
+
     #[test]
     fn origin_runpath_is_read_from_the_dynamic_section() {
         let found = |bytes: &[u8]| elf_has_origin_runpath(std::io::Cursor::new(bytes));
