@@ -3200,20 +3200,12 @@ fn review_stage(
     // A spec whose resolution ladder was already spent is not tried again while
     // it and the specs it depends on are unchanged: the same ladder would end
     // the same way, at the price of several turns. `--force` tries afresh.
-    if patching.is_none()
-        && !config.force
-        && let spec_text = std::fs::read_to_string(spec_path).unwrap_or_default()
-        && PkgState::load(ws).ladder_spec_hash == Some(ladder_key(config, &spec_text))
-    {
-        let reason = PkgState::load(ws).ladder_reason.unwrap_or_default();
-        return Err(ctx.failed_as(
-            FailureKind::Exhausted,
-            format!(
-                "{LADDER_FAILED_PREFIX}{rpm_name}: the resolution ladder was spent on this \
-                 spec earlier and neither it nor the packages it depends on changed ({reason}); \
-                 not trying again without --force"
-            ),
-        ));
+    if let Some(refusal) = spent_ladder_refusal(
+        ctx,
+        patching.is_some(),
+        &std::fs::read_to_string(spec_path).unwrap_or_default(),
+    ) {
+        return Err(refusal);
     }
     if config.no_agent {
         st.step_attempts
@@ -6352,6 +6344,30 @@ fn ladder_key(config: &PipelineConfig, spec: &str) -> u64 {
     hash_spec(&all)
 }
 
+/// The failure for a spec whose resolution ladder was already spent: the same
+/// ladder would end the same way, at the price of several turns, while the spec
+/// and the specs it depends on are unchanged. `--force` and a package that is
+/// being patched for a dependent try afresh.
+fn spent_ladder_refusal(ctx: &RunCtx, patching: bool, spec_text: &str) -> Option<PipelineResult> {
+    if patching || ctx.config.force {
+        return None;
+    }
+    let state = PkgState::load(&ctx.ws);
+    if state.ladder_spec_hash != Some(ladder_key(ctx.config, spec_text)) {
+        return None;
+    }
+    let reason = state.ladder_reason.unwrap_or_default();
+    Some(ctx.failed_as(
+        FailureKind::Exhausted,
+        format!(
+            "{LADDER_FAILED_PREFIX}{}: the resolution ladder was spent on this spec earlier and \
+             neither it nor the packages it depends on changed ({reason}); not trying again \
+             without --force",
+            ctx.rpm_name
+        ),
+    ))
+}
+
 /// Where a turn that was `blocked` was asked, so the resolver rounds repeat it.
 struct LadderSite<'a> {
     task: crate::agent::Task,
@@ -6374,6 +6390,61 @@ fn resolve_blocked(
     site: LadderSite<'_>,
     outcome: &crate::agent::TurnOutcome,
     reason: String,
+) -> Result<TurnEffect, PipelineResult> {
+    resolve_blocked_with(
+        ctx,
+        st,
+        site,
+        outcome,
+        reason,
+        &fetch_release_json,
+        &mut |ctx, st, site, label, attempt, context| {
+            agent_turn(
+                TurnCtx {
+                    label,
+                    task: site.task,
+                    event_task: site.event_task.clone(),
+                    attempt,
+                    hint: site.hint,
+                    unresolvable_deps: &[],
+                    unresolvable_detail: &[],
+                    checkout_dir: Some(&ctx.checkout_dir),
+                    from_repo_archive: st.from_repo_archive,
+                    resume: false,
+                    context: Some(context),
+                },
+                ctx.turn_env(),
+                &mut st.spent_usd,
+                &mut st.session_id,
+                &mut st.step_attempts,
+            )
+        },
+    )
+}
+
+/// Runs one resolver round's agent turn: the real one spends a model call, a
+/// test's scripted one answers from a list. Gets the step label, the attempt
+/// number and the round's context.
+type LadderTurn<'a> = dyn FnMut(
+        &RunCtx,
+        &mut RunState,
+        &LadderSite<'_>,
+        &str,
+        usize,
+        &str,
+    ) -> Result<(StepDir, crate::agent::TurnOutcome), (String, FailureKind)>
+    + 'a;
+
+/// [`resolve_blocked`] with the PyPI lookup of the wheel rung and the turn
+/// runner given.
+fn resolve_blocked_with(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    site: LadderSite<'_>,
+    outcome: &crate::agent::TurnOutcome,
+    reason: String,
+    lookup: PypiLookup<'_>,
+    turn: &mut LadderTurn<'_>,
 ) -> Result<TurnEffect, PipelineResult> {
     let crate::agent::Action::Blocked { why } = &outcome.action else {
         return Err(ctx.failed(reason));
@@ -6454,7 +6525,7 @@ fn resolve_blocked(
                 "the resolver found no way to build from source after a blocked turn: {}",
                 brief(latest)
             ));
-            if let Ok(TurnEffect::SwitchedToWheel) = apply_turn_and_reset(
+            if let Ok(TurnEffect::SwitchedToWheel) = apply_turn_and_reset_with(
                 ApplyTurnCtx {
                     config,
                     checkout_dir,
@@ -6471,6 +6542,7 @@ fn resolve_blocked(
                 *reporter,
                 &mut st.sdist_top_level,
                 &mut st.from_repo_archive,
+                lookup,
             ) {
                 return Rung::Resolved(TurnEffect::SwitchedToWheel);
             }
@@ -6483,25 +6555,7 @@ fn resolve_blocked(
         }
         let context = ladder_context(round, LADDER_ROUNDS, history, site.context);
         let label = format!("resolve-{round}");
-        let turn = agent_turn(
-            TurnCtx {
-                label: &label,
-                task: site.task,
-                event_task: site.event_task.clone(),
-                attempt: site.attempt + round,
-                hint: site.hint,
-                unresolvable_deps: &[],
-                unresolvable_detail: &[],
-                checkout_dir: Some(checkout_dir),
-                from_repo_archive: st.from_repo_archive,
-                resume: false,
-                context: Some(&context),
-            },
-            ctx.turn_env(),
-            &mut st.spent_usd,
-            &mut st.session_id,
-            &mut st.step_attempts,
-        );
+        let turn = turn(ctx, st, &site, &label, site.attempt + round, &context);
         let (step, out) = match turn {
             Ok(v) => v,
             Err((e, kind)) => return Rung::Abort(ctx.failed_as(kind, e)),
@@ -14492,5 +14546,290 @@ mod ladder_tests {
             "{service}"
         );
         osc::validate_service_xml(service.as_bytes()).unwrap();
+    }
+
+    // ── the ladder end to end, with a scripted turn runner ──────────────────
+
+    fn scripted_outcome(action: crate::agent::Action, reasoning: &str) -> crate::agent::TurnOutcome {
+        let mut out = pipeline_wheel_outcome("x");
+        out.action = action;
+        out.reasoning = reasoning.into();
+        out
+    }
+
+    fn blocked(why: &str) -> crate::agent::TurnOutcome {
+        scripted_outcome(crate::agent::Action::Blocked { why: why.into() }, why)
+    }
+
+    fn stages(mut out: crate::agent::TurnOutcome, from: &str, to: &str) -> crate::agent::TurnOutcome {
+        out.stage_files.push(crate::stage::StageFile {
+            from: from.into(),
+            to: to.into(),
+            package: None,
+        });
+        out
+    }
+
+    struct Case {
+        _root: tempfile::TempDir,
+        result: Result<TurnEffect, PipelineResult>,
+        /// The context each scripted turn was given, in order.
+        contexts: Vec<String>,
+        notes: String,
+        checkout: PathBuf,
+        state_root: PathBuf,
+        config_key: u64,
+    }
+
+    /// Run `resolve_blocked_with` on a package whose first turn answered
+    /// `first`, with `turns` as the answers of the resolver rounds. `siblings`
+    /// are other packages of the project.
+    fn run_case(
+        rpm_name: &str,
+        force: bool,
+        siblings: &[&str],
+        first: crate::agent::TurnOutcome,
+        turns: Vec<crate::agent::TurnOutcome>,
+        wheel_lookups: &std::cell::Cell<usize>,
+    ) -> Case {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        let state_root = work.join("state");
+        let mut config = super::hygiene_tests::config(rpm_name, &state_root);
+        config.rpm_name = rpm_name.into();
+        config.work_dir = work.clone();
+        config.project = "proj".into();
+        config.force = force;
+        config.no_agent = false;
+        config.budget_usd = 100.0;
+        let ws = Workspace::open(&state_root, rpm_name).unwrap();
+        std::fs::create_dir_all(ws.dir().join("source")).unwrap();
+        std::fs::write(ws.dir().join("source/package-lock.json"), b"{\"lock\":3}").unwrap();
+        let checkout = work.join("proj").join(rpm_name);
+        std::fs::create_dir_all(&checkout).unwrap();
+        for s in siblings {
+            std::fs::create_dir_all(work.join("proj").join(s)).unwrap();
+        }
+        let spec_path = checkout.join(format!("{rpm_name}.spec"));
+        let before = format!("Name: {rpm_name}\nVersion: 1.0\n");
+        std::fs::write(&spec_path, &before).unwrap();
+        let run = ap_core::run::RunDir::allocate(&work).unwrap();
+        let pkg_run = run.pkg(rpm_name);
+        let ctx = RunCtx {
+            config: &config,
+            pkg_run: &pkg_run,
+            reporter: &ap_core::sink::NULL_REPORTER,
+            ws,
+            rpm_name: rpm_name.into(),
+            checkout_dir: checkout.clone(),
+            spec_path: spec_path.clone(),
+        };
+        let mut st = RunState {
+            step_attempts: Default::default(),
+            sdist_top_level: String::new(),
+            from_repo_archive: false,
+            attempts: 0,
+            spent_usd: 0.0,
+            session_id: None,
+            last_log_digest: None,
+            identical_logs: 0,
+            relaxed_from_spec: None,
+        };
+        let snapshot = CheckoutSnapshot::take(&checkout);
+        let step = StepDir {
+            path: root.path().join("step"),
+            id: ap_core::event::StepId(1),
+        };
+        std::fs::create_dir_all(&step.path).unwrap();
+        let site = LadderSite {
+            task: crate::agent::Task::Review,
+            event_task: ap_core::event::Task::Review,
+            attempt: 0,
+            hint: None,
+            context: None,
+            apply_label: "Review",
+            before: &before,
+            snapshot: &snapshot,
+            step: &step,
+        };
+        let queue = std::cell::RefCell::new(std::collections::VecDeque::from(turns));
+        let contexts = std::cell::RefCell::new(Vec::new());
+        let lookup = |_: &PipelineConfig| {
+            wheel_lookups.set(wheel_lookups.get() + 1);
+            Err("no PyPI in this test".to_string())
+        };
+        let result = resolve_blocked_with(
+            &ctx,
+            &mut st,
+            site,
+            &first,
+            "first turn blocked".into(),
+            &lookup,
+            &mut |_, _, site, _, _, context| {
+                contexts.borrow_mut().push(context.to_string());
+                let out = queue
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("the ladder asked for more turns than the script has");
+                // A speculative file the turn left in the checkout.
+                std::fs::write(site.snapshot.checkout_dir.join("junk.patch"), b"x").unwrap();
+                Ok((
+                    StepDir {
+                        path: site.step.path.clone(),
+                        id: ap_core::event::StepId(2),
+                    },
+                    out,
+                ))
+            },
+        );
+        let notes = std::fs::read_to_string(ctx.ws.notes()).unwrap_or_default();
+        let config_key = ladder_key(&config, &before);
+        let contexts = contexts.into_inner();
+        Case {
+            _root: root,
+            result,
+            contexts,
+            notes,
+            checkout,
+            state_root,
+            config_key,
+        }
+    }
+
+    #[test]
+    fn a_ladder_that_resolves_in_round_two_stages_the_file_and_keeps_it() {
+        let lookups = std::cell::Cell::new(0);
+        let case = run_case(
+            "open-webui-thing",
+            false,
+            &[],
+            blocked("Source10 is missing"),
+            vec![
+                // Round 1 changes nothing.
+                scripted_outcome(crate::agent::Action::NoChange, "nothing to do"),
+                // Round 2 asks the pipeline for the file, answering blocked.
+                stages(blocked("I cannot copy it"), "source/package-lock.json", "package-lock.json"),
+            ],
+            &lookups,
+        );
+        assert_eq!(case.result.unwrap(), TurnEffect::Edited);
+        assert_eq!(case.contexts.len(), 2);
+        // Round 2 was told what round 1 came to.
+        assert!(
+            case.contexts[1].contains("ROUND 2 of 3") && case.contexts[1].contains("answered no_change"),
+            "{}",
+            case.contexts[1]
+        );
+        // The staged file stays: a blocked answer with staging is not rolled back.
+        assert_eq!(
+            std::fs::read(case.checkout.join("package-lock.json")).unwrap(),
+            b"{\"lock\":3}"
+        );
+        assert!(case.notes.contains("staged files"), "{}", case.notes);
+        // A resolved ladder leaves no memo.
+        let state = PkgState::load(&Workspace::open(&case.state_root, "open-webui-thing").unwrap());
+        assert_eq!(state.ladder_spec_hash, None);
+    }
+
+    #[test]
+    fn a_sibling_fix_cue_makes_the_patch_request_without_spending_a_turn() {
+        let lookups = std::cell::Cell::new(0);
+        let case = run_case(
+            "python-tokenspeed-mla",
+            false,
+            &["python-nvidia-cutlass-dsl"],
+            blocked("The fix belongs in the sibling python-nvidia-cutlass-dsl, not here"),
+            Vec::new(),
+            &lookups,
+        );
+        assert!(case.contexts.is_empty());
+        match case.result {
+            Err(PipelineResult::MissingDeps { patches, rpm_name, .. }) => {
+                assert_eq!(rpm_name, "python-tokenspeed-mla");
+                assert_eq!(patches.len(), 1);
+                assert_eq!(patches[0].name, "nvidia-cutlass-dsl");
+                assert!(patches[0].problem.contains("belongs in the sibling"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_spent_ladder_fails_exhausted_with_every_reason_and_is_remembered() {
+        let lookups = std::cell::Cell::new(0);
+        let case = run_case(
+            "python-foo",
+            false,
+            &[],
+            blocked("reason zero"),
+            vec![blocked("reason one"), blocked("reason two"), blocked("reason three")],
+            &lookups,
+        );
+        // The wheel rung of round 2 was tried (and failed) without a turn.
+        assert_eq!(lookups.get(), 1);
+        assert_eq!(case.contexts.len(), 3);
+        match case.result {
+            Err(PipelineResult::Failed { reason, kind, .. }) => {
+                assert_eq!(kind, FailureKind::Exhausted);
+                assert!(reason.starts_with(LADDER_FAILED_PREFIX), "{reason}");
+                for r in ["reason zero", "reason one", "reason two", "reason three"] {
+                    assert!(reason.contains(r) && case.notes.contains(r), "{r}: {reason} {}", case.notes);
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+        // The memo holds the spec: the same spec is not tried again.
+        let ws = Workspace::open(&case.state_root, "python-foo").unwrap();
+        let state = PkgState::load(&ws);
+        assert_eq!(state.ladder_spec_hash, Some(case.config_key));
+        assert!(state.ladder_reason.unwrap().contains("reason three"));
+    }
+
+    fn ctx_for<'a>(
+        config: &'a PipelineConfig,
+        pkg_run: &'a ap_core::run::PkgRunDir,
+        state_root: &Path,
+    ) -> RunCtx<'a> {
+        RunCtx {
+            config,
+            pkg_run,
+            reporter: &ap_core::sink::NULL_REPORTER,
+            ws: Workspace::open(state_root, "python-foo").unwrap(),
+            rpm_name: "python-foo".into(),
+            checkout_dir: PathBuf::new(),
+            spec_path: PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn the_memo_refuses_a_repeat_unless_forced_patching_or_the_spec_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let mut config = super::hygiene_tests::config("foo", &state_root);
+        config.work_dir = root.path().join("work");
+        config.project = "p".into();
+        let ws = Workspace::open(&state_root, "python-foo").unwrap();
+        let run = ap_core::run::RunDir::allocate(root.path()).unwrap();
+        let pkg_run = run.pkg("python-foo");
+        let spec = "Name: python-foo\n";
+        let key = ladder_key(&config, spec);
+        update_state(&ws, &ap_core::sink::NULL_REPORTER, |s| {
+            s.ladder_spec_hash = Some(key);
+            s.ladder_reason = Some("turn 0: nope".into());
+        });
+        let refused = spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, spec);
+        match refused {
+            Some(PipelineResult::Failed { reason, kind, .. }) => {
+                assert_eq!(kind, FailureKind::Exhausted);
+                assert!(reason.contains("not trying again without --force") && reason.contains("nope"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // A changed spec, a package being patched for a dependent: asked again.
+        assert!(spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, "Name: python-foo\nVersion: 2\n").is_none());
+        assert!(spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), true, spec).is_none());
+        // --force bypasses the memo.
+        config.force = true;
+        assert!(spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, spec).is_none());
     }
 }
