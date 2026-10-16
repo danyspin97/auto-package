@@ -4059,6 +4059,54 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         }
     }
 
+    // A patch that does not apply to the unpacked source (inherited from a
+    // linked package, made for other code) is dropped here too: the agent
+    // cannot make it apply, and an edit is rejected while one is left.
+    if let Ok(current) = std::fs::read_to_string(spec_path) {
+        match try_patches(spec_path, &current) {
+            Ok(check) => {
+                if let Some(note) = check.unchecked {
+                    reporter.report(&Event::Warning {
+                        step: Some(validate_step.id),
+                        message: note,
+                    });
+                }
+                if !check.failed.is_empty() {
+                    let names: Vec<String> = check.failed.iter().map(|(n, _)| n.clone()).collect();
+                    write_or_warn(spec_path, &without_patches(&current, &names));
+                    for (name, why) in &check.failed {
+                        let _ = std::fs::remove_file(checkout_dir.join(name));
+                        reporter.report(&Event::Warning {
+                            step: Some(validate_step.id),
+                            message: format!(
+                                "{rpm_name}: dropped {name}: it does not apply to the {} sources \
+                                 (`patch -p1 --dry-run`): {why}",
+                                config.version
+                            ),
+                        });
+                    }
+                    warn_if_err(
+                        reporter,
+                        "adding the .changes entry for the dropped patches",
+                        osc::add_changes_entry(
+                            checkout_dir,
+                            &format!(
+                                "Drop {}: it does not apply to {}",
+                                names.join(", "),
+                                config.version
+                            ),
+                            Emit::new(reporter, validate_step.id),
+                        ),
+                    );
+                }
+            }
+            Err(e) => reporter.report(&Event::Warning {
+                step: Some(validate_step.id),
+                message: format!("{rpm_name}: the patches were not checked: {e}"),
+            }),
+        }
+    }
+
     match osc::rpmspec_check(spec_path, Emit::new(reporter, validate_step.id)) {
         Ok(expanded) => {
             // The fully expanded spec is the single most useful artifact
@@ -7122,12 +7170,24 @@ fn without_patches(spec: &str, names: &[String]) -> String {
     kept
 }
 
-/// Apply the spec's `PatchN:` files, in order, to a scratch copy of the source
-/// tarball the way `%autosetup -p1` will. `Ok` when there is nothing to check
-/// (no patches, no tarball, not a `-p1` autosetup) or all of them apply; the
-/// `Ok` value is what could not be checked and should be reported (the source
-/// archive would not unpack), which says nothing about the patches themselves.
-fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, String> {
+/// What trying the spec's patches against the unpacked source found.
+#[derive(Debug, Default, PartialEq)]
+struct PatchCheck {
+    /// Patches that do not apply, in spec order, each with `patch`'s complaint.
+    /// Later patches were tried on a tree without them.
+    failed: Vec<(String, String)>,
+    /// What could not be checked (the source archive would not unpack), which
+    /// says nothing about the patches themselves.
+    unchecked: Option<String>,
+}
+
+/// Try the spec's `PatchN:` files, in order, on a scratch copy of the source
+/// tarball the way `%autosetup -p1` will: each is first run with
+/// `patch -p1 --dry-run`, and only one that passes is applied, so a patch that
+/// fails costs the ones after it nothing. Nothing is checked when there are no
+/// patches, no tarball, or the spec is not a `-p1` autosetup. `Err` is for
+/// failures of the check itself (no scratch directory, no `patch` binary).
+fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
     let patches: Vec<String> = spec
         .lines()
         .filter_map(|l| {
@@ -7144,14 +7204,14 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
         })
         .collect();
     if patches.is_empty() || !spec.contains("%autosetup") || !spec.contains("-p1") {
-        return Ok(None);
+        return Ok(PatchCheck::default());
     }
     let Some(checkout) = spec_path.parent() else {
-        return Ok(None);
+        return Ok(PatchCheck::default());
     };
     let version = crate::spec::parse_header(spec).map(|h| h.version);
     let Some(tarball) = find_tarball(checkout, version.as_deref().unwrap_or_default()) else {
-        return Ok(None);
+        return Ok(PatchCheck::default());
     };
     let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
     // Unpack only what the patches touch: `patch` reads nothing else, and
@@ -7165,10 +7225,13 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
     }
     let wanted = |p: &Path| targets.iter().any(|t| p.ends_with(t));
     if let Err(e) = ap_ecosystem::sdist::extract_where(&tarball, scratch.path(), wanted) {
-        return Ok(Some(format!(
-            "could not unpack {} to test the patches, so they were not checked: {e}",
-            tarball.display()
-        )));
+        return Ok(PatchCheck {
+            failed: Vec::new(),
+            unchecked: Some(format!(
+                "could not unpack {} to test the patches, so they were not checked: {e}",
+                tarball.display()
+            )),
+        });
     }
     // A single top-level directory is what `%autosetup -n` enters.
     let entries: Vec<_> = std::fs::read_dir(scratch.path())
@@ -7179,6 +7242,7 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
         [only] if only.path().is_dir() => only.path(),
         _ => scratch.path().to_path_buf(),
     };
+    let mut check = PatchCheck::default();
     for name in patches {
         let name = name.replace("%{version}", "");
         // Patch names come from spec text. Only a bare file name is a patch in
@@ -7191,33 +7255,55 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
             // A missing patch file is reported by the missing-source check.
             continue;
         }
-        let out = std::process::Command::new("patch")
-            .args([
-                "-p1",
-                "--fuzz=0",
-                "-f",
-                "-s",
-                "--no-backup-if-mismatch",
-                "-i",
-            ])
-            .arg(&patch_file)
-            .current_dir(&root)
-            .stdin(std::process::Stdio::null())
-            .output()
+        // An absolute path: `patch` runs in the scratch tree, and a project
+        // name with `:` in a relative path would read as a remote host to
+        // some tools.
+        let patch_file = std::fs::canonicalize(&patch_file).unwrap_or(patch_file);
+        let run = |dry: bool| {
+            let mut args: Vec<std::ffi::OsString> =
+                ["-p1", "--fuzz=0", "-f", "-s", "--no-backup-if-mismatch"]
+                    .iter()
+                    .map(Into::into)
+                    .collect();
+            if dry {
+                args.push("--dry-run".into());
+            }
+            args.push("-i".into());
+            args.push(patch_file.clone().into_os_string());
+            crate::proc::capture_with_timeout(
+                "patch",
+                &args,
+                &root,
+                Emit::quiet(),
+                Duration::from_secs(120),
+            )
             .map_err(|e| {
-                let spec = spec_path.file_name().unwrap_or_default().to_string_lossy();
-                format!("could not run patch for {name} ({spec}): {e}")
-            })?;
-        if !out.status.success() {
-            let detail = String::from_utf8_lossy(&out.stdout).to_string()
-                + &String::from_utf8_lossy(&out.stderr);
-            return Err(format!(
-                "{name} does not apply to the pristine source with `patch -p1 --fuzz=0`: {}",
-                detail.trim().chars().take(600).collect::<String>()
-            ));
+                let spec_name = spec_path.file_name().unwrap_or_default().to_string_lossy();
+                format!("could not run patch for {name} ({spec_name}): {e}")
+            })
+        };
+        let dry = run(true)?;
+        let out = if dry.success() { run(false)? } else { dry };
+        if !out.success() {
+            let detail = out.stdout + &out.stderr;
+            check
+                .failed
+                .push((name, detail.trim().chars().take(600).collect::<String>()));
         }
     }
-    Ok(None)
+    Ok(check)
+}
+
+/// [`try_patches`] as a gate for an edit: `Err` names the first patch that does
+/// not apply. The `Ok` value is what could not be checked, to be reported.
+fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, String> {
+    let check = try_patches(spec_path, spec)?;
+    match check.failed.first() {
+        Some((name, detail)) => Err(format!(
+            "{name} does not apply to the pristine source with `patch -p1 --fuzz=0`: {detail}"
+        )),
+        None => Ok(check.unchecked),
+    }
 }
 
 /// The source archive in the checkout. A checkout can hold several (an old
@@ -10446,6 +10532,59 @@ mod tests {
 
         // nothing to check without patches
         assert!(check_patches_apply(&spec_path, "%autosetup -p1\n").is_ok());
+    }
+
+    #[test]
+    fn every_patch_that_does_not_apply_is_found_and_the_rest_build_on_each_other() {
+        let root = tempfile::tempdir().unwrap();
+        // A checkout path with `:` in it, as in `home:user:project`.
+        let dir = root.path().join("home:u:p");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tarball = dir.join("pkg-1.0.tar.gz");
+        {
+            let enc = flate2::write::GzEncoder::new(
+                std::fs::File::create(&tarball).unwrap(),
+                flate2::Compression::default(),
+            );
+            let mut tb = tar::Builder::new(enc);
+            let data = b"a\nb\nc\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tb.append_data(&mut h, "pkg-1.0/f.txt", &data[..]).unwrap();
+            tb.into_inner().unwrap().finish().unwrap();
+        }
+        let spec = "Version: 1.0\n%autosetup -p1 -n pkg-%{version}\n\
+                    Patch0: stale.patch\nPatch1: b.patch\nPatch2: c.patch\n";
+        let spec_path = dir.join("pkg.spec");
+        std::fs::write(&spec_path, spec).unwrap();
+        // Made for other code: its context is not in f.txt.
+        std::fs::write(
+            dir.join("stale.patch"),
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n x\n-y\n+Y\n z\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.patch"),
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n",
+        )
+        .unwrap();
+        // Applies only on top of b.patch.
+        std::fs::write(
+            dir.join("c.patch"),
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-B\n+BB\n c\n",
+        )
+        .unwrap();
+        let check = try_patches(&spec_path, spec).unwrap();
+        assert_eq!(check.unchecked, None);
+        let names: Vec<&str> = check.failed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["stale.patch"], "{check:?}");
+        // Without the stale one the spec is clean.
+        let kept = without_patches(spec, &["stale.patch".to_string()]);
+        assert_eq!(try_patches(&spec_path, &kept).unwrap(), PatchCheck::default());
+        // The dry run wrote nothing into the checkout.
+        assert!(!dir.join("f.txt").exists());
     }
 
     #[test]
