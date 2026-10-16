@@ -5829,6 +5829,44 @@ fn accept_or_restore(
     )
 }
 
+/// How many times the same validation error rejected an edit of one spec, in
+/// this process. A fourth identical turn would be re-prompting for the same
+/// failure (python-torch: eleven rejections of one inherited patch, $2.64).
+static SPEC_REJECTIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(PathBuf, u64), (u32, String)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Identical rejections of one spec after which the step fails instead of asking again.
+const MAX_IDENTICAL_REJECTIONS: u32 = 3;
+
+fn note_spec_rejection(spec_path: &Path, problem: &str) {
+    let mut map = SPEC_REJECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = map
+        .entry((spec_path.to_path_buf(), hash_spec(problem)))
+        .or_insert((0, problem.to_string()));
+    entry.0 += 1;
+}
+
+fn clear_spec_rejections(spec_path: &Path) {
+    let mut map = SPEC_REJECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|(p, _), _| p != spec_path);
+}
+
+/// The failure for a spec rejected with the same error [`MAX_IDENTICAL_REJECTIONS`]
+/// times, or `None` while another try is still reasonable.
+fn repeated_spec_rejection(spec_path: &Path) -> Option<String> {
+    let map = SPEC_REJECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    map.iter()
+        .find(|((p, _), (n, _))| p == spec_path && *n >= MAX_IDENTICAL_REJECTIONS)
+        .map(|(_, (n, problem))| {
+            let first: String = problem.lines().next().unwrap_or("").chars().take(300).collect();
+            format!(
+                "the spec was rejected {n} times with the same error and the agent does not \
+                 get past it: {first}"
+            )
+        })
+}
+
 /// `accept_or_restore` extended with a full-checkout snapshot taken BEFORE
 /// the agent turn ran. On reject (rpmspec --parse fails on the agent's
 /// new spec), both the spec AND every other top-level checkout file the
@@ -5867,6 +5905,7 @@ fn accept_or_restore_with_snapshot(
     }
 
     if let Err(e) = osc::rpmspec_check(spec_path, Emit::new(reporter, step.id)) {
+        note_spec_rejection(spec_path, &e.to_string());
         reporter.report(&Event::SpecRejected {
             step: step.id,
             reason: ap_core::event::SpecRejection::RpmspecParseFailed {
@@ -5897,6 +5936,7 @@ fn accept_or_restore_with_snapshot(
         });
     }
     if let Err(problem) = patch_check {
+        note_spec_rejection(spec_path, &problem);
         reporter.report(&Event::SpecRejected {
             step: step.id,
             reason: ap_core::event::SpecRejection::RpmspecParseFailed {
@@ -5920,6 +5960,7 @@ fn accept_or_restore_with_snapshot(
         return false;
     }
 
+    clear_spec_rejections(spec_path);
     let diff = unified_diff(before, &after);
     let (added, removed) = diff_counts(&diff);
     let diff_path = step.file("spec.diff");
@@ -6067,6 +6108,9 @@ fn apply_turn_outcome(
                 ),
                 notes_path,
             );
+            if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
+                return Err(format!("{label}: {msg}"));
+            }
             // The turn cannot run `osc vc` (osc needs the keyring, which its
             // environment does not reach), so the entry is written here, from
             // what the turn said it did.
@@ -11657,6 +11701,22 @@ mod settled_tests {
 #[cfg(test)]
 mod hygiene_tests {
     use super::*;
+
+    #[test]
+    fn the_third_identical_spec_rejection_fails_the_step() {
+        let spec = PathBuf::from("/nonexistent/hygiene-reject/python-x.spec");
+        let other = PathBuf::from("/nonexistent/hygiene-reject/python-y.spec");
+        note_spec_rejection(&spec, "patch does not apply");
+        note_spec_rejection(&spec, "patch does not apply");
+        note_spec_rejection(&spec, "a different error");
+        assert!(repeated_spec_rejection(&spec).is_none());
+        note_spec_rejection(&spec, "patch does not apply");
+        let msg = repeated_spec_rejection(&spec).unwrap();
+        assert!(msg.contains("3 times") && msg.contains("patch does not apply"), "{msg}");
+        assert!(repeated_spec_rejection(&other).is_none());
+        clear_spec_rejections(&spec);
+        assert!(repeated_spec_rejection(&spec).is_none());
+    }
 
     #[test]
     fn a_stale_or_already_read_build_log_skips_the_prefix_turn() {
