@@ -6249,12 +6249,23 @@ fn changes_message(reasoning: &str) -> String {
         .map(|(s, _)| s)
         .unwrap_or(&flat)
         .trim_end_matches('.');
+    // `.changes` is plain text, not a spec: a doubled `%%` is a spec escape.
+    let first = first.replace("%%", "%");
     // A changelog line is read at a glance: past 120 characters it is cut at a
-    // word, not in the middle of one, and says so.
+    // clause boundary (or at a word when there is none), with no ellipsis.
     let mut line: String = if first.chars().count() > 120 {
         let cut: String = first.chars().take(120).collect();
-        let cut = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
-        format!("{}...", cut.trim_end_matches([',', ';', ':', ' ']))
+        // Boundary candidates must leave a meaningful head.
+        let clause = [", ", "; ", ": ", " - ", " — ", " ("]
+            .iter()
+            .filter_map(|b| cut.rfind(b))
+            .filter(|&i| cut[..i].chars().count() >= 40)
+            .max();
+        let head = match clause {
+            Some(i) => &cut[..i],
+            None => cut.rsplit_once(' ').map(|(h, _)| h).unwrap_or(&cut),
+        };
+        head.trim_end_matches([',', ';', ':', ' ', '-', '(']).to_string()
     } else {
         first.to_string()
     };
@@ -9404,8 +9415,18 @@ mod tests {
             "Relax the numpy bound"
         );
         assert_eq!(changes_message("   "), "Update the packaging");
-        assert!(changes_message(&"word ".repeat(100)).ends_with("..."));
-        assert!(changes_message(&"word ".repeat(100)).chars().count() <= 123);
+        assert!(!changes_message(&"word ".repeat(100)).ends_with("..."));
+        assert!(changes_message(&"word ".repeat(100)).chars().count() <= 120);
+    }
+
+    #[test]
+    fn a_long_changes_message_is_cut_at_a_clause_without_an_ellipsis() {
+        let m = changes_message(
+            "Pass the tests the sdist does not ship through the deselect list, and its cmake \
+             flags keep the build from reaching the network at all",
+        );
+        assert_eq!(m, "Pass the tests the sdist does not ship through the deselect list");
+        assert_eq!(changes_message("Escape %%{version} in the macro"), "Escape %{version} in the macro");
     }
 
     #[test]
