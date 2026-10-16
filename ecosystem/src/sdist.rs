@@ -652,6 +652,22 @@ fn names_have_hashed_libs(names: &[String]) -> bool {
     })
 }
 
+/// The file names (no directories) a wheel unpacks, read from the zip's
+/// directory alone: no metadata is parsed and no library opened, unlike
+/// [`wheel_layout`], so it is cheap enough to ask of every sibling wheel of a
+/// project (an NVIDIA wheel is hundreds of megabytes). `None` when the file is
+/// not a readable zip.
+pub fn wheel_file_names(wheel: &Path) -> Option<Vec<String>> {
+    let zip_archive = zip::ZipArchive::new(std::fs::File::open(wheel).ok()?).ok()?;
+    let mut names: Vec<String> = zip_archive
+        .file_names()
+        .filter(|n| !n.ends_with('/'))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    Some(names)
+}
+
 /// [`WheelLayout::has_hashed_libs`] alone, from the zip's file names only: no
 /// metadata is read and no library opened, so it is cheap enough to ask of
 /// every wheel in a project.

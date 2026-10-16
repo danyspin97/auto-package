@@ -3141,15 +3141,17 @@ fn sibling_wheels_in_checkouts(checkouts: &std::path::Path, pkg_name: &str) -> V
         let Some(wheel) = wheels.first() else {
             continue;
         };
-        let Some(layout) = ap_ecosystem::sdist::wheel_layout(wheel) else {
+        // Names only: reading a full layout would open the libraries of an
+        // NVIDIA wheel, and this runs for every sibling.
+        let Some(names) = ap_ecosystem::sdist::wheel_file_names(wheel) else {
             continue;
         };
-        let dist = layout.dist_info.clone().unwrap_or_default();
-        let files: Vec<String> = layout
-            .files
-            .iter()
-            .filter(|f| f.split('/').next() != Some(dist.as_str()) && f.contains('/'))
-            .cloned()
+        let files: Vec<String> = names
+            .into_iter()
+            .filter(|f| {
+                f.split_once('/')
+                    .is_some_and(|(top, _)| !top.ends_with(".dist-info"))
+            })
             .collect();
         if files.is_empty() {
             continue;
@@ -4163,18 +4165,13 @@ fn spdx_expression_for_spec(expr: &str) -> String {
     // expression (`MIT AND LicenseRef-NVIDIA-Proprietary`) stays.
     let mut out = String::new();
     let mut word = String::new();
-    let mut seen_vendor = false;
-    let mut flush = |word: &mut String, out: &mut String| {
+    let flush = |word: &mut String, out: &mut String| {
         if word.is_empty() {
             return;
         }
         let low = word.to_ascii_lowercase();
         if low.contains("nvidia") || low.contains("proprietary") {
-            // Two vendor terms are one.
-            if !seen_vendor {
-                out.push_str(NVIDIA_PROPRIETARY);
-            }
-            seen_vendor = true;
+            out.push_str(NVIDIA_PROPRIETARY);
         } else {
             out.push_str(word);
         }
@@ -4189,6 +4186,15 @@ fn spdx_expression_for_spec(expr: &str) -> String {
         }
     }
     flush(&mut word, &mut out);
+    // Two vendor terms are one. Dropping the second would leave its operator
+    // dangling (`MIT AND SUSE-NonFree AND`), so the repeat is merged with the
+    // operator that joins it instead.
+    for op in ["AND", "OR"] {
+        let twice = format!("{NVIDIA_PROPRIETARY} {op} {NVIDIA_PROPRIETARY}");
+        while out.contains(&twice) {
+            out = out.replace(&twice, NVIDIA_PROPRIETARY);
+        }
+    }
     out
 }
 
@@ -6809,6 +6815,19 @@ mod sharp_edge_tests {
         );
         assert_eq!(spdx_expression_for_spec("MIT"), "MIT");
         assert_eq!(spdx_expression_for_spec("MIT OR Apache-2.0"), "MIT OR Apache-2.0");
+        // Two vendor terms are one, with no operator left dangling.
+        assert_eq!(
+            spdx_expression_for_spec("MIT AND LicenseRef-NVIDIA-A AND LicenseRef-NVIDIA-B"),
+            "MIT AND SUSE-NonFree"
+        );
+        assert_eq!(
+            spdx_expression_for_spec("LicenseRef-NVIDIA-A AND LicenseRef-NVIDIA-B AND MIT"),
+            "SUSE-NonFree AND MIT"
+        );
+        assert_eq!(
+            spdx_expression_for_spec("(LicenseRef-NVIDIA-A OR LicenseRef-Proprietary)"),
+            "(SUSE-NonFree)"
+        );
     }
 
     #[test]
