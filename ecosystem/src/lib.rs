@@ -2,6 +2,7 @@
 
 pub mod forge;
 pub mod net;
+pub mod nvidia_redist;
 pub mod pip;
 mod pip_sandbox;
 pub mod pypi;

@@ -10,6 +10,7 @@ pub mod flavors;
 pub mod http;
 pub mod log;
 pub mod obs_status;
+pub mod nvidia_spec;
 pub mod osc;
 pub mod package_notes;
 pub mod pipeline;
