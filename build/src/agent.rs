@@ -352,8 +352,10 @@ const PRIORITIES: &str = r#"
    rebuilding another package or of a failed build.
 3. **Speed never beats rule 1.** If the quick fix would leave the package
    broken at runtime, take the longer correct one. If you cannot make it
-   work, say so (`blocked`, with the reason) instead of reporting a hollow
-   success.
+   work directly, take the resolution that does (`stage_files`,
+   `patch_dependencies`, `use_upstream_wheel`, vendoring, a relaxed bound, an
+   added Source, an extra package, a failing test skipped with evidence)
+   instead of reporting a hollow success.
 "#;
 
 const CONVENTIONS: &str = r#"
@@ -1477,8 +1479,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
       action `"use_upstream_wheel"` with `why` naming what needs CUDA and the
       line that proves it. If every wheel is locked to one CPython each
       (`cp313`, `cp314`, ...), follow convention 49 instead and return
-      `"edited"`. If PyPI publishes no usable wheel at all, return `"blocked"`
-      naming CUDA as the reason.
+      `"edited"`. If PyPI publishes no usable wheel at all, build from source
+      and report the missing toolkit component once in `unresolvable_packages`
+      under its redist name (an extra package the pipeline builds), quoting the
+      build.log line that proves it is needed.
    3. A package that merely DEPENDS on a CUDA-needing package at runtime is
       unaffected: it keeps its own normal build and `Requires` — the
       dependency is built by this same rule (wheel) when the pipeline gets
@@ -1641,7 +1645,8 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    pipeline then downloads them all and writes the per-flavor spec itself
    (convention 49's layout). It is refused — "no usable upstream wheel either" —
    only when some flavor has no wheel at all; then follow convention 49 by
-   hand if you can, or return `"blocked"` naming the flavor that has none.
+   hand; for a flavor that has no wheel, drop that flavor from the spec's
+   python flavors with a comment naming the flavor and the missing wheel.
 
    This exception also covers Review discovering that the checked-out
    source is simply the wrong artifact for this specific PyPI release — a
@@ -1661,9 +1666,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    would expect to host it (the official organization, e.g. nvidia/* for NVIDIA
    CUDA packages) in your evidence. Prefer fixing the spec to build from a
    repository the checkout itself names (convention 26) when you can. Setting
-   action to "blocked" with why: "source not on PyPI, repository not recorded in
-   metadata" ENDS this package for the run; the operator then supplies the
-   repository with `--source-url`, which is checked before it is used.
+   action to `use_upstream_wheel` when PyPI publishes a wheel; otherwise add a
+   `download_files` Source (or `_service`) from the release URL of the official
+   organisation you named, which the pipeline fetches and verifies. The operator
+   can still override the repository with `--source-url`, checked before use.
 
 30. Monorepos: when the "Other projects in this archive" section above lists
    more than one project, package ALL sibling projects as subpackages of this
@@ -2496,7 +2502,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      `__requires_exclude`), never a second line. Such a capability is never a
      package: do NOT report it in `unresolvable_packages`, and do not add a
      `Requires:` or `Provides:` for it. A dependency you only consume that
-     carries it is repaired by the pipeline, not a reason to return `"blocked"`.
+     carries it is repaired by the pipeline; there is nothing for you to resolve.
    - Compiled code in the wheel means the spec must be per-architecture
      (`ExclusiveArch` for the arches the wheel covers, or the matching
      `%ifarch`), not noarch.
@@ -2550,8 +2556,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    break is one symbol or API. (b) A package this project already builds is
    unfinished or wrong, so that its RPM lacks files this package needs (a
    Python package missing from its file list, a `%files` that omits part of the
-   wheel); you cannot edit it from here, so report it instead of returning
-   `blocked`. The rest of this entry is written for case (a); for (b) the
+   wheel); you cannot edit it from here, so report it in `patch_dependencies`. The rest of this entry is written for case (a); for (b) the
    `problem` text gives the RPM, the missing files or module, and the error line,
    and the dependency's own recipe is fixed in place. This is
    rare; use it only after the other options fail. Weigh the cost: a patch to a
@@ -2594,7 +2599,9 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `%files`. An `%install` that holds only comments, or a `%files` that
    lists only `%license`, builds "successfully" and publishes an empty
    package that every dependent then fails on. If you cannot finish a part,
-   return `blocked` and say why; never leave a marker for later, and never
+   resolve it with the nearest option (read more of `source/`, `stage_files`,
+   a `download_files` Source, `use_upstream_wheel`, or drop an optional
+   subpackage and say so in the description); never leave a marker for later, and never
    write TODO into a comment either. The pipeline rejects a spec that still
    contains the word TODO outside `%changelog`.
 
@@ -2731,9 +2738,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    and `z3-solver`'s `z3/`, `python-openai-harmony` and `oss-harmony`'s
    `openai_harmony/`) the two cannot be installed together: add `Conflicts:
    python-<other>` above `%python_subpackages` (the macro makes it per flavor)
-   and say in the description that it is a fork or a bundled copy, or report it
-   with `blocked` and name the distro package, because depending on the distro
-   package is usually the right answer. A bundled copy of a distro library
+   and say in the description that it is a fork or a bundled copy, or depend on
+   the distro package instead (BuildRequires and Requires it, drop this
+   package's copy, name the distro package in your reasoning), which is usually
+   the right answer. A bundled copy of a distro library
    (`libz3.so`) also needs convention 68's `__provides_exclude_from`.
 
 72. **`rpmlintrc` filters exist only for a warning OBS actually reported.**
@@ -2842,7 +2850,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      (at least a sentence; the pipeline rejects an empty one).
    - If the check fails because the distro's library IS GPL or non-free (Factory's
      `ffmpeg-8` is `License: GPL-3.0-or-later` and configures `--enable-gpl`), do
-     NOT give up on the package and do not return `blocked`: have a LICENCE-CLEAN
+     NOT give up on the package: have a LICENCE-CLEAN
      copy built in this project. First look whether the project already has one
      (`osc cat <project> ffmpeg-8 ffmpeg-8.spec`, `License:` LGPL and no
      `--enable-gpl`/`--enable-nonfree` in `./configure`): if so, BuildRequire it
@@ -2861,8 +2869,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      licence-clean set the variable with the comment above. Never write the
      confirmation on the strength of a copy that is not built.
    - A variable that ACCEPTS TERMS (`ACCEPT_EULA=Y`, `AGREE_*_TERMS`) is a
-     person's decision, not a fact you can check: do not set it; return
-     `blocked` and name the variable and what it guards.
+     person's decision, not a fact you can check: do not set it; build
+     without the component the terms guard (the option or feature off) or use
+     `use_upstream_wheel` when the wheel ships without the guard, and name the
+     variable and what it guards in your reasoning.
    Prefer a way of satisfying a guard that needs no override (building against
    the library the guard names, or the upstream wheel) when one exists.
 
@@ -2915,7 +2925,7 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    dir>` (`-a1` unpacks inside the source directory). A `SourceN:` that is a plain file name of the
    unpacked source (`Source10: package-lock.json` for the `node_modules` service) is
    copied into the checkout by the pipeline: name it in the spec, do not `cp` it
-   and do not return `blocked` because it is absent. (c) A maturin or cargo
+   and do not treat its absence from the checkout as a missing file. (c) A maturin or cargo
    package: Grep the vendored registry and `Cargo.lock` for `prost-build` or
    `tonic-build` (BuildRequires `protobuf-devel`), `utoipa-swagger-ui` or any
    `build.rs` that downloads (set the offline variable or disable the feature),
@@ -3053,7 +3063,10 @@ verify sources exist, handle untracked files, delete stale artifacts.
 4. **Validate**: re-read the spec after your last edit, not only after the first
 one; the pipeline runs `rpmspec --parse` on it once you finish.
 5. **Finish**: Return a JSON object with:
-- "action": "edited", "no_change", "blocked", or "use_upstream_wheel"
+- "action": "edited", "no_change", "use_upstream_wheel", or "blocked".
+  `blocked` is ONLY the last-resort answer of a resolver round that has tried
+  every resolution the conventions name; anywhere else the pipeline treats it as
+  a defect of the tool and asks again with your reason fed back.
 - "why": required when action is "blocked" or "use_upstream_wheel" — for the
 latter, name the exact missing compiler/SDK and quote the build.log line proving it
 (convention 28 Exception 4)
@@ -3093,21 +3106,7 @@ when the cause may be there (the paths are in the prompt; `rpm -qlp rpms/<f>.rpm
 lists what a built package ships). You cannot edit a sibling package yourself:
 when the fix belongs in one, report it in `patch_dependencies` with the exact
 change needed and return `no_change`: the pipeline branches, patches and rebuilds
-it, then re-runs this package.
-
-## `blocked` is not an accepted answer
-
-The pipeline can do all of these for you, so a missing capability is never a
-reason to stop: stage files (`stage_files`), patch a sibling or distro package
-(`patch_dependencies`), switch to the upstream wheel (`use_upstream_wheel`),
-add a `download_files` `Source` or a `_service` entry, vendor cargo / npm / go
-dependencies, relax a dependency bound, add a BuildRequires or a helper package
-(`unresolvable_packages`), skip a failing test with the evidence from the log,
-and build an additional package. Pick the one that fits and return `edited`,
-`no_change` with `patch_dependencies`, or `use_upstream_wheel`. An answer of
-`blocked` is treated as a defect of the tool: the pipeline asks again, with your
-reason fed back, up to three times. Wherever a convention above says to return
-`blocked`, do the nearest option from this list instead."#;
+it, then re-runs this package."#;
 
 /// Everything sent to `claude --append-system-prompt`: [`CONVENTIONS`] plus
 /// [`STATIC_WORKFLOW`], neither of which varies by package, task, or attempt.
@@ -4782,8 +4781,10 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  just rename the line — a spec pointing at a missing file fails `%prep` \
                  with the same error one turn later (real example: \
                  `python-nvidia-nccl-cu13`). Say exactly which file is missing and return \
-                 `blocked` (or `use_upstream_wheel` when convention 28 Exception 4 \
-                 applies); the pipeline fetches sources outside your turn.\n\
+                 use `stage_files` when it is in `source/`, `sdist/` or a dependency's \
+                 tree, otherwise a `download_files` Source or `_service` entry (or \
+                 `use_upstream_wheel` when convention 28 Exception 4 applies); the \
+                 pipeline fetches sources outside your turn.\n\
              \n\
              0d. **System tools wrapped in `%{python_module ...}`**: Grep the spec's \
                  BuildRequires for `%{python_module cmake}`, `%{python_module ninja}`, or the \
@@ -4971,8 +4972,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              the same request differently on each round is asking for that same change. \
              If the sdist cannot be built because it is a repository snapshot whose \
              `third_party/` submodule directories are empty (torch: pybind11, fmt, \
-             XNNPACK ... have no files), that is not a reason to return `blocked`: \
-             return `use_upstream_wheel` (convention 28 Exception 4), since a wheel \
+             XNNPACK ... have no files), return `use_upstream_wheel` (convention 28 Exception 4), since a wheel \
              carries the same files and the request is then met by it.\n\
              \n\
              First decide which of convention 62's two cases the problem is. If it is \
@@ -4982,8 +4982,8 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              (the `cutlass` split between `%{python_sitelib}` and `%{python_sitearch}`, \
              convention 76) — there is no upstream code to restore and no patch to \
              write: fix the spec in place (install directory, `%files`, `%check`), \
-             make the same choice the siblings need, and return `edited`. Returning \
-             `blocked` because \"there is no source tree to patch\" is wrong for case \
+             make the same choice the siblings need, and return `edited`. \"There is \
+             no source tree to patch\" is no reason to stop in case \
              (b): the spec is the thing to change, and the turn that sent you here \
              cannot edit it.\n\
              \n\
@@ -5007,7 +5007,10 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                 first sentence say what the patch restores.\n\
              Do not change the package's version, its sources or anything unrelated to \
              the problem. If you cannot find the code upstream, or the patch would \
-             need more than restoring it, return `blocked` and say why in `why`."
+             need more than restoring it, return `use_upstream_wheel` when this is a Python \
+             project with a wheel (it carries the unmodified code), otherwise `no_change` \
+             with `reasoning` naming what is missing, so the dependent relaxes its bound or \
+             skips the feature."
         }
         Task::TranslateUnresolvableDeps => {
             "OBS could not resolve the dependencies listed below (see \"Missing \
@@ -5332,9 +5335,9 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              which one you did and why. Never drop a `Requires`/`BuildRequires` the \
              package imports unconditionally (at module level, or from every test \
              module): the result is an RPM that installs and cannot be imported, \
-             packaged to look green. Return `blocked` and name the dependency \
-             instead; the pipeline runs a failed dependency again, and this package \
-             with it once that builds.\n\n",
+             packaged to look green. Fix the dependency instead: report it in \
+             `patch_dependencies` with its failure and return `no_change`; the pipeline \
+             runs a failed dependency again, and this package with it once that builds.\n\n",
             bullets(req.failed_deps),
         )
     };
@@ -5719,7 +5722,17 @@ mod tests {
         assert_eq!(resp.stage_files.len(), 2);
         assert_eq!(resp.stage_files[0].to, "package-lock.json");
         assert_eq!(resp.stage_files[1].package.as_deref(), Some("dep"));
-        assert!(STATIC_WORKFLOW.contains("stage_files") && STATIC_WORKFLOW.contains("is not an accepted answer"));
+        assert!(STATIC_WORKFLOW.contains("stage_files") && STATIC_WORKFLOW.contains("last-resort answer"));
+    }
+
+    #[test]
+    fn no_convention_tells_the_agent_to_return_blocked() {
+        // `blocked` is named once, as the last-resort answer of a resolver
+        // round; every convention names the concrete resolution instead.
+        let all = format!("{CONVENTIONS}{STATIC_WORKFLOW}");
+        assert!(!all.contains("return `blocked`") && !all.contains("return `\"blocked\"`"));
+        assert!(!all.contains("with `blocked`") && !all.contains("is not an accepted answer"));
+        assert_eq!(all.matches("last-resort answer").count(), 1);
     }
 
     #[test]
