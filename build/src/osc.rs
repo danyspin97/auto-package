@@ -1818,6 +1818,41 @@ mod published_binary_tests {
     }
 
     #[test]
+    fn a_wheel_spec_drops_source_recipe_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Name: python-x\nVersion: 2\nSource0: https://h/x-2-py3-none-any.whl#/x-2-py3-none-any.whl\n";
+        std::fs::write(dir.path().join("python-x.spec"), spec).unwrap();
+        for f in [
+            "_service", "_constraints", "x-1.tar.gz", "x-2-py3-none-any.whl", "python-x.changes",
+            "vendor.tar.xz", "x.obsinfo",
+        ] {
+            std::fs::write(dir.path().join(f), "x").unwrap();
+        }
+        let plan = publish_plan(dir.path());
+        for f in ["_service", "_constraints", "x-1.tar.gz", "vendor.tar.xz", "x.obsinfo"] {
+            assert!(plan.skipped.contains(&f.to_string()), "{f}: {plan:?}");
+        }
+        for f in ["python-x.spec", "python-x.changes", "x-2-py3-none-any.whl"] {
+            assert!(plan.files.contains(&f.to_string()), "{f}: {plan:?}");
+        }
+    }
+
+    #[test]
+    fn a_source_recipe_keeps_its_service_and_named_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Name: x\nVersion: 2\nSource0: x-%{version}.tar.gz\nSource1: vendor.tar.zst\n";
+        std::fs::write(dir.path().join("x.spec"), spec).unwrap();
+        for f in ["_service", "x-2.tar.gz", "x-1.tar.gz", "vendor.tar.zst"] {
+            std::fs::write(dir.path().join(f), "x").unwrap();
+        }
+        let plan = publish_plan(dir.path());
+        assert!(plan.files.contains(&"_service".to_string()), "{plan:?}");
+        assert!(plan.files.contains(&"x-2.tar.gz".to_string()));
+        assert!(plan.files.contains(&"vendor.tar.zst".to_string()));
+        assert!(plan.skipped.contains(&"x-1.tar.gz".to_string()), "{plan:?}");
+    }
+
+    #[test]
     fn binary_names_are_distinct_and_sorted() {
         let xml = r#"<collection matches="3">
   <binary name="b-devel" project="p" arch="x86_64"/>
@@ -3415,6 +3450,28 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[Str
     if name == "_multibuild" && !["%{flavor}", "%flavor", "%{?flavor", "%{!?flavor"]
         .iter()
         .any(|m| spec_text.contains(m))
+    {
+        return false;
+    }
+    // A wheel repackage compiles nothing and fetches no source tree: the
+    // source recipe's `_service` (tar_scm), `_constraints` (build resources) and
+    // `.obsinfo` are leftovers of the recipe the wheel switch replaced.
+    let wheel_spec = sources.iter().any(|s| s.ends_with(".whl"));
+    if wheel_spec
+        && (["_service", "_servicedata", "_constraints"].contains(&name) || name.ends_with(".obsinfo"))
+    {
+        return false;
+    }
+    // An archive no `Source:` line names (the previous release's tarball or
+    // vendor archive, the 784 MB source tarball of a switched recipe) is not
+    // needed by `%prep`. Only judged when the spec names sources at all.
+    const ARCHIVES: &[&str] = &[
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar", ".tgz", ".tbz", ".txz", ".zip",
+        ".crate", ".whl",
+    ];
+    if !sources.is_empty()
+        && ARCHIVES.iter().any(|s| name.ends_with(s))
+        && !sources.iter().any(|p| matches_source_name(p, name))
     {
         return false;
     }
@@ -6707,7 +6764,7 @@ mod publish_plan_tests {
     #[test]
     fn only_the_package_files_are_published() {
         let dir = tempfile::tempdir().unwrap();
-        let spec = "Name: pkg\nVersion: 1.0\nPatch0: 0001-fix.patch\n";
+        let spec = "Name: pkg\nVersion: 1.0\nSource0: pkg-%{version}.tar.gz\nPatch0: 0001-fix.patch\n";
         for (name, body) in [
             ("pkg.spec", spec),
             ("pkg-1.0.tar.gz", ""),

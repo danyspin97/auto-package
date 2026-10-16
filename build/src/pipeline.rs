@@ -5976,7 +5976,6 @@ fn apply_turn_outcome(
                     // the run's JSONL, so the switch has to leave a trail
                     // inside the checkout itself.
                     if let Err(e) = write_wheel_switch_provenance(
-                        checkout_dir,
                         rpm_name,
                         config,
                         &wheel,
@@ -5990,9 +5989,7 @@ fn apply_turn_outcome(
                             message: format!(
                                 "{rpm_name}: wheel switch succeeded but writing \
                                  wheel-origin.txt / spec.pre-wheel-switch failed \
-                                 ({e}); add them by hand before submitting the \
-                                 OBS request — the switch is otherwise invisible \
-                                 to the recipe reviewer"
+                                 ({e}); the switch is otherwise not recorded"
                             ),
                         });
                     }
@@ -7795,7 +7792,7 @@ fn validate_wheel_switch_why(why: &str) -> Result<(), String> {
 /// Record WHAT got swapped and WHY, so a human reviewing the OBS commit
 /// after the pipeline has moved on can see the switch happened at all.
 ///
-/// Writes `wheel-origin.txt` into the checkout and preserves the original
+/// Writes `wheel-origin.txt` into `state/<pkg>/` and preserves the original
 /// spec as `<spec>.pre-wheel-switch` before the fallback overwrites it.
 /// Both files travel with the OBS commit and show up in the review diff,
 /// instead of the switch being discoverable only from the run's JSONL
@@ -7808,7 +7805,6 @@ fn validate_wheel_switch_why(why: &str) -> Result<(), String> {
 /// operator to add the file manually.
 #[allow(clippy::too_many_arguments)]
 fn write_wheel_switch_provenance(
-    checkout_dir: &Path,
     rpm_name: &str,
     config: &PipelineConfig,
     wheel: &ap_ecosystem::pypi::WheelFile,
@@ -7837,7 +7833,7 @@ fn write_wheel_switch_provenance(
          {why}\n\
          \n\
          The pre-switch source-build spec is preserved as\n\
-         `{rpm_name}.spec.pre-wheel-switch` in this checkout. Review both\n\
+         `{rpm_name}.spec.pre-wheel-switch` in the package's state directory. Review both\n\
          before accepting the recipe; this file is the only record that\n\
          the recipe was swapped from source to binary.\n",
         pkg_name = config.pkg_name,
@@ -7848,9 +7844,13 @@ fn write_wheel_switch_provenance(
         wheel_sha256 = wheel.sha256,
         wheel_size = wheel.size,
     );
-    ap_core::fsx::write_atomic(&checkout_dir.join("wheel-origin.txt"), provenance)?;
+    // Kept in the package's state directory: files in the checkout are
+    // "not committing" noise on every Commit step.
+    let dir = config.state_root.join(rpm_name);
+    std::fs::create_dir_all(&dir)?;
+    ap_core::fsx::write_atomic(&dir.join("wheel-origin.txt"), provenance)?;
     ap_core::fsx::write_atomic(
-        &checkout_dir.join(format!("{rpm_name}.spec.pre-wheel-switch")),
+        &dir.join(format!("{rpm_name}.spec.pre-wheel-switch")),
         original_spec,
     )?;
     Ok(())
@@ -11467,5 +11467,60 @@ mod settled_tests {
         assert!(is_settled("python-settled-probe"));
         assert!(is_settled("python-Settled_Probe"));
         assert!(!is_settled("python-another-probe"));
+    }
+}
+
+#[cfg(test)]
+mod hygiene_tests {
+    use super::*;
+
+    pub(super) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
+        PipelineConfig {
+            pkg_name: pkg.into(),
+            rpm_name: osc::rpm_name(pkg),
+            version: "1.0".into(),
+            project: "p".into(),
+            work_dir: PathBuf::new(),
+            state_root: state_root.to_path_buf(),
+            rpms_dir: PathBuf::new(),
+            distro: "openSUSE_Tumbleweed".into(),
+            arch: "x86_64".into(),
+            max_attempts: 1,
+            budget_usd: 1.0,
+            agent_backend: AgentBackend::Cli,
+            no_agent: true,
+            force: false,
+            regen: false,
+            source_repo: None,
+            subprojects: Vec::new(),
+            failed_deps: Vec::new(),
+            unbuildable_deps: Vec::new(),
+            run_id: "test".into(),
+            source_urls: Default::default(),
+            python_flavors: Default::default(),
+            patch_request: None,
+        }
+    }
+
+    #[test]
+    fn wheel_switch_provenance_goes_to_the_state_dir_not_the_checkout() {
+        let state = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let config = config("foo", state.path());
+        let wheel = ap_ecosystem::pypi::WheelFile {
+            filename: "foo-1.0-py3-none-any.whl".into(),
+            url: "https://h/foo.whl".into(),
+            sha256: "ab".into(),
+            size: 3,
+        };
+        write_wheel_switch_provenance("python-foo", &config, &wheel, 1, "build", "why", "SPEC")
+            .unwrap();
+        let dir = state.path().join("python-foo");
+        assert!(dir.join("wheel-origin.txt").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("python-foo.spec.pre-wheel-switch")).unwrap(),
+            "SPEC"
+        );
+        assert_eq!(std::fs::read_dir(checkout.path()).unwrap().count(), 0);
     }
 }
