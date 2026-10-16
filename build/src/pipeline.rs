@@ -407,7 +407,7 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
 /// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
 /// only used to detect "did the spec change since it was reviewed", not for
 /// anything security-sensitive.
-fn hash_spec(content: &str) -> u64 {
+pub(crate) fn hash_spec(content: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);

@@ -842,13 +842,26 @@ fn main() -> color_eyre::Result<()> {
 
 /// Set the free-space minimum and warn once, before any TUI takes the
 /// terminal, when the work directory's disk is short of room.
-pub(crate) fn init_disk_guard(work_dir: &Path, min_free_gb: u64) {
+pub(crate) fn init_disk_guard(
+    work_dir: &Path,
+    min_free_gb: u64,
+    project: &str,
+    distro: &str,
+    arch: &str,
+) {
     ap_build::workspace::set_min_free_gb(min_free_gb);
     if let Some(warning) = ap_build::workspace::low_space_warning(work_dir) {
         eprintln!("warning: {warning}");
     }
     for (name, outcome) in ap_build::pipeline::reconcile_state(&work_dir.join("state")) {
         eprintln!("note: {name} was left unfinished; now {outcome}");
+    }
+    // The self-check: what the checkouts, state.json and OBS disagree about.
+    for finding in ap_build::doctor::run(&work_dir.join("state"), &work_dir.join(project), || {
+        ap_build::osc::get_project_build_statuses(project, distro, arch, ap_build::proc::Emit::quiet())
+            .ok()
+    }) {
+        eprintln!("warning: {finding}");
     }
 }
 
@@ -1035,7 +1048,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                     .map_err(|e| color_eyre::eyre::eyre!(e))?,
             );
 
-            init_disk_guard(&project_dir, min_free_gb);
+            init_disk_guard(&project_dir, min_free_gb, &project, &distro, &arch);
             let run_dir = RunDir::allocate(&project_dir)?;
             let work_dir = project_dir;
 

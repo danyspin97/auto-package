@@ -237,7 +237,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     std::fs::create_dir_all(&project_dir)?;
     let _project_lock = ProjectLock::acquire(&project_dir)?;
     let work_dir = project_dir.canonicalize()?;
-    crate::init_disk_guard(&work_dir, a.min_free_gb);
+    crate::init_disk_guard(&work_dir, a.min_free_gb, &branch_project, &a.distro, &a.arch);
     let nvidia_choice = a
         .nvidia
         .or(a.nvidia_redist.then_some(crate::NvidiaMode::Redist));
