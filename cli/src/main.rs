@@ -874,6 +874,7 @@ pub(crate) fn init_disk_guard(
         for (name, what) in ap_build::pipeline::reconcile_with_obs(
             &work_dir.join("state"),
             &work_dir.join(project),
+            &rpms_dir,
             &lower,
             |checkout| ap_build::osc::has_local_changes(checkout, ap_build::proc::Emit::quiet()),
             |name| {

@@ -422,6 +422,7 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
 pub fn reconcile_with_obs(
     state_root: &Path,
     checkout_root: &Path,
+    rpms_dir: &Path,
     statuses: &std::collections::HashMap<String, osc::BuildStatus>,
     local_changes: impl Fn(&Path) -> bool,
     download: impl Fn(&str) -> Result<usize, osc::Error>,
@@ -462,19 +463,23 @@ pub fn reconcile_with_obs(
         match download(&name) {
             Ok(n) if n > 0 => {
                 let version = spec_version.unwrap_or_default();
+                // The rpmlint log of what was fetched, as a normal download does.
+                let lint = record_rpmlint_logs(rpms_dir, &name, &version, &ws);
                 let saved = PkgState::update(&ws, |st| {
                     st.policy_version = POLICY_VERSION;
                     st.last_built_version = Some(version);
                     st.last_outcome = Some("success".to_string());
                     st.last_failure_reason = None;
                 });
-                out.push((
-                    name,
-                    match saved {
-                        Ok(_) => format!("OBS built it; fetched {n} RPM(s) and recorded success"),
-                        Err(e) => format!("OBS built it; fetched {n} RPM(s), state not saved: {e}"),
-                    },
-                ));
+                let mut what = match saved {
+                    Ok(_) => format!("OBS built it; fetched {n} RPM(s) and recorded success"),
+                    Err(e) => format!("OBS built it; fetched {n} RPM(s), state not saved: {e}"),
+                };
+                for w in lint {
+                    what.push_str("; ");
+                    what.push_str(&w);
+                }
+                out.push((name, what));
             }
             Ok(_) => out.push((name, "OBS built it but no RPMs were downloaded".to_string())),
             Err(e) => out.push((name, format!("OBS built it but fetching its RPMs failed: {e}"))),
@@ -4914,9 +4919,24 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
 /// about its errors. The log OBS publishes is overwritten with every build, so
 /// this file is the only record of earlier ones.
 fn record_rpmlint(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Reporter) {
-    let logs = osc::take_rpmlint_logs(&config.rpms_dir, &config.rpm_name);
+    for message in record_rpmlint_logs(&config.rpms_dir, &config.rpm_name, &config.version, ws) {
+        reporter.report(&Event::Warning { step: None, message });
+    }
+}
+
+/// [`record_rpmlint`] without a reporter: returns the warnings instead. Also
+/// used by [`reconcile_with_obs`], so RPMs fetched there are recorded the same
+/// way as those of a normal download.
+fn record_rpmlint_logs(
+    rpms_dir: &Path,
+    rpm_name: &str,
+    version: &str,
+    ws: &Workspace,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let logs = osc::take_rpmlint_logs(rpms_dir, rpm_name);
     if logs.is_empty() {
-        return;
+        return warnings;
     }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4924,19 +4944,15 @@ fn record_rpmlint(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Report
     let mut text = String::new();
     for (name, log) in &logs {
         text.push_str(&format!(
-            "=== rpmlint of {name} {} (unix time {secs}) ===\n{log}\n",
-            config.version
+            "=== rpmlint of {name} {version} (unix time {secs}) ===\n{log}\n"
         ));
         let errors = osc::rpmlint_errors(log);
         if !errors.is_empty() {
-            reporter.report(&Event::Warning {
-                step: None,
-                message: format!(
-                    "rpmlint reports {} error(s) in the RPMs of {name}: {}",
-                    errors.len(),
-                    errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
-                ),
-            });
+            warnings.push(format!(
+                "rpmlint reports {} error(s) in the RPMs of {name}: {}",
+                errors.len(),
+                errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+            ));
         }
     }
     let path = ws.dir().join("rpmlint.log");
@@ -4946,11 +4962,9 @@ fn record_rpmlint(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Report
         .open(&path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
     if let Err(e) = appended {
-        reporter.report(&Event::Warning {
-            step: None,
-            message: format!("could not append to {}: {e}", path.display()),
-        });
+        warnings.push(format!("could not append to {}: {e}", path.display()));
     }
+    warnings
 }
 
 /// A successful OBS build: record it and report the package as built.
@@ -12901,13 +12915,23 @@ mod hygiene_tests {
         .chain([("python-bad".to_string(), osc::BuildStatus::Failed)])
         .collect();
         let downloads = std::sync::Mutex::new(Vec::new());
+        let rpms_dir = root.path().join("rpms");
         let done = reconcile_with_obs(
             &state_root,
             &checkouts,
+            &rpms_dir,
             &statuses,
             |dir| dir.ends_with("python-dirty"),
             |name| {
                 downloads.lock().unwrap().push(name.to_string());
+                // A download leaves OBS's rpmlint log in the stash.
+                let stash = rpms_dir.join(".rpmlint");
+                std::fs::create_dir_all(&stash).unwrap();
+                std::fs::write(
+                    stash.join(format!("{name}.log")),
+                    "x.rpm: E: no-binary\n",
+                )
+                .unwrap();
                 Ok(if name == "python-empty" { 0 } else { 3 })
             },
         );
@@ -12922,8 +12946,12 @@ mod hygiene_tests {
         }
         assert_eq!(outcome(&state_root, "python-empty").as_deref(), Some("interrupted"));
         assert_eq!(done.len(), 2, "{done:?}");
+        // The rpmlint log of the fetched RPMs is recorded at once.
+        let log = std::fs::read_to_string(ws.dir().join("rpmlint.log")).unwrap();
+        assert!(log.contains("rpmlint of python-ok 1.0") && log.contains("E: no-binary"), "{log}");
+        assert!(!rpms_dir.join(".rpmlint").join("python-ok.log").exists());
         // A failing download is reported, not fatal.
-        let again = reconcile_with_obs(&state_root, &checkouts, &statuses, |_| false, |_| {
+        let again = reconcile_with_obs(&state_root, &checkouts, &rpms_dir, &statuses, |_| false, |_| {
             Err(osc::Error::NotActionable("502".into()))
         });
         assert!(again.iter().all(|(_, m)| m.contains("fetching its RPMs failed")), "{again:?}");
