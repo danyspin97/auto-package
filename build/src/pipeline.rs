@@ -3874,6 +3874,41 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         }
     }
 
+    // A patch for another release's tree is dropped, with a note in `.changes`,
+    // before anything is asked of the agent about it.
+    if !st.sdist_top_level.is_empty()
+        && let Ok(current) = std::fs::read_to_string(spec_path)
+    {
+        let stale = stale_patches(&current, checkout_dir, &st.sdist_top_level, &config.version);
+        if !stale.is_empty() {
+            let names: Vec<String> = stale.iter().map(|(n, _)| n.clone()).collect();
+            write_or_warn(spec_path, &without_patches(&current, &names));
+            for (name, prefix) in &stale {
+                let _ = std::fs::remove_file(checkout_dir.join(name));
+                reporter.report(&Event::Warning {
+                    step: Some(validate_step.id),
+                    message: format!(
+                        "{rpm_name}: dropped {name}: it patches {prefix}, not the {} sources",
+                        config.version
+                    ),
+                });
+            }
+            warn_if_err(
+                reporter,
+                "adding the .changes entry for the dropped patches",
+                osc::add_changes_entry(
+                    checkout_dir,
+                    &format!(
+                        "Drop {}: made for another release, it does not apply to {}",
+                        names.join(", "),
+                        config.version
+                    ),
+                    Emit::new(reporter, validate_step.id),
+                ),
+            );
+        }
+    }
+
     match osc::rpmspec_check(spec_path, Emit::new(reporter, validate_step.id)) {
         Ok(expanded) => {
             // The fully expanded spec is the single most useful artifact
@@ -6768,6 +6803,108 @@ fn spec_version_differs(spec_path: &Path, version: &str) -> bool {
         return true;
     };
     header.version != version
+}
+
+/// The tree prefix a patch was made for when it names another release: the first
+/// path component of its diff names is `<name>-<version>` with a version other
+/// than `version`, and not the directory `top_level` the sources unpack to.
+/// `a`, `b`, and the right directory are fine. `None` for a patch that fits.
+fn stale_patch_prefix(diff: &str, top_level: &str, version: &str) -> Option<String> {
+    diff.lines()
+        .filter_map(|l| l.strip_prefix("--- ").or_else(|| l.strip_prefix("+++ ")))
+        .map(|n| n.split('\t').next().unwrap_or("").trim())
+        .filter(|n| *n != "/dev/null")
+        .filter_map(|n| n.split_once('/').map(|(first, _)| first))
+        .find(|first| {
+            let Some((_, ver)) = first.rsplit_once('-') else {
+                return false;
+            };
+            *first != top_level
+                && ver.starts_with(|c: char| c.is_ascii_digit())
+                && ver.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && ver != version
+        })
+        .map(str::to_string)
+}
+
+/// The patches `spec` declares whose diff is for another release's tree (a patch
+/// inherited from a linked Factory package, python-torch's 2.3.1 one against
+/// 2.14): `(file name, prefix it was made for)`. The agent cannot make such a
+/// patch apply, and chasing it cost eleven rejected edits.
+fn stale_patches(
+    spec: &str,
+    checkout: &Path,
+    top_level: &str,
+    version: &str,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in spec.lines() {
+        let Some((tag, value)) = line.split_once(':') else {
+            continue;
+        };
+        let tag = tag.trim();
+        if !(tag.len() > 5
+            && tag.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("patch"))
+            && tag[5..].chars().all(|c| c.is_ascii_digit()))
+        {
+            continue;
+        }
+        let name = value.trim();
+        if name.is_empty()
+            || name.contains('%')
+            || Path::new(name).file_name() != Some(name.as_ref())
+        {
+            continue;
+        }
+        if let Ok(diff) = std::fs::read(checkout.join(name))
+            && let Some(prefix) =
+                stale_patch_prefix(&String::from_utf8_lossy(&diff), top_level, version)
+        {
+            out.push((name.to_string(), prefix));
+        }
+    }
+    out
+}
+
+/// `spec` without the `PatchN:` lines (and `%patchN` applications) of `names`.
+fn without_patches(spec: &str, names: &[String]) -> String {
+    let mut nums: Vec<String> = Vec::new();
+    let mut out = String::new();
+    for line in spec.lines() {
+        if let Some((tag, value)) = line.split_once(':')
+            && tag.trim().get(..5).is_some_and(|p| p.eq_ignore_ascii_case("patch"))
+            && names.iter().any(|n| n == value.trim())
+        {
+            nums.push(tag.trim()[5..].to_string());
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if nums.is_empty() {
+        return spec.to_string();
+    }
+    let applies = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("%patch")
+            && nums.iter().any(|n| {
+                t.strip_prefix("%patch").is_some_and(|r| {
+                    r.trim_start_matches("-P ").starts_with(n.as_str())
+                        && r.trim_start_matches("-P ")[n.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|c| !c.is_ascii_digit())
+                })
+            })
+    };
+    let mut kept = String::new();
+    for line in out.lines() {
+        if !applies(line) {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    kept
 }
 
 /// Apply the spec's `PatchN:` files, in order, to a scratch copy of the source
@@ -11865,6 +12002,38 @@ mod hygiene_tests {
             outcome.action,
             crate::agent::Action::UseUpstreamWheel { why: ref w } if *w == why
         ));
+    }
+
+    #[test]
+    fn a_patch_for_another_releases_tree_is_stale() {
+        let diff = "--- pytorch-2.3.1/setup.py\t2024\n+++ pytorch-2.3.1/setup.py\n@@ -1 +1 @@\n";
+        assert_eq!(
+            stale_patch_prefix(diff, "torch-2.14.0", "2.14.0").as_deref(),
+            Some("pytorch-2.3.1")
+        );
+        assert!(stale_patch_prefix(diff, "pytorch-2.3.1", "2.3.1").is_none());
+        let ab = "--- a/setup.py\n+++ b/setup.py\n";
+        assert!(stale_patch_prefix(ab, "torch-2.14.0", "2.14.0").is_none());
+        let same = "--- torch-2.14.0/setup.py\n+++ torch-2.14.0/setup.py\n";
+        assert!(stale_patch_prefix(same, "torch-2.14.0", "2.14.0").is_none());
+    }
+
+    #[test]
+    fn stale_patches_are_found_and_dropped_from_the_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("old.patch"),
+            "--- pytorch-2.3.1/a\n+++ pytorch-2.3.1/a\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("ok.patch"), "--- a/a\n+++ b/a\n").unwrap();
+        let spec = "Name: x\nPatch0: old.patch\nPatch1: ok.patch\n%prep\n%patch0 -p1\n%patch -P 1 -p1\n";
+        let stale = stale_patches(spec, dir.path(), "torch-2.14.0", "2.14.0");
+        assert_eq!(stale, [("old.patch".to_string(), "pytorch-2.3.1".to_string())]);
+        assert_eq!(
+            without_patches(spec, &["old.patch".to_string()]),
+            "Name: x\nPatch1: ok.patch\n%prep\n%patch -P 1 -p1\n"
+        );
     }
 
     #[test]
