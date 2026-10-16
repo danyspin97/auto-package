@@ -5537,6 +5537,76 @@ pub fn check_quality_problems(spec: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// Test paths (`tests/test_configs`, `test/data`) the `%check` runs or reads
+/// that `exists` says the source does not have. A sdist often leaves the test
+/// fixtures out (accelerate's `tests/test_configs`, brotlicffi's `testdata`):
+/// the fix is the project's GitHub tag as a second source with the directory
+/// extracted in `%prep` (convention 82 b). A path given to `--ignore` or
+/// `--deselect` is not read, and one with a `%` or `$` is not a path.
+pub fn missing_check_paths(spec: &str, exists: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut missing: Vec<String> = Vec::new();
+    for line in check_section(spec) {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        for tok in t.split_whitespace() {
+            let tok = tok.trim_matches(|c| matches!(c, '\'' | '"'));
+            let tok = tok.strip_prefix("./").unwrap_or(tok);
+            let path = tok.split("::").next().unwrap_or(tok).trim_end_matches('/');
+            let under_tests = ["tests/", "test/", "testdata/", "test_data/"]
+                .iter()
+                .any(|d| path.starts_with(d))
+                && path.contains('/');
+            let plain = path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'));
+            if under_tests && plain && !path.contains("..") && !exists(path) {
+                let path = path.to_string();
+                if !missing.contains(&path) {
+                    missing.push(path);
+                }
+            }
+        }
+    }
+    missing
+}
+
+/// The review problem for [`missing_check_paths`], when there are any.
+pub fn missing_check_path_problems(spec: &str, exists: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let missing = missing_check_paths(spec, exists);
+    // %prep already extracts a directory from a second source.
+    if missing.is_empty() || spec.contains("--wildcards") {
+        return Vec::new();
+    }
+    vec![format!(
+        "its %check uses {} which the source archive does not ship: add the project's \
+         GitHub tag archive as `Source1` (in a `_service` with `download_files`) and extract \
+         the directory in %prep after the autosetup with `tar -xzf %{{SOURCE1}} \
+         --strip-components=1 --wildcards '*/<dir>/*'` (convention 82 b); or drop the test \
+         that needs it",
+        missing.join(", ")
+    )]
+}
+
+#[cfg(test)]
+mod missing_check_path_tests {
+    use super::*;
+
+    #[test]
+    fn only_absent_test_paths_that_are_run_are_reported() {
+        let spec = "%check\n%pytest tests/test_configs tests/a.py::t --ignore=tests/gone %{x}/tests/y\n\
+                    # tests/commented\npython -m x test/data/\n\n%files\n";
+        let have = |p: &str| p == "tests/a.py";
+        assert_eq!(
+            missing_check_paths(spec, &have),
+            vec!["tests/test_configs".to_string(), "test/data".to_string()]
+        );
+        assert_eq!(missing_check_path_problems(spec, &|_| true).len(), 0);
+        assert_eq!(missing_check_path_problems(spec, &have).len(), 1);
+    }
+}
+
 /// Drop the `python-pytest` BuildRequires of a spec whose `%check` never runs
 /// pytest (an import smoke test): the dependency only slows the build and
 /// pulls plugins in. A spec with no `%check` section, or one that mentions

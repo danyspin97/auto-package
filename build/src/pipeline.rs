@@ -4119,6 +4119,19 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                 style.push(why);
             }
             style.extend(crate::spec::check_quality_problems(&spec_text_now(spec_path)));
+            {
+                // The unpacked sources, either flat or under one top directory.
+                let src = ws.dir().join("source");
+                let tops: Vec<PathBuf> = std::fs::read_dir(&src)
+                    .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+                    .unwrap_or_default();
+                if src.is_dir() {
+                    style.extend(crate::spec::missing_check_path_problems(
+                        &spec_text_now(spec_path),
+                        &|p| src.join(p).exists() || tops.iter().any(|t| t.join(p).exists()),
+                    ));
+                }
+            }
             if crate::spec::check_is_file_probe_only(&spec_text_now(spec_path))
                 && ships_python_modules(&ws.dir().join("source"))
             {
