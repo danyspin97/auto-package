@@ -2535,7 +2535,11 @@ fn wheel_payload_probe(layout: &ap_ecosystem::sdist::WheelLayout) -> Option<Stri
 ///  * what `%install` removes (bundled headers) is left out;
 ///  * the dist-info directory is listed with its licence files split off as
 ///    `%exclude` + `%license`, so each is owned once.
-fn wheel_files_entries(layout: &ap_ecosystem::sdist::WheelLayout, sitedir: &str) -> Option<String> {
+fn wheel_files_entries(
+    layout: &ap_ecosystem::sdist::WheelLayout,
+    sitedir: &str,
+    foreign: &[String],
+) -> Option<String> {
     use std::collections::BTreeMap;
 
     let dist_info = layout.dist_info.as_deref()?;
@@ -2596,8 +2600,13 @@ fn wheel_files_entries(layout: &ap_ecosystem::sdist::WheelLayout, sitedir: &str)
             }
         }
     }
-    fn emit(dir: &Dir, path: &str, sitedir: &str, out: &mut Vec<String>) {
-        if dir.files.iter().any(|f| f == "__init__.py") || dir.dirs.is_empty() {
+    fn emit(dir: &Dir, path: &str, sitedir: &str, foreign: &[String], out: &mut Vec<String>) {
+        // A directory another package of the project also fills (convention
+        // 83): co-owned with `%dir`, only this wheel's own files listed, never
+        // the directory as a whole.
+        let prefix = format!("{path}/");
+        let shared = foreign.iter().any(|f| f.starts_with(&prefix));
+        if !shared && (dir.files.iter().any(|f| f == "__init__.py") || dir.dirs.is_empty()) {
             out.push(format!("%{{{sitedir}}}/{path}/"));
             return;
         }
@@ -2609,12 +2618,23 @@ fn wheel_files_entries(layout: &ap_ecosystem::sdist::WheelLayout, sitedir: &str)
         }
         // The build byte-compiles every module it installs: the `__pycache__`
         // beside modules listed one by one is installed too, and unowned unless
-        // listed (a package directory above owns its own).
-        if files.iter().any(|f| f.ends_with(".py")) {
-            out.push(format!("%{{{sitedir}}}/{path}/__pycache__/"));
+        // listed (a package directory above owns its own). In a shared
+        // directory the sibling's bytecode lives there too, so list this
+        // wheel's own modules' only.
+        let own_py: Vec<&String> = files.iter().filter(|f| f.ends_with(".py")).collect();
+        if !own_py.is_empty() {
+            if shared {
+                out.push(format!("%dir %{{{sitedir}}}/{path}/__pycache__"));
+                for f in own_py {
+                    let stem = f.trim_end_matches(".py");
+                    out.push(format!("%{{{sitedir}}}/{path}/__pycache__/{stem}.*.pyc"));
+                }
+            } else {
+                out.push(format!("%{{{sitedir}}}/{path}/__pycache__/"));
+            }
         }
         for (name, child) in &dir.dirs {
-            emit(child, &format!("{path}/{name}"), sitedir, out);
+            emit(child, &format!("{path}/{name}"), sitedir, foreign, out);
         }
     }
     let mut lines = Vec::new();
@@ -2623,7 +2643,7 @@ fn wheel_files_entries(layout: &ap_ecosystem::sdist::WheelLayout, sitedir: &str)
         lines.push(format!("%{{{sitedir}}}/{f}"));
     }
     for (name, child) in &root.dirs {
-        emit(child, name, sitedir, &mut lines);
+        emit(child, name, sitedir, foreign, &mut lines);
     }
     licenses.sort();
     // Several files under `licenses/` are one entry: the directory.
@@ -2651,6 +2671,34 @@ pub fn wheel_binary_skeleton(
     root_is_purelib: Option<bool>,
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
 ) -> String {
+    wheel_binary_skeleton_shared(
+        pkg_name,
+        version,
+        wheel_filename,
+        release,
+        root_is_purelib,
+        layout,
+        &[],
+    )
+}
+
+/// [`wheel_binary_skeleton`] for a wheel whose project has other wheels filling
+/// the same directories (convention 83). `siblings` is `(flavor-neutral RPM
+/// name, files the package owns relative to site-packages)` of each one already
+/// built: directories they also hold are co-owned with `%dir` and this wheel's
+/// own files listed one by one, and a sibling that owns a package
+/// (`__init__.py`) this wheel adds files to becomes a `Requires:`, so the import
+/// chain is complete. Nothing in a sibling's `RECORD` or payload is touched.
+pub fn wheel_binary_skeleton_shared(
+    pkg_name: &str,
+    version: &str,
+    wheel_filename: &str,
+    release: &Release,
+    root_is_purelib: Option<bool>,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+    siblings: &[(String, Vec<String>)],
+) -> String {
+    let foreign: Vec<String> = siblings.iter().flat_map(|(_, f)| f.iter().cloned()).collect();
     let name = pkg_name.to_lowercase();
     let summary = release
         .summary
@@ -2685,6 +2733,8 @@ pub fn wheel_binary_skeleton(
     } else {
         String::new()
     };
+    // No `WHEEL` verdict: the platform tag decides, and any tag but `-none-any`
+    // (compiled code, convention 83 b) means `%{python_sitearch}`.
     let purelib = root_is_purelib.unwrap_or(is_pure);
     let sitedir = if purelib {
         "python_sitelib"
@@ -2783,7 +2833,7 @@ pub fn wheel_binary_skeleton(
     let requires_exclude = wheel_requires_exclude_line(layout);
 
     let files_block = layout
-        .and_then(|l| wheel_files_entries(l, sitedir))
+        .and_then(|l| wheel_files_entries(l, sitedir, &foreign))
         .unwrap_or_else(|| {
             "# TODO: list the exact paths pyproject_install put in the buildroot\n\
              # (see source/ for the unpacked wheel's real layout); globs are not allowed\n\
@@ -2863,10 +2913,255 @@ pub fn wheel_binary_skeleton(
         check_block = check_block,
         files_block = files_block,
     );
+    // The siblings that own a package this wheel adds files to.
+    let mut spec = spec;
+    if let Some(l) = layout {
+        let mut lines = String::new();
+        for owner in shared_package_owners(l, siblings) {
+            if !spec.lines().any(|x| x.trim_end() == format!("Requires:       {owner}")) {
+                lines.push_str(&format!("Requires:       {owner}\n"));
+            }
+        }
+        if !lines.is_empty() {
+            spec = spec.replacen(
+                "Requires:       python-base\n",
+                &format!("Requires:       python-base\n{lines}"),
+                1,
+            );
+        }
+    }
     // What the wheel's own metadata requires at run time.
     match layout {
         Some(l) => add_runtime_dependencies(&spec, &l.requires_dist, pkg_name),
         None => spec,
+    }
+}
+
+/// The names of the `siblings` that own (hold the `__init__.py` of) a package
+/// directory `layout` adds files to: this wheel completes their package, so it
+/// needs them installed (convention 83 a). A directory this wheel owns itself is
+/// not listed. Sorted, without duplicates.
+fn shared_package_owners(
+    layout: &ap_ecosystem::sdist::WheelLayout,
+    siblings: &[(String, Vec<String>)],
+) -> Vec<String> {
+    let mut owners: Vec<String> = Vec::new();
+    for (name, files) in siblings {
+        let owns = files.iter().any(|f| {
+            let Some(dir) = f.strip_suffix("/__init__.py") else {
+                return false;
+            };
+            let prefix = format!("{dir}/");
+            let own_init = layout.files.iter().any(|m| m == f);
+            !own_init && layout.files.iter().any(|m| m.starts_with(&prefix))
+        });
+        if owns && !owners.contains(name) {
+            owners.push(name.clone());
+        }
+    }
+    owners.sort();
+    owners
+}
+
+/// The RPMs in `rpms_dir` built for the other wheels of `pkg_name`'s project
+/// (names that share all but the last two dash-separated words, at least two:
+/// `nvidia-cutlass-dsl-libs-base`/`-core`/`-cu13`), as `(flavor-neutral name,
+/// files relative to site-packages)`, one flavor per package. Asking `rpm` for
+/// the file lists is the only way to know what a sibling really installs;
+/// without `rpm` or without siblings the result is empty.
+pub fn sibling_wheel_files(rpms_dir: &std::path::Path, pkg_name: &str) -> Vec<(String, Vec<String>)> {
+    let Ok(entries) = std::fs::read_dir(rpms_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for e in entries.flatten() {
+        let file = e.file_name().to_string_lossy().into_owned();
+        let Some(name) = sibling_rpm_name(&file, pkg_name) else {
+            continue;
+        };
+        if out.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        let Ok(listing) = std::process::Command::new("rpm")
+            .args(["-qlp", "--nosignature"])
+            .arg(e.path())
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !listing.status.success() {
+            continue;
+        }
+        let files = site_package_files(&String::from_utf8_lossy(&listing.stdout));
+        if !files.is_empty() {
+            out.push((name, files));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The flavor-neutral package name of the RPM file `file` when it belongs to a
+/// sibling wheel project of `pkg_name` (see [`sibling_wheel_files`]); `None`
+/// for another project, for `pkg_name` itself, and for a source or debug RPM.
+fn sibling_rpm_name(file: &str, pkg_name: &str) -> Option<String> {
+    let stem = file.strip_suffix(".rpm")?;
+    if stem.ends_with(".src") || stem.ends_with(".nosrc") {
+        return None;
+    }
+    let rest = stem.strip_prefix("python3")?;
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let base = rest[digits..].strip_prefix('-')?;
+    // `<name>-<version>-<release>.<arch>`: cut the last two dashes.
+    let mut parts = base.rsplitn(3, '-');
+    let (_release, _version, name) = (parts.next()?, parts.next()?, parts.next()?);
+    let name = name.to_lowercase();
+    let own = pkg_name.to_lowercase().replace('_', "-");
+    if name == own || name.ends_with("-debuginfo") || name.ends_with("-debugsource") {
+        return None;
+    }
+    let a: Vec<&str> = name.split('-').collect();
+    let b: Vec<&str> = own.split('-').collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let need = a.len().min(b.len()).saturating_sub(2).max(2);
+    (common >= need).then(|| format!("python-{name}"))
+}
+
+/// The paths below `site-packages` in an `rpm -ql` listing, for files only
+/// (directory lines end the same way, so a path that is a prefix of another is a
+/// directory and dropped).
+fn site_package_files(listing: &str) -> Vec<String> {
+    let mut paths: Vec<String> = listing
+        .lines()
+        .filter_map(|l| l.split_once("/site-packages/").map(|(_, p)| p.trim().to_string()))
+        .filter(|p| !p.is_empty())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let all = paths.clone();
+    paths.retain(|p| !all.iter().any(|q| q.starts_with(&format!("{p}/"))));
+    paths
+}
+
+#[cfg(test)]
+mod shared_wheel_tests {
+    use super::*;
+    use ap_ecosystem::sdist::WheelLayout;
+
+    fn layout(files: &[&str]) -> WheelLayout {
+        WheelLayout {
+            files: files.iter().map(|f| f.to_string()).collect(),
+            dist_info: files
+                .iter()
+                .find_map(|f| f.split('/').next().filter(|t| t.ends_with(".dist-info")))
+                .map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn rel() -> Release {
+        Release {
+            name: "x".into(),
+            version: "1".into(),
+            summary: Some("S".into()),
+            homepage: Some("https://example.org".into()),
+            license: License::Spdx("MIT".into()),
+            requires_python: None,
+            requires_dist: Vec::new(),
+            yanked: false,
+            sdist: ap_ecosystem::pypi::Sdist {
+                filename: String::new(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
+            },
+        }
+    }
+
+    fn files_of(spec: &str) -> Vec<String> {
+        let f = spec.split("%files %{python_files}\n").nth(1).unwrap();
+        f.split("%changelog").next().unwrap().lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_directory_a_sibling_fills_is_co_owned_not_listed_whole() {
+        // -base owns the regular package `pk/_mlir`; -cu13 adds the arch half.
+        let base = vec![(
+            "python-pk-base".to_string(),
+            vec!["pk/_mlir/__init__.py".to_string(), "pk/_mlir/a.py".to_string()],
+        )];
+        let l = layout(&[
+            "pk/_mlir/_ods.py",
+            "pk/_mlir/ir.cpython-313-x86_64-linux-gnu.so",
+            "pk/lib/libx.so",
+            "pk_cu13-1.dist-info/METADATA",
+        ]);
+        let spec = wheel_binary_skeleton_shared(
+            "pk-cu13",
+            "1",
+            "pk_cu13-1-cp313-cp313-manylinux_2_28_x86_64.whl",
+            &rel(),
+            Some(false),
+            Some(&l),
+            &base,
+        );
+        let files = files_of(&spec);
+        assert_eq!(
+            files[..7].to_vec(),
+            vec![
+                "%dir %{python_sitearch}/pk",
+                "%dir %{python_sitearch}/pk/_mlir",
+                "%{python_sitearch}/pk/_mlir/_ods.py",
+                "%{python_sitearch}/pk/_mlir/ir.cpython-313-x86_64-linux-gnu.so",
+                "%dir %{python_sitearch}/pk/_mlir/__pycache__",
+                "%{python_sitearch}/pk/_mlir/__pycache__/_ods.*.pyc",
+                "%{python_sitearch}/pk/lib/",
+            ]
+        );
+        assert!(spec.contains("Requires:       python-base\nRequires:       python-pk-base\n"), "{spec}");
+        // Alone, the same wheel lists the package directory whole.
+        let alone = wheel_binary_skeleton(
+            "pk-cu13",
+            "1",
+            "pk_cu13-1-cp313-cp313-manylinux_2_28_x86_64.whl",
+            &rel(),
+            Some(false),
+            Some(&l),
+        );
+        assert!(files_of(&alone).contains(&"%{python_sitearch}/pk/_mlir/".to_string()), "{alone}");
+        assert!(!alone.contains("python-pk-base"));
+    }
+
+    #[test]
+    fn the_owner_of_the_init_needs_no_requires_on_itself() {
+        let l = layout(&["pk/__init__.py", "pk/b.py", "pk-1.dist-info/METADATA"]);
+        let sib = vec![("python-pk-core".to_string(), vec!["pk/c.py".to_string()])];
+        assert!(shared_package_owners(&l, &sib).is_empty());
+        let sib = vec![("python-pk-core".to_string(), vec!["pk/__init__.py".to_string()])];
+        assert!(shared_package_owners(&l, &sib).is_empty());
+        let l2 = layout(&["pk/b.py"]);
+        assert_eq!(shared_package_owners(&l2, &sib), vec!["python-pk-core".to_string()]);
+    }
+
+    #[test]
+    fn siblings_are_found_by_name_and_listings_parse() {
+        let n = |f| sibling_rpm_name(f, "nvidia-cutlass-dsl-libs-cu13");
+        assert_eq!(
+            n("python313-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.x86_64.rpm").as_deref(),
+            Some("python-nvidia-cutlass-dsl-libs-base")
+        );
+        assert_eq!(n("python313-nvidia-cutlass-dsl-libs-cu13-4.5.0-1.1.x86_64.rpm"), None);
+        assert_eq!(n("python313-numpy-2.0-1.1.x86_64.rpm"), None);
+        assert_eq!(n("python313-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.src.rpm"), None);
+        assert_eq!(n("python-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.noarch.rpm"), None);
+        let listing = "/usr/lib/python3.13/site-packages/pk\n/usr/lib/python3.13/site-packages/pk/a.py\n\
+                       /usr/share/doc/x\n/usr/lib/python3.13/site-packages/pk/sub\n\
+                       /usr/lib/python3.13/site-packages/pk/sub/b.so\n";
+        assert_eq!(site_package_files(listing), vec!["pk/a.py", "pk/sub/b.so"]);
+        assert!(sibling_wheel_files(std::path::Path::new("/nonexistent-r2b"), "x").is_empty());
     }
 }
 

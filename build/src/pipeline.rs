@@ -8989,13 +8989,17 @@ fn generate_wheel_binary_spec(
     let release = ap_ecosystem::pypi::parse_release_with_tarball(pypi_json, &wheel.filename)
         .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
 
-    let spec_text = crate::spec::wheel_binary_skeleton(
+    // Other wheels of the project already built into the same directories
+    // (convention 83): co-owned, not listed whole.
+    let siblings = crate::spec::sibling_wheel_files(&config.rpms_dir, &config.pkg_name);
+    let spec_text = crate::spec::wheel_binary_skeleton_shared(
         &config.pkg_name,
         &config.version,
         &wheel.filename,
         &release,
         root_is_purelib,
         layout.as_ref(),
+        &siblings,
     );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
     // A wheel whose Requires-Python is capped below a built flavor needs pip told
