@@ -3918,6 +3918,82 @@ mod cutlass_split_wheels_tests {
     }
 }
 
+/// Copy into `checkout` the files of `missing` (names a spec's `Source`/`Patch`
+/// lines give) that the unpacked source `tree` already holds, at its top or in
+/// its single top-level directory: a lock file (`package-lock.json`) a
+/// `node_modules` service reads, a licence, a config the spec ships as its own
+/// source. The agent cannot copy them itself (open-webui: `Source10:
+/// package-lock.json` stayed missing because the `cp` was refused), and nothing
+/// else is needed to fix it. Names with a directory part, symlinks and files
+/// over 64 MiB are left alone; an existing file is never overwritten. Returns
+/// the names copied.
+pub fn adopt_sources_from_tree(
+    missing: &[String],
+    tree: &std::path::Path,
+    checkout: &std::path::Path,
+) -> Vec<String> {
+    let mut roots = vec![tree.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(tree) {
+        let dirs: Vec<_> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect();
+        if dirs.len() == 1 {
+            roots.insert(0, dirs[0].clone());
+        }
+    }
+    let mut copied = Vec::new();
+    for name in missing {
+        if name.is_empty() || name.contains('/') || name.starts_with('.') {
+            continue;
+        }
+        let dest = checkout.join(name);
+        if dest.exists() {
+            continue;
+        }
+        let found = roots.iter().map(|r| r.join(name)).find(|c| {
+            std::fs::symlink_metadata(c)
+                .is_ok_and(|m| m.is_file() && m.len() <= 64 * 1024 * 1024)
+        });
+        if let Some(src) = found
+            && std::fs::copy(&src, &dest).is_ok()
+        {
+            copied.push(name.clone());
+        }
+    }
+    copied
+}
+
+#[cfg(test)]
+mod adopt_sources_tests {
+    use super::adopt_sources_from_tree;
+
+    /// python-open-webui: Source10 is the sdist's own package-lock.json.
+    #[test]
+    fn a_source_the_unpacked_tree_holds_is_copied_into_the_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("sdist");
+        let top = tree.join("open_webui-0.12.2");
+        std::fs::create_dir_all(top.join("deep")).unwrap();
+        std::fs::write(top.join("package-lock.json"), "{}").unwrap();
+        std::fs::write(top.join("deep/other.json"), "{}").unwrap();
+        let checkout = tmp.path().join("co");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(checkout.join("keep.txt"), "mine").unwrap();
+        std::fs::write(top.join("keep.txt"), "theirs").unwrap();
+        let missing: Vec<String> = ["package-lock.json", "other.json", "keep.txt", "a/b", "nope"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let copied = adopt_sources_from_tree(&missing, &tree, &checkout);
+        assert_eq!(copied, ["package-lock.json"]);
+        assert_eq!(std::fs::read_to_string(checkout.join("package-lock.json")).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(checkout.join("keep.txt")).unwrap(), "mine");
+        assert!(!checkout.join("other.json").exists());
+    }
+}
+
 /// `text` for a spec tag or description: one line, every `%` doubled so rpm does
 /// not expand a macro out of upstream's wording.
 fn rpm_text(text: &str) -> String {

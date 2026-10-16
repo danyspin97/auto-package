@@ -4466,6 +4466,19 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             sync_quilt_series(&expanded, checkout_dir);
 
             let mut missing = missing_source_files(&expanded, checkout_dir);
+            // A Source that is a file of the unpacked source (a lock file for the
+            // `node_modules` service) is copied in here: the agent cannot.
+            if !missing.is_empty() {
+                let copied =
+                    crate::spec::adopt_sources_from_tree(&missing, &ws.sdist_dir(), checkout_dir);
+                if !copied.is_empty() {
+                    ap_core::diag!(
+                        "info: copied {} from the unpacked source into the checkout",
+                        copied.join(", ")
+                    );
+                    missing = missing_source_files(&expanded, checkout_dir);
+                }
+            }
             // A `_service` (`download_files`, the one installed here) is how a Source
             // that is a URL gets onto disk — and the agent cannot run it.
             // Run it before calling the files missing, and keep its error

@@ -124,3 +124,7 @@ N9. When to stop and use the wheel: the lock file is not `package-lock.json`;
    you cannot fix in the spec. Then return `use_upstream_wheel` with `why`
    quoting the failing line, and load `prebuilt-wheel-packaging` for the
    next turn.
+
+A `package-lock.json` listed as `SourceN:` is copied from the unpacked source into
+the checkout by the pipeline before validation; name it in the spec and go on, a
+refused `cp` is no reason to stop.

@@ -2912,7 +2912,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    when a `_service` with `download_files` lists it: write the `_service` in the
    same edit, and extract from `%prep` after `%autosetup` with `tar -xzf
    %{SOURCEN} --strip-components=1 --wildcards '*/tests/cpp/*'`, never `../<top
-   dir>` (`-a1` unpacks inside the source directory). (c) A maturin or cargo
+   dir>` (`-a1` unpacks inside the source directory). A `SourceN:` that is a plain file name of the
+   unpacked source (`Source10: package-lock.json` for the `node_modules` service) is
+   copied into the checkout by the pipeline: name it in the spec, do not `cp` it
+   and do not return `blocked` because it is absent. (c) A maturin or cargo
    package: Grep the vendored registry and `Cargo.lock` for `prost-build` or
    `tonic-build` (BuildRequires `protobuf-devel`), `utoipa-swagger-ui` or any
    `build.rs` that downloads (set the offline variable or disable the feature),
