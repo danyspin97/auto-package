@@ -1897,6 +1897,13 @@ fn package_outcome(result: &PipelineResult) -> PackageOutcome {
         PipelineResult::MissingDeps { deps, .. } => {
             PackageOutcome::MissingDeps { deps: deps.clone() }
         }
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::Blocked,
+            ..
+        } => PackageOutcome::Blocked {
+            reason: reason.clone(),
+        },
         PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
             reason: reason.clone(),
         },
@@ -1906,6 +1913,23 @@ fn package_outcome(result: &PipelineResult) -> PackageOutcome {
 /// Lists what this run built, what is queued and what the project already has
 /// built for this distro and arch, so the outcome is readable without
 /// scrolling the log.
+/// A package's dependencies as the summary lists them: one that is blocked reads
+/// `blocked X`, so a package waiting on it is not mistaken for one that will
+/// get its turn.
+fn waiting_list(deps: &[String], blocked: &[(&String, &String)]) -> String {
+    let key = |n: &str| ap_build::osc::fuzzy_key(ap_build::osc::strip_rpm_prefix(n));
+    deps.iter()
+        .map(|d| {
+            if blocked.iter().any(|(b, _)| key(b) == key(d)) {
+                format!("blocked {d}")
+            } else {
+                d.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -1947,12 +1971,25 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         })
         .collect();
     queued.retain(|(pkg, _)| !built.contains(pkg));
+    let blocked: Vec<(&String, &String)> = latest
+        .iter()
+        .filter_map(|(pkg, (_, outcome))| match outcome {
+            PackageOutcome::Blocked { reason } => Some((pkg, reason)),
+            _ => None,
+        })
+        .collect();
     let _ = writeln!(out, "\nQueued, waiting on dependencies ({}):", queued.len());
     for (pkg, deps) in queued {
         if deps.is_empty() {
             let _ = writeln!(out, "  {pkg}");
         } else {
-            let _ = writeln!(out, "  {pkg} <- {}", deps.join(", "));
+            let _ = writeln!(out, "  {pkg} <- {}", waiting_list(&deps, &blocked));
+        }
+    }
+    if !blocked.is_empty() {
+        let _ = writeln!(out, "\nBlocked, nothing more to try ({}):", blocked.len());
+        for (pkg, reason) in &blocked {
+            let _ = writeln!(out, "  {pkg}: {reason}");
         }
     }
 
@@ -2981,7 +3018,10 @@ fn cmd_build(
                         let rounds = dep_rounds.entry(key.clone()).or_insert(0);
                         *rounds += 1;
                         let retry = *rounds < max_dep_attempts
-                            && !matches!(kind, FailureKind::Exhausted | FailureKind::RateLimited);
+                            && !matches!(
+                                kind,
+                                FailureKind::Exhausted | FailureKind::RateLimited | FailureKind::Blocked
+                            );
                         if retry {
                             attempted_deps.remove(&key);
                             retrying.insert(key);
@@ -3040,16 +3080,7 @@ fn cmd_build(
             });
             let r = pkg_reporter(&rpm_name);
             let result = run_package(&config, &pkg_run, r.as_ref());
-            let outcome = match &result {
-                PipelineResult::Built { .. } => PackageOutcome::Built,
-                PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
-                PipelineResult::MissingDeps { deps, .. } => {
-                    PackageOutcome::MissingDeps { deps: deps.clone() }
-                }
-                PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
-                    reason: reason.clone(),
-                },
-            };
+            let outcome = package_outcome(&result);
             r.report(&Event::PackageFinished {
                 pkg: rpm_name.clone(),
                 version: version.clone(),
@@ -3369,6 +3400,9 @@ fn cmd_build(
                     // whole-round retry count, so without this a package that
                     // burned its budget would repeat the same loop over and over.
                     let exhausted = kind == FailureKind::Exhausted;
+                    // A package a turn declared blocked is not run again: the
+                    // same spec would be declared blocked again.
+                    let blocked = kind == FailureKind::Blocked;
                     let count = if rate_limited {
                         rate_limited_counts.entry(rpm_name.clone()).or_insert(0)
                     } else {
@@ -3380,11 +3414,13 @@ fn cmd_build(
                     } else {
                         max_target_retries
                     };
-                    if exhausted || *count >= limit {
+                    if exhausted || blocked || *count >= limit {
                         permanently_failed.insert(rpm_name.clone());
                         give_ups.insert(
                             rpm_name.clone(),
-                            if exhausted {
+                            if blocked {
+                                format!("it is blocked ({reason})")
+                            } else if exhausted {
                                 format!("it spent its full budget/attempt allowance ({reason})")
                             } else {
                                 format!("it failed {count} times in a row (last: {reason})")
@@ -3392,7 +3428,13 @@ fn cmd_build(
                         );
                         pkg_reporter(&rpm_name).report(&Event::Warning {
                             step: None,
-                            message: if exhausted {
+                            message: if blocked {
+                                format!(
+                                    "{rpm_name} is blocked ({reason}); anything depending on \
+                                     it waits on blocked {rpm_name}, the rest of the closure \
+                                     keeps going"
+                                )
+                            } else if exhausted {
                                 format!(
                                     "giving up on {rpm_name}: it already spent its full \
                                      budget/attempt allowance this round without succeeding \
@@ -4116,6 +4158,45 @@ mod dep_drops_tests {
             msg.ends_with("- python-foo: it failed 10 times in a row (last: spec invalid)"),
             "{msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod blocked_summary_tests {
+    use super::*;
+
+    #[test]
+    fn a_dependency_that_is_blocked_reads_blocked_in_the_waiting_list() {
+        let torch = "python-torch".to_string();
+        let why = "empty submodules".to_string();
+        let deps = ["torch".to_string(), "numpy".to_string()];
+        assert_eq!(
+            waiting_list(&deps, &[(&torch, &why)]),
+            "blocked torch, numpy"
+        );
+        assert_eq!(waiting_list(&deps, &[]), "torch, numpy");
+    }
+
+    #[test]
+    fn a_blocked_result_is_its_own_outcome() {
+        let blocked = PipelineResult::Failed {
+            rpm_name: "python-torch".into(),
+            reason: "no".into(),
+            kind: FailureKind::Blocked,
+        };
+        assert!(matches!(
+            package_outcome(&blocked),
+            PackageOutcome::Blocked { .. }
+        ));
+        let failed = PipelineResult::Failed {
+            rpm_name: "python-x".into(),
+            reason: "no".into(),
+            kind: FailureKind::Other,
+        };
+        assert!(matches!(
+            package_outcome(&failed),
+            PackageOutcome::Failed { .. }
+        ));
     }
 }
 

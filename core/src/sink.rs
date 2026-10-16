@@ -219,18 +219,39 @@ impl Reporter for PkgContextReporter {
     }
 }
 
+/// Sends every event to every sink. A warning whose text was already reported
+/// is dropped: the same relaxed-bound note came 78 times in one run, and the
+/// same git tag clobber warning 133 times, and each distinct warning needs
+/// saying once per run.
 pub struct FanoutReporter {
     sinks: Vec<Box<dyn Reporter>>,
+    warned: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl FanoutReporter {
     pub fn new(sinks: Vec<Box<dyn Reporter>>) -> Self {
-        Self { sinks }
+        Self {
+            sinks,
+            warned: Default::default(),
+        }
+    }
+
+    /// Whether this warning text is new to the run, and is remembered as seen.
+    fn first_time(&self, message: &str) -> bool {
+        self.warned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(message.to_string())
     }
 }
 
 impl Reporter for FanoutReporter {
     fn report(&self, event: &Event) {
+        if let Event::Warning { message, .. } = event
+            && !self.first_time(message)
+        {
+            return;
+        }
         for s in &self.sinks {
             s.report(event);
         }
@@ -367,6 +388,10 @@ impl HumanSink {
                     PackageOutcome::Failed { reason } => format!(
                         "{}",
                         format!("failed: {reason}").if_supports_color(Stderr, |t| t.red()),
+                    ),
+                    PackageOutcome::Blocked { reason } => format!(
+                        "{}",
+                        format!("blocked: {reason}").if_supports_color(Stderr, |t| t.magenta()),
                     ),
                 };
                 Some(format!(
@@ -817,6 +842,28 @@ mod tests {
 
     /// With no later event to trigger the per-event timer, the background
     /// flusher still gets a buffered line to disk.
+    #[test]
+    fn a_warning_is_reported_once_per_run() {
+        use std::sync::{Arc, Mutex};
+        struct Count(Arc<Mutex<usize>>);
+        impl Reporter for Count {
+            fn report(&self, _: &Event) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+        let n = Arc::new(Mutex::new(0));
+        let fan = FanoutReporter::new(vec![Box::new(Count(n.clone()))]);
+        let warn = |m: &str| Event::Warning {
+            step: None,
+            message: m.to_string(),
+        };
+        for _ in 0..5 {
+            fan.report(&warn("relaxed bound a"));
+        }
+        fan.report(&warn("relaxed bound b"));
+        assert_eq!(*n.lock().unwrap(), 2);
+    }
+
     #[test]
     fn a_quiet_stretch_still_flushes_the_tail() {
         let path = tmp_path("quiet");

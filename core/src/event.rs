@@ -166,6 +166,8 @@ pub enum PackageOutcome {
     AlreadyBuilt,
     MissingDeps { deps: Vec<String> },
     Failed { reason: String },
+    /// The package cannot be built here: a turn said so and nothing changed.
+    Blocked { reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

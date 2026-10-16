@@ -164,6 +164,10 @@ pub enum FailureKind {
     /// The run was aborted because the agent cannot work at all (claude is not
     /// logged in). Not a package failure: nothing is retried or counted.
     AgentUnavailable,
+    /// A turn answered `blocked`: the package cannot be built here and nothing
+    /// changed to make it buildable. Reported as `blocked`, not as a failure
+    /// of the pipeline, and not retried.
+    Blocked,
 }
 
 #[derive(Debug)]
@@ -1555,6 +1559,11 @@ pub fn run_package(
             kind: FailureKind::AgentUnavailable,
             ..
         } => Some(("interrupted", reason.clone())),
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::Blocked,
+            ..
+        } => Some(("blocked", reason.clone())),
         PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
         PipelineResult::MissingDeps { deps, .. } => Some((
             "missing_deps",
@@ -1716,6 +1725,16 @@ impl RunCtx<'_> {
             reason,
             kind,
         }
+    }
+
+    /// A failure from applying a turn's outcome: `Blocked` when the turn said so.
+    fn failed_turn(&self, action: &crate::agent::Action, reason: String) -> PipelineResult {
+        let kind = if matches!(action, crate::agent::Action::Blocked { .. }) {
+            FailureKind::Blocked
+        } else {
+            FailureKind::Other
+        };
+        self.failed_as(kind, reason)
     }
 
     fn turn_env(&self) -> TurnEnv<'_> {
@@ -2760,10 +2779,13 @@ fn review_stage(
             .blocked_review(&std::fs::read_to_string(spec_path).unwrap_or_default())
             .map(str::to_string)
     {
-        return Err(ctx.failed(format!(
-            "{rpm_name}: Review blocked this spec earlier and it has not changed ({reason}); \
-             not reviewing or building it again"
-        )));
+        return Err(ctx.failed_as(
+            FailureKind::Blocked,
+            format!(
+                "{rpm_name}: Review blocked this spec earlier and it has not changed \
+                 ({reason}); not reviewing or building it again"
+            ),
+        ));
     }
     if config.no_agent {
         st.step_attempts
@@ -2952,7 +2974,7 @@ fn review_stage(
                             state.blocked_reason = Some(reason.clone());
                         });
                     }
-                    return Err(ctx.failed(reason));
+                    return Err(ctx.failed_turn(&outcome.action, reason));
                 }
             };
             // A patch an earlier run already made (the turn finds nothing left
@@ -3148,7 +3170,7 @@ fn prefix_stage(
                 &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => return Err(ctx.failed(reason)),
+                Err(reason) => return Err(ctx.failed_turn(&outcome.action, reason)),
             };
             if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
                 st.attempts += 1;
@@ -3812,7 +3834,7 @@ fn fix_after_validation(
                 &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => return Err(ctx.failed(reason)),
+                Err(reason) => return Err(ctx.failed_turn(&outcome.action, reason)),
             };
             if effect == TurnEffect::Edited
                 && let Some(missing) = missing_deps_added_by_edit(ctx, agent_step.id, &clean)
@@ -5097,7 +5119,7 @@ fn fix_after_build(
         &mut st.from_repo_archive,
     ) {
         Ok(effect) => effect,
-        Err(reason) => return Err(ctx.failed(reason)),
+        Err(reason) => return Err(ctx.failed_turn(&outcome.action, reason)),
     };
     // A dependency the fix added is queued now, not after another build OBS
     // rejects as unresolvable.
