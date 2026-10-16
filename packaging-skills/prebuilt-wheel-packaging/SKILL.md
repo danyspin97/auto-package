@@ -170,6 +170,13 @@ If the service fails, the error is shown to you on the next turn.
   already has `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\.so.*$`. Check
   them, do not duplicate them; rpm honours one `__requires_exclude`, so fold
   another pattern into that line with `|`.
+- NVIDIA driver libraries (`libcuda.so.1`, `libnvidia-ml.so.1`,
+  `libnvidia-ptxjitcompiler`, `libnvcuvid`) come from the host driver and no
+  repository provides them. The skeleton of every compiled wheel already folds
+  the driver regex (`depclass::driver_requires_exclude`) into
+  `%global __requires_exclude`, and the pipeline adds it itself when OBS reports
+  one of them unresolvable (python-flashinfer-python). Never list the driver as
+  a `Requires`, never report it as a missing package, never block on it.
 - Delete headers, `*.a` archives, test libraries and other architectures' stubs
   in `%install`; list the remaining files in `%files`.
 - `%check` imports the module when there is one, and a package whose payload other

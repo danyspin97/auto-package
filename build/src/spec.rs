@@ -2364,16 +2364,30 @@ const OLD_HASHED_LIBS_REQUIRES_EXCLUDE: &str = r"^lib.*-[0-9a-f]{8}.*\.so.*$";
 /// libraries, empty otherwise. rpm honours only ONE such global: the patterns
 /// to exclude are folded into a single regex with `|`, which is what a second
 /// pattern added to this skeleton has to do.
-fn wheel_requires_exclude_line(layout: Option<&ap_ecosystem::sdist::WheelLayout>) -> String {
+fn wheel_requires_exclude_line(
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+    is_pure: bool,
+) -> String {
     let mut patterns: Vec<&str> = Vec::new();
     if layout.is_some_and(|l| l.has_hashed_libs) {
         patterns.push(hashed_libs_requires_exclude());
     }
-    if patterns.is_empty() {
-        String::new()
-    } else {
-        format!("%global __requires_exclude {}\n", patterns.join("|"))
+    // A compiled wheel may link the NVIDIA driver (`libcuda.so.1`), which no
+    // repository provides: its Requires never name it.
+    if !is_pure {
+        patterns.push(crate::depclass::driver_requires_exclude());
     }
+    let mut line = String::new();
+    for p in patterns {
+        line = if line.is_empty() {
+            format!("%global __requires_exclude {p}\n")
+        } else {
+            with_requires_exclude_pattern(&format!("{line}%description\n"), p)
+                .trim_end_matches("%description\n")
+                .to_string()
+        };
+    }
+    line
 }
 
 /// `spec` with the hashed-library `__requires_exclude` of a wheel that bundles
@@ -2384,20 +2398,37 @@ fn wheel_requires_exclude_line(layout: Option<&ap_ecosystem::sdist::WheelLayout>
 /// only one); the line is otherwise added before `%python_subpackages`, or
 /// `%description`. A spec that already carries the pattern is returned as is.
 pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
-    if spec.contains(OLD_HASHED_LIBS_REQUIRES_EXCLUDE) {
-        return spec.replace(OLD_HASHED_LIBS_REQUIRES_EXCLUDE, hashed_libs_requires_exclude());
-    }
-    if spec.contains(hashed_libs_requires_exclude()) {
-        return spec.to_string();
-    }
-    let inner = |p: &str| -> String {
-        p.trim()
-            .trim_start_matches('^')
-            .trim_end_matches('$')
-            .to_string()
-    };
-    let tail = if spec.ends_with('\n') { "\n" } else { "" };
+    let spec = &spec.replace(OLD_HASHED_LIBS_REQUIRES_EXCLUDE, hashed_libs_requires_exclude());
+    with_requires_exclude_pattern(spec, hashed_libs_requires_exclude())
+}
+
+/// `spec` that leaves the NVIDIA driver's libraries (`libcuda.so.1`, NVML, ...:
+/// [`crate::depclass::is_driver_soname`]) out of its Requires: nothing provides
+/// them, the host driver does at run time, so a package that links one is
+/// unresolvable in OBS (python-flashinfer-python: `nothing provides
+/// libcuda.so.1()(64bit)`). An existing `%global __requires_exclude` is
+/// extended, never overwritten.
+pub fn with_driver_requires_exclude(spec: &str) -> String {
+    with_requires_exclude_pattern(spec, crate::depclass::driver_requires_exclude())
+}
+
+/// The inside of an anchored `__requires_exclude` regex, without `^`/`$`.
+fn requires_exclude_inner(pattern: &str) -> String {
+    pattern
+        .trim()
+        .trim_start_matches('^')
+        .trim_end_matches('$')
+        .to_string()
+}
+
+/// `spec` with `pattern` (an anchored regex) part of its one
+/// `%global __requires_exclude`: folded into an existing line with `|` (rpm
+/// honours only one such global), or added before `%python_subpackages` /
+/// `%description`. A spec already carrying the pattern is returned as is.
+fn with_requires_exclude_pattern(spec: &str, pattern: &str) -> String {
+    let wanted = requires_exclude_inner(pattern);
     let lines: Vec<&str> = spec.lines().collect();
+    let tail = if spec.ends_with('\n') { "\n" } else { "" };
     if let Some(at) = lines
         .iter()
         .position(|l| l.trim_start().starts_with("%global __requires_exclude "))
@@ -2405,10 +2436,13 @@ pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
         let existing = lines[at]
             .trim_start()
             .trim_start_matches("%global __requires_exclude ");
+        if existing.contains(&wanted) {
+            return spec.to_string();
+        }
         let folded = format!(
             "%global __requires_exclude ^({}|{})$",
-            inner(existing),
-            inner(hashed_libs_requires_exclude())
+            requires_exclude_inner(existing),
+            wanted
         );
         let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         out[at] = folded;
@@ -2422,11 +2456,19 @@ pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
         return spec.to_string();
     };
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-    out.insert(
-        at,
-        format!("%global __requires_exclude {}", hashed_libs_requires_exclude()),
-    );
+    out.insert(at, format!("%global __requires_exclude {pattern}"));
     out.join("\n") + tail
+}
+
+/// Whether a spec builds an architecture-specific package that may link the
+/// driver's library: not `BuildArch: noarch`, and it names CUDA or NVIDIA.
+pub fn may_link_driver_library(spec: &str) -> bool {
+    let lower = spec.to_ascii_lowercase();
+    let noarch = lower.lines().any(|l| {
+        let l = l.trim_start();
+        l.starts_with("buildarch:") && l.contains("noarch") && !l.contains('%')
+    });
+    !noarch && (lower.contains("cuda") || lower.contains("nvidia"))
 }
 
 /// Spec fragments that give a wheel's console scripts the openSUSE
@@ -2890,7 +2932,7 @@ pub fn wheel_binary_skeleton_shared(
 
     let (alt_requires, alt_clone, alt_scriptlets, alt_files) =
         wheel_alternatives_fragments(layout.map_or(&[][..], |l| l.console_scripts.as_slice()));
-    let requires_exclude = wheel_requires_exclude_line(layout);
+    let requires_exclude = wheel_requires_exclude_line(layout, is_pure);
 
     let files_block = layout
         .and_then(|l| wheel_files_entries(l, sitedir, &foreign))
@@ -5657,9 +5699,11 @@ BuildRequires:  %{python_module pip}
             Some(false),
             Some(&layout),
         );
+        // The hashed libraries and the driver's share the ONE regex.
         let line = format!(
-            "%global __requires_exclude {}\n%python_subpackages\n",
-            hashed_libs_requires_exclude()
+            "%global __requires_exclude ^({}|{})$\n%python_subpackages\n",
+            requires_exclude_inner(hashed_libs_requires_exclude()),
+            requires_exclude_inner(crate::depclass::driver_requires_exclude())
         );
         assert!(spec.contains(&line), "{spec}");
         assert_eq!(spec.matches("__requires_exclude").count(), 1, "{spec}");
@@ -5743,6 +5787,55 @@ BuildRequires:  %{python_module pip}
         }
         assert!(ap_ecosystem::sdist::is_hashed_soname("libfoo-1a2b3c4d.so.1"));
         assert!(!ap_ecosystem::sdist::is_hashed_soname("libfoo-20240101.so"));
+    }
+
+    /// python-flashinfer-python: the wheel links libcuda.so.1, nothing
+    /// provides it, OBS reported it unresolvable.
+    #[test]
+    fn a_compiled_wheel_never_requires_the_nvidia_driver() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        let spec = wheel_binary_skeleton(
+            "flashinfer-python",
+            "0.6",
+            "flashinfer_python-0.6-cp39-abi3-manylinux_2_28_x86_64.whl",
+            &release,
+            Some(false),
+            Some(&WheelLayout::default()),
+        );
+        let line = format!(
+            "%global __requires_exclude {}\n%python_subpackages\n",
+            crate::depclass::driver_requires_exclude()
+        );
+        assert!(spec.contains(&line), "{spec}");
+        let re = regex::Regex::new(crate::depclass::driver_requires_exclude()).unwrap();
+        for r in ["libcuda.so.1()(64bit)", "libnvidia-ml.so.1()(64bit)"] {
+            assert!(re.is_match(r), "{r}");
+        }
+    }
+
+    #[test]
+    fn the_driver_exclude_extends_an_existing_requires_exclude_once() {
+        let spec = "Name: x\n%global __requires_exclude ^lib(mpi|ucp)\\.so.*$\n%python_subpackages\n";
+        let out = with_driver_requires_exclude(spec);
+        assert_eq!(out.matches("__requires_exclude").count(), 1, "{out}");
+        let line = out.lines().find(|l| l.contains("__requires_exclude")).unwrap();
+        let re = regex::Regex::new(line.trim_start_matches("%global __requires_exclude ")).unwrap();
+        assert!(re.is_match("libmpi.so.40()(64bit)"), "{line}");
+        assert!(re.is_match("libcuda.so.1()(64bit)"), "{line}");
+        assert!(!re.is_match("libcudart.so.12()(64bit)"), "{line}");
+        assert_eq!(with_driver_requires_exclude(&out), out);
+        // Without any, it is added before %python_subpackages.
+        let bare = with_driver_requires_exclude("Name: x\n%python_subpackages\n");
+        assert!(bare.contains("%global __requires_exclude ^(libcuda"), "{bare}");
+        assert_eq!(with_driver_requires_exclude(&bare), bare);
+    }
+
+    #[test]
+    fn only_an_arch_package_naming_cuda_may_link_the_driver() {
+        assert!(may_link_driver_library("Name: x\nBuildRequires: cuda-nvcc\n"));
+        assert!(!may_link_driver_library("Name: x\nBuildArch: noarch\nRequires: cuda\n"));
+        assert!(!may_link_driver_library("Name: x\n"));
     }
 
     #[test]

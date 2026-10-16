@@ -519,9 +519,12 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
             "\n\
              # The CUDA libraries load the driver (libcuda.so.1) and NVML\n\
              # (libnvidia-ml.so.1) from the host's NVIDIA driver, which no package of\n\
-             # this repository provides.\n\
-             %global __requires_exclude ^(libcuda\\.so\\.1|libnvidia-ml\\.so\\.1).*$\n",
+             # this repository provides (the one driver-library rule of depclass).\n",
         );
+        s.push_str(&format!(
+            "%global __requires_exclude {}\n",
+            crate::depclass::driver_requires_exclude()
+        ));
     }
     // GPUDirect Storage's RDMA plug-in links the host's InfiniBand stack
     // (libmlx5, librdmacm, libnuma); a plain libcufile user does not need it, so
@@ -958,7 +961,10 @@ bin/__nvcc_device_query
         assert!(spec.contains("\nRequires:       cuda-13-4-filesystem\n"), "{spec}");
         assert!(!spec.contains("ld.so.conf.d"), "{spec}");
         assert!(
-            spec.contains("%global __requires_exclude ^(libcuda\\.so\\.1|"),
+            spec.contains(&format!(
+                "%global __requires_exclude {}\n",
+                crate::depclass::driver_requires_exclude()
+            )),
             "{spec}"
         );
         assert!(

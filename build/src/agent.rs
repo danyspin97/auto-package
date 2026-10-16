@@ -2488,14 +2488,15 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
      generator turns that NEEDED entry into `Requires: libcuda.so.1()(64bit)`,
      which no repository provides, so every package that depends on yours
      becomes unresolvable (`nothing provides libcuda.so.1()(64bit)`). Filter
-     it out in the package that ships the `.so`, before `%description`:
-         %global __requires_exclude ^libcuda\.so\.1.*$
-     (list further driver libraries such as `libnvidia-ml\.so\.1` in the same
-     alternation, `^(libcuda|libnvidia-ml)\.so\.1.*$`). Such a capability is
-     never a package: do NOT report it in `unresolvable_packages`, and do not
-     add a `Requires:` or `Provides:` for it. If a dependency you only
-     consume carries it, return `"blocked"` with that as `why`; the fix belongs in that
-     dependency's spec.
+     it out in the package that ships the `.so`, before `%description`. The
+     pipeline already writes the one regex for every driver soname (`libcuda`,
+     `libnvidia-*`, `libnvcuvid`, `libcudadebugger`, `libnvoptix`) into a compiled
+     wheel's spec, and adds it itself when OBS reports one unresolvable; fold any
+     further pattern into that same line with `|` (rpm honours one
+     `__requires_exclude`), never a second line. Such a capability is never a
+     package: do NOT report it in `unresolvable_packages`, and do not add a
+     `Requires:` or `Provides:` for it. A dependency you only consume that
+     carries it is repaired by the pipeline, not a reason to return `"blocked"`.
    - Compiled code in the wheel means the spec must be per-architecture
      (`ExclusiveArch` for the arches the wheel covers, or the matching
      `%ifarch`), not noarch.

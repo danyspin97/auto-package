@@ -35,6 +35,9 @@ pub enum Skip {
     SystemTool(String),
     /// A library of a vendor driver or toolkit that has no public source.
     Vendor(String),
+    /// A library of the NVIDIA driver (`libcuda.so.1`): supplied by the host at
+    /// run time, so the requiring package drops the Requires instead.
+    Driver(String),
     /// A capability that is not a package (file, perl module, rpmlib feature).
     NotAPackage {
         capability: String,
@@ -66,6 +69,11 @@ impl Skip {
                  from site-packages depends on NVIDIA's own wheel of it (`nvidia-<lib>-cuNN` \
                  on PyPI); anything else must not require it"
             ),
+            Skip::Driver(n) => format!(
+                "{n} is a library of the NVIDIA driver, supplied by the host at run time; \
+                 the requiring package leaves it out of its Requires with the generated \
+                 `%global __requires_exclude` (the pipeline adds it itself)"
+            ),
             Skip::NotAPackage { capability, why } => {
                 format!("{capability} is not a package: {why}")
             }
@@ -81,7 +89,7 @@ impl Skip {
     /// stops reporting it (convention 28, exception 4). A name the distro
     /// ships is satisfied rather than out of reach.
     pub fn is_unbuildable(&self) -> bool {
-        matches!(self, Skip::Vendor(_) | Skip::NotAPackage { .. })
+        matches!(self, Skip::Vendor(_) | Skip::Driver(_) | Skip::NotAPackage { .. })
     }
 }
 
@@ -155,6 +163,42 @@ const VENDOR_LIBRARY_PREFIXES: &[&str] = &[
     "libcufile",
     "libnvtx",
 ];
+
+/// Sonames the NVIDIA DRIVER supplies at run time (the container gets them from
+/// the host): `libcuda.so.1`, NVML, the PTX JIT compiler, NVDEC/NVENC and the
+/// like. No package of any repository provides them, so a package that links
+/// one must leave it out of its Requires. The single definition: the
+/// requires-exclude regex ([`driver_requires_exclude`]), the unresolvable
+/// handler, the wheel skeleton and the CUDA redist specs all use it.
+const DRIVER_LIBRARY_STEMS: &[&str] = &[
+    "libcuda",
+    "libcudadebugger",
+    "libnvcuvid",
+    "libnvoptix",
+    "libnvidia-",
+];
+
+/// Whether `name` (a Requires such as `libcuda.so.1()(64bit)` or a bare
+/// `libnvidia-ml.so.1`) is a library of the NVIDIA driver.
+pub fn is_driver_soname(name: &str) -> bool {
+    let name = name.trim();
+    let Some(stem) = soname_stem(name) else {
+        return false;
+    };
+    DRIVER_LIBRARY_STEMS.iter().any(|p| {
+        if p.ends_with('-') {
+            stem.starts_with(p) && stem.len() > p.len()
+        } else {
+            stem == *p
+        }
+    })
+}
+
+/// The `__requires_exclude` regex that matches exactly the driver sonames
+/// [`is_driver_soname`] accepts, as rpm matches it against a Requires name.
+pub fn driver_requires_exclude() -> &'static str {
+    r"^(libcuda|libcudadebugger|libnvcuvid|libnvoptix|libnvidia-[A-Za-z0-9_-]+)\.so([.(].*)?$"
+}
 
 /// `python3dist(x)` / `python313dist(x)` -> `x`.
 fn python_dist(name: &str) -> Option<&str> {
@@ -282,6 +326,12 @@ pub fn classify_reported(raw: &str) -> Reported {
                  Requires with the `%global __requires_exclude` the wheel skeleton generates for \
                  hashed libraries",
             );
+        }
+        if is_driver_soname(raw) {
+            return Reported::Capability {
+                capability: raw.to_string(),
+                fallback: Fallback::Unbuildable(Skip::Driver(raw.to_string())),
+            };
         }
         if VENDOR_LIBRARY_PREFIXES.iter().any(|p| stem.starts_with(p)) {
             return Reported::Capability {
@@ -565,15 +615,45 @@ mod tests {
         assert!(matches!(skipped("ninja"), Skip::SystemTool(_)));
     }
 
+    /// The regex and `is_driver_soname` are one rule.
+    #[test]
+    fn the_driver_regex_agrees_with_is_driver_soname() {
+        let re = regex::Regex::new(driver_requires_exclude()).unwrap();
+        for n in [
+            "libcuda.so.1()(64bit)",
+            "libcuda.so.1",
+            "libcuda.so",
+            "libnvidia-ml.so.1()(64bit)",
+            "libnvidia-ptxjitcompiler.so.1()(64bit)",
+            "libnvidia-nvvm.so.4",
+            "libnvcuvid.so.1",
+            "libcudadebugger.so.1()(64bit)",
+            "libcudart.so.12()(64bit)",
+            "libcudnn.so.9()(64bit)",
+            "libcudart.so.13",
+            "libnvrtc.so.12()(64bit)",
+            "libnvidia-.so.1",
+            "libcudaq.so",
+            "libc.so.6()(64bit)",
+        ] {
+            assert_eq!(re.is_match(n), is_driver_soname(n), "{n}");
+        }
+        assert!(is_driver_soname("libcuda.so.1()(64bit)"));
+        assert!(!is_driver_soname("libcudart.so.12()(64bit)"));
+        assert!(!is_driver_soname("libnvrtc.so.12()(64bit)"));
+    }
+
     #[test]
     fn a_vendor_driver_library_is_unbuildable() {
         for raw in [
             "libcuda.so.1()(64bit)",
             "libcuda.so.1",
             "libnvidia-ml.so.1()(64bit)",
+            "libnvidia-ptxjitcompiler.so.1()(64bit)",
+            "libnvcuvid.so.1()(64bit)",
         ] {
             let s = skipped(raw);
-            assert!(matches!(s, Skip::Vendor(_)), "{raw}");
+            assert!(matches!(s, Skip::Driver(_)), "{raw}");
             assert!(s.is_unbuildable());
         }
     }
@@ -789,11 +869,11 @@ mod redist_tests {
         let _on = TestMode::set(true);
         assert!(matches!(
             triage("libcuda.so.1()(64bit)", &|_| false),
-            Triage::Skip(Skip::Vendor(_))
+            Triage::Skip(Skip::Driver(_))
         ));
         assert!(matches!(
             triage("libnvidia-ml.so.1()(64bit)", &|_| false),
-            Triage::Skip(Skip::Vendor(_))
+            Triage::Skip(Skip::Driver(_))
         ));
     }
 

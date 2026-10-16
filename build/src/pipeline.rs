@@ -3836,6 +3836,9 @@ fn linked_bound_conflicts(
 /// asks this whether an already built package still needs a new revision.
 fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path) -> String {
     let mut fixed = crate::spec::parenthesize_conditional_dependencies(spec);
+    if crate::spec::may_link_driver_library(&fixed) {
+        fixed = crate::spec::with_driver_requires_exclude(&fixed);
+    }
     if !fixed.contains("[0-9a-f]{8}")
         && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
         && ap_ecosystem::sdist::wheel_has_hashed_libs(&wheel)
@@ -5417,6 +5420,34 @@ fn unresolvable_deps_round(
             })
             .collect()
     };
+
+    // A library of the NVIDIA driver (`libcuda.so.1()(64bit)`) is nothing to
+    // build: the requiring package leaves it out of its Requires, which is
+    // done here, deterministically, and the build retried.
+    let (driver_deps, unresolvable_deps): (Vec<String>, Vec<String>) = unresolvable_deps
+        .into_iter()
+        .partition(|d| crate::depclass::is_driver_soname(d));
+    let mut driver_fixed = false;
+    if !driver_deps.is_empty()
+        && let Ok(current) = std::fs::read_to_string(spec_path)
+    {
+        let fixed = crate::spec::with_driver_requires_exclude(&current);
+        if fixed != current {
+            write_or_warn(spec_path, &fixed);
+            driver_fixed = true;
+            ctx.reporter.report(&Event::Warning {
+                step: Some(build_step.id),
+                message: format!(
+                    "{} is a library of the NVIDIA driver: added it to \
+                     `%global __requires_exclude` instead of requiring it",
+                    driver_deps.join(", ")
+                ),
+            });
+        }
+    }
+    if driver_fixed {
+        st.relaxed_from_spec = sha256_file(spec_path).ok();
+    }
 
     if unresolvable_deps.is_empty() {
         // Every dep has a local RPM, so OBS should pick them up on
