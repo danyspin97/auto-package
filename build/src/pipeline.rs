@@ -254,6 +254,10 @@ pub struct PkgState {
     pub blocked_spec_hash: Option<u64>,
     #[serde(default)]
     pub blocked_reason: Option<String>,
+    /// Hash of the build.log the last PreFix agent turn read. The same log is
+    /// not handed to a turn twice (it would find nothing new, at a turn's cost).
+    #[serde(default)]
+    pub prefix_log_hash: Option<u64>,
     /// Total model-call USD spent during the `cumulative_spent_run_id`
     /// run. Persisted so an outer-loop retry WITHIN that run (which
     /// recreates `run_package` from scratch for the same package)
@@ -2860,6 +2864,27 @@ fn review_stage(
     Ok(())
 }
 
+/// Why the previous build log must not be handed to a PreFix agent turn, or
+/// `None` when it can be. A log older than the spec describes a spec that is
+/// gone (a fix, or a regeneration, came after the build); a log the last turn
+/// already read has nothing new to say.
+fn stale_build_log_reason(
+    spec_mtime: Option<std::time::SystemTime>,
+    log_mtime: Option<std::time::SystemTime>,
+    log_text: &str,
+    last_turn_log_hash: Option<u64>,
+) -> Option<&'static str> {
+    if let (Some(spec), Some(log)) = (spec_mtime, log_mtime)
+        && log < spec
+    {
+        return Some("the build log is older than the spec (it was edited after that build)");
+    }
+    if !log_text.is_empty() && last_turn_log_hash == Some(hash_spec(log_text)) {
+        return Some("the build log is the one the last fix turn already read");
+    }
+    None
+}
+
 /// Step: PreFix (restart with previous build log).
 /// When this is a restart (spec was not regenerated) and a previous non-empty
 /// build log exists, run an agent turn to fix the spec before a new OBS build.
@@ -2883,6 +2908,23 @@ fn prefix_stage(
         ..
     } = ctx;
     let reporter = *reporter;
+    let log_text = std::fs::read_to_string(ws.build_log()).unwrap_or_default();
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if build_log_nonempty
+        && !spec.need_spec
+        && let Some(why) = stale_build_log_reason(
+            mtime(spec_path),
+            mtime(&ws.build_log()),
+            &log_text,
+            PkgState::load(ws).prefix_log_hash,
+        )
+    {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: format!("{rpm_name}: no PreFix turn, building again: {why}"),
+        });
+        return Ok(());
+    }
     // Gated like every other fix turn: this path also bumps the attempt count,
     // so without the limit a package could run past --max-attempts (13/10).
     if !spec.need_spec
@@ -2941,6 +2983,10 @@ fn prefix_stage(
         );
 
         if let Ok((prefix_step, outcome)) = turn {
+            if build_log_nonempty {
+                let h = hash_spec(&log_text);
+                update_state(ws, reporter, |state| state.prefix_log_hash = Some(h));
+            }
             if let Some(missing) = missing_deps_from_turn(ctx, prefix_step.id, &outcome) {
                 return Err(missing);
             }
@@ -11611,6 +11657,22 @@ mod settled_tests {
 #[cfg(test)]
 mod hygiene_tests {
     use super::*;
+
+    #[test]
+    fn a_stale_or_already_read_build_log_skips_the_prefix_turn() {
+        use std::time::{Duration, SystemTime};
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let t1 = t0 + Duration::from_secs(10);
+        // Spec edited after the build.
+        assert!(stale_build_log_reason(Some(t1), Some(t0), "boom", None).is_some());
+        // Log newer than the spec, not read before.
+        assert!(stale_build_log_reason(Some(t0), Some(t1), "boom", None).is_none());
+        // Same content as the last turn read.
+        assert!(stale_build_log_reason(Some(t0), Some(t1), "boom", Some(hash_spec("boom"))).is_some());
+        assert!(stale_build_log_reason(Some(t0), Some(t1), "bang", Some(hash_spec("boom"))).is_none());
+        // Unknown times never block the turn.
+        assert!(stale_build_log_reason(None, None, "boom", None).is_none());
+    }
 
     #[test]
     fn a_blocked_review_is_remembered_for_the_same_spec_only() {
