@@ -97,10 +97,11 @@ pub fn is_redist_package(rpm_name: &str) -> bool {
 }
 
 fn product_for(key: &str) -> Product {
-    if key == "cudnn" {
-        Product::Cudnn
-    } else {
-        Product::Cuda
+    match key {
+        "cudnn" => Product::Cudnn,
+        "libcusparse_lt" => Product::Cusparselt,
+        "libnvshmem" => Product::Nvshmem,
+        _ => Product::Cuda,
     }
 }
 
@@ -263,7 +264,7 @@ pub fn generate(
             comp.version
         ));
     }
-    let cuda_major = (product == Product::Cudnn).then_some(CUDNN_CUDA_MAJOR);
+    let cuda_major = product.per_cuda_major().then_some(CUDNN_CUDA_MAJOR);
     let archive = comp.archive_for(platform, cuda_major).ok_or_else(|| {
         format!(
             "{key} {} has no {platform} archive{}",
@@ -635,5 +636,27 @@ pub(crate) mod tests {
                 "cuda_nvtx-linux-x86_64-13.4.0-archive.tar.xz"
             ]
         );
+    }
+
+    #[test]
+    fn cusparselt_and_nvshmem_are_components_with_their_own_manifests() {
+        let _on = TestMode::set(true);
+        for (name, key, pkg) in [
+            ("nvidia-cusparselt-cu13", "libcusparse_lt", "cuda-cusparse-lt"),
+            ("nvidia_nvshmem_cu13", "libnvshmem", "cuda-nvshmem"),
+            ("libcusparseLt.so.0()(64bit)", "libcusparse_lt", "cuda-cusparse-lt"),
+            ("libnvshmem_host.so.3", "libnvshmem", "cuda-nvshmem"),
+            ("cuda-cusparse-lt", "libcusparse_lt", "cuda-cusparse-lt"),
+            ("cuda-nvshmem", "libnvshmem", "cuda-nvshmem"),
+        ] {
+            assert_eq!(component(name), Some(key), "{name}");
+            assert_eq!(package_name(name).as_deref(), Some(pkg), "{name}");
+        }
+        assert_eq!(product_for("libnvshmem"), Product::Nvshmem);
+        assert_eq!(product_for("libcusparse_lt"), Product::Cusparselt);
+        assert_eq!(product_for("libcublas"), Product::Cuda);
+        assert!(Product::Nvshmem.base_url().ends_with("/compute/nvshmem/redist"));
+        assert!(Product::Cusparselt.base_url().ends_with("/compute/cusparselt/redist"));
+        assert!(Product::Nvshmem.per_cuda_major() && !Product::Cuda.per_cuda_major());
     }
 }

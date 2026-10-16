@@ -1,7 +1,7 @@
-//! NVIDIA redistributable manifests (CUDA toolkit components and cuDNN).
+//! NVIDIA redistributable manifests (CUDA toolkit components, cuDNN, cuSPARSELt and NVSHMEM).
 //!
 //! NVIDIA publishes `redistrib_<ver>.json` next to the archives at
-//! `https://developer.download.nvidia.com/compute/{cuda,cudnn}/redist/`. Each
+//! `https://developer.download.nvidia.com/compute/{cuda,cudnn,cusparselt,nvshmem}/redist/`. Each
 //! manifest has `release_date`, `release_label` and `release_product`, then
 //! one object per component (`name`, `license`, `license_path`, `version`) with
 //! one entry per platform (`linux-x86_64`, `linux-sbsa`, `windows-x86_64`...).
@@ -16,6 +16,8 @@ use serde_json::Value;
 
 const CUDA_BASE: &str = "https://developer.download.nvidia.com/compute/cuda/redist";
 const CUDNN_BASE: &str = "https://developer.download.nvidia.com/compute/cudnn/redist";
+const CUSPARSELT_BASE: &str = "https://developer.download.nvidia.com/compute/cusparselt/redist";
+const NVSHMEM_BASE: &str = "https://developer.download.nvidia.com/compute/nvshmem/redist";
 const MAX_MANIFEST_BYTES: u64 = 16 << 20;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -83,6 +85,10 @@ impl Archive {
 pub enum Product {
     Cuda,
     Cudnn,
+    /// cuSPARSELt (`libcusparse_lt`), one archive per CUDA major.
+    Cusparselt,
+    /// NVSHMEM (`libnvshmem`), one archive per CUDA major.
+    Nvshmem,
 }
 
 impl Product {
@@ -90,7 +96,15 @@ impl Product {
         match self {
             Product::Cuda => CUDA_BASE,
             Product::Cudnn => CUDNN_BASE,
+            Product::Cusparselt => CUSPARSELT_BASE,
+            Product::Nvshmem => NVSHMEM_BASE,
         }
+    }
+
+    /// Whether the product's archives are split by CUDA major (`cuda13`), so
+    /// that one has to be picked. The CUDA toolkit's are not.
+    pub fn per_cuda_major(self) -> bool {
+        self != Product::Cuda
     }
 }
 
@@ -250,6 +264,8 @@ pub const COMPONENT_KEYS: &[&str] = &[
     "cuda_nvtx",
     "libnvjpeg",
     "cudnn",
+    "libcusparse_lt",
+    "libnvshmem",
     "libnpp",
     "cuda_nvcc",
     "cuda_crt",
@@ -275,6 +291,8 @@ fn soname_component(stem: &str) -> Option<&'static str> {
         "nvtoolsext" => "cuda_nvtx",
         "nvjpeg" => "libnvjpeg",
         "cudnn" => "cudnn",
+        "cusparselt" => "libcusparse_lt",
+        s if s.starts_with("nvshmem") => "libnvshmem",
         s if s.starts_with("cudnn_") => "cudnn",
         s if s.starts_with("npp") => "libnpp",
         _ => return None,
@@ -311,6 +329,8 @@ fn pypi_component(name: &str) -> Option<&'static str> {
         "nvidia-npp" => "libnpp",
         "nvidia-nvjpeg" => "libnvjpeg",
         "nvidia-cudnn" => "cudnn",
+        "nvidia-cusparselt" => "libcusparse_lt",
+        "nvidia-nvshmem" => "libnvshmem",
         _ => return None,
     })
 }
@@ -412,6 +432,8 @@ mod tests {
             "nvidia-npp",
             "nvidia-nvjpeg",
             "nvidia-cudnn",
+            "nvidia-cusparselt-cu13",
+            "nvidia-nvshmem-cu13",
             "libnvvm.so.4",
         ] {
             let key = component_for_package(name).unwrap();
@@ -500,6 +522,10 @@ mod tests {
             ("libcudnn.so.9", "cudnn"),
             ("libcudnn_graph.so.9()(64bit)", "cudnn"),
             ("libnppc.so.13", "libnpp"),
+            ("nvidia-cusparselt-cu13", "libcusparse_lt"),
+            ("nvidia-nvshmem-cu13", "libnvshmem"),
+            ("libcusparseLt.so.0", "libcusparse_lt"),
+            ("libnvshmem_host.so.3", "libnvshmem"),
         ] {
             assert_eq!(component_for_package(input), Some(want), "{input}");
         }
