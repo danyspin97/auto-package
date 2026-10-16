@@ -2124,18 +2124,29 @@ fn state_needs_rpm_reconcile(prior: &PkgState) -> bool {
 /// stale failure), download the RPMs first. Returns whether the package can
 /// be recorded as built; `false` falls through to the normal pipeline.
 fn reconcile_rpms(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Reporter) -> bool {
+    reconcile_rpms_with(config, ws, reporter, || {
+        osc::download_built_rpms(
+            &config.project,
+            &config.rpm_name,
+            &config.distro,
+            &config.arch,
+            &config.rpms_dir,
+            Emit::run(reporter),
+        )
+    })
+}
+
+/// [`reconcile_rpms`] with the download injected.
+fn reconcile_rpms_with(
+    config: &PipelineConfig,
+    ws: &Workspace,
+    reporter: &dyn Reporter,
+    download: impl FnOnce() -> Result<usize, osc::Error>,
+) -> bool {
     if !state_needs_rpm_reconcile(&PkgState::load(ws)) {
         return true;
     }
-    let emit = Emit::run(reporter);
-    match osc::download_built_rpms(
-        &config.project,
-        &config.rpm_name,
-        &config.distro,
-        &config.arch,
-        &config.rpms_dir,
-        emit,
-    ) {
+    match download() {
         Ok(n) if n > 0 => {
             record_rpmlint(config, ws, reporter);
             true
@@ -12195,6 +12206,38 @@ mod hygiene_tests {
         assert_eq!(outcome(root.path(), "python-wait").as_deref(), Some("missing_deps"));
         assert_eq!(outcome(root.path(), "ffmpeg-8").as_deref(), Some("success"));
         assert_eq!(changed.len(), 2, "{changed:?}");
+    }
+
+    struct Warnings(std::sync::Mutex<Vec<String>>);
+
+    impl ap_core::sink::Reporter for Warnings {
+        fn report(&self, event: &Event) {
+            if let Event::Warning { message, .. } = event {
+                self.0.lock().unwrap().push(message.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_failure_is_reconciled_only_when_the_rpms_download() {
+        let root = tempfile::tempdir().unwrap();
+        write_state(root.path(), "python-x", "failed", Some("old"));
+        let ws = Workspace::open(root.path(), "python-x").unwrap();
+        let cfg = config("x", root.path());
+        let quiet = Warnings(Default::default());
+        assert!(reconcile_rpms_with(&cfg, &ws, &quiet, || Ok(2)));
+        assert!(quiet.0.lock().unwrap().is_empty());
+        // Nothing landed: the package is rebuilt, with a warning saying why.
+        assert!(!reconcile_rpms_with(&cfg, &ws, &quiet, || Ok(0)));
+        assert!(quiet.0.lock().unwrap()[0].contains("no RPMs were downloaded"));
+        // A failing download is the same.
+        assert!(!reconcile_rpms_with(&cfg, &ws, &quiet, || {
+            Err(osc::Error::NotActionable("502".into()))
+        }));
+        assert!(quiet.0.lock().unwrap()[1].contains("fetching its RPMs failed"));
+        // A recorded success needs no download at all.
+        write_state(root.path(), "python-x", "success", None);
+        assert!(reconcile_rpms_with(&cfg, &ws, &quiet, || panic!("not called")));
     }
 
     pub(super) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
