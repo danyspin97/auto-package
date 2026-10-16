@@ -2691,6 +2691,36 @@ fn empty_submodule_context(root: &Path) -> Option<String> {
     })
 }
 
+/// The `why` the pipeline gives its own wheel switch for an archive without
+/// its git submodules.
+fn empty_submodule_why(root: &Path) -> String {
+    format!(
+        "the source archive is missing its git submodules ({} are empty directories), \
+         so it cannot be built from source",
+        empty_submodule_dirs(root).join(", ")
+    )
+}
+
+/// A `use_upstream_wheel` outcome made by the pipeline itself, so the switch goes
+/// through the same path (provenance, notes, state reset) as the agent's.
+fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
+    crate::agent::TurnOutcome {
+        action: crate::agent::Action::UseUpstreamWheel { why: why.to_string() },
+        reasoning: why.to_string(),
+        evidence: Vec::new(),
+        unresolvable_packages: Vec::new(),
+        patch_dependencies: Vec::new(),
+        confidence: crate::agent::Confidence::High,
+        usage: crate::agent::Usage::default(),
+        tool_calls: Vec::new(),
+        prompt: String::new(),
+        output: String::new(),
+        raw: String::new(),
+        session_id: None,
+        ended_early: None,
+    }
+}
+
 /// Step: Review (freshly generated specs, or existing spec with no prior build).
 fn review_stage(
     ctx: &RunCtx,
@@ -2752,6 +2782,62 @@ fn review_stage(
         Some(_) => true,
         None => review_turn_wanted(need_spec, build_log_nonempty, already_reviewed, rpm_name),
     };
+    // A source archive without its git submodules cannot be built by any spec
+    // edit: when the wheel exists, switch to it now instead of paying a turn
+    // to be told so.
+    let mut run_turn = run_turn;
+    if patching.is_none()
+        && st.from_repo_archive
+        && let root = ws.sdist_dir().join(&st.sdist_top_level)
+        && empty_submodule_context(&root).is_some()
+    {
+        let why = empty_submodule_why(&root);
+        let step = begin_or_fail!(
+            ctx.pkg_run,
+            reporter,
+            StepKind::AgentTurn,
+            Some("submodule-wheel"),
+            &mut st.step_attempts,
+            rpm_name.clone()
+        );
+        let before = std::fs::read_to_string(spec_path).unwrap_or_default();
+        let outcome = pipeline_wheel_outcome(&why);
+        let applied = apply_turn_and_reset(
+            ApplyTurnCtx {
+                config,
+                checkout_dir,
+                spec_path,
+                step: &step,
+                before: &before,
+                rpm_name,
+                label: "Review — pre-build (git submodules missing)",
+                attempt: 0,
+                notes_path: ws.notes(),
+                snapshot: None,
+            },
+            &outcome,
+            reporter,
+            &mut st.sdist_top_level,
+            &mut st.from_repo_archive,
+        );
+        match applied {
+            Ok(TurnEffect::SwitchedToWheel) => {
+                step.finish(ap_core::event::StepOutcome::Ok);
+                run_turn = false;
+            }
+            other => {
+                step.finish(ap_core::event::StepOutcome::Failed);
+                reporter.report(&Event::Warning {
+                    step: None,
+                    message: format!(
+                        "{rpm_name}: the source archive lacks its git submodules and the \
+                         wheel switch did not happen ({}); the Review turn decides",
+                        other.err().unwrap_or_else(|| "no change".into())
+                    ),
+                });
+            }
+        }
+    }
     if !config.no_agent && run_turn {
         let carry_context = spec.carried_from.as_ref().map(|old| {
             format!(
@@ -11764,6 +11850,21 @@ mod hygiene_tests {
         std::fs::write(tp.join("XNNPACK/x"), "x").unwrap();
         assert!(empty_submodule_context(root.path()).is_none());
         assert!(empty_submodule_dirs(&root.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn the_pipelines_own_wheel_switch_gives_a_reason_the_gate_accepts() {
+        let root = tempfile::tempdir().unwrap();
+        for d in ["pybind11", "XNNPACK"] {
+            std::fs::create_dir_all(root.path().join("third_party").join(d)).unwrap();
+        }
+        let why = empty_submodule_why(root.path());
+        assert!(why.contains("third_party/XNNPACK") && validate_wheel_switch_why(&why).is_ok());
+        let outcome = pipeline_wheel_outcome(&why);
+        assert!(matches!(
+            outcome.action,
+            crate::agent::Action::UseUpstreamWheel { why: ref w } if *w == why
+        ));
     }
 
     #[test]
