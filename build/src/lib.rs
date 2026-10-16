@@ -19,6 +19,7 @@ pub mod proc;
 pub mod redist;
 pub mod sources;
 pub mod spec;
+pub mod stage;
 pub mod step;
 pub mod update;
 pub mod update_project;
