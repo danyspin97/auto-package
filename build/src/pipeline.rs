@@ -2553,6 +2553,20 @@ fn resume_budget(ctx: &RunCtx, st: &mut RunState) {
     }
 }
 
+/// Whether the review turn runs for a package nobody asked to patch. A spec
+/// generated from a CUDA redistributable is never reviewed: it has no source to
+/// read, and the turn can only add a "no test suite" comment.
+fn review_turn_wanted(
+    need_spec: bool,
+    build_log_nonempty: bool,
+    already_reviewed: bool,
+    rpm_name: &str,
+) -> bool {
+    (need_spec || !build_log_nonempty)
+        && !already_reviewed
+        && !crate::redist::is_redist_package(rpm_name)
+}
+
 /// Step: Review (freshly generated specs, or existing spec with no prior build).
 fn review_stage(
     ctx: &RunCtx,
@@ -2599,7 +2613,7 @@ fn review_stage(
     let run_turn = match patching {
         // A request is asked of a package that may have been reviewed before.
         Some(_) => true,
-        None => (need_spec || !build_log_nonempty) && !already_reviewed,
+        None => review_turn_wanted(need_spec, build_log_nonempty, already_reviewed, rpm_name),
     };
     if !config.no_agent && run_turn {
         let carry_context = spec.carried_from.as_ref().map(|old| {
@@ -11263,6 +11277,18 @@ mod redist_pipeline_tests {
     use super::*;
     use crate::redist::TestMode;
     use crate::redist::tests::Fake;
+
+    #[test]
+    fn a_generated_redist_spec_is_not_reviewed() {
+        let _on = TestMode::set(true);
+        assert!(!review_turn_wanted(true, false, false, "cuda-cudart"));
+        assert!(review_turn_wanted(true, false, false, "python-numpy"));
+        assert!(!review_turn_wanted(false, true, false, "python-numpy"));
+        assert!(!review_turn_wanted(true, false, true, "python-numpy"));
+        drop(_on);
+        let _off = TestMode::set(false);
+        assert!(review_turn_wanted(true, false, false, "cuda-cudart"));
+    }
 
     fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         PipelineConfig {
