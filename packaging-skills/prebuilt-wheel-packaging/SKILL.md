@@ -58,6 +58,11 @@ must account for. Do this before touching %files; never guess the layout.
     directory with a `true` one, the skeleton moves the `false` wheel's tree into
     `%{python_sitelib}` in `%install` (`mv`, dist-info included); keep those
     lines and do not edit another package's RECORD.
+    A namespace tree split over lib and lib64 fails with `No module named
+    'cutlass.cute'` (the `.pth` takes `nvidia_cutlass_dsl.__path__[0]`, the first
+    site directory holding one). A sibling spec generated before the others were
+    known is moved onto the one tree by the pipeline (`with_sibling_tree_in_sitelib`);
+    do not work around it with `PYTHONPATH` in `%check`.
 - `%check` for a wheel: there is no source tree, so check the installed
   files. Run any import from a fresh empty directory with
   `PYTHONPATH=%{buildroot}%{$python_sitelib}` (the same site macro the `%files` use) —

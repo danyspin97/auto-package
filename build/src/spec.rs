@@ -3127,6 +3127,50 @@ fn sitelib_relocation(layout: &ap_ecosystem::sdist::WheelLayout) -> String {
     text
 }
 
+/// `spec`, generated for a wheel before a sibling wheel that fills the same
+/// tree in `%{python_sitelib}` was known (convention 83), moved onto that one
+/// tree: python-tokenspeed-mla failed with `No module named 'cutlass.cute'`
+/// because `-base` and `-cu12` had been generated into sitearch while `-core`
+/// is noarch. Every `sitearch` of the spec becomes `sitelib` and the wheel's
+/// tree is moved there right after the install ([`sitelib_relocation`]), as the
+/// generator does when it knows the siblings. A spec that does not use
+/// sitearch, or already relocates, is returned as is.
+pub fn with_sibling_tree_in_sitelib(
+    spec: &str,
+    layout: &ap_ecosystem::sdist::WheelLayout,
+    siblings: &[SiblingWheel],
+) -> String {
+    if !sibling_forces_purelib(layout, siblings)
+        || !spec.contains("python_sitearch")
+        || spec.contains("mv %{buildroot}%{$python_sitearch}/")
+    {
+        return spec.to_string();
+    }
+    let tail = if spec.ends_with('\n') { "\n" } else { "" };
+    let mut out: Vec<String> = Vec::new();
+    for line in spec.lines() {
+        out.push(
+            line.replace("%{$python_sitearch}", "%{$python_sitelib}")
+                .replace("%{python_sitearch}", "%{python_sitelib}"),
+        );
+    }
+    // After the last install line.
+    let at = out.iter().rposition(|l| {
+        let t = l.trim_start();
+        t.starts_with("%pyproject_install")
+            || (t.starts_with("%python") && t.contains("_pyproject_install"))
+    });
+    if let Some(at) = at {
+        let reloc: Vec<String> = sitelib_relocation(layout).lines().map(str::to_string).collect();
+        for (k, l) in reloc.into_iter().enumerate() {
+            out.insert(at + 1 + k, l);
+        }
+    } else {
+        return spec.to_string();
+    }
+    out.join("\n") + tail
+}
+
 /// The other wheels of `pkg_name`'s project, from every source that knows what
 /// they install, in a fixed order so the result does not depend on which was
 /// built first:
@@ -3617,6 +3661,113 @@ mod cutlass_split_wheels_tests {
         let spec = skeleton(3, alone.path());
         assert!(spec.contains("%{python_sitearch}/nvidia_cutlass_dsl/"), "{spec}");
         assert!(!spec.contains("python_sitelib"), "{spec}");
+    }
+
+    /// python-tokenspeed-mla's `%check`: `No module named 'cutlass.cute'`.
+    /// `nvidia-cutlass-dsl`'s `.pth` puts `nvidia_cutlass_dsl.__path__[0] +
+    /// /dsl_packages` on `sys.path`, and `nvidia_cutlass_dsl` is a namespace
+    /// package (no `__init__.py` anywhere), so `__path__[0]` is the FIRST site
+    /// directory that holds one: with the compiled wheels in sitearch (searched
+    /// first on openSUSE) and `-core` in sitelib, `cutlass/__init__.py` was
+    /// found and `cutlass/cute` was not. Merge what the four generated specs
+    /// install, as rpm does, and resolve the imports on both interpreters.
+    /// The specs of `-base` and `-cu12` were generated while `-core` was not
+    /// known, so they sit in sitearch; the spec fix moves them to the tree.
+    #[test]
+    fn a_sibling_spec_generated_alone_is_moved_into_the_shared_tree() {
+        let tmp = checkouts(&[0, 1, 2, 3]);
+        let alone = checkouts(&[2]);
+        let old = skeleton(2, alone.path());
+        assert!(old.contains("%{python_sitearch}/nvidia_cutlass_dsl"), "{old}");
+        let own = "nvidia-cutlass-dsl-libs-cu12";
+        let wheel_dir = tmp.path().join(format!("python-{own}"));
+        let wheel = wheel_dir.join("nvidia_cutlass_dsl_libs_cu12-4.7.1-cp313-cp313-manylinux_2_28_x86_64.whl");
+        let layout = ap_ecosystem::sdist::wheel_layout(&wheel).unwrap();
+        let siblings = sibling_wheels(std::path::Path::new("/nonexistent-r4b"), Some(tmp.path()), own);
+        let fixed = with_sibling_tree_in_sitelib(&old, &layout, &siblings);
+        assert_ne!(fixed, old);
+        for l in files_section(&fixed) {
+            assert!(!l.contains("python_sitearch"), "{l}\n{fixed}");
+        }
+        let install = fixed.find("%pyproject_install").unwrap();
+        let mv = fixed
+            .find("%python_expand mv %{buildroot}%{$python_sitearch}/nvidia_cutlass_dsl ")
+            .expect(&fixed);
+        let cleanup = fixed.find("rm -rf %{buildroot}%{$python_sitelib}/nvidia_cutlass_dsl/cu12/include").expect(&fixed);
+        assert!(install < mv && mv < cleanup, "{fixed}");
+        assert_eq!(with_sibling_tree_in_sitelib(&fixed, &layout, &siblings), fixed);
+        // Without a pure sibling nothing changes.
+        assert_eq!(with_sibling_tree_in_sitelib(&old, &layout, &[]), old);
+    }
+
+    #[test]
+    fn the_merged_install_of_the_four_wheels_resolves_cutlass_cute_in_one_tree() {
+        let tmp = checkouts(&[0, 1, 2, 3]);
+        // site directory -> files, per interpreter flavor (the macros are the
+        // same for both; each flavor expands them against its own directories).
+        for flavor in ["python313", "python314"] {
+            let mut trees: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+            for i in 0..4 {
+                let spec = skeleton(i, tmp.path());
+                let (short, names, purelib, _) = WHEELS[i];
+                // Where `%pyproject_install` puts the wheel: its WHEEL file decides.
+                let mut placed: Vec<(&str, String)> = names
+                    .lines()
+                    .filter(|f| !f.is_empty() && !f.contains(".dist-info/"))
+                    .map(|f| (if purelib { "sitelib" } else { "sitearch" }, f.to_string()))
+                    .collect();
+                // The relocation lines of the spec, each for every flavor.
+                for line in spec.lines().filter(|l| l.contains("mv %{buildroot}")) {
+                    assert!(line.starts_with("%python_expand "), "{short}: {line}");
+                    let top = line
+                        .split("%{$python_sitearch}/")
+                        .nth(1)
+                        .and_then(|r| r.split(' ').next())
+                        .unwrap();
+                    for (site, f) in placed.iter_mut() {
+                        if f.split('/').next() == Some(top) {
+                            *site = "sitelib";
+                        }
+                    }
+                }
+                // %files names the directory the file really is in.
+                for l in files_section(&spec) {
+                    assert!(!l.contains("python_sitearch"), "{flavor} {short}: {l}");
+                }
+                for (site, f) in placed {
+                    trees.entry(site).or_default().insert(f);
+                }
+            }
+            // One tree: nothing of the namespace is left in sitearch.
+            assert_eq!(trees.keys().copied().collect::<Vec<_>>(), ["sitelib"], "{flavor}");
+            let lib = &trees["sitelib"];
+            // `sys.path` of an openSUSE interpreter: sitearch before sitelib;
+            // `__path__[0]` is the first directory with `nvidia_cutlass_dsl/`.
+            let first = ["sitearch", "sitelib"]
+                .into_iter()
+                .find(|s| {
+                    trees.get(s).is_some_and(|t| {
+                        t.iter().any(|f| f.starts_with("nvidia_cutlass_dsl/"))
+                    })
+                })
+                .unwrap();
+            assert_eq!(first, "sitelib", "{flavor}");
+            // Every module of the import chain is in that one tree.
+            for need in [
+                "nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py",
+                "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/__init__.py",
+                "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py",
+                "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/ir.py",
+                "nvidia_cutlass_dsl/cu13/lib/libcute_dsl_runtime.so",
+                "nvidia_cutlass_dsl/cu12/lib/libcute_dsl_runtime.so",
+            ] {
+                assert!(lib.contains(need), "{flavor}: {need} is not in sitelib");
+            }
+            // And every top-level package directory resolves in the one tree.
+            let tops: BTreeSet<&str> =
+                lib.iter().filter_map(|f| f.split('/').next()).collect();
+            assert_eq!(tops.iter().copied().collect::<Vec<_>>(), ["nvidia_cutlass_dsl"], "{flavor}");
+        }
     }
 
     #[test]

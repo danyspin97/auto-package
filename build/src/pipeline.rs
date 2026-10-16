@@ -3839,6 +3839,24 @@ fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path) -> String 
     if crate::spec::may_link_driver_library(&fixed) {
         fixed = crate::spec::with_driver_requires_exclude(&fixed);
     }
+    // A wheel generated before the sibling wheels that fill its tree in sitelib
+    // were known sits in sitearch: the split namespace cannot be imported
+    // (convention 83).
+    if fixed.contains("python_sitearch")
+        && let Some(name) = fixed
+            .lines()
+            .find_map(|l| l.strip_prefix("Name:"))
+            .map(|n| n.trim().trim_start_matches("python-").to_string())
+        && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
+        && let Some(layout) = ap_ecosystem::sdist::wheel_layout(&wheel)
+    {
+        let siblings = crate::spec::sibling_wheels(
+            Path::new("/nonexistent"),
+            checkout_dir.parent(),
+            &name,
+        );
+        fixed = crate::spec::with_sibling_tree_in_sitelib(&fixed, &layout, &siblings);
+    }
     if !fixed.contains("[0-9a-f]{8}")
         && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
         && ap_ecosystem::sdist::wheel_has_hashed_libs(&wheel)
