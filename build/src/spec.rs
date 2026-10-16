@@ -3730,6 +3730,11 @@ mod cutlass_split_wheels_tests {
                         }
                     }
                 }
+                // `import cutlass` runs the CUDA IR extension setup, which needs a
+                // device (`cannot import name 'ir' from _mlir`): %check never runs it.
+                let check = spec.split("%check\n").nth(1).unwrap().split("%files").next().unwrap();
+                assert!(!check.contains("import cutlass"), "{short}: {check}");
+                assert!(!check.contains("import nvidia_cutlass_dsl"), "{short}: {check}");
                 // %files names the directory the file really is in.
                 for l in files_section(&spec) {
                     assert!(!l.contains("python_sitearch"), "{flavor} {short}: {l}");

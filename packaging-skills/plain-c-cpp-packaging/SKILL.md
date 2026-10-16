@@ -248,3 +248,21 @@ in order of preference:
    `%prep` with `tar -xf %{SOURCE1} --strip-components=1 -C third_party/<dir>`;
 3. if neither is possible, report the dependency in `unresolvable_packages`
    (convention 27) rather than inventing a source.
+
+## Known failures with one exact fix
+
+The pipeline recognises these in the build log (`log/cause.rs`) and puts the
+recipe first in the turn; apply it instead of returning `blocked`.
+
+- `Cython 3.3 requires the Python Limited API version to be 3.9 or greater`
+  (python-tilelang, scikit-build-core `wheel.py-api = "cp38"`): in `%prep`,
+  `sed -i -E 's/(py-api[[:space:]]*=[[:space:]]*")cp3[0-8]"/\1cp39"/' pyproject.toml`.
+- A CMake licence guard (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION`,
+  python-torchcodec): a fact to check, convention 78; never the S3 download
+  option, never `blocked`.
+- `No module named 'cutlass.cute'` behind the split `nvidia-cutlass-dsl-libs-*`
+  wheels: the siblings must share one `%{python_sitelib}` tree (see the
+  prebuilt-wheel skill); do not hide it with `PYTHONPATH`.
+- `%check` of a CUDA wheel that fails at import for want of a device
+  (`cannot import name 'ir' from _mlir`): check the installed files, not an
+  import (convention 67).

@@ -55,6 +55,11 @@ pub enum CauseKind {
     UndefinedSymbol {
         symbol: String,
     },
+    /// A failure with one known fix recipe (see [`known_recipe`]); `id` names
+    /// the recipe.
+    KnownRecipe {
+        id: &'static str,
+    },
 }
 
 /// A recognised cause, ready to be put in front of the agent.
@@ -380,6 +385,89 @@ fn import_site(frames: &[PythonFrame]) -> Option<String> {
     })
 }
 
+static CYTHON_LIMITED_API: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Cython (?<c>3\.\d+) requires the Python Limited API version to be (?<v>3\.\d+) or greater")
+        .expect("static pattern")
+});
+static CMAKE_LICENCE_GUARD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION|BUILD_AGAINST_ALL_FFMPEG_FROM_S3")
+        .expect("static pattern")
+});
+static SPLIT_TREE_SUBMODULE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"No module named '(?<m>cutlass\.[A-Za-z0-9_.]+)'").expect("static pattern")
+});
+
+/// Failures that have one known recipe, each seen in a real run: the cause and
+/// the exact fix, so the first attempt is right.
+fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
+    let find = |re: &Regex| haystack.iter().find(|l| re.is_match(l)).map(|l| l.trim().chars().take(300).collect::<String>());
+    // scikit-build-core `wheel.py-api = "cp38"` with Cython 3.3 (python-tilelang).
+    if let Some(line) = find(&CYTHON_LIMITED_API) {
+        let c = CYTHON_LIMITED_API.captures(&line)?;
+        let (cython, floor) = (c["c"].to_string(), c["v"].to_string());
+        let tag = format!("cp{}", floor.replace('.', ""));
+        return Some(ProbableCause {
+            summary: format!(
+                "Cython {cython} refuses a Limited API older than {floor}, and the project's \
+                 build settings ask for an older one (scikit-build-core `wheel.py-api = \
+                 \"cp38\"`, or a `Py_LIMITED_API` define): the stable-ABI floor is too low for \
+                 the Cython the distro ships."
+            ),
+            action: format!(
+                "Raise the floor in `%prep` with `sed -i -E 's/(py-api[[:space:]]*=[[:space:]]*\")\
+                 cp3[0-8]\"/\\1{tag}\"/' pyproject.toml` (or the same change as a quilt patch; \
+                 check with `grep -rn 'py-api\\|Py_LIMITED_API' pyproject.toml CMakeLists.txt`). \
+                 A floor of {floor} loses nothing: every flavor built here is newer. Do not pin \
+                 an older Cython."
+            ),
+            evidence: vec![line],
+            kind: CauseKind::KnownRecipe { id: "cython-limited-api" },
+        });
+    }
+    // torchcodec's wheel-state licence guard.
+    if let Some(line) = find(&CMAKE_LICENCE_GUARD)
+        && haystack.iter().any(|l| l.contains("FATAL_ERROR") || l.contains("CMake Error"))
+    {
+        return Some(ProbableCause {
+            summary: "An upstream CMake licence guard stops the wheel build until a variable \
+                      confirms the FFmpeg that is linked is licence-compatible. That is a fact \
+                      to check, not a reason to give up."
+                .to_string(),
+            action: "Follow convention 78: read the licence lines of the `ffmpeg-<N>` recipe \
+                     (the prompt's \"Licence facts\" section has them), and when it is \
+                     LGPL-only `export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1` in `%build` \
+                     with the `# licence-guard-verified:` comment; when it is GPL, report \
+                     `ffmpeg-<N>` in `patch_dependencies` for a licence-clean copy. Never use the \
+                     S3 download option (no network) and never return `blocked`."
+                .to_string(),
+            evidence: vec![line],
+            kind: CauseKind::KnownRecipe { id: "cmake-licence-guard" },
+        });
+    }
+    // A submodule of the CUTLASS DSL missing although `cutlass` imports: the
+    // split `nvidia-cutlass-dsl-libs-*` wheels are not in one site tree.
+    if let Some(line) = find(&SPLIT_TREE_SUBMODULE) {
+        return Some(ProbableCause {
+            summary: "The `cutlass` package imports but one of its submodules is missing: the \
+                      split `nvidia-cutlass-dsl-libs-*` wheels (core, base, cu12, cu13) share the \
+                      namespace `nvidia_cutlass_dsl/`, and `nvidia-cutlass-dsl`'s `.pth` takes the \
+                      FIRST site directory that holds it, so a tree split between lib and lib64 \
+                      loses `cutlass/cute`."
+                .to_string(),
+            action: "The defect is in the sibling packages, not in this spec and not a \
+                     `PYTHONPATH` workaround in `%check`: every `python-nvidia-cutlass-dsl-libs-*` \
+                     spec must install into `%{python_sitelib}` (convention 83; the pipeline moves \
+                     a sibling generated alone onto that tree). Report the sibling in \
+                     `patch_dependencies` if its spec still uses `%{python_sitearch}`; otherwise \
+                     wait for the rebuilt siblings."
+                .to_string(),
+            evidence: vec![line],
+            kind: CauseKind::KnownRecipe { id: "cutlass-split-tree" },
+        });
+    }
+    None
+}
+
 /// Recognise the cause of the failure in `log`, if it is one of the mechanical
 /// shapes. `own_module` is this package's normalized import name (so its own
 /// module failing to import is told apart from a dependency), and `spec` is
@@ -395,6 +483,10 @@ pub fn detect(log: &ExtractedLog, own_module: &str, spec: &str) -> Option<Probab
         .chain(log.log_tail.lines())
         .collect();
     let section = log.effective_section().to_string();
+
+    if let Some(known) = known_recipe(&haystack) {
+        return Some(known);
+    }
 
     // Many failing tests: the cause is the test environment as a whole, and
     // any single missing module is just one row of it.
@@ -628,6 +720,46 @@ impl ProbableCause {
 mod tests {
     use super::*;
     use crate::log::PathMapper;
+
+    #[test]
+    fn a_cython_limited_api_error_gets_the_floor_recipe() {
+        let log = log_from(&[
+            "Executing(%build): /usr/bin/bash -e /var/tmp/rpm-tmp.abc",
+            "tilelang_cython_wrapper.cpp:1:2: error: #error \"Cython 3.3 requires the Python Limited API version to be 3.9 or greater.\"",
+            "error: Bad exit status from /var/tmp/rpm-tmp.abc (%build)",
+        ]);
+        let c = detect(&log, "tilelang", "").expect("recognised");
+        assert_eq!(c.kind, CauseKind::KnownRecipe { id: "cython-limited-api" });
+        assert!(c.action.contains("cp39"), "{}", c.action);
+        assert!(c.action.contains("sed -i"), "{}", c.action);
+    }
+
+    #[test]
+    fn a_cmake_licence_guard_points_to_convention_78() {
+        let log = log_from(&[
+            "Executing(%build): /usr/bin/bash -e /var/tmp/rpm-tmp.abc",
+            "CMake Error at src/torchcodec/_core/CMakeLists.txt:13 (message):",
+            "  set BUILD_AGAINST_ALL_FFMPEG_FROM_S3 or I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION",
+            "-- Configuring incomplete, errors occurred!",
+            "error: Bad exit status from /var/tmp/rpm-tmp.abc (%build)",
+        ]);
+        let c = detect(&log, "torchcodec", "").expect("recognised");
+        assert_eq!(c.kind, CauseKind::KnownRecipe { id: "cmake-licence-guard" });
+        assert!(c.action.contains("convention 78"), "{}", c.action);
+    }
+
+    #[test]
+    fn a_missing_cutlass_submodule_is_the_split_tree() {
+        let log = log_from(&[
+            "Executing(%check): /usr/bin/bash -e /var/tmp/rpm-tmp.abc",
+            "    import cutlass.cute as cute",
+            "ModuleNotFoundError: No module named 'cutlass.cute'",
+            "error: Bad exit status from /var/tmp/rpm-tmp.abc (%check)",
+        ]);
+        let c = detect(&log, "tokenspeed_mla", "").expect("recognised");
+        assert_eq!(c.kind, CauseKind::KnownRecipe { id: "cutlass-split-tree" });
+        assert!(c.action.contains("%{python_sitelib}"), "{}", c.action);
+    }
 
     #[test]
     fn truncated_match_rejects_short_fragments() {
