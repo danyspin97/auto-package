@@ -323,6 +323,70 @@ impl PkgState {
     }
 }
 
+/// Bring every package's recorded outcome in line with reality at startup.
+///
+/// - `running` left by a process that died (nothing holds the package's
+///   `build.lock`) becomes `interrupted`, so the package reads as re-runnable.
+/// - `missing_deps` whose waited-on dependencies are all built (their own
+///   state says `success`) becomes `interrupted` too: the wait is over.
+///
+/// Returns the packages changed, as `(name, new outcome)`.
+pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
+    let mut changed = Vec::new();
+    let Ok(rd) = std::fs::read_dir(state_root) else {
+        return changed;
+    };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().join("state.json").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let built = |dep: &str| {
+        [dep.to_string(), osc::rpm_name(dep)].iter().any(|n| {
+            Workspace::find_existing(state_root, &[n.as_str()])
+                .is_some_and(|w| PkgState::load(&w).last_outcome.as_deref() == Some("success"))
+        })
+    };
+    for name in names {
+        let Some(ws) = Workspace::find_existing(state_root, &[&name]) else {
+            continue;
+        };
+        let state = PkgState::load(&ws);
+        let (new, reason) = match state.last_outcome.as_deref() {
+            Some("running") => {
+                // Only a lock we can take proves the owner is gone.
+                if ap_core::proc_lock::try_lock(&ws.dir().join("build.lock")).is_err() {
+                    continue;
+                }
+                ("interrupted", "the run that was building this package ended without a result")
+            }
+            Some("missing_deps") => {
+                let waiting: Vec<String> = state
+                    .last_failure_reason
+                    .as_deref()
+                    .and_then(|r| r.strip_prefix("waiting on dependencies: "))
+                    .map(|d| d.split(',').map(|x| x.trim().to_string()).collect())
+                    .unwrap_or_default();
+                if waiting.is_empty() || !waiting.iter().all(|d| built(d)) {
+                    continue;
+                }
+                ("interrupted", "the dependencies it waited on are built; ready to run again")
+            }
+            _ => continue,
+        };
+        if PkgState::update(&ws, |st| {
+            st.last_outcome = Some(new.to_string());
+            st.last_failure_reason = Some(reason.to_string());
+        })
+        .is_ok()
+        {
+            changed.push((name, new));
+        }
+    }
+    changed
+}
+
 /// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
 /// only used to detect "did the spec change since it was reviewed", not for
 /// anything security-sensitive.
@@ -11506,6 +11570,39 @@ mod settled_tests {
 #[cfg(test)]
 mod hygiene_tests {
     use super::*;
+
+    fn write_state(root: &Path, name: &str, outcome: &str, reason: Option<&str>) {
+        let ws = Workspace::open(root, name).unwrap();
+        PkgState::update(&ws, |s| {
+            s.last_outcome = Some(outcome.into());
+            s.last_failure_reason = reason.map(String::from);
+        })
+        .unwrap();
+    }
+
+    fn outcome(root: &Path, name: &str) -> Option<String> {
+        PkgState::load(&Workspace::open(root, name).unwrap()).last_outcome
+    }
+
+    #[test]
+    fn startup_reset_frees_dead_running_and_satisfied_missing_deps() {
+        let root = tempfile::tempdir().unwrap();
+        write_state(root.path(), "python-dead", "running", None);
+        write_state(root.path(), "python-live", "running", None);
+        write_state(root.path(), "ffmpeg-8", "success", None);
+        write_state(root.path(), "python-tc", "missing_deps", Some("waiting on dependencies: ffmpeg-8"));
+        write_state(root.path(), "python-wait", "missing_deps", Some("waiting on dependencies: ffmpeg-8, nothere"));
+        // A live build holds its lock.
+        let live_lock = Workspace::open(root.path(), "python-live").unwrap().dir().join("build.lock");
+        let _held = ap_core::proc_lock::try_lock(&live_lock).unwrap();
+        let changed = reconcile_state(root.path());
+        assert_eq!(outcome(root.path(), "python-dead").as_deref(), Some("interrupted"));
+        assert_eq!(outcome(root.path(), "python-live").as_deref(), Some("running"));
+        assert_eq!(outcome(root.path(), "python-tc").as_deref(), Some("interrupted"));
+        assert_eq!(outcome(root.path(), "python-wait").as_deref(), Some("missing_deps"));
+        assert_eq!(outcome(root.path(), "ffmpeg-8").as_deref(), Some("success"));
+        assert_eq!(changed.len(), 2, "{changed:?}");
+    }
 
     pub(super) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
         PipelineConfig {

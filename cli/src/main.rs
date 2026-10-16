@@ -847,6 +847,9 @@ pub(crate) fn init_disk_guard(work_dir: &Path, min_free_gb: u64) {
     if let Some(warning) = ap_build::workspace::low_space_warning(work_dir) {
         eprintln!("warning: {warning}");
     }
+    for (name, outcome) in ap_build::pipeline::reconcile_state(&work_dir.join("state")) {
+        eprintln!("note: {name} was left unfinished; now {outcome}");
+    }
 }
 
 fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
