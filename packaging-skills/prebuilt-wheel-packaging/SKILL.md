@@ -79,7 +79,8 @@ must account for. Do this before touching %files; never guess the layout.
     expected for NVIDIA's prebuilt libraries: add `Source99:
     python-<name>.rpmlintrc` containing `addFilter("<rule>.*")` for exactly
     the rules build.log reports (convention 39). Do not try to `chmod`/relink
-    vendor binaries, and do not add `Requires: python-base` guesses.
+    vendor binaries. The skeleton already has `Requires: python-base` (rpmlint
+    `no-dependency-on python-base`; `%python_subpackages` does not add it): keep it.
   * `%files`: the `%{python_sitelib}/<dist>-%{version}.dist-info/` directory
     claim already owns `licenses/` and everything under it — a second
     `%license` line for a file inside it makes "File listed twice" fail the
