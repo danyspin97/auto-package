@@ -5106,8 +5106,13 @@ fn retry_transient<T, E>(
         match f() {
             Err(e) if n < attempts && transient(&e) && !crate::proc::shutting_down() => {
                 n += 1;
-                if !pause.is_zero() {
-                    std::thread::sleep(pause);
+                // In slices, so a shutdown does not wait out the pause.
+                let mut left = pause;
+                let slice = std::time::Duration::from_millis(500);
+                while !left.is_zero() && !crate::proc::shutting_down() {
+                    let step = left.min(slice);
+                    std::thread::sleep(step);
+                    left -= step;
                 }
             }
             other => return other,

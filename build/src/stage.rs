@@ -69,7 +69,7 @@ fn relative_clean(path: &str) -> Result<PathBuf, String> {
 
 /// The canonical source file for `rel` below one of `bases`, which must be a
 /// regular file whose real path stays inside that base.
-fn resolve_source(bases: &[PathBuf], rel: &Path) -> Result<PathBuf, String> {
+fn resolve_source(bases: &[PathBuf], rel: &Path) -> Result<(PathBuf, PathBuf), String> {
     let mut last = format!("{} is not in the tree", rel.display());
     for base in bases {
         let Ok(canon_base) = std::fs::canonicalize(base) else {
@@ -90,13 +90,17 @@ fn resolve_source(bases: &[PathBuf], rel: &Path) -> Result<PathBuf, String> {
             last = format!("{} is not a regular file", rel.display());
             continue;
         }
-        return Ok(real);
+        return Ok((real, canon_base));
     }
     Err(last)
 }
 
-/// Validate one request and return `(source, destination)`.
-pub fn validate(req: &StageFile, roots: &StageRoots<'_>) -> Result<(PathBuf, PathBuf), String> {
+/// Validate one request and return `(source, destination, tree the source must
+/// stay inside)`.
+pub fn validate(
+    req: &StageFile,
+    roots: &StageRoots<'_>,
+) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     bare_name(&req.to, "to")?;
     let rel = relative_clean(&req.from)?;
     let bases: Vec<PathBuf> = match req.package.as_deref() {
@@ -106,7 +110,7 @@ pub fn validate(req: &StageFile, roots: &StageRoots<'_>) -> Result<(PathBuf, Pat
             vec![roots.state_root.join(pkg), roots.project_dir.join(pkg)]
         }
     };
-    let src = resolve_source(&bases, &rel)?;
+    let (src, base) = resolve_source(&bases, &rel)?;
     let len = std::fs::metadata(&src)
         .map_err(|e| format!("{}: {e}", rel.display()))?
         .len();
@@ -120,7 +124,68 @@ pub fn validate(req: &StageFile, roots: &StageRoots<'_>) -> Result<(PathBuf, Pat
     if std::fs::symlink_metadata(&dest).is_ok_and(|m| !m.is_file()) {
         return Err(format!("{} exists and is not a regular file", req.to));
     }
-    Ok((src, dest))
+    Ok((src, dest, base))
+}
+
+/// Read the validated source. The path was checked a moment ago, and a tree an
+/// agent's shell can write to may have changed since: so the file is opened
+/// without following a final symlink, the opened file (not the path) must be a
+/// regular file under the cap, and the place the open landed must still be inside
+/// the tree (a directory swapped for a symlink leads out of it).
+fn read_source(src: &Path, base: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(src)
+        .map_err(|e| format!("cannot open {} (it changed after the check?): {e}", src.display()))?;
+    let meta = file.metadata().map_err(|e| format!("{}: {e}", src.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", src.display()));
+    }
+    if meta.len() > MAX_STAGE_BYTES {
+        return Err(format!("{} grew over the staging cap", src.display()));
+    }
+    let landed = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file)))
+        .map_err(|e| format!("cannot confirm where {} was opened: {e}", src.display()))?;
+    if !landed.starts_with(base) {
+        return Err(format!(
+            "{} now resolves to {}, outside {} (the tree changed after the check)",
+            src.display(),
+            landed.display(),
+            base.display()
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_STAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("reading {}: {e}", src.display()))?;
+    if bytes.len() as u64 > MAX_STAGE_BYTES {
+        return Err(format!("{} grew over the staging cap", src.display()));
+    }
+    Ok(bytes)
+}
+
+/// Write `bytes` as `dest` by renaming a temp file in the same directory: a
+/// symlink that appeared at `dest` is replaced, never written through.
+fn write_without_following(dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = dest
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", dest.display()))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".stage-")
+        .tempfile_in(dir)
+        .map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut tmp, bytes).map_err(|e| e.to_string())?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))
+            .map_err(|e| e.to_string())?;
+    }
+    tmp.as_file().sync_all().map_err(|e| e.to_string())?;
+    tmp.persist(dest).map_err(|e| e.error.to_string())?;
+    Ok(())
 }
 
 /// Perform every request. Returns the destination names copied and, for an
@@ -135,13 +200,9 @@ pub fn stage_files(reqs: &[StageFile], roots: &StageRoots<'_>) -> (Vec<String>, 
         ));
     }
     for req in reqs.iter().take(MAX_STAGE_FILES) {
-        let result = validate(req, roots).and_then(|(src, dest)| {
-            std::fs::read(&src)
-                .map_err(|e| format!("reading {}: {e}", req.from))
-                .and_then(|bytes| {
-                    ap_core::fsx::write_atomic(&dest, bytes)
-                        .map_err(|e| format!("writing {}: {e}", req.to))
-                })
+        let result = validate(req, roots).and_then(|(src, dest, base)| {
+            let bytes = read_source(&src, &base)?;
+            write_without_following(&dest, &bytes).map_err(|e| format!("writing {}: {e}", req.to))
         });
         match result {
             Ok(()) => done.push(req.to.clone()),
@@ -271,5 +332,44 @@ mod tests {
         let (done, refused) = stage_files(&many, &f.roots());
         assert_eq!(done.len(), MAX_STAGE_FILES);
         assert_eq!(refused.len(), 1);
+    }
+
+    #[test]
+    fn a_source_swapped_for_a_symlink_after_the_check_is_not_read() {
+        let f = fx();
+        let base = std::fs::canonicalize(&f.own).unwrap();
+        let file = base.join("late");
+        std::fs::write(&file, b"ok").unwrap();
+        assert_eq!(read_source(&file, &base).unwrap(), b"ok");
+        // The file becomes a symlink to a secret between the check and the read.
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(f.t.path().join("secret"), &file).unwrap();
+        let err = read_source(&file, &base).unwrap_err();
+        assert!(err.contains("cannot open"), "{err}");
+    }
+
+    #[test]
+    fn a_directory_swapped_for_a_symlink_after_the_check_leads_out_and_is_refused() {
+        let f = fx();
+        let base = std::fs::canonicalize(&f.own).unwrap();
+        let outside = f.t.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("data"), b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("dir")).unwrap();
+        let err = read_source(&base.join("dir/data"), &base).unwrap_err();
+        assert!(err.contains("outside"), "{err}");
+    }
+
+    #[test]
+    fn a_destination_swapped_for_a_symlink_is_replaced_not_written_through() {
+        let f = fx();
+        let target = f.t.path().join("victim");
+        std::fs::write(&target, b"keep").unwrap();
+        let dest = f.checkout.join("x");
+        std::os::unix::fs::symlink(&target, &dest).unwrap();
+        write_without_following(&dest, b"staged").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"staged");
+        assert!(std::fs::symlink_metadata(&dest).unwrap().is_file());
     }
 }

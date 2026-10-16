@@ -3281,6 +3281,8 @@ fn sibling_rpm_files(
         let Ok(listing) = std::process::Command::new("rpm")
             .args(["-qlp", "--nosignature"])
             .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .output()
         else {
             return Vec::new();

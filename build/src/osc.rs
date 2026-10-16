@@ -124,7 +124,6 @@ pub fn text_is_transient(text: &str) -> bool {
         "connection closed",
         "connection timed out",
         "timed out",
-        "timeout",
         "temporary failure in name resolution",
         "name or service not known",
         "could not resolve host",
@@ -143,7 +142,19 @@ pub fn text_is_transient(text: &str) -> bool {
         "unexpected eof",
         "tls handshake",
     ];
-    MARKS.iter().any(|m| t.contains(m)) || http_status(text).is_some_and(|c| c == 408 || c >= 500)
+    MARKS.iter().any(|m| t.contains(m))
+        || contains_word(&t, "timeout")
+        || http_status(text).is_some_and(|c| c == 408 || c >= 500)
+}
+
+/// Whether `word` is in `text` as a word of its own: `Error: timeout` has it,
+/// `test_timeout_is_set` (a test name in a failing log) does not.
+fn contains_word(text: &str, word: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(at, _)| {
+        !text[..at].chars().next_back().is_some_and(is_word)
+            && !text[at + word.len()..].chars().next().is_some_and(is_word)
+    })
 }
 
 /// Marker in the message of a build whose RPMs could not be fetched after OBS
@@ -7942,5 +7953,10 @@ mod transient_error_tests {
         assert!(text_is_transient("Connection reset by peer"));
         assert!(text_is_transient("No space left on device"));
         assert!(!text_is_transient("version 2.0.0 is yanked"));
+        // A word of its own, not a name that contains it.
+        assert!(text_is_transient("Error: Timeout"));
+        assert!(text_is_transient("operation timed out"));
+        assert!(!text_is_transient("FAILED tests/test_net.py::test_timeout_is_set"));
+        assert!(!text_is_transient("unknown option --timeouts"));
     }
 }
