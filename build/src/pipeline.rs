@@ -7697,7 +7697,7 @@ fn try_wheel_fallback(
             };
         }
     };
-    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step).map_err(
+    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step, false).map_err(
         |e| match e {
             GenSpecError::Other(msg) | GenSpecError::NoReleaseArchive(msg) => {
                 format!("wheel spec generation failed: {msg}")
@@ -7877,7 +7877,7 @@ fn wheel_or_wheel_only(
         config.single_locked_flavor_abi().as_deref(),
     ) {
         Ok(wheel) => {
-            generate_wheel_binary_spec(config, &wheel, json, checkout_dir, spec_path, step)
+            generate_wheel_binary_spec(config, &wheel, json, checkout_dir, spec_path, step, true)
         }
         Err(_) => {
             match generate_multi_flavor_wheel_spec(config, json, checkout_dir, spec_path, step) {
@@ -7960,6 +7960,13 @@ fn generate_multi_flavor_wheel_spec(
             ));
         ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
+        let spec_text = crate::spec::with_pip_ignore_requires_python(
+            &spec_text,
+            release.requires_python.as_deref(),
+            &flavors,
+        );
+        ap_core::fsx::write_atomic(spec_path, &spec_text)
+            .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
         write_wheel_rpmlintrc(checkout_dir, &config.pkg_name, &wheels[0].1, layout.as_ref());
         let first_wheel = picked.into_iter().next().map(|(_, w)| w).ok_or_else(|| {
@@ -7988,8 +7995,16 @@ fn write_wheel_rpmlintrc(
     wheel_filename: &str,
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
 ) {
-    if let Some((file, text)) = crate::spec::wheel_rpmlintrc(pkg_name, wheel_filename, layout) {
-        write_or_warn(&checkout_dir.join(file), text);
+    match crate::spec::wheel_rpmlintrc(pkg_name, wheel_filename, layout) {
+        Some((file, text)) => write_or_warn(&checkout_dir.join(file), text),
+        // A zero-byte rpmlintrc left by an earlier run is a Source99 that
+        // does nothing: remove it.
+        None => {
+            let stale = checkout_dir.join(format!("python-{}.rpmlintrc", pkg_name.to_lowercase()));
+            if std::fs::metadata(&stale).is_ok_and(|m| m.len() == 0) {
+                let _ = std::fs::remove_file(stale);
+            }
+        }
     }
 }
 
@@ -8000,11 +8015,17 @@ fn generate_wheel_binary_spec(
     checkout_dir: &Path,
     spec_path: &Path,
     step: &StepDir,
+    no_sdist: bool,
 ) -> Result<GenSpecResult, GenSpecError> {
     ap_core::diag!(
-        "info: {} {} has no sdist and no source repository — repackaging the upstream wheel {}",
+        "info: {} {} {} — repackaging the upstream wheel {}",
         config.pkg_name,
         config.version,
+        if no_sdist {
+            "has no sdist and no source repository"
+        } else {
+            "is switched to its wheel"
+        },
         wheel.filename,
     );
 
@@ -8026,6 +8047,19 @@ fn generate_wheel_binary_spec(
         layout.as_ref(),
     );
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
+    // A wheel whose Requires-Python is capped below a built flavor needs pip told
+    // so in both sections that run it, without waiting for a review turn.
+    let spec_text = crate::spec::with_pip_ignore_requires_python(
+        &spec_text,
+        release.requires_python.as_deref(),
+        &config.python_flavors.effective(),
+    );
+    // The note about a missing sdist is only true of a release with none.
+    let spec_text = if no_sdist {
+        crate::spec::with_no_sdist_note(&spec_text)
+    } else {
+        spec_text
+    };
     // A wheel that is only a vendor's shared library is a C library carried
     // through PyPI, not a Python package. It is repackaged only because a
     // Python package loads it from site-packages; say so in the description,

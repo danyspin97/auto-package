@@ -1403,7 +1403,7 @@ pub fn runtime_dependencies(requires_dist: &[String], own_name: &str) -> Vec<Run
             Some((spec, marker)) => (spec, marker.trim()),
             None => (entry.as_str(), ""),
         };
-        if !marker.is_empty() {
+        if !marker.is_empty() && !marker_is_always_true_on_linux(marker) {
             continue;
         }
         let spec = spec.trim();
@@ -1417,9 +1417,12 @@ pub fn runtime_dependencies(requires_dist: &[String], own_name: &str) -> Vec<Run
         }
         // `[extra]` selects extras of the dependency; its own pins follow.
         let rest = spec[m.end()..].trim();
-        let rest = match (rest.starts_with('['), rest.find(']')) {
-            (true, Some(close)) => &rest[close + 1..],
-            _ => rest,
+        let (extras, rest): (Vec<&str>, &str) = match (rest.starts_with('['), rest.find(']')) {
+            (true, Some(close)) => (
+                rest[1..close].split(',').map(str::trim).collect(),
+                &rest[close + 1..],
+            ),
+            _ => (Vec::new(), rest),
         };
         let rest = rest.trim().trim_start_matches('(').trim_end_matches(')');
         // A CUDA component's version is NVIDIA's, not the wheel's, so the
@@ -1444,8 +1447,65 @@ pub fn runtime_dependencies(requires_dist: &[String], own_name: &str) -> Vec<Run
             name: recase_python_module_name(&name),
             bound,
         });
+        // A required extra pulls in packages of its own (`psycopg[binary]` needs
+        // `psycopg-binary`): the ones the project is known to need.
+        for extra in extras {
+            for package in extra_requirements(&name, extra) {
+                if seen.insert(crate::osc::fuzzy_key(package)) {
+                    deps.push(RuntimeDep {
+                        name: recase_python_module_name(package),
+                        bound: None,
+                    });
+                }
+            }
+        }
     }
     deps
+}
+
+/// Whether a PEP 508 marker is true on every Linux install: a single clause on
+/// the platform that Linux satisfies (`sys_platform == "linux"`,
+/// `platform_system != "Windows"`). Anything else (a Python version, an
+/// architecture, an `extra`) is for the review to decide.
+fn marker_is_always_true_on_linux(marker: &str) -> bool {
+    let m: String = marker
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '(' | ')'))
+        .collect();
+    matches!(
+        m.as_str(),
+        "sys_platform==linux"
+            | "platform_system==Linux"
+            | "os_name==posix"
+            | "sys_platform!=win32"
+            | "sys_platform!=darwin"
+            | "platform_system!=Windows"
+            | "platform_system!=Darwin"
+            | "os_name!=nt"
+    )
+}
+
+/// The packages a well-known project's extra requires (`httpx[brotli]` needs
+/// `brotli`). Only extras whose packages are known; an unknown extra adds
+/// nothing, as it did before. Project and extra names compare normalised.
+fn extra_requirements(project: &str, extra: &str) -> &'static [&'static str] {
+    let norm = |s: &str| s.to_ascii_lowercase().replace(['_', '.'], "-");
+    match (norm(project).as_str(), norm(extra).as_str()) {
+        ("psycopg", "binary") => &["psycopg-binary"],
+        ("psycopg", "c") => &["psycopg-c"],
+        ("psycopg", "pool") => &["psycopg-pool"],
+        ("httpx", "brotli") => &["brotli"],
+        ("httpx", "zstd") => &["zstandard"],
+        ("httpx", "socks") => &["socksio"],
+        ("httpx", "http2") => &["h2"],
+        ("httpx", "cli") => &["click", "pygments", "rich"],
+        ("requests", "socks") => &["pysocks"],
+        ("pydantic", "email") => &["email-validator"],
+        ("pydantic", "timezone") => &["tzdata"],
+        ("sqlalchemy", "asyncio") => &["greenlet"],
+        ("redis", "hiredis") => &["hiredis"],
+        _ => &[],
+    }
 }
 
 /// Add the release's runtime dependencies as `Requires` (before
@@ -2114,7 +2174,7 @@ pub fn prebuilt_wheel_rpmlintrc(layout: &ap_ecosystem::sdist::WheelLayout) -> St
             "\n\
              # The bundled libraries find each other through an $ORIGIN RUNPATH, which\n\
              # is how a self-contained vendor wheel has to be laid out.\n\
-             addFilter(\"binary-or-shlib-defines-rpath.*[$]ORIGIN\")\n",
+             addFilter(\".*binary-or-shlib-defines-rpath.*[$]ORIGIN\")\n",
         );
     }
     out
@@ -2143,7 +2203,7 @@ fn wheel_empty_files_filters(layout: &ap_ecosystem::sdist::WheelLayout) -> Strin
         }
         let escaped = name.replace('.', "\\.").replace('+', "\\+");
         out.push_str(&format!(
-            "addFilter(r\"zero-length .*/site-packages/{escaped}$\")\n"
+            "addFilter(r\".*zero-length .*/site-packages/{escaped}$\")\n"
         ));
     }
     out
@@ -2181,6 +2241,10 @@ pub(crate) fn wheel_rpmlintrc(
             text.push('\n');
         }
         text.push_str(&empties);
+    }
+    // A zero-byte rpmlintrc is a `Source99` that does nothing: never written.
+    if text.trim().is_empty() {
+        return None;
     }
     Some((format!("python-{}.rpmlintrc", pkg_name.to_lowercase()), text))
 }
@@ -2501,11 +2565,18 @@ fn wheel_files_entries(layout: &ap_ecosystem::sdist::WheelLayout, sitedir: &str)
         emit(child, name, sitedir, &mut lines);
     }
     licenses.sort();
-    for l in &licenses {
-        lines.push(format!("%exclude %{{{sitedir}}}/{l}"));
-    }
-    for l in &licenses {
-        lines.push(format!("%license %{{{sitedir}}}/{l}"));
+    // Several files under `licenses/` are one entry: the directory.
+    let licenses_dir = format!("{dist_info}/licenses/");
+    if licenses.len() >= 2 && licenses.iter().all(|l| l.starts_with(&licenses_dir)) {
+        lines.push(format!("%exclude %{{{sitedir}}}/{dist_info}/licenses"));
+        lines.push(format!("%license %{{{sitedir}}}/{dist_info}/licenses"));
+    } else {
+        for l in &licenses {
+            lines.push(format!("%exclude %{{{sitedir}}}/{l}"));
+        }
+        for l in &licenses {
+            lines.push(format!("%license %{{{sitedir}}}/{l}"));
+        }
     }
     lines.push(format!("%{{{sitedir}}}/{dist_info}/"));
     Some(lines.join("\n") + "\n")
@@ -2527,10 +2598,12 @@ pub fn wheel_binary_skeleton(
     // The release's own licence, or, when PyPI has none the tool can use, what the
     // wheel's METADATA declares (a `License: FIXME` is a turn the review spends
     // reading the wheel for what the generator already read).
-    let license = match license_tag(&release.license) {
-        tag if tag == "FIXME" => layout.and_then(wheel_license).unwrap_or(tag),
-        tag => tag,
+    let license = wheel_declared_license(release, layout);
+    let license = match layout {
+        Some(l) => with_license_terms(license, &wheel_vendor_license_terms(l)),
+        None => license,
     };
+    let description = wheel_description(layout.and_then(|l| l.description.as_deref()), summary);
     let url = release.homepage.as_deref().unwrap_or("FIXME");
     // Two independent facts about a wheel:
     //  * is the PACKAGE arch-specific? Only the platform tag says so:
@@ -2625,19 +2698,21 @@ pub fn wheel_binary_skeleton(
     );
     if layout.is_some_and(|l| !l.header_dirs.is_empty() && wheel_header_cleanups(l).is_empty()) {
         install_extra.push_str(
-            "# the headers are this wheel's payload, so they are kept: put them in a\n\
-             # -devel package (convention 24) instead of removing them\n",
+            "# the headers are this wheel's payload, so they are kept; they belong in a\n\
+             # -devel package rather than being removed\n",
         );
     }
-    for cleanup in layout.map(wheel_header_cleanups).unwrap_or_default() {
+    let cleanups = layout.map(wheel_header_cleanups).unwrap_or_default();
+    if !cleanups.is_empty() {
+        install_extra.push_str("# bundled headers are not needed at run time\n");
+    }
+    for cleanup in cleanups {
         install_extra.push_str(&match cleanup {
             HeaderCleanup::Dir(dir) => format!(
-                "# bundled headers are not needed at run time\n\
-                 %python_expand rm -rf %{{buildroot}}%{{${sitedir}}}/{dir}\n"
+                "%python_expand rm -rf %{{buildroot}}%{{${sitedir}}}/{dir}\n"
             ),
             HeaderCleanup::Headers(dir) => format!(
-                "# bundled headers are not needed at run time; the rest of the directory is\n\
-                 %python_expand find %{{buildroot}}%{{${sitedir}}}/{dir} -type f \\( -name '*.h' -o -name '*.hpp' \\) -delete\n"
+                "%python_expand find %{{buildroot}}%{{${sitedir}}}/{dir} -type f \\( -name '*.h' -o -name '*.hpp' \\) -delete\n"
             ),
         });
     }
@@ -2649,9 +2724,9 @@ pub fn wheel_binary_skeleton(
     let files_block = layout
         .and_then(|l| wheel_files_entries(l, sitedir))
         .unwrap_or_else(|| {
-            "# TODO: list the exact paths %%pyproject_install put in the buildroot\n\
-             # (see source/ for the unpacked wheel's real layout) — convention 15\n\
-             # forbids globs here.\n"
+            "# TODO: list the exact paths pyproject_install put in the buildroot\n\
+             # (see source/ for the unpacked wheel's real layout); globs are not allowed\n\
+             # here.\n"
                 .to_string()
         });
 
@@ -2692,17 +2767,10 @@ pub fn wheel_binary_skeleton(
          %python_subpackages\n\
          \n\
          %description\n\
-         {summary}\n\
-         \n\
-         # This release has no sdist and no discoverable source repository — see\n\
-         # convention 28 (and convention 24 Exception 3). %%{{SOURCE0}} is the\n\
-         # upstream wheel itself,\n\
-         # unpacked as-is below; there is no source to compile. Confirm the arch\n\
-         # guess above and the %%files list against source/ (the unpacked wheel)\n\
-         # before the first build.\n\
+         {description}\n\
          \n\
          %prep\n\
-         # nothing to unpack here: %%{{SOURCE0}} is a prebuilt wheel\n\
+         # nothing to unpack here: the source is a prebuilt wheel\n\
          \n\
          %build\n\
          # prebuilt binary wheel - nothing to compile\n\
@@ -2725,6 +2793,7 @@ pub fn wheel_binary_skeleton(
         name = name,
         version = version,
         summary = summary,
+        description = description,
         license = license,
         url = url,
         wheel_filename = wheel_filename,
@@ -2738,6 +2807,110 @@ pub fn wheel_binary_skeleton(
         Some(l) => add_runtime_dependencies(&spec, &l.requires_dist, pkg_name),
         None => spec,
     }
+}
+
+/// The `%description` body of a wheel spec: the METADATA's first paragraph,
+/// wrapped, with every `%` doubled (rpm expands macros in a description), or the
+/// summary when the wheel has none.
+fn wheel_description(paragraph: Option<&str>, summary: &str) -> String {
+    let text = paragraph.map(str::trim).filter(|t| !t.is_empty()).unwrap_or(summary);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.replace('%', "%%").split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > 76 {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    lines.push(line);
+    lines.join("\n")
+}
+
+/// `spec` with a note under `%prep` that the release has no sdist and no source
+/// repository, so the unpacked wheel is all there is. Only for a true no-sdist
+/// release; a package switched to its wheel after a failed source build has a
+/// sdist and gets no such note.
+pub fn with_no_sdist_note(spec: &str) -> String {
+    const NOTE: &str = "# this release has no sdist and no source repository: the upstream wheel is\n\
+                        # installed as it is, so check the architecture and the file list against it\n";
+    let mut out = String::with_capacity(spec.len() + NOTE.len());
+    let mut done = false;
+    for line in spec.split_inclusive('\n') {
+        out.push_str(line);
+        if !done && line.trim_end() == "%prep" {
+            out.push_str(NOTE);
+            done = true;
+        }
+    }
+    out
+}
+
+/// The `(major, minor)` of a Python flavor name: `python313` -> (3, 13),
+/// `python39` -> (3, 9), `python314t` -> (3, 14).
+fn flavor_version(flavor: &str) -> Option<(u32, u32)> {
+    let rest = flavor.strip_prefix("python")?.trim_end_matches('t');
+    let (major, minor) = rest.split_at_checked(1)?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Whether a `Requires-Python` specifier excludes a flavor the project builds
+/// through an upper bound (`<3.13`, `<=3.12`, `==3.12.*`): pip then refuses to
+/// install the wheel for that flavor unless told otherwise.
+pub fn requires_python_caps_below(requires_python: &str, flavors: &[String]) -> bool {
+    let versions: Vec<(u32, u32)> = flavors.iter().filter_map(|f| flavor_version(f)).collect();
+    let parse = |v: &str| -> Option<(u32, u32)> {
+        let mut it = v.trim().trim_end_matches(".*").split('.');
+        let major = it.next()?.parse().ok()?;
+        let minor = it.next().map_or(Some(0), |m| m.parse().ok())?;
+        Some((major, minor))
+    };
+    requires_python.split(',').map(str::trim).any(|clause| {
+        if let Some(v) = clause.strip_prefix("<=") {
+            // `<=3.12` still allows 3.12.x; `<=3.12.5` allows all of 3.12.
+            parse(v).is_some_and(|cap| versions.iter().any(|f| *f > cap))
+        } else if let Some(v) = clause.strip_prefix('<') {
+            let patch = v.trim().split('.').count() > 2;
+            parse(v).is_some_and(|cap| {
+                versions
+                    .iter()
+                    .any(|f| if patch { *f > cap } else { *f >= cap })
+            })
+        } else if let Some(v) = clause.strip_prefix("==") {
+            v.trim().ends_with(".*") && parse(v).is_some_and(|only| versions.iter().any(|f| *f != only))
+        } else {
+            false
+        }
+    })
+}
+
+/// `spec` with `export PIP_IGNORE_REQUIRES_PYTHON=1` as the first line of `%build`
+/// and `%install` (each is its own shell and each may run pip), when the wheel's
+/// `Requires-Python` has an upper bound below a flavor that is built. A spec that
+/// already sets the variable is returned as it is.
+pub fn with_pip_ignore_requires_python(
+    spec: &str,
+    requires_python: Option<&str>,
+    flavors: &[String],
+) -> String {
+    if spec.contains("PIP_IGNORE_REQUIRES_PYTHON")
+        || !requires_python.is_some_and(|r| requires_python_caps_below(r, flavors))
+    {
+        return spec.to_string();
+    }
+    let mut out = String::with_capacity(spec.len() + 160);
+    for line in spec.split_inclusive('\n') {
+        out.push_str(line);
+        if matches!(line.trim_end(), "%build" | "%install") {
+            out.push_str(
+                "# the wheel caps Requires-Python below a Python we build for\n\
+                 export PIP_IGNORE_REQUIRES_PYTHON=1\n",
+            );
+        }
+    }
+    out
 }
 
 /// Which native build system a plain C/C++ project uses. Decided by
@@ -2887,7 +3060,7 @@ fn classifier_spdx(name: &str) -> Option<&'static str> {
 /// than a flagged one.
 fn wheel_license(layout: &ap_ecosystem::sdist::WheelLayout) -> Option<String> {
     if let Some(expr) = &layout.license_expression {
-        return Some(expr.clone());
+        return Some(spdx_expression_for_spec(expr));
     }
     if !layout.license_classifiers.is_empty() {
         let tag = license_tag(&License::Classifiers(layout.license_classifiers.clone()));
@@ -2895,7 +3068,25 @@ fn wheel_license(layout: &ap_ecosystem::sdist::WheelLayout) -> Option<String> {
             return Some(tag);
         }
     }
-    let text = layout.license_text.as_deref()?;
+    spdx_from_free_text(layout.license_text.as_deref()?)
+}
+
+/// An SPDX expression for `License:`: a vendor's own licence reference
+/// (`LicenseRef-NVIDIA-Proprietary`) is not a SPDX id and becomes the non-free
+/// tag; anything else is kept as declared.
+fn spdx_expression_for_spec(expr: &str) -> String {
+    let low = expr.to_ascii_lowercase();
+    if low.contains("nvidia") || low.contains("proprietary") {
+        NVIDIA_PROPRIETARY.to_string()
+    } else {
+        expr.to_string()
+    }
+}
+
+/// The SPDX id a free-text licence name spells (`MIT`, `Apache 2.0`,
+/// `3-clause BSD`), or the non-free tag for NVIDIA's proprietary redistribution
+/// text; `None` for anything else.
+fn spdx_from_free_text(text: &str) -> Option<String> {
     let key: String = text
         .to_ascii_lowercase()
         .replace(['_', ',', '.'], " ")
@@ -2926,6 +3117,93 @@ fn wheel_license(layout: &ap_ecosystem::sdist::WheelLayout) -> Option<String> {
         }
     };
     Some(spdx.to_string())
+}
+
+/// The `License:` of a repackaged wheel: the release's own licence when it is a
+/// usable tag, else what the wheel's METADATA supports (see [`wheel_license`]).
+/// A free-text licence that is a known spelling is mapped to its SPDX id; one
+/// that is prose or pasted licence text (multi-line, long) is never written into
+/// the tag. A vendor's proprietary licence is the non-free tag.
+fn wheel_declared_license(
+    release: &Release,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+) -> String {
+    let own = match &release.license {
+        License::FreeText(text) => {
+            let text = text.trim();
+            match spdx_from_free_text(text) {
+                Some(id) => id,
+                None if text.is_empty() || text.contains('\n') || text.len() > 100 => {
+                    "FIXME".to_string()
+                }
+                None => text.to_string(),
+            }
+        }
+        License::Spdx(expr) => spdx_expression_for_spec(expr),
+        other => license_tag(other),
+    };
+    match own.as_str() {
+        "FIXME" => layout.and_then(wheel_license).unwrap_or(own),
+        _ => own,
+    }
+}
+
+/// The licence of a GCC runtime library bundled in a wheel (torch's `libgomp`).
+const GCC_RUNTIME_LICENSE: &str = "GPL-3.0-or-later WITH GCC-exception-3.1";
+
+/// Licence terms a wheel's own `License:` does not carry because the wheel
+/// bundles a third party's binaries: NVIDIA's toolchain programs and the CUPTI
+/// libraries (triton declares MIT but ships `ptxas`) are non-free, and GCC's
+/// `libgomp` is GPL with the runtime exception. In a fixed order, no
+/// duplicates; found from the file names only.
+fn wheel_vendor_license_terms(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<&'static str> {
+    let mut nonfree = false;
+    let mut gcc = false;
+    for file in &layout.files {
+        let top = file.split('/').next().unwrap_or("");
+        if top.ends_with(".dist-info") || top.ends_with(".data") {
+            continue;
+        }
+        let name = file.rsplit('/').next().unwrap_or(file);
+        if matches!(
+            name,
+            "ptxas" | "ptxas-blackwell" | "cuobjdump" | "nvdisasm" | "nvlink" | "fatbinary" | "nvprune"
+        ) || (name.starts_with("libcupti") && name.contains(".so"))
+        {
+            nonfree = true;
+        }
+        if name.starts_with("libgomp") && name.contains(".so") {
+            gcc = true;
+        }
+    }
+    let mut terms = Vec::new();
+    if nonfree {
+        terms.push(NVIDIA_PROPRIETARY);
+    }
+    if gcc {
+        terms.push(GCC_RUNTIME_LICENSE);
+    }
+    terms
+}
+
+/// `license` with each of `terms` it does not already name, joined by `AND`
+/// (an `OR` expression is parenthesised first). A licence still `FIXME` is left
+/// for a person: terms beside an unknown are noise.
+fn with_license_terms(license: String, terms: &[&str]) -> String {
+    if license == "FIXME" {
+        return license;
+    }
+    let mut out = license;
+    for term in terms {
+        if out.contains(term) {
+            continue;
+        }
+        if out.contains(" OR ") && !out.starts_with('(') {
+            out = format!("({out})");
+        }
+        out = format!("{out} AND {term}");
+    }
+    out
 }
 
 fn license_tag(license: &License) -> String {
@@ -3510,7 +3788,7 @@ BuildRequires:  %{python_module pip}
         assert!(!spec.contains("test -e"), "{spec}");
         assert!(!spec.contains("smoke-test the import name"), "{spec}");
         assert!(
-            spec.contains("License:        LicenseRef-NVIDIA-SOFTWARE-LICENSE"),
+            spec.contains("License:        SUSE-NonFree"),
             "{spec}"
         );
         assert!(!check_is_file_probe_only(&spec));
@@ -3634,7 +3912,7 @@ BuildRequires:  %{python_module pip}
         let (file, text) = wheel_rpmlintrc("open-webui", wheel, Some(&layout)).unwrap();
         assert_eq!(file, "python-open-webui.rpmlintrc");
         assert!(
-            text.contains(r#"addFilter(r"zero-length .*/site-packages/open_webui/static/custom\.css$")"#),
+            text.contains(r#"addFilter(r".*zero-length .*/site-packages/open_webui/static/custom\.css$")"#),
             "{text}"
         );
         assert!(text.contains(r"loader\.js$"), "{text}");
@@ -3863,7 +4141,7 @@ BuildRequires:  %{python_module pip}
         let (install, check, files) = wheel_install_and_files(&layout, true);
         assert!(!install.contains("rm -rf"), "{install}");
         assert!(!install.contains("-delete"), "{install}");
-        assert!(install.contains("put them in a\n# -devel package"), "{install}");
+        assert!(install.contains("belong in a\n# -devel package"), "{install}");
         assert_eq!(
             check,
             "%python_expand test -e %{buildroot}%{$python_sitelib}/nvidia/cu13/include/crt/mma.h\n\n"
@@ -4081,7 +4359,7 @@ BuildRequires:  %{python_module pip}
             ..Default::default()
         });
         assert!(
-            with.contains("addFilter(\"binary-or-shlib-defines-rpath.*[$]ORIGIN\")\n"),
+            with.contains("addFilter(\".*binary-or-shlib-defines-rpath.*[$]ORIGIN\")\n"),
             "{with}"
         );
         // It matches the `$ORIGIN` finding and no other RPATH value.
@@ -5432,5 +5710,256 @@ mod redist_requires_tests {
              Requires:       cuda-cudnn\n"
         );
         assert_eq!(normalize_runtime_python_module(&out), out);
+    }
+}
+
+#[cfg(test)]
+mod wheel_generator_tests {
+    use super::*;
+    use ap_ecosystem::sdist::WheelLayout;
+
+    fn release(license: License) -> Release {
+        Release {
+            name: "pkg".to_string(),
+            version: "1.0".to_string(),
+            summary: Some("A package".to_string()),
+            homepage: Some("https://example.org".to_string()),
+            license,
+            requires_python: None,
+            requires_dist: Vec::new(),
+            yanked: false,
+            sdist: ap_ecosystem::pypi::Sdist {
+                filename: String::new(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
+            },
+        }
+    }
+
+    fn skeleton(layout: &WheelLayout, license: License) -> String {
+        wheel_binary_skeleton(
+            "pkg",
+            "1.0",
+            "pkg-1.0-py3-none-any.whl",
+            &release(license),
+            Some(true),
+            Some(layout),
+        )
+    }
+
+    #[test]
+    fn the_skeleton_never_mentions_conventions_or_a_missing_sdist() {
+        let spec = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
+        assert!(!spec.contains("convention"), "{spec}");
+        assert!(!spec.contains("no sdist"), "{spec}");
+        assert!(!spec.contains("Confirm the arch"), "{spec}");
+        let desc = spec.split("%description\n").nth(1).unwrap();
+        let desc = desc.split("%prep").next().unwrap();
+        assert!(!desc.contains('#') && !desc.contains("SOURCE0"), "{desc}");
+    }
+
+    #[test]
+    fn the_no_sdist_note_goes_under_prep_once() {
+        let spec = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
+        let noted = with_no_sdist_note(&spec);
+        let (before, after) = noted.split_once("%prep\n").unwrap();
+        assert!(!before.contains("no sdist"));
+        assert!(after.starts_with("# this release has no sdist and no source repository"));
+        assert_eq!(noted.matches("no sdist").count(), 1);
+        assert!(!noted.contains("convention"));
+    }
+
+    #[test]
+    fn header_cleanups_share_one_comment() {
+        let layout = WheelLayout {
+            importable: Some("pkg".into()),
+            files: vec![
+                "pkg/__init__.py".into(),
+                "pkg/inc/a.h".into(),
+                "pkg/other/b.h".into(),
+                "pkg/other/b.py".into(),
+            ],
+            header_dirs: vec!["pkg/inc".into(), "pkg/other".into()],
+            dist_info: Some("pkg-1.0.dist-info".into()),
+            ..Default::default()
+        };
+        let spec = skeleton(&layout, License::Spdx("MIT".into()));
+        assert_eq!(spec.matches("bundled headers are not needed").count(), 1, "{spec}");
+        assert!(spec.contains("rm -rf"), "{spec}");
+        assert!(spec.contains("-name '*.h'"), "{spec}");
+    }
+
+    #[test]
+    fn the_description_comes_from_the_metadata_paragraph() {
+        let layout = WheelLayout {
+            description: Some(
+                "Pkg does 100% of the work for you and it is a very long sentence that \
+                 has to be wrapped over more than one line to stay readable."
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let spec = skeleton(&layout, License::Spdx("MIT".into()));
+        let desc = spec.split("%description\n").nth(1).unwrap();
+        let desc = desc.split("\n\n").next().unwrap();
+        assert!(desc.contains("100%% of the work"), "{desc}");
+        assert!(desc.lines().count() >= 2 && desc.lines().all(|l| l.len() <= 80), "{desc}");
+        assert!(description_problems(&spec).is_empty(), "{spec}");
+        // Without a paragraph the summary stays.
+        let plain = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
+        assert!(plain.contains("%description\nA package\n"), "{plain}");
+    }
+
+    #[test]
+    fn the_licence_is_mapped_and_never_pasted_text() {
+        let layout = WheelLayout {
+            license_expression: Some("LicenseRef-NVIDIA-Proprietary".into()),
+            ..Default::default()
+        };
+        let spec = skeleton(&layout, License::Unknown);
+        assert!(spec.contains("License:        SUSE-NonFree\n"), "{spec}");
+        // PyPI's `license` field holding the whole text of the licence.
+        let pasted = License::FreeText("Permission is hereby granted,\nfree of charge...".into());
+        let layout = WheelLayout {
+            license_expression: Some("MIT".into()),
+            ..Default::default()
+        };
+        let spec = skeleton(&layout, pasted.clone());
+        assert!(spec.contains("License:        MIT\n"), "{spec}");
+        let spec = skeleton(&WheelLayout::default(), pasted);
+        assert!(spec.contains("License:        FIXME\n"), "{spec}");
+        let spec = skeleton(&WheelLayout::default(), License::FreeText("Apache 2.0".into()));
+        assert!(spec.contains("License:        Apache-2.0\n"), "{spec}");
+    }
+
+    #[test]
+    fn several_licence_files_are_one_licence_entry() {
+        let layout = WheelLayout {
+            importable: Some("pkg".into()),
+            files: vec![
+                "pkg/__init__.py".into(),
+                "pkg-1.0.dist-info/METADATA".into(),
+                "pkg-1.0.dist-info/licenses/LICENSE".into(),
+                "pkg-1.0.dist-info/licenses/NOTICE".into(),
+            ],
+            dist_info: Some("pkg-1.0.dist-info".into()),
+            ..Default::default()
+        };
+        let spec = skeleton(&layout, License::Spdx("MIT".into()));
+        assert!(spec.contains("%license %{python_sitelib}/pkg-1.0.dist-info/licenses\n"), "{spec}");
+        assert!(spec.contains("%exclude %{python_sitelib}/pkg-1.0.dist-info/licenses\n"), "{spec}");
+        assert_eq!(spec.matches("%license").count(), 1, "{spec}");
+        // One file keeps its own entry.
+        let one = WheelLayout {
+            files: layout.files[..3].to_vec(),
+            ..layout
+        };
+        let spec = skeleton(&one, License::Spdx("MIT".into()));
+        assert!(spec.contains("%license %{python_sitelib}/pkg-1.0.dist-info/licenses/LICENSE\n"), "{spec}");
+    }
+
+    #[test]
+    fn bundled_vendor_binaries_add_their_licence_terms() {
+        let layout = |files: &[&str]| WheelLayout {
+            files: files.iter().map(|f| f.to_string()).collect(),
+            ..Default::default()
+        };
+        let triton = layout(&["triton/backends/nvidia/bin/ptxas", "triton/__init__.py"]);
+        let spec = skeleton(&triton, License::Spdx("MIT".into()));
+        assert!(spec.contains("License:        MIT AND SUSE-NonFree\n"), "{spec}");
+        let torch = layout(&["torch/lib/libgomp-a34b3233.so.1", "torch/lib/libcupti.so.13"]);
+        let spec = skeleton(&torch, License::Spdx("BSD-3-Clause OR MIT".into()));
+        assert!(
+            spec.contains(
+                "License:        (BSD-3-Clause OR MIT) AND SUSE-NonFree AND GPL-3.0-or-later WITH GCC-exception-3.1\n"
+            ),
+            "{spec}"
+        );
+        // Already non-free: not repeated. Unknown licence: left for a person.
+        let spec = skeleton(&triton, License::Spdx("SUSE-NonFree".into()));
+        assert!(spec.contains("License:        SUSE-NonFree\n"), "{spec}");
+        let spec = skeleton(&triton, License::Unknown);
+        assert!(spec.contains("License:        FIXME\n"), "{spec}");
+        // A dist-info file named like a vendor binary does not count.
+        let plain = layout(&["pkg-1.0.dist-info/ptxas"]);
+        assert!(wheel_vendor_license_terms(&plain).is_empty());
+    }
+
+    #[test]
+    fn a_required_extra_adds_the_packages_it_needs() {
+        let deps = runtime_dependencies(
+            &[
+                "psycopg[binary]>=3.2".to_string(),
+                "httpx[brotli,socks]".to_string(),
+                "foo[unknown]".to_string(),
+                "ext; extra == 'x'".to_string(),
+                "uvloop; sys_platform != \"win32\"".to_string(),
+                "pywin; sys_platform == \"win32\"".to_string(),
+            ],
+            "own",
+        );
+        let names: Vec<&str> = deps.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["psycopg", "psycopg-binary", "httpx", "brotli", "socksio", "foo", "uvloop"],
+            "{names:?}"
+        );
+        assert_eq!(deps[0].bound.as_deref(), Some(">= 3.2"));
+        let spec = add_runtime_dependencies(
+            "Name: x\n%python_subpackages\n",
+            &["psycopg[binary]".to_string()],
+            "own",
+        );
+        assert!(spec.contains("Requires:       python-psycopg-binary\n"), "{spec}");
+    }
+
+    #[test]
+    fn the_rpmlintrc_path_filters_start_with_a_wildcard_and_it_is_never_empty() {
+        let layout = WheelLayout {
+            first_shared_lib: Some("p/lib.so".into()),
+            origin_runpath: true,
+            empty_files: vec!["p/custom.css".into()],
+            ..Default::default()
+        };
+        let (_, text) = wheel_rpmlintrc("p", "p-1-cp313-cp313-manylinux_2_28_x86_64.whl", Some(&layout)).unwrap();
+        for line in text.lines().filter(|l| l.contains("zero-length") || l.contains("rpath")) {
+            assert!(line.starts_with("addFilter(r\".*") || line.starts_with("addFilter(\".*"), "{line}");
+        }
+        // Nothing to filter: no file at all, never an empty one.
+        let none = WheelLayout::default();
+        assert!(wheel_rpmlintrc("p", "p-1-py3-none-any.whl", Some(&none)).is_none());
+        assert!(wheel_rpmlintrc("p", "p-1-py3-none-any.whl", None).is_none());
+    }
+
+    #[test]
+    fn pip_ignores_requires_python_when_a_flavor_is_above_the_cap() {
+        let flavors: Vec<String> = ["python311", "python313", "python314t"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(requires_python_caps_below(">=3.9,<3.13", &flavors));
+        assert!(requires_python_caps_below("<=3.12", &flavors));
+        assert!(requires_python_caps_below("==3.11.*", &flavors));
+        assert!(!requires_python_caps_below(">=3.9", &flavors));
+        assert!(!requires_python_caps_below(">=3.9,<4", &flavors));
+        assert!(!requires_python_caps_below("<3.15", &flavors));
+        assert!(!requires_python_caps_below("<3.12", &flavors[..1]));
+        let spec = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
+        let out = with_pip_ignore_requires_python(&spec, Some("<3.12"), &flavors);
+        assert_eq!(out.matches("export PIP_IGNORE_REQUIRES_PYTHON=1").count(), 2, "{out}");
+        assert!(out.contains("%build\n# the wheel caps Requires-Python"), "{out}");
+        assert!(out.contains("%install\n# the wheel caps"), "{out}");
+        // Idempotent, and absent without a cap.
+        assert_eq!(with_pip_ignore_requires_python(&out, Some("<3.12"), &flavors), out);
+        assert_eq!(with_pip_ignore_requires_python(&spec, Some(">=3.9"), &flavors), spec);
+        assert_eq!(with_pip_ignore_requires_python(&spec, None, &flavors), spec);
+    }
+
+    #[test]
+    fn the_skeleton_keeps_requires_python_base() {
+        // `%python_subpackages` does not add it: rpmlint's no-dependency-on python-base.
+        let spec = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
+        assert!(spec.contains("\nRequires:       python-base\n"), "{spec}");
     }
 }

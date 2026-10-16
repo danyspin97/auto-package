@@ -325,6 +325,10 @@ pub struct WheelLayout {
     /// before `License-Expression` existed.
     pub license_text: Option<String>,
     pub license_classifiers: Vec<String>,
+    /// The first prose paragraph of the METADATA's long description (the
+    /// message body, or a `Description:` header), on one line and bounded:
+    /// what the generated `%description` says instead of repeating the Summary.
+    pub description: Option<String>,
     /// Shortest path (relative to site-packages) of a shared library in the
     /// wheel, for a file-existence check when there is nothing to import.
     pub first_shared_lib: Option<String>,
@@ -668,6 +672,7 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         .into_iter()
         .filter(|c| c.starts_with("License ::"))
         .collect();
+    let description = metadata.as_deref().and_then(metadata_description);
     let files: Vec<String> = names
         .iter()
         .filter(|n| !n.ends_with('/'))
@@ -770,6 +775,7 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         license_expression,
         license_text,
         license_classifiers,
+        description,
         first_shared_lib,
         header_dirs,
         files,
@@ -780,6 +786,60 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         origin_runpath,
         empty_files,
     })
+}
+
+/// The first prose paragraph of a METADATA's long description (the body after
+/// the header block), joined on one line, at most 600 characters cut at a word.
+/// Headings, badge/image lines, HTML, code fences and tables are skipped: a
+/// paragraph is prose only when none of its lines starts like markup. `None`
+/// when nothing qualifies or the text carries a `TODO`/`FIXME` word.
+fn metadata_description(metadata: &str) -> Option<String> {
+    let body = metadata
+        .split_once("\n\n")
+        .map(|(_, body)| body)
+        .unwrap_or("");
+    let mut in_fence = false;
+    let mut paragraphs: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if t.is_empty() {
+            if !paragraphs.last().is_some_and(Vec::is_empty) {
+                paragraphs.push(Vec::new());
+            }
+        } else if let Some(p) = paragraphs.last_mut() {
+            p.push(t);
+        }
+    }
+    let markup = |l: &str| {
+        l.starts_with(['#', '<', '|', '>', '!', '=', '`', '*', '-', '+', '.', ':', '['])
+            || l.starts_with("http")
+            || l.starts_with(|c: char| c.is_ascii_digit()) && l.contains(". ")
+    };
+    let para = paragraphs.iter().find(|p| {
+        !p.is_empty()
+            && !p.iter().any(|l| markup(l))
+            && p.join(" ").split_whitespace().count() >= 5
+    })?;
+    let mut text = para.join(" ");
+    if text.contains("TODO") || text.contains("FIXME") {
+        return None;
+    }
+    if text.chars().count() > 600 {
+        let cut: String = text.chars().take(600).collect();
+        let at = cut.rfind(". ").map(|i| i + 1).or_else(|| cut.rfind(' '))?;
+        text = cut[..at].trim_end_matches([',', ';', ' ']).to_string();
+        if !text.ends_with('.') {
+            text.push('.');
+        }
+    }
+    Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// Files rpmlint's `zero-length` check lets be empty (its
@@ -2693,6 +2753,28 @@ build-backend = "flit_core.buildapi"
             l.requires_dist,
             ["numpy>=1.20", "tomli; python_version < \"3.11\""]
         );
+    }
+
+    #[test]
+    fn wheel_layout_reads_the_first_prose_paragraph_of_the_description() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("d.whl");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&w).unwrap());
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        zw.start_file("pkg-1.0.dist-info/METADATA", opts).unwrap();
+        write!(
+            zw,
+            "Metadata-Version: 2.4\nName: pkg\nSummary: s\n\n# pkg\n\n[![CI](x)](y)\n\nPkg is a fast thing that does\nuseful work, 100% of the time.\n\nSecond paragraph.\n"
+        )
+        .unwrap();
+        zw.finish().unwrap();
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(
+            l.description.as_deref(),
+            Some("Pkg is a fast thing that does useful work, 100% of the time.")
+        );
+        assert_eq!(metadata_description("Name: x\n\n# only a heading\n"), None);
     }
 
     #[test]
