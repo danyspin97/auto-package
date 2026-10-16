@@ -3900,6 +3900,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
         let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
         let fixed = crate::spec::drop_unused_pytest_build_requires(&fixed);
+        let fixed = crate::spec::collapse_dist_info_license_lines(&fixed);
         let fixed = crate::spec::parenthesize_conditional_dependencies(&fixed);
         // Flavor-neutral runtime dependencies, before `%python_subpackages`,
         // one spelling of the NVIDIA licence, one `%changelog` (conventions 65, 69).

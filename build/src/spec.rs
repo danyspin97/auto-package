@@ -5240,6 +5240,81 @@ mod normalizer_tests {
     }
 }
 
+/// Collapse the per-file licence lines under one `<name>.dist-info/licenses`
+/// directory in `%files` (torch lists ~86 `licenses/third_party/...` files) into
+/// the directory itself: `%exclude <dir>` beside `%license <dir>`, so the
+/// dist-info entry that also matches them does not list them twice. Applies to a
+/// directory with at least three such `%license` lines; the `%exclude` lines for
+/// the same files are dropped with them.
+pub fn collapse_dist_info_license_lines(spec: &str) -> String {
+    const MIN_LINES: usize = 3;
+    let dir_of = |line: &str| -> Option<String> {
+        let rest = line
+            .trim()
+            .strip_prefix("%license")
+            .or_else(|| line.trim().strip_prefix("%exclude"))?;
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let path = rest.trim();
+        let (dir, _file) = path.split_once(".dist-info/licenses/")?;
+        (!path.contains(char::is_whitespace)).then(|| format!("{dir}.dist-info/licenses"))
+    };
+    let mut counts: std::collections::HashMap<String, usize> = Default::default();
+    for l in spec.lines().filter(|l| l.trim().starts_with("%license")) {
+        if let Some(d) = dir_of(l) {
+            *counts.entry(d).or_default() += 1;
+        }
+    }
+    counts.retain(|_, n| *n >= MIN_LINES);
+    if counts.is_empty() {
+        return spec.to_string();
+    }
+    let mut done: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for line in spec.lines() {
+        match dir_of(line) {
+            Some(d) if counts.contains_key(&d) => {
+                if !done.contains(&d) {
+                    out.push(format!("%exclude {d}"));
+                    out.push(format!("%license {d}"));
+                    done.push(d);
+                }
+            }
+            _ => out.push(line.to_string()),
+        }
+    }
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+#[cfg(test)]
+mod license_collapse_tests {
+    use super::collapse_dist_info_license_lines;
+
+    #[test]
+    fn many_license_files_become_the_directory() {
+        let mut spec = String::from("%files %{python_files}\n%{python_sitearch}/torch/\n");
+        for i in 0..5 {
+            spec.push_str(&format!(
+                "%license %{{python_sitearch}}/torch-%{{version}}.dist-info/licenses/third_party/l{i}/LICENSE\n"
+            ));
+        }
+        spec.push_str("%{python_sitearch}/torch-%{version}.dist-info/\n\n%changelog\n");
+        let out = collapse_dist_info_license_lines(&spec);
+        let d = "%{python_sitearch}/torch-%{version}.dist-info/licenses";
+        assert_eq!(
+            out,
+            format!(
+                "%files %{{python_files}}\n%{{python_sitearch}}/torch/\n%exclude {d}\n%license {d}\n\
+                 %{{python_sitearch}}/torch-%{{version}}.dist-info/\n\n%changelog\n"
+            )
+        );
+        assert_eq!(collapse_dist_info_license_lines(&out), out);
+        let two = "%license a.dist-info/licenses/x\n%license a.dist-info/licenses/y\n";
+        assert_eq!(collapse_dist_info_license_lines(two), two);
+    }
+}
+
 /// The lines of the `%check` section of `spec`, empty when there is none.
 fn check_section(spec: &str) -> Vec<&str> {
     let body = spec.split("\n%changelog").next().unwrap_or(spec);
