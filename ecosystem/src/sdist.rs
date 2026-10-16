@@ -32,6 +32,8 @@ enum ArchiveKind {
     TarGz,
     TarBz2,
     TarZstd,
+    /// An `.tar.xz`: NVIDIA's redistributable archives.
+    TarXz,
     /// A `.zip` sdist. Container-wise indistinguishable from `.whl`; kept
     /// separate for diagnostics.
     Zip,
@@ -47,6 +49,8 @@ fn classify(path: &Path) -> Option<ArchiveKind> {
         Some(ArchiveKind::TarBz2)
     } else if s.ends_with(".tar.zst") || s.ends_with(".tzst") {
         Some(ArchiveKind::TarZstd)
+    } else if s.ends_with(".tar.xz") || s.ends_with(".txz") {
+        Some(ArchiveKind::TarXz)
     } else if s.ends_with(".whl") {
         Some(ArchiveKind::Wheel)
     } else if s.ends_with(".zip") {
@@ -77,6 +81,7 @@ fn open_tar(path: &Path, kind: ArchiveKind) -> Result<tar::Archive<Box<dyn Read>
             })?;
             Box::new(dec)
         }
+        ArchiveKind::TarXz => Box::new(lzma_rust2::XzReader::new(file, true)),
         ArchiveKind::Zip | ArchiveKind::Wheel => {
             return Err(Error::Io {
                 path: path.to_path_buf(),
@@ -895,7 +900,7 @@ fn extract_into(tarball: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Re
         )),
     })?;
     match kind {
-        ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd => {
+        ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd | ArchiveKind::TarXz => {
             let mut archive = open_tar(tarball, kind)?;
             // Both are off by default; stated so a setuid bit or an xattr
             // from an untrusted archive can never be applied.
@@ -1088,6 +1093,50 @@ fn extract_zip(archive: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Res
     Ok(())
 }
 
+/// The member paths of a tar archive (`.tar.gz`, `.tar.bz2`, `.tar.zst`,
+/// `.tar.xz`) without unpacking it: directories end in `/`, links are listed
+/// like files, a leading `./` is dropped and entries that are absolute or climb
+/// out with `..` are skipped. Stops at the same entry cap as extraction.
+pub fn list_archive_members(path: &Path) -> Result<Vec<String>, Error> {
+    let kind = classify(path).filter(|k| !matches!(k, ArchiveKind::Zip | ArchiveKind::Wheel));
+    let Some(kind) = kind else {
+        return Err(Error::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("not a tar archive"),
+        });
+    };
+    let mut archive = open_tar(path, kind)?;
+    let mut out = Vec::new();
+    for entry in archive.entries().map_err(Error::Tar)? {
+        let entry = entry.map_err(Error::Tar)?;
+        if out.len() >= MAX_ENTRIES {
+            return Err(Error::LimitExceeded(format!(
+                "more than {MAX_ENTRIES} entries"
+            )));
+        }
+        let entry_path = entry.path().map_err(Error::Tar)?.into_owned();
+        if entry_path.is_absolute()
+            || entry_path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            continue;
+        }
+        let mut name = entry_path.to_string_lossy().into_owned();
+        while let Some(rest) = name.strip_prefix("./") {
+            name = rest.to_string();
+        }
+        if name.is_empty() || name == "." {
+            continue;
+        }
+        if entry.header().entry_type().is_dir() && !name.ends_with('/') {
+            name.push('/');
+        }
+        out.push(name);
+    }
+    Ok(out)
+}
+
 /// Inspect an sdist tarball in a single pass.
 ///
 /// Replaces the individual `build_system`, `top_level_dir`, `has_tests`,
@@ -1120,7 +1169,7 @@ pub fn inspect_preferring(path: &Path, want: Option<&str>) -> Result<SdistInfo, 
         )),
     })?;
     let entries = match kind {
-        ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd => {
+        ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarZstd | ArchiveKind::TarXz => {
             collect_tar_entries(path, kind)?
         }
         ArchiveKind::Zip | ArchiveKind::Wheel => collect_zip_entries(path)?,
@@ -1897,6 +1946,51 @@ mod tests {
             ar.append_data(&mut header, name, *body).unwrap();
         }
         ar.into_inner().unwrap().finish().unwrap();
+    }
+
+    /// NVIDIA's archives are `.tar.xz`: the member list comes from the stream,
+    /// directories keep their trailing slash, and nothing is unpacked.
+    #[test]
+    fn list_archive_members_reads_a_tar_xz_without_extracting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz");
+        let mut raw = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut raw);
+            let mut d = tar::Header::new_gnu();
+            d.set_entry_type(tar::EntryType::Directory);
+            d.set_size(0);
+            d.set_mode(0o755);
+            d.set_cksum();
+            ar.append_data(&mut d, "top/lib", std::io::empty()).unwrap();
+            for name in ["top/LICENSE", "top/lib/libx.so.1"] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(2);
+                h.set_mode(0o644);
+                h.set_cksum();
+                ar.append_data(&mut h, name, &b"hi"[..]).unwrap();
+            }
+            ar.finish().unwrap();
+        }
+        let mut w = lzma_rust2::XzWriter::new(
+            std::fs::File::create(&path).unwrap(),
+            lzma_rust2::XzOptions::default(),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut w, &raw).unwrap();
+        w.finish().unwrap();
+
+        assert_eq!(
+            list_archive_members(&path).unwrap(),
+            ["top/lib/", "top/LICENSE", "top/lib/libx.so.1"]
+        );
+        // Only the archive is in the directory.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn list_archive_members_refuses_a_zip() {
+        assert!(list_archive_members(Path::new("x.whl")).is_err());
     }
 
     /// A monorepo snapshot holds several projects side by side; which one is

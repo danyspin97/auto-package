@@ -94,6 +94,7 @@ dependencies = [
  "hex",
  "indicatif",
  "libc",
+ "lzma-rust2",
  "pep440_rs",
  "quick-xml",
  "regex",
@@ -153,6 +154,7 @@ dependencies = [
  "bzip2",
  "flate2",
  "hex",
+ "lzma-rust2",
  "pep440_rs",
  "serde",
  "serde_json",
@@ -889,6 +891,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
 dependencies = [
  "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "lzma-rust2"
+version = "0.16.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca93e534d1142d1d0dcca6d25fe302508a5dfb40b302802904577725ea0b695b"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]

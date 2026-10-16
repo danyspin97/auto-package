@@ -232,6 +232,31 @@ pub fn component_for_package(name: &str) -> Option<&'static str> {
     pypi_component(n)
 }
 
+/// Every component key [`component_for_package`] can return, so a package name
+/// built from one (`cuda-cublas`) can be mapped back.
+pub const COMPONENT_KEYS: &[&str] = &[
+    "libcublas",
+    "cuda_cudart",
+    "cuda_nvrtc",
+    "libcufft",
+    "libcurand",
+    "libcusolver",
+    "libcusparse",
+    "libnvjitlink",
+    "libnvfatbin",
+    "libnvvm",
+    "libcufile",
+    "cuda_cupti",
+    "cuda_nvtx",
+    "libnvjpeg",
+    "cudnn",
+    "libnpp",
+    "cuda_nvcc",
+    "cuda_crt",
+    "cuda_nvdisasm",
+    "cccl",
+];
+
 fn soname_component(stem: &str) -> Option<&'static str> {
     let s = stem.to_ascii_lowercase();
     Some(match s.as_str() {
@@ -364,6 +389,35 @@ mod tests {
         "cuda_variant": ["11", "12"]
     }
 }"#;
+
+    #[test]
+    fn every_mapped_component_is_listed() {
+        for name in [
+            "nvidia-cublas",
+            "nvidia-cuda-runtime",
+            "nvidia-cuda-nvrtc",
+            "nvidia-cufft",
+            "nvidia-curand",
+            "nvidia-cusolver",
+            "nvidia-cusparse",
+            "nvidia-nvjitlink",
+            "nvidia-nvtx",
+            "nvidia-cuda-cupti",
+            "nvidia-cuda-nvcc",
+            "nvidia-cuda-crt",
+            "nvidia-cuda-nvdisasm",
+            "nvidia-cuda-cccl",
+            "nvidia-cufile",
+            "nvidia-nvfatbin",
+            "nvidia-npp",
+            "nvidia-nvjpeg",
+            "nvidia-cudnn",
+            "libnvvm.so.4",
+        ] {
+            let key = component_for_package(name).unwrap();
+            assert!(COMPONENT_KEYS.contains(&key), "{name} -> {key}");
+        }
+    }
 
     #[test]
     fn parses_flat_and_nested() {

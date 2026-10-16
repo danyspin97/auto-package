@@ -1422,7 +1422,13 @@ pub fn runtime_dependencies(requires_dist: &[String], own_name: &str) -> Vec<Run
             _ => rest,
         };
         let rest = rest.trim().trim_start_matches('(').trim_end_matches(')');
+        // A CUDA component's version is NVIDIA's, not the wheel's, so the
+        // wheel's bound does not carry over (`--nvidia-redist`).
+        let is_cuda_component = crate::redist::component(&name).is_some();
         let bound = rest.split(',').map(str::trim).find_map(|clause| {
+            if is_cuda_component {
+                return None;
+            }
             let version = ["===", "==", "~=", ">=", ">"]
                 .iter()
                 .find_map(|op| clause.strip_prefix(op))?
@@ -1466,20 +1472,26 @@ pub fn add_runtime_dependencies(spec: &str, requires_dist: &[String], own_name: 
     let mut out = spec.to_string();
     let mut requires_lines = String::new();
     for dep in &deps {
-        let key = crate::osc::fuzzy_key(&dep.name);
+        // `--nvidia-redist`: a CUDA wheel is the package built from NVIDIA's
+        // archive, which is not a Python package and has no flavors.
+        let cuda = crate::redist::package_name(&dep.name);
+        let key = crate::osc::fuzzy_key(cuda.as_deref().unwrap_or(&dep.name));
         let bound = dep
             .bound
             .as_deref()
             .map(|b| format!(" {b}"))
             .unwrap_or_default();
         if !have_requires.contains(&key) {
-            requires_lines.push_str(&format!("Requires:       python-{}{bound}\n", dep.name));
+            let package = cuda.clone().unwrap_or_else(|| format!("python-{}", dep.name));
+            requires_lines.push_str(&format!("Requires:       {package}{bound}\n"));
         }
-        if !have_build.contains(&key)
-            && let Some(next) =
-                add_build_requires(&out, &format!("%{{python_module {}{bound}}}", dep.name))
-        {
-            out = next;
+        if !have_build.contains(&key) {
+            let package = cuda
+                .clone()
+                .unwrap_or_else(|| format!("%{{python_module {}{bound}}}", dep.name));
+            if let Some(next) = add_build_requires(&out, &package) {
+                out = next;
+            }
         }
     }
     if !requires_lines.is_empty()
@@ -2994,6 +3006,13 @@ pub fn normalize_runtime_python_module(spec: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for line in spec.lines() {
         let t = line.trim_start();
+        let redist_line;
+        let line = if crate::redist::enabled() {
+            redist_line = redist_runtime_requires(line);
+            redist_line.as_str()
+        } else {
+            line
+        };
         let runtime = ["Requires", "Recommends", "Suggests", "Supplements"]
             .iter()
             .any(|tag| {
@@ -3018,6 +3037,41 @@ pub fn normalize_runtime_python_module(spec: &str) -> String {
         }
     }
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// With `--nvidia-redist`, a runtime `Requires:` of a CUDA wheel, written as
+/// `%{python_module nvidia-cublas >= 13.1}` or `python-nvidia-cublas`, names the
+/// package built from NVIDIA's archive instead: `cuda-cublas`, with no version
+/// (the wheel's scheme is not the component's). Other lines are returned as they
+/// are.
+fn redist_runtime_requires(line: &str) -> String {
+    static MODULE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static PLAIN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let t = line.trim_start();
+    let runtime = ["Requires", "Recommends", "Suggests", "Supplements"]
+        .iter()
+        .any(|tag| {
+            t.strip_prefix(tag)
+                .is_some_and(|r| r.starts_with(':') || r.starts_with('('))
+        });
+    if !runtime || line.contains(" if ") {
+        return line.to_string();
+    }
+    let module = MODULE.get_or_init(|| {
+        regex::Regex::new(r"%\{python_module\s+([^\s}]+)(?:\s*(?:[<>=!~]+)\s*[^\s}]+)?\}").unwrap()
+    });
+    let plain = PLAIN.get_or_init(|| {
+        regex::Regex::new(r"(^|[\s:])python-([^\s,]+)(?:\s*(?:[<>=!~]+)\s*[^\s,]+)?").unwrap()
+    });
+    let out = module.replace_all(line, |c: &regex::Captures| {
+        crate::redist::package_name(&c[1]).unwrap_or_else(|| c[0].to_string())
+    });
+    plain
+        .replace_all(&out, |c: &regex::Captures| match crate::redist::package_name(&c[2]) {
+            Some(cuda) => format!("{}{cuda}", &c[1]),
+            None => c[0].to_string(),
+        })
+        .into_owned()
 }
 
 /// Dependency tags written after `%python_subpackages` (up to the next section)
@@ -5220,5 +5274,63 @@ mod hashed_libs_exclude_tests {
         let out = with_hashed_libs_requires_exclude(spec);
         assert_eq!(out.matches("__requires_exclude").count(), 1, "{out}");
         assert!(out.contains(r"^(lib(mpi|ucp)\.so.*|lib.*-[0-9a-f]{8}.*\.so.*)$"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod redist_requires_tests {
+    use super::*;
+    use crate::redist::TestMode;
+
+    fn dist(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| s.to_string()).collect()
+    }
+
+    const SPEC: &str = "Name: python-x\nBuildRequires:  python-rpm-macros\nBuildRequires:  %{python_module pip}\n%python_subpackages\n\n%description\nx\n";
+
+    #[test]
+    fn a_cuda_wheel_requires_the_cuda_package_with_the_mode_on() {
+        let reqs = dist(&["nvidia-cublas>=13.1", "numpy>=2"]);
+        {
+            let _off = TestMode::set(false);
+            let out = add_runtime_dependencies(SPEC, &reqs, "x");
+            assert!(out.contains("Requires:       python-nvidia-cublas >= 13.1\n"), "{out}");
+        }
+        let _on = TestMode::set(true);
+        let deps = runtime_dependencies(&reqs, "x");
+        assert_eq!(deps[0].bound, None);
+        assert_eq!(deps[1].bound.as_deref(), Some(">= 2"));
+        let out = add_runtime_dependencies(SPEC, &reqs, "x");
+        assert!(out.contains("Requires:       cuda-cublas\n"), "{out}");
+        assert!(out.contains("BuildRequires:  cuda-cublas\n"), "{out}");
+        assert!(out.contains("Requires:       python-numpy >= 2\n"), "{out}");
+        assert!(!out.contains("python-nvidia"), "{out}");
+        // Already there: left alone.
+        assert_eq!(add_runtime_dependencies(&out, &reqs, "x"), out);
+    }
+
+    #[test]
+    fn the_review_agents_runtime_requires_of_a_cuda_wheel_is_rewritten() {
+        let spec = "Requires:       %{python_module nvidia-cublas >= 13.1}\n\
+                    Requires:       python-nvidia-cuda-runtime >= 13.0\n\
+                    Requires:       python-numpy >= 2\n\
+                    BuildRequires:  %{python_module nvidia-cublas}\n\
+                    Requires:       python-nvidia-cudnn-cu13\n";
+        {
+            let _off = TestMode::set(false);
+            let out = normalize_runtime_python_module(spec);
+            assert!(out.contains("Requires:       python-nvidia-cublas >= 13.1\n"), "{out}");
+        }
+        let _on = TestMode::set(true);
+        let out = normalize_runtime_python_module(spec);
+        assert_eq!(
+            out,
+            "Requires:       cuda-cublas\n\
+             Requires:       cuda-cudart\n\
+             Requires:       python-numpy >= 2\n\
+             BuildRequires:  %{python_module nvidia-cublas}\n\
+             Requires:       cuda-cudnn\n"
+        );
+        assert_eq!(normalize_runtime_python_module(&out), out);
     }
 }

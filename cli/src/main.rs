@@ -118,6 +118,12 @@ enum Commands {
         #[arg(long, default_value_t = 3)]
         min_free_gb: u64,
 
+        /// Package NVIDIA's CUDA components (cublas, cudnn, cudart...) from
+        /// NVIDIA's redistributable archives as `cuda-<name>` packages, in
+        /// place of repackaging the `nvidia-*` PyPI wheels as `python-nvidia-*`.
+        #[arg(long, default_value_t = false)]
+        nvidia_redist: bool,
+
         /// GitHub URL for Rust packages (e.g. https://github.com/BurntSushi/ripgrep).
         /// When provided, triggers the Rust build path: writes `_service` and
         /// runs `osc service ra` to vendor Cargo dependencies before building.
@@ -408,6 +414,33 @@ fn resolve_dependency_config(
     // never looked up on PyPI: a PyPI project that happens to share its name is
     // not it, and would be packaged as `python-<x>`.
     let parent_is_python = config.rpm_name.starts_with("python-") && !native;
+
+    // `--nvidia-redist`: a CUDA component is NVIDIA's archive at the version of
+    // NVIDIA's manifest, whatever PyPI says about the wheel or a repository
+    // about the name.
+    if let Some(version) = ap_build::redist::latest_version(&ap_build::redist::Network, dep) {
+        return match version {
+            Ok(version) => {
+                let rpm_name = ap_build::osc::rpm_name(dep);
+                ap_core::diag!("  queuing missing dependency: {rpm_name} (NVIDIA {version})");
+                Some(PipelineConfig {
+                    pkg_name: dep.to_string(),
+                    rpm_name,
+                    version,
+                    source_repo: None,
+                    subprojects: Vec::new(),
+                    ..config.clone()
+                })
+            }
+            Err(e) => {
+                reporter.report(&Event::Warning {
+                    step: None,
+                    message: format!("cannot package {dep} from NVIDIA's archives: {e}"),
+                });
+                None
+            }
+        };
+    }
 
     if parent_is_python {
         // Use the version-only path, not fetch_latest_release: a wheel-only
@@ -736,10 +769,12 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             cleanup,
             jobs,
             min_free_gb,
+            nvidia_redist,
             url,
             source_url,
             sweep,
         } => {
+            ap_build::redist::set_enabled(nvidia_redist);
             // `--regen` means "start over": without this, an already-built
             // package returned AlreadyBuilt (state.json / OBS-green fast paths,
             // `select_target`) before the regeneration ever ran, so `--regen`
@@ -1941,6 +1976,11 @@ fn cmd_build(
                     message: format!("{repo} latest release is {v}"),
                 });
                 v
+            } else if let Some(v) =
+                ap_build::redist::latest_version(&ap_build::redist::Network, name)
+            {
+                // `--nvidia-redist`: NVIDIA's version of the component.
+                v.map_err(|e| color_eyre::eyre::eyre!(e))?
             } else {
                 // Probe PyPI first — the overwhelmingly common case — then
                 // fall back to public-source-repository discovery for names
@@ -3591,6 +3631,22 @@ mod tests {
         };
         assert_eq!(min_free(&[]), 3);
         assert_eq!(min_free(&["--min-free-gb", "0"]), 0);
+    }
+
+    #[test]
+    fn build_takes_nvidia_redist_defaulting_to_off() {
+        let flag = |extra: &[&str]| {
+            let base = ["auto-package", "build", "httpx", "--project", "home:u"];
+            match Cli::try_parse_from([&base[..], extra].concat())
+                .unwrap()
+                .command
+            {
+                Commands::Build { nvidia_redist, .. } => nvidia_redist,
+                _ => panic!("not build"),
+            }
+        };
+        assert!(!flag(&[]));
+        assert!(flag(&["--nvidia-redist"]));
     }
 
     #[test]

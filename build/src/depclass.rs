@@ -267,6 +267,17 @@ pub fn classify_reported(raw: &str) -> Reported {
         }
     }
     if let Some(stem) = soname_stem(raw) {
+        // `--nvidia-redist`: the CUDA libraries are packages of their own,
+        // `cuda-<component>`, whose subpackages carry the soname.
+        if let Some(package) = crate::redist::package_name(raw) {
+            return Reported::Capability {
+                capability: raw.to_string(),
+                fallback: Fallback::Package {
+                    name: package,
+                    kind: PackageKind::Native,
+                },
+            };
+        }
         if is_hashed_bundled_library(stem) {
             return not_a_package(
                 "a library a wheel bundles under a hashed name (auditwheel): no package \
@@ -313,6 +324,14 @@ pub fn classify_reported(raw: &str) -> Reported {
     let name = osc::strip_devel_wrapping(stripped);
     if name.is_empty() {
         return Reported::Never(Skip::Empty);
+    }
+    // `--nvidia-redist`: `cuda-cublas` (or its `-devel`) is built from NVIDIA's
+    // archive, never looked up on PyPI as a project of that name.
+    if !prefixed && crate::redist::is_redist_package(name) {
+        return Reported::Package {
+            name: name.to_string(),
+            kind: PackageKind::Native,
+        };
     }
     if crate::pipeline::is_system_tool_alias(name) {
         return Reported::Never(Skip::SystemTool(name.to_string()));
@@ -718,5 +737,88 @@ mod tests {
             availability("nothing", &own, &statuses, &linked),
             Availability::Absent
         );
+    }
+}
+
+#[cfg(test)]
+mod redist_tests {
+    use super::*;
+    use crate::redist::TestMode;
+
+    fn build(raw: &str) -> Option<(String, PackageKind)> {
+        match triage(raw, &|_| false) {
+            Triage::Build { name, kind } => Some((name, kind)),
+            Triage::Skip(_) => None,
+        }
+    }
+
+    #[test]
+    fn a_cuda_soname_is_a_package_to_build_only_with_the_mode_on() {
+        {
+            let _off = TestMode::set(false);
+            // As before: the library is a vendor one, never a package.
+            assert_eq!(build("libcublas.so.13()(64bit)"), None);
+            assert!(matches!(
+                triage("libcublas.so.13()(64bit)", &|_| false),
+                Triage::Skip(Skip::Vendor(_))
+            ));
+        }
+        let _on = TestMode::set(true);
+        for soname in [
+            "libcublas.so.13()(64bit)",
+            "libcublasLt.so.13()(64bit)",
+            "libcublas.so.13",
+        ] {
+            assert_eq!(
+                build(soname),
+                Some(("cuda-cublas".to_string(), PackageKind::Native)),
+                "{soname}"
+            );
+        }
+        assert_eq!(
+            build("libcudart.so.13()(64bit)"),
+            Some(("cuda-cudart".to_string(), PackageKind::Native))
+        );
+        assert_eq!(
+            build("libcudnn.so.9()(64bit)"),
+            Some(("cuda-cudnn".to_string(), PackageKind::Native))
+        );
+    }
+
+    #[test]
+    fn the_driver_stays_unbuildable_with_the_mode_on() {
+        let _on = TestMode::set(true);
+        assert!(matches!(
+            triage("libcuda.so.1()(64bit)", &|_| false),
+            Triage::Skip(Skip::Vendor(_))
+        ));
+        assert!(matches!(
+            triage("libnvidia-ml.so.1()(64bit)", &|_| false),
+            Triage::Skip(Skip::Vendor(_))
+        ));
+    }
+
+    #[test]
+    fn a_cuda_package_name_is_native_and_not_python_or_flavored() {
+        let _on = TestMode::set(true);
+        assert_eq!(
+            build("cuda-cublas"),
+            Some(("cuda-cublas".to_string(), PackageKind::Native))
+        );
+        assert_eq!(
+            build("cuda-cublas-devel"),
+            Some(("cuda-cublas".to_string(), PackageKind::Native))
+        );
+        assert_eq!(osc::strip_rpm_prefix("cuda-cublas"), "cuda-cublas");
+        // Not a component: untouched.
+        assert_eq!(build("cuda-toolkit"), Some(("cuda-toolkit".to_string(), PackageKind::Unknown)));
+        // A queued wheel is available as the cuda package, by either spelling.
+        let own: HashSet<String> = ["cuda-cublas".to_string()].into();
+        for dep in ["nvidia-cublas", "cuda-cublas"] {
+            assert!(matches!(
+                availability(dep, &own, &HashMap::new(), &[]),
+                Availability::InProject { .. }
+            ));
+        }
     }
 }

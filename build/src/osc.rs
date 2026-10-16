@@ -947,7 +947,14 @@ Foo
 /// alone. Never compare this against a real package list with `==`/
 /// `.contains()` for an existence check — use [`fuzzy_key`] on both sides, and
 /// when it matches, use the real listing's spelling, not this guess.
+///
+/// With `--nvidia-redist` a name of one of NVIDIA's CUDA components (the
+/// `nvidia-cublas` wheel, or the `cuda-cublas` package itself) is `cuda-<short>`
+/// instead: see [`crate::redist`].
 pub fn rpm_name(pypi_name: &str) -> String {
+    if let Some(cuda) = crate::redist::package_name(pypi_name) {
+        return cuda;
+    }
     format!("python-{}", pypi_name.to_lowercase())
 }
 
@@ -6886,6 +6893,36 @@ mod superseded_rpm_tests {
                 "python-foo-1.0-1.1.src.rpm",
                 "python313-foobar-1.0-1.1.noarch.rpm",
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod redist_name_tests {
+    use super::*;
+    use crate::redist::TestMode;
+
+    #[test]
+    fn a_cuda_wheel_is_python_prefixed_unless_the_mode_is_on() {
+        {
+            let _off = TestMode::set(false);
+            assert_eq!(rpm_name("nvidia-cublas"), "python-nvidia-cublas");
+            assert_eq!(rpm_name("nvidia-cuda-runtime"), "python-nvidia-cuda-runtime");
+            assert_eq!(rpm_name("cuda-cublas"), "python-cuda-cublas");
+        }
+        let _on = TestMode::set(true);
+        assert_eq!(rpm_name("nvidia-cublas"), "cuda-cublas");
+        assert_eq!(rpm_name("nvidia_cublas_cu13"), "cuda-cublas");
+        assert_eq!(rpm_name("nvidia-cuda-runtime"), "cuda-cudart");
+        assert_eq!(rpm_name("nvidia-cudnn-cu13"), "cuda-cudnn");
+        // Idempotent for the package's own name, and untouched for the rest.
+        assert_eq!(rpm_name("cuda-cublas"), "cuda-cublas");
+        assert_eq!(rpm_name("numpy"), "python-numpy");
+        assert_eq!(rpm_name("nvidia-smi"), "python-nvidia-smi");
+        // The node and the package it becomes agree on the comparison key.
+        assert_eq!(
+            fuzzy_key(&rpm_name("nvidia-cublas")),
+            fuzzy_key("cuda-cublas")
         );
     }
 }

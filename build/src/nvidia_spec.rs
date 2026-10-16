@@ -72,7 +72,7 @@ struct Layout {
 
 /// `cuda_cudart` -> `cudart`, `libcublas` -> `cublas`, `cudnn` -> `cudnn`;
 /// `_` becomes `-`. The package is `cuda-<short>`.
-fn short_name(component_key: &str) -> String {
+pub(crate) fn short_name(component_key: &str) -> String {
     let k = component_key
         .strip_prefix("cuda_")
         .or_else(|| component_key.strip_prefix("lib"))
@@ -389,9 +389,9 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
          Summary:        {human}\n\
          License:        {license}\n\
          URL:            https://developer.nvidia.com/cuda-toolkit\n\
-         # The archive is fetched by a download_files service (_service) from NVIDIA's\n\
-         # redistributable server; it is not stored in the package.\n\
+         # NVIDIA's archive, committed next to the spec as downloaded from here.\n\
          Source0:        {url}\n\
+         Source99:       {name}.rpmlintrc\n\
          ExclusiveArch:  {arch}\n",
         version = input.version,
         human = human_name(&input.name),

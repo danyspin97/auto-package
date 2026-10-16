@@ -15,6 +15,7 @@ pub mod osc;
 pub mod package_notes;
 pub mod pipeline;
 pub mod proc;
+pub mod redist;
 pub mod sources;
 pub mod spec;
 pub mod step;
