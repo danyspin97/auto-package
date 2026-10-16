@@ -157,6 +157,10 @@ pub struct SdistInfo {
     /// All file paths in the tarball (non-directories), sorted. Used to give
     /// the review agent visibility into what the package actually contains.
     pub files: Vec<String>,
+    /// Command names the chosen `pyproject.toml` declares in `[project.scripts]`
+    /// / `[project.gui-scripts]` (or `[tool.poetry.scripts]`), plain file names
+    /// only. pip generates one `/usr/bin/<name>` per flavor for each.
+    pub console_scripts: Vec<String>,
 }
 
 /// One project inside a multi-project archive.
@@ -1518,6 +1522,7 @@ fn inspect_from_entries(
     let pyproject = py_manifests.first().cloned();
 
     let mut project_name = None;
+    let mut console_scripts = Vec::new();
     let build_system = match &pyproject {
         None => BuildSystem::setuptools_default(),
         Some((_, _, src)) => {
@@ -1530,6 +1535,7 @@ fn inspect_from_entries(
                         .take()
                         .map(BuildSystem::from)
                         .unwrap_or_else(BuildSystem::setuptools_default);
+                    console_scripts = doc.script_names();
                     project_name = doc.declared_name();
                     build_system
                 }
@@ -1626,6 +1632,7 @@ fn inspect_from_entries(
         autotools_manifest: autotools_manifest && python_depth.is_none() && cargo.is_none(),
         subprojects,
         files,
+        console_scripts,
     })
 }
 
@@ -1666,6 +1673,10 @@ struct PyprojectToml {
 #[derive(Deserialize)]
 struct RawProject {
     name: Option<String>,
+    // Loose like `tool`: a malformed table must not fail the parse.
+    scripts: Option<toml::Value>,
+    #[serde(rename = "gui-scripts")]
+    gui_scripts: Option<toml::Value>,
 }
 
 /// Whether an upstream-declared project name is safe to build a package, a
@@ -1682,6 +1693,40 @@ fn is_plain_project_name(name: &str) -> bool {
 }
 
 impl PyprojectToml {
+    /// Keys of `[project.scripts]`, `[project.gui-scripts]` and the legacy
+    /// `[tool.poetry.scripts]`, in order, without a name that is not a plain
+    /// file name (it ends up in spec lines and paths).
+    fn script_names(&self) -> Vec<String> {
+        let mut tables: Vec<&toml::Value> = Vec::new();
+        if let Some(p) = &self.project {
+            tables.extend(p.scripts.iter().chain(p.gui_scripts.iter()));
+        }
+        if let Some(t) = self
+            .tool
+            .as_ref()
+            .and_then(|t| t.get("poetry")?.get("scripts"))
+        {
+            tables.push(t);
+        }
+        let mut out: Vec<String> = Vec::new();
+        for table in tables {
+            let Some(table) = table.as_table() else {
+                continue;
+            };
+            for name in table.keys() {
+                let plain = !name.starts_with(['-', '.'])
+                    && name.len() <= 100
+                    && name.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+')
+                    });
+                if plain && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// `[project].name`, else the legacy `[tool.poetry].name`.
     fn declared_name(self) -> Option<String> {
         self.project
@@ -1764,6 +1809,23 @@ mod tests {
         for bad in ["", "../x", "a/b", "a b", "-x", "a;rm", "a<b", "a%{x}", "é"] {
             assert!(!is_plain_project_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn pyproject_scripts_are_read_and_unsafe_names_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[(
+                "thing-1/pyproject.toml",
+                b"[project]\nname = \"thing\"\n[project.scripts]\nthing = \"thing:main\"\n\
+                  \"../x\" = \"a:b\"\n[project.gui-scripts]\nthing-gui = \"thing:gui\"\n"
+                    .as_slice(),
+            )],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert_eq!(info.console_scripts, vec!["thing", "thing-gui"]);
     }
 
     #[test]

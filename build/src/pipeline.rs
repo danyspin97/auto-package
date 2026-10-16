@@ -7526,6 +7526,7 @@ fn generate_spec(
             has_tests: sdist_info.has_tests,
             has_c_extensions: sdist_info.has_c_extensions,
             top_level_tests_dir: sdist_info.top_level_tests_dir.clone(),
+            console_scripts: sdist_info.console_scripts.clone(),
             install_entries: sdist_info.top_level_dir.as_deref().and_then(|top| {
                 crate::spec::sdist_files_entries(
                     &sdist_info.files,
@@ -8178,6 +8179,7 @@ fn generate_repo_python_spec(
             has_tests: sdist_info.has_tests,
             has_c_extensions: sdist_info.has_c_extensions,
             top_level_tests_dir: sdist_info.top_level_tests_dir.clone(),
+            console_scripts: sdist_info.console_scripts.clone(),
             install_entries: crate::spec::sdist_files_entries(
                 &sdist_info.files,
                 &sdist_top_level,

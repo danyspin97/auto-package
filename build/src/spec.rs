@@ -1247,6 +1247,9 @@ pub struct SdistFacts {
     /// What the project installs into site-packages, from [`sdist_files_entries`];
     /// `None` when the sdist's layout does not say it unambiguously.
     pub install_entries: Option<Vec<String>>,
+    /// Commands the project declares in `[project.scripts]`; see
+    /// `ap_ecosystem::sdist::SdistInfo::console_scripts`.
+    pub console_scripts: Vec<String>,
 }
 
 /// Re-run post-processing once the tarball has been inspected.
@@ -1370,6 +1373,7 @@ fn post_process(
         None => out,
     };
     let out = fix_bare_source_filename(&out, release);
+    let out = add_console_script_alternatives(&out, &facts.console_scripts);
     if facts.has_c_extensions {
         fix_c_extension_arch(&out)
     } else {
@@ -1743,6 +1747,63 @@ fn apply_install_entries(spec: &str, entries: &[String]) -> String {
         out.pop();
     }
     out
+}
+
+/// Give the commands a source build installs (`[project.scripts]`) the
+/// `update-alternatives` handling convention 18 asks for, when py2pack did not
+/// (it only reads `setup.py` metadata): `%python_clone` after
+/// `%pyproject_install`, `%post`/`%postun` registration and a
+/// `%python_alternative` in `%files`. A script the spec already handles is
+/// left alone.
+pub fn add_console_script_alternatives(spec: &str, scripts: &[String]) -> String {
+    let missing: Vec<&String> = scripts
+        .iter()
+        .filter(|s| {
+            !spec.contains(&format!("%python_clone -a %{{buildroot}}%{{_bindir}}/{s}\n"))
+                && !spec.contains(&format!("%python_alternative %{{_bindir}}/{s}\n"))
+        })
+        .collect();
+    let has_install = spec.lines().any(|l| l.trim() == "%pyproject_install");
+    let files_pos = spec
+        .lines()
+        .position(|l| l.starts_with("%files") && l.contains("%{python_files}"));
+    if missing.is_empty() || !has_install || files_pos.is_none() {
+        return spec.to_string();
+    }
+    let each = |f: &dyn Fn(&str) -> String| -> Vec<String> {
+        missing.iter().map(|s| f(s)).collect()
+    };
+    let clones = each(&|s| format!("%python_clone -a %{{buildroot}}%{{_bindir}}/{s}"));
+    let installs = each(&|s| format!("%python_install_alternative {s}"));
+    let uninstalls = each(&|s| format!("%python_uninstall_alternative {s}"));
+    let owned = each(&|s| format!("%python_alternative %{{_bindir}}/{s}"));
+
+    let mut lines: Vec<String> = spec.lines().map(str::to_string).collect();
+    // Bottom-up, so earlier indices stay valid.
+    let files_pos = files_pos.unwrap_or(0);
+    lines.splice(files_pos + 1..files_pos + 1, owned);
+    for (header, add) in [("%postun", uninstalls), ("%post", installs)] {
+        match lines.iter().position(|l| l.trim() == header) {
+            Some(pos) => {
+                lines.splice(pos + 1..pos + 1, add);
+            }
+            None => {
+                let files_pos = lines
+                    .iter()
+                    .position(|l| l.starts_with("%files") && l.contains("%{python_files}"))
+                    .unwrap_or(0);
+                let mut block = vec![header.to_string()];
+                block.extend(add);
+                block.push(String::new());
+                lines.splice(files_pos..files_pos, block);
+            }
+        }
+    }
+    if let Some(pos) = lines.iter().position(|l| l.trim() == "%pyproject_install") {
+        lines.splice(pos + 1..pos + 1, clones);
+    }
+    let out = lines.join("\n") + if spec.ends_with('\n') { "\n" } else { "" };
+    fix_missing_alternatives_requires(&out)
 }
 
 /// Point a bare-filename `Source:` at the archive actually in the checkout.
@@ -3637,6 +3698,7 @@ BuildRequires:  %{python_module pip}
                 has_c_extensions: false,
                 top_level_tests_dir: Some("tests".to_string()),
                 install_entries: None,
+                console_scripts: Vec::new(),
             },
         );
         assert!(scoped.contains("%check\n%pytest tests/\n"), "{scoped}");
@@ -3650,6 +3712,7 @@ BuildRequires:  %{python_module pip}
                 has_c_extensions: false,
                 top_level_tests_dir: None,
                 install_entries: None,
+                console_scripts: Vec::new(),
             },
         );
         assert!(unscoped.contains("%check\n%pytest\n"), "{unscoped}");
@@ -5230,6 +5293,28 @@ pub fn check_is_file_probe_only(spec: &str) -> bool {
         }
     }
     probes > 0
+}
+
+#[cfg(test)]
+mod console_script_tests {
+    use super::add_console_script_alternatives;
+
+    const SPEC: &str = "Name: python-x\n%python_subpackages\n\n%install\n%pyproject_install\n\
+                        %python_expand %fdupes x\n\n%files %{python_files}\n%license LICENSE\n\
+                        %{python_sitelib}/x\n\n%changelog\n";
+
+    #[test]
+    fn scripts_get_clone_scriptlets_and_files_entries() {
+        let out = add_console_script_alternatives(SPEC, &["xcli".to_string()]);
+        assert!(out.contains("%pyproject_install\n%python_clone -a %{buildroot}%{_bindir}/xcli\n"));
+        assert!(out.contains("%post\n%python_install_alternative xcli\n"), "{out}");
+        assert!(out.contains("%postun\n%python_uninstall_alternative xcli\n"), "{out}");
+        assert!(out.contains("%files %{python_files}\n%python_alternative %{_bindir}/xcli\n"));
+        assert!(out.contains("Requires(post):   update-alternatives"));
+        // Idempotent, and a no-script project is untouched.
+        assert_eq!(add_console_script_alternatives(&out, &["xcli".to_string()]), out);
+        assert_eq!(add_console_script_alternatives(SPEC, &[]), SPEC);
+    }
 }
 
 #[cfg(test)]

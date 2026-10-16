@@ -1768,6 +1768,7 @@ mod tests {
             has_tests: false,
             top_level_tests_dir: None,
             files: Vec::new(),
+            console_scripts: Vec::new(),
         }
     }
 
