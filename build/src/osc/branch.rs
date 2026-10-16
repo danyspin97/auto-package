@@ -437,6 +437,7 @@ pub fn get_project_meta(project: &str, emit: Emit<'_>) -> Result<Option<String>,
 /// Replace the meta of `project` with `xml`.
 pub fn set_project_meta(project: &str, xml: &str, emit: Emit<'_>) -> Result<(), Error> {
     check_obs_name("project", project)?;
+    super::invalidate_repo_paths(project);
     let mut file = tempfile::Builder::new()
         .prefix("ap-prj-meta-")
         .suffix(".xml")

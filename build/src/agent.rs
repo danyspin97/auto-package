@@ -346,6 +346,10 @@ const PRIORITIES: &str = r#"
    line points to. Fix every problem you can see in one turn rather than one
    per turn, and do not re-verify what the build log or an earlier turn has
    already shown.
+   Coverage is not the goal: a test that fails for a reason outside this package
+   (a defective dependency, a missing fixture, no network, no device) is
+   deselected with a comment naming the reason, never kept at the price of
+   rebuilding another package or of a failed build.
 3. **Speed never beats rule 1.** If the quick fix would leave the package
    broken at runtime, take the longer correct one. If you cannot make it
    work, say so (`blocked`, with the reason) instead of reporting a hollow
@@ -693,6 +697,14 @@ openSUSE spec conventions to keep in mind:
          - Examples/benchmarks that aren't tests: --ignore=examples --ignore=benchmarks
 
    (iii) Clear upstream options that do not apply here: %pytest -o addopts=''
+   (iii-b) A test that fails because a DEPENDENCY is defective, not this
+         package (python-accelerate: `tests/test_compile.py` imports
+         `torch.utils.benchmark`, which needs `torch/utils/benchmark/utils/`, a
+         directory the distro's torch excludes into `-devel`): deselect that test,
+         or its file, with a comment naming the dependency's defect, and go on.
+         Do NOT ask for the dependency to be rebuilt or patched to keep one test
+         (convention 62: hours of OBS time), and do not report it in
+         `unresolvable_packages`: the dependency is not missing.
    (iv)  Replace the suite with an import smoke test. Do this when the tests
          need something no build worker can have and no package can supply —
          a GPU device, network access, weights downloaded at run time (a
@@ -2872,7 +2884,12 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    CPU-safe subset is not selectable by a marker or a directory, run the import
    smoke test only (convention 67) and say so in a comment. Never size a skip
    list from the word `cuda` alone: 28 tests still failed after nine files were
-   ignored for it.
+   ignored for it. Tests that compile at run time (`torch.compile`/inductor,
+   numba, cffi, Cython `pyximport`) need `BuildRequires: gcc-c++` (and `gcc`) in
+   the spec; python-accelerate failed on it after the dependencies were right. A
+   test directory the sdist does not ship (`tests/test_configs`) is fetched as a
+   second source (convention 82 b), not deselected, when the tests need it to
+   mean anything.
 
 82. **Four things to read before the first build of a package that has them.**
    (a) `requires-python` with an upper cap below a flavor we build (`<3.11`):

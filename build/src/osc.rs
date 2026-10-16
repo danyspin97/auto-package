@@ -1385,6 +1385,23 @@ mod distro_provides_tests {
     }
 }
 
+type RepoPaths = Vec<(String, String)>;
+
+/// `get_project_repo_paths` answers by project, shared for a few minutes.
+static REPO_PATHS_CACHE: std::sync::Mutex<Option<HashMap<String, (Instant, RepoPaths)>>> =
+    std::sync::Mutex::new(None);
+
+/// Forget a project's cached build paths: its meta was just written.
+pub(crate) fn invalidate_repo_paths(project: &str) {
+    if let Some(c) = REPO_PATHS_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        c.remove(project);
+    }
+}
+
 /// Return the `(project, repository)` pairs the OBS project's repositories
 /// build against.
 ///
@@ -1410,24 +1427,57 @@ pub fn get_project_repo_paths(
     emit: Emit<'_>,
 ) -> Result<Vec<(String, String)>, Error> {
     check_obs_name("project", project)?;
-    let cmd = format!("meta prj {project}");
-    let out = proc::capture_with_timeout(
-        "osc",
-        &["meta", "prj", project],
-        &anywhere(),
-        emit,
-        OSC_QUERY_TIMEOUT,
-    )
-    .map_err(during(cmd.clone()))?;
-    if !out.success() {
-        return Err(Error::OscFailed {
-            cmd,
-            code: out.code,
-            stderr: out.stderr,
-        });
+    // The build paths of a project change when someone edits its meta, not during a
+    // run: one answer is shared for a few minutes. A timed-out query is tried
+    // again: a single `osc meta prj` killed after 60 s (two parallel runs, a loaded
+    // machine) ended the root build of open-webui with 'could not read build paths'.
+    const TTL: Duration = Duration::from_secs(180);
+    if let Some((at, paths)) = REPO_PATHS_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|c| c.get(project))
+        && at.elapsed() < TTL
+    {
+        return Ok(paths.clone());
     }
-
-    Ok(parse_project_repo_paths(&out.stdout))
+    let cmd = format!("meta prj {project}");
+    let mut last: Option<Error> = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            sleep_interruptible(Duration::from_secs(5 * attempt));
+        }
+        match proc::capture_with_timeout(
+            "osc",
+            &["meta", "prj", project],
+            &anywhere(),
+            emit,
+            OSC_QUERY_TIMEOUT,
+        )
+        .map_err(during(cmd.clone()))
+        {
+            Ok(out) if out.success() => {
+                let paths = parse_project_repo_paths(&out.stdout);
+                REPO_PATHS_CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_or_insert_with(Default::default)
+                    .insert(project.to_string(), (Instant::now(), paths.clone()));
+                return Ok(paths);
+            }
+            // A server answer that is not success (unknown project, no permission)
+            // does not change by asking again.
+            Ok(out) => {
+                return Err(Error::OscFailed {
+                    cmd,
+                    code: out.code,
+                    stderr: out.stderr,
+                });
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.expect("three attempts were made"))
 }
 
 /// Parsing half of [`get_project_repo_paths`], split out so it is testable
@@ -4631,6 +4681,13 @@ fn fold_flavor_statuses(
     let flavors: Vec<(String, BuildStatus)> = statuses
         .iter()
         .filter(|(k, s)| k.contains(':') && blocks(s))
+        // A `test` flavor whose tests FAIL builds nothing a dependent installs,
+        // and the package it belongs to cannot be fixed by building it again:
+        // python-redis (`python-redis:test` failed, `python-redis` succeeded) was
+        // selected as unbuilt every round, finished "already built" every
+        // round, and the requested root was never reached. Only a test flavor
+        // that cannot even be set up (`unresolvable`, `broken`) still counts.
+        .filter(|(k, s)| !(k.ends_with(":test") && matches!(s, BuildStatus::Failed)))
         .map(|(k, s)| (k.clone(), s.clone()))
         .collect();
     for (key, status) in flavors {
@@ -6814,6 +6871,24 @@ mod overall_status_tests {
         assert!(!folded["python-mcp"].is_success());
         assert!(folded["python-ok"].is_success());
         assert!(folded.contains_key("python-mcp:test"));
+    }
+
+    /// python-redis: tests failing in `:test` do not unbuild the package.
+    #[test]
+    fn a_failing_test_flavor_does_not_unbuild_its_package() {
+        let xml = r#"<resultlist>
+  <result repository="r" arch="x86_64">
+    <status package="python-redis" code="succeeded"/>
+    <status package="python-redis:test" code="failed"/>
+    <status package="python-foo" code="succeeded"/>
+    <status package="python-foo:openmpi4" code="failed"/>
+  </result>
+</resultlist>"#;
+        let folded = fold_flavor_statuses(project_statuses_from_xml(xml, "r", "x86_64").unwrap());
+        assert!(folded["python-redis"].is_success());
+        assert_eq!(folded["python-redis:test"], BuildStatus::Failed);
+        // Any other flavor that fails still counts.
+        assert!(!folded["python-foo"].is_success());
     }
 
     #[test]

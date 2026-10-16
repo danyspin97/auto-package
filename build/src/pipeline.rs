@@ -94,6 +94,31 @@ pub struct PipelineConfig {
     pub patch_request: Option<String>,
 }
 
+/// Packages the pipeline itself reported built (or already built) in this
+/// process, by `fuzzy_key`. The resolver reads OBS statuses, which can keep
+/// calling a package unbuilt for a reason it cannot fix by building it again (a
+/// failing flavor): without this a package that finishes `AlreadyBuilt` is
+/// selected again the next round, and the packages that wait for it, the
+/// requested root among them, are never reached.
+static SETTLED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+fn mark_settled(rpm_name: &str) {
+    SETTLED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .insert(osc::fuzzy_key(rpm_name));
+}
+
+fn is_settled(rpm_name: &str) -> bool {
+    SETTLED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|s| s.contains(&osc::fuzzy_key(rpm_name)))
+}
+
 /// The reserved `--source-url <package>=wheel` value: package this one from the
 /// upstream wheel, not from source (torch, whose Factory recipe is a multi-hour
 /// source build and whose PyPI release is the CUDA wheel).
@@ -839,6 +864,9 @@ pub fn select_target(
             }
             let rpm = osc::rpm_name(&n.name);
             let key = osc::fuzzy_key(&rpm);
+            if is_settled(&rpm) {
+                return Resolution::Built;
+            }
             if let Some(&real) = own_fuzzy.get(&key) {
                 // A package OBS built that its dependents cannot install (see
                 // `spec_with_published_defects_fixed`) is not resolved: it is
@@ -1394,6 +1422,13 @@ pub fn run_package(
         }
     }
     let result = run_package_inner(config, pkg_run, reporter);
+    // What the pipeline itself found built is settled for the rest of the run.
+    if matches!(
+        result,
+        PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. }
+    ) {
+        mark_settled(&config.rpm_name);
+    }
     // Once the run is aborted, whatever else was in flight died of the abort
     // (killed children, refused spawns): report it as the abort, not as the
     // package's own failure.
@@ -11111,5 +11146,19 @@ mod redist_pipeline_tests {
         );
         assert!(spec.contains("python-nvidia-cublas"), "{spec}");
         assert!(!spec.contains("cuda-cublas"), "{spec}");
+    }
+}
+
+#[cfg(test)]
+mod settled_tests {
+    use super::*;
+
+    #[test]
+    fn a_package_the_pipeline_reported_built_is_settled_under_any_spelling() {
+        assert!(!is_settled("python-settled-probe"));
+        mark_settled("python-settled-probe");
+        assert!(is_settled("python-settled-probe"));
+        assert!(is_settled("python-Settled_Probe"));
+        assert!(!is_settled("python-another-probe"));
     }
 }
