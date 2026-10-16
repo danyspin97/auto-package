@@ -6,7 +6,12 @@
 //! unittest `FAIL: test (mod.Class.test)` headers, ctest's "The following tests
 //! FAILED" list) and edits the spec: a narrow `--deselect` through
 //! `PYTEST_ADDOPTS`, an `-E` regex on the `%ctest` line, or a `skip` decorator
-//! inserted in `%prep` for unittest. Every dropped test carries a
+//! inserted in `%prep` for unittest modules found in the unpacked sdist. A
+//! unittest module that is not there (an installed package's tests) is skipped
+//! through the runner instead: `%check` is moved to pytest (`-m unittest` is
+//! rewritten, pytest added to the BuildRequires) and the test is excluded by a
+//! `-k` expression in `PYTEST_ADDOPTS`; a `%check` that runs tox, nox, make
+//! and the like is refused with the exact reason. Every dropped test carries a
 //! `# evidence:` comment quoting its log line.
 //!
 //! It refuses when the failure is a dependency problem (an import error, a
@@ -318,18 +323,7 @@ fn apply_pytest(spec: &str, tests: &[&FailingTest]) -> Result<String, String> {
     let lines: Vec<&str> = spec.lines().collect();
     let (start, end) =
         section_body(&lines, "%check").ok_or("the spec has no %check section to edit")?;
-    // Our own export has to come after one that assigns the variable outright.
-    let mut at = start;
-    for (i, l) in lines[start..end].iter().enumerate() {
-        let t = l.trim_start();
-        let assigns = t.strip_prefix("export ").unwrap_or(t).starts_with("PYTEST_ADDOPTS=");
-        if assigns && !t.contains("PYTEST_ADDOPTS:-") && !t.contains("$PYTEST_ADDOPTS") && !t.contains("${PYTEST_ADDOPTS") {
-            if t.ends_with('\\') {
-                return Err("the %check sets PYTEST_ADDOPTS over several lines".into());
-            }
-            at = start + i + 1;
-        }
-    }
+    let at = addopts_insertion_point(&lines, start, end)?;
     let mut add: Vec<String> = tests.iter().map(|t| evidence_comment(&t.line)).collect();
     add.push(format!(
         "export PYTEST_ADDOPTS=\"${{PYTEST_ADDOPTS:-}} {}\"",
@@ -375,18 +369,248 @@ fn apply_ctest(spec: &str, tests: &[&FailingTest]) -> Result<String, String> {
     Ok(join(&out, spec.ends_with('\n')))
 }
 
+/// Where in `%check` the export of our own `PYTEST_ADDOPTS` goes: after one that
+/// assigns the variable outright.
+fn addopts_insertion_point(lines: &[&str], start: usize, end: usize) -> Result<usize, String> {
+    let mut at = start;
+    for (i, l) in lines[start..end].iter().enumerate() {
+        let t = l.trim_start();
+        let assigns = t.strip_prefix("export ").unwrap_or(t).starts_with("PYTEST_ADDOPTS=");
+        if assigns && !t.contains("PYTEST_ADDOPTS:-") && !t.contains("$PYTEST_ADDOPTS") && !t.contains("${PYTEST_ADDOPTS") {
+            if t.ends_with('\\') {
+                return Err("the %check sets PYTEST_ADDOPTS over several lines".into());
+            }
+            at = start + i + 1;
+        }
+    }
+    Ok(at)
+}
+
+/// The start of the `-k` expression export this module writes, which the next
+/// round extends (pytest keeps only the last `-k`).
+const K_EXPORT_HEAD: &str = "export PYTEST_ADDOPTS=\"${PYTEST_ADDOPTS:-} -k '";
+const K_EXPORT_TAIL: &str = "'\"";
+
+/// `-m unittest` in a line of `%check`.
+const UNITTEST_MODULE: &str = "-m unittest";
+
+/// The runners of `%check` that offer no deselect interface this module can
+/// drive from outside: they pass their own arguments to the tests.
+const CUSTOM_RUNNERS: &[&str] = &[
+    "tox", "nox", "make", "stestr", "nosetests", "nose2", "behave", "%meson_test", "%cmake_build",
+    "pytest-xdist-runner",
+];
+
+fn is_pytest_line(t: &str) -> bool {
+    t.split_whitespace()
+        .any(|w| w == "%pytest" || w == "pytest" || w.starts_with("%pytest_") || w.ends_with("/pytest") || w == "pytest3")
+        || t.contains("-m pytest")
+        || t.contains("%{python_expand")
+            && t.contains("pytest")
+}
+
+fn is_comment(t: &str) -> bool {
+    t.trim_start().starts_with('#')
+}
+
+/// `-m unittest <args>` rewritten as `-m pytest <args>`: dotted module names
+/// become `--pyargs` ones, `discover -s DIR` becomes `DIR`, the flags that
+/// have a pytest equivalent are mapped. `Err` names what has no equivalent.
+fn unittest_line_as_pytest(line: &str) -> Result<String, String> {
+    let pos = line.find(UNITTEST_MODULE).ok_or("no unittest invocation")?;
+    let (prefix, rest) = (&line[..pos], &line[pos + UNITTEST_MODULE.len()..]);
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return Err(format!("the %check runs `{}`, which is not plain unittest", line.trim()));
+    }
+    if rest.contains(['}', ';', '&', '|', '$', '"', '\'', '\\', '`', '(', ')', '<', '>']) {
+        return Err(format!(
+            "the unittest line `{}` has shell or macro syntax after `-m unittest` that cannot be \
+             translated to pytest arguments",
+            line.trim()
+        ));
+    }
+    let mut args: Vec<String> = Vec::new();
+    let mut toks = rest.split_whitespace();
+    while let Some(tok) = toks.next() {
+        match tok {
+            "discover" => {}
+            "-v" | "--verbose" => args.push("-v".into()),
+            "-q" | "--quiet" => args.push("-q".into()),
+            "-f" | "--failfast" => args.push("-x".into()),
+            "-s" | "--start-directory" => {
+                let dir = toks.next().ok_or("unittest `-s` without a directory")?;
+                if dir.starts_with('/') || dir.split('/').any(|c| c == "..") {
+                    return Err(format!("unittest start directory `{dir}` is not a plain relative path"));
+                }
+                args.push(dir.to_string());
+            }
+            t if !t.starts_with('-')
+                && t.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) =>
+            {
+                args.push("--pyargs".into());
+                args.push(t.to_string());
+            }
+            other => {
+                return Err(format!(
+                    "the unittest option `{other}` has no pytest equivalent, so the invocation \
+                     cannot be moved to pytest"
+                ));
+            }
+        }
+    }
+    let mut out = format!("{prefix}-m pytest");
+    for a in args {
+        out.push(' ');
+        out.push_str(&a);
+    }
+    Ok(out)
+}
+
+/// The `BuildRequires` line that adds pytest, in the spec's own style.
+fn pytest_buildrequires(preamble: &[&str]) -> Result<Option<String>, String> {
+    let brs: Vec<&&str> = preamble
+        .iter()
+        .filter(|l| l.trim_start().to_ascii_lowercase().starts_with("buildrequires:"))
+        .collect();
+    if brs.iter().any(|l| l.to_ascii_lowercase().contains("pytest")) {
+        return Ok(None);
+    }
+    if brs.iter().any(|l| l.contains("%{python_module")) {
+        return Ok(Some("BuildRequires:  %{python_module pytest}".into()));
+    }
+    if brs.iter().any(|l| l.contains("python3-")) {
+        return Ok(Some("BuildRequires:  python3-pytest".into()));
+    }
+    Err("pytest is not a BuildRequires and the spec's BuildRequires use neither \
+         `%{python_module ...}` nor `python3-...`, so its spelling here is unknown"
+        .into())
+}
+
+/// Skip installed-module unittest tests through the runner: `%check` is moved to
+/// (or already is) pytest and the tests are excluded with one `-k` expression,
+/// `not (module and Class and test)` for each, from `PYTEST_ADDOPTS`. `-k`
+/// matches names as substrings, so a test whose name continues with more
+/// characters is dropped with it; the comment says so. `Err` is exactly why the
+/// `%check` cannot take it.
+fn apply_unittest_through_pytest(spec: &str, tests: &[&FailingTest]) -> Result<String, String> {
+    let mut lines: Vec<String> = spec.lines().map(str::to_string).collect();
+    let view: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (start, end) =
+        section_body(&view, "%check").ok_or("the spec has no %check section to edit")?;
+    let body: Vec<&str> = view[start..end].iter().copied().filter(|l| !is_comment(l)).collect();
+    let unittest_lines: Vec<usize> = (start..end)
+        .filter(|&i| !is_comment(view[i]) && view[i].contains(UNITTEST_MODULE))
+        .collect();
+    let has_pytest = body.iter().any(|l| is_pytest_line(l));
+    if unittest_lines.is_empty() && !has_pytest {
+        let custom = body.iter().find_map(|l| {
+            l.split_whitespace()
+                .find(|w| CUSTOM_RUNNERS.contains(w))
+                .map(|w| (w.to_string(), l.trim().to_string()))
+        });
+        return Err(match custom {
+            Some((runner, line)) => format!(
+                "the %check runs its tests through `{runner}` (`{line}`), which takes no deselect \
+                 from here: the tests are not in the unpacked source (installed package tests) \
+                 and the runner has no PYTEST_ADDOPTS-style hook auto-package can rely on, so \
+                 they have to be skipped through that runner's own configuration"
+            ),
+            None => "the %check has no unittest or pytest invocation to deselect through".into(),
+        });
+    }
+    // Another `-k` of the check would override ours (the last one wins).
+    let ours = |l: &str| l.trim_start().starts_with(K_EXPORT_HEAD);
+    if body.iter().any(|l| {
+        !ours(l) && l.split_whitespace().any(|w| w == "-k" || w.starts_with("-k=") || w.starts_with("--k"))
+    }) {
+        return Err(
+            "the %check already selects tests with its own `-k`, which would override or be \
+             overridden by a second `-k` expression"
+                .into(),
+        );
+    }
+    // Rewrite the unittest invocations (before the section moves).
+    let mut rewritten: Vec<(usize, String)> = Vec::new();
+    for &i in &unittest_lines {
+        rewritten.push((i, unittest_line_as_pytest(view[i])?));
+    }
+    // Where pytest must be a BuildRequires.
+    let first_section = view.iter().position(|l| is_section(l)).unwrap_or(view.len());
+    let new_br = pytest_buildrequires(&view[..first_section])?;
+    let br_at = view[..first_section]
+        .iter()
+        .rposition(|l| l.trim_start().to_ascii_lowercase().starts_with("buildrequires:"))
+        .map(|i| i + 1);
+    if new_br.is_some() && br_at.is_none() {
+        return Err("the spec has no BuildRequires line to add pytest after".into());
+    }
+    let insert_at = addopts_insertion_point(&view, start, end)?;
+    let existing = (start..end).find(|&i| ours(view[i]));
+    let pieces: Vec<String> = tests
+        .iter()
+        .map(|t| {
+            let parts: Vec<&str> = t.id.split('.').collect();
+            format!(
+                "not ({} and {} and {})",
+                parts[parts.len() - 3],
+                parts[parts.len() - 2],
+                parts[parts.len() - 1]
+            )
+        })
+        .collect();
+    let mut comments: Vec<String> = Vec::new();
+    for t in tests {
+        comments.push(evidence_comment(&t.line));
+        comments.push(format!(
+            "# auto-package dropped {} (installed module: skipped through pytest -k, which matches names as substrings)",
+            t.id
+        ));
+    }
+    // Rewrites first: they replace lines in place, then the export is spliced.
+    for (i, new) in &rewritten {
+        lines[*i] = new.clone();
+    }
+    let (k_at, k_new): (usize, Vec<String>) = match existing {
+        Some(i) => {
+            let line = lines[i].trim_end();
+            let head = line.find(K_EXPORT_HEAD).unwrap_or(0) + K_EXPORT_HEAD.len();
+            let expr = line[head..]
+                .strip_suffix(K_EXPORT_TAIL)
+                .ok_or("the earlier -k export was edited, so it cannot be extended")?;
+            let merged = format!("{}{expr} and {}{K_EXPORT_TAIL}", &line[..head], pieces.join(" and "));
+            let mut v = comments.clone();
+            v.push(merged);
+            lines.remove(i);
+            (i, v)
+        }
+        None => {
+            let mut v = comments.clone();
+            v.push(format!("{K_EXPORT_HEAD}{}{K_EXPORT_TAIL}", pieces.join(" and ")));
+            (insert_at, v)
+        }
+    };
+    for (off, l) in k_new.into_iter().enumerate() {
+        lines.insert(k_at + off, l);
+    }
+    if let (Some(br), Some(at)) = (new_br, br_at) {
+        lines.insert(at, br);
+    }
+    Ok(join(&lines, spec.ends_with('\n')))
+}
+
+/// Unittest failures: modules in the unpacked source get a skip decorator in
+/// `%prep`; installed-package tests (not in the source) are excluded through
+/// the runner, see [`apply_unittest_through_pytest`]. Returns the spec and the
+/// ids that were dropped; `Err` when none could be.
 fn apply_unittest(
     spec: &str,
     tests: &[&FailingTest],
     source_has: &dyn Fn(&str) -> bool,
-) -> Result<String, String> {
+) -> Result<(String, Vec<String>), String> {
     let lines: Vec<&str> = spec.lines().collect();
-    let (start, end) = section_body(&lines, "%prep").ok_or("the spec has no %prep section")?;
-    let mut at = end;
-    while at > start && lines[at - 1].trim().is_empty() {
-        at -= 1;
-    }
     let mut add: Vec<String> = Vec::new();
+    let mut done: Vec<String> = Vec::new();
+    let mut installed: Vec<&FailingTest> = Vec::new();
     for t in tests {
         let parts: Vec<&str> = t.id.split('.').collect();
         let (module, class, test) = (
@@ -399,6 +623,7 @@ fn apply_unittest(
             .into_iter()
             .find(|c| source_has(c))
         else {
+            installed.push(t);
             continue;
         };
         add.push(evidence_comment(&t.line));
@@ -406,11 +631,34 @@ fn apply_unittest(
             "sed -i -E '/^class {class}\\b/,/^class /{{s/^([[:space:]]+)def {test}\\(/\\1@__import__(\"unittest\").skip(\"auto-package dropped {id}\")\\n\\1def {test}(/}}' {file}",
             id = t.id
         ));
+        done.push(t.id.clone());
     }
-    if add.is_empty() {
-        return Err("none of the failing unittest modules was found in the unpacked source".into());
+    let mut out = spec.to_string();
+    if !add.is_empty() {
+        let (start, end) = section_body(&lines, "%prep").ok_or("the spec has no %prep section")?;
+        let mut at = end;
+        while at > start && lines[at - 1].trim().is_empty() {
+            at -= 1;
+        }
+        out = splice(&lines, at, &add, spec.ends_with('\n'));
     }
-    Ok(splice(&lines, at, &add, spec.ends_with('\n')))
+    if !installed.is_empty() {
+        match apply_unittest_through_pytest(&out, &installed) {
+            Ok(s) => {
+                out = s;
+                done.extend(installed.iter().map(|t| t.id.clone()));
+            }
+            Err(why) if done.is_empty() => {
+                return Err(format!(
+                    "the failing unittest modules are not in the unpacked source, and they cannot \
+                     be skipped through the runner either: {why}"
+                ));
+            }
+            // The tests found in the source were dropped; the rest stay for the ladder.
+            Err(_) => {}
+        }
+    }
+    Ok((out, done))
 }
 
 fn splice(lines: &[&str], at: usize, add: &[String], trailing_newline: bool) -> String {
@@ -459,11 +707,15 @@ pub fn drop_failing_tests(
     let room = MAX_PER_ROUND.min(MAX_IN_SPEC - used);
     let chosen: Vec<&FailingTest> = fresh.iter().take(room).collect();
     let runner = chosen[0].runner;
-    let chosen: Vec<&FailingTest> = chosen.into_iter().filter(|t| t.runner == runner).collect();
+    let mut chosen: Vec<&FailingTest> = chosen.into_iter().filter(|t| t.runner == runner).collect();
     let spec_out = match runner {
         Runner::Pytest => apply_pytest(spec, &chosen)?,
         Runner::Ctest => apply_ctest(spec, &chosen)?,
-        Runner::Unittest => apply_unittest(spec, &chosen, source_has)?,
+        Runner::Unittest => {
+            let (s, ids) = apply_unittest(spec, &chosen, source_has)?;
+            chosen.retain(|t| ids.contains(&t.id));
+            s
+        }
     };
     let omitted = fresh.len() - chosen.len();
     Ok(Dropped {
@@ -620,5 +872,90 @@ mod tests {
         let log = "FAILED tests/t.py::test_a - AssertionError: 100% wrong\n== 1 failed, 4 passed in 1s ==\n";
         let got = drop_failing_tests(SPEC, log, &none).unwrap();
         assert!(got.spec.contains("100%% wrong"), "{}", got.spec);
+    }
+
+    const INSTALLED_LOG: &str = "[  20s] FAIL: test_roundtrip (pkg.tests.test_codec.CodecTest.test_roundtrip)\n[  20s] ERROR: test_other (pkg.tests.test_codec.CodecTest)\n";
+
+    fn installed_spec(check: &str) -> String {
+        format!("Name: python-pkg\nBuildRequires:  %{{python_module pip}}\nBuildRequires:  python-rpm-macros\n\n%prep\n%autosetup\n\n%build\n%pyproject_wheel\n\n%check\n{check}\n\n%files\n")
+    }
+
+    #[test]
+    fn installed_module_unittest_failures_move_the_check_to_pytest_with_a_k_expression() {
+        let spec = installed_spec("%python_exec -m unittest -v pkg.tests");
+        let got = drop_failing_tests(&spec, INSTALLED_LOG, &none).unwrap();
+        assert_eq!(got.tests.len(), 2);
+        assert!(got.spec.contains("%python_exec -m pytest -v --pyargs pkg.tests"), "{}", got.spec);
+        assert!(got.spec.contains("BuildRequires:  %{python_module pytest}"), "{}", got.spec);
+        assert!(got.spec.contains("# evidence: FAIL: test_roundtrip (pkg.tests.test_codec.CodecTest.test_roundtrip)"), "{}", got.spec);
+        assert!(got.spec.contains("-k 'not (test_codec and CodecTest and test_roundtrip) and not (test_codec and CodecTest and test_other)'"), "{}", got.spec);
+        let check = got.spec.split("%check\n").nth(1).unwrap();
+        assert!(check.find("-k 'not").unwrap() < check.find("-m pytest").unwrap());
+        // The BuildRequires sits with the others, before %prep.
+        assert!(got.spec.find("python_module pytest").unwrap() < got.spec.find("%prep").unwrap());
+        assert_eq!(dropped_count(&got.spec), 2);
+        // The same tests again are refused: the drop did not take effect.
+        assert!(drop_failing_tests(&got.spec, INSTALLED_LOG, &none).unwrap_err().contains("already dropped"));
+    }
+
+    #[test]
+    fn a_later_round_extends_the_single_k_expression() {
+        let spec = installed_spec("%python_exec -m unittest discover -s pkg/tests");
+        let first = drop_failing_tests(&spec, INSTALLED_LOG, &none).unwrap();
+        assert!(first.spec.contains("-m pytest pkg/tests"), "{}", first.spec);
+        let more = "FAIL: test_new (pkg.tests.test_io.IoTest.test_new)\n";
+        let second = drop_failing_tests(&first.spec, more, &none).unwrap();
+        assert_eq!(second.spec.matches("-k '").count(), 1, "{}", second.spec);
+        assert!(second.spec.contains("and not (test_io and IoTest and test_new)'"), "{}", second.spec);
+        assert!(second.spec.contains("test_roundtrip"), "{}", second.spec);
+        assert_eq!(second.spec.matches("python_module pytest").count(), 1);
+    }
+
+    #[test]
+    fn an_installed_unittest_failure_under_a_pytest_check_uses_pytest_addopts() {
+        let spec = installed_spec("%pytest --pyargs pkg");
+        let got = drop_failing_tests(&spec, INSTALLED_LOG, &none).unwrap();
+        assert!(got.spec.contains("%pytest --pyargs pkg"), "{}", got.spec);
+        assert!(got.spec.contains("export PYTEST_ADDOPTS=\"${PYTEST_ADDOPTS:-} -k 'not (test_codec"), "{}", got.spec);
+        assert!(got.spec.contains("python_module pytest"), "{}", got.spec);
+        // A spec that already requires pytest gets no second one.
+        let with = spec.replace("python-rpm-macros", "python-rpm-macros\nBuildRequires:  %{python_module pytest}");
+        let got = drop_failing_tests(&with, INSTALLED_LOG, &none).unwrap();
+        assert_eq!(got.spec.matches("python_module pytest").count(), 1);
+    }
+
+    #[test]
+    fn installed_unittest_failures_go_back_to_the_ladder_with_the_exact_reason() {
+        for (check, needle) in [
+            ("tox -e py3", "through `tox`"),
+            ("make check", "through `make`"),
+            ("echo nothing", "no unittest or pytest invocation"),
+            ("%python_exec -m unittest -p x pkg", "no pytest equivalent"),
+            ("%{python_expand $python -m unittest pkg}", "shell or macro syntax"),
+            ("%pytest -k 'not slow'", "own `-k`"),
+        ] {
+            let err = drop_failing_tests(&installed_spec(check), INSTALLED_LOG, &none).unwrap_err();
+            assert!(err.contains(needle), "{check}: {err}");
+            assert!(err.contains("not in the unpacked source"), "{check}: {err}");
+        }
+        // No spelling of pytest's BuildRequires known.
+        let bare = "Name: x\n\n%prep\n%autosetup\n\n%check\n%python_exec -m unittest\n";
+        assert!(drop_failing_tests(bare, INSTALLED_LOG, &none).unwrap_err().contains("BuildRequires"));
+    }
+
+    #[test]
+    fn source_and_installed_modules_are_dropped_each_their_own_way_in_one_round() {
+        let log = "FAIL: test_a (pkg.tests.test_in.A.test_a)\nFAIL: test_b (pkg.tests.test_out.B.test_b)\n";
+        let spec = installed_spec("%python_exec -m unittest pkg.tests");
+        let have = |p: &str| p == "pkg/tests/test_in.py";
+        let got = drop_failing_tests(&spec, log, &have).unwrap();
+        assert_eq!(got.tests.len(), 2);
+        assert!(got.spec.contains("sed -i -E '/^class A"), "{}", got.spec);
+        assert!(got.spec.contains("not (test_out and B and test_b)"), "{}", got.spec);
+        // The runner cannot take it: only the source one is dropped, the other is omitted.
+        let spec = installed_spec("tox");
+        let got = drop_failing_tests(&spec, log, &have).unwrap();
+        assert_eq!(got.tests.len(), 1);
+        assert_eq!(got.omitted, 1);
     }
 }
