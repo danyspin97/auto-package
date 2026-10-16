@@ -313,7 +313,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     if !a.dry_run {
         *summary = Some(format!(
             "{}{}",
-            print_run_summary(&memory, &branch_project, &a.distro, &a.arch),
+            print_run_summary(&memory, &branch_project, &a.distro, &a.arch, &ctx.state_root),
             up::summary_text(&branch_project, &report.results, &report.paths, a.submit)
         ));
     }

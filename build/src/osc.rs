@@ -1897,6 +1897,24 @@ mod published_binary_tests {
     }
 
     #[test]
+    fn rpmlint_logs_are_stashed_per_package_and_taken_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rpmlint.log"), "a: E: bad-x y\n").unwrap();
+        stash_rpmlint_log(dir.path(), "python-a");
+        assert!(!dir.path().join("rpmlint.log").exists());
+        std::fs::write(dir.path().join("rpmlint.log"), "flavor: W: x\n").unwrap();
+        stash_rpmlint_log(dir.path(), "python-a:openmpi");
+        std::fs::write(dir.path().join("rpmlint.log"), "b: E: z\n").unwrap();
+        stash_rpmlint_log(dir.path(), "python-ab");
+        let taken = take_rpmlint_logs(dir.path(), "python-a");
+        assert_eq!(taken.len(), 2, "{taken:?}");
+        assert_eq!(taken[0].0, "python-a");
+        assert!(take_rpmlint_logs(dir.path(), "python-a").is_empty());
+        assert_eq!(rpmlint_errors(&taken[0].1), ["a: E: bad-x y"]);
+        assert!(rpmlint_errors(&taken[1].1).is_empty());
+    }
+
+    #[test]
     fn an_empty_rpmlintrc_goes_with_its_source_line() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -6092,9 +6110,58 @@ pub fn download_built_rpms(
             }
             get_binaries(project, name, repo, arch, rpms_dir, emit)
         })?;
+        stash_rpmlint_log(rpms_dir, name);
         downloaded_count += downloaded_rpm_count(listing.as_deref(), rpms_dir);
     }
     Ok(downloaded_count)
+}
+
+/// Directory under `rpms_dir` holding the `rpmlint.log` OBS published for each
+/// package (and multibuild flavor) downloaded, until the pipeline records it.
+const RPMLINT_STASH: &str = ".rpmlint";
+
+/// `osc getbinaries` writes OBS's `rpmlint.log` next to the RPMs, where the next
+/// package's download overwrites it. Move it to a file of its own for `name`.
+fn stash_rpmlint_log(rpms_dir: &Path, name: &str) {
+    let log = rpms_dir.join("rpmlint.log");
+    if !log.is_file() {
+        return;
+    }
+    let dir = rpms_dir.join(RPMLINT_STASH);
+    if fs::create_dir_all(&dir).is_ok() {
+        let _ = fs::rename(&log, dir.join(format!("{name}.log")));
+    }
+}
+
+/// The stashed rpmlint logs of `pkg` and its multibuild flavors
+/// (`pkg:flavor`), as `(name, text)`, removed from the stash.
+pub fn take_rpmlint_logs(rpms_dir: &Path, pkg: &str) -> Vec<(String, String)> {
+    let Ok(rd) = fs::read_dir(rpms_dir.join(RPMLINT_STASH)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let file = e.file_name().to_string_lossy().into_owned();
+        let Some(name) = file.strip_suffix(".log") else {
+            continue;
+        };
+        if (name == pkg || name.strip_prefix(pkg).is_some_and(|r| r.starts_with(':')))
+            && let Ok(text) = fs::read_to_string(e.path())
+        {
+            let _ = fs::remove_file(e.path());
+            out.push((name.to_string(), text));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The error lines of an rpmlint log (`pkg.rpm: E: rule detail`).
+pub fn rpmlint_errors(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|l| l.contains(": E: "))
+        .map(|l| l.trim().to_string())
+        .collect()
 }
 
 fn obs_build_once(

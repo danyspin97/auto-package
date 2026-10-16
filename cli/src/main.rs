@@ -1276,7 +1276,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
-            *summary = Some(print_run_summary(&memory, &project, &distro, &arch));
+            *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
 
             result?;
             if !added_failures.is_empty() {
@@ -1455,7 +1455,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
-            *summary = Some(print_run_summary(&memory, &project, &distro, &arch));
+            *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
 
             result?;
         }
@@ -1913,6 +1913,28 @@ fn package_outcome(result: &PipelineResult) -> PackageOutcome {
 /// Lists what this run built, what is queued and what the project already has
 /// built for this distro and arch, so the outcome is readable without
 /// scrolling the log.
+/// The error lines of the latest rpmlint section in `state/<pkg>/rpmlint.log`
+/// of each built package, as `pkg: line`.
+fn rpmlint_errors_of(state_root: &Path, built: &[&String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for pkg in built {
+        let Some(ws) = ap_build::workspace::Workspace::find_existing(state_root, &[pkg.as_str()])
+        else {
+            continue;
+        };
+        let text = std::fs::read_to_string(ws.dir().join("rpmlint.log")).unwrap_or_default();
+        // The sections of the last build: from the first header of the last
+        // run (the log of a package and its flavors share one `unix time`).
+        let last = text.rfind("=== rpmlint of").map_or("", |at| &text[at..]);
+        out.extend(
+            ap_build::osc::rpmlint_errors(last)
+                .into_iter()
+                .map(|l| format!("{pkg}: {l}")),
+        );
+    }
+    out
+}
+
 /// A package's dependencies as the summary lists them: one that is blocked reads
 /// `blocked X`, so a package waiting on it is not mistaken for one that will
 /// get its turn.
@@ -1930,7 +1952,13 @@ fn waiting_list(deps: &[String], blocked: &[(&String, &String)]) -> String {
         .join(", ")
 }
 
-fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &str) -> String {
+fn print_run_summary(
+    memory: &MemorySink,
+    project: &str,
+    distro: &str,
+    arch: &str,
+    state_root: &Path,
+) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     // Latest outcome per package, so a package that later built is not also
@@ -1990,6 +2018,14 @@ fn print_run_summary(memory: &MemorySink, project: &str, distro: &str, arch: &st
         let _ = writeln!(out, "\nBlocked, nothing more to try ({}):", blocked.len());
         for (pkg, reason) in &blocked {
             let _ = writeln!(out, "  {pkg}: {reason}");
+        }
+    }
+
+    let lint = rpmlint_errors_of(state_root, &built);
+    if !lint.is_empty() {
+        let _ = writeln!(out, "\nrpmlint errors in the final RPMs ({}):", lint.len());
+        for line in &lint {
+            let _ = writeln!(out, "  {line}");
         }
     }
 
@@ -4175,6 +4211,23 @@ mod blocked_summary_tests {
             "blocked torch, numpy"
         );
         assert_eq!(waiting_list(&deps, &[]), "torch, numpy");
+    }
+
+    #[test]
+    fn the_summary_lists_the_rpmlint_errors_of_the_latest_build_only() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = ap_build::workspace::Workspace::open(root.path(), "python-x").unwrap();
+        std::fs::write(
+            ws.dir().join("rpmlint.log"),
+            "=== rpmlint of python-x 1 (unix time 1) ===\nx.rpm: E: old-error a\n\n\
+             === rpmlint of python-x 2 (unix time 2) ===\nx.rpm: W: warn\nx.rpm: E: new-error b\n",
+        )
+        .unwrap();
+        let pkg = "python-x".to_string();
+        assert_eq!(
+            rpmlint_errors_of(root.path(), &[&pkg]),
+            ["python-x: x.rpm: E: new-error b"]
+        );
     }
 
     #[test]

@@ -2136,7 +2136,10 @@ fn reconcile_rpms(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Report
         &config.rpms_dir,
         emit,
     ) {
-        Ok(n) if n > 0 => true,
+        Ok(n) if n > 0 => {
+            record_rpmlint(config, ws, reporter);
+            true
+        }
         Ok(_) => {
             reporter.report(&Event::Warning {
                 step: None,
@@ -4459,6 +4462,50 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
     }
 }
 
+/// Append the rpmlint result of the RPMs just downloaded for this package to
+/// `state/<pkg>/rpmlint.log`, one dated section per run of rpmlint, and warn
+/// about its errors. The log OBS publishes is overwritten with every build, so
+/// this file is the only record of earlier ones.
+fn record_rpmlint(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Reporter) {
+    let logs = osc::take_rpmlint_logs(&config.rpms_dir, &config.rpm_name);
+    if logs.is_empty() {
+        return;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut text = String::new();
+    for (name, log) in &logs {
+        text.push_str(&format!(
+            "=== rpmlint of {name} {} (unix time {secs}) ===\n{log}\n",
+            config.version
+        ));
+        let errors = osc::rpmlint_errors(log);
+        if !errors.is_empty() {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!(
+                    "rpmlint reports {} error(s) in the RPMs of {name}: {}",
+                    errors.len(),
+                    errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+                ),
+            });
+        }
+    }
+    let path = ws.dir().join("rpmlint.log");
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+    if let Err(e) = appended {
+        reporter.report(&Event::Warning {
+            step: None,
+            message: format!("could not append to {}: {e}", path.display()),
+        });
+    }
+}
+
 /// A successful OBS build: record it and report the package as built.
 fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -> PipelineResult {
     let RunCtx {
@@ -4470,6 +4517,7 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
     } = ctx;
     let reporter = *reporter;
     let build_step = build_step.finish(StepOutcome::Ok);
+    record_rpmlint(config, ws, reporter);
     st.step_attempts
         .skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
     update_state(ws, reporter, |state| {
