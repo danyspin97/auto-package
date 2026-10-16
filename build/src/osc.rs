@@ -1778,6 +1778,62 @@ mod tracked_stray_tests {
 }
 
 #[cfg(test)]
+mod pending_changes_tests {
+    use super::*;
+
+    const SEP: &str = "-------------------------------------------------------------------";
+
+    fn entry(date: &str, bullet: &str) -> String {
+        format!("{SEP}\n{date} - Me <me@x.org>\n\n- {bullet}\n\n")
+    }
+
+    #[test]
+    fn the_entries_of_one_upload_become_one_entry_with_every_bullet() {
+        let committed = entry("Mon", "Initial packaging");
+        let current = format!(
+            "{}{}{committed}",
+            entry("Wed", "Relax the numpy bound"),
+            entry("Tue", "Add a patch")
+        );
+        let merged = merge_pending_changes(&current, &committed).unwrap();
+        assert_eq!(
+            merged,
+            format!("{SEP}\nWed - Me <me@x.org>\n\n- Add a patch\n- Relax the numpy bound\n\n{committed}")
+        );
+        // Merging again finds one new entry: nothing to do.
+        assert!(merge_pending_changes(&merged, &committed).is_none());
+    }
+
+    #[test]
+    fn a_new_package_merges_against_an_empty_committed_file() {
+        let current = format!("{}{}", entry("Tue", "Fix"), entry("Mon", "Initial packaging"));
+        let merged = merge_pending_changes(&current, "").unwrap();
+        assert!(merged.contains("- Initial packaging\n- Fix\n"));
+        assert_eq!(merged.matches(SEP).count(), 1);
+    }
+
+    #[test]
+    fn an_edited_history_is_left_alone() {
+        let current = format!("{}{}", entry("Tue", "Fix"), entry("Mon", "Other"));
+        assert!(merge_pending_changes(&current, &entry("Mon", "Initial")).is_none());
+    }
+
+    #[test]
+    fn the_file_is_merged_against_the_committed_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".osc/sources")).unwrap();
+        let committed = entry("Mon", "Initial packaging");
+        fs::write(dir.path().join(".osc/sources/p.changes"), &committed).unwrap();
+        let current = format!("{}{}{committed}", entry("Wed", "B"), entry("Tue", "A"));
+        fs::write(dir.path().join("p.changes"), current).unwrap();
+        merge_pending_changes_file(dir.path());
+        let text = fs::read_to_string(dir.path().join("p.changes")).unwrap();
+        assert_eq!(text.matches(SEP).count(), 2);
+        assert!(text.contains("- A\n- B\n"));
+    }
+}
+
+#[cfg(test)]
 mod published_binary_tests {
     use super::*;
 
@@ -2254,7 +2310,83 @@ pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> 
             stderr: out.stderr,
         });
     }
+    merge_pending_changes_file(checkout_dir);
     Ok(())
+}
+
+fn is_changes_separator(l: &str) -> bool {
+    let l = l.trim();
+    l.len() >= 20 && l.bytes().all(|b| b == b'-')
+}
+
+/// One bullet list per upload: the entries `osc vc` added to `current` since
+/// `committed` (the `.changes` OBS has) become the newest entry alone, headed by
+/// its header, with the bullets of all of them, oldest first. `None` when there
+/// is nothing to merge: fewer than two new entries, or `current` does not end
+/// with the committed text (somebody edited the old entries).
+fn merge_pending_changes(current: &str, committed: &str) -> Option<String> {
+    let new = current.strip_suffix(committed)?;
+    let mut blocks: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in new.lines() {
+        if is_changes_separator(line) {
+            blocks.push((String::new(), Vec::new()));
+        } else if let Some((header, body)) = blocks.last_mut() {
+            if header.is_empty() {
+                *header = line.to_string();
+            } else {
+                body.push(line);
+            }
+        } else if !line.trim().is_empty() {
+            return None;
+        }
+    }
+    if blocks.len() < 2 {
+        return None;
+    }
+    let mut bullets: Vec<String> = Vec::new();
+    for (_, body) in blocks.iter().rev() {
+        let text = body.join("\n");
+        let text = text.trim_matches('\n').trim_end();
+        if !text.is_empty() && !bullets.iter().any(|b| b == text) {
+            bullets.push(text.to_string());
+        }
+    }
+    let mut out = format!(
+        "{}\n{}\n\n{}\n\n",
+        "-".repeat(67),
+        blocks[0].0,
+        bullets.join("\n")
+    );
+    out.push_str(committed);
+    Some(out)
+}
+
+/// [`merge_pending_changes`] on the checkout's `.changes`, against the copy OBS
+/// has (`.osc/sources/`; none for a file not committed yet). Best effort: a
+/// file that cannot be read or written is left as `osc vc` made it.
+fn merge_pending_changes_file(checkout_dir: &Path) {
+    let Ok(rd) = fs::read_dir(checkout_dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "changes"))
+        .collect();
+    files.sort();
+    let Some(file) = files.first() else {
+        return;
+    };
+    let Ok(current) = fs::read_to_string(file) else {
+        return;
+    };
+    let committed = file
+        .file_name()
+        .and_then(|n| fs::read_to_string(checkout_dir.join(".osc/sources").join(n)).ok())
+        .unwrap_or_default();
+    if let Some(merged) = merge_pending_changes(&current, &committed) {
+        let _ = fs::write(file, merged);
+    }
 }
 
 /// Whether the newest entry of a `.changes` file (the text between its first
