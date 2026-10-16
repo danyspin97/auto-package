@@ -245,6 +245,15 @@ pub struct PkgState {
     /// reviewed just because the version tag matches.
     #[serde(default)]
     pub reviewed_spec_hash: Option<u64>,
+    /// Hash of the spec the Review turn declared `blocked` (it cannot be built
+    /// as it stands), with the agent's reason. The same spec is not reviewed
+    /// again: it would only block again, at the price of a turn, and the
+    /// package is not built while it stands (torchcodec: seven identical
+    /// blocked reviews). A changed spec, or `--force`, reviews afresh.
+    #[serde(default)]
+    pub blocked_spec_hash: Option<u64>,
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
     /// Total model-call USD spent during the `cumulative_spent_run_id`
     /// run. Persisted so an outer-loop retry WITHIN that run (which
     /// recreates `run_package` from scratch for the same package)
@@ -491,6 +500,12 @@ impl PkgState {
     #[allow(clippy::absurd_extreme_comparisons)]
     pub fn policy_current(&self) -> bool {
         self.policy_version >= POLICY_VERSION
+    }
+
+    /// The reason the Review turn blocked exactly this spec content, if it did.
+    pub fn blocked_review(&self, spec_content: &str) -> Option<&str> {
+        (self.blocked_spec_hash == Some(hash_spec(spec_content)))
+            .then(|| self.blocked_reason.as_deref().unwrap_or("blocked"))
     }
 
     pub fn is_reviewed(&self, version: &str, spec_content: &str) -> bool {
@@ -2664,6 +2679,19 @@ fn review_stage(
         );
 
     let patching = config.patch_request.as_deref();
+    // A spec the Review already declared blocked is not reviewed again, and
+    // not built: nothing changed since the turn said it cannot be.
+    if patching.is_none()
+        && !config.force
+        && let Some(reason) = PkgState::load(ws)
+            .blocked_review(&std::fs::read_to_string(spec_path).unwrap_or_default())
+            .map(str::to_string)
+    {
+        return Err(ctx.failed(format!(
+            "{rpm_name}: Review blocked this spec earlier and it has not changed ({reason}); \
+             not reviewing or building it again"
+        )));
+    }
     if config.no_agent {
         st.step_attempts
             .skip(reporter, StepKind::AgentTurn, SkipReason::NoAgent);
@@ -2780,7 +2808,18 @@ fn review_stage(
                 &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => return Err(ctx.failed(reason)),
+                Err(reason) => {
+                    if patching.is_none()
+                        && matches!(outcome.action, crate::agent::Action::Blocked { .. })
+                    {
+                        let hash = hash_spec(&spec_before);
+                        update_state(ws, reporter, |state| {
+                            state.blocked_spec_hash = Some(hash);
+                            state.blocked_reason = Some(reason.clone());
+                        });
+                    }
+                    return Err(ctx.failed(reason));
+                }
             };
             // A patch an earlier run already made (the turn finds nothing left
             // to do) is not a failure to patch.
@@ -2801,6 +2840,8 @@ fn review_stage(
             update_state(ws, reporter, |state| {
                 state.reviewed_version = Some(config.version.clone());
                 state.reviewed_spec_hash = Some(spec_hash);
+                state.blocked_spec_hash = None;
+                state.blocked_reason = None;
                 if let Some(h) = patched
                     && !state.patched_problems.contains(&h)
                 {
@@ -11570,6 +11611,20 @@ mod settled_tests {
 #[cfg(test)]
 mod hygiene_tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_review_is_remembered_for_the_same_spec_only() {
+        let st = PkgState {
+            blocked_spec_hash: Some(hash_spec("spec A")),
+            blocked_reason: Some("needs a compiler".into()),
+            ..Default::default()
+        };
+        assert_eq!(st.blocked_review("spec A"), Some("needs a compiler"));
+        assert_eq!(st.blocked_review("spec B"), None);
+        assert_eq!(PkgState::default().blocked_review("spec A"), None);
+        let back: PkgState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+        assert_eq!(back.blocked_review("spec A"), Some("needs a compiler"));
+    }
 
     fn write_state(root: &Path, name: &str, outcome: &str, reason: Option<&str>) {
         let ws = Workspace::open(root, name).unwrap();
