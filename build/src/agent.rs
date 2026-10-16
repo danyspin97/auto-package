@@ -1347,16 +1347,13 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    Always remove both the `.py` file and its corresponding `__pycache__` entry;
    removing only the `.py` leaves orphan `.pyc` files that trigger the same error.
 
-   **If the installed package carries a `dist-info/RECORD` file, delete
-   the corresponding RECORD lines too.** `RECORD` is pip's manifest of
-   every file the wheel installed; downstream tooling (`pip check`,
-   introspection via `importlib.metadata.files()`) compares it against
-   the filesystem and reports deleted entries as broken. The one-liner:
-     sed -i -e '/<name>-<ext>,/d' %{buildroot}%{$python_sitearch}/<pkg>-%{version}.dist-info/RECORD
-   For a batch delete (e.g. the C sources after a Cython compile — real
-   example `python-pandas`), match on the shared extension:
+   **Do not edit `dist-info/RECORD` after removing files.** Nothing in rpm reads
+   it: the package manager is rpm, `%files` is the manifest, and a `sed` on
+   RECORD (also under `%python_expand`) after an `rm` changes nothing that is
+   checked. Remove the files, leave RECORD alone, and do not write the `sed`.
+   For a batch delete (e.g. the C sources after a Cython compile, real example
+   `python-pandas`) a `find ... -name '*.[ch]' -delete` is enough:
      find %{buildroot}%{$python_sitearch}/<pkg>/_libs -name '*.[ch]' -delete
-     sed -i -e '/\.[ch],/d' %{buildroot}%{$python_sitearch}/<pkg>-%{version}.dist-info/RECORD
 
 24. rpmlint devel-file-in-non-devel-package (PYTHON packages that bundle
    headers; for a C/C++ library's OWN installed headers do the opposite —
@@ -2650,6 +2647,9 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    resort for a package whose every module needs the device, and only after you
    tried a driver-free import and quote the failure; a package that ships Python
    modules is imported. Never leave the whole upstream GPU suite in `%check`.
+   A `%check` with more than six `--ignore` options is rejected before the
+   build: the suite has one root cause (a device, a missing fixture directory),
+   so replace it by an import smoke test and the few tests that can pass.
    Tests run against the installed tree, from a clean working directory (not
    from the unpacked source, where the build tree's own copy and its
    `build/lib/*.so` shadow the package: `tilelang`'s 282 collection errors).
@@ -2916,6 +2916,25 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    and check that the `_service` `cargo_vendor` has `update=false`; fix all of
    them in the same edit. (d) `pybind11`: the headers come from
    `pybind11-devel`, not `%{python_module pybind11}` alone.
+
+83. **Split wheels that share one namespace tree: one owner per directory, arch
+   files in sitearch.** When one project ships several wheels that unpack into
+   the same top-level directory (`nvidia-cutlass-dsl-libs-base/-core/-cu12/-cu13`
+   all fill `nvidia_cutlass_dsl/python_packages/...`), (a) a directory that is a
+   namespace (no `__init__.py`) is `%dir` in each package and only the files a
+   wheel really contains are listed; a package directory that two wheels both
+   fill must be owned by the one that has its `__init__.py`, and the others
+   `Requires:` it instead of listing it. (b) Payload with compiled code (the
+   `.so` files of the `-cu12`/`-cu13` flavors) goes to `%{python_sitearch}`
+   whatever `Root-Is-Purelib` says when it differs by arch; only pure Python is
+   `%{python_sitelib}`. A pure-Python wheel and an arch wheel must not write
+   into one directory from two different site directories. (c) Never `sed` or
+   rewrite another package's `dist-info/RECORD`, and never make the `-cu13` flavor
+   `%check` import a module whose other half (`..._mlir.ir`) lives in a wheel it
+   does not `Requires:`: give it that `Requires:` and import the chain
+   (convention 76). (d) A downstream wheel (`tokenspeed-mla`) that fails to
+   import because of a split wheel is fixed in the split wheel's spec, not by
+   copying files.
 
 ── Rust / Cargo packages ─────────────────────────────────────────────────────
 
