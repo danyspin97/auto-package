@@ -374,6 +374,10 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
     let owners = dir_owners(&members);
     let libs = has_shared_libs(&layout);
     let arch = &input.arch;
+    let rdma_lib = layout
+        .members
+        .iter()
+        .any(|m| m.dest.rsplit('/').next().is_some_and(|f| f.starts_with("libcufile_rdma.so")));
 
     let mut s = String::new();
     s.push_str(&format!(
@@ -425,13 +429,32 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
              %global __requires_exclude ^(libcuda\\.so\\.1|libnvidia-ml\\.so\\.1).*$\n",
         );
     }
-    if layout.members.iter().any(|m| is_aux(&m.dest)) {
-        s.push_str(
-            "\n\
-             # Sample programs and helper scripts need perl, bash or python, and tools\n\
-             # of the host (libmlx5, ...): those are not requirements of the libraries.\n\
-             %global __requires_exclude_from ^%{cuda_prefix}/(samples|tools|doc|docs|man|extras/CUPTI/(samples|doc))/\n",
-        );
+    // GPUDirect Storage's RDMA plug-in links the host's InfiniBand stack
+    // (libmlx5, librdmacm, libnuma); a plain libcufile user does not need it, so
+    // its dependencies are Recommends of the package, not Requires.
+    let aux = layout.members.iter().any(|m| is_aux(&m.dest));
+    if aux || rdma_lib {
+        let mut patterns: Vec<&str> = Vec::new();
+        let mut why = String::new();
+        if aux {
+            patterns
+                .push("^%{cuda_prefix}/(samples|tools|doc|docs|man|extras/CUPTI/(samples|doc))/");
+            why.push_str(
+                "# Sample programs and helper scripts need perl, bash or python, and tools\n\
+                 # of the host (libmlx5, ...): those are not requirements of the libraries.\n",
+            );
+        }
+        if rdma_lib {
+            patterns.push("^%{cuda_prefix}/lib64/libcufile_rdma\\.so");
+            why.push_str(
+                "# libcufile_rdma.so links libmlx5, librdmacm and libnuma, which only an\n\
+                 # RDMA setup uses: they are Recommends, not Requires, of the package.\n",
+            );
+        }
+        s.push_str(&format!(
+            "\n{why}%global __requires_exclude_from {}\n",
+            patterns.join("|")
+        ));
     }
     s.push_str(&format!(
         "\n\
@@ -452,6 +475,11 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
     ));
     if !split {
         s.push_str("Provides:       %{name}-devel = %{version}-%{release}\n");
+    }
+    if rdma_lib {
+        s.push_str(
+            "Recommends:     libmlx5-1\nRecommends:     librdmacm1\nRecommends:     libnuma1\n",
+        );
     }
     s.push_str(&format!(
         "\n\
@@ -517,6 +545,12 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
         ));
     }
     if libs {
+        // Every library component owns the same `cuda-<ver>.conf` (identical
+        // content, which rpm accepts) rather than depending on a separate
+        // `cuda-<ver>-filesystem` package: the generator makes one spec per
+        // manifest component and has no package model for a component-less
+        // spec, so such a package would need its own source and release flow
+        // for one line of text.
         s.push_str(&format!(
             "mkdir -p %{{buildroot}}%{{_sysconfdir}}/ld.so.conf.d\n\
              echo %{{cuda_prefix}}/lib64 > %{{buildroot}}%{{_sysconfdir}}/ld.so.conf.d/{}\n",
@@ -1038,8 +1072,15 @@ samples/cufile_sample_001.cc
             spec.contains("%global __requires_exclude_from ^%{cuda_prefix}/(samples|tools|"),
             "{spec}"
         );
+        // The RDMA plug-in's host libraries are Recommends, not Requires.
+        assert!(spec.contains("|^%{cuda_prefix}/lib64/libcufile_rdma\\.so\n"), "{spec}");
+        for r in ["libmlx5-1", "librdmacm1", "libnuma1"] {
+            assert!(spec.contains(&format!("Recommends:     {r}\n")), "{spec}");
+        }
         // A component without such files has no exclude.
-        assert!(!redist_component_spec(&cudart()).contains("__requires_exclude_from"));
+        let plain = redist_component_spec(&cudart());
+        assert!(!plain.contains("__requires_exclude_from"));
+        assert!(!plain.contains("Recommends:"));
     }
 
     #[test]
