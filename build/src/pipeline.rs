@@ -9160,13 +9160,18 @@ fn generate_multi_flavor_wheel_spec(
             .as_deref()
             .and_then(ap_ecosystem::sdist::wheel_layout);
         let spec_text =
-            crate::spec::strip_ap_fix_comments(&crate::spec::wheel_multi_flavor_skeleton(
+            crate::spec::strip_ap_fix_comments(&crate::spec::wheel_multi_flavor_skeleton_shared(
                 &config.pkg_name,
                 &config.version,
                 &wheels,
                 &release,
                 root_is_purelib,
                 layout.as_ref(),
+                &crate::spec::sibling_wheels(
+                    &config.rpms_dir,
+                    checkout_dir.parent(),
+                    &config.pkg_name,
+                ),
             ));
         ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
@@ -9250,7 +9255,8 @@ fn generate_wheel_binary_spec(
 
     // Other wheels of the project already built into the same directories
     // (convention 83): co-owned, not listed whole.
-    let siblings = crate::spec::sibling_wheel_files(&config.rpms_dir, &config.pkg_name);
+    let siblings =
+        crate::spec::sibling_wheels(&config.rpms_dir, checkout_dir.parent(), &config.pkg_name);
     let spec_text = crate::spec::wheel_binary_skeleton_shared(
         &config.pkg_name,
         &config.version,

@@ -2919,19 +2919,28 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    them in the same edit. (d) `pybind11`: the headers come from
    `pybind11-devel`, not `%{python_module pybind11}` alone.
 
-83. **Split wheels that share one namespace tree: one owner per directory, arch
-   files in sitearch.** When one project ships several wheels that unpack into
-   the same top-level directory (`nvidia-cutlass-dsl-libs-base/-core/-cu12/-cu13`
-   all fill `nvidia_cutlass_dsl/python_packages/...`), (a) a directory that is a
-   namespace (no `__init__.py`) is `%dir` in each package and only the files a
-   wheel really contains are listed; a package directory that two wheels both
-   fill must be owned by the one that has its `__init__.py`, and the others
-   `Requires:` it instead of listing it. (b) Payload with compiled code (the
-   `.so` files of the `-cu12`/`-cu13` flavors) goes to `%{python_sitearch}`
-   whatever `Root-Is-Purelib` says when it differs by arch; only pure Python is
-   `%{python_sitelib}`. A pure-Python wheel and an arch wheel must not write
-   into one directory from two different site directories. (c) Never `sed` or
-   rewrite another package's `dist-info/RECORD`, and never make the `-cu13` flavor
+83. **Split wheels that share one namespace tree: one owner per directory, one
+   site directory for the tree.** When one project ships several wheels that
+   unpack into the same top-level directory (`nvidia-cutlass-dsl-libs-base/-core/
+   -cu12/-cu13` all fill `nvidia_cutlass_dsl/dsl_packages/...`), (a) a directory
+   that is a namespace (no `__init__.py`) is `%dir` in each package and only the
+   files a wheel really contains are listed; a package directory that two wheels
+   both fill must be owned by the one that has its `__init__.py`, and the others
+   `Requires:` it instead of listing it. The pipeline's wheel skeleton does this
+   from the sibling wheels' own file lists, whichever was built first: keep its
+   `%dir` lines and exact file entries. (b) The wheel's own `Root-Is-Purelib`
+   decides the site directory, not the `.so` files in it: a wheel that says
+   `true` stays in `%{python_sitelib}` with `ExclusiveArch` even when it ships
+   `.so` files (NVIDIA wheels find their sibling libraries relative to each
+   other inside one tree), and one that says `false` is `%{python_sitearch}`.
+   Never relocate a purelib wheel to `%{python_sitearch}` for its `.so`. The one
+   exception is a tree split across the two: a `false` wheel (`-base`, `-cu13`)
+   that fills the same top-level directory as a `true` sibling (`-core`, noarch)
+   cannot be imported from `lib64`, since a regular package in `lib` never sees
+   the other half; the skeleton then moves it into `%{python_sitelib}` in
+   `%install` (its `mv` lines, dist-info included, and `ExclusiveArch` stay).
+   Do not undo that, and do not add a second move. (c) Never `sed` or rewrite
+   another package's `dist-info/RECORD`, and never make the `-cu13` flavor
    `%check` import a module whose other half (`..._mlir.ir`) lives in a wheel it
    does not `Requires:`: give it that `Requires:` and import the chain
    (convention 76). (d) A downstream wheel (`tokenspeed-mla`) that fails to

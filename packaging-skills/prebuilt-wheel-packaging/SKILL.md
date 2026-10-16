@@ -48,7 +48,16 @@ must account for. Do this before touching %files; never guess the layout.
     with `%{python_sitelib}`. Use ONE site macro consistently in `%fdupes`,
     `%check` and `%files`, and do not flip it or add/remove `noarch` unless
     the unpacked `source/` proves the generator wrong — read the `WHEEL`
-    file, don't guess.
+    file, don't guess. The wheel tag never moves files to sitearch: a purelib
+    wheel with `.so` files stays in sitelib with `ExclusiveArch`.
+  * SPLIT wheels of one project that fill the same top-level directory
+    (`nvidia-cutlass-dsl-libs-base/-core/-cu12/-cu13`): each lists only its own
+    files and co-owns shared directories with `%dir` (the skeleton does this from
+    the sibling wheels, in any build order; keep it). The tree must live in ONE
+    site directory: if a `Root-Is-Purelib: false` wheel shares a top-level
+    directory with a `true` one, the skeleton moves the `false` wheel's tree into
+    `%{python_sitelib}` in `%install` (`mv`, dist-info included); keep those
+    lines and do not edit another package's RECORD.
 - `%check` for a wheel: there is no source tree, so check the installed
   files. Run any import from a fresh empty directory with
   `PYTHONPATH=%{buildroot}%{$python_sitelib}` (the same site macro the `%files` use) —
