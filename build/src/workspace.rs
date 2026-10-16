@@ -136,6 +136,17 @@ impl Workspace {
         Ok(Self { dir })
     }
 
+    /// Open the workspace of the first of `names` that already has one, without
+    /// creating a directory for a name nothing was ever built under (a read
+    /// path asking about a dependency by its RPM name, `ffmpeg-8`, must not
+    /// leave `state/python-ffmpeg-8` behind).
+    pub fn find_existing(state_root: &Path, names: &[&str]) -> Option<Self> {
+        names.iter().find_map(|n| {
+            let dir = state_root.join(sanitize_name(n));
+            dir.is_dir().then_some(Self { dir })
+        })
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -297,6 +308,16 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_existing_never_creates_a_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("ffmpeg-8")).unwrap();
+        assert!(Workspace::find_existing(tmp.path(), &["python-ffmpeg-8", "nope"]).is_none());
+        let ws = Workspace::find_existing(tmp.path(), &["python-ffmpeg-8", "ffmpeg-8"]).unwrap();
+        assert!(ws.dir().ends_with("ffmpeg-8"));
+        assert!(!tmp.path().join("python-ffmpeg-8").exists());
+    }
 
     #[test]
     fn sdist_is_extracted_only_for_the_tarball_it_came_from() {

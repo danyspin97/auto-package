@@ -958,8 +958,10 @@ pub fn select_target(
             // and goes to a patch (convention 62), not to a dependency that is
             // given up on.
             if conflict.kind == distro_bounds::Kind::DistroTooNew
-                && let Ok(ws) =
-                    Workspace::open(&config.state_root, &osc::rpm_name(&conflict.dependent))
+                && let Some(ws) = Workspace::find_existing(
+                    &config.state_root,
+                    &[&osc::rpm_name(&conflict.dependent), &conflict.dependent],
+                )
             {
                 update_state(&ws, reporter, |state| {
                     state.relax_dependency(&conflict.dependency, &conflict.distro_version);
@@ -2977,9 +2979,13 @@ fn missing_deps_from_turn(
     // its own that a dependent found wrong) is not a reason to drop it, since
     // being built is exactly what the defect is about.
     let already_patched = |p: &crate::agent::PatchRequest| {
-        Workspace::open(&ctx.config.state_root, &osc::rpm_name(&p.name))
-            .map(|w| patch_request_settled(&PkgState::load(&w).patched_problems, &p.problem))
-            .unwrap_or(false)
+        // `p.name` is an RPM name (`ffmpeg-8`) as often as a PyPI one.
+        Workspace::find_existing(
+            &ctx.config.state_root,
+            &[&osc::rpm_name(&p.name), &p.name],
+        )
+        .map(|w| patch_request_settled(&PkgState::load(&w).patched_problems, &p.problem))
+        .unwrap_or(false)
     };
     let mut patches: Vec<crate::agent::PatchRequest> = patch_dependencies
         .iter()
