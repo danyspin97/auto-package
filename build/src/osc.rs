@@ -5979,9 +5979,29 @@ pub fn obs_build(
     rpms_dir: &Path,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
+    build_with_retriggers(
+        pkg_name,
+        emit,
+        BROKEN_RETRIGGER_PAUSE,
+        || obs_build_once(project, pkg_name, repo, arch, log_path, rpms_dir, emit),
+        || trigger_rebuild(project, pkg_name, repo, arch, emit),
+    )
+}
+
+/// The retry loop of [`obs_build`], with the build and the re-trigger injected:
+/// a `broken` verdict with no build log behind it is re-triggered up to
+/// [`MAX_BROKEN_RETRIGGERS`] times, then stands as a plain `broken`. Any other
+/// result is returned as it came.
+fn build_with_retriggers(
+    pkg_name: &str,
+    emit: Emit<'_>,
+    pause: Duration,
+    mut once: impl FnMut() -> Result<(), Error>,
+    mut rebuild: impl FnMut() -> Result<(), Error>,
+) -> Result<(), Error> {
     let mut retriggers = 0;
     loop {
-        match obs_build_once(project, pkg_name, repo, arch, log_path, rpms_dir, emit) {
+        match once() {
             Err(Error::NotActionable(msg)) if msg == BROKEN_UNCONFIRMED => {
                 if retriggers >= MAX_BROKEN_RETRIGGERS {
                     return Err(Error::NotActionable(BROKEN_MESSAGE.to_string()));
@@ -5995,13 +6015,15 @@ pub fn obs_build(
                          ({retriggers}/{MAX_BROKEN_RETRIGGERS})"
                     ),
                 });
-                if let Err(e) = trigger_rebuild(project, pkg_name, repo, arch, emit) {
+                if let Err(e) = rebuild() {
                     emit.reporter.report(&Event::Warning {
                         step: emit.step,
                         message: format!("could not re-trigger the OBS build: {e}"),
                     });
                 }
-                sleep_interruptible(BROKEN_RETRIGGER_PAUSE);
+                if !pause.is_zero() {
+                    sleep_interruptible(pause);
+                }
             }
             other => return other,
         }
@@ -6079,6 +6101,34 @@ fn retry<T, E>(
 const GETBINARIES_ATTEMPTS: u32 = 4;
 const GETBINARIES_PAUSE: Duration = Duration::from_secs(20);
 
+/// One package's `getbinaries`, `get` injected: retried up to `attempts` times,
+/// and each try waits for free disk space first (a full disk fails the try with
+/// code 28 without running `get`).
+#[allow(clippy::too_many_arguments)]
+fn fetch_with_retries(
+    project: &str,
+    name: &str,
+    repo: &str,
+    arch: &str,
+    rpms_dir: &Path,
+    emit: Emit<'_>,
+    attempts: u32,
+    pause: Duration,
+    mut get: impl FnMut() -> Result<(), Error>,
+) -> Result<(), Error> {
+    retry(attempts, pause, || {
+        if let Err(stderr) = crate::workspace::await_disk_space(rpms_dir, emit.reporter, emit.step)
+        {
+            return Err(Error::OscFailed {
+                cmd: format!("getbinaries {project} {name} {repo} {arch}"),
+                code: 28,
+                stderr,
+            });
+        }
+        get()
+    })
+}
+
 /// Download the RPMs of `pkg_name` (and its multibuild flavors) into
 /// `rpms_dir`, retrying a failing `osc getbinaries`. Returns how many of the
 /// RPMs OBS lists landed.
@@ -6098,18 +6148,17 @@ pub fn download_built_rpms(
         if let Some(names) = &listing {
             remove_superseded_rpms(rpms_dir, names);
         }
-        retry(GETBINARIES_ATTEMPTS, GETBINARIES_PAUSE, || {
-            if let Err(stderr) =
-                crate::workspace::await_disk_space(rpms_dir, emit.reporter, emit.step)
-            {
-                return Err(Error::OscFailed {
-                    cmd: format!("getbinaries {project} {name} {repo} {arch}"),
-                    code: 28,
-                    stderr,
-                });
-            }
-            get_binaries(project, name, repo, arch, rpms_dir, emit)
-        })?;
+        fetch_with_retries(
+            project,
+            name,
+            repo,
+            arch,
+            rpms_dir,
+            emit,
+            GETBINARIES_ATTEMPTS,
+            GETBINARIES_PAUSE,
+            || get_binaries(project, name, repo, arch, rpms_dir, emit),
+        )?;
         stash_rpmlint_log(rpms_dir, name);
         downloaded_count += downloaded_rpm_count(listing.as_deref(), rpms_dir);
     }
@@ -7619,6 +7668,122 @@ mod transient_broken_tests {
         fs::write(&log, "[1s] error: bad source\n").unwrap();
         assert!(broken_is_confirmed(&log));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn emit_quiet() -> Emit<'static> {
+        Emit::quiet()
+    }
+
+    #[test]
+    fn an_unconfirmed_broken_is_re_triggered_until_it_builds() {
+        let mut builds = 0;
+        let mut rebuilds = 0;
+        let r = build_with_retriggers(
+            "python-x",
+            emit_quiet(),
+            Duration::ZERO,
+            || {
+                builds += 1;
+                if builds < 3 {
+                    Err(Error::NotActionable(BROKEN_UNCONFIRMED.to_string()))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!((builds, rebuilds), (3, 2));
+    }
+
+    #[test]
+    fn an_unconfirmed_broken_that_persists_stands_as_broken_after_the_bound() {
+        let mut builds = 0;
+        let r = build_with_retriggers(
+            "python-x",
+            emit_quiet(),
+            Duration::ZERO,
+            || {
+                builds += 1;
+                Err(Error::NotActionable(BROKEN_UNCONFIRMED.to_string()))
+            },
+            // A failing re-trigger only warns; the loop still ends.
+            || Err(Error::NotActionable("rebuild refused".into())),
+        );
+        assert_eq!(builds, MAX_BROKEN_RETRIGGERS + 1);
+        match r {
+            Err(Error::NotActionable(m)) => assert_eq!(m, BROKEN_MESSAGE),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_other_result_is_returned_without_a_retrigger() {
+        for (expect_ok, result) in [
+            (false, Err(Error::NotActionable("OBS: build is disabled".into()))),
+            (false, Err(Error::NotActionable(BROKEN_MESSAGE.into()))),
+            (true, Ok(())),
+        ] {
+            let mut rebuilds = 0;
+            let mut result = Some(result);
+            let r = build_with_retriggers(
+                "python-x",
+                emit_quiet(),
+                Duration::ZERO,
+                || result.take().unwrap(),
+                || {
+                    rebuilds += 1;
+                    Ok(())
+                },
+            );
+            assert_eq!(rebuilds, 0);
+            assert_eq!(r.is_ok(), expect_ok);
+        }
+    }
+
+    #[test]
+    fn getbinaries_is_retried_and_a_late_success_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut calls = 0;
+        let r = fetch_with_retries(
+            "p", "python-x", "r", "x86_64", dir.path(), emit_quiet(), 4, Duration::ZERO,
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(Error::OscFailed {
+                        cmd: "getbinaries".into(),
+                        code: 1,
+                        stderr: "502".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn getbinaries_gives_up_after_its_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut calls = 0;
+        let r = fetch_with_retries(
+            "p", "python-x", "r", "x86_64", dir.path(), emit_quiet(), 4, Duration::ZERO,
+            || {
+                calls += 1;
+                Err(Error::OscFailed {
+                    cmd: "getbinaries".into(),
+                    code: 1,
+                    stderr: "502".into(),
+                })
+            },
+        );
+        assert!(matches!(r, Err(Error::OscFailed { code: 1, .. })));
+        assert_eq!(calls, 4);
     }
 
     #[test]
