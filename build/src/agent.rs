@@ -2576,7 +2576,10 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    (it would conflict with the distro's), and do not vendor or rewrite the
    dependency's code inside this package.
    Report the dependency in `patch_dependencies` as `{"name": <upstream project
-   name>, "problem": <text>}`, and not in `unresolvable_packages`. The problem
+   name>, "problem": <text>}` (add `"condition": {"path": ..., "package": ...,
+   "not_in": ["devel"]}` when the defect is a path the package ships in the
+   wrong subpackage or not at all: the pipeline checks it itself and stops
+   asking once it holds), and not in `unresolvable_packages`. The problem
    text must give: the exact error line from the log, the symbol or API that is
    missing, the version that still had it and the version that dropped it, and
    the upstream repository URL. The build system then branches the distro's
@@ -3091,7 +3094,13 @@ report system tools (cmake, ninja, pkg-config, gcc) as python-* packages — fix
 the spec to use the plain package name instead.
 - "patch_dependencies": optional. Dependencies the distro ships whose shipped
 version breaks this package in a way only a patch to the dependency fixes
-(convention 62), each as {"name", "problem"}. Leave it out otherwise.
+(convention 62), each as {"name", "problem"} and, when the defect is a path the
+package does not ship where it should, a machine-checkable "condition"
+{"path": "torch/utils/benchmark/utils", "package": "python-torch", "not_in":
+["devel"]}: the pipeline checks it against the package's RPM file lists and
+`%files`, does not ask for a patch that is already true, and escalates to the
+upstream wheel when two patch turns could not make it true. Leave it out
+otherwise.
 - "stage_files": optional. Files the PIPELINE copies into the package checkout for
 you, because your shell cannot write there (a refused `cp` into the checkout is
 not an obstacle: ask for the copy here). Each entry is {"from", "to"} (add
@@ -3663,7 +3672,17 @@ const TURN_RESPONSE_SCHEMA: &str = r#"{
         "type": "object",
         "properties": {
           "name": {"type": "string"},
-          "problem": {"type": "string"}
+          "problem": {"type": "string"},
+          "condition": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"},
+              "package": {"type": "string"},
+              "not_in": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+          }
         },
         "required": ["name", "problem"],
         "additionalProperties": false
@@ -3698,6 +3717,11 @@ pub struct PatchRequest {
     /// What is wrong with the shipped version: the missing symbol or API, the
     /// error that shows it, and where upstream has the code.
     pub problem: String,
+    /// What the pipeline can check about the fix: where a path must be shipped.
+    /// A request with one is over when the check holds, not when a patch of
+    /// the same name was made.
+    #[serde(default)]
+    pub condition: Option<crate::ship_condition::FilesCondition>,
 }
 
 #[derive(Deserialize)]
@@ -5723,6 +5747,21 @@ mod tests {
         assert_eq!(resp.stage_files[0].to, "package-lock.json");
         assert_eq!(resp.stage_files[1].package.as_deref(), Some("dep"));
         assert!(STATIC_WORKFLOW.contains("stage_files") && STATIC_WORKFLOW.contains("last-resort answer"));
+    }
+
+    #[test]
+    fn a_patch_request_carries_its_machine_checkable_condition() {
+        let payload = r#"{"action":"no_change","reasoning":"x","confidence":"high",
+            "patch_dependencies":[
+              {"name":"torch","problem":"p","condition":{"path":"torch/utils/benchmark/utils","package":"python-torch","not_in":["devel"]}},
+              {"name":"other","problem":"q"}]}"#;
+        let resp = pick_turn_response(payload, &[]).unwrap();
+        let c = resp.patch_dependencies[0].condition.as_ref().unwrap();
+        assert_eq!(c.path, "torch/utils/benchmark/utils");
+        assert_eq!(c.package.as_deref(), Some("python-torch"));
+        assert!(resp.patch_dependencies[1].condition.is_none());
+        assert!(STATIC_WORKFLOW.contains("\"condition\"") && CONVENTIONS.contains("\"condition\""));
+        assert!(TURN_RESPONSE_SCHEMA.contains("\"not_in\""));
     }
 
     #[test]

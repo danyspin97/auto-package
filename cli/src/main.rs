@@ -1629,6 +1629,7 @@ fn branch_for_patch(
             force: true,
             regen: false,
             patch_request: Some(request.problem.clone()),
+        patch_condition: request.condition.clone(),
             ..config.clone()
         });
     }
@@ -1681,6 +1682,7 @@ fn branch_for_patch(
         force: true,
         regen: false,
         patch_request: Some(request.problem.clone()),
+        patch_condition: request.condition.clone(),
         ..config.clone()
     })
 }
@@ -1798,6 +1800,7 @@ fn update_config_for_outdated(
         force: true,
         regen: false,
         patch_request: None,
+        patch_condition: None,
         ..config.clone()
     })
 }
@@ -2365,6 +2368,7 @@ fn cmd_build(
         source_urls,
         python_flavors,
         patch_request: None,
+        patch_condition: None,
         failed_deps: Vec::new(),
         unbuildable_deps: Vec::new(),
     };
