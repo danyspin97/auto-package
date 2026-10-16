@@ -1874,6 +1874,29 @@ mod published_binary_tests {
     }
 
     #[test]
+    fn unused_constraints_and_multibuild_are_deleted_from_a_source_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["_constraints", "_multibuild"] {
+            std::fs::write(dir.path().join(f), "<x/>").unwrap();
+        }
+        let spec = "Name: python-x\nBuildArch: noarch\nSource0: x-1.tar.gz\n%python_subpackages\n";
+        std::fs::write(dir.path().join("python-x.spec"), spec).unwrap();
+        assert!(publish_plan(dir.path()).skipped.contains(&"_constraints".to_string()));
+        assert_eq!(drop_unused_recipe_files(dir.path()), ["_constraints", "_multibuild"]);
+        assert!(!dir.path().join("_constraints").exists());
+        // A native build keeps its constraints; a spec that names them does too.
+        std::fs::write(dir.path().join("_constraints"), "<x/>").unwrap();
+        std::fs::write(dir.path().join("python-x.spec"), "Name: python-x\nSource0: x.tar.gz\n").unwrap();
+        assert!(drop_unused_recipe_files(dir.path()).is_empty());
+        std::fs::write(
+            dir.path().join("python-x.spec"),
+            "Name: python-x\nBuildArch: noarch\nBuildRequires: memory-constraints\n",
+        )
+        .unwrap();
+        assert!(drop_unused_recipe_files(dir.path()).is_empty());
+    }
+
+    #[test]
     fn an_empty_rpmlintrc_goes_with_its_source_line() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -3593,15 +3616,63 @@ fn matches_source_name(pattern: &str, name: &str) -> bool {
     remaining.ends_with(last) && remaining.len() >= last.len()
 }
 
+/// Whether `name` is a build-recipe file (`_multibuild`, `_constraints`) that the
+/// spec has no use for. `_multibuild` declares flavors, which only a spec that
+/// reads `%flavor` builds differently. `_constraints` asks OBS for build
+/// resources: a pure-Python (`BuildArch: noarch`) spec that does not mention
+/// constraints or `%limit_build` compiles nothing that needs them, so one
+/// inherited from a Factory recipe of another shape is a leftover. A spec that
+/// builds native code keeps it: the agent writes it without touching the spec.
+fn recipe_file_unused(name: &str, spec_text: &str) -> bool {
+    match name {
+        "_multibuild" => !["%{flavor}", "%flavor", "%{?flavor", "%{!?flavor"]
+            .iter()
+            .any(|m| spec_text.contains(m)),
+        "_constraints" => {
+            let noarch = spec_text.lines().any(|l| {
+                let l = l.trim();
+                l.get(..9).is_some_and(|p| p.eq_ignore_ascii_case("buildarch"))
+                    && l.ends_with("noarch")
+            });
+            noarch && !spec_text.contains("constraints") && !spec_text.contains("%limit_build")
+        }
+        _ => false,
+    }
+}
+
+/// Delete the build-recipe files of the checkout that its spec has no use for
+/// ([`recipe_file_unused`]), so an upload never carries them and OBS drops the
+/// tracked copy with the next commit. Returns the names removed.
+pub fn drop_unused_recipe_files(checkout_dir: &Path) -> Vec<String> {
+    let Ok(rd) = fs::read_dir(checkout_dir) else {
+        return Vec::new();
+    };
+    let spec_text: String = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "spec"))
+        .filter_map(|p| fs::read_to_string(p).ok())
+        .collect();
+    if spec_text.is_empty() {
+        return Vec::new();
+    }
+    ["_constraints", "_multibuild"]
+        .into_iter()
+        .filter(|name| {
+            checkout_dir.join(name).is_file()
+                && recipe_file_unused(name, &spec_text)
+                && fs::remove_file(checkout_dir.join(name)).is_ok()
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[String]) -> bool {
     // `_multibuild` declares flavors that only a spec which reads `%flavor` builds
     // differently. One left behind when a source recipe is swapped for a wheel
     // repackage (python-torch: `standard` and `openmpi4`) makes OBS build the same
     // spec once per flavor, so it goes, and is removed from OBS with the commit.
-    if name == "_multibuild" && !["%{flavor}", "%flavor", "%{?flavor", "%{!?flavor"]
-        .iter()
-        .any(|m| spec_text.contains(m))
-    {
+    if recipe_file_unused(name, spec_text) {
         return false;
     }
     // A wheel repackage compiles nothing and fetches no source tree: the

@@ -2982,6 +2982,12 @@ fn review_stage(
                     state.patched_problems.push(h);
                 }
             });
+            for name in osc::drop_unused_recipe_files(checkout_dir) {
+                reporter.report(&Event::Warning {
+                    step: Some(review_step.id),
+                    message: format!("{rpm_name}: dropped '{name}': the spec does not use it"),
+                });
+            }
             // A dependency the review added is queued now, not after a build
             // OBS rejects as unresolvable.
             if effect == TurnEffect::Edited
@@ -4226,6 +4232,12 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         ctx.reporter.report(&Event::Warning {
             step: Some(commit_step.id),
             message: format!("restored '{name}' from OBS: the spec names it as a source"),
+        });
+    }
+    for name in osc::drop_unused_recipe_files(&ctx.checkout_dir) {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: format!("{}: dropped '{name}': the spec does not use it", ctx.rpm_name),
         });
     }
     let plan = osc::publish_plan(&ctx.checkout_dir);
