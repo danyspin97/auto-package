@@ -1347,25 +1347,55 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
     // Convert tags to URLs
     unique_tags
         .iter()
-        .map(|tag| {
-            // A tag from the API or a guess may hold characters that are not
-            // URL-safe; encode each segment but keep `/` (`release/1.0`).
-            let tag = tag
-                .split('/')
-                .map(|seg| urlencoding::encode(seg).into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-            if is_gitlab {
-                format!("{base}/-/archive/{tag}/{repo}-{tag}.tar.gz")
-            } else {
-                format!("{base}/archive/refs/tags/{tag}.tar.gz")
-            }
-        })
+        .map(|tag| tag_archive_url_for(base, repo, is_gitlab, tag))
         .collect()
+}
+
+/// The archive URL of one tag. A tag from the API or a guess may hold
+/// characters that are not URL-safe; each segment is encoded but `/` is kept
+/// (`release/1.0`).
+fn tag_archive_url_for(base: &str, repo: &str, is_gitlab: bool, tag: &str) -> String {
+    let tag = tag
+        .split('/')
+        .map(|seg| urlencoding::encode(seg).into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    if is_gitlab {
+        format!("{base}/-/archive/{tag}/{repo}-{tag}.tar.gz")
+    } else {
+        format!("{base}/archive/refs/tags/{tag}.tar.gz")
+    }
+}
+
+/// The archive URL of the tag the forge API lists for `version`, or `None` when
+/// the repository is not on a forge, the API does not answer or no listed tag
+/// is that version. Unlike [`archive_urls`] there is no guess: a caller that
+/// writes the URL into a spec without downloading it first needs a tag that
+/// exists.
+pub fn tag_archive_url(repo_url: &str, version: &str) -> Option<String> {
+    let parsed = ap_ecosystem::forge::parse(repo_url)?;
+    let tags = get_repo_tags(repo_url).ok()?;
+    let tag = find_matching_tag(&tags, version, &parsed.repo_name)?;
+    let base = parsed.canonical_https();
+    let is_gitlab = crate::http::host_of(&base)
+        .is_some_and(|h| h == "gitlab.com" || h.starts_with("gitlab."));
+    Some(tag_archive_url_for(&base, &parsed.repo_name, is_gitlab, &tag))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tag_archive_urls_follow_the_forge_layout() {
+        assert_eq!(
+            tag_archive_url_for("https://github.com/o/r", "r", false, "release/1.0"),
+            "https://github.com/o/r/archive/refs/tags/release/1.0.tar.gz"
+        );
+        assert_eq!(
+            tag_archive_url_for("https://gitlab.com/g/r", "r", true, "v1 2"),
+            "https://gitlab.com/g/r/-/archive/v1%202/r-v1%202.tar.gz"
+        );
+    }
+
     #[test]
     fn gh_api_only_takes_the_requests_this_crate_makes() {
         for ok in [

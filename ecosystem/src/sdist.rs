@@ -1760,6 +1760,74 @@ struct RawBuildSystem {
     build_backend: Option<String>,
 }
 
+/// The project's source repository on GitHub or GitLab, from the metadata an
+/// unpacked sdist carries: `Project-URL:` lines of `PKG-INFO` and
+/// `[project.urls]` of `pyproject.toml`, then `Home-page`. Keys that name the
+/// source (`Source`, `Repository`, `Code`) win over `Homepage`; a URL that is
+/// not a repository on those two hosts (docs, an issue tracker on another
+/// host) is skipped. The result is the canonical `https://host/owner/repo`.
+pub fn source_repo_from_metadata(pkg_info: &str, pyproject: &str) -> Option<String> {
+    let mut urls: Vec<(String, String)> = Vec::new();
+    for line in pkg_info.lines() {
+        // Metadata headers end at the first blank line; the body is the readme.
+        if line.trim().is_empty() {
+            break;
+        }
+        if let Some(v) = line.strip_prefix("Project-URL:") {
+            if let Some((k, u)) = v.split_once(',') {
+                urls.push((k.trim().to_string(), u.trim().to_string()));
+            }
+        } else if let Some(v) = line.strip_prefix("Home-page:") {
+            urls.push(("Homepage".to_string(), v.trim().to_string()));
+        }
+    }
+    if let Ok(doc) = pyproject.parse::<toml::Table>()
+        && let Some(t) = doc
+            .get("project")
+            .and_then(|p| p.get("urls"))
+            .and_then(|u| u.as_table())
+    {
+        for (k, v) in t {
+            if let Some(u) = v.as_str() {
+                urls.push((k.clone(), u.trim().to_string()));
+            }
+        }
+    }
+    let rank = |k: &str| -> usize {
+        let k = k.to_ascii_lowercase();
+        ["source", "source code", "repository", "code", "github", "gitlab"]
+            .iter()
+            .position(|s| *s == k)
+            .unwrap_or(10)
+    };
+    urls.sort_by_key(|(k, _)| rank(k));
+    urls.iter().find_map(|(_, u)| {
+        let f = crate::forge::parse(u)?;
+        let host_ok = f.host == "github.com"
+            || f.host == "gitlab.com"
+            || (f.host.starts_with("gitlab.") && crate::forge::is_known_host(&f.host));
+        (host_ok && f.project_path.contains('/')).then(|| f.canonical_https())
+    })
+}
+
+#[cfg(test)]
+mod source_repo_tests {
+    use super::source_repo_from_metadata as repo;
+
+    #[test]
+    fn source_keys_beat_homepage_and_other_hosts_are_skipped() {
+        let pi = "Metadata-Version: 2.1\nProject-URL: Documentation, https://docs.example.org/x\n\
+                  Project-URL: Homepage, https://github.com/o/home\n\
+                  Project-URL: Source, git@github.com:o/real.git\n\nProject-URL: Source, https://github.com/o/body\n";
+        assert_eq!(repo(pi, "").as_deref(), Some("https://github.com/o/real"));
+        let py = "[project.urls]\nHomepage = \"https://gitlab.com/g/sub/proj/-/issues\"\n";
+        assert_eq!(repo("", py).as_deref(), Some("https://gitlab.com/g/sub/proj"));
+        assert_eq!(repo("Project-URL: Home, https://bitbucket.org/o/r\n", ""), None);
+        assert_eq!(repo("Home-page: https://github.com/onlyowner\n", ""), None);
+        assert_eq!(repo("", "not toml ["), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

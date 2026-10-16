@@ -5607,6 +5607,196 @@ mod missing_check_path_tests {
     }
 }
 
+/// Add the project's tag archive as a further source and extract `dirs` from it
+/// in `%prep` (convention 82 b): a `SourceN: <url>#/<name>` line after the last
+/// `Source` line, and `tar -xzf %{SOURCEN} --strip-components=1 --wildcards
+/// '*/<dir>/*'` after the `%autosetup`/`%setup` of `%prep`. The `download_files`
+/// service that fetches it is written by the pipeline when the file is missing.
+/// `version` inside `url` becomes `%{version}`. `None` when the spec has no
+/// `Source` line or no setup line in `%prep`, already extracts with
+/// `--wildcards`, or a directory is not a plain relative path.
+pub fn add_fixture_source(spec: &str, url: &str, version: &str, dirs: &[String]) -> Option<String> {
+    let plain = |d: &str| {
+        !d.is_empty()
+            && !d.starts_with('/')
+            && !d.contains("..")
+            && d.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+    };
+    if dirs.is_empty()
+        || !dirs.iter().all(|d| plain(d))
+        || spec.contains("--wildcards")
+        || url.contains(|c: char| c.is_whitespace() || c == '%' || c == '#')
+    {
+        return None;
+    }
+    let lines: Vec<&str> = spec.lines().collect();
+    let source_num = |l: &str| -> Option<u32> {
+        let rest = l.strip_prefix("Source")?;
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        rest[digits.len()..].trim_start().starts_with(':').then(|| digits.parse().unwrap_or(0))
+    };
+    let mut last_source = None;
+    let mut next = 0;
+    for (i, l) in lines.iter().enumerate() {
+        if l.starts_with("%description") || l.starts_with("%package") {
+            break;
+        }
+        if let Some(n) = source_num(l) {
+            last_source = Some(i);
+            next = next.max(n + 1);
+        }
+    }
+    let last_source = last_source?;
+    let prep = lines.iter().position(|l| l.trim() == "%prep")?;
+    let mut setup = None;
+    for (i, l) in lines.iter().enumerate().skip(prep + 1) {
+        let t = l.trim();
+        if t.starts_with('%')
+            && !t.starts_with("%autosetup")
+            && !t.starts_with("%setup")
+            && !t.starts_with("%{")
+            && !t.starts_with("%if")
+            && !t.starts_with("%endif")
+            && !t.starts_with("%else")
+        {
+            break;
+        }
+        if t.starts_with("%autosetup") || t.starts_with("%setup") {
+            // The directive may continue on the next lines.
+            let mut end = i;
+            while lines[end].trim_end().ends_with('\\') && end + 1 < lines.len() {
+                end += 1;
+            }
+            setup = Some(end);
+            break;
+        }
+    }
+    let setup = setup?;
+    let url = if version.is_empty() { url.to_string() } else { url.replace(version, "%{version}") };
+    let file = url.rsplit('/').next().unwrap_or("fixtures.tar.gz");
+    let repo = url
+        .split('/')
+        .nth(4)
+        .filter(|r| !r.is_empty())
+        .unwrap_or("fixtures");
+    let rename = format!("{repo}-fixtures-{file}");
+    let wild: Vec<String> = dirs.iter().map(|d| format!("'*/{}/*'", d.trim_end_matches('/'))).collect();
+    let tar = format!(
+        "tar -xzf %{{SOURCE{next}}} --strip-components=1 --wildcards {}",
+        wild.join(" ")
+    );
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 3);
+    for (i, l) in lines.iter().enumerate() {
+        out.push((*l).to_string());
+        if i == last_source {
+            out.push(format!("Source{next}:        {url}#/{rename}"));
+        }
+        if i == setup {
+            out.push(format!("# The sdist leaves out {}", dirs.join(", ")));
+            out.push(tar.clone());
+        }
+    }
+    let mut text = out.join("\n");
+    if spec.ends_with('\n') {
+        text.push('\n');
+    }
+    Some(text)
+}
+
+#[cfg(test)]
+mod add_fixture_source_tests {
+    use super::*;
+
+    const SPEC: &str = "Name: python-x\nVersion: 1.2\nSource0: https://files/x-%{version}.tar.gz\n\
+Source1: x.rpmlintrc\nBuildRequires: a\n\n%description\nd\n\n%prep\n%autosetup -p1 \\\n  -n x-%{version}\n\
+%build\n%check\n%pytest tests/test_configs\n";
+
+    #[test]
+    fn adds_the_next_source_and_the_extract_line() {
+        let dirs = vec!["tests/test_configs".to_string()];
+        let out = add_fixture_source(
+            SPEC,
+            "https://github.com/o/x/archive/refs/tags/v1.2.tar.gz",
+            "1.2",
+            &dirs,
+        )
+        .unwrap();
+        assert!(out.contains(
+            "Source1: x.rpmlintrc\nSource2:        https://github.com/o/x/archive/refs/tags/v%{version}.tar.gz#/x-fixtures-v%{version}.tar.gz\nBuildRequires"
+        ), "{out}");
+        assert!(out.contains(
+            "  -n x-%{version}\n# The sdist leaves out tests/test_configs\ntar -xzf %{SOURCE2} --strip-components=1 --wildcards '*/tests/test_configs/*'\n%build"
+        ), "{out}");
+        // Applied once, no matter how often the check runs.
+        assert_eq!(add_fixture_source(&out, "https://github.com/o/x/a.tar.gz", "1.2", &dirs), None);
+        assert!(missing_check_path_problems(&out, &|_| false).is_empty());
+    }
+
+    #[test]
+    fn refuses_what_it_cannot_place() {
+        let d = vec!["tests/a".to_string()];
+        let u = "https://github.com/o/x/archive/v1.tar.gz";
+        assert_eq!(add_fixture_source("Name: x\n%prep\n%autosetup\n", u, "1", &d), None);
+        assert_eq!(add_fixture_source("Source0: a\n%description\n%prep\nmake\n", u, "1", &d), None);
+        assert_eq!(add_fixture_source(SPEC, u, "1", &["../x".to_string()]), None);
+        assert_eq!(add_fixture_source(SPEC, u, "1", &[]), None);
+        assert_eq!(add_fixture_source(SPEC, "https://h/a b", "1", &d), None);
+    }
+}
+
+/// [`add_fixture_source`] for the paths [`missing_check_paths`] reports: the
+/// repository comes from the sdist metadata (`pkg_info`, `pyproject`), the tag
+/// archive URL from `resolve(repo, version)`. `None` when there is nothing
+/// missing, no repository, or no tag, so the reviewer prompt stays the fallback.
+pub fn auto_fixture_source(
+    spec: &str,
+    exists: &dyn Fn(&str) -> bool,
+    pkg_info: &str,
+    pyproject: &str,
+    version: &str,
+    resolve: &dyn Fn(&str, &str) -> Option<String>,
+) -> Option<String> {
+    let missing = missing_check_paths(spec, exists);
+    if missing.is_empty() || spec.contains("--wildcards") {
+        return None;
+    }
+    // One directory at the top of tests is enough when the missing path is a
+    // file inside a fixtures directory already listed.
+    let mut dirs: Vec<String> = Vec::new();
+    for m in missing {
+        if !dirs.iter().any(|d| m == *d || m.starts_with(&format!("{d}/"))) {
+            dirs.retain(|d| !d.starts_with(&format!("{m}/")));
+            dirs.push(m);
+        }
+    }
+    let repo = ap_ecosystem::sdist::source_repo_from_metadata(pkg_info, pyproject)?;
+    let url = resolve(&repo, version)?;
+    add_fixture_source(spec, &url, version, &dirs)
+}
+
+#[cfg(test)]
+mod auto_fixture_source_tests {
+    use super::*;
+
+    const SPEC: &str = "Name: python-x\nVersion: 1.2\nSource0: https://files/x-%{version}.tar.gz\n\
+%description\nd\n\n%prep\n%autosetup\n%check\n%pytest tests/test_configs tests/test_configs/a.yml\n";
+    const PI: &str = "Project-URL: Source, https://github.com/o/x\n";
+
+    #[test]
+    fn resolves_the_repo_and_tag_or_leaves_the_prompt() {
+        let found = |r: &str, v: &str| Some(format!("{r}/archive/refs/tags/v{v}.tar.gz"));
+        let out = auto_fixture_source(SPEC, &|_| false, PI, "", "1.2", &found).unwrap();
+        assert!(out.contains("Source1:        https://github.com/o/x/archive/refs/tags/v%{version}.tar.gz#/"));
+        // The file inside the directory does not add a second wildcard.
+        assert!(out.contains("--wildcards '*/tests/test_configs/*'\n"), "{out}");
+        assert_eq!(out.matches("--wildcards").count(), 1);
+        assert_eq!(auto_fixture_source(SPEC, &|_| false, PI, "", "1.2", &|_, _| None), None);
+        assert_eq!(auto_fixture_source(SPEC, &|_| false, "", "", "1.2", &found), None);
+        assert_eq!(auto_fixture_source(SPEC, &|_| true, PI, "", "1.2", &found), None);
+    }
+}
+
 /// Drop the `python-pytest` BuildRequires of a spec whose `%check` never runs
 /// pytest (an import smoke test): the dependency only slows the build and
 /// pulls plugins in. A spec with no `%check` section, or one that mentions

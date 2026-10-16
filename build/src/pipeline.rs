@@ -4377,9 +4377,31 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                     .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
                     .unwrap_or_default();
                 if src.is_dir() {
+                    let have = |p: &str| src.join(p).exists() || tops.iter().any(|t| t.join(p).exists());
+                    // The repository's tag archive as a second source, when the
+                    // sdist metadata names the repository and the tag exists; the
+                    // missing-source step above fetches it on the next pass.
+                    let meta = |f: &str| {
+                        std::iter::once(src.clone())
+                            .chain(tops.iter().cloned())
+                            .find_map(|d| std::fs::read_to_string(d.join(f)).ok())
+                            .unwrap_or_default()
+                    };
+                    if let Some(fixed) = crate::spec::auto_fixture_source(
+                        &spec_text_now(spec_path),
+                        &have,
+                        &meta("PKG-INFO"),
+                        &meta("pyproject.toml"),
+                        &config.version,
+                        &|repo, v| crate::sources::tag_archive_url(repo, v),
+                    ) {
+                        write_or_warn(spec_path, &fixed);
+                        validate_step.finish(StepOutcome::Ok);
+                        return Ok(Flow::Retry);
+                    }
                     style.extend(crate::spec::missing_check_path_problems(
                         &spec_text_now(spec_path),
-                        &|p| src.join(p).exists() || tops.iter().any(|t| t.join(p).exists()),
+                        &have,
                     ));
                 }
             }
