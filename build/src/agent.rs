@@ -3064,7 +3064,65 @@ fn static_system_prompt() -> &'static str {
     // never changes within the process, so compute it once and hand out the
     // same allocation instead of re-formatting and recopying it every call.
     static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PROMPT.get_or_init(|| format!("{PRIORITIES}\n{CONVENTIONS}\n\n{STATIC_WORKFLOW}"))
+    // `--nvidia redist` is set once at startup, before the first turn.
+    PROMPT.get_or_init(|| {
+        let mut prompt = format!("{PRIORITIES}\n{CONVENTIONS}\n\n{STATIC_WORKFLOW}");
+        if let Some(addendum) = redist_cuda_prompt() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&addendum);
+        }
+        prompt
+    })
+}
+
+/// The CUDA build-time rules when the CUDA toolkit components are packaged from
+/// NVIDIA's redistributables (`--nvidia redist`): the generic text says openSUSE
+/// has no CUDA toolkit, which is true only without that mode. The package list
+/// is the one the generator builds (`redist::COMPONENT_KEYS`).
+fn redist_cuda_prompt() -> Option<String> {
+    if !crate::redist::enabled() {
+        return None;
+    }
+    let devel: Vec<String> = ap_ecosystem::nvidia_redist::COMPONENT_KEYS
+        .iter()
+        .map(|k| format!("`cuda-{}-devel`", crate::nvidia_spec::short_name(k)))
+        .collect();
+    Some(format!(
+        r#"## CUDA in this run (`--nvidia redist`): THE CUDA TOOLKIT COMPONENTS EXIST HERE
+
+This section REPLACES every statement above and below that openSUSE has no CUDA
+toolkit, that `cuda-devel`/`cuda-runtime` "cannot exist here", and the "CUDA at
+build time means: use the upstream wheel" special case (convention 27 CUDA special
+case, step "0f", the dependency-failure hints). In this run the pipeline builds
+NVIDIA's redistributable components as RPMs in the same project, one package per
+component and a `-devel` package for its headers:
+
+{list}
+
+They install under NVIDIA's own tree `/usr/local/cuda-<major>.<minor>` (headers in
+`include/`, libraries in `lib64/`, pkg-config files in `pkg-config/`; look the
+exact version up with `ls -d /usr/local/cuda-*` or `rpm -ql cuda-cudart-devel`).
+
+- A BUILD-time need for CUDA headers or libraries (`cuda.h`, `cuda_runtime.h`,
+  `cupti.h`, `nvrtc.h`, `-lcudart`, `find_package(CUDAToolkit)` that only needs
+  headers and libraries) is a `BuildRequires` on the component package that ships
+  them: `BuildRequires: cuda-cudart-devel`, `cuda-cupti-devel`, `cuda-nvrtc-devel`,
+  `cuda-cublas-devel`, `cuda-cudnn-devel`, ... Point the build at the tree with
+  `export CUDA_HOME=/usr/local/cuda-<major>.<minor>` (and `CUDA_PATH`,
+  `CPLUS_INCLUDE_PATH=$CUDA_HOME/include` or `CFLAGS="-I$CUDA_HOME/include"` when
+  the build does not read `CUDA_HOME`) in `%build`. Do NOT add `cuda-devel` or
+  `cuda-runtime`, and do not report any `cuda-*` package in `unresolvable_packages`.
+- Do NOT switch such a package to its prebuilt wheel only because it includes CUDA
+  headers or links the CUDA runtime libraries: build it from source with the
+  BuildRequires above (python-triton and cuda-bindings are built this way).
+- The wheel switch (`use_upstream_wheel`, convention 28 Exception 4) stays only for
+  what these packages cannot cover: a build that must COMPILE device code with
+  `nvcc`, i.e. `.cu` files in `ext_modules`/`CUDAExtension`/CMake `enable_language(CUDA)`.
+- The driver library `libcuda.so.1` is still the host's: never BuildRequire or
+  Require it, and keep the `__requires_exclude` for it when a `.so` links it.
+"#,
+        list = devel.join(", ")
+    ))
 }
 
 /// [`static_system_prompt`] written to a file for `--append-system-prompt-file`.
@@ -5421,6 +5479,29 @@ mod tests {
     /// The prompt is handed to `claude` by file because it no longer fits
     /// comfortably in one argv entry (131072-byte cap); the file must hold
     /// exactly the cached text.
+    #[test]
+    fn the_redist_cuda_prompt_names_the_generated_packages_only_with_the_mode_on() {
+        {
+            let _off = crate::redist::TestMode::set(false);
+            assert!(redist_cuda_prompt().is_none());
+        }
+        let _on = crate::redist::TestMode::set(true);
+        let p = redist_cuda_prompt().unwrap();
+        for pkg in [
+            "`cuda-cudart-devel`",
+            "`cuda-cupti-devel`",
+            "`cuda-nvrtc-devel`",
+            "`cuda-cusparse-lt-devel`",
+            "`cuda-nvshmem-devel`",
+        ] {
+            assert!(p.contains(pkg), "{pkg}");
+        }
+        assert!(p.contains("CUDA_HOME=/usr/local/cuda-<major>.<minor>"));
+        assert!(p.contains("nvcc"));
+        // The wheel-mode text is untouched.
+        assert!(!static_system_prompt().is_empty());
+    }
+
     #[test]
     fn system_prompt_file_holds_the_static_prompt() {
         use std::os::unix::fs::PermissionsExt;
