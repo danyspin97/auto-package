@@ -2670,13 +2670,15 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    `libavcodec-f34387fd.so.62.11.100` or `libopenblasp-r0-37b5f859.3.3.so`) is
    worse: the `__provides_exclude_from` above removes the Provides of those
    hashed names, yet the auto-generated Requires still name them, so the RPM
-   cannot be installed and every package depending on it is `unresolvable`; add
-   `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\.so.*$` (the pipeline's
-   wheel skeleton already writes it when it sees such libraries). rpm honours
-   only ONE `__requires_exclude`: a second line silently replaces the first, so
-   fold every pattern into one regex with `|`
-   (`^(lib.*-[0-9a-f]{8}.*\.so.*|lib(mpi|ucp)\.so.*)$`) and never add another
-   line. For a soname
+   cannot be installed and every package depending on it is `unresolvable`; the
+   pipeline's wheel skeleton already writes the `%global __requires_exclude`
+   line for it when it sees such libraries (it matches `lib*-<8 hex digits>.so*`
+   with at least one letter in the hash, so a date-stamped `libfoo-20240101.so`
+   is left alone): keep that line as it is. rpm honours only ONE
+   `__requires_exclude`: a second line silently replaces the first, so fold every
+   other pattern into the generated regex with `|`
+   (`^(<generated pattern without ^ and $>|lib(mpi|ucp)\.so.*)$`) and never add
+   another line. For a soname
    another package of this project supplies (`libnccl.so.2` from
    `python-nvidia-nccl-cu13`), exclude the auto-Requires and write the explicit
    `Requires: python-nvidia-nccl-cu13`, so the choice between flavors is not left

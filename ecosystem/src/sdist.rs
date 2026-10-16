@@ -391,20 +391,45 @@ impl WheelLayout {
     }
 }
 
-/// Whether `file` is a shared library named `<stem>-<8 hex digits>.<rest>.so…`
-/// the way auditwheel renames a vendored library. The hash must include a
-/// letter, so a date-stamped `libfoo-20240101.so.1` is not taken for one.
-fn is_hashed_soname(file: &str) -> bool {
-    if !(file.ends_with(".so") || file.contains(".so.")) {
+/// Whether `file` (a file name or a soname, without any `(...)` suffix) is a
+/// shared library named `lib<stem>-<8 hex digits><rest>.so<rest>` the way
+/// auditwheel renames a vendored library. The hash must include a letter, so a
+/// date-stamped `libfoo-20240101.so.1` is not taken for one. The single
+/// definition of "hashed": [`hashed_soname_requires_exclude`] is the same rule
+/// as an rpm regex, and `depclass` asks this function too.
+pub fn is_hashed_soname(file: &str) -> bool {
+    if !file.starts_with("lib") {
         return false;
     }
     file.match_indices('-').any(|(i, _)| {
-        let hash = file.as_bytes().get(i + 1..i + 9);
-        hash.is_some_and(|h| {
-            h.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-                && h.iter().any(u8::is_ascii_lowercase)
-                && file.as_bytes().get(i + 9) == Some(&b'.')
-        })
+        let Some(hash) = file.as_bytes().get(i + 1..i + 9) else {
+            return false;
+        };
+        if !hash.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            || !hash.iter().any(u8::is_ascii_lowercase)
+        {
+            return false;
+        }
+        let tail = &file[i + 9..];
+        tail.starts_with('.') && (tail.ends_with(".so") || tail.contains(".so."))
+    })
+}
+
+/// The `__requires_exclude` regex that matches exactly the sonames
+/// [`is_hashed_soname`] accepts, as rpm matches it against a Requires name
+/// (`libfoo-1a2b3c4d.so.1()(64bit)`). rpm's regex has no lookahead, so "the
+/// hash has a letter" is spelled out as the position of its first letter.
+pub fn hashed_soname_requires_exclude() -> &'static str {
+    static RE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        let hash: Vec<String> = (0..8)
+            .map(|k| {
+                let digits = if k == 0 { String::new() } else { format!("[0-9]{{{k}}}") };
+                let rest = if k == 7 { String::new() } else { format!("[0-9a-f]{{{}}}", 7 - k) };
+                format!("{digits}[a-f]{rest}")
+            })
+            .collect();
+        format!(r"^lib.*-({})(\..*)?\.so([.(].*)?$", hash.join("|"))
     })
 }
 

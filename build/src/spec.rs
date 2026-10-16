@@ -2318,9 +2318,17 @@ pub(crate) fn wheel_rpmlintrc(
 /// libraries (`libavcodec-f34387fd.so.62.11.100`): the generated `Requires`
 /// name those hashed sonames, and nothing can provide them. Requires 8 hex
 /// digits after a `-` in a `lib*` name, so `libcuda.so.1`, `libz3.so.4.15`
-/// and `libfoo-1.2.so` are left alone. Keep in step with the reason text of
-/// `depclass.rs` and convention 68 of the agent prompt.
-const HASHED_LIBS_REQUIRES_EXCLUDE: &str = r"^lib.*-[0-9a-f]{8}.*\.so.*$";
+/// and `libfoo-1.2.so` are left alone, nor a date-stamped `libfoo-20240101.so`.
+/// Generated from the same rule as `ap_ecosystem::sdist::is_hashed_soname`
+/// (the one definition of "hashed"); convention 68 of the agent prompt and the
+/// reason text of `depclass.rs` describe it in words.
+fn hashed_libs_requires_exclude() -> &'static str {
+    ap_ecosystem::sdist::hashed_soname_requires_exclude()
+}
+
+/// The regex an earlier generator wrote: it also matched date-stamped names.
+/// Specs carrying it are rewritten to the current one.
+const OLD_HASHED_LIBS_REQUIRES_EXCLUDE: &str = r"^lib.*-[0-9a-f]{8}.*\.so.*$";
 
 /// The `%global __requires_exclude` line for a wheel that bundles hashed
 /// libraries, empty otherwise. rpm honours only ONE such global: the patterns
@@ -2329,7 +2337,7 @@ const HASHED_LIBS_REQUIRES_EXCLUDE: &str = r"^lib.*-[0-9a-f]{8}.*\.so.*$";
 fn wheel_requires_exclude_line(layout: Option<&ap_ecosystem::sdist::WheelLayout>) -> String {
     let mut patterns: Vec<&str> = Vec::new();
     if layout.is_some_and(|l| l.has_hashed_libs) {
-        patterns.push(HASHED_LIBS_REQUIRES_EXCLUDE);
+        patterns.push(hashed_libs_requires_exclude());
     }
     if patterns.is_empty() {
         String::new()
@@ -2339,14 +2347,17 @@ fn wheel_requires_exclude_line(layout: Option<&ap_ecosystem::sdist::WheelLayout>
 }
 
 /// `spec` with the hashed-library `__requires_exclude` of a wheel that bundles
-/// such libraries (see [`HASHED_LIBS_REQUIRES_EXCLUDE`]), for a spec written
+/// such libraries (see [`hashed_libs_requires_exclude`]), for a spec written
 /// before the generator knew to: python-opencv-python-headless was built, was
 /// uninstallable, and every package needing it stayed unresolvable. An existing
 /// `%global __requires_exclude` is folded into one regex with `|` (rpm honours
 /// only one); the line is otherwise added before `%python_subpackages`, or
 /// `%description`. A spec that already carries the pattern is returned as is.
 pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
-    if spec.contains(HASHED_LIBS_REQUIRES_EXCLUDE) {
+    if spec.contains(OLD_HASHED_LIBS_REQUIRES_EXCLUDE) {
+        return spec.replace(OLD_HASHED_LIBS_REQUIRES_EXCLUDE, hashed_libs_requires_exclude());
+    }
+    if spec.contains(hashed_libs_requires_exclude()) {
         return spec.to_string();
     }
     let inner = |p: &str| -> String {
@@ -2367,7 +2378,7 @@ pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
         let folded = format!(
             "%global __requires_exclude ^({}|{})$",
             inner(existing),
-            inner(HASHED_LIBS_REQUIRES_EXCLUDE)
+            inner(hashed_libs_requires_exclude())
         );
         let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         out[at] = folded;
@@ -2383,7 +2394,7 @@ pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     out.insert(
         at,
-        format!("%global __requires_exclude {HASHED_LIBS_REQUIRES_EXCLUDE}"),
+        format!("%global __requires_exclude {}", hashed_libs_requires_exclude()),
     );
     out.join("\n") + tail
 }
@@ -5105,8 +5116,11 @@ BuildRequires:  %{python_module pip}
             Some(false),
             Some(&layout),
         );
-        let line = "%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\\.so.*$\n%python_subpackages\n";
-        assert!(spec.contains(line), "{spec}");
+        let line = format!(
+            "%global __requires_exclude {}\n%python_subpackages\n",
+            hashed_libs_requires_exclude()
+        );
+        assert!(spec.contains(&line), "{spec}");
         assert_eq!(spec.matches("__requires_exclude").count(), 1, "{spec}");
         let multi = wheel_multi_flavor_skeleton(
             "opencv-python-headless",
@@ -5116,10 +5130,10 @@ BuildRequires:  %{python_module pip}
             Some(false),
             Some(&layout),
         );
-        assert!(multi.contains(line), "{multi}");
+        assert!(multi.contains(&line), "{multi}");
 
         // The regex matches hashed sonames only.
-        let re = regex::Regex::new(HASHED_LIBS_REQUIRES_EXCLUDE).unwrap();
+        let re = regex::Regex::new(hashed_libs_requires_exclude()).unwrap();
         for hashed in [
             "libavcodec-f34387fd.so.62.11.100()(64bit)",
             "libopenblasp-r0-37b5f859.3.3.so",
@@ -5148,20 +5162,67 @@ BuildRequires:  %{python_module pip}
         assert!(!spec.contains("__requires_exclude"), "{spec}");
     }
 
-    /// The same regex is quoted in `depclass.rs`'s reason text (escaped for a
-    /// Rust string) and in the agent prompt's convention 68.
+    /// The regex and `is_hashed_soname` are one rule: both accept auditwheel
+    /// names and refuse date stamps, and agree on every name in between.
     #[test]
-    fn the_hashed_libs_regex_is_the_same_everywhere_it_is_quoted() {
-        let depclass = include_str!("depclass.rs");
-        assert!(
-            depclass.contains(&HASHED_LIBS_REQUIRES_EXCLUDE.replace('\\', "\\\\")),
-            "depclass.rs quotes another regex"
-        );
-        let agent = include_str!("agent.rs");
-        assert!(
-            agent.contains(HASHED_LIBS_REQUIRES_EXCLUDE),
-            "convention 68 quotes another regex"
-        );
+    fn the_hashed_libs_regex_agrees_with_is_hashed_soname() {
+        let re = regex::Regex::new(hashed_libs_requires_exclude()).unwrap();
+        let names = [
+            "libfoo-1a2b3c4d.so.1",
+            "libfoo-1a2b3c4d.so",
+            "libavcodec-f34387fd.so.62.11.100",
+            "libopenblasp-r0-37b5f859.3.3.so",
+            "libfoo-deadbeef.so.1",
+            "libfoo-0000000a.so.1",
+            "libfoo-a0000000.so.1",
+            "libfoo-20240101.so",
+            "libfoo-20240101.so.1",
+            "libfoo-00000000.so.1",
+            "libfoo-1a2b3c4.so.1",
+            "libfoo-1a2b3c4d5.so.1",
+            "libfoo-1a2b3c4dx.so.1",
+            "libfoo-1a2b3c4d.txt",
+            "libfoo-1a2b3c4d",
+            "libfoo-1a2b3c4dso",
+            "libfoo-1.2.so",
+            "libz3.so.4.15",
+            "libcuda.so.1",
+            "foo-1a2b3c4d.so.1",
+            "libfoo-20240101-1a2b3c4d.so.2",
+            "libfoo-1a2b3c4d.so.1.2-20240101",
+            "libfoo-1A2B3C4D.so.1",
+        ];
+        for n in names {
+            let sym = ap_ecosystem::sdist::is_hashed_soname(n);
+            assert_eq!(re.is_match(n), sym, "{n}: regex vs predicate");
+            // As rpm names the Requires of it.
+            let req = format!("{n}()(64bit)");
+            let req_ok = sym && (n.ends_with(".so") || n.contains(".so."));
+            assert_eq!(re.is_match(&req), req_ok, "{req}");
+        }
+        assert!(ap_ecosystem::sdist::is_hashed_soname("libfoo-1a2b3c4d.so.1"));
+        assert!(!ap_ecosystem::sdist::is_hashed_soname("libfoo-20240101.so"));
+    }
+
+    #[test]
+    fn a_spec_with_the_looser_old_regex_is_rewritten() {
+        let spec = "%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\\.so.*$\n%python_subpackages\n";
+        let out = with_hashed_libs_requires_exclude(spec);
+        assert!(out.contains(hashed_libs_requires_exclude()), "{out}");
+        assert!(!out.contains(OLD_HASHED_LIBS_REQUIRES_EXCLUDE), "{out}");
+        assert_eq!(with_hashed_libs_requires_exclude(&out), out);
+    }
+
+    /// The prompt and the dependency reason text must not quote a regex of
+    /// their own: it would drift from the generated one.
+    #[test]
+    fn nothing_else_quotes_the_old_hashed_libs_regex() {
+        for (name, text) in [
+            ("depclass.rs", include_str!("depclass.rs")),
+            ("agent.rs", include_str!("agent.rs")),
+        ] {
+            assert!(!text.contains("[0-9a-f]{8}.*"), "{name} quotes a regex");
+        }
     }
 
     #[test]
@@ -6806,7 +6867,8 @@ mod hashed_libs_exclude_tests {
         let spec = "Name: python-x\n%global __provides_exclude_from ^x$\n%python_subpackages\n\n%description\nd\n";
         let out = with_hashed_libs_requires_exclude(spec);
         assert!(out.contains(&format!(
-            "%global __requires_exclude {HASHED_LIBS_REQUIRES_EXCLUDE}\n%python_subpackages"
+            "%global __requires_exclude {}\n%python_subpackages",
+            hashed_libs_requires_exclude()
         )));
         assert_eq!(with_hashed_libs_requires_exclude(&out), out);
     }
@@ -6816,7 +6878,11 @@ mod hashed_libs_exclude_tests {
         let spec = "%global __requires_exclude ^lib(mpi|ucp)\\.so.*$\n%python_subpackages\n";
         let out = with_hashed_libs_requires_exclude(spec);
         assert_eq!(out.matches("__requires_exclude").count(), 1, "{out}");
-        assert!(out.contains(r"^(lib(mpi|ucp)\.so.*|lib.*-[0-9a-f]{8}.*\.so.*)$"), "{out}");
+        let want = format!(
+            r"^(lib(mpi|ucp)\.so.*|{})$",
+            hashed_libs_requires_exclude().trim_start_matches('^').trim_end_matches('$')
+        );
+        assert!(out.contains(&want), "{out}");
     }
 }
 

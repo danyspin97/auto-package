@@ -172,16 +172,13 @@ fn soname_stem(name: &str) -> Option<&str> {
     plain.then_some(stem)
 }
 
-/// Whether a soname stem carries the 8-hex-digit hash auditwheel appends to the
-/// libraries it bundles into a wheel (`libavcodec-f34387fd`,
-/// `libopenblasp-r0-37b5f859.3.3`): such a library is never a package.
-fn is_hashed_bundled_library(stem: &str) -> bool {
-    stem.split('-').skip(1).any(|part| {
-        let hash = part.split('.').next().unwrap_or("");
-        hash.len() == 8
-            && hash.chars().all(|c| c.is_ascii_hexdigit())
-            && hash.chars().any(|c| c.is_ascii_digit())
-    })
+/// Whether a soname carries the 8-hex-digit hash auditwheel appends to the
+/// libraries it bundles into a wheel (`libavcodec-f34387fd.so.62`,
+/// `libopenblasp-r0-37b5f859.3.3.so`): such a library is never a package. The
+/// rule is `ap_ecosystem::sdist::is_hashed_soname`, the one the generated
+/// `__requires_exclude` is built from; `raw` loses its `(SYMBOL)(64bit)` tail.
+fn is_hashed_bundled_library(raw: &str) -> bool {
+    ap_ecosystem::sdist::is_hashed_soname(raw.split('(').next().unwrap_or(raw))
 }
 
 /// The names among `names` that stand for a native (C/C++) library reported in
@@ -278,11 +275,12 @@ pub fn classify_reported(raw: &str) -> Reported {
                 },
             };
         }
-        if is_hashed_bundled_library(stem) {
+        if is_hashed_bundled_library(raw) {
             return not_a_package(
                 "a library a wheel bundles under a hashed name (auditwheel): no package \
                  provides it, so the package that ships the wheel has to leave it out of its \
-                 Requires with `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\\.so.*$`",
+                 Requires with the `%global __requires_exclude` the wheel skeleton generates for \
+                 hashed libraries",
             );
         }
         if VENDOR_LIBRARY_PREFIXES.iter().any(|p| stem.starts_with(p)) {
@@ -597,7 +595,8 @@ mod tests {
         // Ordinary sonames are untouched.
         assert!(built("libfoo-1.2.so.3()(64bit)").is_some());
         assert!(built("libz3.so.4.15()(64bit)").is_some());
-        assert!(built("libdeadbeef-abcdefab.so.1()(64bit)").is_some());
+        // A date stamp is not a hash.
+        assert!(built("libfoo-20240101.so.1()(64bit)").is_some());
     }
 
     #[test]
