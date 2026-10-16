@@ -3899,6 +3899,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         let fixed = crate::spec::normalize_python_module_versions(&current);
         let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
         let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
+        let fixed = crate::spec::drop_unused_pytest_build_requires(&fixed);
         let fixed = crate::spec::parenthesize_conditional_dependencies(&fixed);
         // Flavor-neutral runtime dependencies, before `%python_subpackages`,
         // one spelling of the NVIDIA licence, one `%changelog` (conventions 65, 69).
@@ -4116,6 +4117,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             if let Some(why) = missing_license_entry(ws, spec_path) {
                 style.push(why);
             }
+            style.extend(crate::spec::check_quality_problems(&spec_text_now(spec_path)));
             if crate::spec::check_is_file_probe_only(&spec_text_now(spec_path))
                 && ships_python_modules(&ws.dir().join("source"))
             {

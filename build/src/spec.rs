@@ -5240,6 +5240,118 @@ mod normalizer_tests {
     }
 }
 
+/// The lines of the `%check` section of `spec`, empty when there is none.
+fn check_section(spec: &str) -> Vec<&str> {
+    let body = spec.split("\n%changelog").next().unwrap_or(spec);
+    let mut in_check = false;
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if t == "%check" {
+            in_check = true;
+            continue;
+        }
+        if in_check
+            && t.starts_with('%')
+            && [
+                "%files", "%install", "%prep", "%build", "%package", "%description", "%post",
+                "%pre", "%preun", "%postun", "%conf", "%generate_buildrequires",
+            ]
+            .iter()
+            .any(|h| t == *h || t.starts_with(&format!("{h} ")))
+        {
+            break;
+        }
+        if in_check {
+            out.push(line);
+        }
+    }
+    out
+}
+
+/// Most `--ignore` options one `%check` may carry before it is a sign that the
+/// suite is being cut down for a single root cause (a missing device, a missing
+/// fixture directory) instead of replaced by an import smoke test.
+pub const MAX_CHECK_IGNORES: usize = 6;
+
+/// `%check` problems a reviewer sends back (convention 67): more than
+/// [`MAX_CHECK_IGNORES`] `--ignore` options. Empty when fine.
+pub fn check_quality_problems(spec: &str) -> Vec<String> {
+    let ignores: usize = check_section(spec)
+        .iter()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(|l| l.matches("--ignore").count())
+        .sum();
+    if ignores > MAX_CHECK_IGNORES {
+        return vec![format!(
+            "its %check carries {ignores} `--ignore` options: a suite cut down this far has \
+             one root cause (a device, a missing fixture directory, a network); replace it \
+             with an import smoke test of the package, plus only the tests that can pass \
+             (convention 67)"
+        )];
+    }
+    Vec::new()
+}
+
+/// Drop the `python-pytest` BuildRequires of a spec whose `%check` never runs
+/// pytest (an import smoke test): the dependency only slows the build and
+/// pulls plugins in. A spec with no `%check` section, or one that mentions
+/// pytest, is left alone.
+pub fn drop_unused_pytest_build_requires(spec: &str) -> String {
+    let check = check_section(spec);
+    if check.is_empty()
+        || check
+            .iter()
+            .any(|l| !l.trim_start().starts_with('#') && l.contains("pytest"))
+    {
+        return spec.to_string();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for line in spec.lines() {
+        let t = line.trim();
+        let is_pytest = t.starts_with("BuildRequires:")
+            && t.trim_start_matches("BuildRequires:").trim().split_whitespace().eq([
+                "%{python_module",
+                "pytest}",
+            ]);
+        if !is_pytest {
+            out.push(line);
+        }
+    }
+    out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+#[cfg(test)]
+mod check_quality_tests {
+    use super::*;
+
+    #[test]
+    fn many_ignores_are_flagged_and_few_are_not() {
+        let many = format!(
+            "%check\n%pytest {}\n\n%files\n",
+            (0..7).map(|i| format!("--ignore=t/{i}.py")).collect::<Vec<_>>().join(" ")
+        );
+        assert_eq!(check_quality_problems(&many).len(), 1);
+        let few = "%check\n%pytest --ignore=a --ignore=b\n";
+        assert!(check_quality_problems(few).is_empty());
+        // An ignore in another section does not count.
+        let other = format!("%install\n{}\n%check\nx\n", "--ignore ".repeat(9));
+        assert!(check_quality_problems(&other).is_empty());
+    }
+
+    #[test]
+    fn pytest_is_dropped_only_when_check_does_not_run_it() {
+        let import = "BuildRequires:  %{python_module pytest}\nBuildRequires:  %{python_module pytest-xdist}\n%check\n%python_expand $python -c 'import x'\n\n%files\n";
+        let out = drop_unused_pytest_build_requires(import);
+        assert!(!out.contains("module pytest}"), "{out}");
+        assert!(out.contains("pytest-xdist"));
+        let runs = "BuildRequires:  %{python_module pytest}\n%check\n%pytest\n";
+        assert_eq!(drop_unused_pytest_build_requires(runs), runs);
+        let none = "BuildRequires:  %{python_module pytest}\n%files\n";
+        assert_eq!(drop_unused_pytest_build_requires(none), none);
+    }
+}
+
 /// Whether the spec's `%check` does nothing but test that a file exists
 /// (`test -e`, `test -x`, `ls`, also behind `%python_expand`): it has at least
 /// one such command and no other. A package that ships Python modules is
