@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod depclass;
 pub mod depreach;
+pub mod deselect;
 pub mod discovery;
 pub mod doctor;
 pub mod distro_bounds;

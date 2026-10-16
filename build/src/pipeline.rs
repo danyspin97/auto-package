@@ -3339,6 +3339,7 @@ fn review_stage(
                     ctx,
                     st,
                     LadderSite {
+                        build_log: None,
                         task: if patching.is_some() {
                             crate::agent::Task::PatchDependency
                         } else {
@@ -3484,7 +3485,8 @@ fn prefix_stage(
     {
         let attempts = st.attempts;
         let clean = strip_and_rewrite(spec_path);
-        let extract = extract_build_log(&ws.build_log(), &st.sdist_top_level, reporter, None);
+        let prefix_log = ws.build_log();
+        let extract = extract_build_log(&prefix_log, &st.sdist_top_level, reporter, None);
         let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
 
         let turn = agent_turn(
@@ -3565,6 +3567,7 @@ fn prefix_stage(
                     ctx,
                     st,
                     LadderSite {
+                        build_log: Some(&prefix_log),
                         task: crate::agent::Task::FixAfterBuild,
                         event_task: ap_core::event::Task::FixAfterBuild {
                             attempt: attempts as u32 + 1,
@@ -4272,6 +4275,7 @@ fn fix_after_validation(
                     ctx,
                     st,
                     LadderSite {
+                        build_log: None,
                         task: crate::agent::Task::FixAfterValidation,
                         event_task: ap_core::event::Task::FixAfterBuild {
                             attempt: attempts as u32,
@@ -5843,6 +5847,7 @@ fn fix_after_build(
             ctx,
             st,
             LadderSite {
+                build_log: Some(build_log),
                 task: crate::agent::Task::FixAfterBuild,
                 event_task: ap_core::event::Task::FixAfterBuild {
                     attempt: attempts as u32,
@@ -6159,6 +6164,47 @@ fn named_sibling_fix(reason: &str, available: &[String], own: &str) -> Vec<Strin
     out
 }
 
+/// Largest build log the test-dropping rung reads, from its end.
+const DROP_LOG_CAP: u64 = 8 * 1024 * 1024;
+
+/// The `.changes` line for tests the pipeline dropped from `%check`.
+fn dropped_tests_message(dropped: &crate::deselect::Dropped) -> String {
+    let ids: Vec<&str> = dropped.tests.iter().map(|t| t.id.as_str()).collect();
+    changes_message(&format!("Skip the failing tests {}", ids.join(", ")))
+}
+
+/// The spec edit of the test-dropping rung: the failing tests of a `%check`
+/// log skipped with their log lines as evidence. Only when the failure was in
+/// `%check` (so the build and the install had succeeded) and is a test failure,
+/// not a dependency one. `Err` is why nothing was dropped.
+fn dropped_tests_edit(
+    failed_section: Option<&str>,
+    log: &str,
+    spec: &str,
+    source_has: &dyn Fn(&str) -> bool,
+) -> Result<crate::deselect::Dropped, String> {
+    if failed_section != Some("%check") {
+        return Err(format!(
+            "the build failed in {}, not in %check",
+            failed_section.unwrap_or("an unknown phase")
+        ));
+    }
+    crate::deselect::drop_failing_tests(spec, log, source_has)
+}
+
+/// The tail of a build log, read up to [`DROP_LOG_CAP`] bytes.
+fn read_log_tail(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len > DROP_LOG_CAP {
+        f.seek(SeekFrom::Start(len - DROP_LOG_CAP)).ok()?;
+    }
+    let mut bytes = Vec::new();
+    f.take(DROP_LOG_CAP).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// The names a spec's `BuildRequires:`/`Requires:` lines depend on, lower-cased
 /// (`%{python_module x}` and `python3dist(x)` give `x`).
 fn spec_dependency_names(spec: &str) -> Vec<String> {
@@ -6370,6 +6416,9 @@ fn spent_ladder_refusal(ctx: &RunCtx, patching: bool, spec_text: &str) -> Option
 
 /// Where a turn that was `blocked` was asked, so the resolver rounds repeat it.
 struct LadderSite<'a> {
+    /// The failed build's log, when the turn was asked about one: the rung that
+    /// drops failing tests reads it.
+    build_log: Option<&'a Path>,
     task: crate::agent::Task,
     event_task: ap_core::event::Task,
     attempt: usize,
@@ -6517,6 +6566,68 @@ fn resolve_blocked_with(
                     native: Vec::new(),
                     outdated: Vec::new(),
                 });
+            }
+        }
+        // Mechanical: when only a few tests of `%check` fail, skip exactly those
+        // with the log lines as evidence (an import error is not that: it is a
+        // dependency to fix).
+        if (round == 1 || round == 3)
+            && let Some(log_path) = site.build_log
+            && let Some(log) = read_log_tail(log_path)
+        {
+            let spec_now = std::fs::read_to_string(spec_path).unwrap_or_default();
+            let top = st.sdist_top_level.clone();
+            let sdist = ws.sdist_dir();
+            let source_has = |rel: &str| {
+                !rel.split('/').any(|c| c == ".." || c.is_empty())
+                    && sdist.join(&top).join(rel).is_file()
+            };
+            let failed_section = site.hint.and_then(|h| h.failed_section.as_deref());
+            match dropped_tests_edit(failed_section, &log, &spec_now, &source_has) {
+                Ok(dropped) => {
+                    write_or_warn(spec_path, &dropped.spec);
+                    let names: Vec<&str> = dropped.tests.iter().map(|t| t.id.as_str()).collect();
+                    append_notes(
+                        ws.notes(),
+                        &format!(
+                            "\n## {} - resolve round {round} - failing tests skipped\n{}\n{}",
+                            site.apply_label,
+                            dropped
+                                .tests
+                                .iter()
+                                .map(|t| format!("- {} ({})", t.id, brief(&t.line)))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            if dropped.omitted > 0 {
+                                format!("{} more failing test(s) are left for the next round.\n", dropped.omitted)
+                            } else {
+                                String::new()
+                            }
+                        ),
+                    );
+                    warn_if_err(
+                        *reporter,
+                        "adding the .changes entry for the skipped tests",
+                        osc::add_changes_entry(
+                            checkout_dir,
+                            &dropped_tests_message(&dropped),
+                            Emit::new(*reporter, site.step.id),
+                        ),
+                    );
+                    reporter.report(&Event::Warning {
+                        step: Some(site.step.id),
+                        message: format!(
+                            "{rpm_name}: only %check tests fail; skipped {} with the log as \
+                             evidence instead of asking again",
+                            names.join(", ")
+                        ),
+                    });
+                    return Rung::Resolved(TurnEffect::Edited);
+                }
+                Err(why) => append_notes(
+                    ws.notes(),
+                    &format!("\n## resolve round {round} - failing tests not skipped\n{why}\n"),
+                ),
             }
         }
         // Mechanical: the upstream wheel, when the project publishes one.
@@ -14591,6 +14702,7 @@ mod ladder_tests {
         first: crate::agent::TurnOutcome,
         turns: Vec<crate::agent::TurnOutcome>,
         wheel_lookups: &std::cell::Cell<usize>,
+        check: Option<(&str, &str)>,
     ) -> Case {
         let root = tempfile::tempdir().unwrap();
         let work = root.path().join("work");
@@ -14611,7 +14723,7 @@ mod ladder_tests {
             std::fs::create_dir_all(work.join("proj").join(s)).unwrap();
         }
         let spec_path = checkout.join(format!("{rpm_name}.spec"));
-        let before = format!("Name: {rpm_name}\nVersion: 1.0\n");
+        let before = format!("Name: {rpm_name}\nVersion: 1.0\n\n%check\n%pytest\n");
         std::fs::write(&spec_path, &before).unwrap();
         let run = ap_core::run::RunDir::allocate(&work).unwrap();
         let pkg_run = run.pkg(rpm_name);
@@ -14641,11 +14753,26 @@ mod ladder_tests {
             id: ap_core::event::StepId(1),
         };
         std::fs::create_dir_all(&step.path).unwrap();
+        // A failed %check build: its log, the extraction naming the section,
+        // and a `.changes` file that already says what the rung would add (so no
+        // `osc vc` runs).
+        let log_path = root.path().join("build.log");
+        let mut hint = crate::log::ExtractedLog::default();
+        if let Some((log, message)) = check {
+            std::fs::write(&log_path, log).unwrap();
+            hint.failed_section = Some("%check".into());
+            std::fs::write(
+                checkout.join(format!("{rpm_name}.changes")),
+                format!("{}\nMon Jan 1 00:00:00 UTC 2026 - x@y\n\n- {message}\n\n{}\n", "-".repeat(67), "-".repeat(67)),
+            )
+            .unwrap();
+        }
         let site = LadderSite {
+            build_log: check.map(|_| log_path.as_path()),
             task: crate::agent::Task::Review,
             event_task: ap_core::event::Task::Review,
             attempt: 0,
-            hint: None,
+            hint: check.map(|_| &hint),
             context: None,
             apply_label: "Review",
             before: &before,
@@ -14711,6 +14838,7 @@ mod ladder_tests {
                 stages(blocked("I cannot copy it"), "source/package-lock.json", "package-lock.json"),
             ],
             &lookups,
+            None,
         );
         assert_eq!(case.result.unwrap(), TurnEffect::Edited);
         assert_eq!(case.contexts.len(), 2);
@@ -14741,6 +14869,7 @@ mod ladder_tests {
             blocked("The fix belongs in the sibling python-nvidia-cutlass-dsl, not here"),
             Vec::new(),
             &lookups,
+            None,
         );
         assert!(case.contexts.is_empty());
         match case.result {
@@ -14764,6 +14893,7 @@ mod ladder_tests {
             blocked("reason zero"),
             vec![blocked("reason one"), blocked("reason two"), blocked("reason three")],
             &lookups,
+            None,
         );
         // The wheel rung of round 2 was tried (and failed) without a turn.
         assert_eq!(lookups.get(), 1);
@@ -14831,5 +14961,52 @@ mod ladder_tests {
         // --force bypasses the memo.
         config.force = true;
         assert!(spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, spec).is_none());
+    }
+
+    #[test]
+    fn only_failing_check_tests_are_skipped_with_evidence_without_a_turn() {
+        let lookups = std::cell::Cell::new(0);
+        let log = "[  30s] FAILED tests/test_a.py::test_one - AssertionError: boom\n[  30s] ===== 1 failed, 40 passed in 2s =====\n";
+        let message = changes_message("Skip the failing tests tests/test_a.py::test_one");
+        let case = run_case(
+            "mathlib",
+            false,
+            &[],
+            blocked("test_one fails and I may not deselect it"),
+            Vec::new(),
+            &lookups,
+            Some((log, &message)),
+        );
+        assert_eq!(case.result.unwrap(), TurnEffect::Edited);
+        assert!(case.contexts.is_empty());
+        assert!(case.notes.contains("failing tests skipped"), "{}", case.notes);
+    }
+
+    #[test]
+    fn a_check_import_error_is_not_dropped_and_the_ladder_goes_on_to_a_turn() {
+        let lookups = std::cell::Cell::new(0);
+        let log = "[  30s] FAILED tests/test_a.py::test_one - ModuleNotFoundError: No module named 'numpy'\n[  30s] ===== 1 failed, 40 passed in 2s =====\n";
+        let case = run_case(
+            "mathlib",
+            false,
+            &[],
+            blocked("needs numpy"),
+            (0..3).map(|_| scripted_outcome(crate::agent::Action::NoChange, "x")).collect(),
+            &lookups,
+            Some((log, "unused")),
+        );
+        // The turn was asked, and the refusal is in the notes.
+        assert!(!case.contexts.is_empty());
+        assert!(case.notes.contains("failing tests not skipped"), "{}", case.notes);
+        assert!(case.notes.contains("dependency problem"), "{}", case.notes);
+    }
+
+    #[test]
+    fn the_drop_edit_needs_a_check_failure() {
+        let log = "FAILED tests/t.py::test_a - assert 0\n== 1 failed, 9 passed in 1s ==\n";
+        let none = |_: &str| false;
+        assert!(dropped_tests_edit(Some("%build"), log, "%check\n%pytest\n", &none).is_err());
+        assert!(dropped_tests_edit(None, log, "%check\n%pytest\n", &none).is_err());
+        assert!(dropped_tests_edit(Some("%check"), log, "%check\n%pytest\n", &none).is_ok());
     }
 }
