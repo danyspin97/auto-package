@@ -2860,6 +2860,80 @@ fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
     }
 }
 
+/// A source archive without its git submodules cannot be built by any spec
+/// edit: when the wheel exists, switch to it now instead of paying a turn to be
+/// told so. `true` when the spec was switched (the Review turn is then not
+/// needed); on a failed switch the Review turn decides.
+fn switch_for_missing_submodules(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    spec_path: &Path,
+    lookup: PypiLookup<'_>,
+) -> Result<bool, PipelineResult> {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        ..
+    } = ctx;
+    let mut switched = false;
+    if st.from_repo_archive
+        && let root = ws.sdist_dir().join(&st.sdist_top_level)
+        && empty_submodule_context(&root).is_some()
+    {
+        let why = empty_submodule_why(&root);
+        let step = begin_or_fail!(
+            ctx.pkg_run,
+            *reporter,
+            StepKind::AgentTurn,
+            Some("submodule-wheel"),
+            &mut st.step_attempts,
+            rpm_name.clone()
+        );
+        let before = std::fs::read_to_string(spec_path).unwrap_or_default();
+        let outcome = pipeline_wheel_outcome(&why);
+        let applied = apply_turn_and_reset_with(
+            ApplyTurnCtx {
+                config,
+                checkout_dir,
+                spec_path,
+                step: &step,
+                before: &before,
+                rpm_name,
+                label: "Review — pre-build (git submodules missing)",
+                attempt: 0,
+                notes_path: ws.notes(),
+                snapshot: None,
+            },
+            &outcome,
+            *reporter,
+            &mut st.sdist_top_level,
+            &mut st.from_repo_archive,
+            lookup,
+        );
+        match applied {
+            Ok(TurnEffect::SwitchedToWheel) => {
+                step.finish(ap_core::event::StepOutcome::Ok);
+                switched = true;
+            }
+            other => {
+                step.finish(ap_core::event::StepOutcome::Failed);
+                reporter.report(&Event::Warning {
+                    step: None,
+                    message: format!(
+                        "{rpm_name}: the source archive lacks its git submodules and the \
+                         wheel switch did not happen ({}); the Review turn decides",
+                        other.err().unwrap_or_else(|| "no change".into())
+                    ),
+                });
+            }
+        }
+    }
+    Ok(switched)
+}
+
 /// Step: Review (freshly generated specs, or existing spec with no prior build).
 fn review_stage(
     ctx: &RunCtx,
@@ -2928,57 +3002,8 @@ fn review_stage(
     // edit: when the wheel exists, switch to it now instead of paying a turn
     // to be told so.
     let mut run_turn = run_turn;
-    if patching.is_none()
-        && st.from_repo_archive
-        && let root = ws.sdist_dir().join(&st.sdist_top_level)
-        && empty_submodule_context(&root).is_some()
-    {
-        let why = empty_submodule_why(&root);
-        let step = begin_or_fail!(
-            ctx.pkg_run,
-            reporter,
-            StepKind::AgentTurn,
-            Some("submodule-wheel"),
-            &mut st.step_attempts,
-            rpm_name.clone()
-        );
-        let before = std::fs::read_to_string(spec_path).unwrap_or_default();
-        let outcome = pipeline_wheel_outcome(&why);
-        let applied = apply_turn_and_reset(
-            ApplyTurnCtx {
-                config,
-                checkout_dir,
-                spec_path,
-                step: &step,
-                before: &before,
-                rpm_name,
-                label: "Review — pre-build (git submodules missing)",
-                attempt: 0,
-                notes_path: ws.notes(),
-                snapshot: None,
-            },
-            &outcome,
-            reporter,
-            &mut st.sdist_top_level,
-            &mut st.from_repo_archive,
-        );
-        match applied {
-            Ok(TurnEffect::SwitchedToWheel) => {
-                step.finish(ap_core::event::StepOutcome::Ok);
-                run_turn = false;
-            }
-            other => {
-                step.finish(ap_core::event::StepOutcome::Failed);
-                reporter.report(&Event::Warning {
-                    step: None,
-                    message: format!(
-                        "{rpm_name}: the source archive lacks its git submodules and the \
-                         wheel switch did not happen ({}); the Review turn decides",
-                        other.err().unwrap_or_else(|| "no change".into())
-                    ),
-                });
-            }
-        }
+    if patching.is_none() && switch_for_missing_submodules(ctx, st, spec_path, &fetch_release_json)? {
+        run_turn = false;
     }
     if !config.no_agent && run_turn {
         let carry_context = spec.carried_from.as_ref().map(|old| {
@@ -6467,10 +6492,11 @@ struct ApplyTurnCtx<'a> {
 /// `sdist_top_level` mainly degrades traceback-file matching in
 /// `extract_build_log`, not silently corrupts the package, but there is no
 /// reason to leave it wrong once we know better.
-fn apply_turn_outcome(
+fn apply_turn_outcome_with(
     ctx: ApplyTurnCtx<'_>,
     outcome: &crate::agent::TurnOutcome,
     reporter: &dyn Reporter,
+    lookup: PypiLookup<'_>,
 ) -> Result<TurnEffect, String> {
     let ApplyTurnCtx {
         config,
@@ -6603,7 +6629,7 @@ fn apply_turn_outcome(
                      ({why}); trying to repackage the upstream PyPI wheel instead"
                 ),
             });
-            match try_wheel_fallback(config, checkout_dir, spec_path, step) {
+            match try_wheel_fallback_with(config, checkout_dir, spec_path, step, lookup) {
                 Ok(wheel) => {
                     // Durable, reviewable audit record of what got swapped
                     // and why. See `write_wheel_switch_provenance` for the
@@ -6722,7 +6748,26 @@ fn apply_turn_and_reset(
     sdist_top_level: &mut String,
     from_repo_archive: &mut bool,
 ) -> Result<TurnEffect, String> {
-    let effect = apply_turn_outcome(ctx, outcome, reporter)?;
+    apply_turn_and_reset_with(
+        ctx,
+        outcome,
+        reporter,
+        sdist_top_level,
+        from_repo_archive,
+        &fetch_release_json,
+    )
+}
+
+/// [`apply_turn_and_reset`] with the PyPI lookup of a wheel switch given.
+fn apply_turn_and_reset_with(
+    ctx: ApplyTurnCtx<'_>,
+    outcome: &crate::agent::TurnOutcome,
+    reporter: &dyn Reporter,
+    sdist_top_level: &mut String,
+    from_repo_archive: &mut bool,
+    lookup: PypiLookup<'_>,
+) -> Result<TurnEffect, String> {
+    let effect = apply_turn_outcome_with(ctx, outcome, reporter, lookup)?;
     if effect == TurnEffect::SwitchedToWheel {
         *sdist_top_level = String::new();
         *from_repo_archive = false;
@@ -8444,8 +8489,18 @@ fn try_wheel_fallback(
     spec_path: &Path,
     step: &StepDir,
 ) -> Result<ap_ecosystem::pypi::WheelFile, String> {
+    try_wheel_fallback_with(config, checkout_dir, spec_path, step, &fetch_release_json)
+}
+
+/// How the wheel switch learns what PyPI has for a release: the JSON of
+/// `https://pypi.org/pypi/<name>/<version>/json`. Injected so a test drives the
+/// switch without the network.
+type PypiLookup<'a> = &'a dyn Fn(&PipelineConfig) -> Result<String, String>;
+
+/// The release's PyPI JSON, from the network.
+fn fetch_release_json(config: &PipelineConfig) -> Result<String, String> {
     let pypi_url = pypi_json_url(&config.pkg_name, &config.version);
-    let json = crate::http::read_text(crate::http::get_with_retries(&pypi_url).map_err(|e| {
+    crate::http::read_text(crate::http::get_with_retries(&pypi_url).map_err(|e| {
         format!(
             "PyPI fetch failed for {} {}: {e}",
             config.pkg_name, config.version
@@ -8456,7 +8511,17 @@ fn try_wheel_fallback(
             "PyPI read failed for {} {}: {e}",
             config.pkg_name, config.version
         )
-    })?;
+    })
+}
+
+fn try_wheel_fallback_with(
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+    lookup: PypiLookup<'_>,
+) -> Result<ap_ecosystem::pypi::WheelFile, String> {
+    let json = lookup(config)?;
     let wheel = match ap_ecosystem::pypi::pick_wheel_from_json(
         &json,
         &config.arch,
@@ -12607,5 +12672,147 @@ mod hygiene_tests {
             "SPEC"
         );
         assert_eq!(std::fs::read_dir(checkout.path()).unwrap().count(), 0);
+    }
+
+    /// A release whose one wheel is `bytes`, as PyPI's JSON describes it.
+    fn pypi_json_for(wheel: &str, bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let sha: String = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
+        format!(
+            r#"{{"info":{{"name":"foo","version":"1.0","summary":"Foo","license":"MIT",
+            "requires_python":">=3.9"}},
+            "urls":[{{"filename":"{wheel}","url":"https://h/{wheel}","packagetype":"bdist_wheel",
+            "size":{},"digests":{{"sha256":"{sha}"}}}}]}}"#,
+            bytes.len()
+        )
+    }
+
+    #[test]
+    fn a_missing_submodule_tree_switches_to_the_wheel_end_to_end_without_the_network() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let checkout = root.path().join("proj").join("python-foo");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let config = config("foo", &state_root);
+        let ws = Workspace::open(&state_root, "python-foo").unwrap();
+        // The unpacked source archive: a submodule directory with nothing in it.
+        for d in ["pybind11", "XNNPACK"] {
+            std::fs::create_dir_all(ws.sdist_dir().join("foo-1.0/third_party").join(d)).unwrap();
+        }
+        std::fs::write(ws.sdist_dir().join("foo-1.0/setup.py"), "x").unwrap();
+        let spec_path = checkout.join("python-foo.spec");
+        std::fs::write(&spec_path, "Name: python-foo\nVersion: 1.0\nSource0: foo-1.0.tar.gz\n")
+            .unwrap();
+        // The wheel is already in the checkout with the digest PyPI reports, so
+        // nothing is downloaded.
+        let wheel = "foo-1.0-py3-none-any.whl";
+        let bytes = b"not a real wheel";
+        std::fs::write(checkout.join(wheel), bytes).unwrap();
+        let json = pypi_json_for(wheel, bytes);
+        let asked = std::sync::Mutex::new(Vec::new());
+        let lookup = |c: &PipelineConfig| {
+            asked.lock().unwrap().push(format!("{} {}", c.pkg_name, c.version));
+            Ok(json.clone())
+        };
+
+        let run = ap_core::run::RunDir::allocate(&root.path().join("work")).unwrap();
+        let pkg_run = run.pkg("python-foo");
+        let warnings = Warnings(Default::default());
+        let ctx = RunCtx {
+            config: &config,
+            pkg_run: &pkg_run,
+            reporter: &warnings,
+            ws,
+            rpm_name: "python-foo".into(),
+            checkout_dir: checkout.clone(),
+            spec_path: spec_path.clone(),
+        };
+        let mut st = RunState {
+            step_attempts: Default::default(),
+            sdist_top_level: "foo-1.0".into(),
+            from_repo_archive: true,
+            attempts: 3,
+            spent_usd: 0.0,
+            session_id: None,
+            last_log_digest: None,
+            identical_logs: 0,
+            relaxed_from_spec: None,
+        };
+
+        let switched =
+            switch_for_missing_submodules(&ctx, &mut st, &spec_path, &lookup).unwrap_or_else(|_| {
+                panic!("the switch step failed")
+            });
+
+        // The Review turn is skipped, and the lookup ran once for this release.
+        assert!(switched, "{:?}", warnings.0.lock().unwrap());
+        assert_eq!(*asked.lock().unwrap(), ["foo 1.0"]);
+        // The recipe is now the wheel's, and the source-tree state is reset.
+        let spec = std::fs::read_to_string(&spec_path).unwrap();
+        assert!(spec.contains(wheel), "{spec}");
+        assert_eq!((st.sdist_top_level.as_str(), st.from_repo_archive), ("", false));
+        // Provenance sits in the state directory, with the spec that was replaced.
+        let dir = state_root.join("python-foo");
+        let origin = std::fs::read_to_string(dir.join("wheel-origin.txt")).unwrap();
+        assert!(origin.contains(wheel) && origin.contains("third_party/pybind11"), "{origin}");
+        assert!(
+            std::fs::read_to_string(dir.join("python-foo.spec.pre-wheel-switch"))
+                .unwrap()
+                .contains("Source0: foo-1.0.tar.gz")
+        );
+        assert!(!checkout.join("wheel-origin.txt").exists());
+        // The notes say what was swapped.
+        let notes = std::fs::read_to_string(ctx.ws.notes()).unwrap();
+        assert!(notes.contains("switched to upstream wheel") && notes.contains(wheel), "{notes}");
+    }
+
+    #[test]
+    fn a_failed_wheel_lookup_leaves_the_spec_to_the_review_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let checkout = root.path().join("proj").join("python-foo");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let config = config("foo", &state_root);
+        let ws = Workspace::open(&state_root, "python-foo").unwrap();
+        for d in ["pybind11", "XNNPACK"] {
+            std::fs::create_dir_all(ws.sdist_dir().join("foo-1.0/third_party").join(d)).unwrap();
+        }
+        let spec_path = checkout.join("python-foo.spec");
+        let original = "Name: python-foo\nVersion: 1.0\n";
+        std::fs::write(&spec_path, original).unwrap();
+        let run = ap_core::run::RunDir::allocate(&root.path().join("work")).unwrap();
+        let pkg_run = run.pkg("python-foo");
+        let warnings = Warnings(Default::default());
+        let ctx = RunCtx {
+            config: &config,
+            pkg_run: &pkg_run,
+            reporter: &warnings,
+            ws,
+            rpm_name: "python-foo".into(),
+            checkout_dir: checkout,
+            spec_path: spec_path.clone(),
+        };
+        let mut st = RunState {
+            step_attempts: Default::default(),
+            sdist_top_level: "foo-1.0".into(),
+            from_repo_archive: true,
+            attempts: 0,
+            spent_usd: 0.0,
+            session_id: None,
+            last_log_digest: None,
+            identical_logs: 0,
+            relaxed_from_spec: None,
+        };
+        let offline = |_: &PipelineConfig| Err("PyPI fetch failed: offline".to_string());
+        let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &offline)
+            .unwrap_or_else(|_| panic!("the switch step failed"));
+        assert!(!switched);
+        assert_eq!(std::fs::read_to_string(&spec_path).unwrap(), original);
+        assert!(st.from_repo_archive && st.sdist_top_level == "foo-1.0");
+        assert!(
+            warnings.0.lock().unwrap().iter().any(|m| m.contains("the Review turn decides")),
+            "{:?}",
+            warnings.0.lock().unwrap()
+        );
     }
 }
