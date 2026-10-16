@@ -1991,6 +1991,7 @@ fn checkout_stage(
         && !wheel_policy_pending(&config.source_urls, &config.pkg_name, spec_path)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
         && PkgState::load(ws).policy_current()
+        && reconcile_rpms(config, ws, reporter)
     {
         update_state(ws, reporter, |state| {
             state.policy_version = POLICY_VERSION;
@@ -2007,6 +2008,46 @@ fn checkout_stage(
         });
     }
     Ok(obs_status)
+}
+
+/// Whether local state records a failure although OBS now reports the same
+/// source as succeeded, so the RPMs must be fetched before success is recorded.
+fn state_needs_rpm_reconcile(prior: &PkgState) -> bool {
+    prior.last_outcome.as_deref() != Some("success")
+}
+
+/// For a package OBS reports as succeeded: when local state disagrees (a
+/// stale failure), download the RPMs first. Returns whether the package can
+/// be recorded as built; `false` falls through to the normal pipeline.
+fn reconcile_rpms(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Reporter) -> bool {
+    if !state_needs_rpm_reconcile(&PkgState::load(ws)) {
+        return true;
+    }
+    let emit = Emit::run(reporter);
+    match osc::download_built_rpms(
+        &config.project,
+        &config.rpm_name,
+        &config.distro,
+        &config.arch,
+        &config.rpms_dir,
+        emit,
+    ) {
+        Ok(n) if n > 0 => true,
+        Ok(_) => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: "OBS reports a success but no RPMs were downloaded; rebuilding".into(),
+            });
+            false
+        }
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!("OBS reports a success but fetching its RPMs failed: {e}"),
+            });
+            false
+        }
+    }
 }
 
 /// Step: GenerateSpec (if needed). Sets `sdist_top_level` and
@@ -9263,6 +9304,21 @@ mod version_conflict_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_failure_state_needs_rpm_reconcile() {
+        let failed = PkgState {
+            last_outcome: Some("failed".into()),
+            last_failure_reason: Some("OBS: package source is broken".into()),
+            ..PkgState::default()
+        };
+        assert!(state_needs_rpm_reconcile(&failed));
+        let ok = PkgState {
+            last_outcome: Some("success".into()),
+            ..PkgState::default()
+        };
+        assert!(!state_needs_rpm_reconcile(&ok));
+    }
+
     use super::*;
 
     #[test]

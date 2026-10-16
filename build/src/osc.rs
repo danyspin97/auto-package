@@ -269,6 +269,37 @@ fn nothing_provides_segments(line: &str) -> Vec<String> {
     segments
 }
 
+/// The package names in one `nothing provides` segment. Normally just the
+/// first word (version constraint dropped); a rich dependency such as
+/// `(python313-tomli >= 2.0.0 if python313-base < 3.11)` also carries the
+/// boolean keywords `if`, `unless`, `and`, ... which are not packages.
+fn segment_package_names(segment: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &["if", "unless", "else", "and", "or", "with", "without"];
+    let is_keyword = |w: &str| KEYWORDS.contains(&w);
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    let rich = words.iter().any(|w| is_keyword(w.trim_matches(['(', ')'])));
+    if !rich {
+        let first = words.first().copied().unwrap_or(segment);
+        let pkg = clean_unresolvable_name(first);
+        return if pkg.is_empty() {
+            Vec::new()
+        } else {
+            vec![pkg.to_string()]
+        };
+    }
+    let mut names = Vec::new();
+    for w in words {
+        let w = clean_unresolvable_name(w.trim_matches(['(', ')']));
+        let operator_or_version =
+            w.starts_with(['<', '>', '=', '!']) || w.starts_with(|c: char| c.is_ascii_digit());
+        // A version bound belongs to the previous name.
+        if !w.is_empty() && !is_keyword(w) && !operator_or_version {
+            names.push(w.to_string());
+        }
+    }
+    names
+}
+
 /// Extract RPM package names from "nothing provides <pkg>" lines in a build log.
 ///
 /// Handles both bare `nothing provides <pkg>` and `unresolvable: nothing provides <pkg>`,
@@ -280,11 +311,10 @@ fn extract_unresolvable(log: &str) -> Vec<String> {
     let mut result = Vec::new();
     for line in log.lines() {
         for segment in nothing_provides_segments(line) {
-            // Take just the package name; drop any version constraint.
-            let pkg = segment.split_whitespace().next().unwrap_or(&segment);
-            let pkg = clean_unresolvable_name(pkg);
-            if !pkg.is_empty() && seen.insert(pkg.to_string()) {
-                result.push(pkg.to_string());
+            for pkg in segment_package_names(&segment) {
+                if seen.insert(pkg.clone()) {
+                    result.push(pkg);
+                }
             }
         }
     }
@@ -637,6 +667,19 @@ nothing provides (python313-foo
                 "python314-pybind11",
                 "python313-foo",
             ]
+        );
+    }
+
+    /// A rich dependency's `if` is a keyword, never a package.
+    #[test]
+    fn rich_dependency_keywords_are_not_package_names() {
+        let log = "\
+nothing provides (python313-tomli >= 2.0.0 if python313-base < 3.11) needed by python313-fastapi-cli
+nothing provides if python313-base < 3.11
+";
+        assert_eq!(
+            extract_unresolvable(log),
+            vec!["python313-tomli", "python313-base"]
         );
     }
 
@@ -5589,6 +5632,151 @@ pub fn obs_build(
     rpms_dir: &Path,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
+    let mut retriggers = 0;
+    loop {
+        match obs_build_once(project, pkg_name, repo, arch, log_path, rpms_dir, emit) {
+            Err(Error::NotActionable(msg)) if msg == BROKEN_UNCONFIRMED => {
+                if retriggers >= MAX_BROKEN_RETRIGGERS {
+                    return Err(Error::NotActionable(BROKEN_MESSAGE.to_string()));
+                }
+                retriggers += 1;
+                emit.reporter.report(&Event::Warning {
+                    step: emit.step,
+                    message: format!(
+                        "OBS says {pkg_name} is broken but has no build log to confirm it; \
+                         treating it as transient and re-triggering the build \
+                         ({retriggers}/{MAX_BROKEN_RETRIGGERS})"
+                    ),
+                });
+                if let Err(e) = trigger_rebuild(project, pkg_name, repo, arch, emit) {
+                    emit.reporter.report(&Event::Warning {
+                        step: emit.step,
+                        message: format!("could not re-trigger the OBS build: {e}"),
+                    });
+                }
+                sleep_interruptible(BROKEN_RETRIGGER_PAUSE);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// The final message for a `broken` verdict.
+const BROKEN_MESSAGE: &str = "OBS: package source is broken";
+/// Internal marker: `broken` without a build log behind it (see [`obs_build`]).
+const BROKEN_UNCONFIRMED: &str = "OBS: broken status could not be confirmed by a build log";
+/// How often an unconfirmed `broken` verdict is re-triggered before it stands.
+const MAX_BROKEN_RETRIGGERS: u32 = 3;
+const BROKEN_RETRIGGER_PAUSE: Duration = Duration::from_secs(30);
+
+/// Whether a `broken` verdict is backed by evidence: a non-empty build log.
+fn broken_is_confirmed(log_path: &Path) -> bool {
+    fs::read_to_string(log_path).is_ok_and(|t| !t.trim().is_empty())
+}
+
+/// Ask OBS to rebuild `pkg_name` (`osc rebuild`), which re-evaluates a source
+/// it had flagged `broken`.
+fn trigger_rebuild(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    emit: Emit<'_>,
+) -> Result<(), Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("pkg_name", pkg_name)?;
+    check_obs_name("repo", repo)?;
+    check_obs_name("arch", arch)?;
+    let out = proc::capture_with_timeout(
+        "osc",
+        &["rebuild", project, pkg_name, repo, arch],
+        &anywhere(),
+        emit,
+        OSC_ARTIFACT_TIMEOUT,
+    )
+    .map_err(during(format!(
+        "rebuild {project} {pkg_name} {repo} {arch}"
+    )))?;
+    if !out.success() {
+        return Err(Error::OscFailed {
+            cmd: format!("rebuild {project} {pkg_name} {repo} {arch}"),
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
+    Ok(())
+}
+
+/// Call `f` up to `attempts` times, pausing `pause` between failures.
+fn retry<T, E>(
+    attempts: u32,
+    pause: Duration,
+    mut f: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
+    let mut n = 1;
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if n >= attempts => return Err(e),
+            Err(_) => {
+                n += 1;
+                if !pause.is_zero() {
+                    sleep_interruptible(pause);
+                }
+            }
+        }
+    }
+}
+
+/// `osc getbinaries` right after a green verdict can fail transiently.
+const GETBINARIES_ATTEMPTS: u32 = 4;
+const GETBINARIES_PAUSE: Duration = Duration::from_secs(20);
+
+/// Download the RPMs of `pkg_name` (and its multibuild flavors) into
+/// `rpms_dir`, retrying a failing `osc getbinaries`. Returns how many of the
+/// RPMs OBS lists landed.
+pub fn download_built_rpms(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    rpms_dir: &Path,
+    emit: Emit<'_>,
+) -> Result<usize, Error> {
+    let mut packages = vec![pkg_name.to_string()];
+    packages.extend(multibuild_flavors(project, pkg_name, repo, arch));
+    let mut downloaded_count = 0;
+    for name in &packages {
+        let listing = binary_rpm_listing(project, name, repo, arch);
+        if let Some(names) = &listing {
+            remove_superseded_rpms(rpms_dir, names);
+        }
+        retry(GETBINARIES_ATTEMPTS, GETBINARIES_PAUSE, || {
+            if let Err(stderr) =
+                crate::workspace::await_disk_space(rpms_dir, emit.reporter, emit.step)
+            {
+                return Err(Error::OscFailed {
+                    cmd: format!("getbinaries {project} {name} {repo} {arch}"),
+                    code: 28,
+                    stderr,
+                });
+            }
+            get_binaries(project, name, repo, arch, rpms_dir, emit)
+        })?;
+        downloaded_count += downloaded_rpm_count(listing.as_deref(), rpms_dir);
+    }
+    Ok(downloaded_count)
+}
+
+fn obs_build_once(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    log_path: &Path,
+    rpms_dir: &Path,
+    emit: Emit<'_>,
+) -> Result<(), Error> {
     let reporter = emit.reporter;
     let step = emit.step;
     // The caller has committed already: no `_result` document fetched before
@@ -5961,30 +6149,8 @@ pub fn obs_build(
         // with no files written when the project is misconfigured
         // (empty binary set for this repo/arch pair), which the warning
         // version silently papered over.
-        // A multibuild package ships its flavors' RPMs under `<pkg>:<flavor>`.
-        let mut packages = vec![pkg_name.to_string()];
-        packages.extend(multibuild_flavors(project, pkg_name, repo, arch));
-        let mut fetch_result = Ok(());
-        let mut downloaded_count = 0;
-        for name in &packages {
-            let listing = binary_rpm_listing(project, name, repo, arch);
-            if let Some(names) = &listing {
-                remove_superseded_rpms(rpms_dir, names);
-            }
-            if let Err(stderr) = crate::workspace::await_disk_space(rpms_dir, reporter, step) {
-                fetch_result = Err(Error::OscFailed {
-                    cmd: format!("getbinaries {project} {name} {repo} {arch}"),
-                    code: 28,
-                    stderr,
-                });
-                break;
-            }
-            if let Err(e) = get_binaries(project, name, repo, arch, rpms_dir, emit) {
-                fetch_result = Err(e);
-                break;
-            }
-            downloaded_count += downloaded_rpm_count(listing.as_deref(), rpms_dir);
-        }
+        let fetch_result = download_built_rpms(project, pkg_name, repo, arch, rpms_dir, emit);
+        let downloaded_count = fetch_result.as_ref().copied().unwrap_or(0);
         if let Err(e) = fetch_result {
             reporter.report(&Event::CommandDone {
                 step,
@@ -6048,10 +6214,13 @@ pub fn obs_build(
                 current_unresolvable(project, &log_pkg, repo, arch, log_path, emit);
             Error::UnresolvableDeps { names, detail }
         }
+        BuildStatus::Broken if !broken_is_confirmed(log_path) => {
+            Error::NotActionable(BROKEN_UNCONFIRMED.to_string())
+        }
         BuildStatus::Broken => Error::NotActionable(
             match build_details(project, &log_pkg, repo, arch) {
-                Some(d) => format!("OBS: package source is broken: {d}"),
-                None => "OBS: package source is broken".to_string(),
+                Some(d) => format!("{BROKEN_MESSAGE}: {d}"),
+                None => BROKEN_MESSAGE.to_string(),
             },
         ),
         BuildStatus::Disabled => {
@@ -7036,5 +7205,48 @@ mod redist_name_tests {
             fuzzy_key(&rpm_name("nvidia-cublas")),
             fuzzy_key("cuda-cublas")
         );
+    }
+}
+
+#[cfg(test)]
+mod transient_broken_tests {
+    use super::*;
+
+    #[test]
+    fn broken_needs_a_nonempty_log_to_be_confirmed() {
+        let dir = std::env::temp_dir().join(format!("ap-broken-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("build.log");
+        assert!(!broken_is_confirmed(&log), "missing log");
+        fs::write(&log, "\n  \n").unwrap();
+        assert!(!broken_is_confirmed(&log), "empty log");
+        fs::write(&log, "[1s] error: bad source\n").unwrap();
+        assert!(broken_is_confirmed(&log));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retry_stops_at_the_first_success() {
+        let mut calls = 0;
+        let r: Result<u32, &str> = retry(4, Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                Err("transient")
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(r, Ok(3));
+    }
+
+    #[test]
+    fn retry_gives_up_after_the_bound() {
+        let mut calls = 0;
+        let r: Result<(), &str> = retry(4, Duration::ZERO, || {
+            calls += 1;
+            Err("down")
+        });
+        assert_eq!(r, Err("down"));
+        assert_eq!(calls, 4);
     }
 }
