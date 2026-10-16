@@ -2,6 +2,7 @@
 
 ## Build requirements
 - Mirror the package's install_requires as both Requires and BuildRequires, so the runtime and the build see the same dependencies. urllib3 must also be a BuildRequires because the %check import loads the package, which imports urllib3.
+- Optional client backends (botocore, aiohttp) are imported only inside guarded blocks, so they are not required.
 Checked against 3.2.0 on openSUSE_Tumbleweed, x86_64.
 
 ## Test changes
