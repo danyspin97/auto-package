@@ -171,6 +171,11 @@ pub enum FailureKind {
     /// `interrupted`, so the package reads as re-runnable; the caller retries
     /// it within its usual bound.
     Transient,
+    /// A patch turn ran but did not make the dependent's shipping condition
+    /// true. The package's own condition counters bound the repeats (a second
+    /// patch turn, then the upstream wheel), so the caller re-queues the
+    /// request within the same run whatever its round count.
+    ConditionUnmet,
 }
 
 #[derive(Debug)]
@@ -1876,7 +1881,11 @@ pub fn run_package(
         (
             PipelineResult::Failed {
                 rpm_name,
-                kind: FailureKind::Other | FailureKind::AgentUnavailable | FailureKind::Transient,
+                kind:
+                    FailureKind::Other
+                    | FailureKind::AgentUnavailable
+                    | FailureKind::Transient
+                    | FailureKind::ConditionUnmet,
                 ..
             },
             Some(reason),
@@ -8381,9 +8390,9 @@ fn patch_condition_gate(
         ),
     );
     if failures < CONDITION_PATCH_TURNS {
-        return Err(ctx.failed(format!(
-            "the patch of {} did not make this true: {} ({why}); the dependent asks again, and \
-             a second failed patch switches the package to the upstream wheel",
+        return Err(ctx.failed_as(FailureKind::ConditionUnmet, format!(
+            "the patch of {} did not make this true: {} ({why}); the request is queued again in \
+             this run, and a second failed patch switches the package to the upstream wheel",
             ctx.rpm_name,
             cond.describe()
         )));
@@ -14882,7 +14891,7 @@ mod hygiene_tests {
         let (result, state, spec, _root) = gate_case(SPLIT_SPEC, 0, true);
         match result {
             Err(PipelineResult::Failed { reason, kind, .. }) => {
-                assert_eq!(kind, FailureKind::Other);
+                assert_eq!(kind, FailureKind::ConditionUnmet);
                 assert!(reason.contains("foo/utils") && reason.contains("python-foo-devel") || reason.contains("devel"), "{reason}");
             }
             other => panic!("{other:?}"),

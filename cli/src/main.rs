@@ -3119,11 +3119,7 @@ fn cmd_build(
                         // attempt count.
                         let rounds = dep_rounds.entry(key.clone()).or_insert(0);
                         *rounds += 1;
-                        let retry = *rounds < max_dep_attempts
-                            && !matches!(
-                                kind,
-                                FailureKind::Exhausted | FailureKind::RateLimited
-                            );
+                        let retry = dep_failure_retries(kind, *rounds, max_dep_attempts);
                         if retry {
                             attempted_deps.remove(&key);
                             retrying.insert(key);
@@ -3849,8 +3845,33 @@ fn report_update_plan(
     });
 }
 
+/// Whether a failed dependency run is queued again within this run. A failure
+/// to meet a ship condition is: the package's own condition counters (two
+/// patch turns, then the upstream wheel) bound it, so it neither waits for a
+/// dependent to ask in a later run nor depends on the round count. Other
+/// failures are retried within `max_attempts` rounds, except a spent allowance
+/// or a rate limit, which a repeat would only reproduce.
+fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts: usize) -> bool {
+    match kind {
+        FailureKind::ConditionUnmet => true,
+        FailureKind::Exhausted | FailureKind::RateLimited => false,
+        _ => rounds < max_attempts,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_condition_failure_is_queued_again_in_the_same_run() {
+        use super::{FailureKind as K, dep_failure_retries as r};
+        // Even with the rounds spent: the condition counters are the bound.
+        assert!(r(K::ConditionUnmet, 5, 1));
+        assert!(r(K::Other, 0, 2));
+        assert!(!r(K::Other, 2, 2));
+        assert!(!r(K::Exhausted, 0, 3));
+        assert!(!r(K::RateLimited, 0, 3));
+    }
+
     use super::*;
 
     #[test]
