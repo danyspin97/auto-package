@@ -35,6 +35,13 @@ pub fn run(
         let Some(ws) = Workspace::find_existing(state_root, &[&name]) else {
             continue;
         };
+        if let Ok(text) = std::fs::read_to_string(ws.state_json())
+            && let Err(e) = serde_json::from_str::<PkgState>(&text)
+        {
+            findings.push(format!(
+                "{name}: state.json cannot be read ({e}); it is treated as empty"
+            ));
+        }
         let state = PkgState::load(&ws);
         let checkout = checkout_root.join(&name);
         findings.extend(check_checkout(&name, &state, &ws, &checkout));
@@ -74,6 +81,19 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
              {spec_version}; the package is built again"
         ));
     }
+    // A source archive for another release than the spec names: the spec was
+    // not bumped with it, or the archive is left from an older release.
+    if let Some(spec_version) = &spec_version {
+        let archives = source_archives(checkout);
+        if !archives.is_empty()
+            && !archives.iter().any(|a| a.contains(&format!("-{spec_version}.")))
+        {
+            out.push(format!(
+                "{name}: the spec says {spec_version} but the checkout's source archive(s) are {}",
+                archives.join(", ")
+            ));
+        }
+    }
     if let Some(blocked) = state.blocked_spec_hash
         && blocked != hash_spec(&spec)
     {
@@ -107,6 +127,23 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
     out
 }
 
+/// File names of the source archives in a checkout.
+fn source_archives(checkout: &Path) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(checkout)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| {
+            [".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tgz", ".zip"]
+                .iter()
+                .any(|ext| n.ends_with(ext))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// Whether OBS and `state.json` disagree about one package.
 fn check_obs(name: &str, state: &PkgState, obs: Option<&BuildStatus>) -> Option<String> {
     let obs = obs?;
@@ -124,8 +161,8 @@ fn check_obs(name: &str, state: &PkgState, obs: Option<&BuildStatus>) -> Option<
         && *obs == BuildStatus::Succeeded
     {
         return Some(format!(
-            "{name}: state.json says {outcome}, but OBS shows it built; its RPMs are fetched \
-             and the state corrected"
+            "{name}: state.json says {outcome}, but OBS shows it built (the start-up \
+             reconcile fetches its RPMs when the checkout is clean and at the recorded version)"
         ));
     }
     None
@@ -169,6 +206,32 @@ mod tests {
         assert!(all.contains("python-a: the spec was switched to an upstream wheel"), "{all}");
         assert!(all.contains("python-a: state.json says it built, but OBS shows Failed"), "{all}");
         assert!(all.contains("python-b: state.json says failed, but OBS shows it built"), "{all}");
+    }
+
+    #[test]
+    fn a_stale_archive_and_an_unreadable_state_file_are_found() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let checkouts = root.path().join("proj");
+        std::fs::create_dir_all(checkouts.join("python-a")).unwrap();
+        std::fs::write(
+            checkouts.join("python-a/python-a.spec"),
+            "Name: python-a\nVersion: 2.0\nSource0: a-2.0.tar.gz\n",
+        )
+        .unwrap();
+        std::fs::write(checkouts.join("python-a/a-1.0.tar.gz"), "x").unwrap();
+        write(&state_root, "python-a", |s| s.last_outcome = Some("failed".into()));
+        std::fs::create_dir_all(state_root.join("python-b")).unwrap();
+        std::fs::write(state_root.join("python-b/state.json"), "{not json").unwrap();
+        let all = run(&state_root, &checkouts, || None).join("\n");
+        assert!(
+            all.contains("python-a: the spec says 2.0 but the checkout's source archive(s) are a-1.0.tar.gz"),
+            "{all}"
+        );
+        assert!(all.contains("python-b: state.json cannot be read"), "{all}");
+        // The matching archive is no finding.
+        std::fs::write(checkouts.join("python-a/a-2.0.tar.gz"), "x").unwrap();
+        assert!(!run(&state_root, &checkouts, || None).join("\n").contains("python-a: the spec says"));
     }
 
     #[test]

@@ -856,11 +856,42 @@ pub(crate) fn init_disk_guard(
     for (name, outcome) in ap_build::pipeline::reconcile_state(&work_dir.join("state")) {
         eprintln!("note: {name} was left unfinished; now {outcome}");
     }
+    // What OBS shows for the project, asked once for the reconcile and the self-check.
+    let statuses = ap_build::osc::get_project_build_statuses(
+        project,
+        distro,
+        arch,
+        ap_build::proc::Emit::quiet(),
+    )
+    .ok();
+    // A package state.json calls unfinished while OBS shows it built gets its
+    // RPMs fetched and its state corrected.
+    if let Some(statuses) = &statuses {
+        let lower: std::collections::HashMap<_, _> =
+            statuses.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
+        let rpms_dir = work_dir.join("rpms");
+        let _ = std::fs::create_dir_all(&rpms_dir);
+        for (name, what) in ap_build::pipeline::reconcile_with_obs(
+            &work_dir.join("state"),
+            &work_dir.join(project),
+            &lower,
+            |checkout| ap_build::osc::has_local_changes(checkout, ap_build::proc::Emit::quiet()),
+            |name| {
+                ap_build::osc::download_built_rpms(
+                    project,
+                    name,
+                    distro,
+                    arch,
+                    &rpms_dir,
+                    ap_build::proc::Emit::quiet(),
+                )
+            },
+        ) {
+            eprintln!("note: {name}: {what}");
+        }
+    }
     // The self-check: what the checkouts, state.json and OBS disagree about.
-    for finding in ap_build::doctor::run(&work_dir.join("state"), &work_dir.join(project), || {
-        ap_build::osc::get_project_build_statuses(project, distro, arch, ap_build::proc::Emit::quiet())
-            .ok()
-    }) {
+    for finding in ap_build::doctor::run(&work_dir.join("state"), &work_dir.join(project), || statuses) {
         eprintln!("warning: {finding}");
     }
 }

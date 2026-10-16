@@ -428,6 +428,78 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
     changed
 }
 
+/// A package whose `state.json` records an unfinished outcome although OBS shows
+/// its build succeeded is fixed here, before the run builds on it: the RPMs are
+/// downloaded (`download(name)`, the number fetched) and the outcome becomes
+/// `success`. Only for a package whose checkout holds the version the state
+/// last worked on and has no local changes, so an OBS success of an older
+/// source is not taken for this one. `statuses` is keyed by lower-case package
+/// name. Returns `(name, what was done)` for each package looked at that could
+/// not be fixed or was.
+pub fn reconcile_with_obs(
+    state_root: &Path,
+    checkout_root: &Path,
+    statuses: &std::collections::HashMap<String, osc::BuildStatus>,
+    local_changes: impl Fn(&Path) -> bool,
+    download: impl Fn(&str) -> Result<usize, osc::Error>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(state_root) else {
+        return out;
+    };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().join("state.json").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    for name in names {
+        let Some(ws) = Workspace::find_existing(state_root, &[&name]) else {
+            continue;
+        };
+        let state = PkgState::load(&ws);
+        if !matches!(
+            state.last_outcome.as_deref(),
+            Some("failed" | "interrupted" | "missing_deps" | "blocked")
+        ) || statuses.get(&name.to_lowercase()) != Some(&osc::BuildStatus::Succeeded)
+            || !state.policy_current()
+        {
+            continue;
+        }
+        let checkout = checkout_root.join(&name);
+        let spec_version = std::fs::read_to_string(checkout.join(format!("{name}.spec")))
+            .ok()
+            .and_then(|t| crate::spec::parse_header(&t).map(|h| h.version));
+        if spec_version.is_none()
+            || spec_version != state.last_built_version
+            || local_changes(&checkout)
+        {
+            continue;
+        }
+        match download(&name) {
+            Ok(n) if n > 0 => {
+                let version = spec_version.unwrap_or_default();
+                let saved = PkgState::update(&ws, |st| {
+                    st.policy_version = POLICY_VERSION;
+                    st.last_built_version = Some(version);
+                    st.last_outcome = Some("success".to_string());
+                    st.last_failure_reason = None;
+                });
+                out.push((
+                    name,
+                    match saved {
+                        Ok(_) => format!("OBS built it; fetched {n} RPM(s) and recorded success"),
+                        Err(e) => format!("OBS built it; fetched {n} RPM(s), state not saved: {e}"),
+                    },
+                ));
+            }
+            Ok(_) => out.push((name, "OBS built it but no RPMs were downloaded".to_string())),
+            Err(e) => out.push((name, format!("OBS built it but fetching its RPMs failed: {e}"))),
+        }
+    }
+    out
+}
+
 /// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
 /// only used to detect "did the spec change since it was reviewed", not for
 /// anything security-sensitive.
@@ -12590,6 +12662,65 @@ mod hygiene_tests {
         assert_eq!(changed.len(), 2, "{changed:?}");
         assert_eq!(outcome(root.path(), "python-mid").as_deref(), Some("interrupted"));
         assert_eq!(outcome(root.path(), "python-top").as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn a_failed_state_that_obs_built_is_reconciled_by_downloading_its_rpms() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        // A project name with `:` in it, as the checkout root has.
+        let checkouts = root.path().join("home:u:p");
+        let package = |name: &str, outcome: &str, built: &str, spec: &str| {
+            write_state(&state_root, name, outcome, Some("OBS: build failed"));
+            let ws = Workspace::open(&state_root, name).unwrap();
+            PkgState::update(&ws, |s| s.last_built_version = Some(built.into())).unwrap();
+            std::fs::create_dir_all(checkouts.join(name)).unwrap();
+            std::fs::write(
+                checkouts.join(name).join(format!("{name}.spec")),
+                format!("Name: {name}\nVersion: {spec}\n"),
+            )
+            .unwrap();
+        };
+        package("python-ok", "failed", "1.0", "1.0");
+        package("python-old", "failed", "1.0", "2.0");
+        package("python-dirty", "failed", "1.0", "1.0");
+        package("python-empty", "interrupted", "1.0", "1.0");
+        package("python-built", "success", "1.0", "1.0");
+        package("python-bad", "failed", "1.0", "1.0");
+        let statuses: std::collections::HashMap<String, osc::BuildStatus> = [
+            "python-ok", "python-old", "python-dirty", "python-empty", "python-built",
+        ]
+        .iter()
+        .map(|n| (n.to_string(), osc::BuildStatus::Succeeded))
+        .chain([("python-bad".to_string(), osc::BuildStatus::Failed)])
+        .collect();
+        let downloads = std::sync::Mutex::new(Vec::new());
+        let done = reconcile_with_obs(
+            &state_root,
+            &checkouts,
+            &statuses,
+            |dir| dir.ends_with("python-dirty"),
+            |name| {
+                downloads.lock().unwrap().push(name.to_string());
+                Ok(if name == "python-empty" { 0 } else { 3 })
+            },
+        );
+        // Only the package OBS built, at the version the state worked on, with a
+        // clean checkout, is fetched; an empty download changes nothing.
+        assert_eq!(*downloads.lock().unwrap(), ["python-empty", "python-ok"]);
+        assert_eq!(outcome(&state_root, "python-ok").as_deref(), Some("success"));
+        let ws = Workspace::open(&state_root, "python-ok").unwrap();
+        assert_eq!(PkgState::load(&ws).last_failure_reason, None);
+        for kept in ["python-old", "python-dirty", "python-bad"] {
+            assert_eq!(outcome(&state_root, kept).as_deref(), Some("failed"), "{kept}");
+        }
+        assert_eq!(outcome(&state_root, "python-empty").as_deref(), Some("interrupted"));
+        assert_eq!(done.len(), 2, "{done:?}");
+        // A failing download is reported, not fatal.
+        let again = reconcile_with_obs(&state_root, &checkouts, &statuses, |_| false, |_| {
+            Err(osc::Error::NotActionable("502".into()))
+        });
+        assert!(again.iter().all(|(_, m)| m.contains("fetching its RPMs failed")), "{again:?}");
     }
 
     struct Warnings(std::sync::Mutex<Vec<String>>);
