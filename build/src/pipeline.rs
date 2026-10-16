@@ -2921,11 +2921,7 @@ fn missing_deps_from_turn(
     // being built is exactly what the defect is about.
     let already_patched = |p: &crate::agent::PatchRequest| {
         Workspace::open(&ctx.config.state_root, &osc::rpm_name(&p.name))
-            .map(|w| {
-                PkgState::load(&w)
-                    .patched_problems
-                    .contains(&hash_spec(&p.problem))
-            })
+            .map(|w| patch_request_settled(&PkgState::load(&w).patched_problems, &p.problem))
             .unwrap_or(false)
     };
     let mut patches: Vec<crate::agent::PatchRequest> = patch_dependencies
@@ -6055,6 +6051,20 @@ enum TurnEffect {
     SwitchedToWheel,
 }
 
+/// How many different patch requests one package takes in total. A dependent
+/// words the same defect differently every round (python-torch was asked eleven
+/// times to keep `torch/utils/benchmark/utils` in the main package), so the
+/// text alone cannot tell a repeat: past this many turns that already patched
+/// the package, a further request is treated as met.
+const MAX_PATCH_REQUESTS_PER_PACKAGE: usize = 2;
+
+/// Whether a patch request is over: this very text was patched, or the
+/// package has already been patched [`MAX_PATCH_REQUESTS_PER_PACKAGE`] times.
+fn patch_request_settled(patched_problems: &[u64], problem: &str) -> bool {
+    patched_problems.contains(&hash_spec(problem))
+        || patched_problems.len() >= MAX_PATCH_REQUESTS_PER_PACKAGE
+}
+
 /// Whether a patch turn (convention 62) failed to deliver what a dependent asked
 /// for. Not when it edited, not when an earlier run already did, and not when it
 /// answered `no_change`: that is the turn finding the change already in the
@@ -6067,8 +6077,10 @@ fn patch_turn_failed(
     already_reviewed: bool,
     action: &crate::agent::Action,
 ) -> bool {
+    // A switch to the upstream wheel replaces the recipe: the wheel carries every
+    // file the dependent looked for, so the request is met, not refused.
     patching
-        && effect != TurnEffect::Edited
+        && !matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel)
         && !already_reviewed
         && !matches!(action, crate::agent::Action::NoChange)
 }
@@ -11046,6 +11058,24 @@ mod patch_turn_tests {
         assert!(!patch_turn_failed(false, TurnEffect::NoChange, false, &blocked));
         // Blocked is still a failure to patch.
         assert!(patch_turn_failed(true, TurnEffect::NoChange, false, &blocked));
+        // python-torch: the wheel switch meets the request.
+        assert!(!patch_turn_failed(
+            true,
+            TurnEffect::SwitchedToWheel,
+            false,
+            &Action::UseUpstreamWheel { why: "x".into() }
+        ));
+    }
+
+    /// python-torch was asked eleven times, each in new words, for the same
+    /// change: the text no longer matters once the package was patched twice.
+    #[test]
+    fn a_reworded_request_for_an_already_patched_package_is_settled() {
+        let a = hash_spec("Keep torch/utils/benchmark/utils in the main package.");
+        assert!(!patch_request_settled(&[], "anything"));
+        assert!(patch_request_settled(&[a], "Keep torch/utils/benchmark/utils in the main package."));
+        assert!(!patch_request_settled(&[a], "Ship benchmark/utils in the main package."));
+        assert!(patch_request_settled(&[a, a ^ 1], "Ship benchmark/utils in the main package."));
     }
 }
 

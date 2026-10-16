@@ -4808,6 +4808,16 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              dependents still resolve, and return `edited`. Do not weaken it to a flag \
              that only hides the licence.\n\
              \n\
+             If the recipe ALREADY has what the problem asks for (the files it names \
+             are packaged where the dependent looks, the option is set), the change is \
+             made: return `no_change` and say where you saw it. A dependent that words \
+             the same request differently on each round is asking for that same change. \
+             If the sdist cannot be built because it is a repository snapshot whose \
+             `third_party/` submodule directories are empty (torch: pybind11, fmt, \
+             XNNPACK ... have no files), that is not a reason to return `blocked`: \
+             return `use_upstream_wheel` (convention 28 Exception 4), since a wheel \
+             carries the same files and the request is then met by it.\n\
+             \n\
              First decide which of convention 62's two cases the problem is. If it is \
              case (b) — this package is one this project builds itself (a prebuilt \
              wheel repackage, say) and its OWN RECIPE is wrong or unfinished, so its \
