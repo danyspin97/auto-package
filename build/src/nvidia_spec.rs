@@ -121,8 +121,31 @@ fn is_license_name(name: &str) -> bool {
     u.starts_with("LICENSE") || u.starts_with("EULA") || u.starts_with("COPYING")
 }
 
+/// Top-level directories that hold no run-time file: samples, documentation and
+/// helper scripts (`cufile/tools/gds_log_collection.py`). They go with the devel
+/// package so the runtime one does not carry their `/usr/bin/perl`, `bash`
+/// or `python` requirements.
+const AUX_DIRS: &[&str] = &[
+    "samples",
+    "doc",
+    "docs",
+    "man",
+    "tools",
+    "extras/CUPTI/samples",
+    "extras/CUPTI/doc",
+];
+
+fn is_aux(dest: &str) -> bool {
+    // A top-level README is documentation too.
+    (!dest.contains('/') && dest.to_ascii_uppercase().starts_with("README"))
+        || AUX_DIRS
+            .iter()
+            .any(|d| dest.strip_prefix(d).is_some_and(|r| r.starts_with('/')))
+}
+
 /// Development files: headers, static libraries, link-time symlinks, build
-/// system metadata and the driver stubs. Everything else (shared libraries,
+/// system metadata, the driver stubs, and samples, documentation and helper
+/// tools ([`AUX_DIRS`]). Everything else (shared libraries,
 /// executables, nvcc's profile and stubs, libdevice bitcode, `extras/` and
 /// `nvvm/` content that the tools load while running) is runtime: nvcc stays
 /// usable from the main package alone.
@@ -130,6 +153,9 @@ fn classify(dest: &str, all: &BTreeSet<&str>) -> Role {
     let segs: Vec<&str> = dest.split('/').collect();
     let (dirs, file) = segs.split_at(segs.len() - 1);
     let file = file[0];
+    if is_aux(dest) {
+        return Role::Devel;
+    }
     if dirs.iter().any(|d| {
         matches!(
             *d,
@@ -288,6 +314,24 @@ fn ld_conf_name(release: &str) -> String {
     format!("cuda-{maj}-{min}.conf")
 }
 
+/// The components whose headers the headers of `key` include, so that a build
+/// against `cuda-<key>-devel` finds them. The manifests carry no dependency
+/// information, and the include graph is stable across releases:
+/// `cublas_api.h` and `cufft.h` include `cuda_runtime.h` and `driver_types.h`
+/// (cudart), `cusolverDn.h` includes `cublas_v2.h` and `cusparse.h`. Header
+/// dependencies only: the runtime packages' needs are the sonames' (rpm adds
+/// them itself).
+fn devel_requires(key: &str) -> &'static [&'static str] {
+    match key {
+        "libcusolver" => &["cuda_cudart", "libcublas", "libcusparse"],
+        "libcublas" | "libcufft" | "libcurand" | "libcusparse" | "libcufile" | "libnvjpeg"
+        | "libnpp" | "cuda_cupti" | "cudnn" | "libcusparse_lt" | "libnvshmem" => {
+            &["cuda_cudart"]
+        }
+        _ => &[],
+    }
+}
+
 /// A complete spec for one redistributable component.
 ///
 /// Layout decisions:
@@ -381,6 +425,14 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
              %global __requires_exclude ^(libcuda\\.so\\.1|libnvidia-ml\\.so\\.1).*$\n",
         );
     }
+    if layout.members.iter().any(|m| is_aux(&m.dest)) {
+        s.push_str(
+            "\n\
+             # Sample programs and helper scripts need perl, bash or python, and tools\n\
+             # of the host (libmlx5, ...): those are not requirements of the libraries.\n\
+             %global __requires_exclude_from ^%{cuda_prefix}/(samples|tools|doc|docs|man|extras/CUPTI/(samples|doc))/\n",
+        );
+    }
     s.push_str(&format!(
         "\n\
          Name:           {name}\n\
@@ -419,6 +471,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
              %package devel\n\
              Summary:        Development files for {human}\n\
              Requires:       %{{name}} = %{{version}}-%{{release}}\n\
+             {devel_requires}\
              \n\
              %description devel\n\
              Headers, link-time links, static libraries and build-system files of\n\
@@ -426,6 +479,10 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
             human = human_name(&input.name),
             key = input.component_key,
             version = input.version,
+            devel_requires = devel_requires(&input.component_key)
+                .iter()
+                .map(|k| format!("Requires:       cuda-{}-devel\n", short_name(k)))
+                .collect::<String>(),
         ));
     }
 
@@ -517,7 +574,8 @@ pub fn redist_rpmlintrc(input: &RedistSpecInput) -> String {
     out.push_str(
         "# NVIDIA's CUDA tree lives in /usr/local/cuda-<major>.<minor>: nvcc finds\n\
          # its tools and headers relative to that tree.\n\
-         addFilter(\"filelist-forbidden-fhs23\")\n",
+         addFilter(\"filelist-forbidden-fhs23\")\n\
+         addFilter(\"dir-or-file-outside-snapshot\")\n",
     );
     let Some(layout) = analyse(&input.files) else {
         return out;
@@ -936,6 +994,85 @@ bin/__nvcc_device_query
         assert!(
             !rc.contains("no-binary") && !rc.contains("missing-hash-section"),
             "{rc}"
+        );
+    }
+
+    const CUFILE: &str = "\
+LICENSE
+README
+etc/cufile.json
+include/cufile.h
+lib/libcufile.so.0
+lib/libcufile.so.1.19.1
+lib/libcufile.so
+lib/libcufile_rdma.so.1
+man/man3/cufile.h.3
+pkg-config/cufile-13.4.pc
+tools/README
+tools/gds_log_collection.py
+samples/cufile_sample_001.cc
+";
+
+    #[test]
+    fn samples_docs_man_and_tools_go_to_devel_with_no_interpreter_requires() {
+        let spec = redist_component_spec(&input("libcufile", "1.19.1.55", CUFILE));
+        let rt = section(&spec, "%files");
+        let dv = section(&spec, "%files devel");
+        let p = "%{cuda_prefix}/";
+        for f in [
+            "README",
+            "man/man3/cufile.h.3",
+            "tools/gds_log_collection.py",
+            "tools/README",
+            "samples/cufile_sample_001.cc",
+        ] {
+            let path = format!("{p}{f}");
+            assert!(dv.contains(&path.as_str()), "{f} in devel: {dv:?}");
+            assert!(!rt.contains(&path.as_str()), "{f} in runtime: {rt:?}");
+        }
+        for f in ["etc/cufile.json", "lib64/libcufile.so.0", "lib64/libcufile_rdma.so.1"] {
+            let path = format!("{p}{f}");
+            assert!(rt.contains(&path.as_str()), "{f}: {rt:?}");
+        }
+        assert!(
+            spec.contains("%global __requires_exclude_from ^%{cuda_prefix}/(samples|tools|"),
+            "{spec}"
+        );
+        // A component without such files has no exclude.
+        assert!(!redist_component_spec(&cudart()).contains("__requires_exclude_from"));
+    }
+
+    #[test]
+    fn devel_packages_require_the_devel_of_the_headers_they_include() {
+        let files = "LICENSE\ninclude/cusolverDn.h\nlib/libcusolver.so.12\nlib/libcusolver.so\n";
+        let spec = redist_component_spec(&input("libcusolver", "12.1.0.1", files));
+        let devel = spec
+            .split("%package devel")
+            .nth(1)
+            .unwrap()
+            .split("%description devel")
+            .next()
+            .unwrap();
+        for dep in ["cuda-cudart-devel", "cuda-cublas-devel", "cuda-cusparse-devel"] {
+            assert!(devel.contains(&format!("Requires:       {dep}\n")), "{devel}");
+        }
+        // cudart includes nothing of another component.
+        let spec = redist_component_spec(&cudart());
+        let devel = spec
+            .split("%package devel")
+            .nth(1)
+            .unwrap()
+            .split("%description devel")
+            .next()
+            .unwrap();
+        assert_eq!(devel.matches("Requires:").count(), 1, "{devel}");
+        assert_eq!(devel_requires("libnvshmem"), ["cuda_cudart"]);
+    }
+
+    #[test]
+    fn rpmlintrc_filters_the_snapshot_check() {
+        assert!(
+            redist_rpmlintrc(&cudart()).contains("addFilter(\"dir-or-file-outside-snapshot\")")
         );
     }
 }
