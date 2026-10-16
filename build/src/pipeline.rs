@@ -8664,6 +8664,16 @@ fn generate_wheel_binary_spec(
     } else {
         spec_text
     };
+    // A wheel without a licence text, switched to from a sdist that has one: the
+    // sdist's is shipped as Source1 and owned as %license.
+    let spec_text = match layout
+        .as_ref()
+        .filter(|_| !no_sdist)
+        .and_then(|l| crate::spec::copy_sdist_license(checkout_dir, &config.version, l))
+    {
+        Some(file) => crate::spec::with_license_source(&spec_text, &file),
+        None => spec_text,
+    };
     ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     write_or_warn(step.file("spec.generated"), &spec_text);

@@ -2890,6 +2890,175 @@ fn wheel_description(paragraph: Option<&str>, summary: &str) -> String {
     lines.join("\n")
 }
 
+/// Whether `file` (a path inside a wheel) is a licence text: a licence-named
+/// leaf anywhere, or anything under `<dist-info>/licenses/`.
+fn is_license_path(file: &str) -> bool {
+    let leaf = file.rsplit('/').next().unwrap_or(file).to_ascii_uppercase();
+    file.contains(".dist-info/licenses/")
+        || ["LICENSE", "LICENCE", "COPYING"]
+            .iter()
+            .any(|p| leaf.starts_with(p))
+}
+
+/// Whether the wheel ships a licence text of its own.
+pub fn wheel_has_license_file(layout: &ap_ecosystem::sdist::WheelLayout) -> bool {
+    layout.files.iter().any(|f| is_license_path(f))
+}
+
+/// The leaf name and bytes of the licence file at the top of a `.tar.gz` sdist
+/// (`LICENSE`, `LICENSE.txt`, `COPYING`; the shortest name wins), at most 1 MiB.
+pub fn sdist_top_level_license(tarball: &std::path::Path) -> Option<(String, Vec<u8>)> {
+    use std::io::Read;
+    let file = std::fs::File::open(tarball).ok()?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut best: Option<(String, Vec<u8>)> = None;
+    for entry in archive.entries().ok()? {
+        let Ok(entry) = entry else { continue };
+        if !entry.header().entry_type().is_file() || entry.size() > (1 << 20) {
+            continue;
+        }
+        let Ok(path) = entry.path() else { continue };
+        let parts: Vec<String> = path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let [_top, leaf] = parts.as_slice() else { continue };
+        let upper = leaf.to_ascii_uppercase();
+        let plain = leaf
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        let named = ["LICENSE", "LICENCE", "COPYING"]
+            .iter()
+            .any(|p| upper.starts_with(p));
+        if !plain || !named || upper.ends_with(".PY") {
+            continue;
+        }
+        if best.as_ref().is_some_and(|(b, _)| b.len() <= leaf.len()) {
+            continue;
+        }
+        let leaf = leaf.clone();
+        let mut bytes = Vec::new();
+        if entry.take(1 << 20).read_to_end(&mut bytes).is_ok() {
+            best = Some((leaf, bytes));
+        }
+    }
+    best
+}
+
+/// A wheel with no licence text of its own, whose sdist has one: copy it from
+/// the sdist in `dir` (the checkout) next to the wheel and return its file name,
+/// for [`with_license_source`]. `None` when the wheel has one, there is no sdist
+/// there, or the sdist has none.
+pub fn copy_sdist_license(
+    dir: &std::path::Path,
+    version: &str,
+    layout: &ap_ecosystem::sdist::WheelLayout,
+) -> Option<String> {
+    if wheel_has_license_file(layout) {
+        return None;
+    }
+    let mut tarballs: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy())
+                .is_some_and(|n| n.ends_with(".tar.gz") && n.contains(version))
+        })
+        .collect();
+    tarballs.sort();
+    let (name, bytes) = tarballs.iter().find_map(|t| sdist_top_level_license(t))?;
+    std::fs::write(dir.join(&name), bytes).ok()?;
+    Some(name)
+}
+
+/// `spec` of a prebuilt wheel with the licence `file` (copied from the sdist by
+/// [`copy_sdist_license`]) as `Source1`, copied to the build directory in
+/// `%prep` and owned as `%license`, for a wheel that carries no licence text.
+/// Left alone when the spec has a `%license` or a `Source1` already.
+pub fn with_license_source(spec: &str, file: &str) -> String {
+    if spec.contains("%license") || spec.contains("Source1:") {
+        return spec.to_string();
+    }
+    let mut out = String::with_capacity(spec.len() + 160);
+    for line in spec.split_inclusive('\n') {
+        out.push_str(line);
+        let t = line.trim_end();
+        if t.starts_with("Source0:") {
+            out.push_str(&format!(
+                "# the wheel has no licence text; this one is the sdist's\nSource1:        {file}\n"
+            ));
+        } else if t == "%prep" {
+            out.push_str(&format!("cp -p %{{SOURCE1}} {file}\n"));
+        } else if t.starts_with("%files") && t.contains("%{python_files}") {
+            out.push_str(&format!("%license {file}\n"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod sdist_license_tests {
+    use super::*;
+
+    fn tarball(dir: &std::path::Path, files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let path = dir.join("x-1.0.tar.gz");
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut b = tar::Builder::new(gz);
+        for (name, data) in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, name, *data).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn the_top_level_licence_is_found_and_deeper_ones_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tarball(
+            dir.path(),
+            &[
+                ("x-1.0/src/LICENSE", b"deep".as_slice()),
+                ("x-1.0/LICENSE.txt", b"mit".as_slice()),
+                ("x-1.0/README.md", b"r".as_slice()),
+            ],
+        );
+        let (name, bytes) = sdist_top_level_license(&t).unwrap();
+        assert_eq!((name.as_str(), bytes.as_slice()), ("LICENSE.txt", b"mit".as_slice()));
+    }
+
+    #[test]
+    fn the_spec_gets_source1_prep_copy_and_license_entry() {
+        let spec = "Source0:        x.whl
+Source99:       r
+%prep
+# n
+
+%files %{python_files}
+%{python_sitelib}/x/
+";
+        let out = with_license_source(spec, "LICENSE");
+        assert!(out.contains("Source0:        x.whl
+# the wheel has no licence text; this one is the sdist's
+Source1:        LICENSE
+"), "{out}");
+        assert!(out.contains("%prep
+cp -p %{SOURCE1} LICENSE
+"), "{out}");
+        assert!(out.contains("%files %{python_files}
+%license LICENSE
+"), "{out}");
+        assert_eq!(with_license_source(&out, "LICENSE"), out);
+    }
+}
+
 /// `spec` with a note under `%prep` that the release has no sdist and no source
 /// repository, so the unpacked wheel is all there is. Only for a true no-sdist
 /// release; a package switched to its wheel after a failed source build has a
