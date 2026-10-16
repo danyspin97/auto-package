@@ -5914,6 +5914,12 @@ fn apply_turn_outcome(
             // environment does not reach), so the entry is written here, from
             // what the turn said it did.
             if changed {
+                for name in osc::drop_empty_rpmlintrc(checkout_dir) {
+                    reporter.report(&Event::Warning {
+                        step: Some(step.id),
+                        message: format!("{rpm_name}: dropped the empty '{name}'"),
+                    });
+                }
                 warn_if_err(
                     reporter,
                     "adding the .changes entry for the agent's edit",

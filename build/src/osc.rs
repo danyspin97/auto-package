@@ -1818,6 +1818,25 @@ mod published_binary_tests {
     }
 
     #[test]
+    fn an_empty_rpmlintrc_goes_with_its_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.spec"),
+            "Name: p\nSource0: p-1.tar.gz\nSource99: p.rpmlintrc\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("p.rpmlintrc"), "").unwrap();
+        assert_eq!(drop_empty_rpmlintrc(dir.path()), ["p.rpmlintrc"]);
+        assert!(!dir.path().join("p.rpmlintrc").exists());
+        let spec = std::fs::read_to_string(dir.path().join("p.spec")).unwrap();
+        assert_eq!(spec, "Name: p\nSource0: p-1.tar.gz\n");
+        // A rpmlintrc with content stays.
+        std::fs::write(dir.path().join("q.rpmlintrc"), "addFilter(\"x\")\n").unwrap();
+        assert!(drop_empty_rpmlintrc(dir.path()).is_empty());
+        assert!(dir.path().join("q.rpmlintrc").exists());
+    }
+
+    #[test]
     fn a_wheel_spec_drops_source_recipe_leftovers() {
         let dir = tempfile::tempdir().unwrap();
         let spec = "Name: python-x\nVersion: 2\nSource0: https://h/x-2-py3-none-any.whl#/x-2-py3-none-any.whl\n";
@@ -3517,6 +3536,56 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[Str
     }
     let is_patch = name.ends_with(".patch") || name.ends_with(".diff");
     is_patch && (series.iter().any(|s| s == name) || spec_text.contains(name))
+}
+
+/// Delete zero-byte `*.rpmlintrc` files and the `SourceN:` lines of the spec
+/// that name them: an empty filter file is noise in the package. Returns the
+/// names removed.
+pub fn drop_empty_rpmlintrc(checkout_dir: &Path) -> Vec<String> {
+    let mut removed = Vec::new();
+    let Ok(rd) = fs::read_dir(checkout_dir) else {
+        return removed;
+    };
+    let mut entries: Vec<_> = rd.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in &entries {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.ends_with(".rpmlintrc")
+            && e.metadata().is_ok_and(|m| m.is_file() && m.len() == 0)
+            && fs::remove_file(e.path()).is_ok()
+        {
+            removed.push(name);
+        }
+    }
+    if removed.is_empty() {
+        return removed;
+    }
+    for e in entries {
+        let path = e.path();
+        if path.extension().is_none_or(|x| x != "spec") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let kept: String = text
+            .split_inclusive('\n')
+            .filter(|l| {
+                let Some((tag, value)) = l.split_once(':') else {
+                    return true;
+                };
+                let tag = tag.trim().to_ascii_lowercase();
+                let is_source = tag
+                    .strip_prefix("source")
+                    .is_some_and(|r| r.chars().all(|c| c.is_ascii_digit()));
+                !(is_source && value.contains("rpmlintrc"))
+            })
+            .collect();
+        if kept != text {
+            let _ = fs::write(&path, kept);
+        }
+    }
+    removed
 }
 
 /// Names OBS already tracks for this checkout (`.osc/_files`).
