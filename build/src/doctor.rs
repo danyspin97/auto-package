@@ -58,8 +58,25 @@ pub fn run(
 fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let spec = std::fs::read_to_string(checkout.join(format!("{name}.spec"))).ok();
+    // A spec that builds from a wheel got there by a switch that wrote its
+    // provenance into the state directory (see the check below).
+    let wheel_spec = spec.as_deref().is_some_and(|spec| {
+        spec.lines()
+            .any(|l| l.trim_start().starts_with("Source") && l.contains(".whl"))
+    });
     if checkout.is_dir() {
-        let skipped = crate::osc::publish_plan(checkout).skipped;
+        let archives = source_archives(checkout);
+        let skipped: Vec<String> = crate::osc::publish_plan(checkout)
+            .skipped
+            .into_iter()
+            // The switch's own files have a finding of their own below, and
+            // the source archive it replaced is an expected leftover.
+            .filter(|f| {
+                !(f == "wheel-origin.txt"
+                    || f.ends_with(".spec.pre-wheel-switch")
+                    || (wheel_spec && archives.contains(f)))
+            })
+            .collect();
         if !skipped.is_empty() {
             out.push(format!(
                 "{name}: the checkout has file(s) its spec does not reference, which are not \
@@ -85,9 +102,7 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
     // not bumped with it, or the archive is left from an older release.
     if let Some(spec_version) = &spec_version {
         let archives = source_archives(checkout);
-        if !archives.is_empty()
-            && !archives.iter().any(|a| a.contains(&format!("-{spec_version}.")))
-        {
+        if !archives.is_empty() && !archives.iter().any(|a| names_version(a, spec_version)) {
             out.push(format!(
                 "{name}: the spec says {spec_version} but the checkout's source archive(s) are {}",
                 archives.join(", ")
@@ -108,12 +123,9 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
             "{name}: state.json records a review of {reviewed} but the spec says {version}"
         ));
     }
-    // A spec that builds from a wheel got there by a switch that wrote its
-    // provenance into the state directory; none there, or one left in the
-    // checkout, means the switch was made by an older version of the tool.
-    let wheel_spec = spec
-        .lines()
-        .any(|l| l.trim_start().starts_with("Source") && l.contains(".whl"));
+    // None there, or one left in the checkout, means the switch was made by an
+    // older version of the tool; the pipeline copies it into the state
+    // directory the next time it runs the package.
     let state_has = |f: &str| ws.dir().join(f).is_file();
     let switched = state_has(&format!("{name}.spec.pre-wheel-switch"))
         || checkout.join(format!("{name}.spec.pre-wheel-switch")).is_file()
@@ -125,6 +137,25 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
         ));
     }
     out
+}
+
+/// Whether the archive file name `archive` names `version`: the version is
+/// followed by a separator or the extension, not by more of a version
+/// (`1.0` is in `a-1.0.tar.gz` and `a-1.0_cuda13-archive.tar.xz`, not in
+/// `a-1.0.1.tar.gz`).
+fn names_version(archive: &str, version: &str) -> bool {
+    let bare = version.replace('~', "");
+    [version, bare.as_str()].iter().any(|v| {
+        archive.match_indices(*v).any(|(at, _)| {
+            let rest = &archive[at + v.len()..];
+            let mut chars = rest.chars();
+            match chars.next() {
+                None => true,
+                Some('.') => !chars.next().is_some_and(|c| c.is_ascii_digit()),
+                Some(c) => !c.is_ascii_alphanumeric(),
+            }
+        })
+    })
 }
 
 /// File names of the source archives in a checkout.
@@ -232,6 +263,35 @@ mod tests {
         // The matching archive is no finding.
         std::fs::write(checkouts.join("python-a/a-2.0.tar.gz"), "x").unwrap();
         assert!(!run(&state_root, &checkouts, || None).join("\n").contains("python-a: the spec says"));
+    }
+
+    #[test]
+    fn archive_names_match_the_spec_version_and_wheel_leftovers_are_not_noise() {
+        assert!(names_version("a-1.0.tar.gz", "1.0"));
+        assert!(names_version("libcublas-linux-x86_64-13.8.0.4-archive.tar.xz", "13.8.0.4"));
+        assert!(names_version("cudnn-linux-x86_64-9.27.0.42_cuda13-archive.tar.xz", "9.27.0.42"));
+        assert!(names_version("v1.0.zip", "1.0"));
+        assert!(!names_version("a-1.0.1.tar.gz", "1.0"));
+        assert!(!names_version("a-11.0.tar.gz", "1.0.1"));
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let checkouts = root.path().join("proj");
+        let dir = checkouts.join("python-w");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("python-w.spec"),
+            "Name: python-w\nVersion: 1.0\nSource0: w-1.0-py3-none-any.whl\n",
+        )
+        .unwrap();
+        for f in ["w-1.0.tar.gz", "wheel-origin.txt", "python-w.spec.pre-wheel-switch", "stray.bin"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        write(&state_root, "python-w", |s| s.last_outcome = Some("failed".into()));
+        let found = run(&state_root, &checkouts, || None).join("\n");
+        // One finding for the leftovers a wheel switch makes, one for the stray file.
+        assert!(found.contains("not committed: stray.bin"), "{found}");
+        assert!(!found.contains("wheel-origin.txt") || found.contains("wheel-origin.txt is missing"), "{found}");
+        assert!(!found.contains("w-1.0.tar.gz"), "{found}");
     }
 
     #[test]

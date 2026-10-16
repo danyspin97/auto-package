@@ -2364,6 +2364,7 @@ fn checkout_stage(
             .canonicalize()
             .unwrap_or_else(|_| spec_path.clone());
         warn_if_err(reporter, "updating the spec link", ws.link_spec(&abs));
+        migrate_wheel_provenance(checkout_dir, ws, rpm_name, reporter);
 
         // A checkout dir is reused across runs (see `osc::checkout`), and
         // `osc up` never discards local uncommitted edits — so a spec that a
@@ -4888,6 +4889,30 @@ fn recorded_outcome(result: &PipelineResult) -> Option<(&'static str, String)> {
             format!("waiting on dependencies: {}", deps.join(", ")),
         )),
         PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => None,
+    }
+}
+
+/// An older version of the tool wrote a wheel switch's provenance
+/// (`wheel-origin.txt`, `<pkg>.spec.pre-wheel-switch`) into the checkout; it
+/// now lives in the state directory. Copy what the checkout still holds there
+/// when the state directory lacks it. The checkout's copy is left alone: it may
+/// be tracked by OBS, and the commit step removes what the package no longer names.
+fn migrate_wheel_provenance(
+    checkout: &Path,
+    ws: &Workspace,
+    rpm_name: &str,
+    reporter: &dyn Reporter,
+) {
+    let pre_switch = format!("{}.spec.pre-wheel-switch", ap_core::run::sanitize_name(rpm_name));
+    for file in ["wheel-origin.txt", pre_switch.as_str()] {
+        let (from, to) = (checkout.join(file), ws.dir().join(file));
+        if from.is_file() && !to.exists() {
+            warn_if_err(
+                reporter,
+                "moving the wheel switch's provenance to the state directory",
+                std::fs::read(&from).and_then(|b| ap_core::fsx::write_atomic(&to, b)),
+            );
+        }
     }
 }
 
@@ -12966,6 +12991,26 @@ mod hygiene_tests {
         };
         assert_eq!(recorded_outcome(&failed(FailureKind::Transient)).unwrap().0, "interrupted");
         assert_eq!(recorded_outcome(&failed(FailureKind::Other)).unwrap().0, "failed");
+    }
+
+    #[test]
+    fn wheel_provenance_left_in_a_checkout_is_copied_to_the_state_directory_once() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("co");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(checkout.join("wheel-origin.txt"), "from the checkout").unwrap();
+        std::fs::write(checkout.join("python-w.spec.pre-wheel-switch"), "old spec").unwrap();
+        let ws = Workspace::open(&root.path().join("state"), "python-w").unwrap();
+        let quiet = Warnings(Default::default());
+        migrate_wheel_provenance(&checkout, &ws, "python-w", &quiet);
+        assert_eq!(std::fs::read_to_string(ws.dir().join("wheel-origin.txt")).unwrap(), "from the checkout");
+        assert_eq!(std::fs::read_to_string(ws.dir().join("python-w.spec.pre-wheel-switch")).unwrap(), "old spec");
+        // The state's own record is not overwritten, and the checkout keeps its copy.
+        std::fs::write(ws.dir().join("wheel-origin.txt"), "newer").unwrap();
+        migrate_wheel_provenance(&checkout, &ws, "python-w", &quiet);
+        assert_eq!(std::fs::read_to_string(ws.dir().join("wheel-origin.txt")).unwrap(), "newer");
+        assert!(checkout.join("wheel-origin.txt").is_file());
+        assert!(quiet.0.lock().unwrap().is_empty());
     }
 
     #[test]
