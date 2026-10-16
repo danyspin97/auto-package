@@ -1912,6 +1912,12 @@ mod published_binary_tests {
         assert!(take_rpmlint_logs(dir.path(), "python-a").is_empty());
         assert_eq!(rpmlint_errors(&taken[0].1), ["a: E: bad-x y"]);
         assert!(rpmlint_errors(&taken[1].1).is_empty());
+        // A log with an invalid byte is still taken, and leaves the stash.
+        std::fs::write(dir.path().join("rpmlint.log"), b"c.rpm: E: bad \xff\n").unwrap();
+        stash_rpmlint_log(dir.path(), "python-c");
+        let bad = take_rpmlint_logs(dir.path(), "python-c");
+        assert_eq!(rpmlint_errors(&bad[0].1).len(), 1);
+        assert!(take_rpmlint_logs(dir.path(), "python-c").is_empty());
     }
 
     #[test]
@@ -6195,10 +6201,12 @@ pub fn take_rpmlint_logs(rpms_dir: &Path, pkg: &str) -> Vec<(String, String)> {
             continue;
         };
         if (name == pkg || name.strip_prefix(pkg).is_some_and(|r| r.starts_with(':')))
-            && let Ok(text) = fs::read_to_string(e.path())
+            // Bytes, lossily: a log with one invalid byte is still a log, and a
+            // file that never reads would stay in the stash for ever.
+            && let Ok(bytes) = fs::read(e.path())
         {
             let _ = fs::remove_file(e.path());
-            out.push((name.to_string(), text));
+            out.push((name.to_string(), String::from_utf8_lossy(&bytes).into_owned()));
         }
     }
     out.sort();

@@ -8771,11 +8771,15 @@ fn write_wheel_switch_provenance(
     );
     // Kept in the package's state directory: files in the checkout are
     // "not committing" noise on every Commit step.
-    let dir = config.state_root.join(rpm_name);
-    std::fs::create_dir_all(&dir)?;
+    // Through the workspace, which sanitizes the name: a raw `join` would let a
+    // package name with `/` or `..` write outside the state root.
+    let dir = Workspace::open(&config.state_root, rpm_name)?.dir().to_path_buf();
     ap_core::fsx::write_atomic(&dir.join("wheel-origin.txt"), provenance)?;
     ap_core::fsx::write_atomic(
-        &dir.join(format!("{rpm_name}.spec.pre-wheel-switch")),
+        &dir.join(format!(
+            "{}.spec.pre-wheel-switch",
+            ap_core::run::sanitize_name(rpm_name)
+        )),
         original_spec,
     )?;
     Ok(())
