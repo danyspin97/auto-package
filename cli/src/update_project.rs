@@ -128,9 +128,13 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = 3)]
     pub min_free_gb: u64,
 
-    /// Package NVIDIA's CUDA components from their redistributable archives as
-    /// `cuda-<name>` (see `build --nvidia-redist`).
-    #[arg(long, default_value_t = false)]
+    /// How the NVIDIA CUDA libraries are packaged: `wheel` (the default) or
+    /// `redist` (see `build --nvidia`). Remembered in the work directory.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub nvidia: Option<crate::NvidiaMode>,
+
+    /// Same as `--nvidia redist`.
+    #[arg(long, default_value_t = false, conflicts_with = "nvidia")]
     pub nvidia_redist: bool,
 
     /// Regenerate each package's spec from scratch instead of carrying the
@@ -234,7 +238,11 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     let _project_lock = ProjectLock::acquire(&project_dir)?;
     let work_dir = project_dir.canonicalize()?;
     crate::init_disk_guard(&work_dir, a.min_free_gb);
-    ap_build::redist::set_enabled(a.nvidia_redist);
+    let nvidia_choice = a
+        .nvidia
+        .or(a.nvidia_redist.then_some(crate::NvidiaMode::Redist));
+    let nvidia_mode = crate::apply_nvidia_mode(&work_dir, nvidia_choice, false)?;
+    crate::write_nvidia_mode(&work_dir, nvidia_mode, nvidia_choice.is_some())?;
     let rpms_dir = work_dir.join("rpms");
     std::fs::create_dir_all(&rpms_dir)?;
     let state_root = work_dir.join("state");
@@ -955,7 +963,11 @@ mod tests {
 
     #[test]
     fn nvidia_redist_is_off_unless_asked() {
-        assert!(!args(&[]).nvidia_redist);
+        assert!(!args(&[]).nvidia_redist && args(&[]).nvidia.is_none());
         assert!(args(&["--nvidia-redist"]).nvidia_redist);
+        assert_eq!(
+            args(&["--nvidia", "redist"]).nvidia,
+            Some(crate::NvidiaMode::Redist)
+        );
     }
 }

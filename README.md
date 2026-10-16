@@ -70,7 +70,7 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--jobs`: Maximum concurrent builds (0 = unlimited)
 - A package built from a prebuilt wheel has its unpacked tree (`state/<pkg>/sdist`) deleted once it is Built; a later run unpacks the wheel again.
 - `--min-free-gb`: GiB that must be free on the work directory's disk before a package starts or downloads its RPMs; it waits up to 10 minutes, then fails with `No space left on device` (default: 3, 0 = off)
-- `--nvidia-redist`: Package NVIDIA's CUDA components (cublas, cudnn, cudart...) from NVIDIA's redistributable archives as `cuda-<name>` packages, instead of repackaging the `nvidia-*` wheels as `python-nvidia-*` (default: off)
+- `--nvidia <wheel|redist>`: How the NVIDIA CUDA libraries are packaged: `wheel` repackages the `nvidia-*` PyPI wheels as `python-nvidia-*` (default), `redist` packages NVIDIA's redistributable archives as `cuda-<name>`. The choice is remembered in the work directory (`<project>-<arch>/nvidia-mode`), so a restart keeps it; passing the other value switches it with a warning. `--nvidia-redist` is shorthand for `--nvidia redist`.
 
 ### Updating a whole project
 
@@ -104,7 +104,7 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 - `--update-deps`: also branch and update dependencies that live in another
   project and have a newer release themselves (see below).
 - `--min-free-gb`: as for `build` (default: 3, 0 = off).
-- `--nvidia-redist`: as for `build` (default: off).
+- `--nvidia <wheel|redist>` / `--nvidia-redist`: as for `build` (default: `wheel`, or what the work directory last used).
 - `--submit`: create submit requests (see below). `--yes` skips the question.
 
 Packages are branched with the OBS branch API, without following a devel

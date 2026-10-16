@@ -118,10 +118,17 @@ enum Commands {
         #[arg(long, default_value_t = 3)]
         min_free_gb: u64,
 
-        /// Package NVIDIA's CUDA components (cublas, cudnn, cudart...) from
-        /// NVIDIA's redistributable archives as `cuda-<name>` packages, in
-        /// place of repackaging the `nvidia-*` PyPI wheels as `python-nvidia-*`.
-        #[arg(long, default_value_t = false)]
+        /// How the NVIDIA CUDA libraries (cublas, cudnn, cudart...) are
+        /// packaged: `wheel` repackages the `nvidia-*` PyPI wheels as
+        /// `python-nvidia-*` (the default), `redist` packages NVIDIA's own
+        /// redistributable archives as `cuda-<name>`. Remembered in the work
+        /// directory, so a restart keeps the choice; giving the other value
+        /// switches it, with a warning.
+        #[arg(long, value_enum, value_name = "MODE")]
+        nvidia: Option<NvidiaMode>,
+
+        /// Same as `--nvidia redist`.
+        #[arg(long, default_value_t = false, conflicts_with = "nvidia")]
         nvidia_redist: bool,
 
         /// GitHub URL for Rust packages (e.g. https://github.com/BurntSushi/ripgrep).
@@ -664,6 +671,102 @@ const PROJECT_LOCK_NAME: &str = ".auto-package.lock";
 /// Refuse a project directory that is a symlink: `create_dir_all` and the
 /// marker write would follow it and put state (and `--cleanup`'s deletes)
 /// wherever it points, e.g. `~/Documents`.
+/// How the NVIDIA CUDA libraries are packaged (`--nvidia`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum NvidiaMode {
+    /// The `nvidia-*` PyPI wheels, repackaged as `python-nvidia-*`.
+    Wheel,
+    /// NVIDIA's redistributable archives, packaged as `cuda-<name>`.
+    Redist,
+}
+
+impl NvidiaMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            NvidiaMode::Wheel => "wheel",
+            NvidiaMode::Redist => "redist",
+        }
+    }
+}
+
+/// Where a work directory remembers its `--nvidia` choice.
+const NVIDIA_MODE_FILE: &str = "nvidia-mode";
+
+fn read_nvidia_mode(project_dir: &Path) -> Option<NvidiaMode> {
+    match std::fs::read_to_string(project_dir.join(NVIDIA_MODE_FILE))
+        .ok()?
+        .trim()
+    {
+        "wheel" => Some(NvidiaMode::Wheel),
+        "redist" => Some(NvidiaMode::Redist),
+        _ => None,
+    }
+}
+
+/// The mode to run in, and a warning when it changes what the work directory
+/// last used. An explicit choice wins, then the remembered one, then `wheel`.
+/// The two modes name their packages differently (`cuda-cublas` against
+/// `python-nvidia-cublas`) and never share state, so flipping on a restart
+/// without being asked would build a second copy of every CUDA package.
+pub(crate) fn resolve_nvidia_mode(
+    explicit: Option<NvidiaMode>,
+    remembered: Option<NvidiaMode>,
+) -> (NvidiaMode, Option<String>) {
+    match (explicit, remembered) {
+        (Some(chosen), Some(before)) if chosen != before => (
+            chosen,
+            Some(format!(
+                "this work directory was run with --nvidia {}; switching to {}. Packages \
+                 already built the other way stay in the project: the modes name them \
+                 differently (cuda-<name> against python-nvidia-<name>)",
+                before.as_str(),
+                chosen.as_str()
+            )),
+        ),
+        (Some(chosen), _) => (chosen, None),
+        (None, Some(before)) => (before, None),
+        (None, None) => (NvidiaMode::Wheel, None),
+    }
+}
+
+/// Remember `mode` in the work directory. Called once `--cleanup` has had its
+/// chance to empty it. A plain run in the default mode leaves no file behind.
+pub(crate) fn write_nvidia_mode(
+    project_dir: &Path,
+    mode: NvidiaMode,
+    explicit: bool,
+) -> color_eyre::Result<()> {
+    if mode != NvidiaMode::Wheel || explicit || project_dir.join(NVIDIA_MODE_FILE).exists() {
+        std::fs::write(
+            project_dir.join(NVIDIA_MODE_FILE),
+            format!("{}\n", mode.as_str()),
+        )?;
+    }
+    Ok(())
+}
+
+/// Decide the mode for this run and switch the pipeline to it.
+pub(crate) fn apply_nvidia_mode(
+    project_dir: &Path,
+    explicit: Option<NvidiaMode>,
+    cleanup: bool,
+) -> color_eyre::Result<NvidiaMode> {
+    let remembered = if cleanup {
+        None
+    } else {
+        read_nvidia_mode(project_dir)
+    };
+    let (mode, warning) = resolve_nvidia_mode(explicit, remembered);
+    if let Some(w) = warning {
+        eprintln!("warning: {w}");
+    }
+    ap_build::redist::set_enabled(mode == NvidiaMode::Redist);
+    if mode == NvidiaMode::Redist {
+        eprintln!("info: NVIDIA CUDA libraries are packaged from NVIDIA's archives (--nvidia redist)");
+    }
+    Ok(mode)
+}
+
 fn reject_symlink_project_dir(dir: &Path) -> color_eyre::Result<()> {
     if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(color_eyre::eyre::eyre!(
@@ -769,12 +872,12 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             cleanup,
             jobs,
             min_free_gb,
+            nvidia,
             nvidia_redist,
             url,
             source_url,
             sweep,
         } => {
-            ap_build::redist::set_enabled(nvidia_redist);
             // `--regen` means "start over": without this, an already-built
             // package returned AlreadyBuilt (state.json / OBS-green fast paths,
             // `select_target`) before the regeneration ever ran, so `--regen`
@@ -851,6 +954,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // Taken before --cleanup touches anything: a second run for this
             // project must not delete state under one that is still building.
             let _project_lock = ProjectLock::acquire(&project_dir)?;
+            // `--nvidia`: the flag, else what this work directory used before.
+            let nvidia_choice = nvidia.or(nvidia_redist.then_some(NvidiaMode::Redist));
+            let nvidia_mode = apply_nvidia_mode(&project_dir, nvidia_choice, cleanup)?;
             if cleanup && !created_now {
                 let marker = project_dir.join(OWNERSHIP_MARKER);
                 if !marker.exists() {
@@ -896,6 +1002,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // cwd is the osc checkout.
             let project_dir = project_dir.canonicalize()?;
 
+            write_nvidia_mode(&project_dir, nvidia_mode, nvidia_choice.is_some())?;
             let rpms_dir = project_dir.join("rpms");
             std::fs::create_dir_all(&rpms_dir)?;
             let state_root = project_dir.join("state");
@@ -3634,19 +3741,58 @@ mod tests {
     }
 
     #[test]
-    fn build_takes_nvidia_redist_defaulting_to_off() {
-        let flag = |extra: &[&str]| {
+    fn build_takes_nvidia_mode_defaulting_to_none_chosen() {
+        let parse = |extra: &[&str]| {
             let base = ["auto-package", "build", "httpx", "--project", "home:u"];
-            match Cli::try_parse_from([&base[..], extra].concat())
-                .unwrap()
-                .command
-            {
-                Commands::Build { nvidia_redist, .. } => nvidia_redist,
+            Cli::try_parse_from([&base[..], extra].concat()).map(|c| match c.command {
+                Commands::Build {
+                    nvidia,
+                    nvidia_redist,
+                    ..
+                } => (nvidia, nvidia_redist),
                 _ => panic!("not build"),
-            }
+            })
         };
-        assert!(!flag(&[]));
-        assert!(flag(&["--nvidia-redist"]));
+        assert_eq!(parse(&[]).unwrap(), (None, false));
+        assert_eq!(
+            parse(&["--nvidia", "redist"]).unwrap(),
+            (Some(NvidiaMode::Redist), false)
+        );
+        assert_eq!(
+            parse(&["--nvidia", "wheel"]).unwrap(),
+            (Some(NvidiaMode::Wheel), false)
+        );
+        assert_eq!(parse(&["--nvidia-redist"]).unwrap(), (None, true));
+        assert!(parse(&["--nvidia", "rpm"]).is_err());
+        assert!(parse(&["--nvidia", "wheel", "--nvidia-redist"]).is_err());
+    }
+
+    #[test]
+    fn the_nvidia_mode_is_explicit_then_remembered_then_wheel() {
+        use NvidiaMode::*;
+        assert_eq!(resolve_nvidia_mode(None, None), (Wheel, None));
+        assert_eq!(resolve_nvidia_mode(None, Some(Redist)), (Redist, None));
+        assert_eq!(resolve_nvidia_mode(Some(Redist), None), (Redist, None));
+        assert_eq!(resolve_nvidia_mode(Some(Redist), Some(Redist)), (Redist, None));
+        let (mode, warning) = resolve_nvidia_mode(Some(Wheel), Some(Redist));
+        assert_eq!(mode, Wheel);
+        assert!(warning.unwrap().contains("switching to wheel"));
+    }
+
+    #[test]
+    fn the_nvidia_mode_is_remembered_in_the_work_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_nvidia_mode(dir.path()), None);
+        // A plain run in the default mode leaves nothing behind.
+        write_nvidia_mode(dir.path(), NvidiaMode::Wheel, false).unwrap();
+        assert!(!dir.path().join(NVIDIA_MODE_FILE).exists());
+        write_nvidia_mode(dir.path(), NvidiaMode::Redist, true).unwrap();
+        assert_eq!(read_nvidia_mode(dir.path()), Some(NvidiaMode::Redist));
+        // Once there, it is kept up to date, including a switch back.
+        write_nvidia_mode(dir.path(), NvidiaMode::Wheel, true).unwrap();
+        assert_eq!(read_nvidia_mode(dir.path()), Some(NvidiaMode::Wheel));
+        std::fs::write(dir.path().join(NVIDIA_MODE_FILE), "garbage").unwrap();
+        assert_eq!(read_nvidia_mode(dir.path()), None);
     }
 
     #[test]
