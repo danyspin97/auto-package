@@ -2841,6 +2841,7 @@ const ALLOWED_SERVICES: &[&str] = &[
     "recompress",
     "set_version",
     "cargo_vendor",
+    "node_modules",
     "download_files",
     "go_modules",
     "format_spec_file",
@@ -2889,6 +2890,14 @@ const ALLOWED_SERVICE_PARAMS: &[&str] = &[
     // cargo_vendor
     "versioned-dirs",
     "respect-lockfile",
+    // node_modules
+    "input",
+    "node-dir",
+    "omit-optional",
+    "legacy-container",
+    "cpio",
+    "output",
+    "source-offset",
     // download_files
     "enforceupstream",
     "enforcehash",
@@ -2908,6 +2917,10 @@ const SERVICE_PATH_PARAMS: &[&str] = &[
     "exclude",
     "include",
     "extract",
+    "input",
+    "node-dir",
+    "cpio",
+    "output",
 ];
 
 /// Check one `<param>` against the allowlists. `value` is the decoded text,
@@ -6690,6 +6703,30 @@ mod service_validation_tests {
         validate_service_xml(xml.as_bytes()).unwrap();
         let bad = r#"<services><service name="tar_scm"><param name="extract">../../x</param></service></services>"#;
         assert!(validate_service_xml(bad.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn node_modules_params_pass_and_paths_are_confined() {
+        let xml = r#"<services>
+  <service name="node_modules" mode="manual">
+    <param name="input">package-lock.json</param>
+    <param name="node-dir">node_modules</param>
+    <param name="omit-optional">true</param>
+    <param name="legacy-container"/>
+    <param name="cpio">node_modules.obscpio</param>
+    <param name="output">node_modules.spec.inc</param>
+    <param name="source-offset">10000</param>
+  </service>
+</services>"#;
+        validate_service_xml(xml.as_bytes()).unwrap();
+        for p in ["input", "node-dir", "cpio", "output"] {
+            for v in ["../x", "/etc/x", "&#46;&#46;/x"] {
+                let bad = format!(
+                    r#"<services><service name="node_modules"><param name="{p}">{v}</param></service></services>"#
+                );
+                assert!(validate_service_xml(bad.as_bytes()).is_err(), "{bad}");
+            }
+        }
     }
 
     #[test]

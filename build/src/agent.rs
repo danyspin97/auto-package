@@ -1624,6 +1624,16 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    sees a fresh spec shaped like Exception 3's — load the
    `prebuilt-wheel-packaging` skill to finish it.
 
+   NPM EXCEPTION: when the failure is that the sdist's build hook runs npm
+   or node (`npm: command not found`, `ENOTFOUND registry.npmjs.org`, a
+   hatch_build.py building a JavaScript frontend) and the sdist ships a
+   `package-lock.json`, the package IS buildable from source: load the
+   `npm-vendor-packaging` skill and vendor the dependencies with the
+   `node_modules` OBS service first. Return `"use_upstream_wheel"` for it
+   only after that attempt has failed, or when the project has no
+   `package-lock.json` (pnpm-lock.yaml / yarn.lock only). The pipeline holds
+   the first such `use_upstream_wheel` back and points you at the skill.
+
    BEFORE choosing `"use_upstream_wheel"`, look at the wheels PyPI actually
    publishes for this release (WebFetch `https://pypi.org/pypi/<name>/<version>/json`
    — the `urls[].filename` list). The automatic switch handles two shapes:

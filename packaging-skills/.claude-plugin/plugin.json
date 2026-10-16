@@ -15,6 +15,7 @@
     "./systemd-service-files",
     "./gettext-i18n-packaging",
     "./doc-subpackage",
-    "./django-test-settings"
+    "./django-test-settings",
+    "./npm-vendor-packaging"
   ]
 }

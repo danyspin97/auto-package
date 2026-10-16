@@ -5884,6 +5884,30 @@ fn apply_turn_outcome(
             if let Err(e) = validate_wheel_switch_why(why) {
                 return Err(format!("{label}: {e}"));
             }
+            // An npm failure in an sdist that ships a package-lock.json is
+            // fixable with the `node_modules` OBS service. Send the agent
+            // there once; a second `use_upstream_wheel` is honoured.
+            if npm_vendor_route_pending(why, checkout_dir, &notes_path, &config.version) {
+                append_notes(
+                    notes_path,
+                    &format!(
+                        "\n## {label} — use_upstream_wheel deferred\n\
+                         {NPM_VENDOR_NOTE_MARKER} The sdist ships a package-lock.json, so \
+                         the npm build can be done offline: load the `npm-vendor-packaging` \
+                         skill and vendor the dependencies with the `node_modules` OBS \
+                         service, then make the build hook reuse that. Return \
+                         `use_upstream_wheel` again only if that attempt fails.\n"
+                    ),
+                );
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message: format!(
+                        "{rpm_name}: npm build failure with a package-lock.json in the \
+                         sdist; asking the agent to try npm vendoring before the wheel"
+                    ),
+                });
+                return Ok(TurnEffect::NoChange);
+            }
             reporter.report(&Event::Warning {
                 step: Some(step.id),
                 message: format!(
@@ -7631,6 +7655,47 @@ fn try_wheel_fallback(
 /// evidence line the Exception 4 wording asks for (`"nvcc: not found"` is 15,
 /// `"find_package(CUDAToolkit"` is 23); it rejects "" / "no reason" / the
 /// placeholder shapes without rejecting any genuine single-line citation.
+/// Marker written to the notes when the wheel switch was deferred in favour
+/// of npm vendoring, so the second request goes through.
+const NPM_VENDOR_NOTE_MARKER: &str = "[npm-vendor-route-suggested]";
+
+/// Whether a `.tar.gz` sdist ships a `package-lock.json` (the input the
+/// `node_modules` service reads; it cannot use pnpm-lock.yaml or yarn.lock).
+fn tarball_has_npm_lockfile(tarball: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(tarball) else {
+        return false;
+    };
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let Ok(entries) = ar.entries() else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.path().is_ok_and(|p| {
+            p.file_name().is_some_and(|n| n == "package-lock.json")
+                && !p.components().any(|c| c.as_os_str() == "node_modules")
+        })
+    })
+}
+
+/// True when a `use_upstream_wheel` should first be turned into an npm
+/// vendoring attempt: the reason cites npm/node, the sdist has a
+/// package-lock.json, and that redirect has not been given yet.
+fn npm_vendor_route_pending(
+    why: &str,
+    checkout_dir: &Path,
+    notes_path: &Path,
+    version: &str,
+) -> bool {
+    let w = why.to_lowercase();
+    if !(w.contains("npm") || w.contains("node.js") || w.contains("nodejs")) {
+        return false;
+    }
+    if std::fs::read_to_string(notes_path).is_ok_and(|n| n.contains(NPM_VENDOR_NOTE_MARKER)) {
+        return false;
+    }
+    find_tarball(checkout_dir, version).is_some_and(|t| tarball_has_npm_lockfile(&t))
+}
+
 fn validate_wheel_switch_why(why: &str) -> Result<(), String> {
     let trimmed = why.trim();
     if trimmed.len() < 20 {
@@ -10671,6 +10736,66 @@ mod policy_tests {
         };
         assert!(st.policy_current());
         assert!(st.is_built("1.0"));
+    }
+}
+
+#[cfg(test)]
+mod npm_vendor_route_tests {
+    use super::*;
+
+    fn sdist(dir: &Path, files: &[&str]) {
+        let file = std::fs::File::create(dir.join("pkg-1.0.tar.gz")).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(enc);
+        for f in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(2);
+            h.set_mode(0o644);
+            h.set_cksum();
+            ar.append_data(&mut h, format!("pkg-1.0/{f}"), &b"{}"[..])
+                .unwrap();
+        }
+        ar.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn first_npm_failure_is_redirected_second_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        sdist(dir.path(), &["package.json", "frontend/package-lock.json"]);
+        let notes = dir.path().join("notes.md");
+        let why = "hatch_build.py: npm not found";
+        assert!(npm_vendor_route_pending(why, dir.path(), &notes, "1.0"));
+        append_notes(notes.clone(), &format!("x {NPM_VENDOR_NOTE_MARKER}\n"));
+        assert!(!npm_vendor_route_pending(why, dir.path(), &notes, "1.0"));
+    }
+
+    #[test]
+    fn needs_npm_in_why_and_a_lockfile_outside_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes.md");
+        sdist(
+            dir.path(),
+            &["package.json", "node_modules/x/package-lock.json"],
+        );
+        assert!(!npm_vendor_route_pending(
+            "npm not found",
+            dir.path(),
+            &notes,
+            "1.0"
+        ));
+        sdist(dir.path(), &["package-lock.json"]);
+        assert!(!npm_vendor_route_pending(
+            "nvcc: command not found",
+            dir.path(),
+            &notes,
+            "1.0"
+        ));
+        assert!(npm_vendor_route_pending(
+            "npm: command not found",
+            dir.path(),
+            &notes,
+            "1.0"
+        ));
     }
 }
 
