@@ -365,18 +365,6 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
                 .is_some_and(|w| PkgState::load(&w).last_outcome.as_deref() == Some("success"))
         })
     };
-    // A given-up package is `blocked`, or `failed` and given up this run; a
-    // restart gives the latter a fresh attempt, so only `blocked` holds.
-    let still_blocked = |dep: &str| {
-        [dep.to_string(), osc::rpm_name(dep)].iter().any(|n| {
-            Workspace::find_existing(state_root, &[n.as_str()]).is_some_and(|w| {
-                matches!(
-                    PkgState::load(&w).last_outcome.as_deref(),
-                    Some("blocked" | WAITING_ON_BLOCKED)
-                )
-            })
-        })
-    };
     for name in names {
         let Some(ws) = Workspace::find_existing(state_root, &[&name]) else {
             continue;
@@ -402,18 +390,6 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
                 }
                 ("interrupted", "the dependencies it waited on are built; ready to run again")
             }
-            Some(WAITING_ON_BLOCKED) => {
-                let blocker = state
-                    .last_failure_reason
-                    .as_deref()
-                    .and_then(|r| r.strip_prefix(WAITING_ON_BLOCKED_PREFIX))
-                    .map(str::trim)
-                    .unwrap_or_default();
-                if !blocker.is_empty() && still_blocked(blocker) {
-                    continue;
-                }
-                ("interrupted", "the package it waited on is no longer blocked; ready to run again")
-            }
             _ => continue,
         };
         if PkgState::update(&ws, |st| {
@@ -424,6 +400,13 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
         {
             changed.push((name, new));
         }
+    }
+    // Dependents that wait on a blocked package, and those whose blocker is
+    // no longer blocked.
+    let (more, _errors) = sync_blocked_waiters(state_root, &[]);
+    for (name, outcome) in more {
+        changed.retain(|(n, _)| *n != name);
+        changed.push((name, outcome));
     }
     changed
 }
@@ -1256,13 +1239,13 @@ pub fn select_target(
     }
 
     if !permanently_failed.is_empty() {
-        for (dependent, blocker) in blocked_dependents(&nodes, &resolvable, &failed_keys) {
-            mark_waiting_on_blocked(
-                &config.state_root,
-                &osc::rpm_name(&nodes[dependent].name),
-                &osc::rpm_name(&nodes[blocker].name),
-                reporter,
-            );
+        let edges: Vec<(String, String)> = blocked_dependents(&nodes, &resolvable, &failed_keys)
+            .into_iter()
+            .map(|(d, b)| (osc::rpm_name(&nodes[d].name), osc::rpm_name(&nodes[b].name)))
+            .collect();
+        let (_, errors) = sync_blocked_waiters(&config.state_root, &edges);
+        for message in errors {
+            reporter.report(&Event::Warning { step: None, message });
         }
     }
 
@@ -1382,25 +1365,187 @@ fn blocked_dependents(
         .collect()
 }
 
-/// Record on `dependent`'s state that it waits on `blocker`. Nothing is
-/// written for a package that is running or built.
-fn mark_waiting_on_blocked(
+/// Bring every package that waits on a blocked package into
+/// `waiting_on_blocked`, and free those whose blocker left the blocked state.
+/// One function for both directions, used by `select_target` (which knows the
+/// dependency graph: `edges` are `(dependent, blocker)` RPM names, each blocker
+/// held as blocked for this call even when its own state is `failed`) and by
+/// [`reconcile_state`] (state only: `edges` empty).
+///
+/// A `missing_deps` package whose waited-on dependencies include a blocked or
+/// `waiting_on_blocked` package waits on that blocker too, so it converts, and
+/// so does whatever waits on it in turn (to a fixpoint). A package that is
+/// `running` or `success` is never touched. Returns the packages whose outcome
+/// changed, and the errors of state writes that failed.
+pub(crate) fn sync_blocked_waiters(
     state_root: &Path,
-    dependent: &str,
-    blocker: &str,
-    reporter: &dyn Reporter,
-) {
-    let Ok(ws) = Workspace::open(state_root, dependent) else {
-        return;
+    edges: &[(String, String)],
+) -> (Vec<(String, &'static str)>, Vec<String>) {
+    use std::collections::{HashMap, HashSet};
+    // (outcome, reason)
+    type Cur = (Option<String>, Option<String>);
+    let mut errors = Vec::new();
+    let Ok(rd) = std::fs::read_dir(state_root) else {
+        return (Vec::new(), errors);
     };
-    let reason = format!("{WAITING_ON_BLOCKED_PREFIX}{blocker}");
-    update_state(&ws, reporter, |st| {
-        if matches!(st.last_outcome.as_deref(), Some("running" | "success")) {
-            return;
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().join("state.json").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let mut orig: HashMap<String, Cur> = HashMap::new();
+    let mut key_of: HashMap<String, String> = HashMap::new();
+    for n in &names {
+        let Some(ws) = Workspace::find_existing(state_root, &[n.as_str()]) else {
+            continue;
+        };
+        let st = PkgState::load(&ws);
+        key_of.insert(osc::fuzzy_key(n), n.clone());
+        orig.insert(n.clone(), (st.last_outcome, st.last_failure_reason));
+    }
+    let mut cur = orig.clone();
+    let find = |dep: &str| -> Option<String> {
+        [dep.to_string(), osc::rpm_name(dep)]
+            .iter()
+            .find_map(|d| key_of.get(&osc::fuzzy_key(d)).cloned())
+    };
+    let held: HashSet<String> = edges.iter().map(|(_, b)| osc::fuzzy_key(b)).collect();
+    // The root blocker `name` stands for, when it is blocked or waiting.
+    let blocker_of = |cur: &HashMap<String, Cur>, name: &str| -> Option<String> {
+        let c = cur.get(name)?;
+        match c.0.as_deref() {
+            Some("blocked") => Some(name.to_string()),
+            Some(WAITING_ON_BLOCKED) => c
+                .1
+                .as_deref()
+                .and_then(|r| r.strip_prefix(WAITING_ON_BLOCKED_PREFIX))
+                .map(|b| b.trim().to_string())
+                .filter(|b| !b.is_empty()),
+            _ => None,
         }
-        st.last_outcome = Some(WAITING_ON_BLOCKED.to_string());
-        st.last_failure_reason = Some(reason);
-    });
+    };
+    let is_blocked = |cur: &HashMap<String, Cur>, b: &str| {
+        held.contains(&osc::fuzzy_key(b))
+            || find(b).is_some_and(|n| {
+                matches!(
+                    cur.get(&n).and_then(|c| c.0.as_deref()),
+                    Some("blocked" | WAITING_ON_BLOCKED)
+                )
+            })
+    };
+    // Free: a waiter whose blocker is no longer blocked. Repeat, since a
+    // waiter's own blocker may be another waiter that is freed first.
+    loop {
+        let mut changed = false;
+        for n in &names {
+            if cur.get(n).and_then(|c| c.0.as_deref()) != Some(WAITING_ON_BLOCKED) {
+                continue;
+            }
+            let blocker = blocker_of(&cur, n).unwrap_or_default();
+            if !blocker.is_empty() && is_blocked(&cur, &blocker) {
+                continue;
+            }
+            cur.insert(
+                n.clone(),
+                (
+                    Some("interrupted".into()),
+                    Some("the package it waited on is no longer blocked; ready to run again".into()),
+                ),
+            );
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    // Hold: graph dependents of a given-up package.
+    for (dependent, blocker) in edges {
+        let Some(n) = find(dependent) else { continue };
+        if matches!(cur[&n].0.as_deref(), Some("running" | "success")) {
+            continue;
+        }
+        cur.insert(
+            n,
+            (
+                Some(WAITING_ON_BLOCKED.into()),
+                Some(format!("{WAITING_ON_BLOCKED_PREFIX}{blocker}")),
+            ),
+        );
+    }
+    // Hold: a `missing_deps` package waiting on a blocked one, transitively.
+    loop {
+        let mut changed = false;
+        for n in &names {
+            let Some(c) = cur.get(n) else { continue };
+            if c.0.as_deref() != Some("missing_deps") {
+                continue;
+            }
+            let Some(list) = c
+                .1
+                .as_deref()
+                .and_then(|r| r.strip_prefix("waiting on dependencies: "))
+            else {
+                continue;
+            };
+            let root = list
+                .split(',')
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .find_map(|d| {
+                    find(d)
+                        .and_then(|dn| blocker_of(&cur, &dn))
+                        .or_else(|| held.contains(&osc::fuzzy_key(d)).then(|| d.to_string()))
+                });
+            if let Some(root) = root {
+                cur.insert(
+                    n.clone(),
+                    (
+                        Some(WAITING_ON_BLOCKED.into()),
+                        Some(format!("{WAITING_ON_BLOCKED_PREFIX}{root}")),
+                    ),
+                );
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    for n in names {
+        let (Some(was), Some(now)) = (orig.get(&n), cur.get(&n)) else {
+            continue;
+        };
+        if was == now {
+            continue;
+        }
+        let new: &'static str = if now.0.as_deref() == Some(WAITING_ON_BLOCKED) {
+            WAITING_ON_BLOCKED
+        } else {
+            "interrupted"
+        };
+        let Some(ws) = Workspace::find_existing(state_root, &[n.as_str()]) else {
+            continue;
+        };
+        let (outcome, reason) = now.clone();
+        match PkgState::update(&ws, |st| {
+            // A run may have started since the states were read.
+            if matches!(st.last_outcome.as_deref(), Some("running" | "success")) {
+                return;
+            }
+            st.last_outcome = outcome;
+            st.last_failure_reason = reason;
+        }) {
+            Ok(_) => {
+                if was.0 != now.0 {
+                    out.push((n, new));
+                }
+            }
+            Err(e) => errors.push(format!("saving state.json of {n}: {e}")),
+        }
+    }
+    (out, errors)
 }
 
 /// PyPI names (normalized, see [`normalize_pkg_name`]) that are pure
@@ -12677,9 +12822,12 @@ mod hygiene_tests {
         let root = tempfile::tempdir().unwrap();
         write_state(root.path(), "python-torch", "blocked", Some("needs a GPU"));
         write_state(root.path(), "python-top", "missing_deps", Some("waiting on dependencies: x"));
-        let quiet = Warnings(Default::default());
-        mark_waiting_on_blocked(root.path(), "python-mid", "python-torch", &quiet);
-        mark_waiting_on_blocked(root.path(), "python-top", "python-torch", &quiet);
+        write_state(root.path(), "python-mid", "interrupted", None);
+        let edges = vec![
+            ("python-mid".to_string(), "python-torch".to_string()),
+            ("python-top".to_string(), "python-torch".to_string()),
+        ];
+        sync_blocked_waiters(root.path(), &edges);
         assert_eq!(outcome(root.path(), "python-mid").as_deref(), Some(WAITING_ON_BLOCKED));
         let ws = Workspace::open(root.path(), "python-top").unwrap();
         assert_eq!(
@@ -12693,6 +12841,32 @@ mod hygiene_tests {
         let changed = reconcile_state(root.path());
         assert_eq!(changed.len(), 2, "{changed:?}");
         assert_eq!(outcome(root.path(), "python-mid").as_deref(), Some("interrupted"));
+        assert_eq!(outcome(root.path(), "python-top").as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn missing_deps_dependents_wait_on_a_blocker_transitively_and_are_freed() {
+        let root = tempfile::tempdir().unwrap();
+        write_state(root.path(), "python-torch", "blocked", Some("needs a GPU"));
+        write_state(root.path(), "python-mid", "missing_deps", Some("waiting on dependencies: torch"));
+        write_state(root.path(), "python-top", "missing_deps", Some("waiting on dependencies: ok, python-mid"));
+        write_state(root.path(), "python-free", "missing_deps", Some("waiting on dependencies: nothere"));
+        write_state(root.path(), "python-ok", "success", None);
+        let changed = reconcile_state(root.path());
+        assert_eq!(changed.len(), 2, "{changed:?}");
+        assert_eq!(outcome(root.path(), "python-mid").as_deref(), Some(WAITING_ON_BLOCKED));
+        assert_eq!(outcome(root.path(), "python-top").as_deref(), Some(WAITING_ON_BLOCKED));
+        assert_eq!(outcome(root.path(), "python-free").as_deref(), Some("missing_deps"));
+        let ws = Workspace::open(root.path(), "python-top").unwrap();
+        assert_eq!(
+            PkgState::load(&ws).last_failure_reason.as_deref(),
+            Some("waiting on blocked package: python-torch")
+        );
+        // Idempotent.
+        assert!(reconcile_state(root.path()).is_empty());
+        write_state(root.path(), "python-torch", "success", None);
+        let changed = reconcile_state(root.path());
+        assert_eq!(changed.len(), 2, "{changed:?}");
         assert_eq!(outcome(root.path(), "python-top").as_deref(), Some("interrupted"));
     }
 
