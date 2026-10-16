@@ -3375,7 +3375,7 @@ fn review_stage(
                 &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => match resolve_blocked(
+                Err(reason) => resolve_blocked(
                     ctx,
                     st,
                     LadderSite {
@@ -3404,10 +3404,7 @@ fn review_stage(
                     },
                     &outcome,
                     reason,
-                ) {
-                    Ok(effect) => effect,
-                    Err(result) => return Err(result),
-                },
+                )?,
             };
             // A patch an earlier run already made (the turn finds nothing left
             // to do) is not a failure to patch.
@@ -3626,7 +3623,7 @@ fn prefix_stage(
                 &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => match resolve_blocked(
+                Err(reason) => resolve_blocked(
                     ctx,
                     st,
                     LadderSite {
@@ -3646,10 +3643,7 @@ fn prefix_stage(
                     },
                     &outcome,
                     reason,
-                ) {
-                    Ok(effect) => effect,
-                    Err(result) => return Err(result),
-                },
+                )?,
             };
             if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
                 st.attempts += 1;
@@ -4354,7 +4348,7 @@ fn fix_after_validation(
                 &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => match resolve_blocked(
+                Err(reason) => resolve_blocked(
                     ctx,
                     st,
                     LadderSite {
@@ -4374,10 +4368,7 @@ fn fix_after_validation(
                     },
                     &outcome,
                     reason,
-                ) {
-                    Ok(effect) => effect,
-                    Err(result) => return Err(result),
-                },
+                )?,
             };
             if effect == TurnEffect::Edited
                 && let Some(missing) = missing_deps_added_by_edit(ctx, agent_step.id, &clean)
@@ -4455,7 +4446,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         let stale = stale_patches(&current, checkout_dir, &st.sdist_top_level, &config.version);
         if !stale.is_empty() {
             let names: Vec<String> = stale.iter().map(|(n, _)| n.clone()).collect();
-            write_or_warn(spec_path, &without_patches(&current, &names));
+            write_or_warn(spec_path, without_patches(&current, &names));
             for (name, prefix) in &stale {
                 let _ = std::fs::remove_file(checkout_dir.join(name));
                 reporter.report(&Event::Warning {
@@ -4496,7 +4487,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                 }
                 if !check.failed.is_empty() {
                     let names: Vec<String> = check.failed.iter().map(|(n, _)| n.clone()).collect();
-                    write_or_warn(spec_path, &without_patches(&current, &names));
+                    write_or_warn(spec_path, without_patches(&current, &names));
                     for (name, why) in &check.failed {
                         let _ = std::fs::remove_file(checkout_dir.join(name));
                         reporter.report(&Event::Warning {
@@ -5926,7 +5917,7 @@ fn fix_after_build(
         &mut st.from_repo_archive,
     ) {
         Ok(effect) => effect,
-        Err(reason) => match resolve_blocked(
+        Err(reason) => resolve_blocked(
             ctx,
             st,
             LadderSite {
@@ -5946,10 +5937,7 @@ fn fix_after_build(
             },
             &outcome,
             reason,
-        ) {
-            Ok(effect) => effect,
-            Err(result) => return Err(result),
-        },
+        )?,
     };
     // A dependency the fix added is queued now, not after another build OBS
     // rejects as unresolvable.
@@ -7611,9 +7599,9 @@ fn accept_or_restore(
 /// How many times the same validation error rejected an edit of one spec, in
 /// this process. A fourth identical turn would be re-prompting for the same
 /// failure (python-torch: eleven rejections of one inherited patch, $2.64).
-static SPEC_REJECTIONS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<(PathBuf, u64), (u32, String)>>,
-> = std::sync::LazyLock::new(Default::default);
+type SpecRejections = std::collections::HashMap<(PathBuf, u64), (u32, String)>;
+static SPEC_REJECTIONS: std::sync::LazyLock<std::sync::Mutex<SpecRejections>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Identical rejections of one spec after which the step fails instead of asking again.
 const MAX_IDENTICAL_REJECTIONS: u32 = 3;
@@ -10598,7 +10586,7 @@ fn write_wheel_rpmlintrc(
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
 ) {
     match crate::spec::wheel_rpmlintrc(pkg_name, wheel_filename, layout) {
-        Some((file, text)) => write_or_warn(&checkout_dir.join(file), text),
+        Some((file, text)) => write_or_warn(checkout_dir.join(file), text),
         // A zero-byte rpmlintrc left by an earlier run is a Source99 that
         // does nothing: remove it.
         None => {
@@ -14752,8 +14740,10 @@ mod hygiene_tests {
         let cond = utils_condition();
         let key = condition_key(&cond);
         // The loop: two patches already made, the old cap calls any request over.
-        let mut state = PkgState::default();
-        state.patched_problems = vec![1, 2];
+        let mut state = PkgState {
+            patched_problems: vec![1, 2],
+            ..Default::default()
+        };
         assert!(patch_request_over(&state, &request("reworded", None), &never));
         // With a condition, the cap does not settle it: the condition decides.
         assert!(!patch_request_over(&state, &request("reworded", Some(cond.clone())), &never));

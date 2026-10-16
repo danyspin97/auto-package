@@ -3707,9 +3707,8 @@ mod cutlass_split_wheels_tests {
         // same for both; each flavor expands them against its own directories).
         for flavor in ["python313", "python314"] {
             let mut trees: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
-            for i in 0..4 {
+            for (i, &(short, names, purelib, _)) in WHEELS.iter().enumerate().take(4) {
                 let spec = skeleton(i, tmp.path());
-                let (short, names, purelib, _) = WHEELS[i];
                 // Where `%pyproject_install` puts the wheel: its WHEEL file decides.
                 let mut placed: Vec<(&str, String)> = names
                     .lines()
@@ -3824,9 +3823,11 @@ mod cutlass_split_wheels_tests {
             for line in files_section(spec) {
                 if let Some(dir) = line.strip_prefix("%dir ") {
                     assert!(d.insert(site_path(dir).to_string()), "{}: %dir twice: {line}", WHEELS[i].0);
-                } else if line.starts_with("%exclude ") || line.starts_with("%license ") {
-                    continue;
-                } else if line.contains("dist-info") || line.contains("/__pycache__/") {
+                } else if line.starts_with("%exclude ")
+                    || line.starts_with("%license ")
+                    || line.contains("dist-info")
+                    || line.contains("/__pycache__/")
+                {
                     continue;
                 } else if let Some(dir) = line.strip_suffix('/') {
                     w.insert(site_path(dir).to_string());
@@ -7218,7 +7219,7 @@ pub fn drop_unused_pytest_build_requires(spec: &str) -> String {
     for line in spec.lines() {
         let t = line.trim();
         let is_pytest = t.starts_with("BuildRequires:")
-            && t.trim_start_matches("BuildRequires:").trim().split_whitespace().eq([
+            && t.trim_start_matches("BuildRequires:").split_whitespace().eq([
                 "%{python_module",
                 "pytest}",
             ]);

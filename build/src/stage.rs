@@ -240,7 +240,7 @@ mod tests {
             req("source/top/package-lock.json", "", None),
             req("x", "x", Some("../dep")),
         ] {
-            let (done, refused) = stage_files(&[r.clone()], &f.roots());
+            let (done, refused) = stage_files(std::slice::from_ref(&r), &f.roots());
             assert!(done.is_empty() && refused.len() == 1, "{r:?}: {done:?} {refused:?}");
         }
     }

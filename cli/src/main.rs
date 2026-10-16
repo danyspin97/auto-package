@@ -1967,10 +1967,10 @@ fn latest_rpmlint_run(text: &str) -> String {
     let mut sections: Vec<&str> = Vec::new();
     let mut start = None;
     for (at, _) in text.match_indices(HEADER) {
-        if at == 0 || text.as_bytes()[at - 1] == b'\n' {
-            if let Some(s) = start.replace(at) {
-                sections.push(&text[s..at]);
-            }
+        if (at == 0 || text.as_bytes()[at - 1] == b'\n')
+            && let Some(s) = start.replace(at)
+        {
+            sections.push(&text[s..at]);
         }
     }
     if let Some(s) = start {

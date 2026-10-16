@@ -99,10 +99,7 @@ fn norm(name: &str) -> String {
 /// macro (`%{python_sitearch}`), and without the leading slash.
 fn entry_path(entry: &str) -> String {
     let mut token = entry.trim();
-    loop {
-        let Some(rest) = token.strip_prefix('%') else {
-            break;
-        };
+    while let Some(rest) = token.strip_prefix('%') {
         // A leading macro that is the start of the path (`%{python_sitearch}/x`).
         if rest.starts_with('{') {
             let end = rest.find('}').map_or(rest.len(), |e| e + 1);
@@ -232,29 +229,29 @@ pub fn spec_packages(spec: &str) -> Vec<PackageFiles> {
     let mut current: Option<usize> = None;
     for line in spec.lines() {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("%files") {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                let args = rest.trim();
-                // `%files -n name`, `%files devel`, `%files %{python_files devel}`
-                let args = args
-                    .strip_prefix("-n")
-                    .map_or(args, |r| r.trim())
-                    .replace("%{python_files", "")
-                    .replace('}', "");
-                let name = args.split_whitespace().next().unwrap_or("").trim().to_string();
-                let name = if name.starts_with('-') { String::new() } else { name };
-                let idx = out.iter().position(|p| p.name == name).unwrap_or_else(|| {
-                    out.push(PackageFiles {
-                        name,
-                        files: Vec::new(),
-                        excludes: Vec::new(),
-                        from_spec: true,
-                    });
-                    out.len() - 1
+        if let Some(rest) = t.strip_prefix("%files")
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            let args = rest.trim();
+            // `%files -n name`, `%files devel`, `%files %{python_files devel}`
+            let args = args
+                .strip_prefix("-n")
+                .map_or(args, |r| r.trim())
+                .replace("%{python_files", "")
+                .replace('}', "");
+            let name = args.split_whitespace().next().unwrap_or("").trim().to_string();
+            let name = if name.starts_with('-') { String::new() } else { name };
+            let idx = out.iter().position(|p| p.name == name).unwrap_or_else(|| {
+                out.push(PackageFiles {
+                    name,
+                    files: Vec::new(),
+                    excludes: Vec::new(),
+                    from_spec: true,
                 });
-                current = Some(idx);
-                continue;
-            }
+                out.len() - 1
+            });
+            current = Some(idx);
+            continue;
         }
         if t.starts_with('%') && !t.starts_with("%exclude") {
             let first = t.split_whitespace().next().unwrap_or("");
