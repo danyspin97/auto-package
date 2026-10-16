@@ -3,7 +3,7 @@
 //! an error: the run goes on, and the finding says what it will do about it.
 
 use crate::osc::BuildStatus;
-use crate::pipeline::{PkgState, hash_spec};
+use crate::pipeline::PkgState;
 use crate::workspace::Workspace;
 use std::collections::HashMap;
 use std::path::Path;
@@ -109,13 +109,6 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
             ));
         }
     }
-    if let Some(blocked) = state.blocked_spec_hash
-        && blocked != hash_spec(&spec)
-    {
-        out.push(format!(
-            "{name}: the spec changed since it was declared blocked; it is reviewed again"
-        ));
-    }
     if let (Some(reviewed), Some(version)) = (&state.reviewed_version, &spec_version)
         && reviewed != version
     {
@@ -188,7 +181,7 @@ fn check_obs(name: &str, state: &PkgState, obs: Option<&BuildStatus>) -> Option<
             "{name}: state.json says it built, but OBS shows {obs:?}; it is checked again"
         ));
     }
-    if matches!(outcome, "failed" | "interrupted" | "missing_deps" | "blocked")
+    if matches!(outcome, "failed" | "interrupted" | "missing_deps")
         && *obs == BuildStatus::Succeeded
     {
         return Some(format!(

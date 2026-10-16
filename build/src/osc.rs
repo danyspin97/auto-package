@@ -3312,7 +3312,7 @@ fn validate_service_param(name: &str, value: &str) -> Result<(), String> {
 /// decodes character references (`&#46;&#46;/`) before using them. Anything
 /// the parser cannot read, any DOCTYPE, processing instruction or entity
 /// other than the five predefined ones is refused.
-fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
+pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
 

@@ -50,7 +50,11 @@ N3. `_service`. You cannot run services; the pipeline runs them in manual
    avoid it). Paths must be relative and stay inside the checkout. The
    service downloads every tarball named by the lock file into `node_modules/`.
    `package-lock.json` itself must sit next to the spec as its own Source;
-   copy it out of the sdist into the checkout.
+   copy it out of the sdist into the checkout. The pipeline does both file steps
+   itself when it takes this route: it copies the sdist's `package-lock.json` into the
+   checkout and writes the `node_modules` entry into `_service`; only the spec
+   wiring (N4, N5) is left to you. If a copy is still missing, ask for it with
+   `stage_files` (`from` `source/<path>/package-lock.json`, `to` `package-lock.json`).
 
 N4. Spec sources:
 

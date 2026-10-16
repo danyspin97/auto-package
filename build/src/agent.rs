@@ -3074,7 +3074,36 @@ report system tools (cmake, ninja, pkg-config, gcc) as python-* packages — fix
 the spec to use the plain package name instead.
 - "patch_dependencies": optional. Dependencies the distro ships whose shipped
 version breaks this package in a way only a patch to the dependency fixes
-(convention 62), each as {"name", "problem"}. Leave it out otherwise."#;
+(convention 62), each as {"name", "problem"}. Leave it out otherwise.
+- "stage_files": optional. Files the PIPELINE copies into the package checkout for
+you, because your shell cannot write there (a refused `cp` into the checkout is
+not an obstacle: ask for the copy here). Each entry is {"from", "to"} (add
+"package" to read from another package's tree): `from` is a relative path inside
+the package's own state directory (`source/package-lock.json`, `sdist/<top>/...`),
+or inside the named package's state directory or checkout; `to` is a bare file
+name in the checkout. Absolute paths, `..`, directories as destinations and files
+over 64 MiB are refused. Staging a file and then naming it as a `SourceN:` in the
+spec is the whole job; set action `edited` (or `no_change` when only staging).
+- READ the specs, file lists and checkouts of the packages this one depends on
+when the cause may be there (the paths are in the prompt; `rpm -qlp rpms/<f>.rpm`
+lists what a built package ships). You cannot edit a sibling package yourself:
+when the fix belongs in one, report it in `patch_dependencies` with the exact
+change needed and return `no_change`: the pipeline branches, patches and rebuilds
+it, then re-runs this package.
+
+## `blocked` is not an accepted answer
+
+The pipeline can do all of these for you, so a missing capability is never a
+reason to stop: stage files (`stage_files`), patch a sibling or distro package
+(`patch_dependencies`), switch to the upstream wheel (`use_upstream_wheel`),
+add a `download_files` `Source` or a `_service` entry, vendor cargo / npm / go
+dependencies, relax a dependency bound, add a BuildRequires or a helper package
+(`unresolvable_packages`), skip a failing test with the evidence from the log,
+and build an additional package. Pick the one that fits and return `edited`,
+`no_change` with `patch_dependencies`, or `use_upstream_wheel`. An answer of
+`blocked` is treated as a defect of the tool: the pipeline asks again, with your
+reason fed back, up to three times. Wherever a convention above says to return
+`blocked`, do the nearest option from this list instead."#;
 
 /// Everything sent to `claude --append-system-prompt`: [`CONVENTIONS`] plus
 /// [`STATIC_WORKFLOW`], neither of which varies by package, task, or attempt.
@@ -3464,6 +3493,10 @@ pub struct TurnRequest<'a> {
     /// Where the RPMs this project built are kept. When set, the turn may list
     /// one's files with `rpm -qlp` (see [`rpm_inspection_tools`]).
     pub rpms_dir: Option<&'a std::path::Path>,
+    /// Checkouts of sibling packages (the ones this package depends on): the
+    /// turn may read them, never write them. Changes to a sibling go through
+    /// `patch_dependencies`.
+    pub sibling_dirs: &'a [std::path::PathBuf],
     /// How many models to move along [`AGENT_MODELS`] from the one the attempt
     /// number picks. Quota is per model, so the pipeline bumps this after a 429
     /// to retry the same turn on a different model.
@@ -3510,6 +3543,8 @@ pub struct TurnOutcome {
     pub unresolvable_packages: Vec<String>,
     /// Dependencies to branch and patch rather than build (convention 62).
     pub patch_dependencies: Vec<PatchRequest>,
+    /// Files the pipeline copies into the package checkout for the turn.
+    pub stage_files: Vec<crate::stage::StageFile>,
     pub confidence: Confidence,
     pub usage: Usage,
     pub tool_calls: Vec<ToolCall>,
@@ -3630,6 +3665,19 @@ const TURN_RESPONSE_SCHEMA: &str = r#"{
         "required": ["name", "problem"],
         "additionalProperties": false
       }
+    },
+    "stage_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": {"type": "string"},
+          "to": {"type": "string"},
+          "package": {"type": "string"}
+        },
+        "required": ["from", "to"],
+        "additionalProperties": false
+      }
     }
   },
   "required": ["action", "reasoning", "evidence", "confidence"],
@@ -3662,6 +3710,8 @@ struct TurnResponse {
     unresolvable_packages: Vec<String>,
     #[serde(default)]
     patch_dependencies: Vec<PatchRequest>,
+    #[serde(default)]
+    stage_files: Vec<crate::stage::StageFile>,
 }
 
 /// Pick a usable `TurnResponse` out of a finished turn's output.
@@ -3762,6 +3812,7 @@ fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
         confidence,
         unresolvable_packages,
         patch_dependencies: Vec::new(),
+        stage_files: Vec::new(),
     })
 }
 
@@ -3963,6 +4014,18 @@ fn turn_allowed_tools(
     tools
 }
 
+/// Read-only access to the checkouts of the packages this one depends on, so a
+/// turn can read a sibling's spec and files before it reports a defect in it.
+/// Reading only: a change to a sibling is requested with `patch_dependencies`.
+fn sibling_read_tools(dirs: &[std::path::PathBuf]) -> String {
+    dirs.iter()
+        .map(|d| {
+            let d = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
+            format!(",Read({}/**)", permission_path(&d))
+        })
+        .collect()
+}
+
 /// Read-only queries on the RPMs this project built, so a turn can tell what a
 /// dependency really ships (convention 61) instead of guessing from an import
 /// error. Tied to the `rpms/` directory by prefix: `rpm -q` takes `--eval`
@@ -4075,6 +4138,7 @@ fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let mut allowed_tools = turn_allowed_tools(req.task, req.workspace, req.checkout_dir);
     if req.task != Task::TranslateUnresolvableDeps {
         allowed_tools.push_str(&rpm_inspection_tools(req.rpms_dir));
+        allowed_tools.push_str(&sibling_read_tools(req.sibling_dirs));
     }
     let denied_tools = turn_denied_tools(req.workspace, req.checkout_dir);
 
@@ -4558,6 +4622,7 @@ fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         evidence: resp.evidence,
         unresolvable_packages: resp.unresolvable_packages,
         patch_dependencies: resp.patch_dependencies,
+        stage_files: resp.stage_files,
         confidence: resp.confidence,
         usage,
         tool_calls,
@@ -5410,6 +5475,7 @@ mod tests {
             checkout_dir: None,
             context: None,
             rpms_dir: None,
+            sibling_dirs: &[],
             model_rotation: 0,
             on_tool_use: None,
         }
@@ -5638,6 +5704,18 @@ mod tests {
         .expect("result payload must take priority");
         assert_eq!(resp.action, "edited");
         assert_eq!(resp.reasoning, "fresh");
+    }
+
+    #[test]
+    fn a_stage_files_request_is_parsed_from_the_turn_response() {
+        let payload = r#"{"action":"no_change","reasoning":"r","evidence":[],"confidence":"high",
+            "stage_files":[{"from":"source/package-lock.json","to":"package-lock.json"},
+                           {"from":"x.spec","to":"y.spec","package":"dep"}]}"#;
+        let resp = pick_turn_response(payload, &[]).unwrap();
+        assert_eq!(resp.stage_files.len(), 2);
+        assert_eq!(resp.stage_files[0].to, "package-lock.json");
+        assert_eq!(resp.stage_files[1].package.as_deref(), Some("dep"));
+        assert!(STATIC_WORKFLOW.contains("stage_files") && STATIC_WORKFLOW.contains("is not an accepted answer"));
     }
 
     #[test]

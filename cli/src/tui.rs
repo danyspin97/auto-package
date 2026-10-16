@@ -216,8 +216,6 @@ enum PkgStatus {
     AlreadyBuilt,
     MissingDeps,
     Failed,
-    /// A turn said the package cannot be built here; not a pipeline failure.
-    Blocked,
     /// Live, but no step is executing right now: the last step has finished
     /// and the agent turn (or `PackageFinished`) has not yet come in.
     Between,
@@ -238,7 +236,6 @@ impl PkgStatus {
             PkgStatus::AlreadyBuilt => "cached",
             PkgStatus::MissingDeps => "needs deps",
             PkgStatus::Failed => "failed",
-            PkgStatus::Blocked => "blocked",
             PkgStatus::NoSpace => "no space",
         }
     }
@@ -250,7 +247,6 @@ impl PkgStatus {
             PkgStatus::Succeeded | PkgStatus::AlreadyBuilt => Color::Green,
             PkgStatus::MissingDeps => Color::Magenta,
             PkgStatus::Failed => Color::Red,
-            PkgStatus::Blocked => Color::Magenta,
             PkgStatus::NoSpace => Color::LightRed,
         }
     }
@@ -512,7 +508,7 @@ impl PkgState {
             (PkgStatus::Running, _) | (PkgStatus::Between, None) => {
                 format!("{label} {}", fmt_dur(step.started.elapsed()))
             }
-            (PkgStatus::Failed | PkgStatus::Blocked | PkgStatus::NoSpace, done) => {
+            (PkgStatus::Failed | PkgStatus::NoSpace, done) => {
                 let elapsed = done.as_ref().map_or(step.started.elapsed(), |d| d.1);
                 format!("✗ {label} {}", fmt_dur(elapsed))
             }
@@ -736,7 +732,6 @@ impl TuiState {
                     PackageOutcome::Built => PkgStatus::Succeeded,
                     PackageOutcome::AlreadyBuilt => PkgStatus::AlreadyBuilt,
                     PackageOutcome::MissingDeps { .. } => PkgStatus::MissingDeps,
-                    PackageOutcome::Blocked { .. } => PkgStatus::Blocked,
                     PackageOutcome::Failed { reason } => {
                         if state.disk_full_detected || looks_like_disk_full(reason) {
                             PkgStatus::NoSpace
@@ -746,7 +741,7 @@ impl TuiState {
                     }
                 };
                 match outcome {
-                    PackageOutcome::Failed { reason } | PackageOutcome::Blocked { reason } => {
+                    PackageOutcome::Failed { reason } => {
                         // Keep the failed step so the Step column can name it.
                         // A worker that died mid-step never sent `StepFinished`,
                         // so close the step here.
@@ -770,14 +765,11 @@ impl TuiState {
                         format!("needs: {}", deps.join(", "))
                     }
                     PackageOutcome::Failed { reason } => format!("failed: {reason}"),
-                    PackageOutcome::Blocked { reason } => format!("blocked: {reason}"),
                 };
                 state.add_log(
                     match outcome {
                         PackageOutcome::Failed { .. } => LogLevel::Error,
-                        PackageOutcome::MissingDeps { .. } | PackageOutcome::Blocked { .. } => {
-                            LogLevel::Warn
-                        }
+                        PackageOutcome::MissingDeps { .. } => LogLevel::Warn,
                         _ => LogLevel::Success,
                     },
                     msg,
