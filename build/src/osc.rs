@@ -112,6 +112,89 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+/// Text that marks a failure of the machine or the network rather than of the
+/// package: a dropped or refused connection, a name that did not resolve, a
+/// timeout, an OBS 5xx, a full disk. Matched case-insensitively.
+pub fn text_is_transient(text: &str) -> bool {
+    let t = text.to_lowercase();
+    const MARKS: &[&str] = &[
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "connection closed",
+        "connection timed out",
+        "timed out",
+        "timeout",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "could not resolve host",
+        "failed to lookup address",
+        "dns error",
+        "network is unreachable",
+        "no route to host",
+        "bad gateway",
+        "service unavailable",
+        "gateway time-out",
+        "gateway timeout",
+        "no space left on device",
+        "the disk is full",
+        "rate limited (429)",
+        "broken pipe",
+        "unexpected eof",
+        "tls handshake",
+    ];
+    MARKS.iter().any(|m| t.contains(m)) || http_status(text).is_some_and(|c| c == 408 || c >= 500)
+}
+
+/// Marker in the message of a build whose RPMs could not be fetched after OBS
+/// reported it built.
+const DOWNLOAD_FAILED: &str = "succeeded but downloading the built RPMs failed";
+
+impl Error {
+    /// Whether the failure says nothing about the package and a later attempt
+    /// may succeed: the network, OBS or this machine failed. A wait that gave
+    /// up polling counts too (the build itself may have been fine).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Error::Launch(_) | Error::Process(_) | Error::Io(_) | Error::Command { .. } => {
+                match self {
+                    Error::Io(e) | Error::Launch(e) => io_is_transient(e),
+                    Error::Process(p) | Error::Command { source: p, .. } => match p {
+                        proc::ProcessError::Timeout { .. } | proc::ProcessError::OutputLost { .. } => true,
+                        proc::ProcessError::Io(e) | proc::ProcessError::Launch { source: e, .. } => {
+                            io_is_transient(e)
+                        }
+                    },
+                    _ => false,
+                }
+            }
+            Error::OscFailed { code, stderr, .. } => {
+                // Our own wait gave up (`-1`) for another reason than a shutdown.
+                *code == 28
+                    || (*code == -1 && stderr != "interrupted")
+                    || text_is_transient(stderr)
+            }
+            Error::NotActionable(m) => m.contains(DOWNLOAD_FAILED),
+            _ => false,
+        }
+    }
+}
+
+fn io_is_transient(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind as K;
+    matches!(
+        e.kind(),
+        K::TimedOut
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::ConnectionRefused
+            | K::BrokenPipe
+            | K::StorageFull
+            | K::NetworkUnreachable
+            | K::HostUnreachable
+    ) || text_is_transient(&e.to_string())
+}
+
 /// OBS remote build status for a single arch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildStatus {
@@ -6622,8 +6705,7 @@ fn obs_build_once(
                  for repo={repo}/arch={arch}."
             };
             return Err(Error::NotActionable(format!(
-                "OBS reported {pkg_name} succeeded but downloading the built RPMs \
-                 failed: {e}. {}",
+                "OBS reported {pkg_name} {DOWNLOAD_FAILED}: {e}. {}",
                 advice.replace("{repo}", repo).replace("{arch}", arch)
             )));
         }
@@ -7817,5 +7899,48 @@ mod transient_broken_tests {
         });
         assert_eq!(r, Err("down"));
         assert_eq!(calls, 4);
+    }
+}
+
+#[cfg(test)]
+mod transient_error_tests {
+    use super::*;
+
+    fn failed(code: i32, stderr: &str) -> Error {
+        Error::OscFailed {
+            cmd: "x".into(),
+            code,
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn network_obs_and_disk_failures_are_transient_and_package_failures_are_not() {
+        assert!(failed(1, "HTTP Error 503: Service Unavailable").is_transient());
+        assert!(failed(1, "502 Server Error: Bad Gateway for url").is_transient());
+        assert!(failed(1, "fatal: unable to access: Could not resolve host: github.com").is_transient());
+        assert!(failed(28, "").is_transient());
+        assert!(failed(-1, "gave up after 8 consecutive failed status polls; last error: x").is_transient());
+        assert!(failed(-1, "timed out after 7200s waiting for OBS build").is_transient());
+        assert!(Error::Process(proc::ProcessError::Timeout { program: "osc".into(), secs: 1 }).is_transient());
+        assert!(Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)).is_transient());
+        assert!(
+            Error::NotActionable(format!("OBS reported p {DOWNLOAD_FAILED}: osc getbinaries failed"))
+                .is_transient()
+        );
+        // The package is at fault, or the run was stopped.
+        assert!(!failed(1, "HTTP Error 404: Not Found").is_transient());
+        assert!(!failed(1, "HTTP Error 403: Forbidden").is_transient());
+        assert!(!failed(-1, "interrupted").is_transient());
+        assert!(!Error::NotActionable(BROKEN_MESSAGE.into()).is_transient());
+        assert!(!Error::UnresolvableDeps { names: vec![], detail: vec![] }.is_transient());
+        assert!(!Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)).is_transient());
+    }
+
+    #[test]
+    fn transient_text_is_recognised() {
+        assert!(text_is_transient("Connection reset by peer"));
+        assert!(text_is_transient("No space left on device"));
+        assert!(!text_is_transient("version 2.0.0 is yanked"));
     }
 }

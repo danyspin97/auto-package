@@ -168,6 +168,11 @@ pub enum FailureKind {
     /// changed to make it buildable. Reported as `blocked`, not as a failure
     /// of the pipeline, and not retried.
     Blocked,
+    /// The network, OBS or this machine failed (a dropped connection, an OBS
+    /// 5xx, a timeout, a full disk), not the package. Recorded as
+    /// `interrupted`, so the package reads as re-runnable; the caller retries
+    /// it within its usual bound.
+    Transient,
 }
 
 #[derive(Debug)]
@@ -1855,7 +1860,7 @@ pub fn run_package(
         (
             PipelineResult::Failed {
                 rpm_name,
-                kind: FailureKind::Other | FailureKind::AgentUnavailable,
+                kind: FailureKind::Other | FailureKind::AgentUnavailable | FailureKind::Transient,
                 ..
             },
             Some(reason),
@@ -1878,29 +1883,7 @@ pub fn run_package(
     // `PkgState::last_failure_reason`'s doc comment for the stale-reason bug
     // this closes (a `MissingDeps` round used to leave an older, unrelated
     // `Failed` reason sitting in state.json untouched).
-    let outcome = match &result {
-        // Nothing was attempted, so the package's last outcome is left alone.
-        PipelineResult::Failed {
-            kind: FailureKind::Busy,
-            ..
-        } => None,
-        PipelineResult::Failed {
-            reason,
-            kind: FailureKind::AgentUnavailable,
-            ..
-        } => Some(("interrupted", reason.clone())),
-        PipelineResult::Failed {
-            reason,
-            kind: FailureKind::Blocked,
-            ..
-        } => Some(("blocked", reason.clone())),
-        PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
-        PipelineResult::MissingDeps { deps, .. } => Some((
-            "missing_deps",
-            format!("waiting on dependencies: {}", deps.join(", ")),
-        )),
-        PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => None,
-    };
+    let outcome = recorded_outcome(&result);
     let ws = Workspace::open(&config.state_root, &config.rpm_name)
         .inspect_err(|e| {
             reporter.report(&Event::Warning {
@@ -2049,6 +2032,22 @@ impl RunCtx<'_> {
         self.failed_as(FailureKind::Other, reason)
     }
 
+    /// A failure of an `osc` call: transient when the network, OBS or this
+    /// machine failed rather than the package.
+    fn failed_osc(&self, e: &osc::Error) -> PipelineResult {
+        self.failed_text(e.is_transient(), e.to_string())
+    }
+
+    /// A failure with a message: transient when `transient` says so.
+    fn failed_text(&self, transient: bool, reason: String) -> PipelineResult {
+        let kind = if transient {
+            FailureKind::Transient
+        } else {
+            FailureKind::Other
+        };
+        self.failed_as(kind, reason)
+    }
+
     fn failed_as(&self, kind: FailureKind, reason: String) -> PipelineResult {
         PipelineResult::Failed {
             rpm_name: self.rpm_name.clone(),
@@ -2172,7 +2171,8 @@ fn run_stages(
 ) -> Result<PipelineResult, PipelineResult> {
     let ctx = preflight(config, pkg_run, reporter)?;
     if let Err(reason) = crate::workspace::await_disk_space(&config.work_dir, reporter, None) {
-        return Err(ctx.failed(reason));
+        // A full disk is the machine's, and ends when space is freed.
+        return Err(ctx.failed_text(true, reason));
     }
     let mut st = RunState {
         step_attempts: Attempts::default(),
@@ -2356,7 +2356,7 @@ fn checkout_stage(
                 step: Some(id),
                 message: e.to_string(),
             });
-            return Err(ctx.failed(e.to_string()));
+            return Err(ctx.failed_osc(&e));
         }
         step.finish(StepOutcome::Ok);
         // Keep spec symlink fresh.
@@ -2682,7 +2682,16 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
                     }
                 )));
             }
-            Err(GenSpecError::Other(e) | GenSpecError::NoReleaseArchive(e)) => {
+            Err(GenSpecError::Other(e)) => {
+                let step = step.finish(StepOutcome::Failed);
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message: e.clone(),
+                });
+                // A download that failed on the network is not the package's fault.
+                return Err(ctx.failed_text(osc::text_is_transient(&e), e));
+            }
+            Err(GenSpecError::NoReleaseArchive(e)) => {
                 let step = step.finish(StepOutcome::Failed);
                 reporter.report(&Event::Warning {
                     step: Some(step.id),
@@ -2752,14 +2761,14 @@ fn osc_service_stage(
 
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
-                .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
+                .map_err(|e| (false, format!("writing _service failed for {}: {e}", config.pkg_name)))
                 .and_then(|()| {
-                    osc::run_service(checkout_dir, Emit::new(reporter, step.id))
-                        .map_err(|e| e.to_string())
+                    run_service_with_retries(checkout_dir, Emit::new(reporter, step.id))
+                        .map_err(|e| (e.is_transient(), e.to_string()))
                 });
 
-            if let Err(reason) = result {
-                return Err(ctx.failed(reason));
+            if let Err((transient, reason)) = result {
+                return Err(ctx.failed_text(transient, reason));
             }
             step.finish(StepOutcome::Ok);
         } else {
@@ -2833,14 +2842,14 @@ fn osc_service_stage(
                 .is_some_and(|t| tarball_has_cargo_lock(&t));
             let service_xml = render_maturin_service_file(&normalized, &extra_manifests, locked);
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
-                .map_err(|e| format!("writing _service failed for {}: {e}", config.pkg_name))
+                .map_err(|e| (false, format!("writing _service failed for {}: {e}", config.pkg_name)))
                 .and_then(|()| {
-                    osc::run_service(checkout_dir, Emit::new(reporter, step.id))
-                        .map_err(|e| e.to_string())
+                    run_service_with_retries(checkout_dir, Emit::new(reporter, step.id))
+                        .map_err(|e| (e.is_transient(), e.to_string()))
                 });
 
-            if let Err(reason) = result {
-                return Err(ctx.failed(reason));
+            if let Err((transient, reason)) = result {
+                return Err(ctx.failed_text(transient, reason));
             }
             step.finish(StepOutcome::Ok);
         } else {
@@ -4747,7 +4756,7 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         &files,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
-        return Err(ctx.failed(e.to_string()));
+        return Err(ctx.failed_osc(&e));
     }
     commit_step.finish(StepOutcome::Ok);
     Ok(())
@@ -4854,6 +4863,70 @@ fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<(), 
     Ok(())
 }
 
+/// The `last_outcome` and reason recorded for an unsuccessful result; `None`
+/// when the package's recorded outcome is left alone.
+fn recorded_outcome(result: &PipelineResult) -> Option<(&'static str, String)> {
+    match result {
+        // Nothing was attempted, so the package's last outcome is left alone.
+        PipelineResult::Failed {
+            kind: FailureKind::Busy,
+            ..
+        } => None,
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::AgentUnavailable | FailureKind::Transient,
+            ..
+        } => Some(("interrupted", reason.clone())),
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::Blocked,
+            ..
+        } => Some(("blocked", reason.clone())),
+        PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
+        PipelineResult::MissingDeps { deps, .. } => Some((
+            "missing_deps",
+            format!("waiting on dependencies: {}", deps.join(", ")),
+        )),
+        PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => None,
+    }
+}
+
+/// `osc service runs` (a git tag fetch, a crates.io vendoring), tried again
+/// when the network failed it.
+fn run_service_with_retries(dir: &Path, emit: Emit<'_>) -> Result<(), osc::Error> {
+    retry_transient(
+        SERVICE_ATTEMPTS,
+        SERVICE_PAUSE,
+        osc::Error::is_transient,
+        || osc::run_service(dir, emit),
+    )
+}
+
+const SERVICE_ATTEMPTS: u32 = 3;
+const SERVICE_PAUSE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Call `f` up to `attempts` times, pausing `pause` after each failure that
+/// `transient` calls transient; any other failure, and the last one, is returned.
+fn retry_transient<T, E>(
+    attempts: u32,
+    pause: std::time::Duration,
+    transient: impl Fn(&E) -> bool,
+    mut f: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
+    let mut n = 1;
+    loop {
+        match f() {
+            Err(e) if n < attempts && transient(&e) && !crate::proc::shutting_down() => {
+                n += 1;
+                if !pause.is_zero() {
+                    std::thread::sleep(pause);
+                }
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Step: Build (wait for OBS remote build, fetch log, download RPMs), then
 /// route its outcome: success finishes the package, unresolvable dependencies
 /// end it with `MissingDeps`, and an ordinary failure runs a fix turn.
@@ -4895,9 +4968,9 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
             let build_step = build_step.finish(StepOutcome::Failed);
             unresolvable_deps_round(ctx, st, &build_step, &build_log, deps, detail)
         }
-        Err(osc::Error::NotActionable(msg)) => {
+        Err(e @ osc::Error::NotActionable(_)) => {
             build_step.finish(StepOutcome::Failed);
-            Err(ctx.failed(msg))
+            Err(ctx.failed_osc(&e))
         }
         Err(osc::Error::BuildFailed { .. }) => {
             let build_step = build_step.finish(StepOutcome::Failed);
@@ -4909,7 +4982,7 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
         // it ends this attempt instead of being sent to the fix loop.
         Err(e) => {
             build_step.finish(StepOutcome::Failed);
-            Err(ctx.failed(e.to_string()))
+            Err(ctx.failed_osc(&e))
         }
     }
 }
@@ -12882,6 +12955,43 @@ mod hygiene_tests {
         let changed = reconcile_state(root.path());
         assert_eq!(changed.len(), 2, "{changed:?}");
         assert_eq!(outcome(root.path(), "python-top").as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn a_transient_failure_is_recorded_as_interrupted_and_a_real_one_as_failed() {
+        let failed = |kind| PipelineResult::Failed {
+            rpm_name: "python-x".into(),
+            reason: "r".into(),
+            kind,
+        };
+        assert_eq!(recorded_outcome(&failed(FailureKind::Transient)).unwrap().0, "interrupted");
+        assert_eq!(recorded_outcome(&failed(FailureKind::Other)).unwrap().0, "failed");
+    }
+
+    #[test]
+    fn transient_failures_are_retried_a_bounded_number_of_times() {
+        let calls = std::cell::Cell::new(0);
+        let zero = std::time::Duration::ZERO;
+        // A dropped connection that clears on the third try.
+        let r: Result<u32, String> = retry_transient(3, zero, |e: &String| e.contains("reset"), || {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 { Err("connection reset".into()) } else { Ok(7) }
+        });
+        assert_eq!((r, calls.get()), (Ok(7), 3));
+        // One that never clears stops at the bound.
+        calls.set(0);
+        let r: Result<u32, String> = retry_transient(3, zero, |_| true, || {
+            calls.set(calls.get() + 1);
+            Err("connection reset".into())
+        });
+        assert_eq!((r.is_err(), calls.get()), (true, 3));
+        // A real failure is not retried.
+        calls.set(0);
+        let r: Result<u32, String> = retry_transient(3, zero, |_| false, || {
+            calls.set(calls.get() + 1);
+            Err("yanked".into())
+        });
+        assert_eq!((r.is_err(), calls.get()), (true, 1));
     }
 
     #[test]
