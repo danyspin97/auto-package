@@ -62,7 +62,9 @@ fn relative_clean(path: &str) -> Result<PathBuf, String> {
         return Err(format!("from {path:?} must be a relative path"));
     }
     if p.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Err(format!("from {path:?} must not contain `..` or `.` components"));
+        return Err(format!(
+            "from {path:?} must not contain `..` or `.` components"
+        ));
     }
     Ok(p.to_path_buf())
 }
@@ -139,16 +141,26 @@ fn read_source(src: &Path, base: &Path) -> Result<Vec<u8>, String> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(src)
-        .map_err(|e| format!("cannot open {} (it changed after the check?): {e}", src.display()))?;
-    let meta = file.metadata().map_err(|e| format!("{}: {e}", src.display()))?;
+        .map_err(|e| {
+            format!(
+                "cannot open {} (it changed after the check?): {e}",
+                src.display()
+            )
+        })?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", src.display()))?;
     if !meta.is_file() {
         return Err(format!("{} is not a regular file", src.display()));
     }
     if meta.len() > MAX_STAGE_BYTES {
         return Err(format!("{} grew over the staging cap", src.display()));
     }
-    let landed = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file)))
-        .map_err(|e| format!("cannot confirm where {} was opened: {e}", src.display()))?;
+    let landed = std::fs::read_link(format!(
+        "/proc/self/fd/{}",
+        std::os::fd::AsRawFd::as_raw_fd(&file)
+    ))
+    .map_err(|e| format!("cannot confirm where {} was opened: {e}", src.display()))?;
     if !landed.starts_with(base) {
         return Err(format!(
             "{} now resolves to {}, outside {} (the tree changed after the check)",
@@ -269,7 +281,11 @@ mod tests {
     fn copies_from_the_source_tree_through_its_symlink() {
         let f = fx();
         let (done, refused) = stage_files(
-            &[req("source/top/package-lock.json", "package-lock.json", None)],
+            &[req(
+                "source/top/package-lock.json",
+                "package-lock.json",
+                None,
+            )],
             &f.roots(),
         );
         assert_eq!(done, ["package-lock.json"]);
@@ -302,7 +318,10 @@ mod tests {
             req("x", "x", Some("../dep")),
         ] {
             let (done, refused) = stage_files(std::slice::from_ref(&r), &f.roots());
-            assert!(done.is_empty() && refused.len() == 1, "{r:?}: {done:?} {refused:?}");
+            assert!(
+                done.is_empty() && refused.len() == 1,
+                "{r:?}: {done:?} {refused:?}"
+            );
         }
     }
 
@@ -310,8 +329,10 @@ mod tests {
     fn refuses_a_symlink_leaving_the_tree_and_a_directory() {
         let f = fx();
         std::os::unix::fs::symlink(f.t.path().join("secret"), f.own.join("escape")).unwrap();
-        let (done, refused) =
-            stage_files(&[req("escape", "x", None), req("sdist", "y", None)], &f.roots());
+        let (done, refused) = stage_files(
+            &[req("escape", "x", None), req("sdist", "y", None)],
+            &f.roots(),
+        );
         assert!(done.is_empty(), "{done:?}");
         assert_eq!(refused.len(), 2, "{refused:?}");
     }

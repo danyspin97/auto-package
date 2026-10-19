@@ -5,6 +5,8 @@ Prebuilt CUDA nvcc wheel, packaged from its unpacked layout. Last built: 13.4.92
 ## Build requirements
 Checked against 13.4.92 on openSUSE_Tumbleweed, x86_64.
 - Import name is `nvidia`, a namespace package installed to sitelib. Its `nvidia/` directory is shared with other nvidia-* packages, so %files lists it with %dir.
+- The wheel sets Root-Is-Purelib: true, so its contents go to sitelib even though its platform tag is manylinux.
+- Source0 must name the wheel the upstream publishes for the build architecture, using that exact filename.
 - Requires and BuildRequires: `nvidia-nvvm`, `nvidia-cuda-runtime`, `nvidia-cuda-crt`, the wheel's Requires-Dist. BuildRequires mirror them so %check can import the package and run nvcc (inferred; the reason is not recorded).
 
 ## Test changes

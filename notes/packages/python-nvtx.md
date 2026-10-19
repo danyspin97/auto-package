@@ -8,5 +8,5 @@
 Checked against 0.2.15 on openSUSE_Tumbleweed, x86_64.
 
 ## Test changes
-- The sdist's tests import a conftest module that the sdist does not include, so the %pytest run cannot work. It is replaced with an import check of the nvtx package and nvtx._lib.profiler from the buildroot. No individual tests are deselected.
+- The sdist's tests need a tests/conftest.py that the sdist does not ship, so the %pytest run cannot work. It is replaced with an import check of the nvtx package and nvtx._lib.profiler from the buildroot. No individual tests are deselected.
 Checked against 0.2.15 on openSUSE_Tumbleweed, x86_64.

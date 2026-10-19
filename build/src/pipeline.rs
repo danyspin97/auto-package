@@ -391,7 +391,10 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
                 if ap_core::proc_lock::try_lock(&ws.dir().join("build.lock")).is_err() {
                     continue;
                 }
-                ("interrupted", "the run that was building this package ended without a result")
+                (
+                    "interrupted",
+                    "the run that was building this package ended without a result",
+                )
             }
             Some("missing_deps") => {
                 let waiting: Vec<String> = state
@@ -403,7 +406,10 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
                 if waiting.is_empty() || !waiting.iter().all(|d| built(d)) {
                     continue;
                 }
-                ("interrupted", "the dependencies it waited on are built; ready to run again")
+                (
+                    "interrupted",
+                    "the dependencies it waited on are built; ready to run again",
+                )
             }
             // The retired terminal states: `blocked` is no longer an outcome (a
             // turn that says so is taken through the resolution ladder), and
@@ -505,7 +511,10 @@ pub fn reconcile_with_obs(
                 out.push((name, what));
             }
             Ok(_) => out.push((name, "OBS built it but no RPMs were downloaded".to_string())),
-            Err(e) => out.push((name, format!("OBS built it but fetching its RPMs failed: {e}"))),
+            Err(e) => out.push((
+                name,
+                format!("OBS built it but fetching its RPMs failed: {e}"),
+            )),
         }
     }
     out
@@ -1274,7 +1283,10 @@ pub fn select_target(
             .collect();
         let (_, errors) = sync_blocked_waiters(&config.state_root, &edges);
         for message in errors {
-            reporter.report(&Event::Warning { step: None, message });
+            reporter.report(&Event::Warning {
+                step: None,
+                message,
+            });
         }
     }
 
@@ -1444,12 +1456,12 @@ pub(crate) fn sync_blocked_waiters(
     let blocker_of = |cur: &HashMap<String, Cur>, name: &str| -> Option<String> {
         let c = cur.get(name)?;
         match c.0.as_deref() {
-            Some(WAITING_ON_FAILED) => c
-                .1
-                .as_deref()
-                .and_then(|r| r.strip_prefix(WAITING_ON_FAILED_PREFIX))
-                .map(|b| b.trim().to_string())
-                .filter(|b| !b.is_empty()),
+            Some(WAITING_ON_FAILED) => {
+                c.1.as_deref()
+                    .and_then(|r| r.strip_prefix(WAITING_ON_FAILED_PREFIX))
+                    .map(|b| b.trim().to_string())
+                    .filter(|b| !b.is_empty())
+            }
             _ => None,
         }
     };
@@ -1478,7 +1490,9 @@ pub(crate) fn sync_blocked_waiters(
                 n.clone(),
                 (
                     Some("interrupted".into()),
-                    Some("the package it waited on is no longer given up; ready to run again".into()),
+                    Some(
+                        "the package it waited on is no longer given up; ready to run again".into(),
+                    ),
                 ),
             );
             changed = true;
@@ -1509,10 +1523,9 @@ pub(crate) fn sync_blocked_waiters(
             if c.0.as_deref() != Some("missing_deps") {
                 continue;
             }
-            let Some(list) = c
-                .1
-                .as_deref()
-                .and_then(|r| r.strip_prefix("waiting on dependencies: "))
+            let Some(list) =
+                c.1.as_deref()
+                    .and_then(|r| r.strip_prefix("waiting on dependencies: "))
             else {
                 continue;
             };
@@ -2537,8 +2550,7 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
         spec_existed_before_generation && spec_version_differs(spec_path, &config.version);
     // A wheel is asked for and the checked-out recipe builds from source.
     let wheel_switch = wheel_policy_pending(&config.source_urls, &config.pkg_name, spec_path);
-    let need_spec =
-        config.regen || !spec_existed_before_generation || version_bump || wheel_switch;
+    let need_spec = config.regen || !spec_existed_before_generation || version_bump || wheel_switch;
     // A bump keeps the recipe the package already has (its patches,
     // BuildRequires, `%check` skips, a distro package's whole layout) unless
     // `--regen` asks to start over; only the version and the source change.
@@ -2777,7 +2789,12 @@ fn osc_service_stage(
 
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
-                .map_err(|e| (false, format!("writing _service failed for {}: {e}", config.pkg_name)))
+                .map_err(|e| {
+                    (
+                        false,
+                        format!("writing _service failed for {}: {e}", config.pkg_name),
+                    )
+                })
                 .and_then(|()| {
                     run_service_with_retries(checkout_dir, Emit::new(reporter, step.id))
                         .map_err(|e| (e.is_transient(), e.to_string()))
@@ -2858,7 +2875,12 @@ fn osc_service_stage(
                 .is_some_and(|t| tarball_has_cargo_lock(&t));
             let service_xml = render_maturin_service_file(&normalized, &extra_manifests, locked);
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
-                .map_err(|e| (false, format!("writing _service failed for {}: {e}", config.pkg_name)))
+                .map_err(|e| {
+                    (
+                        false,
+                        format!("writing _service failed for {}: {e}", config.pkg_name),
+                    )
+                })
                 .and_then(|()| {
                     run_service_with_retries(checkout_dir, Emit::new(reporter, step.id))
                         .map_err(|e| (e.is_transient(), e.to_string()))
@@ -3093,7 +3115,9 @@ fn empty_submodule_why(root: &Path) -> String {
 /// through the same path (provenance, notes, state reset) as the agent's.
 fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
     crate::agent::TurnOutcome {
-        action: crate::agent::Action::UseUpstreamWheel { why: why.to_string() },
+        action: crate::agent::Action::UseUpstreamWheel {
+            why: why.to_string(),
+        },
         reasoning: why.to_string(),
         evidence: Vec::new(),
         unresolvable_packages: Vec::new(),
@@ -3262,7 +3286,8 @@ fn review_stage(
     // edit: when the wheel exists, switch to it now instead of paying a turn
     // to be told so.
     let mut run_turn = run_turn;
-    if patching.is_none() && switch_for_missing_submodules(ctx, st, spec_path, &fetch_release_json)? {
+    if patching.is_none() && switch_for_missing_submodules(ctx, st, spec_path, &fetch_release_json)?
+    {
         run_turn = false;
     }
     if !config.no_agent && run_turn {
@@ -3772,30 +3797,29 @@ fn missing_deps_from_turn(
     // being built is exactly what the defect is about.
     let already_patched = |p: &crate::agent::PatchRequest| {
         // `p.name` is an RPM name (`ffmpeg-8`) as often as a PyPI one.
-        Workspace::find_existing(
-            &ctx.config.state_root,
-            &[&osc::rpm_name(&p.name), &p.name],
-        )
-        .map(|w| {
-            let real = w
-                .dir()
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let state = PkgState::load(&w);
-            let over = patch_request_over(&state, p, &|c| {
-                condition_holds_now(ctx.config, &real, c)
-                    || condition_holds_now(ctx.config, &osc::rpm_name(&p.name), c)
-            });
-            if over && let Some(cond) = &p.condition {
-                let key = condition_key(cond);
-                if !state.satisfied_conditions.contains(&key) && state.condition_failures_of(key) < CONDITION_GIVE_UP {
-                    update_state(&w, ctx.reporter, |s| s.record_condition_satisfied(key));
+        Workspace::find_existing(&ctx.config.state_root, &[&osc::rpm_name(&p.name), &p.name])
+            .map(|w| {
+                let real = w
+                    .dir()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let state = PkgState::load(&w);
+                let over = patch_request_over(&state, p, &|c| {
+                    condition_holds_now(ctx.config, &real, c)
+                        || condition_holds_now(ctx.config, &osc::rpm_name(&p.name), c)
+                });
+                if over && let Some(cond) = &p.condition {
+                    let key = condition_key(cond);
+                    if !state.satisfied_conditions.contains(&key)
+                        && state.condition_failures_of(key) < CONDITION_GIVE_UP
+                    {
+                        update_state(&w, ctx.reporter, |s| s.record_condition_satisfied(key));
+                    }
                 }
-            }
-            over
-        })
-        .unwrap_or(false)
+                over
+            })
+            .unwrap_or(false)
     };
     let mut patches: Vec<crate::agent::PatchRequest> = patch_dependencies
         .iter()
@@ -3931,11 +3955,8 @@ fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path) -> String 
         && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
         && let Some(layout) = ap_ecosystem::sdist::wheel_layout(&wheel)
     {
-        let siblings = crate::spec::sibling_wheels(
-            Path::new("/nonexistent"),
-            checkout_dir.parent(),
-            &name,
-        );
+        let siblings =
+            crate::spec::sibling_wheels(Path::new("/nonexistent"), checkout_dir.parent(), &name);
         fixed = crate::spec::with_sibling_tree_in_sitelib(&fixed, &layout, &siblings);
     }
     if !fixed.contains("[0-9a-f]{8}")
@@ -3957,6 +3978,7 @@ fn spec_has_published_defects(spec_path: &Path) -> bool {
 
 /// The prebuilt wheel a spec's `Source` names, when it is in the checkout.
 fn local_wheel_source(spec: &str, checkout_dir: &Path) -> Option<PathBuf> {
+    let version = crate::spec::parse_header(spec).map(|h| h.version);
     spec.lines()
         .filter_map(|l| {
             let l = l.trim_start();
@@ -3964,6 +3986,11 @@ fn local_wheel_source(spec: &str, checkout_dir: &Path) -> Option<PathBuf> {
             (tag.starts_with("Source") && !tag.contains('(')).then(|| value.trim())
         })
         .map(|v| v.rsplit('/').next().unwrap_or(v))
+        // `%{version}` is the spec's own, so the file is still the one on disk.
+        .map(|f| match &version {
+            Some(v) => f.replace("%{version}", v).replace("%version", v),
+            None => f.to_string(),
+        })
         .filter(|f| f.ends_with(".whl") && !f.contains('%'))
         .map(|f| checkout_dir.join(f))
         .find(|p| p.is_file())
@@ -3997,11 +4024,7 @@ fn linked_package_spelling(
 
 /// The version a linked project ships of `dep` (a bare upstream name), or `None`
 /// when none does or the projects cannot be read.
-fn linked_shipped_version(
-    ctx: &RunCtx,
-    step: ap_core::event::StepId,
-    dep: &str,
-) -> Option<String> {
+fn linked_shipped_version(ctx: &RunCtx, step: ap_core::event::StepId, dep: &str) -> Option<String> {
     let emit = Emit::new(ctx.reporter, step);
     let mut linked = Vec::new();
     for (path_project, _repo) in osc::get_project_repo_paths(&ctx.config.project, emit).ok()? {
@@ -4437,6 +4460,13 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         let fixed = crate::spec::hoist_dependency_tags(&fixed);
         let fixed = crate::spec::normalize_nvidia_license(&fixed);
         let fixed = crate::spec::dedupe_changelog_header(&fixed);
+        // Style: section order, a noarch tag, the version as a macro, and no
+        // build dependency a prebuilt wheel does not use (spec_tidy).
+        let fixed = crate::spec_tidy::unwrap_python_expand_block(&fixed);
+        let fixed = crate::spec_tidy::move_check_before_files(&fixed);
+        let fixed = crate::spec_tidy::add_noarch_to_pure_python(&fixed);
+        let fixed = crate::spec_tidy::use_version_macro(&fixed);
+        let fixed = crate::spec_tidy::drop_unneeded_wheel_build_requires(&fixed);
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
         let mut fixed = fixed;
@@ -4708,15 +4738,23 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             if let Some(why) = missing_license_entry(ws, spec_path) {
                 style.push(why);
             }
-            style.extend(crate::spec::check_quality_problems(&spec_text_now(spec_path)));
+            style.extend(crate::spec::check_quality_problems(&spec_text_now(
+                spec_path,
+            )));
             {
                 // The unpacked sources, either flat or under one top directory.
                 let src = ws.dir().join("source");
                 let tops: Vec<PathBuf> = std::fs::read_dir(&src)
-                    .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+                    .map(|d| {
+                        d.flatten()
+                            .map(|e| e.path())
+                            .filter(|p| p.is_dir())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 if src.is_dir() {
-                    let have = |p: &str| src.join(p).exists() || tops.iter().any(|t| t.join(p).exists());
+                    let have =
+                        |p: &str| src.join(p).exists() || tops.iter().any(|t| t.join(p).exists());
                     // The repository's tag archive as a second source, when the
                     // sdist metadata names the repository and the tag exists; the
                     // missing-source step above fetches it on the next pass.
@@ -4901,7 +4939,10 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     for name in osc::drop_unused_recipe_files(&ctx.checkout_dir) {
         ctx.reporter.report(&Event::Warning {
             step: Some(commit_step.id),
-            message: format!("{}: dropped '{name}': the spec does not use it", ctx.rpm_name),
+            message: format!(
+                "{}: dropped '{name}': the spec does not use it",
+                ctx.rpm_name
+            ),
         });
     }
     let plan = osc::publish_plan(&ctx.checkout_dir);
@@ -5075,7 +5116,10 @@ fn migrate_wheel_provenance(
     rpm_name: &str,
     reporter: &dyn Reporter,
 ) {
-    let pre_switch = format!("{}.spec.pre-wheel-switch", ap_core::run::sanitize_name(rpm_name));
+    let pre_switch = format!(
+        "{}.spec.pre-wheel-switch",
+        ap_core::run::sanitize_name(rpm_name)
+    );
     for file in ["wheel-origin.txt", pre_switch.as_str()] {
         let (from, to) = (checkout.join(file), ws.dir().join(file));
         if from.is_file() && !to.exists() {
@@ -5195,7 +5239,10 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
 /// this file is the only record of earlier ones.
 fn record_rpmlint(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Reporter) {
     for message in record_rpmlint_logs(&config.rpms_dir, &config.rpm_name, &config.version, ws) {
-        reporter.report(&Event::Warning { step: None, message });
+        reporter.report(&Event::Warning {
+            step: None,
+            message,
+        });
     }
 }
 
@@ -5226,7 +5273,12 @@ fn record_rpmlint_logs(
             warnings.push(format!(
                 "rpmlint reports {} error(s) in the RPMs of {name}: {}",
                 errors.len(),
-                errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+                errors
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
     }
@@ -6117,7 +6169,8 @@ fn skip_agent(
 const LADDER_ROUNDS: usize = 3;
 
 /// Start of the failure reason of a package whose ladder was spent.
-pub const LADDER_FAILED_PREFIX: &str = "UNRESOLVED after the resolution ladder (investigate the tool): ";
+pub const LADDER_FAILED_PREFIX: &str =
+    "UNRESOLVED after the resolution ladder (investigate the tool): ";
 
 /// What one rung of the ladder came to.
 enum Rung<T, E> {
@@ -6362,7 +6415,9 @@ fn sibling_checkouts(config: &PipelineConfig, spec: &str, extra_text: &str) -> V
         .flatten()
         .filter(|e| {
             let n = e.file_name();
-            e.path().join(format!("{}.spec", n.to_string_lossy())).is_file()
+            e.path()
+                .join(format!("{}.spec", n.to_string_lossy()))
+                .is_file()
         })
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
@@ -6469,7 +6524,10 @@ fn ladder_key(config: &PipelineConfig, spec: &str) -> u64 {
     let mut all = spec.to_string();
     for dir in sibling_checkouts(config, spec, "") {
         if let Some(name) = dir.file_name() {
-            all.push_str(&std::fs::read_to_string(dir.join(format!("{}.spec", name.to_string_lossy()))).unwrap_or_default());
+            all.push_str(
+                &std::fs::read_to_string(dir.join(format!("{}.spec", name.to_string_lossy())))
+                    .unwrap_or_default(),
+            );
         }
     }
     hash_spec(&all)
@@ -6642,7 +6700,11 @@ fn resolve_blocked_with(
                     message: format!(
                         "{rpm_name}: the blocker names {} as the place of the fix; requesting a \
                          patch of it instead of asking again",
-                        patches.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+                        patches
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 });
                 return Rung::Abort(PipelineResult::MissingDeps {
@@ -6685,7 +6747,10 @@ fn resolve_blocked_with(
                                 .collect::<Vec<_>>()
                                 .join("\n"),
                             if dropped.omitted > 0 {
-                                format!("{} more failing test(s) are left for the next round.\n", dropped.omitted)
+                                format!(
+                                    "{} more failing test(s) are left for the next round.\n",
+                                    dropped.omitted
+                                )
                             } else {
                                 String::new()
                             }
@@ -7299,10 +7364,8 @@ fn missing_source_urls(expanded_spec: &str, missing: &[String]) -> Vec<String> {
                 .iter()
                 .any(|p| value.len() > p.len() && value.starts_with(p));
             let name = value.rsplit('/').next().unwrap_or(value);
-            (is_url
-                && !value.contains(['%', ' ', '\t'])
-                && missing.iter().any(|m| m == name))
-            .then(|| value.to_string())
+            (is_url && !value.contains(['%', ' ', '\t']) && missing.iter().any(|m| m == name))
+                .then(|| value.to_string())
         })
         .collect()
 }
@@ -7640,7 +7703,13 @@ fn repeated_spec_rejection(spec_path: &Path) -> Option<String> {
     map.iter()
         .find(|((p, _), (n, _))| p == spec_path && *n >= MAX_IDENTICAL_REJECTIONS)
         .map(|(_, (n, problem))| {
-            let first: String = problem.lines().next().unwrap_or("").chars().take(300).collect();
+            let first: String = problem
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(300)
+                .collect();
             format!(
                 "the spec was rejected {n} times with the same error and the agent does not \
                  get past it: {first}"
@@ -7841,8 +7910,15 @@ fn apply_turn_outcome_with(
     // Files the turn asked the pipeline to copy into the checkout: its shell
     // cannot write there. Done first, and kept even by a `blocked` or
     // `no_change` answer: the copy is the work the turn asked for.
-    let staged =
-        stage_requested_files(config, checkout_dir, step, outcome, reporter, &notes_path, label);
+    let staged = stage_requested_files(
+        config,
+        checkout_dir,
+        step,
+        outcome,
+        reporter,
+        &notes_path,
+        label,
+    );
     let effect = match &outcome.action {
         crate::agent::Action::Blocked { .. } | crate::agent::Action::NoChange
             if !staged.is_empty() =>
@@ -7953,10 +8029,7 @@ fn apply_turn_outcome_with(
                 // lock file into the checkout and the `node_modules` service
                 // entry. The turn only has to wire the spec to them.
                 let staged = match stage_npm_vendor_route(checkout_dir, &config.version) {
-                    Ok(done) => format!(
-                        "The pipeline already {}. ",
-                        done.join(" and ")
-                    ),
+                    Ok(done) => format!("The pipeline already {}. ", done.join(" and ")),
                     Err(e) => format!(
                         "The pipeline could not stage the lock file or the service ({e}): \
                          ask for it with `stage_files` and write the `_service` entry. "
@@ -7998,13 +8071,7 @@ fn apply_turn_outcome_with(
                     // the run's JSONL, so the switch has to leave a trail
                     // inside the checkout itself.
                     if let Err(e) = write_wheel_switch_provenance(
-                        rpm_name,
-                        config,
-                        &wheel,
-                        attempt,
-                        label,
-                        why,
-                        before,
+                        rpm_name, config, &wheel, attempt, label, why, before,
                     ) {
                         reporter.report(&Event::Warning {
                             step: Some(step.id),
@@ -8293,7 +8360,10 @@ fn run_rpm_query(args: &[&str], rpm: &Path) -> Option<String> {
 
 /// The RPMs the project built from `rpm_name`'s spec, with their file lists:
 /// the main package and every subpackage, found by their source RPM.
-fn package_files_from_rpms(rpms_dir: &Path, rpm_name: &str) -> Vec<crate::ship_condition::PackageFiles> {
+fn package_files_from_rpms(
+    rpms_dir: &Path,
+    rpm_name: &str,
+) -> Vec<crate::ship_condition::PackageFiles> {
     package_files_from_rpms_with(rpms_dir, rpm_name, &run_rpm_query)
 }
 
@@ -8369,7 +8439,11 @@ fn condition_holds_now(
     {
         return true;
     }
-    check(cond, &package_files_from_rpms(&config.rpms_dir, rpm_name), rpm_name) == Verdict::Satisfied
+    check(
+        cond,
+        &package_files_from_rpms(&config.rpms_dir, rpm_name),
+        rpm_name,
+    ) == Verdict::Satisfied
 }
 
 /// After a patch turn on a package with a condition: true of the spec now, the
@@ -8396,7 +8470,9 @@ fn patch_condition_gate(
         Verdict::Violated(why) => why,
     };
     let mut failures = 0;
-    update_state(&ctx.ws, ctx.reporter, |s| failures = s.record_condition_failure(key));
+    update_state(&ctx.ws, ctx.reporter, |s| {
+        failures = s.record_condition_failure(key)
+    });
     append_notes(
         ctx.ws.notes(),
         &format!(
@@ -8449,7 +8525,10 @@ fn patch_condition_gate(
         }
         Ok(_) => Err(ctx.failed_as(
             FailureKind::Exhausted,
-            format!("{}: the wheel switch changed nothing after {failures} failed patches", ctx.rpm_name),
+            format!(
+                "{}: the wheel switch changed nothing after {failures} failed patches",
+                ctx.rpm_name
+            ),
         )),
         Err(e) => Err(ctx.failed_as(
             FailureKind::Exhausted,
@@ -8514,7 +8593,11 @@ fn recipe_licence_lines(spec: &str) -> Vec<String> {
 /// that recipe's licence lines from this project, else from a project it builds
 /// against, as the evidence convention 78 asks for. `None` when there is no
 /// guard or no recipe could be read. Cached per recipe for the process.
-fn licence_guard_facts(config: &PipelineConfig, build_log: &Path, checkout_dir: &Path) -> Option<String> {
+fn licence_guard_facts(
+    config: &PipelineConfig,
+    build_log: &Path,
+    checkout_dir: &Path,
+) -> Option<String> {
     let guard = |text: &str| text.contains("LICENSE_VIOLATION");
     let log = std::fs::read_to_string(build_log).unwrap_or_default();
     let spec = std::fs::read_to_string(checkout_dir.join(format!("{}.spec", config.rpm_name)))
@@ -8615,7 +8698,8 @@ fn changes_message(reasoning: &str) -> String {
             Some(i) => &cut[..i],
             None => cut.rsplit_once(' ').map(|(h, _)| h).unwrap_or(&cut),
         };
-        head.trim_end_matches([',', ';', ':', ' ', '-', '(']).to_string()
+        head.trim_end_matches([',', ';', ':', ' ', '-', '('])
+            .to_string()
     } else {
         first.to_string()
     };
@@ -8822,7 +8906,9 @@ fn stale_patches(
         };
         let tag = tag.trim();
         if !(tag.len() > 5
-            && tag.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("patch"))
+            && tag
+                .get(..5)
+                .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
             && tag[5..].chars().all(|c| c.is_ascii_digit()))
         {
             continue;
@@ -8850,7 +8936,10 @@ fn without_patches(spec: &str, names: &[String]) -> String {
     let mut out = String::new();
     for line in spec.lines() {
         if let Some((tag, value)) = line.split_once(':')
-            && tag.trim().get(..5).is_some_and(|p| p.eq_ignore_ascii_case("patch"))
+            && tag
+                .trim()
+                .get(..5)
+                .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
             && names.iter().any(|n| n == value.trim())
         {
             nums.push(tag.trim()[5..].to_string());
@@ -9687,13 +9776,13 @@ pub(crate) fn sha256_file(path: &Path) -> std::io::Result<String> {
 /// Record which archive a spec was generated from, so the commit to OBS keeps
 /// a digest of what was used.
 fn record_archive_digest(spec_path: &Path, url: &str, digest: &str) {
-    use std::io::Write;
-    let note = format!("\n# Source archive: {url}\n# Source archive sha256: {digest}\n");
-    let appended = std::fs::OpenOptions::new()
-        .append(true)
-        .open(spec_path)
-        .and_then(|mut spec| spec.write_all(note.as_bytes()));
-    if let Err(e) = appended {
+    let noted = std::fs::read_to_string(spec_path).and_then(|spec| {
+        std::fs::write(
+            spec_path,
+            crate::spec_tidy::with_archive_note(&spec, url, digest),
+        )
+    });
+    if let Err(e) = noted {
         ap_core::diag!(
             "  could not record the archive digest in {}: {e}",
             spec_path.display()
@@ -10217,16 +10306,15 @@ fn try_wheel_fallback_with(
             };
         }
     };
-    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step, false).map_err(
-        |e| match e {
+    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step, false)
+        .map_err(|e| match e {
             GenSpecError::Other(msg) | GenSpecError::NoReleaseArchive(msg) => {
                 format!("wheel spec generation failed: {msg}")
             }
             GenSpecError::WheelOnly { .. } => {
                 "wheel spec generation failed unexpectedly".to_string()
             }
-        },
-    )?;
+        })?;
     Ok(wheel)
 }
 
@@ -10325,11 +10413,17 @@ const NODE_MODULES_SERVICE_ENTRY: &str = "  <service name=\"node_modules\" mode=
 /// already has one or is not a `<services>` document.
 fn with_node_modules_service(existing: Option<&str>) -> Option<String> {
     match existing {
-        None => Some(format!("<services>\n{NODE_MODULES_SERVICE_ENTRY}</services>\n")),
+        None => Some(format!(
+            "<services>\n{NODE_MODULES_SERVICE_ENTRY}</services>\n"
+        )),
         Some(xml) if xml.contains("name=\"node_modules\"") => None,
         Some(xml) => {
             let at = xml.rfind("</services>")?;
-            Some(format!("{}{NODE_MODULES_SERVICE_ENTRY}{}", &xml[..at], &xml[at..]))
+            Some(format!(
+                "{}{NODE_MODULES_SERVICE_ENTRY}{}",
+                &xml[..at],
+                &xml[at..]
+            ))
         }
     }
 }
@@ -10458,7 +10552,9 @@ fn write_wheel_switch_provenance(
     // "not committing" noise on every Commit step.
     // Through the workspace, which sanitizes the name: a raw `join` would let a
     // package name with `/` or `..` write outside the state root.
-    let dir = Workspace::open(&config.state_root, rpm_name)?.dir().to_path_buf();
+    let dir = Workspace::open(&config.state_root, rpm_name)?
+        .dir()
+        .to_path_buf();
     ap_core::fsx::write_atomic(&dir.join("wheel-origin.txt"), provenance)?;
     ap_core::fsx::write_atomic(
         &dir.join(format!(
@@ -10587,7 +10683,12 @@ fn generate_multi_flavor_wheel_spec(
         ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
-        write_wheel_rpmlintrc(checkout_dir, &config.pkg_name, &wheels[0].1, layout.as_ref());
+        write_wheel_rpmlintrc(
+            checkout_dir,
+            &config.pkg_name,
+            &wheels[0].1,
+            layout.as_ref(),
+        );
         let first_wheel = picked.into_iter().next().map(|(_, w)| w).ok_or_else(|| {
             GenSpecError::Other(format!(
                 "no wheel picked for any flavor of {}",
@@ -10718,7 +10819,12 @@ fn generate_wheel_binary_spec(
     ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
     write_or_warn(step.file("spec.generated"), &spec_text);
-    write_wheel_rpmlintrc(checkout_dir, &config.pkg_name, &wheel.filename, layout.as_ref());
+    write_wheel_rpmlintrc(
+        checkout_dir,
+        &config.pkg_name,
+        &wheel.filename,
+        layout.as_ref(),
+    );
 
     Ok(GenSpecResult {
         // A wheel unpacks flat — no wrapping top-level directory.
@@ -12048,8 +12154,14 @@ mod tests {
             "Pass the tests the sdist does not ship through the deselect list, and its cmake \
              flags keep the build from reaching the network at all",
         );
-        assert_eq!(m, "Pass the tests the sdist does not ship through the deselect list");
-        assert_eq!(changes_message("Escape %%{version} in the macro"), "Escape %{version} in the macro");
+        assert_eq!(
+            m,
+            "Pass the tests the sdist does not ship through the deselect list"
+        );
+        assert_eq!(
+            changes_message("Escape %%{version} in the macro"),
+            "Escape %{version} in the macro"
+        );
     }
 
     #[test]
@@ -12227,14 +12339,21 @@ mod tests {
     #[test]
     fn a_locked_crate_is_vendored_without_cargo_update() {
         let locked = render_maturin_service_file("chromadb", &[], true);
-        assert!(locked.contains("<param name=\"update\">false</param>"), "{locked}");
+        assert!(
+            locked.contains("<param name=\"update\">false</param>"),
+            "{locked}"
+        );
         let unlocked = render_maturin_service_file("chromadb", &[], false);
-        assert!(unlocked.contains("<param name=\"update\">true</param>"), "{unlocked}");
+        assert!(
+            unlocked.contains("<param name=\"update\">true</param>"),
+            "{unlocked}"
+        );
     }
 
     #[test]
     fn service_files_escape_values_taken_from_upstream() {
-        let xml = render_maturin_service_file("x", &["a&b</param><evil/>/Cargo.toml".to_string()], false);
+        let xml =
+            render_maturin_service_file("x", &["a&b</param><evil/>/Cargo.toml".to_string()], false);
         assert!(!xml.contains("<evil/>"), "{xml}");
         assert!(xml.contains("a&amp;b&lt;/param&gt;"), "{xml}");
         let xml = render_service_file("https://example.org/o/r?a=1&b=2", "1.0", "r");
@@ -12418,7 +12537,10 @@ mod tests {
         assert_eq!(names, ["stale.patch"], "{check:?}");
         // Without the stale one the spec is clean.
         let kept = without_patches(spec, &["stale.patch".to_string()]);
-        assert_eq!(try_patches(&spec_path, &kept).unwrap(), PatchCheck::default());
+        assert_eq!(
+            try_patches(&spec_path, &kept).unwrap(),
+            PatchCheck::default()
+        );
         // The dry run wrote nothing into the checkout.
         assert!(!dir.join("f.txt").exists());
     }
@@ -13092,7 +13214,10 @@ Requires:       python-Old
 
     #[test]
     fn added_python_dependencies_triage_sets_aside_interpreter_packages() {
-        let added = vec!["python-devel".to_string(), "python-cuda_bindings".to_string()];
+        let added = vec![
+            "python-devel".to_string(),
+            "python-cuda_bindings".to_string(),
+        ];
         let (named, skipped) = crate::depclass::triage_all(&added, &|_| false);
         assert_eq!(named, vec!["cuda_bindings"]);
         assert_eq!(skipped.len(), 1);
@@ -13475,7 +13600,7 @@ Source:         %{undefined_macro}\n";
             source_urls: Default::default(),
             python_flavors: Default::default(),
             patch_request: None,
-        patch_condition: None,
+            patch_condition: None,
         };
         let run = ap_core::run::RunDir::allocate(&work_dir).unwrap();
         let pkg_run = run.pkg("python-foo");
@@ -13522,7 +13647,7 @@ Source:         %{undefined_macro}\n";
             source_urls: Default::default(),
             python_flavors: Default::default(),
             patch_request: None,
-        patch_condition: None,
+            patch_condition: None,
         };
         config.no_agent = true;
         let recorder = Recorder::default();
@@ -13874,11 +13999,15 @@ mod published_defect_tests {
     fn a_cuda_arch_package_without_the_driver_exclude_is_defective_until_it_has_it() {
         let dir = tempfile::tempdir().unwrap();
         let spec = dir.path().join("python-flashinfer-python.spec");
-        let text = "Name: python-flashinfer-python\nBuildRequires: cuda-nvcc\n%python_subpackages\n";
+        let text =
+            "Name: python-flashinfer-python\nBuildRequires: cuda-nvcc\n%python_subpackages\n";
         std::fs::write(&spec, text).unwrap();
         assert!(spec_has_published_defects(&spec));
         let fixed = spec_with_published_defects_fixed(text, dir.path());
-        assert!(fixed.contains("%global __requires_exclude ^(libcuda"), "{fixed}");
+        assert!(
+            fixed.contains("%global __requires_exclude ^(libcuda"),
+            "{fixed}"
+        );
         std::fs::write(&spec, &fixed).unwrap();
         assert!(!spec_has_published_defects(&spec));
         // A noarch package cannot link the driver.
@@ -13890,9 +14019,17 @@ mod published_defect_tests {
     fn a_built_package_with_a_bare_conditional_dependency_is_defective() {
         let dir = tempfile::tempdir().unwrap();
         let spec = dir.path().join("python-x.spec");
-        std::fs::write(&spec, "Requires:  python-tomli >= 2 if python-base < 3.11\n").unwrap();
+        std::fs::write(
+            &spec,
+            "Requires:  python-tomli >= 2 if python-base < 3.11\n",
+        )
+        .unwrap();
         assert!(spec_has_published_defects(&spec));
-        std::fs::write(&spec, "Requires:  (python-tomli >= 2 if python-base < 3.11)\n").unwrap();
+        std::fs::write(
+            &spec,
+            "Requires:  (python-tomli >= 2 if python-base < 3.11)\n",
+        )
+        .unwrap();
         assert!(!spec_has_published_defects(&spec));
         // No spec checked out: nothing to repair.
         assert!(!spec_has_published_defects(&dir.path().join("absent.spec")));
@@ -13908,13 +14045,38 @@ mod patch_turn_tests {
     fn a_patch_turn_that_finds_nothing_to_change_is_satisfied_not_failed() {
         let blocked = Action::Blocked { why: "no".into() };
         // ffmpeg-8 was already licence-clean: no_change.
-        assert!(!patch_turn_failed(true, TurnEffect::NoChange, false, &Action::NoChange));
+        assert!(!patch_turn_failed(
+            true,
+            TurnEffect::NoChange,
+            false,
+            &Action::NoChange
+        ));
         // It edited, an earlier run did, or this is not a patch turn.
-        assert!(!patch_turn_failed(true, TurnEffect::Edited, false, &Action::Edited));
-        assert!(!patch_turn_failed(true, TurnEffect::NoChange, true, &blocked));
-        assert!(!patch_turn_failed(false, TurnEffect::NoChange, false, &blocked));
+        assert!(!patch_turn_failed(
+            true,
+            TurnEffect::Edited,
+            false,
+            &Action::Edited
+        ));
+        assert!(!patch_turn_failed(
+            true,
+            TurnEffect::NoChange,
+            true,
+            &blocked
+        ));
+        assert!(!patch_turn_failed(
+            false,
+            TurnEffect::NoChange,
+            false,
+            &blocked
+        ));
         // Blocked is still a failure to patch.
-        assert!(patch_turn_failed(true, TurnEffect::NoChange, false, &blocked));
+        assert!(patch_turn_failed(
+            true,
+            TurnEffect::NoChange,
+            false,
+            &blocked
+        ));
         // python-torch: the wheel switch meets the request.
         assert!(!patch_turn_failed(
             true,
@@ -13930,9 +14092,18 @@ mod patch_turn_tests {
     fn a_reworded_request_for_an_already_patched_package_is_settled() {
         let a = hash_spec("Keep torch/utils/benchmark/utils in the main package.");
         assert!(!patch_request_settled(&[], "anything"));
-        assert!(patch_request_settled(&[a], "Keep torch/utils/benchmark/utils in the main package."));
-        assert!(!patch_request_settled(&[a], "Ship benchmark/utils in the main package."));
-        assert!(patch_request_settled(&[a, a ^ 1], "Ship benchmark/utils in the main package."));
+        assert!(patch_request_settled(
+            &[a],
+            "Keep torch/utils/benchmark/utils in the main package."
+        ));
+        assert!(!patch_request_settled(
+            &[a],
+            "Ship benchmark/utils in the main package."
+        ));
+        assert!(patch_request_settled(
+            &[a, a ^ 1],
+            "Ship benchmark/utils in the main package."
+        ));
     }
 }
 
@@ -13986,26 +14157,50 @@ mod wheel_policy_tests {
     fn a_source_recipe_is_pending_when_a_wheel_is_asked_for() {
         let dir = tempfile::tempdir().unwrap();
         let spec = dir.path().join("python-torch.spec");
-        std::fs::write(&spec, "Name: python-torch\nSource: torch-%{version}.tar.gz\n").unwrap();
+        std::fs::write(
+            &spec,
+            "Name: python-torch\nSource: torch-%{version}.tar.gz\n",
+        )
+        .unwrap();
         let wheel = urls(&[("torch", "wheel")]);
         assert!(wheel_policy_pending(&wheel, "torch", &spec));
         assert!(wheel_policy_pending(&wheel, "Torch", &spec));
         // Another package, an ordinary URL, or no entry: nothing pending.
         assert!(!wheel_policy_pending(&wheel, "numpy", &spec));
-        assert!(!wheel_policy_pending(&urls(&[("torch", "https://github.com/pytorch/pytorch")]), "torch", &spec));
+        assert!(!wheel_policy_pending(
+            &urls(&[("torch", "https://github.com/pytorch/pytorch")]),
+            "torch",
+            &spec
+        ));
         // The wheel spec is done.
-        std::fs::write(&spec, "Name: python-torch\nSource0:        torch-2.14.1-cp313.whl\n").unwrap();
+        std::fs::write(
+            &spec,
+            "Name: python-torch\nSource0:        torch-2.14.1-cp313.whl\n",
+        )
+        .unwrap();
         assert!(!wheel_policy_pending(&wheel, "torch", &spec));
-        assert!(!wheel_policy_pending(&wheel, "torch", &dir.path().join("absent.spec")));
+        assert!(!wheel_policy_pending(
+            &wheel,
+            "torch",
+            &dir.path().join("absent.spec")
+        ));
     }
 
     #[test]
     fn switching_to_a_wheel_clears_the_source_recipe_and_keeps_the_wheel_files() {
         let dir = tempfile::tempdir().unwrap();
         for f in [
-            "_service", "_multibuild", "_constraints", "a.patch", "pytorch-v2.14.0.tar.gz",
-            "python-torch-rpmlintrc", "python-torch.spec", "python-torch.changes",
-            "python-torch.rpmlintrc", "torch-2.14.1-cp313.whl", "_link",
+            "_service",
+            "_multibuild",
+            "_constraints",
+            "a.patch",
+            "pytorch-v2.14.0.tar.gz",
+            "python-torch-rpmlintrc",
+            "python-torch.spec",
+            "python-torch.changes",
+            "python-torch.rpmlintrc",
+            "torch-2.14.1-cp313.whl",
+            "_link",
         ] {
             std::fs::write(dir.path().join(f), "x").unwrap();
         }
@@ -14018,7 +14213,14 @@ mod wheel_policy_tests {
         left.sort();
         assert_eq!(
             left,
-            ["_link", "python-torch.changes", "python-torch.rpmlintrc", "python-torch.spec", "pytorch", "torch-2.14.1-cp313.whl"]
+            [
+                "_link",
+                "python-torch.changes",
+                "python-torch.rpmlintrc",
+                "python-torch.spec",
+                "pytorch",
+                "torch-2.14.1-cp313.whl"
+            ]
         );
     }
 }
@@ -14066,7 +14268,7 @@ mod redist_pipeline_tests {
             source_urls: Default::default(),
             python_flavors: Default::default(),
             patch_request: None,
-        patch_condition: None,
+            patch_condition: None,
         }
     }
 
@@ -14077,7 +14279,9 @@ mod redist_pipeline_tests {
         let top = "cuda_cudart-linux-x86_64-13.4.92-archive";
         let fake = Fake::new(top);
         // A leftover of an earlier release is dropped with the old source.
-        let stale = dir.path().join("cuda_cudart-linux-x86_64-13.3.0-archive.tar.xz");
+        let stale = dir
+            .path()
+            .join("cuda_cudart-linux-x86_64-13.3.0-archive.tar.xz");
         std::fs::write(&stale, b"old").unwrap();
         // The node `nvidia-cuda-runtime` is the package `cuda-cudart`, at the manifest's version.
         let config = config("nvidia-cuda-runtime", "13.4.92", "x86_64");
@@ -14085,8 +14289,7 @@ mod redist_pipeline_tests {
         let spec_path = dir.path().join("cuda-cudart.spec");
         let artifact = dir.path().join("spec.generated");
 
-        let Ok(res) =
-            generate_redist_spec(&config, dir.path(), &spec_path, Some(&artifact), &fake)
+        let Ok(res) = generate_redist_spec(&config, dir.path(), &spec_path, Some(&artifact), &fake)
         else {
             panic!("the generation failed");
         };
@@ -14112,7 +14315,11 @@ mod redist_pipeline_tests {
             "cuda-cudart.rpmlintrc",
             &format!("{top}.tar.xz"),
         ] {
-            assert!(plan.files.iter().any(|p| p == f), "{f} not in {:?}", plan.files);
+            assert!(
+                plan.files.iter().any(|p| p == f),
+                "{f} not in {:?}",
+                plan.files
+            );
         }
         // The spec's version is the config's: no version bump is seen next run.
         assert!(!spec_version_differs(&spec_path, &config.version));
@@ -14250,9 +14457,13 @@ mod hygiene_tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("ok.patch"), "--- a/a\n+++ b/a\n").unwrap();
-        let spec = "Name: x\nPatch0: old.patch\nPatch1: ok.patch\n%prep\n%patch0 -p1\n%patch -P 1 -p1\n";
+        let spec =
+            "Name: x\nPatch0: old.patch\nPatch1: ok.patch\n%prep\n%patch0 -p1\n%patch -P 1 -p1\n";
         let stale = stale_patches(spec, dir.path(), "torch-2.14.0", "2.14.0");
-        assert_eq!(stale, [("old.patch".to_string(), "pytorch-2.3.1".to_string())]);
+        assert_eq!(
+            stale,
+            [("old.patch".to_string(), "pytorch-2.3.1".to_string())]
+        );
         assert_eq!(
             without_patches(spec, &["old.patch".to_string()]),
             "Name: x\nPatch1: ok.patch\n%prep\n%patch -P 1 -p1\n"
@@ -14269,7 +14480,10 @@ mod hygiene_tests {
         assert!(repeated_spec_rejection(&spec).is_none());
         note_spec_rejection(&spec, "patch does not apply");
         let msg = repeated_spec_rejection(&spec).unwrap();
-        assert!(msg.contains("3 times") && msg.contains("patch does not apply"), "{msg}");
+        assert!(
+            msg.contains("3 times") && msg.contains("patch does not apply"),
+            "{msg}"
+        );
         assert!(repeated_spec_rejection(&other).is_none());
         clear_spec_rejections(&spec);
         assert!(repeated_spec_rejection(&spec).is_none());
@@ -14285,8 +14499,12 @@ mod hygiene_tests {
         // Log newer than the spec, not read before.
         assert!(stale_build_log_reason(Some(t0), Some(t1), "boom", None).is_none());
         // Same content as the last turn read.
-        assert!(stale_build_log_reason(Some(t0), Some(t1), "boom", Some(hash_spec("boom"))).is_some());
-        assert!(stale_build_log_reason(Some(t0), Some(t1), "bang", Some(hash_spec("boom"))).is_none());
+        assert!(
+            stale_build_log_reason(Some(t0), Some(t1), "boom", Some(hash_spec("boom"))).is_some()
+        );
+        assert!(
+            stale_build_log_reason(Some(t0), Some(t1), "bang", Some(hash_spec("boom"))).is_none()
+        );
         // Unknown times never block the turn.
         assert!(stale_build_log_reason(None, None, "boom", None).is_none());
     }
@@ -14302,7 +14520,10 @@ mod hygiene_tests {
         assert_eq!(st.failed_ladder("spec B"), None);
         assert_eq!(PkgState::default().failed_ladder("spec A"), None);
         let back: PkgState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
-        assert_eq!(back.failed_ladder("spec A"), Some("turn 0: needs a compiler"));
+        assert_eq!(
+            back.failed_ladder("spec A"),
+            Some("turn 0: needs a compiler")
+        );
         // An old state.json that recorded a block still loads; the fields are gone.
         let old: PkgState =
             serde_json::from_str(r#"{"blocked_spec_hash": 5, "blocked_reason": "x"}"#).unwrap();
@@ -14312,13 +14533,27 @@ mod hygiene_tests {
     #[test]
     fn retired_blocked_states_are_migrated_to_a_rerunnable_state() {
         let root = tempfile::tempdir().unwrap();
-        write_state(root.path(), "python-b", "blocked", Some("Source10 is not in the checkout"));
-        write_state(root.path(), "python-w", "waiting_on_blocked", Some("waiting on blocked package: python-b"));
+        write_state(
+            root.path(),
+            "python-b",
+            "blocked",
+            Some("Source10 is not in the checkout"),
+        );
+        write_state(
+            root.path(),
+            "python-w",
+            "waiting_on_blocked",
+            Some("waiting on blocked package: python-b"),
+        );
         write_state(root.path(), "python-f", "failed", Some("x"));
         let changed = reconcile_state(root.path());
         assert_eq!(changed.len(), 2, "{changed:?}");
         for n in ["python-b", "python-w"] {
-            assert_eq!(outcome(root.path(), n).as_deref(), Some("interrupted"), "{n}");
+            assert_eq!(
+                outcome(root.path(), n).as_deref(),
+                Some("interrupted"),
+                "{n}"
+            );
             let ws = Workspace::open(root.path(), n).unwrap();
             let why = PkgState::load(&ws).last_failure_reason.unwrap();
             assert!(why.contains("resolution ladder"), "{why}");
@@ -14346,16 +14581,41 @@ mod hygiene_tests {
         write_state(root.path(), "python-dead", "running", None);
         write_state(root.path(), "python-live", "running", None);
         write_state(root.path(), "ffmpeg-8", "success", None);
-        write_state(root.path(), "python-tc", "missing_deps", Some("waiting on dependencies: ffmpeg-8"));
-        write_state(root.path(), "python-wait", "missing_deps", Some("waiting on dependencies: ffmpeg-8, nothere"));
+        write_state(
+            root.path(),
+            "python-tc",
+            "missing_deps",
+            Some("waiting on dependencies: ffmpeg-8"),
+        );
+        write_state(
+            root.path(),
+            "python-wait",
+            "missing_deps",
+            Some("waiting on dependencies: ffmpeg-8, nothere"),
+        );
         // A live build holds its lock.
-        let live_lock = Workspace::open(root.path(), "python-live").unwrap().dir().join("build.lock");
+        let live_lock = Workspace::open(root.path(), "python-live")
+            .unwrap()
+            .dir()
+            .join("build.lock");
         let _held = ap_core::proc_lock::try_lock(&live_lock).unwrap();
         let changed = reconcile_state(root.path());
-        assert_eq!(outcome(root.path(), "python-dead").as_deref(), Some("interrupted"));
-        assert_eq!(outcome(root.path(), "python-live").as_deref(), Some("running"));
-        assert_eq!(outcome(root.path(), "python-tc").as_deref(), Some("interrupted"));
-        assert_eq!(outcome(root.path(), "python-wait").as_deref(), Some("missing_deps"));
+        assert_eq!(
+            outcome(root.path(), "python-dead").as_deref(),
+            Some("interrupted")
+        );
+        assert_eq!(
+            outcome(root.path(), "python-live").as_deref(),
+            Some("running")
+        );
+        assert_eq!(
+            outcome(root.path(), "python-tc").as_deref(),
+            Some("interrupted")
+        );
+        assert_eq!(
+            outcome(root.path(), "python-wait").as_deref(),
+            Some("missing_deps")
+        );
         assert_eq!(outcome(root.path(), "ffmpeg-8").as_deref(), Some("success"));
         assert_eq!(changed.len(), 2, "{changed:?}");
     }
@@ -14386,14 +14646,22 @@ mod hygiene_tests {
 
         let root = tempfile::tempdir().unwrap();
         write_state(root.path(), "python-torch", "failed", Some("needs a GPU"));
-        write_state(root.path(), "python-top", "missing_deps", Some("waiting on dependencies: x"));
+        write_state(
+            root.path(),
+            "python-top",
+            "missing_deps",
+            Some("waiting on dependencies: x"),
+        );
         write_state(root.path(), "python-mid", "interrupted", None);
         let edges = vec![
             ("python-mid".to_string(), "python-torch".to_string()),
             ("python-top".to_string(), "python-torch".to_string()),
         ];
         sync_blocked_waiters(root.path(), &edges);
-        assert_eq!(outcome(root.path(), "python-mid").as_deref(), Some(WAITING_ON_FAILED));
+        assert_eq!(
+            outcome(root.path(), "python-mid").as_deref(),
+            Some(WAITING_ON_FAILED)
+        );
         let ws = Workspace::open(root.path(), "python-top").unwrap();
         assert_eq!(
             PkgState::load(&ws).last_failure_reason.as_deref(),
@@ -14404,8 +14672,14 @@ mod hygiene_tests {
         // The graph is not known at startup: the dependents are ready again.
         let changed = reconcile_state(root.path());
         assert_eq!(changed.len(), 2, "{changed:?}");
-        assert_eq!(outcome(root.path(), "python-mid").as_deref(), Some("interrupted"));
-        assert_eq!(outcome(root.path(), "python-top").as_deref(), Some("interrupted"));
+        assert_eq!(
+            outcome(root.path(), "python-mid").as_deref(),
+            Some("interrupted")
+        );
+        assert_eq!(
+            outcome(root.path(), "python-top").as_deref(),
+            Some("interrupted")
+        );
     }
 
     #[test]
@@ -14413,16 +14687,40 @@ mod hygiene_tests {
         let root = tempfile::tempdir().unwrap();
         write_state(root.path(), "python-torch", "failed", Some("needs a GPU"));
         write_state(root.path(), "python-other", "interrupted", None);
-        write_state(root.path(), "python-mid", "missing_deps", Some("waiting on dependencies: torch"));
-        write_state(root.path(), "python-top", "missing_deps", Some("waiting on dependencies: ok, python-mid"));
-        write_state(root.path(), "python-free", "missing_deps", Some("waiting on dependencies: nothere"));
+        write_state(
+            root.path(),
+            "python-mid",
+            "missing_deps",
+            Some("waiting on dependencies: torch"),
+        );
+        write_state(
+            root.path(),
+            "python-top",
+            "missing_deps",
+            Some("waiting on dependencies: ok, python-mid"),
+        );
+        write_state(
+            root.path(),
+            "python-free",
+            "missing_deps",
+            Some("waiting on dependencies: nothere"),
+        );
         write_state(root.path(), "python-ok", "success", None);
         let edges = vec![("python-other".to_string(), "python-torch".to_string())];
         let (changed, _) = sync_blocked_waiters(root.path(), &edges);
         assert_eq!(changed.len(), 3, "{changed:?}");
-        assert_eq!(outcome(root.path(), "python-mid").as_deref(), Some(WAITING_ON_FAILED));
-        assert_eq!(outcome(root.path(), "python-top").as_deref(), Some(WAITING_ON_FAILED));
-        assert_eq!(outcome(root.path(), "python-free").as_deref(), Some("missing_deps"));
+        assert_eq!(
+            outcome(root.path(), "python-mid").as_deref(),
+            Some(WAITING_ON_FAILED)
+        );
+        assert_eq!(
+            outcome(root.path(), "python-top").as_deref(),
+            Some(WAITING_ON_FAILED)
+        );
+        assert_eq!(
+            outcome(root.path(), "python-free").as_deref(),
+            Some("missing_deps")
+        );
         let ws = Workspace::open(root.path(), "python-top").unwrap();
         assert_eq!(
             PkgState::load(&ws).last_failure_reason.as_deref(),
@@ -14433,7 +14731,10 @@ mod hygiene_tests {
         write_state(root.path(), "python-torch", "success", None);
         let changed = reconcile_state(root.path());
         assert_eq!(changed.len(), 3, "{changed:?}");
-        assert_eq!(outcome(root.path(), "python-top").as_deref(), Some("interrupted"));
+        assert_eq!(
+            outcome(root.path(), "python-top").as_deref(),
+            Some("interrupted")
+        );
     }
 
     #[test]
@@ -14443,8 +14744,14 @@ mod hygiene_tests {
             reason: "r".into(),
             kind,
         };
-        assert_eq!(recorded_outcome(&failed(FailureKind::Transient)).unwrap().0, "interrupted");
-        assert_eq!(recorded_outcome(&failed(FailureKind::Other)).unwrap().0, "failed");
+        assert_eq!(
+            recorded_outcome(&failed(FailureKind::Transient)).unwrap().0,
+            "interrupted"
+        );
+        assert_eq!(
+            recorded_outcome(&failed(FailureKind::Other)).unwrap().0,
+            "failed"
+        );
     }
 
     #[test]
@@ -14457,12 +14764,21 @@ mod hygiene_tests {
         let ws = Workspace::open(&root.path().join("state"), "python-w").unwrap();
         let quiet = Warnings(Default::default());
         migrate_wheel_provenance(&checkout, &ws, "python-w", &quiet);
-        assert_eq!(std::fs::read_to_string(ws.dir().join("wheel-origin.txt")).unwrap(), "from the checkout");
-        assert_eq!(std::fs::read_to_string(ws.dir().join("python-w.spec.pre-wheel-switch")).unwrap(), "old spec");
+        assert_eq!(
+            std::fs::read_to_string(ws.dir().join("wheel-origin.txt")).unwrap(),
+            "from the checkout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.dir().join("python-w.spec.pre-wheel-switch")).unwrap(),
+            "old spec"
+        );
         // The state's own record is not overwritten, and the checkout keeps its copy.
         std::fs::write(ws.dir().join("wheel-origin.txt"), "newer").unwrap();
         migrate_wheel_provenance(&checkout, &ws, "python-w", &quiet);
-        assert_eq!(std::fs::read_to_string(ws.dir().join("wheel-origin.txt")).unwrap(), "newer");
+        assert_eq!(
+            std::fs::read_to_string(ws.dir().join("wheel-origin.txt")).unwrap(),
+            "newer"
+        );
         assert!(checkout.join("wheel-origin.txt").is_file());
         assert!(quiet.0.lock().unwrap().is_empty());
     }
@@ -14472,24 +14788,43 @@ mod hygiene_tests {
         let calls = std::cell::Cell::new(0);
         let zero = std::time::Duration::ZERO;
         // A dropped connection that clears on the third try.
-        let r: Result<u32, String> = retry_transient(3, zero, |e: &String| e.contains("reset"), || {
-            calls.set(calls.get() + 1);
-            if calls.get() < 3 { Err("connection reset".into()) } else { Ok(7) }
-        });
+        let r: Result<u32, String> = retry_transient(
+            3,
+            zero,
+            |e: &String| e.contains("reset"),
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Err("connection reset".into())
+                } else {
+                    Ok(7)
+                }
+            },
+        );
         assert_eq!((r, calls.get()), (Ok(7), 3));
         // One that never clears stops at the bound.
         calls.set(0);
-        let r: Result<u32, String> = retry_transient(3, zero, |_| true, || {
-            calls.set(calls.get() + 1);
-            Err("connection reset".into())
-        });
+        let r: Result<u32, String> = retry_transient(
+            3,
+            zero,
+            |_| true,
+            || {
+                calls.set(calls.get() + 1);
+                Err("connection reset".into())
+            },
+        );
         assert_eq!((r.is_err(), calls.get()), (true, 3));
         // A real failure is not retried.
         calls.set(0);
-        let r: Result<u32, String> = retry_transient(3, zero, |_| false, || {
-            calls.set(calls.get() + 1);
-            Err("yanked".into())
-        });
+        let r: Result<u32, String> = retry_transient(
+            3,
+            zero,
+            |_| false,
+            || {
+                calls.set(calls.get() + 1);
+                Err("yanked".into())
+            },
+        );
         assert_eq!((r.is_err(), calls.get()), (true, 1));
     }
 
@@ -14517,7 +14852,11 @@ mod hygiene_tests {
         package("python-built", "success", "1.0", "1.0");
         package("python-bad", "failed", "1.0", "1.0");
         let statuses: std::collections::HashMap<String, osc::BuildStatus> = [
-            "python-ok", "python-old", "python-dirty", "python-empty", "python-built",
+            "python-ok",
+            "python-old",
+            "python-dirty",
+            "python-empty",
+            "python-built",
         ]
         .iter()
         .map(|n| (n.to_string(), osc::BuildStatus::Succeeded))
@@ -14536,34 +14875,53 @@ mod hygiene_tests {
                 // A download leaves OBS's rpmlint log in the stash.
                 let stash = rpms_dir.join(".rpmlint");
                 std::fs::create_dir_all(&stash).unwrap();
-                std::fs::write(
-                    stash.join(format!("{name}.log")),
-                    "x.rpm: E: no-binary\n",
-                )
-                .unwrap();
+                std::fs::write(stash.join(format!("{name}.log")), "x.rpm: E: no-binary\n").unwrap();
                 Ok(if name == "python-empty" { 0 } else { 3 })
             },
         );
         // Only the package OBS built, at the version the state worked on, with a
         // clean checkout, is fetched; an empty download changes nothing.
         assert_eq!(*downloads.lock().unwrap(), ["python-empty", "python-ok"]);
-        assert_eq!(outcome(&state_root, "python-ok").as_deref(), Some("success"));
+        assert_eq!(
+            outcome(&state_root, "python-ok").as_deref(),
+            Some("success")
+        );
         let ws = Workspace::open(&state_root, "python-ok").unwrap();
         assert_eq!(PkgState::load(&ws).last_failure_reason, None);
         for kept in ["python-old", "python-dirty", "python-bad"] {
-            assert_eq!(outcome(&state_root, kept).as_deref(), Some("failed"), "{kept}");
+            assert_eq!(
+                outcome(&state_root, kept).as_deref(),
+                Some("failed"),
+                "{kept}"
+            );
         }
-        assert_eq!(outcome(&state_root, "python-empty").as_deref(), Some("interrupted"));
+        assert_eq!(
+            outcome(&state_root, "python-empty").as_deref(),
+            Some("interrupted")
+        );
         assert_eq!(done.len(), 2, "{done:?}");
         // The rpmlint log of the fetched RPMs is recorded at once.
         let log = std::fs::read_to_string(ws.dir().join("rpmlint.log")).unwrap();
-        assert!(log.contains("rpmlint of python-ok 1.0") && log.contains("E: no-binary"), "{log}");
+        assert!(
+            log.contains("rpmlint of python-ok 1.0") && log.contains("E: no-binary"),
+            "{log}"
+        );
         assert!(!rpms_dir.join(".rpmlint").join("python-ok.log").exists());
         // A failing download is reported, not fatal.
-        let again = reconcile_with_obs(&state_root, &checkouts, &rpms_dir, &statuses, |_| false, |_| {
-            Err(osc::Error::NotActionable("502".into()))
-        });
-        assert!(again.iter().all(|(_, m)| m.contains("fetching its RPMs failed")), "{again:?}");
+        let again = reconcile_with_obs(
+            &state_root,
+            &checkouts,
+            &rpms_dir,
+            &statuses,
+            |_| false,
+            |_| Err(osc::Error::NotActionable("502".into())),
+        );
+        assert!(
+            again
+                .iter()
+                .all(|(_, m)| m.contains("fetching its RPMs failed")),
+            "{again:?}"
+        );
     }
 
     struct Warnings(std::sync::Mutex<Vec<String>>);
@@ -14595,7 +14953,9 @@ mod hygiene_tests {
         assert!(quiet.0.lock().unwrap()[1].contains("fetching its RPMs failed"));
         // A recorded success needs no download at all.
         write_state(root.path(), "python-x", "success", None);
-        assert!(reconcile_rpms_with(&cfg, &ws, &quiet, || panic!("not called")));
+        assert!(reconcile_rpms_with(&cfg, &ws, &quiet, || panic!(
+            "not called"
+        )));
     }
 
     pub(super) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
@@ -14623,7 +14983,7 @@ mod hygiene_tests {
             source_urls: Default::default(),
             python_flavors: Default::default(),
             patch_request: None,
-        patch_condition: None,
+            patch_condition: None,
         }
     }
 
@@ -14652,7 +15012,10 @@ mod hygiene_tests {
     /// A release whose one wheel is `bytes`, as PyPI's JSON describes it.
     fn pypi_json_for(wheel: &str, bytes: &[u8]) -> String {
         use sha2::{Digest, Sha256};
-        let sha: String = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
+        let sha: String = Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         format!(
             r#"{{"info":{{"name":"foo","version":"1.0","summary":"Foo","license":"MIT",
             "requires_python":">=3.9"}},
@@ -14676,8 +15039,11 @@ mod hygiene_tests {
         }
         std::fs::write(ws.sdist_dir().join("foo-1.0/setup.py"), "x").unwrap();
         let spec_path = checkout.join("python-foo.spec");
-        std::fs::write(&spec_path, "Name: python-foo\nVersion: 1.0\nSource0: foo-1.0.tar.gz\n")
-            .unwrap();
+        std::fs::write(
+            &spec_path,
+            "Name: python-foo\nVersion: 1.0\nSource0: foo-1.0.tar.gz\n",
+        )
+        .unwrap();
         // The wheel is already in the checkout with the digest PyPI reports, so
         // nothing is downloaded.
         let wheel = "foo-1.0-py3-none-any.whl";
@@ -14686,7 +15052,10 @@ mod hygiene_tests {
         let json = pypi_json_for(wheel, bytes);
         let asked = std::sync::Mutex::new(Vec::new());
         let lookup = |c: &PipelineConfig| {
-            asked.lock().unwrap().push(format!("{} {}", c.pkg_name, c.version));
+            asked
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", c.pkg_name, c.version));
             Ok(json.clone())
         };
 
@@ -14714,10 +15083,8 @@ mod hygiene_tests {
             relaxed_from_spec: None,
         };
 
-        let switched =
-            switch_for_missing_submodules(&ctx, &mut st, &spec_path, &lookup).unwrap_or_else(|_| {
-                panic!("the switch step failed")
-            });
+        let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &lookup)
+            .unwrap_or_else(|_| panic!("the switch step failed"));
 
         // The Review turn is skipped, and the lookup ran once for this release.
         assert!(switched, "{:?}", warnings.0.lock().unwrap());
@@ -14725,11 +15092,17 @@ mod hygiene_tests {
         // The recipe is now the wheel's, and the source-tree state is reset.
         let spec = std::fs::read_to_string(&spec_path).unwrap();
         assert!(spec.contains(wheel), "{spec}");
-        assert_eq!((st.sdist_top_level.as_str(), st.from_repo_archive), ("", false));
+        assert_eq!(
+            (st.sdist_top_level.as_str(), st.from_repo_archive),
+            ("", false)
+        );
         // Provenance sits in the state directory, with the spec that was replaced.
         let dir = state_root.join("python-foo");
         let origin = std::fs::read_to_string(dir.join("wheel-origin.txt")).unwrap();
-        assert!(origin.contains(wheel) && origin.contains("third_party/pybind11"), "{origin}");
+        assert!(
+            origin.contains(wheel) && origin.contains("third_party/pybind11"),
+            "{origin}"
+        );
         assert!(
             std::fs::read_to_string(dir.join("python-foo.spec.pre-wheel-switch"))
                 .unwrap()
@@ -14738,7 +15111,10 @@ mod hygiene_tests {
         assert!(!checkout.join("wheel-origin.txt").exists());
         // The notes say what was swapped.
         let notes = std::fs::read_to_string(ctx.ws.notes()).unwrap();
-        assert!(notes.contains("switched to upstream wheel") && notes.contains(wheel), "{notes}");
+        assert!(
+            notes.contains("switched to upstream wheel") && notes.contains(wheel),
+            "{notes}"
+        );
     }
 
     // ── conditions on patch requests (the torch `-devel` split) ─────────────
@@ -14754,7 +15130,10 @@ mod hygiene_tests {
         }
     }
 
-    fn request(problem: &str, condition: Option<crate::ship_condition::FilesCondition>) -> crate::agent::PatchRequest {
+    fn request(
+        problem: &str,
+        condition: Option<crate::ship_condition::FilesCondition>,
+    ) -> crate::agent::PatchRequest {
         crate::agent::PatchRequest {
             name: "foo".into(),
             problem: problem.into(),
@@ -14773,23 +15152,55 @@ mod hygiene_tests {
             patched_problems: vec![1, 2],
             ..Default::default()
         };
-        assert!(patch_request_over(&state, &request("reworded", None), &never));
+        assert!(patch_request_over(
+            &state,
+            &request("reworded", None),
+            &never
+        ));
         // With a condition, the cap does not settle it: the condition decides.
-        assert!(!patch_request_over(&state, &request("reworded", Some(cond.clone())), &never));
-        assert!(patch_request_over(&state, &request("reworded", Some(cond.clone())), &always));
+        assert!(!patch_request_over(
+            &state,
+            &request("reworded", Some(cond.clone())),
+            &never
+        ));
+        assert!(patch_request_over(
+            &state,
+            &request("reworded", Some(cond.clone())),
+            &always
+        ));
         // Found true before: over without a check.
         state.record_condition_satisfied(key);
-        assert!(patch_request_over(&state, &request("again, worded another way", Some(cond.clone())), &never));
+        assert!(patch_request_over(
+            &state,
+            &request("again, worded another way", Some(cond.clone())),
+            &never
+        ));
         // Failures are counted, and the request is given up on only when spent.
         let mut state = PkgState::default();
         assert_eq!(state.record_condition_failure(key), 1);
         assert_eq!(state.record_condition_failure(key), 2);
-        assert!(!patch_request_over(&state, &request("x", Some(cond.clone())), &never));
+        assert!(!patch_request_over(
+            &state,
+            &request("x", Some(cond.clone())),
+            &never
+        ));
         assert_eq!(state.record_condition_failure(key), 3);
-        assert!(patch_request_over(&state, &request("x", Some(cond.clone())), &never));
+        assert!(patch_request_over(
+            &state,
+            &request("x", Some(cond.clone())),
+            &never
+        ));
         // An invalid condition is ignored, falling back to the text and the cap.
-        let bad = crate::ship_condition::FilesCondition { path: "../x".into(), package: None, not_in: vec![] };
-        assert!(!patch_request_over(&PkgState::default(), &request("x", Some(bad)), &never));
+        let bad = crate::ship_condition::FilesCondition {
+            path: "../x".into(),
+            package: None,
+            not_in: vec![],
+        };
+        assert!(!patch_request_over(
+            &PkgState::default(),
+            &request("x", Some(bad)),
+            &never
+        ));
     }
 
     #[test]
@@ -14804,7 +15215,11 @@ mod hygiene_tests {
         let cond = utils_condition();
         std::fs::write(dir.join("python-foo.spec"), SPLIT_SPEC).unwrap();
         assert!(!condition_holds_now(&config, "python-foo", &cond));
-        std::fs::write(dir.join("python-foo.spec"), FIXED_SPEC.replace("foo/include", "foo/utils")).unwrap();
+        std::fs::write(
+            dir.join("python-foo.spec"),
+            FIXED_SPEC.replace("foo/include", "foo/utils"),
+        )
+        .unwrap();
         // Still devel: not true.
         assert!(!condition_holds_now(&config, "python-foo", &cond));
         std::fs::write(dir.join("python-foo.spec"), FIXED_SPEC).unwrap();
@@ -14817,7 +15232,12 @@ mod hygiene_tests {
         spec: &str,
         failures_before: u32,
         lookup_ok: bool,
-    ) -> (Result<(), PipelineResult>, PkgState, String, tempfile::TempDir) {
+    ) -> (
+        Result<(), PipelineResult>,
+        PkgState,
+        String,
+        tempfile::TempDir,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let state_root = root.path().join("state");
         let checkout = root.path().join("proj").join("python-foo");
@@ -14832,7 +15252,13 @@ mod hygiene_tests {
         let bytes = b"not a real wheel";
         std::fs::write(checkout.join(wheel), bytes).unwrap();
         let json = pypi_json_for(wheel, bytes);
-        let lookup = |_: &PipelineConfig| if lookup_ok { Ok(json.clone()) } else { Err("no PyPI".to_string()) };
+        let lookup = |_: &PipelineConfig| {
+            if lookup_ok {
+                Ok(json.clone())
+            } else {
+                Err("no PyPI".to_string())
+            }
+        };
         let cond = utils_condition();
         let key = condition_key(&cond);
         for _ in 0..failures_before {
@@ -14895,7 +15321,11 @@ mod hygiene_tests {
     fn a_patch_that_meets_the_condition_marks_the_request_satisfied() {
         let (result, state, spec, _root) = gate_case(FIXED_SPEC, 0, false);
         assert!(result.is_ok());
-        assert!(state.satisfied_conditions.contains(&condition_key(&utils_condition())));
+        assert!(
+            state
+                .satisfied_conditions
+                .contains(&condition_key(&utils_condition()))
+        );
         assert_eq!(spec, FIXED_SPEC);
     }
 
@@ -14907,7 +15337,11 @@ mod hygiene_tests {
         match result {
             Err(PipelineResult::Failed { reason, kind, .. }) => {
                 assert_eq!(kind, FailureKind::ConditionUnmet);
-                assert!(reason.contains("foo/utils") && reason.contains("python-foo-devel") || reason.contains("devel"), "{reason}");
+                assert!(
+                    reason.contains("foo/utils") && reason.contains("python-foo-devel")
+                        || reason.contains("devel"),
+                    "{reason}"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -14924,7 +15358,10 @@ mod hygiene_tests {
         match result {
             Err(PipelineResult::Failed { reason, kind, .. }) => {
                 assert_eq!(kind, FailureKind::Exhausted);
-                assert!(reason.contains("2 patches") && reason.contains("wheel"), "{reason}");
+                assert!(
+                    reason.contains("2 patches") && reason.contains("wheel"),
+                    "{reason}"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -14975,7 +15412,12 @@ mod hygiene_tests {
         assert_eq!(std::fs::read_to_string(&spec_path).unwrap(), original);
         assert!(st.from_repo_archive && st.sdist_top_level == "foo-1.0");
         assert!(
-            warnings.0.lock().unwrap().iter().any(|m| m.contains("the Review turn decides")),
+            warnings
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.contains("the Review turn decides")),
             "{:?}",
             warnings.0.lock().unwrap()
         );
@@ -15057,7 +15499,10 @@ mod ladder_tests {
         let reason = "The fix belongs in the sibling nvidia-cutlass-dsl-libs-* specs, which are not in this workspace";
         assert_eq!(
             named_sibling_fix(reason, &available, "python-tokenspeed-mla"),
-            ["nvidia-cutlass-dsl-libs-base", "nvidia-cutlass-dsl-libs-cu13"]
+            [
+                "nvidia-cutlass-dsl-libs-base",
+                "nvidia-cutlass-dsl-libs-cu13"
+            ]
         );
         // No cue: a passing mention is not a request to patch it.
         assert!(
@@ -15192,7 +15637,10 @@ mod ladder_tests {
 
     // ── the ladder end to end, with a scripted turn runner ──────────────────
 
-    fn scripted_outcome(action: crate::agent::Action, reasoning: &str) -> crate::agent::TurnOutcome {
+    fn scripted_outcome(
+        action: crate::agent::Action,
+        reasoning: &str,
+    ) -> crate::agent::TurnOutcome {
         let mut out = pipeline_wheel_outcome("x");
         out.action = action;
         out.reasoning = reasoning.into();
@@ -15203,7 +15651,11 @@ mod ladder_tests {
         scripted_outcome(crate::agent::Action::Blocked { why: why.into() }, why)
     }
 
-    fn stages(mut out: crate::agent::TurnOutcome, from: &str, to: &str) -> crate::agent::TurnOutcome {
+    fn stages(
+        mut out: crate::agent::TurnOutcome,
+        from: &str,
+        to: &str,
+    ) -> crate::agent::TurnOutcome {
         out.stage_files.push(crate::stage::StageFile {
             from: from.into(),
             to: to.into(),
@@ -15294,7 +15746,11 @@ mod ladder_tests {
             hint.failed_section = Some("%check".into());
             std::fs::write(
                 checkout.join(format!("{rpm_name}.changes")),
-                format!("{}\nMon Jan 1 00:00:00 UTC 2026 - x@y\n\n- {message}\n\n{}\n", "-".repeat(67), "-".repeat(67)),
+                format!(
+                    "{}\nMon Jan 1 00:00:00 UTC 2026 - x@y\n\n- {message}\n\n{}\n",
+                    "-".repeat(67),
+                    "-".repeat(67)
+                ),
             )
             .unwrap();
         }
@@ -15366,7 +15822,11 @@ mod ladder_tests {
                 // Round 1 changes nothing.
                 scripted_outcome(crate::agent::Action::NoChange, "nothing to do"),
                 // Round 2 asks the pipeline for the file, answering blocked.
-                stages(blocked("I cannot copy it"), "source/package-lock.json", "package-lock.json"),
+                stages(
+                    blocked("I cannot copy it"),
+                    "source/package-lock.json",
+                    "package-lock.json",
+                ),
             ],
             &lookups,
             None,
@@ -15375,7 +15835,8 @@ mod ladder_tests {
         assert_eq!(case.contexts.len(), 2);
         // Round 2 was told what round 1 came to.
         assert!(
-            case.contexts[1].contains("ROUND 2 of 3") && case.contexts[1].contains("answered no_change"),
+            case.contexts[1].contains("ROUND 2 of 3")
+                && case.contexts[1].contains("answered no_change"),
             "{}",
             case.contexts[1]
         );
@@ -15404,7 +15865,9 @@ mod ladder_tests {
         );
         assert!(case.contexts.is_empty());
         match case.result {
-            Err(PipelineResult::MissingDeps { patches, rpm_name, .. }) => {
+            Err(PipelineResult::MissingDeps {
+                patches, rpm_name, ..
+            }) => {
                 assert_eq!(rpm_name, "python-tokenspeed-mla");
                 assert_eq!(patches.len(), 1);
                 assert_eq!(patches[0].name, "nvidia-cutlass-dsl");
@@ -15422,7 +15885,11 @@ mod ladder_tests {
             false,
             &[],
             blocked("reason zero"),
-            vec![blocked("reason one"), blocked("reason two"), blocked("reason three")],
+            vec![
+                blocked("reason one"),
+                blocked("reason two"),
+                blocked("reason three"),
+            ],
             &lookups,
             None,
         );
@@ -15434,7 +15901,11 @@ mod ladder_tests {
                 assert_eq!(kind, FailureKind::Exhausted);
                 assert!(reason.starts_with(LADDER_FAILED_PREFIX), "{reason}");
                 for r in ["reason zero", "reason one", "reason two", "reason three"] {
-                    assert!(reason.contains(r) && case.notes.contains(r), "{r}: {reason} {}", case.notes);
+                    assert!(
+                        reason.contains(r) && case.notes.contains(r),
+                        "{r}: {reason} {}",
+                        case.notes
+                    );
                 }
             }
             other => panic!("{other:?}"),
@@ -15482,16 +15953,29 @@ mod ladder_tests {
         match refused {
             Some(PipelineResult::Failed { reason, kind, .. }) => {
                 assert_eq!(kind, FailureKind::Exhausted);
-                assert!(reason.contains("not trying again without --force") && reason.contains("nope"));
+                assert!(
+                    reason.contains("not trying again without --force") && reason.contains("nope")
+                );
             }
             other => panic!("{other:?}"),
         }
         // A changed spec, a package being patched for a dependent: asked again.
-        assert!(spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, "Name: python-foo\nVersion: 2\n").is_none());
-        assert!(spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), true, spec).is_none());
+        assert!(
+            spent_ladder_refusal(
+                &ctx_for(&config, &pkg_run, &state_root),
+                false,
+                "Name: python-foo\nVersion: 2\n"
+            )
+            .is_none()
+        );
+        assert!(
+            spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), true, spec).is_none()
+        );
         // --force bypasses the memo.
         config.force = true;
-        assert!(spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, spec).is_none());
+        assert!(
+            spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, spec).is_none()
+        );
     }
 
     #[test]
@@ -15510,7 +15994,11 @@ mod ladder_tests {
         );
         assert_eq!(case.result.unwrap(), TurnEffect::Edited);
         assert!(case.contexts.is_empty());
-        assert!(case.notes.contains("failing tests skipped"), "{}", case.notes);
+        assert!(
+            case.notes.contains("failing tests skipped"),
+            "{}",
+            case.notes
+        );
     }
 
     #[test]
@@ -15522,13 +16010,19 @@ mod ladder_tests {
             false,
             &[],
             blocked("needs numpy"),
-            (0..3).map(|_| scripted_outcome(crate::agent::Action::NoChange, "x")).collect(),
+            (0..3)
+                .map(|_| scripted_outcome(crate::agent::Action::NoChange, "x"))
+                .collect(),
             &lookups,
             Some((log, "unused")),
         );
         // The turn was asked, and the refusal is in the notes.
         assert!(!case.contexts.is_empty());
-        assert!(case.notes.contains("failing tests not skipped"), "{}", case.notes);
+        assert!(
+            case.notes.contains("failing tests not skipped"),
+            "{}",
+            case.notes
+        );
         assert!(case.notes.contains("dependency problem"), "{}", case.notes);
     }
 
@@ -15582,20 +16076,29 @@ mod rpm_query_tests {
         let calls = std::sync::Mutex::new(Vec::<String>::new());
         let runner = |args: &[&str], rpm: &Path| -> Option<String> {
             let file = rpm.file_name().unwrap().to_string_lossy().into_owned();
-            calls.lock().unwrap().push(format!("{} {file}", args.join(" ")));
+            calls
+                .lock()
+                .unwrap()
+                .push(format!("{} {file}", args.join(" ")));
             let (source, name, files): (&str, &str, &str) = match file.as_str() {
                 "python-foo-1.0-0.noarch.rpm" => (
                     "python-foo-1.0-0.src.rpm",
                     "python-foo",
                     "/usr/lib/python3/site-packages/foo/utils/a.py\n/usr/lib/python3/site-packages/foo/__init__.py\n",
                 ),
-                "python-foo-devel-1.0-0.noarch.rpm" => {
-                    ("python-foo-1.0-0.src.rpm", "python-foo-devel", "/usr/include/foo/foo.h\n")
+                "python-foo-devel-1.0-0.noarch.rpm" => (
+                    "python-foo-1.0-0.src.rpm",
+                    "python-foo-devel",
+                    "/usr/include/foo/foo.h\n",
+                ),
+                "python-foo-extras-1.0-0.noarch.rpm" => (
+                    "python-foo-extras-2.0-0.src.rpm",
+                    "python-foo-extras",
+                    "/x\n",
+                ),
+                "python-food-1.0-0.noarch.rpm" => {
+                    ("python-food-1.0-0.src.rpm", "python-food", "/y\n")
                 }
-                "python-foo-extras-1.0-0.noarch.rpm" => {
-                    ("python-foo-extras-2.0-0.src.rpm", "python-foo-extras", "/x\n")
-                }
-                "python-food-1.0-0.noarch.rpm" => ("python-food-1.0-0.src.rpm", "python-food", "/y\n"),
                 _ => return None,
             };
             if args.contains(&"--qf") {
@@ -15614,10 +16117,21 @@ mod rpm_query_tests {
         assert!(got.iter().all(|p| !p.from_spec && p.excludes.is_empty()));
         // The source RPM and unrelated RPMs were never queried for their files.
         let calls = calls.lock().unwrap();
-        assert!(!calls.iter().any(|c| c.contains(".src.rpm") || c.contains("python-bar")), "{calls:?}");
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains(".src.rpm") || c.contains("python-bar")),
+            "{calls:?}"
+        );
         // And the listing feeds the condition check.
-        assert_eq!(check(&cond(Some("python-foo")), &got, "python-foo"), Verdict::Satisfied);
-        assert!(matches!(check(&cond(Some("python-foo-devel")), &got, "python-foo"), Verdict::Violated(_)));
+        assert_eq!(
+            check(&cond(Some("python-foo")), &got, "python-foo"),
+            Verdict::Satisfied
+        );
+        assert!(matches!(
+            check(&cond(Some("python-foo-devel")), &got, "python-foo"),
+            Verdict::Violated(_)
+        ));
     }
 
     #[test]
@@ -15627,14 +16141,18 @@ mod rpm_query_tests {
         assert!(package_files_from_rpms_with(dir.path(), "python-foo", &|_, _| None).is_empty());
         // A listing that fails after the header leaves the package with no files.
         let header_only = |args: &[&str], _: &Path| -> Option<String> {
-            args.contains(&"--qf").then(|| "python-foo-1.0-0.src.rpm\npython-foo\n".to_string())
+            args.contains(&"--qf")
+                .then(|| "python-foo-1.0-0.src.rpm\npython-foo\n".to_string())
         };
         let got = package_files_from_rpms_with(dir.path(), "python-foo", &header_only);
         assert_eq!(got.len(), 1);
         assert!(got[0].files.is_empty());
         let empty = tempfile::tempdir().unwrap();
         assert!(package_files_from_rpms_with(empty.path(), "python-foo", &header_only).is_empty());
-        assert!(package_files_from_rpms_with(&empty.path().join("absent"), "python-foo", &header_only).is_empty());
+        assert!(
+            package_files_from_rpms_with(&empty.path().join("absent"), "python-foo", &header_only)
+                .is_empty()
+        );
     }
 
     /// Builds a real noarch RPM with a subpackage. SKIPPED (returns early,
@@ -15650,7 +16168,9 @@ mod rpm_query_tests {
                 .is_ok_and(|s| s.success())
         };
         if !have("rpm") || !have("rpmbuild") {
-            eprintln!("SKIPPED real_rpms_are_read_with_the_rpm_binary_when_it_exists: rpm/rpmbuild not installed");
+            eprintln!(
+                "SKIPPED real_rpms_are_read_with_the_rpm_binary_when_it_exists: rpm/rpmbuild not installed"
+            );
             return;
         }
         let top = tempfile::tempdir().unwrap();
@@ -15677,7 +16197,9 @@ mod rpm_query_tests {
         match built {
             Ok(o) if o.status.success() => {}
             other => {
-                eprintln!("SKIPPED real_rpms_are_read_with_the_rpm_binary_when_it_exists: rpmbuild cannot build here: {other:?}");
+                eprintln!(
+                    "SKIPPED real_rpms_are_read_with_the_rpm_binary_when_it_exists: rpmbuild cannot build here: {other:?}"
+                );
                 return;
             }
         }
@@ -15685,8 +16207,14 @@ mod rpm_query_tests {
         let mut names: Vec<&str> = got.iter().map(|p| p.name.as_str()).collect();
         names.sort();
         assert_eq!(names, ["python-foo", "python-foo-devel"], "{got:?}");
-        assert_eq!(check(&cond(Some("python-foo")), &got, "python-foo"), Verdict::Satisfied);
-        assert!(matches!(check(&cond(Some("python-foo-devel")), &got, "python-foo"), Verdict::Violated(_)));
+        assert_eq!(
+            check(&cond(Some("python-foo")), &got, "python-foo"),
+            Verdict::Satisfied
+        );
+        assert!(matches!(
+            check(&cond(Some("python-foo-devel")), &got, "python-foo"),
+            Verdict::Violated(_)
+        ));
         // Another source package's name does not match these RPMs.
         assert!(package_files_from_rpms(&rpms, "python-fo").is_empty());
     }

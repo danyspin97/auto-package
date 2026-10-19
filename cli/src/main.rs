@@ -802,7 +802,9 @@ pub(crate) fn apply_nvidia_mode(
     }
     ap_build::redist::set_enabled(mode == NvidiaMode::Redist);
     if mode == NvidiaMode::Redist {
-        eprintln!("info: NVIDIA CUDA libraries are packaged from NVIDIA's archives (--nvidia redist)");
+        eprintln!(
+            "info: NVIDIA CUDA libraries are packaged from NVIDIA's archives (--nvidia redist)"
+        );
     }
     Ok(mode)
 }
@@ -907,8 +909,10 @@ pub(crate) fn init_disk_guard(
     // A package state.json calls unfinished while OBS shows it built gets its
     // RPMs fetched and its state corrected.
     if let Some(statuses) = &statuses {
-        let lower: std::collections::HashMap<_, _> =
-            statuses.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
+        let lower: std::collections::HashMap<_, _> = statuses
+            .iter()
+            .map(|(k, v)| (k.to_lowercase(), v.clone()))
+            .collect();
         let rpms_dir = work_dir.join("rpms");
         let _ = std::fs::create_dir_all(&rpms_dir);
         for (name, what) in ap_build::pipeline::reconcile_with_obs(
@@ -932,7 +936,9 @@ pub(crate) fn init_disk_guard(
         }
     }
     // The self-check: what the checkouts, state.json and OBS disagree about.
-    for finding in ap_build::doctor::run(&work_dir.join("state"), &work_dir.join(project), || statuses) {
+    for finding in ap_build::doctor::run(&work_dir.join("state"), &work_dir.join(project), || {
+        statuses
+    }) {
         eprintln!("warning: {finding}");
     }
 }
@@ -1380,7 +1386,13 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 .unwrap_or_else(|p| p.into_inner());
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
-            *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
+            *summary = Some(print_run_summary(
+                &memory,
+                &project,
+                &distro,
+                &arch,
+                &state_root,
+            ));
 
             // Only the TUI takes add requests, so without it there are no
             // added failures to report.
@@ -1572,7 +1584,13 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
-            *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
+            *summary = Some(print_run_summary(
+                &memory,
+                &project,
+                &distro,
+                &arch,
+                &state_root,
+            ));
 
             match &tui_ctrl {
                 Some(t) => {
@@ -1707,7 +1725,7 @@ fn branch_for_patch(
             force: true,
             regen: false,
             patch_request: Some(request.problem.clone()),
-        patch_condition: request.condition.clone(),
+            patch_condition: request.condition.clone(),
             ..config.clone()
         });
     }
@@ -4073,7 +4091,10 @@ mod tests {
         assert_eq!(resolve_nvidia_mode(None, None), (Wheel, None));
         assert_eq!(resolve_nvidia_mode(None, Some(Redist)), (Redist, None));
         assert_eq!(resolve_nvidia_mode(Some(Redist), None), (Redist, None));
-        assert_eq!(resolve_nvidia_mode(Some(Redist), Some(Redist)), (Redist, None));
+        assert_eq!(
+            resolve_nvidia_mode(Some(Redist), Some(Redist)),
+            (Redist, None)
+        );
         let (mode, warning) = resolve_nvidia_mode(Some(Wheel), Some(Redist));
         assert_eq!(mode, Wheel);
         assert!(warning.unwrap().contains("switching to wheel"));
@@ -4459,7 +4480,10 @@ mod blocked_summary_tests {
         let pkg = "python-x".to_string();
         assert_eq!(
             rpmlint_errors_of(root.path(), &[&pkg]),
-            ["python-x: x.rpm: E: base-error", "python-x: m.rpm: E: mpi-error"]
+            [
+                "python-x: x.rpm: E: base-error",
+                "python-x: m.rpm: E: mpi-error"
+            ]
         );
     }
 

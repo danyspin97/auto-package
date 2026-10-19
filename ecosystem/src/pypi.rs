@@ -1626,9 +1626,17 @@ mod tests {
         // A wheel-only NVIDIA release: no sdist, one manylinux wheel per arch.
         let json = get_json("https://pypi.org/pypi/nvidia-nvjitlink/json").unwrap();
         let wheel = pick_wheel_from_json(&json, "x86_64", None).unwrap();
-        assert!(wheel.filename.ends_with(".whl") && wheel.filename.contains("x86_64"), "{}", wheel.filename);
+        assert!(
+            wheel.filename.ends_with(".whl") && wheel.filename.contains("x86_64"),
+            "{}",
+            wheel.filename
+        );
         assert_eq!(wheel.sha256.len(), 64);
-        assert!(wheel.url.starts_with("https://files.pythonhosted.org/"), "{}", wheel.url);
+        assert!(
+            wheel.url.starts_with("https://files.pythonhosted.org/"),
+            "{}",
+            wheel.url
+        );
         assert!(pypi_name_and_version_from_wheel_filename(&wheel.filename).is_some());
         let aarch = pick_wheel_from_json(&json, "aarch64", None).unwrap();
         assert!(aarch.filename.contains("aarch64"), "{}", aarch.filename);
@@ -1641,6 +1649,10 @@ mod tests {
         let release = fetch_latest_release("flask").unwrap();
         assert!(!release.version.is_empty() && !release.sdist.url.is_empty());
         assert!(fetch_latest_version("nvidia-nvjitlink").is_ok());
-        assert!(fetch_latest_release("this-package-does-not-exist-ap-r3a").unwrap_err().is_not_found());
+        assert!(
+            fetch_latest_release("this-package-does-not-exist-ap-r3a")
+                .unwrap_err()
+                .is_not_found()
+        );
     }
 }

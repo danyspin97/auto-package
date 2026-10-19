@@ -89,7 +89,10 @@ impl Skip {
     /// stops reporting it (convention 28, exception 4). A name the distro
     /// ships is satisfied rather than out of reach.
     pub fn is_unbuildable(&self) -> bool {
-        matches!(self, Skip::Vendor(_) | Skip::Driver(_) | Skip::NotAPackage { .. })
+        matches!(
+            self,
+            Skip::Vendor(_) | Skip::Driver(_) | Skip::NotAPackage { .. }
+        )
     }
 }
 
@@ -890,7 +893,10 @@ mod redist_tests {
         );
         assert_eq!(osc::strip_rpm_prefix("cuda-cublas"), "cuda-cublas");
         // Not a component: untouched.
-        assert_eq!(build("cuda-toolkit"), Some(("cuda-toolkit".to_string(), PackageKind::Unknown)));
+        assert_eq!(
+            build("cuda-toolkit"),
+            Some(("cuda-toolkit".to_string(), PackageKind::Unknown))
+        );
         // A queued wheel is available as the cuda package, by either spelling.
         let own: HashSet<String> = ["cuda-cublas".to_string()].into();
         for dep in ["nvidia-cublas", "cuda-cublas"] {

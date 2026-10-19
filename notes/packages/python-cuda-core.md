@@ -1,15 +1,15 @@
 # python-cuda-core notes
 
 ## Build requirements
-Checked against 1.2.1 on openSUSE_Tumbleweed, x86_64.
-- Upstream ships one wheel per Python flavor (cp313 and cp314 for this version). The spec must not assume a single flavor.
-- The generator dropped a runtime Requires for this wheel package. It was added by hand; the journal does not record which one, so verify the wheel's runtime dependencies on the next build.
+Checked against 1.2.2 on openSUSE_Tumbleweed, x86_64.
+- Upstream ships one wheel per Python flavor, and the set of flavors changes between versions (1.2.1 had cp313 and cp314; 1.2.2 has cp313). The spec must not assume a single flavor.
+- Require the cuda-bindings runtime package explicitly. The wheel metadata lists it only under the cu12 and cu13 extras, so a base install does not pull it in, but the module imports it unconditionally and fails without it.
 
 ## Test changes
-Checked against 1.2.1 on openSUSE_Tumbleweed, x86_64.
-- %check was made independent of the Python flavor, so it runs under whichever flavor is built.
+Checked against 1.2.2 on openSUSE_Tumbleweed, x86_64.
+- The %check that was hardcoded to the cpython-314 flavor is replaced by an import smoke test of the module, so it runs under whichever flavor is built.
 
 ## Workarounds
 Checked against 1.2.1 on openSUSE_Tumbleweed, x86_64.
-- The generator left the %files block as a TODO. It was filled by hand from the wheel's RECORD listing. The tool should derive the file list from the wheel for wheel packages; do not hand-edit the spec.
-- The generator dropped the runtime Requires noted above. The tool should carry runtime dependencies over from the wheel metadata instead of relying on a manual edit.
+- The generator left the %files block as a TODO; it was filled by hand from the wheel's RECORD listing. For wheel packages the tool should derive the file list from the wheel instead of the spec being hand-edited.
+- The generator drops runtime Requires from the wheel metadata. The tool should carry them over instead of relying on a manual edit.

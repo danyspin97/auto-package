@@ -171,19 +171,17 @@ impl Error {
                 match self {
                     Error::Io(e) | Error::Launch(e) => io_is_transient(e),
                     Error::Process(p) | Error::Command { source: p, .. } => match p {
-                        proc::ProcessError::Timeout { .. } | proc::ProcessError::OutputLost { .. } => true,
-                        proc::ProcessError::Io(e) | proc::ProcessError::Launch { source: e, .. } => {
-                            io_is_transient(e)
-                        }
+                        proc::ProcessError::Timeout { .. }
+                        | proc::ProcessError::OutputLost { .. } => true,
+                        proc::ProcessError::Io(e)
+                        | proc::ProcessError::Launch { source: e, .. } => io_is_transient(e),
                     },
                     _ => false,
                 }
             }
             Error::OscFailed { code, stderr, .. } => {
                 // Our own wait gave up (`-1`) for another reason than a shutdown.
-                *code == 28
-                    || (*code == -1 && stderr != "interrupted")
-                    || text_is_transient(stderr)
+                *code == 28 || (*code == -1 && stderr != "interrupted") || text_is_transient(stderr)
             }
             Error::NotActionable(m) => m.contains(DOWNLOAD_FAILED),
             _ => false,
@@ -556,7 +554,10 @@ pub fn annotate_rich_misses(
 
 fn rich_miss(line: &str, shipped: &dyn Fn(&str) -> Option<String>) -> Option<(String, String)> {
     let line = line.trim();
-    let line = line.strip_prefix("unresolvable:").unwrap_or(line).trim_start();
+    let line = line
+        .strip_prefix("unresolvable:")
+        .unwrap_or(line)
+        .trim_start();
     let rest = line.strip_prefix("nothing provides ")?.trim_start();
     let group = rest.split(" needed by ").next()?.trim();
     let inner = group.strip_prefix('(')?.strip_suffix(')')?;
@@ -565,7 +566,9 @@ fn rich_miss(line: &str, shipped: &dyn Fn(&str) -> Option<String>) -> Option<(St
     }
     let clauses: Vec<&str> = inner.split(" with ").map(str::trim).collect();
     let (name, _) = clauses.first()?.split_once(char::is_whitespace)?;
-    let bare = missing_package_names(&[name.to_string()]).into_iter().next()?;
+    let bare = missing_package_names(&[name.to_string()])
+        .into_iter()
+        .next()?;
     let got = shipped(&bare)?;
     let got_v: pep440_rs::Version = got.parse().ok()?;
     clauses.iter().find_map(|clause| {
@@ -733,7 +736,9 @@ mod extract_unresolvable_tests {
         assert_eq!(misses[0].name, "trio");
         // A version that meets every clause, or one that is unknown, leaves the line.
         let met = |_: &str| Some("0.30.0".to_string());
-        let line = vec!["nothing provides (python314-trio >= 0.25.1 with python314-trio < 0.34)".to_string()];
+        let line = vec![
+            "nothing provides (python314-trio >= 0.25.1 with python314-trio < 0.34)".to_string(),
+        ];
         assert_eq!(annotate_rich_misses(line.clone(), &met), line);
         assert_eq!(annotate_rich_misses(line.clone(), &|_: &str| None), line);
     }
@@ -1892,7 +1897,9 @@ mod pending_changes_tests {
         let merged = merge_pending_changes(&current, &committed).unwrap();
         assert_eq!(
             merged,
-            format!("{SEP}\nWed - Me <me@x.org>\n\n- Add a patch\n- Relax the numpy bound\n\n{committed}")
+            format!(
+                "{SEP}\nWed - Me <me@x.org>\n\n- Add a patch\n- Relax the numpy bound\n\n{committed}"
+            )
         );
         // Merging again finds one new entry: nothing to do.
         assert!(merge_pending_changes(&merged, &committed).is_none());
@@ -1900,7 +1907,11 @@ mod pending_changes_tests {
 
     #[test]
     fn a_new_package_merges_against_an_empty_committed_file() {
-        let current = format!("{}{}", entry("Tue", "Fix"), entry("Mon", "Initial packaging"));
+        let current = format!(
+            "{}{}",
+            entry("Tue", "Fix"),
+            entry("Mon", "Initial packaging")
+        );
         let merged = merge_pending_changes(&current, "").unwrap();
         assert!(merged.contains("- Initial packaging\n- Fix\n"));
         assert_eq!(merged.matches(SEP).count(), 1);
@@ -1955,16 +1966,27 @@ mod published_binary_tests {
     fn a_multibuild_the_spec_does_not_use_is_not_published() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("_multibuild"), "<multibuild/>").unwrap();
-        std::fs::write(dir.path().join("python-x.spec"), "Name: python-x\n%python_subpackages\n").unwrap();
+        std::fs::write(
+            dir.path().join("python-x.spec"),
+            "Name: python-x\n%python_subpackages\n",
+        )
+        .unwrap();
         let plan = publish_plan(dir.path());
-        assert!(plan.skipped.contains(&"_multibuild".to_string()), "{plan:?}");
+        assert!(
+            plan.skipped.contains(&"_multibuild".to_string()),
+            "{plan:?}"
+        );
         assert!(plan.files.contains(&"python-x.spec".to_string()));
         std::fs::write(
             dir.path().join("python-x.spec"),
             "Name: python-x\n%if \"%{flavor}\" == \"openmpi4\"\n%endif\n",
         )
         .unwrap();
-        assert!(publish_plan(dir.path()).files.contains(&"_multibuild".to_string()));
+        assert!(
+            publish_plan(dir.path())
+                .files
+                .contains(&"_multibuild".to_string())
+        );
     }
 
     #[test]
@@ -1975,12 +1997,23 @@ mod published_binary_tests {
         }
         let spec = "Name: python-x\nBuildArch: noarch\nSource0: x-1.tar.gz\n%python_subpackages\n";
         std::fs::write(dir.path().join("python-x.spec"), spec).unwrap();
-        assert!(publish_plan(dir.path()).skipped.contains(&"_constraints".to_string()));
-        assert_eq!(drop_unused_recipe_files(dir.path()), ["_constraints", "_multibuild"]);
+        assert!(
+            publish_plan(dir.path())
+                .skipped
+                .contains(&"_constraints".to_string())
+        );
+        assert_eq!(
+            drop_unused_recipe_files(dir.path()),
+            ["_constraints", "_multibuild"]
+        );
         assert!(!dir.path().join("_constraints").exists());
         // A native build keeps its constraints; a spec that names them does too.
         std::fs::write(dir.path().join("_constraints"), "<x/>").unwrap();
-        std::fs::write(dir.path().join("python-x.spec"), "Name: python-x\nSource0: x.tar.gz\n").unwrap();
+        std::fs::write(
+            dir.path().join("python-x.spec"),
+            "Name: python-x\nSource0: x.tar.gz\n",
+        )
+        .unwrap();
         assert!(drop_unused_recipe_files(dir.path()).is_empty());
         std::fs::write(
             dir.path().join("python-x.spec"),
@@ -2039,13 +2072,24 @@ mod published_binary_tests {
         let spec = "Name: python-x\nVersion: 2\nSource0: https://h/x-2-py3-none-any.whl#/x-2-py3-none-any.whl\n";
         std::fs::write(dir.path().join("python-x.spec"), spec).unwrap();
         for f in [
-            "_service", "_constraints", "x-1.tar.gz", "x-2-py3-none-any.whl", "python-x.changes",
-            "vendor.tar.xz", "x.obsinfo",
+            "_service",
+            "_constraints",
+            "x-1.tar.gz",
+            "x-2-py3-none-any.whl",
+            "python-x.changes",
+            "vendor.tar.xz",
+            "x.obsinfo",
         ] {
             std::fs::write(dir.path().join(f), "x").unwrap();
         }
         let plan = publish_plan(dir.path());
-        for f in ["_service", "_constraints", "x-1.tar.gz", "vendor.tar.xz", "x.obsinfo"] {
+        for f in [
+            "_service",
+            "_constraints",
+            "x-1.tar.gz",
+            "vendor.tar.xz",
+            "x.obsinfo",
+        ] {
             assert!(plan.skipped.contains(&f.to_string()), "{f}: {plan:?}");
         }
         for f in ["python-x.spec", "python-x.changes", "x-2-py3-none-any.whl"] {
@@ -3749,7 +3793,8 @@ fn recipe_file_unused(name: &str, spec_text: &str) -> bool {
         "_constraints" => {
             let noarch = spec_text.lines().any(|l| {
                 let l = l.trim();
-                l.get(..9).is_some_and(|p| p.eq_ignore_ascii_case("buildarch"))
+                l.get(..9)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("buildarch"))
                     && l.ends_with("noarch")
             });
             noarch && !spec_text.contains("constraints") && !spec_text.contains("%limit_build")
@@ -3798,7 +3843,8 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[Str
     // `.obsinfo` are leftovers of the recipe the wheel switch replaced.
     let wheel_spec = sources.iter().any(|s| s.ends_with(".whl"));
     if wheel_spec
-        && (["_service", "_servicedata", "_constraints"].contains(&name) || name.ends_with(".obsinfo"))
+        && (["_service", "_servicedata", "_constraints"].contains(&name)
+            || name.ends_with(".obsinfo"))
     {
         return false;
     }
@@ -4652,7 +4698,11 @@ mod results_cache_tests {
     const LONG: Duration = Duration::from_secs(60);
 
     fn key(project: &str) -> ResultsKey {
-        (project.to_string(), "repo".to_string(), "x86_64".to_string())
+        (
+            project.to_string(),
+            "repo".to_string(),
+            "x86_64".to_string(),
+        )
     }
 
     fn doc(body: &str) -> Result<String, ApiFailure> {
@@ -4695,8 +4745,14 @@ mod results_cache_tests {
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
         // With no lifetime every read is a new fetch.
-        cache.get(&key("p"), Duration::ZERO, None, fetch).ok().unwrap();
-        cache.get(&key("p"), Duration::ZERO, None, fetch).ok().unwrap();
+        cache
+            .get(&key("p"), Duration::ZERO, None, fetch)
+            .ok()
+            .unwrap();
+        cache
+            .get(&key("p"), Duration::ZERO, None, fetch)
+            .ok()
+            .unwrap();
         assert_eq!(fetches.load(Ordering::SeqCst), 3);
     }
 
@@ -4707,14 +4763,20 @@ mod results_cache_tests {
         let b = cache.get(&key("b"), LONG, None, || doc("b")).ok().unwrap();
         let mut other_arch = key("a");
         other_arch.2 = "aarch64".to_string();
-        let c = cache.get(&other_arch, LONG, None, || doc("c")).ok().unwrap();
+        let c = cache
+            .get(&other_arch, LONG, None, || doc("c"))
+            .ok()
+            .unwrap();
         assert_eq!((&*a, &*b, &*c), ("a", "b", "c"));
     }
 
     #[test]
     fn a_fresh_read_skips_a_document_fetched_before_it() {
         let cache = ResultsCache::new();
-        cache.get(&key("p"), LONG, None, || doc("old")).ok().unwrap();
+        cache
+            .get(&key("p"), LONG, None, || doc("old"))
+            .ok()
+            .unwrap();
         std::thread::sleep(Duration::from_millis(5));
         let committed = Instant::now();
         let fresh = cache
@@ -4780,7 +4842,10 @@ mod results_cache_tests {
             .unwrap();
         // The fetcher still gets what it fetched, but nobody else does.
         assert_eq!(&*first, "pre-commit");
-        let next = cache.get(&key("p"), LONG, None, || doc("post-commit")).ok().unwrap();
+        let next = cache
+            .get(&key("p"), LONG, None, || doc("post-commit"))
+            .ok()
+            .unwrap();
         assert_eq!(&*next, "post-commit");
     }
 
@@ -4800,7 +4865,10 @@ mod results_cache_tests {
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
         // Once the (short) error lifetime is over, it is asked again.
-        let again = cache.get(&key("p"), Duration::ZERO, None, || doc("up")).ok().unwrap();
+        let again = cache
+            .get(&key("p"), Duration::ZERO, None, || doc("up"))
+            .ok()
+            .unwrap();
         assert_eq!(&*again, "up");
     }
 
@@ -4811,7 +4879,10 @@ mod results_cache_tests {
             let _ = cache.get(&key("p"), LONG, None, || panic!("osc exploded"));
         }));
         assert!(crashed.is_err());
-        let next = cache.get(&key("p"), LONG, None, || doc("fine")).ok().unwrap();
+        let next = cache
+            .get(&key("p"), LONG, None, || doc("fine"))
+            .ok()
+            .unwrap();
         assert_eq!(&*next, "fine");
     }
 
@@ -4853,8 +4924,14 @@ mod results_cache_tests {
     fn every_package_reads_its_entries_from_the_one_project_document() {
         let cache = ResultsCache::new();
         let (project, single) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let foo = entries_of(&cache, "foo", &project, &single, PROJECT_DOC, "").ok().unwrap().unwrap();
-        let bar = entries_of(&cache, "bar", &project, &single, PROJECT_DOC, "").ok().unwrap().unwrap();
+        let foo = entries_of(&cache, "foo", &project, &single, PROJECT_DOC, "")
+            .ok()
+            .unwrap()
+            .unwrap();
+        let bar = entries_of(&cache, "bar", &project, &single, PROJECT_DOC, "")
+            .ok()
+            .unwrap()
+            .unwrap();
         assert_eq!(project.load(Ordering::SeqCst), 1);
         assert_eq!(single.load(Ordering::SeqCst), 0);
         // Multibuild flavors come with the package, as with a per-package read.
@@ -4879,7 +4956,14 @@ mod results_cache_tests {
         assert_eq!(single.load(Ordering::SeqCst), 1);
         assert_eq!(entries[0].code, "scheduled");
         // Missing there too: no entry, the caller falls back to `osc results`.
-        let none = entries_of(&cache, "ghost", &project, &single, PROJECT_DOC, "<resultlist/>");
+        let none = entries_of(
+            &cache,
+            "ghost",
+            &project,
+            &single,
+            PROJECT_DOC,
+            "<resultlist/>",
+        );
         assert!(none.ok().unwrap().is_none());
     }
 
@@ -6300,7 +6384,10 @@ pub fn take_rpmlint_logs(rpms_dir: &Path, pkg: &str) -> Vec<(String, String)> {
             && let Ok(bytes) = fs::read(e.path())
         {
             let _ = fs::remove_file(e.path());
-            out.push((name.to_string(), String::from_utf8_lossy(&bytes).into_owned()));
+            out.push((
+                name.to_string(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ));
         }
     }
     out.sort();
@@ -6763,12 +6850,12 @@ fn obs_build_once(
         BuildStatus::Broken if !broken_is_confirmed(log_path) => {
             Error::NotActionable(BROKEN_UNCONFIRMED.to_string())
         }
-        BuildStatus::Broken => Error::NotActionable(
-            match build_details(project, &log_pkg, repo, arch) {
+        BuildStatus::Broken => {
+            Error::NotActionable(match build_details(project, &log_pkg, repo, arch) {
                 Some(d) => format!("{BROKEN_MESSAGE}: {d}"),
                 None => BROKEN_MESSAGE.to_string(),
-            },
-        ),
+            })
+        }
         BuildStatus::Disabled => {
             Error::NotActionable("OBS: build is disabled in project config".to_string())
         }
@@ -7253,7 +7340,8 @@ mod publish_plan_tests {
     #[test]
     fn only_the_package_files_are_published() {
         let dir = tempfile::tempdir().unwrap();
-        let spec = "Name: pkg\nVersion: 1.0\nSource0: pkg-%{version}.tar.gz\nPatch0: 0001-fix.patch\n";
+        let spec =
+            "Name: pkg\nVersion: 1.0\nSource0: pkg-%{version}.tar.gz\nPatch0: 0001-fix.patch\n";
         for (name, body) in [
             ("pkg.spec", spec),
             ("pkg-1.0.tar.gz", ""),
@@ -7734,7 +7822,10 @@ mod redist_name_tests {
         {
             let _off = TestMode::set(false);
             assert_eq!(rpm_name("nvidia-cublas"), "python-nvidia-cublas");
-            assert_eq!(rpm_name("nvidia-cuda-runtime"), "python-nvidia-cuda-runtime");
+            assert_eq!(
+                rpm_name("nvidia-cuda-runtime"),
+                "python-nvidia-cuda-runtime"
+            );
             assert_eq!(rpm_name("cuda-cublas"), "python-cuda-cublas");
         }
         let _on = TestMode::set(true);
@@ -7824,7 +7915,10 @@ mod transient_broken_tests {
     #[test]
     fn any_other_result_is_returned_without_a_retrigger() {
         for (expect_ok, result) in [
-            (false, Err(Error::NotActionable("OBS: build is disabled".into()))),
+            (
+                false,
+                Err(Error::NotActionable("OBS: build is disabled".into())),
+            ),
             (false, Err(Error::NotActionable(BROKEN_MESSAGE.into()))),
             (true, Ok(())),
         ] {
@@ -7850,7 +7944,14 @@ mod transient_broken_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut calls = 0;
         let r = fetch_with_retries(
-            "p", "python-x", "r", "x86_64", dir.path(), emit_quiet(), 4, Duration::ZERO,
+            "p",
+            "python-x",
+            "r",
+            "x86_64",
+            dir.path(),
+            emit_quiet(),
+            4,
+            Duration::ZERO,
             || {
                 calls += 1;
                 if calls < 3 {
@@ -7873,7 +7974,14 @@ mod transient_broken_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut calls = 0;
         let r = fetch_with_retries(
-            "p", "python-x", "r", "x86_64", dir.path(), emit_quiet(), 4, Duration::ZERO,
+            "p",
+            "python-x",
+            "r",
+            "x86_64",
+            dir.path(),
+            emit_quiet(),
+            4,
+            Duration::ZERO,
             || {
                 calls += 1;
                 Err(Error::OscFailed {
@@ -7929,22 +8037,48 @@ mod transient_error_tests {
     fn network_obs_and_disk_failures_are_transient_and_package_failures_are_not() {
         assert!(failed(1, "HTTP Error 503: Service Unavailable").is_transient());
         assert!(failed(1, "502 Server Error: Bad Gateway for url").is_transient());
-        assert!(failed(1, "fatal: unable to access: Could not resolve host: github.com").is_transient());
+        assert!(
+            failed(
+                1,
+                "fatal: unable to access: Could not resolve host: github.com"
+            )
+            .is_transient()
+        );
         assert!(failed(28, "").is_transient());
-        assert!(failed(-1, "gave up after 8 consecutive failed status polls; last error: x").is_transient());
+        assert!(
+            failed(
+                -1,
+                "gave up after 8 consecutive failed status polls; last error: x"
+            )
+            .is_transient()
+        );
         assert!(failed(-1, "timed out after 7200s waiting for OBS build").is_transient());
-        assert!(Error::Process(proc::ProcessError::Timeout { program: "osc".into(), secs: 1 }).is_transient());
+        assert!(
+            Error::Process(proc::ProcessError::Timeout {
+                program: "osc".into(),
+                secs: 1
+            })
+            .is_transient()
+        );
         assert!(Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)).is_transient());
         assert!(
-            Error::NotActionable(format!("OBS reported p {DOWNLOAD_FAILED}: osc getbinaries failed"))
-                .is_transient()
+            Error::NotActionable(format!(
+                "OBS reported p {DOWNLOAD_FAILED}: osc getbinaries failed"
+            ))
+            .is_transient()
         );
         // The package is at fault, or the run was stopped.
         assert!(!failed(1, "HTTP Error 404: Not Found").is_transient());
         assert!(!failed(1, "HTTP Error 403: Forbidden").is_transient());
         assert!(!failed(-1, "interrupted").is_transient());
         assert!(!Error::NotActionable(BROKEN_MESSAGE.into()).is_transient());
-        assert!(!Error::UnresolvableDeps { names: vec![], detail: vec![] }.is_transient());
+        assert!(
+            !Error::UnresolvableDeps {
+                names: vec![],
+                detail: vec![]
+            }
+            .is_transient()
+        );
         assert!(!Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)).is_transient());
     }
 
@@ -7956,7 +8090,9 @@ mod transient_error_tests {
         // A word of its own, not a name that contains it.
         assert!(text_is_transient("Error: Timeout"));
         assert!(text_is_transient("operation timed out"));
-        assert!(!text_is_transient("FAILED tests/test_net.py::test_timeout_is_set"));
+        assert!(!text_is_transient(
+            "FAILED tests/test_net.py::test_timeout_is_set"
+        ));
         assert!(!text_is_transient("unknown option --timeouts"));
     }
 }

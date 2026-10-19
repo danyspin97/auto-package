@@ -10,4 +10,6 @@ Checked against 12.6.3.3 on openSUSE_Tumbleweed, x86_64.
 - The CUDA headers bundled in the wheel are removed in %install and dropped from the file list, so the package does not ship them.
 - The automatic requirement on libcuda.so.1 is excluded, so the package does not require the driver-provided library.
 - The %files list is written out exactly from the wheel's RECORD file.
+- The License tag is SUSE-NonFree, because the upstream wheel is under NVIDIA's proprietary license and not an open-source license.
+- The %description is written out in full rather than repeating the summary, because rpmlint flags a description that equals the summary.
 Checked against 12.6.3.3 on openSUSE_Tumbleweed, x86_64.

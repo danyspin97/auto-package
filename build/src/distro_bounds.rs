@@ -148,7 +148,9 @@ pub fn bound_violation(
         let Some((name, spec, marker)) = parse_requirement(line) else {
             continue;
         };
-        if fuzzy_key(&name) != wanted || spec.is_empty() || crate::redist::component(&name).is_some()
+        if fuzzy_key(&name) != wanted
+            || spec.is_empty()
+            || crate::redist::component(&name).is_some()
         {
             continue;
         }
@@ -427,7 +429,10 @@ mod tests {
         let mut reported = Reported::default();
         assert!(reported.first_conflict("p:x", &conflict("open-webui", "pydantic")));
         assert!(!reported.first_conflict("p:x", &conflict("open-webui", "pydantic")));
-        assert!(!reported.first_conflict("p:x", &conflict("Open_WebUI".replace("WebUI", "webui").as_str(), "Pydantic")));
+        assert!(!reported.first_conflict(
+            "p:x",
+            &conflict("Open_WebUI".replace("WebUI", "webui").as_str(), "Pydantic")
+        ));
         // Another dependency, another dependent, another project: new.
         assert!(reported.first_conflict("p:x", &conflict("open-webui", "redis")));
         assert!(reported.first_conflict("p:x", &conflict("vllm", "pydantic")));

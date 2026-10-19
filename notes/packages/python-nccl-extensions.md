@@ -1,27 +1,36 @@
 # python-nccl-extensions
 
-Version 0.1.0. Last built successfully on the attempt-3 spec.
+Version 0.1.0. Last built successfully on openSUSE_Tumbleweed, x86_64.
 
 ## Build requirements
 
-- The package is built from the upstream per-CPython wheel, not the sdist. The wheel is `nccl_extensions-0.1.0-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl`, SHA256 `28f2513696bd03453857db32a5f6144631f874efb23b5fede4c6218e6026d6b1`.
-- Why the wheel: the sdist's `python/setup.py` exits with "CUDA_HOME is not set" when CUDA is absent, and its Cython extensions include CUDA runtime headers (`driver_types.h`, `library_types.h`, `cuComplex.h`) from `nccl/_extensions/bindings/cynccl_ep.pxd` and `cynccl_m2n.pxd`. openSUSE does not ship the CUDA toolkit, so the source build cannot run here. Do not add cuda-devel or cuda-runtime.
-- PyPI publishes 0.1.0 only as cp310 to cp314 and cp314t wheels (x86_64 and aarch64), with no noarch or sdist-only fallback. Each Python flavour therefore has its own wheel layout, and the spec currently handles python313 and python314.
-- The package installs into the shared `nccl/` namespace (`nccl/_extensions`, `nccl/ep`, `nccl/m2n`), not into a `nccl_extensions/` directory.
+- Built from the upstream per-CPython wheel for the build architecture, not the sdist. The sdist's setup.py exits with "CUDA_HOME is not set" when CUDA is absent, and its Cython extensions include CUDA runtime headers from the bindings .pxd files. Distros without the CUDA toolkit cannot compile it, so do not add cuda-devel or cuda-runtime.
+- Requires the NCCL runtime package (nvidia-nccl-cu13) at run time, because the wheel's libraries need the NCCL soname.
+- Runtime Requires on cuda-core and cuda-pathfinder carry the upstream bounds from the sdist's [project.dependencies] (cuda-core ~=1.0, cuda-pathfinder >=1.5.4,<2.0.0). Keep them in step with upstream.
+- PyPI publishes 0.1.0 as per-CPython wheels (cp310 to cp314, and cp314t), one set per architecture, with no sdist fallback that builds without CUDA. Each Python flavour needs its own Source entry and file list.
+- The wheel installs into the shared nccl/ namespace (nccl/_extensions, nccl/ep, nccl/m2n), not into a nccl_extensions/ directory.
+- The flavours built are those in the distro's %pythons macro. On openSUSE_Tumbleweed that is python313 and python314.
+
+Checked against 0.1.0 on openSUSE_Tumbleweed, x86_64.
 
 ## Test changes
 
-None recorded.
+- %check no longer tests for a library file. It runs an import smoke test of the nccl.ep and nccl.m2n facades for each flavour under %python_expand, because those are the public import paths and the package adds no nccl/__init__.py.
+
+Checked against 0.1.0 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds
 
-- Source switched to the upstream wheel (see above) because the CUDA toolkit is unavailable.
-- `%files` lists the three `nccl` subtrees as directories, plus a `%dir` for the shared `nccl/` namespace, the dist-info directory for each Python, and a `%exclude`/`%license` pair for `licenses/LICENSE.txt`.
-- rpmlintrc filters only the two devel-header warnings, for `nccl/ep/include` and `nccl/m2n/include` (matching both lib and lib64). The package has no -devel split.
-- Summary was shortened to keep rpmlint badness under the 999 limit.
-- Open: the spec's `%fdupes` targets `sitelib` while `%files` uses `sitearch`. The review flagged this, and the journal records no fix for it.
+- %files lists the three nccl subtrees as directories, a %dir for the shared nccl/ namespace, the dist-info directory for each flavour, and the license pair. Unlisted files fail the build as unpackaged.
+- rpmlintrc filters only the two devel-header warnings (nccl/ep/include and nccl/m2n/include, lib and lib64). The package has no -devel split.
+- Summary is kept short so rpmlint badness stays under 999.
+- Open: %fdupes targets sitelib while %files uses sitearch. The journal records no fix.
+
+Checked against 0.1.0 on openSUSE_Tumbleweed, x86_64.
 
 ## Failure history
 
-- Attempt 1: "Installed (but unpackaged) file(s)" for `nccl/_extensions`, `nccl/ep`, `nccl/m2n` and the dist-info. Fixed by filling `%files` with those directories, the dist-info, and the license pair.
-- Attempt 3: rpmlint badness 1107 > 999 (summary-too-long at 3×200, devel headers at 10×50). Fixed by shortening Summary and cutting rpmlintrc to the two devel-header filters, removing five unused ones. The journal marks this attempt Medium confidence and notes that its log may predate the rpmlintrc edit, so the build result is confirmed but the rpmlint numbers may need a re-check.
+- Earlier attempt 1: unpackaged nccl/_extensions, nccl/ep, nccl/m2n and dist-info. Fixed by listing them in %files.
+- Earlier attempt 3: rpmlint badness 1107 over the 999 limit (long summary, devel headers). Fixed by shortening Summary and keeping two rpmlintrc filters. Badness was not re-measured in the later successful build.
+
+Checked against 0.1.0 on openSUSE_Tumbleweed, x86_64.

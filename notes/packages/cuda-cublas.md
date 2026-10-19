@@ -1,7 +1,8 @@
 # cuda-cublas notes
 
 ## Build requirements
-- Source0 is the upstream prebuilt archive for the build architecture; the spec is ExclusiveArch x86_64 and unpacks the archive directory named for the version.
+- Source0 is the upstream prebuilt archive for the build architecture; %setup unpacks the archive directory named for the version.
+- ExclusiveArch is x86_64 only, because the archive is the linux-x86_64 build.
 - Checked against 13.8.0.4 on openSUSE_Tumbleweed, x86_64.
 
 ## Test changes
@@ -9,9 +10,9 @@
 - Checked against 13.8.0.4 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds
-- Fortran .c sources under the CUDA src directory belong in the -devel subpackage, not the main package.
+- Fortran .c sources under the CUDA src directory (fortran.c, fortran_thunking.c) belong in the -devel subpackage, not the main package, because rpmlint flags them as devel files in a non-devel package.
 - The $ORIGIN RUNPATH is removed from the shipped shared objects to get below the rpmlint badness threshold.
 - Checked against 13.8.0.4 on openSUSE_Tumbleweed, x86_64.
 
 ## Failure history
-- rpmlint badness 50100 over the 999 threshold (devel-file-in-non-devel-package for the Fortran .c sources): fixed by moving those sources to -devel and removing the RUNPATH, after which the build passed. Checked against 13.8.0.4 on openSUSE_Tumbleweed, x86_64.
+- rpmlint badness 50100 over the 999 threshold, from devel-file-in-non-devel-package on the Fortran .c sources: fixed by moving them to -devel and removing the RUNPATH, after which the build passed. Checked against 13.8.0.4 on openSUSE_Tumbleweed, x86_64.

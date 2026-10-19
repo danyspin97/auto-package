@@ -323,12 +323,20 @@ fn claude_program() -> std::ffi::OsString {
 
 /// `(wall-clock limit, idle limit, watchdog tick)` of a turn.
 #[cfg(not(test))]
-fn turn_deadlines() -> (std::time::Duration, std::time::Duration, std::time::Duration) {
+fn turn_deadlines() -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+) {
     (AGENT_TURN_TIMEOUT, AGENT_IDLE_TIMEOUT, AGENT_WATCHDOG_TICK)
 }
 
 #[cfg(test)]
-fn turn_deadlines() -> (std::time::Duration, std::time::Duration, std::time::Duration) {
+fn turn_deadlines() -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+) {
     let o = TURN_TEST_OVERRIDES.with(|o| o.borrow().clone());
     (
         o.turn_timeout.unwrap_or(AGENT_TURN_TIMEOUT),
@@ -5707,7 +5715,9 @@ mod tests {
     #[test]
     fn convention_76_names_the_split_tree_symptom_and_the_fix() {
         let combined = static_system_prompt();
-        let at = combined.find("76. **The files of one Python package come from one tree.**").unwrap();
+        let at = combined
+            .find("76. **The files of one Python package come from one tree.**")
+            .unwrap();
         let end = combined[at..].find("77. **").unwrap();
         let text = &combined[at..at + end];
         for want in [
@@ -5725,7 +5735,11 @@ mod tests {
     #[test]
     fn static_system_prompt_opens_with_the_priorities() {
         let combined = static_system_prompt();
-        assert!(combined.trim_start().starts_with("# What matters in this turn"));
+        assert!(
+            combined
+                .trim_start()
+                .starts_with("# What matters in this turn")
+        );
         assert!(combined.contains("**Time matters.**"));
         assert!(combined.contains("builds AND works"));
         assert!(
@@ -5790,7 +5804,10 @@ mod tests {
         assert_eq!(resp.stage_files.len(), 2);
         assert_eq!(resp.stage_files[0].to, "package-lock.json");
         assert_eq!(resp.stage_files[1].package.as_deref(), Some("dep"));
-        assert!(STATIC_WORKFLOW.contains("stage_files") && STATIC_WORKFLOW.contains("last-resort answer"));
+        assert!(
+            STATIC_WORKFLOW.contains("stage_files")
+                && STATIC_WORKFLOW.contains("last-resort answer")
+        );
     }
 
     #[test]
@@ -6603,10 +6620,16 @@ mod tests {
                 "session_id": "sess-1",
                 "usage": {"input_tokens": 10, "output_tokens": 20}
             });
-            Stub::new(&format!("cat \"$d/payload\"\nexit {code}"), &format!("{event}\n"))
+            Stub::new(
+                &format!("cat \"$d/payload\"\nexit {code}"),
+                &format!("{event}\n"),
+            )
         }
 
-        fn run(&self, overrides: impl FnOnce(&mut TurnTestOverrides)) -> Result<TurnOutcome, Error> {
+        fn run(
+            &self,
+            overrides: impl FnOnce(&mut TurnTestOverrides),
+        ) -> Result<TurnOutcome, Error> {
             let ws = tempfile::tempdir().unwrap();
             TURN_TEST_OVERRIDES.with(|o| {
                 let mut o = o.borrow_mut();
@@ -6648,8 +6671,18 @@ mod tests {
         assert!(out.ended_early.is_none());
         // The CLI was called the way the pipeline relies on.
         let args = stub.recorded("args.txt");
-        for needle in ["--print", "stream-json", "--json-schema", "--permission-mode", "project", "--max-budget-usd"] {
-            assert!(args.lines().any(|l| l == needle), "{needle} missing from {args}");
+        for needle in [
+            "--print",
+            "stream-json",
+            "--json-schema",
+            "--permission-mode",
+            "project",
+            "--max-budget-usd",
+        ] {
+            assert!(
+                args.lines().any(|l| l == needle),
+                "{needle} missing from {args}"
+            );
         }
         assert!(args.contains("--allowed-tools"), "{args}");
         assert!(args.lines().any(|l| l == "-p"), "{args}");
@@ -6667,7 +6700,8 @@ mod tests {
     #[test]
     fn stage_files_and_patch_dependencies_reach_the_outcome() {
         let mut resp = answer("edited");
-        resp["stage_files"] = serde_json::json!([{"from": "source/package-lock.json", "to": "package-lock.json"}]);
+        resp["stage_files"] =
+            serde_json::json!([{"from": "source/package-lock.json", "to": "package-lock.json"}]);
         resp["patch_dependencies"] = serde_json::json!([{"name": "torch", "problem": "ships utils in -devel",
             "condition": {"path": "torch/utils/benchmark/utils"}}]);
         let out = Stub::answering(&resp, 0).run(|_| {}).expect("turn");
@@ -6677,7 +6711,10 @@ mod tests {
         assert_eq!(out.patch_dependencies.len(), 1);
         assert_eq!(out.patch_dependencies[0].name, "torch");
         assert_eq!(
-            out.patch_dependencies[0].condition.as_ref().map(|c| c.path.as_str()),
+            out.patch_dependencies[0]
+                .condition
+                .as_ref()
+                .map(|c| c.path.as_str()),
             Some("torch/utils/benchmark/utils")
         );
     }
@@ -6687,7 +6724,9 @@ mod tests {
         let event = serde_json::json!({"type": "result", "subtype": "success", "result": "{\"action\": \"edited\", oops"});
         let stub = Stub::new("cat \"$d/payload\"", &format!("{event}\nnot json at all\n"));
         match stub.run(|_| {}) {
-            Err(Error::Parse { message, stdout, .. }) => {
+            Err(Error::Parse {
+                message, stdout, ..
+            }) => {
                 assert!(message.contains("no usable turn response"), "{message}");
                 assert!(stdout.contains("not json at all"), "{stdout}");
             }
@@ -6713,7 +6752,9 @@ mod tests {
             Ok(o) => panic!("{:?}", o.action),
         }
         // A usable response is still used when the CLI exits 1 after it.
-        let out = Stub::answering(&answer("no_change"), 1).run(|_| {}).expect("rescued");
+        let out = Stub::answering(&answer("no_change"), 1)
+            .run(|_| {})
+            .expect("rescued");
         assert_eq!(out.action, Action::NoChange);
     }
 
@@ -6737,9 +6778,14 @@ mod tests {
             o.idle_timeout = Some(std::time::Duration::from_millis(300));
             o.tick = Some(std::time::Duration::from_millis(50));
         });
-        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the stub was not killed");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the stub was not killed"
+        );
         match result {
-            Err(Error::Failed { stderr, .. }) => assert!(stderr.contains("claude turn was killed"), "{stderr}"),
+            Err(Error::Failed { stderr, .. }) => {
+                assert!(stderr.contains("claude turn was killed"), "{stderr}")
+            }
             Err(e) => panic!("{e}"),
             Ok(o) => panic!("{:?}", o.action),
         }
@@ -6747,13 +6793,18 @@ mod tests {
 
     #[test]
     fn a_turn_over_the_wall_clock_limit_is_killed_even_while_it_prints() {
-        let stub = Stub::new("while true; do echo '{\"type\":\"system\"}'; sleep 0.05; done", "");
+        let stub = Stub::new(
+            "while true; do echo '{\"type\":\"system\"}'; sleep 0.05; done",
+            "",
+        );
         let result = stub.run(|o| {
             o.turn_timeout = Some(std::time::Duration::from_millis(400));
             o.tick = Some(std::time::Duration::from_millis(50));
         });
         match result {
-            Err(Error::Failed { stderr, .. }) => assert!(stderr.contains("claude turn was killed"), "{stderr}"),
+            Err(Error::Failed { stderr, .. }) => {
+                assert!(stderr.contains("claude turn was killed"), "{stderr}")
+            }
             Err(e) => panic!("{e}"),
             Ok(o) => panic!("{:?}", o.action),
         }
@@ -6770,7 +6821,11 @@ mod tests {
         });
         let result = turn(request(ws.path(), &[]));
         TURN_TEST_OVERRIDES.with(|o| *o.borrow_mut() = TurnTestOverrides::default());
-        assert!(matches!(result, Err(Error::Launch(_))), "{:?}", result.err().map(|e| e.to_string()));
+        assert!(
+            matches!(result, Err(Error::Launch(_))),
+            "{:?}",
+            result.err().map(|e| e.to_string())
+        );
     }
 
     #[test]

@@ -424,8 +424,16 @@ pub fn hashed_soname_requires_exclude() -> &'static str {
     RE.get_or_init(|| {
         let hash: Vec<String> = (0..8)
             .map(|k| {
-                let digits = if k == 0 { String::new() } else { format!("[0-9]{{{k}}}") };
-                let rest = if k == 7 { String::new() } else { format!("[0-9a-f]{{{}}}", 7 - k) };
+                let digits = if k == 0 {
+                    String::new()
+                } else {
+                    format!("[0-9]{{{k}}}")
+                };
+                let rest = if k == 7 {
+                    String::new()
+                } else {
+                    format!("[0-9a-f]{{{}}}", 7 - k)
+                };
                 format!("{digits}[a-f]{rest}")
             })
             .collect();
@@ -504,11 +512,15 @@ impl<R: Read> Prefix<R> {
 }
 
 fn le_u16(b: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?)))
+    Some(u64::from(u16::from_le_bytes(
+        b.get(at..at + 2)?.try_into().ok()?,
+    )))
 }
 
 fn le_u32(b: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?)))
+    Some(u64::from(u32::from_le_bytes(
+        b.get(at..at + 4)?.try_into().ok()?,
+    )))
 }
 
 fn le_u64(b: &[u8], at: usize) -> Option<u64> {
@@ -646,8 +658,7 @@ fn names_have_hashed_libs(names: &[String]) -> bool {
     names.iter().any(|n| {
         let top = n.split('/').next().unwrap_or("");
         let file = n.rsplit('/').next().unwrap_or("");
-        let skipped =
-            top.ends_with(".dist-info") || top.ends_with(".data") || top == "__pycache__";
+        let skipped = top.ends_with(".dist-info") || top.ends_with(".data") || top == "__pycache__";
         !skipped && n.contains('/') && (top.ends_with(".libs") || is_hashed_soname(file))
     })
 }
@@ -800,7 +811,9 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         .iter()
         .filter(|n| {
             let file = n.rsplit('/').next().unwrap_or("");
-            !n.ends_with('/') && !skip(&top_of(n)) && (file.ends_with(".so") || file.contains(".so."))
+            !n.ends_with('/')
+                && !skip(&top_of(n))
+                && (file.ends_with(".so") || file.contains(".so."))
         })
         .map(String::as_str)
         .collect();
@@ -809,8 +822,11 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         .filter_map(|i| {
             let entry = zip_archive.by_index_raw(i).ok()?;
             let name = entry.name().to_string();
-            (!entry.is_dir() && entry.size() == 0 && !skip(&top_of(&name)) && !rpmlint_accepts_empty(&name))
-                .then_some(name)
+            (!entry.is_dir()
+                && entry.size() == 0
+                && !skip(&top_of(&name))
+                && !rpmlint_accepts_empty(&name))
+            .then_some(name)
         })
         .collect();
     empty_files.sort_unstable();
@@ -863,14 +879,13 @@ fn metadata_description(metadata: &str) -> Option<String> {
         }
     }
     let markup = |l: &str| {
-        l.starts_with(['#', '<', '|', '>', '!', '=', '`', '*', '-', '+', '.', ':', '['])
-            || l.starts_with("http")
+        l.starts_with([
+            '#', '<', '|', '>', '!', '=', '`', '*', '-', '+', '.', ':', '[',
+        ]) || l.starts_with("http")
             || l.starts_with(|c: char| c.is_ascii_digit()) && l.contains(". ")
     };
     let para = paragraphs.iter().find(|p| {
-        !p.is_empty()
-            && !p.iter().any(|l| markup(l))
-            && p.join(" ").split_whitespace().count() >= 5
+        !p.is_empty() && !p.iter().any(|l| markup(l)) && p.join(" ").split_whitespace().count() >= 5
     })?;
     let mut text = para.join(" ");
     if text.contains("TODO") || text.contains("FIXME") {
@@ -1836,10 +1851,17 @@ pub fn source_repo_from_metadata(pkg_info: &str, pyproject: &str) -> Option<Stri
     }
     let rank = |k: &str| -> usize {
         let k = k.to_ascii_lowercase();
-        ["source", "source code", "repository", "code", "github", "gitlab"]
-            .iter()
-            .position(|s| *s == k)
-            .unwrap_or(10)
+        [
+            "source",
+            "source code",
+            "repository",
+            "code",
+            "github",
+            "gitlab",
+        ]
+        .iter()
+        .position(|s| *s == k)
+        .unwrap_or(10)
     };
     urls.sort_by_key(|(k, _)| rank(k));
     urls.iter().find_map(|(_, u)| {
@@ -1862,8 +1884,14 @@ mod source_repo_tests {
                   Project-URL: Source, git@github.com:o/real.git\n\nProject-URL: Source, https://github.com/o/body\n";
         assert_eq!(repo(pi, "").as_deref(), Some("https://github.com/o/real"));
         let py = "[project.urls]\nHomepage = \"https://gitlab.com/g/sub/proj/-/issues\"\n";
-        assert_eq!(repo("", py).as_deref(), Some("https://gitlab.com/g/sub/proj"));
-        assert_eq!(repo("Project-URL: Home, https://bitbucket.org/o/r\n", ""), None);
+        assert_eq!(
+            repo("", py).as_deref(),
+            Some("https://gitlab.com/g/sub/proj")
+        );
+        assert_eq!(
+            repo("Project-URL: Home, https://bitbucket.org/o/r\n", ""),
+            None
+        );
         assert_eq!(repo("Home-page: https://github.com/onlyowner\n", ""), None);
         assert_eq!(repo("", "not toml ["), None);
     }
@@ -2208,7 +2236,9 @@ mod tests {
     #[test]
     fn list_archive_members_reads_a_tar_xz_without_extracting() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz");
+        let path = dir
+            .path()
+            .join("cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz");
         let mut raw = Vec::new();
         {
             let mut ar = tar::Builder::new(&mut raw);
@@ -3106,7 +3136,10 @@ build-backend = "flit_core.buildapi"
         );
         let l = wheel_layout(&old).unwrap();
         assert_eq!(l.license_text.as_deref(), Some("3-Clause BSD"));
-        assert_eq!(l.license_classifiers, vec!["License :: OSI Approved :: BSD License"]);
+        assert_eq!(
+            l.license_classifiers,
+            vec!["License :: OSI Approved :: BSD License"]
+        );
         assert_eq!(l.license_expression, None);
 
         let new = dir.path().join("new.whl");
@@ -3143,7 +3176,10 @@ build-backend = "flit_core.buildapi"
             ],
         );
         let l = wheel_layout(&w).unwrap();
-        assert_eq!(l.console_scripts, vec!["proton", "proton-viewer", "pkg-gui"]);
+        assert_eq!(
+            l.console_scripts,
+            vec!["proton", "proton-viewer", "pkg-gui"]
+        );
 
         let n = dir.path().join("n.whl");
         write_wheel(&n, &["pkg/__init__.py", "pkg-1.0.dist-info/RECORD"]);
@@ -3278,7 +3314,10 @@ build-backend = "flit_core.buildapi"
         let w = dir.path().join("p.whl");
         write_wheel_with(
             &w,
-            &[("nvidia/lib/libfoo.so.1", &elf_with_dynamic(29, Some("/opt")))],
+            &[(
+                "nvidia/lib/libfoo.so.1",
+                &elf_with_dynamic(29, Some("/opt")),
+            )],
         );
         assert!(!wheel_layout(&w).unwrap().origin_runpath);
         // A library under .dist-info is not part of the payload.

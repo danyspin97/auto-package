@@ -7,7 +7,7 @@ Checked against 13.0.85 on openSUSE_Tumbleweed, x86_64.
 ## Workarounds
 - The package repackages the prebuilt upstream wheel for the build architecture instead of building from source.
 - The wheel is installed into the site-packages directory, not the platform-specific one, because its metadata marks it as purelib-rooted.
-- ExclusiveArch is restricted to the architecture the upstream wheel targets.
+- ExclusiveArch follows the platform tag of the upstream wheel, so the package is only built for architectures that wheel targets.
 - Header files shipped in the wheel are removed during install, together with their entries in the wheel's RECORD, so they are not packaged.
 - The file list is built from the wheel's RECORD rather than by globbing.
 - The dist-info license file is kept out of the plain file list and packaged with the license marker instead.

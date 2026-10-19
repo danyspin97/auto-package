@@ -66,8 +66,11 @@ impl Component {
                 all.iter()
                     .find(|a| a.cuda_variant.is_none())
                     .or_else(|| {
-                        all.iter()
-                            .max_by_key(|a| a.cuda_variant.as_deref().and_then(|v| v.parse::<u64>().ok()))
+                        all.iter().max_by_key(|a| {
+                            a.cuda_variant
+                                .as_deref()
+                                .and_then(|v| v.parse::<u64>().ok())
+                        })
                     })
                     .copied()
             }
@@ -131,7 +134,12 @@ fn str_field(obj: &Value, key: &str) -> Option<String> {
     obj.get(key)?.as_str().map(str::to_string)
 }
 
-fn parse_archive(v: &Value, platform: &str, variant: Option<&str>, ctx: &str) -> Result<Archive, Error> {
+fn parse_archive(
+    v: &Value,
+    platform: &str,
+    variant: Option<&str>,
+    ctx: &str,
+) -> Result<Archive, Error> {
     let bad = |f: &str| Error::Field(format!("{ctx}.{platform}.{f}"));
     let size = match v.get("size") {
         Some(Value::String(s)) => s.parse().map_err(|_| bad("size"))?,
@@ -150,11 +158,14 @@ fn parse_archive(v: &Value, platform: &str, variant: Option<&str>, ctx: &str) ->
 /// Parse a manifest. `base_url` is where `relative_path`s are rooted.
 pub fn parse(json: &str, base_url: &str) -> Result<Manifest, Error> {
     let root: Value = serde_json::from_str(json)?;
-    let obj = root.as_object().ok_or_else(|| Error::Field("<root>".into()))?;
+    let obj = root
+        .as_object()
+        .ok_or_else(|| Error::Field("<root>".into()))?;
     let mut components = Vec::new();
     for (key, comp) in obj {
         // Components are the objects that carry a name and a version.
-        let (Some(name), Some(version)) = (str_field(comp, "name"), str_field(comp, "version")) else {
+        let (Some(name), Some(version)) = (str_field(comp, "name"), str_field(comp, "version"))
+        else {
             continue;
         };
         let mut archives = Vec::new();
@@ -182,8 +193,10 @@ pub fn parse(json: &str, base_url: &str) -> Result<Manifest, Error> {
         });
     }
     Ok(Manifest {
-        product: str_field(&root, "release_product").ok_or_else(|| Error::Field("release_product".into()))?,
-        release_label: str_field(&root, "release_label").ok_or_else(|| Error::Field("release_label".into()))?,
+        product: str_field(&root, "release_product")
+            .ok_or_else(|| Error::Field("release_product".into()))?,
+        release_label: str_field(&root, "release_label")
+            .ok_or_else(|| Error::Field("release_label".into()))?,
         base_url: base_url.trim_end_matches('/').to_string(),
         components,
     })
@@ -209,7 +222,10 @@ pub fn latest_manifest_name(index_html: &str) -> Option<String> {
 }
 
 fn get(url: &str) -> Result<String, Error> {
-    let err = |e| Error::Http { url: url.to_string(), source: Box::new(e) };
+    let err = |e| Error::Http {
+        url: url.to_string(),
+        source: Box::new(e),
+    };
     let agent = crate::net::agent(ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)));
     crate::net::call_with_retries(|| agent.get(url))
         .map_err(err)?
@@ -444,10 +460,17 @@ mod tests {
     #[test]
     fn parses_flat_and_nested() {
         let m = parse(FIXTURE, "https://x/redist/").unwrap();
-        assert_eq!((m.product.as_str(), m.release_label.as_str()), ("cuda", "13.4.3"));
+        assert_eq!(
+            (m.product.as_str(), m.release_label.as_str()),
+            ("cuda", "13.4.3")
+        );
         assert_eq!(m.base_url, "https://x/redist");
         assert_eq!(m.components.len(), 4);
-        let c = m.components.iter().find(|c| c.key == "cuda_cudart").unwrap();
+        let c = m
+            .components
+            .iter()
+            .find(|c| c.key == "cuda_cudart")
+            .unwrap();
         assert_eq!(c.version, "13.4.92");
         assert_eq!(c.license, "CUDA Toolkit");
         assert_eq!(c.archives.len(), 2);
@@ -464,10 +487,24 @@ mod tests {
         assert_eq!(cudnn.archives.len(), 2);
         let a12 = cudnn.archive_for("linux-x86_64", Some("12")).unwrap();
         assert!(a12.relative_path.contains("_cuda12-"));
-        assert_eq!(cudnn.archive_for("linux-x86_64", Some("cuda11")).unwrap().cuda_variant.as_deref(), Some("11"));
+        assert_eq!(
+            cudnn
+                .archive_for("linux-x86_64", Some("cuda11"))
+                .unwrap()
+                .cuda_variant
+                .as_deref(),
+            Some("11")
+        );
         assert!(cudnn.archive_for("linux-x86_64", Some("13")).is_none());
         // No major requested: newest variant.
-        assert_eq!(cudnn.archive_for("linux-x86_64", None).unwrap().cuda_variant.as_deref(), Some("12"));
+        assert_eq!(
+            cudnn
+                .archive_for("linux-x86_64", None)
+                .unwrap()
+                .cuda_variant
+                .as_deref(),
+            Some("12")
+        );
     }
 
     #[test]
@@ -484,7 +521,10 @@ mod tests {
         let html = "<a href='redistrib_13.9.1.json'>x</a><a href='redistrib_13.10.0.json'>x</a>\
                     <a href='redistrib_9.99.json'>x</a><a href='redistrib_13.4.3.json'>x</a>\
                     <a href='cuda_cudart/'>c</a>";
-        assert_eq!(latest_manifest_name(html).as_deref(), Some("redistrib_13.10.0.json"));
+        assert_eq!(
+            latest_manifest_name(html).as_deref(),
+            Some("redistrib_13.10.0.json")
+        );
         assert_eq!(latest_manifest_name("<a href='cuda/'>"), None);
     }
 
@@ -529,7 +569,15 @@ mod tests {
         ] {
             assert_eq!(component_for_package(input), Some(want), "{input}");
         }
-        for input in ["libcuda.so.1", "libcuda.so.1()(64bit)", "libc.so.6", "numpy", "nvidia-foo", "libcublas", ""] {
+        for input in [
+            "libcuda.so.1",
+            "libcuda.so.1()(64bit)",
+            "libc.so.6",
+            "numpy",
+            "nvidia-foo",
+            "libcublas",
+            "",
+        ] {
             assert_eq!(component_for_package(input), None, "{input}");
         }
     }
@@ -548,7 +596,12 @@ mod tests {
                 .components
                 .iter()
                 .find(|c| c.key == key)
-                .unwrap_or_else(|| panic!("{product:?} has no {key}: {:?}", m.components.iter().map(|c| &c.key).collect::<Vec<_>>()));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{product:?} has no {key}: {:?}",
+                        m.components.iter().map(|c| &c.key).collect::<Vec<_>>()
+                    )
+                });
             assert!(!c.version.is_empty());
             let a = c
                 .archive_for("linux-x86_64", None)

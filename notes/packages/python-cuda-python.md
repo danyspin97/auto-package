@@ -17,7 +17,7 @@ Checked against 13.4.4 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds
 
-- For a monorepo tarball the generator emits a skeleton spec with TODO placeholders and no real build steps. The spec for a single subproject must come from the tool itself; a hand-edited spec is not a fix, so the generator needs to produce the scoped spec.
+- For a monorepo tarball the generator emits a skeleton spec with TODO placeholders and no real build steps. The scoped spec for a single subproject must come from the generator itself; hand-editing the skeleton is not an accepted fix.
 - When the build service client cannot reach its credential keyring from the build environment, the changelog entry must be written by hand.
 
 Checked against 13.4.4 on openSUSE_Tumbleweed, x86_64.

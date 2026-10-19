@@ -1546,7 +1546,9 @@ pub fn add_runtime_dependencies(spec: &str, requires_dist: &[String], own_name: 
             .map(|b| format!(" {b}"))
             .unwrap_or_default();
         if !have_requires.contains(&key) {
-            let package = cuda.clone().unwrap_or_else(|| format!("python-{}", dep.name));
+            let package = cuda
+                .clone()
+                .unwrap_or_else(|| format!("python-{}", dep.name));
             requires_lines.push_str(&format!("Requires:       {package}{bound}\n"));
         }
         if !have_build.contains(&key) {
@@ -1759,8 +1761,9 @@ pub fn add_console_script_alternatives(spec: &str, scripts: &[String]) -> String
     let missing: Vec<&String> = scripts
         .iter()
         .filter(|s| {
-            !spec.contains(&format!("%python_clone -a %{{buildroot}}%{{_bindir}}/{s}\n"))
-                && !spec.contains(&format!("%python_alternative %{{_bindir}}/{s}\n"))
+            !spec.contains(&format!(
+                "%python_clone -a %{{buildroot}}%{{_bindir}}/{s}\n"
+            )) && !spec.contains(&format!("%python_alternative %{{_bindir}}/{s}\n"))
         })
         .collect();
     let has_install = spec.lines().any(|l| l.trim() == "%pyproject_install");
@@ -1770,9 +1773,8 @@ pub fn add_console_script_alternatives(spec: &str, scripts: &[String]) -> String
     if missing.is_empty() || !has_install || files_pos.is_none() {
         return spec.to_string();
     }
-    let each = |f: &dyn Fn(&str) -> String| -> Vec<String> {
-        missing.iter().map(|s| f(s)).collect()
-    };
+    let each =
+        |f: &dyn Fn(&str) -> String| -> Vec<String> { missing.iter().map(|s| f(s)).collect() };
     let clones = each(&|s| format!("%python_clone -a %{{buildroot}}%{{_bindir}}/{s}"));
     let installs = each(&|s| format!("%python_install_alternative {s}"));
     let uninstalls = each(&|s| format!("%python_uninstall_alternative {s}"));
@@ -2341,7 +2343,10 @@ pub(crate) fn wheel_rpmlintrc(
     if text.trim().is_empty() {
         return None;
     }
-    Some((format!("python-{}.rpmlintrc", pkg_name.to_lowercase()), text))
+    Some((
+        format!("python-{}.rpmlintrc", pkg_name.to_lowercase()),
+        text,
+    ))
 }
 
 /// The `__requires_exclude` regex for a wheel bundling auditwheel-style
@@ -2398,7 +2403,10 @@ fn wheel_requires_exclude_line(
 /// only one); the line is otherwise added before `%python_subpackages`, or
 /// `%description`. A spec that already carries the pattern is returned as is.
 pub fn with_hashed_libs_requires_exclude(spec: &str) -> String {
-    let spec = &spec.replace(OLD_HASHED_LIBS_REQUIRES_EXCLUDE, hashed_libs_requires_exclude());
+    let spec = &spec.replace(
+        OLD_HASHED_LIBS_REQUIRES_EXCLUDE,
+        hashed_libs_requires_exclude(),
+    );
     with_requires_exclude_pattern(spec, hashed_libs_requires_exclude())
 }
 
@@ -2451,7 +2459,11 @@ fn with_requires_exclude_pattern(spec: &str, pattern: &str) -> String {
     let Some(at) = lines
         .iter()
         .position(|l| l.trim_start().starts_with("%python_subpackages"))
-        .or_else(|| lines.iter().position(|l| l.trim_start().starts_with("%description")))
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|l| l.trim_start().starts_with("%description"))
+        })
     else {
         return spec.to_string();
     };
@@ -2483,7 +2495,8 @@ fn wheel_alternatives_fragments(scripts: &[String]) -> (&'static str, String, St
     if scripts.is_empty() {
         return ("", String::new(), String::new(), String::new());
     }
-    let each = |line: &dyn Fn(&str) -> String| -> String { scripts.iter().map(|s| line(s)).collect() };
+    let each =
+        |line: &dyn Fn(&str) -> String| -> String { scripts.iter().map(|s| line(s)).collect() };
     (
         "Requires(post):   update-alternatives\nRequires(postun): update-alternatives\n",
         each(&|s| format!("%python_clone -a %{{buildroot}}%{{_bindir}}/{s}\n")),
@@ -2533,7 +2546,8 @@ impl HeaderCleanup<'_> {
         match self {
             HeaderCleanup::Dir(d) => path == *d || path.starts_with(&format!("{d}/")),
             HeaderCleanup::Headers(d) => {
-                path.starts_with(&format!("{d}/")) && (path.ends_with(".h") || path.ends_with(".hpp"))
+                path.starts_with(&format!("{d}/"))
+                    && (path.ends_with(".h") || path.ends_with(".hpp"))
             }
         }
     }
@@ -2559,10 +2573,14 @@ fn wheel_header_cleanups(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<Heade
             || file.contains(".so.")
             || f.split('/').rev().skip(1).any(|c| c == "bin")
     };
-    let outside = |f: &String| {
-        is_payload(f) && !layout.header_dirs.iter().any(|d| under(d, f))
-    };
-    if layout.header_dirs.is_empty() || !layout.files.iter().filter(|f| outside(f)).any(|f| is_code(f)) {
+    let outside = |f: &String| is_payload(f) && !layout.header_dirs.iter().any(|d| under(d, f));
+    if layout.header_dirs.is_empty()
+        || !layout
+            .files
+            .iter()
+            .filter(|f| outside(f))
+            .any(|f| is_code(f))
+    {
         return Vec::new();
     }
     let header_like = |f: &str| {
@@ -2576,7 +2594,12 @@ fn wheel_header_cleanups(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<Heade
         .header_dirs
         .iter()
         .map(|d| {
-            if layout.files.iter().filter(|f| under(d, f)).all(|f| header_like(f)) {
+            if layout
+                .files
+                .iter()
+                .filter(|f| under(d, f))
+                .all(|f| header_like(f))
+            {
                 HeaderCleanup::Dir(d.as_str())
             } else {
                 HeaderCleanup::Headers(d.as_str())
@@ -2792,7 +2815,10 @@ pub fn wheel_binary_skeleton_shared(
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
     siblings: &[SiblingWheel],
 ) -> String {
-    let foreign: Vec<String> = siblings.iter().flat_map(|s| s.files.iter().cloned()).collect();
+    let foreign: Vec<String> = siblings
+        .iter()
+        .flat_map(|s| s.files.iter().cloned())
+        .collect();
     let name = pkg_name.to_lowercase();
     let summary = release
         .summary
@@ -2833,8 +2859,7 @@ pub fn wheel_binary_skeleton_shared(
     // No `WHEEL` verdict: the platform tag decides, and any tag but `-none-any`
     // (compiled code, convention 83 b) means `%{python_sitearch}`.
     let declared_purelib = root_is_purelib.unwrap_or(is_pure);
-    let purelib = declared_purelib
-        || layout.is_some_and(|l| sibling_forces_purelib(l, siblings));
+    let purelib = declared_purelib || layout.is_some_and(|l| sibling_forces_purelib(l, siblings));
     let sitedir = if purelib {
         "python_sitelib"
     } else {
@@ -3020,7 +3045,10 @@ pub fn wheel_binary_skeleton_shared(
     if let Some(l) = layout {
         let mut lines = String::new();
         for owner in shared_package_owners(l, siblings) {
-            if !spec.lines().any(|x| x.trim_end() == format!("Requires:       {owner}")) {
+            if !spec
+                .lines()
+                .any(|x| x.trim_end() == format!("Requires:       {owner}"))
+            {
                 lines.push_str(&format!("Requires:       {owner}\n"));
             }
         }
@@ -3161,7 +3189,10 @@ pub fn with_sibling_tree_in_sitelib(
             || (t.starts_with("%python") && t.contains("_pyproject_install"))
     });
     if let Some(at) = at {
-        let reloc: Vec<String> = sitelib_relocation(layout).lines().map(str::to_string).collect();
+        let reloc: Vec<String> = sitelib_relocation(layout)
+            .lines()
+            .map(str::to_string)
+            .collect();
         for (k, l) in reloc.into_iter().enumerate() {
             out.insert(at + 1 + k, l);
         }
@@ -3192,7 +3223,11 @@ pub fn sibling_wheels(
         .unwrap_or_default();
     for (name, files, purelib) in sibling_rpm_files(rpms_dir, pkg_name) {
         if !out.iter().any(|s| s.name == name) {
-            out.push(SiblingWheel { name, files, purelib });
+            out.push(SiblingWheel {
+                name,
+                files,
+                purelib,
+            });
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -3294,7 +3329,10 @@ fn sibling_rpm_files(
         let files: Vec<String> = site_package_files(&text)
             .into_iter()
             .filter(|f| {
-                f.split('/').next().is_some_and(|t| !t.ends_with(".dist-info")) && f.contains('/')
+                f.split('/')
+                    .next()
+                    .is_some_and(|t| !t.ends_with(".dist-info"))
+                    && f.contains('/')
             })
             .collect();
         if !files.is_empty() {
@@ -3353,7 +3391,10 @@ fn sibling_rpm_name(file: &str, pkg_name: &str) -> Option<String> {
 fn site_package_files(listing: &str) -> Vec<String> {
     let mut paths: Vec<String> = listing
         .lines()
-        .filter_map(|l| l.split_once("/site-packages/").map(|(_, p)| p.trim().to_string()))
+        .filter_map(|l| {
+            l.split_once("/site-packages/")
+                .map(|(_, p)| p.trim().to_string())
+        })
         .filter(|p| !p.is_empty())
         .collect();
     paths.sort();
@@ -3400,7 +3441,12 @@ mod shared_wheel_tests {
 
     fn files_of(spec: &str) -> Vec<String> {
         let f = spec.split("%files %{python_files}\n").nth(1).unwrap();
-        f.split("%changelog").next().unwrap().lines().map(str::to_string).collect()
+        f.split("%changelog")
+            .next()
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
@@ -3408,7 +3454,10 @@ mod shared_wheel_tests {
         // -base owns the regular package `pk/_mlir`; -cu13 adds the arch half.
         let base = vec![SiblingWheel {
             name: "python-pk-base".to_string(),
-            files: vec!["pk/_mlir/__init__.py".to_string(), "pk/_mlir/a.py".to_string()],
+            files: vec![
+                "pk/_mlir/__init__.py".to_string(),
+                "pk/_mlir/a.py".to_string(),
+            ],
             purelib: Some(false),
         }];
         let l = layout(&[
@@ -3439,7 +3488,10 @@ mod shared_wheel_tests {
                 "%{python_sitearch}/pk/lib/",
             ]
         );
-        assert!(spec.contains("Requires:       python-base\nRequires:       python-pk-base\n"), "{spec}");
+        assert!(
+            spec.contains("Requires:       python-base\nRequires:       python-pk-base\n"),
+            "{spec}"
+        );
         // Alone, the same wheel lists the package directory whole.
         let alone = wheel_binary_skeleton(
             "pk-cu13",
@@ -3449,7 +3501,10 @@ mod shared_wheel_tests {
             Some(false),
             Some(&l),
         );
-        assert!(files_of(&alone).contains(&"%{python_sitearch}/pk/_mlir/".to_string()), "{alone}");
+        assert!(
+            files_of(&alone).contains(&"%{python_sitearch}/pk/_mlir/".to_string()),
+            "{alone}"
+        );
         assert!(!alone.contains("python-pk-base"));
     }
 
@@ -3468,7 +3523,10 @@ mod shared_wheel_tests {
         let sib = sw(&["pk/__init__.py"]);
         assert!(shared_package_owners(&l, &sib).is_empty());
         let l2 = layout(&["pk/b.py"]);
-        assert_eq!(shared_package_owners(&l2, &sib), vec!["python-pk-core".to_string()]);
+        assert_eq!(
+            shared_package_owners(&l2, &sib),
+            vec!["python-pk-core".to_string()]
+        );
     }
 
     #[test]
@@ -3478,10 +3536,19 @@ mod shared_wheel_tests {
             n("python313-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.x86_64.rpm").as_deref(),
             Some("python-nvidia-cutlass-dsl-libs-base")
         );
-        assert_eq!(n("python313-nvidia-cutlass-dsl-libs-cu13-4.5.0-1.1.x86_64.rpm"), None);
+        assert_eq!(
+            n("python313-nvidia-cutlass-dsl-libs-cu13-4.5.0-1.1.x86_64.rpm"),
+            None
+        );
         assert_eq!(n("python313-numpy-2.0-1.1.x86_64.rpm"), None);
-        assert_eq!(n("python313-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.src.rpm"), None);
-        assert_eq!(n("python-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.noarch.rpm"), None);
+        assert_eq!(
+            n("python313-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.src.rpm"),
+            None
+        );
+        assert_eq!(
+            n("python-nvidia-cutlass-dsl-libs-base-4.5.0-1.1.noarch.rpm"),
+            None
+        );
         let listing = "/usr/lib/python3.13/site-packages/pk\n/usr/lib/python3.13/site-packages/pk/a.py\n\
                        /usr/share/doc/x\n/usr/lib/python3.13/site-packages/pk/sub\n\
                        /usr/lib/python3.13/site-packages/pk/sub/b.so\n";
@@ -3539,7 +3606,9 @@ mod cutlass_split_wheels_tests {
             let body: String = if n.ends_with(".dist-info/WHEEL") {
                 format!("Wheel-Version: 1.0\nRoot-Is-Purelib: {purelib}\nTag: {tag}\n")
             } else if n.ends_with(".dist-info/METADATA") {
-                format!("Metadata-Version: 2.4\nName: nvidia-cutlass-dsl-libs-{short}\nVersion: 4.7.1\n")
+                format!(
+                    "Metadata-Version: 2.4\nName: nvidia-cutlass-dsl-libs-{short}\nVersion: 4.7.1\n"
+                )
             } else {
                 "x".into()
             };
@@ -3554,7 +3623,8 @@ mod cutlass_split_wheels_tests {
         for &i in order {
             let (short, names, purelib, tag) = WHEELS[i];
             write_wheel(
-                &tmp.path().join(format!("python-nvidia-cutlass-dsl-libs-{short}")),
+                &tmp.path()
+                    .join(format!("python-nvidia-cutlass-dsl-libs-{short}")),
                 short,
                 names,
                 purelib,
@@ -3562,7 +3632,13 @@ mod cutlass_split_wheels_tests {
             );
         }
         // Unrelated checkouts are no siblings.
-        write_wheel(&tmp.path().join("python-nvidia-nccl-cu13"), "base", "x/y.py\n", true, "py3-none-any");
+        write_wheel(
+            &tmp.path().join("python-nvidia-nccl-cu13"),
+            "base",
+            "x/y.py\n",
+            true,
+            "py3-none-any",
+        );
         tmp
     }
 
@@ -3600,7 +3676,15 @@ mod cutlass_split_wheels_tests {
             wheel_dir.parent(),
             &own,
         );
-        wheel_binary_skeleton_shared(&own, "4.7.1", &file, &rel(), purelib, Some(&layout), &siblings)
+        wheel_binary_skeleton_shared(
+            &own,
+            "4.7.1",
+            &file,
+            &rel(),
+            purelib,
+            Some(&layout),
+            &siblings,
+        )
     }
 
     fn files_section(spec: &str) -> Vec<String> {
@@ -3641,7 +3725,10 @@ mod cutlass_split_wheels_tests {
             assert_eq!(names, want, "{short}: nccl and itself are no siblings");
             assert_eq!(skeleton(i, a.path()), skeleton(i, b.path()), "{short}");
             // dist-info is never part of what a sibling owns.
-            assert!(sa.iter().all(|s| s.files.iter().all(|f| !f.contains(".dist-info/"))));
+            assert!(
+                sa.iter()
+                    .all(|s| s.files.iter().all(|f| !f.contains(".dist-info/")))
+            );
         }
         let core = sibling_wheels(none, Some(a.path()), "nvidia-cutlass-dsl-libs-cu13")
             .into_iter()
@@ -3655,13 +3742,22 @@ mod cutlass_split_wheels_tests {
         // Only the sibling's wheel exists: no RPM anywhere.
         let only_core = checkouts(&[1, 3]);
         let spec = skeleton(3, only_core.path());
-        assert!(spec.contains("Requires:       python-nvidia-cutlass-dsl-libs-core\n"), "{spec}");
+        assert!(
+            spec.contains("Requires:       python-nvidia-cutlass-dsl-libs-core\n"),
+            "{spec}"
+        );
         // -cu13 shares the tree with the pure -core: both land in sitelib.
-        assert!(spec.contains("%{python_sitelib}/nvidia_cutlass_dsl/cu13/lib/libcute_dsl_runtime.so"), "{spec}");
+        assert!(
+            spec.contains("%{python_sitelib}/nvidia_cutlass_dsl/cu13/lib/libcute_dsl_runtime.so"),
+            "{spec}"
+        );
         // And alone (no sibling wheel at all) it follows its own WHEEL file.
         let alone = checkouts(&[3]);
         let spec = skeleton(3, alone.path());
-        assert!(spec.contains("%{python_sitearch}/nvidia_cutlass_dsl/"), "{spec}");
+        assert!(
+            spec.contains("%{python_sitearch}/nvidia_cutlass_dsl/"),
+            "{spec}"
+        );
         assert!(!spec.contains("python_sitelib"), "{spec}");
     }
 
@@ -3680,12 +3776,20 @@ mod cutlass_split_wheels_tests {
         let tmp = checkouts(&[0, 1, 2, 3]);
         let alone = checkouts(&[2]);
         let old = skeleton(2, alone.path());
-        assert!(old.contains("%{python_sitearch}/nvidia_cutlass_dsl"), "{old}");
+        assert!(
+            old.contains("%{python_sitearch}/nvidia_cutlass_dsl"),
+            "{old}"
+        );
         let own = "nvidia-cutlass-dsl-libs-cu12";
         let wheel_dir = tmp.path().join(format!("python-{own}"));
-        let wheel = wheel_dir.join("nvidia_cutlass_dsl_libs_cu12-4.7.1-cp313-cp313-manylinux_2_28_x86_64.whl");
+        let wheel = wheel_dir
+            .join("nvidia_cutlass_dsl_libs_cu12-4.7.1-cp313-cp313-manylinux_2_28_x86_64.whl");
         let layout = ap_ecosystem::sdist::wheel_layout(&wheel).unwrap();
-        let siblings = sibling_wheels(std::path::Path::new("/nonexistent-r4b"), Some(tmp.path()), own);
+        let siblings = sibling_wheels(
+            std::path::Path::new("/nonexistent-r4b"),
+            Some(tmp.path()),
+            own,
+        );
         let fixed = with_sibling_tree_in_sitelib(&old, &layout, &siblings);
         assert_ne!(fixed, old);
         for l in files_section(&fixed) {
@@ -3695,9 +3799,14 @@ mod cutlass_split_wheels_tests {
         let mv = fixed
             .find("%python_expand mv %{buildroot}%{$python_sitearch}/nvidia_cutlass_dsl ")
             .expect(&fixed);
-        let cleanup = fixed.find("rm -rf %{buildroot}%{$python_sitelib}/nvidia_cutlass_dsl/cu12/include").expect(&fixed);
+        let cleanup = fixed
+            .find("rm -rf %{buildroot}%{$python_sitelib}/nvidia_cutlass_dsl/cu12/include")
+            .expect(&fixed);
         assert!(install < mv && mv < cleanup, "{fixed}");
-        assert_eq!(with_sibling_tree_in_sitelib(&fixed, &layout, &siblings), fixed);
+        assert_eq!(
+            with_sibling_tree_in_sitelib(&fixed, &layout, &siblings),
+            fixed
+        );
         // Without a pure sibling nothing changes.
         assert_eq!(with_sibling_tree_in_sitelib(&old, &layout, &[]), old);
     }
@@ -3733,9 +3842,18 @@ mod cutlass_split_wheels_tests {
                 }
                 // `import cutlass` runs the CUDA IR extension setup, which needs a
                 // device (`cannot import name 'ir' from _mlir`): %check never runs it.
-                let check = spec.split("%check\n").nth(1).unwrap().split("%files").next().unwrap();
+                let check = spec
+                    .split("%check\n")
+                    .nth(1)
+                    .unwrap()
+                    .split("%files")
+                    .next()
+                    .unwrap();
                 assert!(!check.contains("import cutlass"), "{short}: {check}");
-                assert!(!check.contains("import nvidia_cutlass_dsl"), "{short}: {check}");
+                assert!(
+                    !check.contains("import nvidia_cutlass_dsl"),
+                    "{short}: {check}"
+                );
                 // %files names the directory the file really is in.
                 for l in files_section(&spec) {
                     assert!(!l.contains("python_sitearch"), "{flavor} {short}: {l}");
@@ -3745,16 +3863,20 @@ mod cutlass_split_wheels_tests {
                 }
             }
             // One tree: nothing of the namespace is left in sitearch.
-            assert_eq!(trees.keys().copied().collect::<Vec<_>>(), ["sitelib"], "{flavor}");
+            assert_eq!(
+                trees.keys().copied().collect::<Vec<_>>(),
+                ["sitelib"],
+                "{flavor}"
+            );
             let lib = &trees["sitelib"];
             // `sys.path` of an openSUSE interpreter: sitearch before sitelib;
             // `__path__[0]` is the first directory with `nvidia_cutlass_dsl/`.
             let first = ["sitearch", "sitelib"]
                 .into_iter()
                 .find(|s| {
-                    trees.get(s).is_some_and(|t| {
-                        t.iter().any(|f| f.starts_with("nvidia_cutlass_dsl/"))
-                    })
+                    trees
+                        .get(s)
+                        .is_some_and(|t| t.iter().any(|f| f.starts_with("nvidia_cutlass_dsl/")))
                 })
                 .unwrap();
             assert_eq!(first, "sitelib", "{flavor}");
@@ -3770,9 +3892,12 @@ mod cutlass_split_wheels_tests {
                 assert!(lib.contains(need), "{flavor}: {need} is not in sitelib");
             }
             // And every top-level package directory resolves in the one tree.
-            let tops: BTreeSet<&str> =
-                lib.iter().filter_map(|f| f.split('/').next()).collect();
-            assert_eq!(tops.iter().copied().collect::<Vec<_>>(), ["nvidia_cutlass_dsl"], "{flavor}");
+            let tops: BTreeSet<&str> = lib.iter().filter_map(|f| f.split('/').next()).collect();
+            assert_eq!(
+                tops.iter().copied().collect::<Vec<_>>(),
+                ["nvidia_cutlass_dsl"],
+                "{flavor}"
+            );
         }
     }
 
@@ -3792,7 +3917,10 @@ mod cutlass_split_wheels_tests {
             let (short, _, purelib, _) = WHEELS[i];
             // One site directory for the whole tree: sitelib, where the noarch
             // -core must be; the arch wheels carry ExclusiveArch for their .so.
-            assert!(!spec.contains("python_sitearch}/nvidia_cutlass_dsl/"), "{short}: {spec}");
+            assert!(
+                !spec.contains("python_sitearch}/nvidia_cutlass_dsl/"),
+                "{short}: {spec}"
+            );
             if purelib {
                 assert!(spec.contains("BuildArch:      noarch\n"), "{short}");
                 assert!(!spec.contains("ExclusiveArch"), "{short}");
@@ -3824,7 +3952,11 @@ mod cutlass_split_wheels_tests {
             let mut w = BTreeSet::new();
             for line in files_section(spec) {
                 if let Some(dir) = line.strip_prefix("%dir ") {
-                    assert!(d.insert(site_path(dir).to_string()), "{}: %dir twice: {line}", WHEELS[i].0);
+                    assert!(
+                        d.insert(site_path(dir).to_string()),
+                        "{}: %dir twice: {line}",
+                        WHEELS[i].0
+                    );
                 } else if line.starts_with("%exclude ")
                     || line.starts_with("%license ")
                     || line.contains("dist-info")
@@ -3834,7 +3966,11 @@ mod cutlass_split_wheels_tests {
                 } else if let Some(dir) = line.strip_suffix('/') {
                     w.insert(site_path(dir).to_string());
                 } else {
-                    assert!(e.insert(site_path(&line).to_string()), "{}: listed twice: {line}", WHEELS[i].0);
+                    assert!(
+                        e.insert(site_path(&line).to_string()),
+                        "{}: listed twice: {line}",
+                        WHEELS[i].0
+                    );
                 }
             }
             dirs_listed.push(d);
@@ -3874,7 +4010,10 @@ mod cutlass_split_wheels_tests {
                     WHEELS[j].0,
                     explicit[i].intersection(&explicit[j]).collect::<Vec<_>>()
                 );
-                assert!(dirs_listed[i].is_disjoint(&whole[j]), "a co-owned directory is whole in another package");
+                assert!(
+                    dirs_listed[i].is_disjoint(&whole[j]),
+                    "a co-owned directory is whole in another package"
+                );
             }
         }
         // A directory two packages fill is `%dir` in each of them, listed whole
@@ -3889,7 +4028,11 @@ mod cutlass_split_wheels_tests {
                     "{} fills the shared directory {dir} without owning it with %dir",
                     WHEELS[i].0
                 );
-                assert!(!whole[i].contains(dir), "{} lists {dir}/ whole", WHEELS[i].0);
+                assert!(
+                    !whole[i].contains(dir),
+                    "{} lists {dir}/ whole",
+                    WHEELS[i].0
+                );
             }
         }
         // Every payload file of a package is owned by it: listed, or below a
@@ -3956,8 +4099,7 @@ pub fn adopt_sources_from_tree(
             continue;
         }
         let found = roots.iter().map(|r| r.join(name)).find(|c| {
-            std::fs::symlink_metadata(c)
-                .is_ok_and(|m| m.is_file() && m.len() <= 64 * 1024 * 1024)
+            std::fs::symlink_metadata(c).is_ok_and(|m| m.is_file() && m.len() <= 64 * 1024 * 1024)
         });
         if let Some(src) = found
             && std::fs::copy(&src, &dest).is_ok()
@@ -3991,8 +4133,14 @@ mod adopt_sources_tests {
             .collect();
         let copied = adopt_sources_from_tree(&missing, &tree, &checkout);
         assert_eq!(copied, ["package-lock.json"]);
-        assert_eq!(std::fs::read_to_string(checkout.join("package-lock.json")).unwrap(), "{}");
-        assert_eq!(std::fs::read_to_string(checkout.join("keep.txt")).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("package-lock.json")).unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("keep.txt")).unwrap(),
+            "mine"
+        );
         assert!(!checkout.join("other.json").exists());
     }
 }
@@ -4000,14 +4148,20 @@ mod adopt_sources_tests {
 /// `text` for a spec tag or description: one line, every `%` doubled so rpm does
 /// not expand a macro out of upstream's wording.
 fn rpm_text(text: &str) -> String {
-    text.replace('%', "%%").split_whitespace().collect::<Vec<_>>().join(" ")
+    text.replace('%', "%%")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The `%description` body of a wheel spec: the METADATA's first paragraph,
 /// wrapped, with every `%` doubled (rpm expands macros in a description), or the
 /// summary when the wheel has none.
 fn wheel_description(paragraph: Option<&str>, summary: &str) -> String {
-    let text = paragraph.map(str::trim).filter(|t| !t.is_empty()).unwrap_or(summary);
+    let text = paragraph
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(summary);
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     for word in text.replace('%', "%%").split_whitespace() {
@@ -4055,7 +4209,9 @@ pub fn sdist_top_level_license(tarball: &std::path::Path) -> Option<(String, Vec
             .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect();
-        let [_top, leaf] = parts.as_slice() else { continue };
+        let [_top, leaf] = parts.as_slice() else {
+            continue;
+        };
         let upper = leaf.to_ascii_uppercase();
         let plain = leaf
             .bytes()
@@ -4164,7 +4320,10 @@ mod sdist_license_tests {
             ],
         );
         let (name, bytes) = sdist_top_level_license(&t).unwrap();
-        assert_eq!((name.as_str(), bytes.as_slice()), ("LICENSE.txt", b"mit".as_slice()));
+        assert_eq!(
+            (name.as_str(), bytes.as_slice()),
+            ("LICENSE.txt", b"mit".as_slice())
+        );
     }
 
     #[test]
@@ -4178,16 +4337,31 @@ Source99:       r
 %{python_sitelib}/x/
 ";
         let out = with_license_source(spec, "LICENSE");
-        assert!(out.contains("Source0:        x.whl
+        assert!(
+            out.contains(
+                "Source0:        x.whl
 # the wheel has no licence text; this one is the sdist's
 Source1:        LICENSE
-"), "{out}");
-        assert!(out.contains("%prep
+"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "%prep
 cp -p %{SOURCE1} LICENSE
-"), "{out}");
-        assert!(out.contains("%files %{python_files}
+"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "%files %{python_files}
 %license LICENSE
-"), "{out}");
+"
+            ),
+            "{out}"
+        );
         assert_eq!(with_license_source(&out, "LICENSE"), out);
     }
 }
@@ -4242,7 +4416,8 @@ pub fn requires_python_caps_below(requires_python: &str, flavors: &[String]) -> 
                     .any(|f| if patch { *f > cap } else { *f >= cap })
             })
         } else if let Some(v) = clause.strip_prefix("==") {
-            v.trim().ends_with(".*") && parse(v).is_some_and(|only| versions.iter().any(|f| *f != only))
+            v.trim().ends_with(".*")
+                && parse(v).is_some_and(|only| versions.iter().any(|f| *f != only))
         } else {
             false
         }
@@ -4488,8 +4663,13 @@ fn spdx_from_free_text(text: &str) -> Option<String> {
     let spdx = match key.as_str() {
         "mit" | "mit license" => "MIT",
         "mit-0" => "MIT-0",
-        "apache 2 0" | "apache-2 0" | "apache license 2 0" | "apache license version 2 0"
-        | "apache software license" | "apache software license 2 0" | "apache 2" => "Apache-2.0",
+        "apache 2 0"
+        | "apache-2 0"
+        | "apache license 2 0"
+        | "apache license version 2 0"
+        | "apache software license"
+        | "apache software license 2 0"
+        | "apache 2" => "Apache-2.0",
         "bsd-3-clause" | "bsd 3-clause" | "bsd 3 clause" | "3-clause bsd" | "3 clause bsd"
         | "new bsd" | "modified bsd" | "bsd-3" => "BSD-3-Clause",
         "bsd-2-clause" | "bsd 2-clause" | "bsd 2 clause" | "2-clause bsd" | "simplified bsd"
@@ -4559,7 +4739,13 @@ fn wheel_vendor_license_terms(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<
         let name = file.rsplit('/').next().unwrap_or(file);
         if matches!(
             name,
-            "ptxas" | "ptxas-blackwell" | "cuobjdump" | "nvdisasm" | "nvlink" | "fatbinary" | "nvprune"
+            "ptxas"
+                | "ptxas-blackwell"
+                | "cuobjdump"
+                | "nvdisasm"
+                | "nvlink"
+                | "fatbinary"
+                | "nvprune"
         ) || (name.starts_with("libcupti") && name.contains(".so"))
         {
             nonfree = true;
@@ -4825,10 +5011,13 @@ fn redist_runtime_requires(line: &str) -> String {
         crate::redist::package_name(&c[1]).unwrap_or_else(|| c[0].to_string())
     });
     plain
-        .replace_all(&out, |c: &regex::Captures| match crate::redist::package_name(&c[2]) {
-            Some(cuda) => format!("{}{cuda}", &c[1]),
-            None => c[0].to_string(),
-        })
+        .replace_all(
+            &out,
+            |c: &regex::Captures| match crate::redist::package_name(&c[2]) {
+                Some(cuda) => format!("{}{cuda}", &c[1]),
+                None => c[0].to_string(),
+            },
+        )
         .into_owned()
 }
 
@@ -5210,10 +5399,7 @@ BuildRequires:  %{python_module pip}
         );
         assert!(!spec.contains("test -e"), "{spec}");
         assert!(!spec.contains("smoke-test the import name"), "{spec}");
-        assert!(
-            spec.contains("License:        SUSE-NonFree"),
-            "{spec}"
-        );
+        assert!(spec.contains("License:        SUSE-NonFree"), "{spec}");
         assert!(!check_is_file_probe_only(&spec));
         // Older wheels: classifiers, then free text; an unknown text is not guessed.
         let from = |classifiers: &[&str], text: Option<&str>| {
@@ -5230,16 +5416,33 @@ BuildRequires:  %{python_module pip}
         );
         // `BSD License` does not say 2 or 3 clauses: the free text may.
         assert_eq!(
-            from(&["License :: OSI Approved :: BSD License"], Some("3-Clause BSD")).as_deref(),
+            from(
+                &["License :: OSI Approved :: BSD License"],
+                Some("3-Clause BSD")
+            )
+            .as_deref(),
             Some("BSD-3-Clause")
         );
-        assert_eq!(from(&[], Some("Apache License, Version 2.0")).as_deref(), Some("Apache-2.0"));
-        assert_eq!(from(&[], Some("NVIDIA Proprietary Software")).as_deref(), Some("SUSE-NonFree"));
+        assert_eq!(
+            from(&[], Some("Apache License, Version 2.0")).as_deref(),
+            Some("Apache-2.0")
+        );
+        assert_eq!(
+            from(&[], Some("NVIDIA Proprietary Software")).as_deref(),
+            Some("SUSE-NonFree")
+        );
         assert_eq!(from(&[], Some("Custom terms, see LICENSE")), None);
         assert_eq!(from(&[], None), None);
         // The release's own licence wins over the wheel's.
         let own = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
-        let spec = wheel_binary_skeleton("p", "1", "p-1-py3-none-any.whl", &own, Some(true), Some(&layout));
+        let spec = wheel_binary_skeleton(
+            "p",
+            "1",
+            "p-1-py3-none-any.whl",
+            &own,
+            Some(true),
+            Some(&layout),
+        );
         assert!(spec.contains("License:        MIT"), "{spec}");
     }
 
@@ -5328,14 +5531,27 @@ BuildRequires:  %{python_module pip}
             ],
             ..Default::default()
         };
-        let spec =
-            wheel_binary_skeleton("open-webui", "1.0", wheel, &release, Some(true), Some(&layout));
-        assert!(spec.contains("Source99:       python-open-webui.rpmlintrc
-"), "{spec}");
+        let spec = wheel_binary_skeleton(
+            "open-webui",
+            "1.0",
+            wheel,
+            &release,
+            Some(true),
+            Some(&layout),
+        );
+        assert!(
+            spec.contains(
+                "Source99:       python-open-webui.rpmlintrc
+"
+            ),
+            "{spec}"
+        );
         let (file, text) = wheel_rpmlintrc("open-webui", wheel, Some(&layout)).unwrap();
         assert_eq!(file, "python-open-webui.rpmlintrc");
         assert!(
-            text.contains(r#"addFilter(r".*zero-length .*/site-packages/open_webui/static/custom\.css$")"#),
+            text.contains(
+                r#"addFilter(r".*zero-length .*/site-packages/open_webui/static/custom\.css$")"#
+            ),
             "{text}"
         );
         assert!(text.contains(r"loader\.js$"), "{text}");
@@ -5417,7 +5633,10 @@ BuildRequires:  %{python_module pip}
              s = s and m.PathFinder.find_spec('nccl.ep', s.submodule_search_locations); \
              sys.exit(0 if s else 1)"
         );
-        let Ok(python) = std::process::Command::new("python3").arg("--version").output() else {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
             return;
         };
         assert!(python.status.success());
@@ -5435,7 +5654,10 @@ BuildRequires:  %{python_module pip}
                     "PYTHONPATH",
                     format!("{}:{}", root.display(), system.display()),
                 )
-                .args(["-c", &namespace_find_spec_snippet(module, &root.display().to_string())])
+                .args([
+                    "-c",
+                    &namespace_find_spec_snippet(module, &root.display().to_string()),
+                ])
                 .status()
                 .unwrap()
                 .success()
@@ -5446,8 +5668,14 @@ BuildRequires:  %{python_module pip}
         // What it replaces fails on the same tree.
         let old = std::process::Command::new("python3")
             .current_dir(dir.path())
-            .env("PYTHONPATH", format!("{}:{}", root.display(), system.display()))
-            .args(["-c", "import importlib.util as u, sys; sys.exit(0 if u.find_spec('nccl.ep') else 1)"])
+            .env(
+                "PYTHONPATH",
+                format!("{}:{}", root.display(), system.display()),
+            )
+            .args([
+                "-c",
+                "import importlib.util as u, sys; sys.exit(0 if u.find_spec('nccl.ep') else 1)",
+            ])
             .status()
             .unwrap();
         assert!(!old.success());
@@ -5506,7 +5734,10 @@ BuildRequires:  %{python_module pip}
             "{install}"
         );
         assert!(!install.contains("rm -rf"), "{install}");
-        assert!(files.contains("%{python_sitearch}/cuda/bindings/\n"), "{files}");
+        assert!(
+            files.contains("%{python_sitearch}/cuda/bindings/\n"),
+            "{files}"
+        );
 
         // A directory of headers and extension-less headers only is still removed whole.
         let mut headers = layout_of(
@@ -5540,7 +5771,10 @@ BuildRequires:  %{python_module pip}
         );
         mixed.header_dirs = vec!["ns/data".into()];
         let (_, _, files) = wheel_install_and_files(&mixed, true);
-        assert!(files.contains("%{python_sitelib}/ns/data/b.txt\n"), "{files}");
+        assert!(
+            files.contains("%{python_sitelib}/ns/data/b.txt\n"),
+            "{files}"
+        );
         assert!(files.contains("%{python_sitelib}/ns/data/sub/"), "{files}");
         assert!(!files.contains("a.h"), "{files}");
     }
@@ -5564,7 +5798,10 @@ BuildRequires:  %{python_module pip}
         let (install, check, files) = wheel_install_and_files(&layout, true);
         assert!(!install.contains("rm -rf"), "{install}");
         assert!(!install.contains("-delete"), "{install}");
-        assert!(install.contains("belong in a\n# -devel package"), "{install}");
+        assert!(
+            install.contains("belong in a\n# -devel package"),
+            "{install}"
+        );
         assert_eq!(
             check,
             "%python_expand test -e %{buildroot}%{$python_sitelib}/nvidia/cu13/include/crt/mma.h\n\n"
@@ -5590,10 +5827,7 @@ BuildRequires:  %{python_module pip}
     #[test]
     fn a_wheel_without_modules_or_libraries_gets_a_check_and_files() {
         let mut bin = layout_of(
-            &[
-                "nvidia/cu13/bin/nvdisasm",
-                "pkg-1.0.dist-info/METADATA",
-            ],
+            &["nvidia/cu13/bin/nvdisasm", "pkg-1.0.dist-info/METADATA"],
             &[],
         );
         bin.importable = None;
@@ -5602,7 +5836,10 @@ BuildRequires:  %{python_module pip}
             check,
             "%python_expand test -e %{buildroot}%{$python_sitelib}/nvidia/cu13/bin/nvdisasm\n\n"
         );
-        assert!(files.contains("%{python_sitelib}/nvidia/cu13/bin/\n"), "{files}");
+        assert!(
+            files.contains("%{python_sitelib}/nvidia/cu13/bin/\n"),
+            "{files}"
+        );
         assert!(!files.contains("TODO"), "{files}");
 
         let mut meta = layout_of(
@@ -5631,7 +5868,10 @@ BuildRequires:  %{python_module pip}
         );
         pth.importable = None;
         let (_, check, files) = wheel_install_and_files(&pth, true);
-        assert!(check.contains("test -e %{buildroot}%{$python_sitelib}/pkg_packages.pth"), "{check}");
+        assert!(
+            check.contains("test -e %{buildroot}%{$python_sitelib}/pkg_packages.pth"),
+            "{check}"
+        );
         assert!(
             files.starts_with("%{python_sitelib}/pkg_packages.pth\n%exclude"),
             "{files}"
@@ -5896,7 +6136,14 @@ BuildRequires:  %{python_module pip}
                 Some(true),
                 Some(&plain),
             ),
-            wheel_binary_skeleton("plain", "1.0", "p-1.0-py3-none-any.whl", &release, None, None),
+            wheel_binary_skeleton(
+                "plain",
+                "1.0",
+                "p-1.0-py3-none-any.whl",
+                &release,
+                None,
+                None,
+            ),
             wheel_multi_flavor_skeleton("t", "3.0", &wheels, &release, Some(false), Some(&plain)),
         ] {
             for absent in [
@@ -6020,7 +6267,9 @@ BuildRequires:  %{python_module pip}
             let req_ok = sym && (n.ends_with(".so") || n.contains(".so."));
             assert_eq!(re.is_match(&req), req_ok, "{req}");
         }
-        assert!(ap_ecosystem::sdist::is_hashed_soname("libfoo-1a2b3c4d.so.1"));
+        assert!(ap_ecosystem::sdist::is_hashed_soname(
+            "libfoo-1a2b3c4d.so.1"
+        ));
         assert!(!ap_ecosystem::sdist::is_hashed_soname("libfoo-20240101.so"));
     }
 
@@ -6051,10 +6300,14 @@ BuildRequires:  %{python_module pip}
 
     #[test]
     fn the_driver_exclude_extends_an_existing_requires_exclude_once() {
-        let spec = "Name: x\n%global __requires_exclude ^lib(mpi|ucp)\\.so.*$\n%python_subpackages\n";
+        let spec =
+            "Name: x\n%global __requires_exclude ^lib(mpi|ucp)\\.so.*$\n%python_subpackages\n";
         let out = with_driver_requires_exclude(spec);
         assert_eq!(out.matches("__requires_exclude").count(), 1, "{out}");
-        let line = out.lines().find(|l| l.contains("__requires_exclude")).unwrap();
+        let line = out
+            .lines()
+            .find(|l| l.contains("__requires_exclude"))
+            .unwrap();
         let re = regex::Regex::new(line.trim_start_matches("%global __requires_exclude ")).unwrap();
         assert!(re.is_match("libmpi.so.40()(64bit)"), "{line}");
         assert!(re.is_match("libcuda.so.1()(64bit)"), "{line}");
@@ -6062,14 +6315,21 @@ BuildRequires:  %{python_module pip}
         assert_eq!(with_driver_requires_exclude(&out), out);
         // Without any, it is added before %python_subpackages.
         let bare = with_driver_requires_exclude("Name: x\n%python_subpackages\n");
-        assert!(bare.contains("%global __requires_exclude ^(libcuda"), "{bare}");
+        assert!(
+            bare.contains("%global __requires_exclude ^(libcuda"),
+            "{bare}"
+        );
         assert_eq!(with_driver_requires_exclude(&bare), bare);
     }
 
     #[test]
     fn only_an_arch_package_naming_cuda_may_link_the_driver() {
-        assert!(may_link_driver_library("Name: x\nBuildRequires: cuda-nvcc\n"));
-        assert!(!may_link_driver_library("Name: x\nBuildArch: noarch\nRequires: cuda\n"));
+        assert!(may_link_driver_library(
+            "Name: x\nBuildRequires: cuda-nvcc\n"
+        ));
+        assert!(!may_link_driver_library(
+            "Name: x\nBuildArch: noarch\nRequires: cuda\n"
+        ));
         assert!(!may_link_driver_library("Name: x\n"));
     }
 
@@ -6790,8 +7050,18 @@ fn check_section(spec: &str) -> Vec<&str> {
         if in_check
             && t.starts_with('%')
             && [
-                "%files", "%install", "%prep", "%build", "%package", "%description", "%post",
-                "%pre", "%preun", "%postun", "%conf", "%generate_buildrequires",
+                "%files",
+                "%install",
+                "%prep",
+                "%build",
+                "%package",
+                "%description",
+                "%post",
+                "%pre",
+                "%preun",
+                "%postun",
+                "%conf",
+                "%generate_buildrequires",
             ]
             .iter()
             .any(|h| t == *h || t.starts_with(&format!("{h} ")))
@@ -6945,7 +7215,10 @@ pub fn add_fixture_source(spec: &str, url: &str, version: &str, dirs: &[String])
     let source_num = |l: &str| -> Option<u32> {
         let rest = l.strip_prefix("Source")?;
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        rest[digits.len()..].trim_start().starts_with(':').then(|| digits.parse().unwrap_or(0))
+        rest[digits.len()..]
+            .trim_start()
+            .starts_with(':')
+            .then(|| digits.parse().unwrap_or(0))
     };
     let mut last_source = None;
     let mut next = 0;
@@ -6984,7 +7257,11 @@ pub fn add_fixture_source(spec: &str, url: &str, version: &str, dirs: &[String])
         }
     }
     let setup = setup?;
-    let url = if version.is_empty() { url.to_string() } else { url.replace(version, "%{version}") };
+    let url = if version.is_empty() {
+        url.to_string()
+    } else {
+        url.replace(version, "%{version}")
+    };
     let file = url.rsplit('/').next().unwrap_or("fixtures.tar.gz");
     let repo = url
         .split('/')
@@ -6992,7 +7269,10 @@ pub fn add_fixture_source(spec: &str, url: &str, version: &str, dirs: &[String])
         .filter(|r| !r.is_empty())
         .unwrap_or("fixtures");
     let rename = format!("{repo}-fixtures-{file}");
-    let wild: Vec<String> = dirs.iter().map(|d| format!("'*/{}/*'", d.trim_end_matches('/'))).collect();
+    let wild: Vec<String> = dirs
+        .iter()
+        .map(|d| format!("'*/{}/*'", d.trim_end_matches('/')))
+        .collect();
     let tar = format!(
         "tar -xzf %{{SOURCE{next}}} --strip-components=1 --wildcards {}",
         wild.join(" ")
@@ -7040,7 +7320,10 @@ Source1: x.rpmlintrc\nBuildRequires: a\n\n%description\nd\n\n%prep\n%autosetup -
             "  -n x-%{version}\n# The sdist leaves out tests/test_configs\ntar -xzf %{SOURCE2} --strip-components=1 --wildcards '*/tests/test_configs/*'\n%build"
         ), "{out}");
         // Applied once, no matter how often the check runs.
-        assert_eq!(add_fixture_source(&out, "https://github.com/o/x/a.tar.gz", "1.2", &dirs), None);
+        assert_eq!(
+            add_fixture_source(&out, "https://github.com/o/x/a.tar.gz", "1.2", &dirs),
+            None
+        );
         assert!(missing_check_path_problems(&out, &|_| false).is_empty());
     }
 
@@ -7048,9 +7331,18 @@ Source1: x.rpmlintrc\nBuildRequires: a\n\n%description\nd\n\n%prep\n%autosetup -
     fn refuses_what_it_cannot_place() {
         let d = vec!["tests/a".to_string()];
         let u = "https://github.com/o/x/archive/v1.tar.gz";
-        assert_eq!(add_fixture_source("Name: x\n%prep\n%autosetup\n", u, "1", &d), None);
-        assert_eq!(add_fixture_source("Source0: a\n%description\n%prep\nmake\n", u, "1", &d), None);
-        assert_eq!(add_fixture_source(SPEC, u, "1", &["../x".to_string()]), None);
+        assert_eq!(
+            add_fixture_source("Name: x\n%prep\n%autosetup\n", u, "1", &d),
+            None
+        );
+        assert_eq!(
+            add_fixture_source("Source0: a\n%description\n%prep\nmake\n", u, "1", &d),
+            None
+        );
+        assert_eq!(
+            add_fixture_source(SPEC, u, "1", &["../x".to_string()]),
+            None
+        );
         assert_eq!(add_fixture_source(SPEC, u, "1", &[]), None);
         assert_eq!(add_fixture_source(SPEC, "https://h/a b", "1", &d), None);
     }
@@ -7076,7 +7368,10 @@ pub fn auto_fixture_source(
     // file inside a fixtures directory already listed.
     let mut dirs: Vec<String> = Vec::new();
     for m in missing {
-        if !dirs.iter().any(|d| m == *d || m.starts_with(&format!("{d}/"))) {
+        if !dirs
+            .iter()
+            .any(|d| m == *d || m.starts_with(&format!("{d}/")))
+        {
             dirs.retain(|d| !d.starts_with(&format!("{m}/")));
             dirs.push(m);
         }
@@ -7098,13 +7393,27 @@ mod auto_fixture_source_tests {
     fn resolves_the_repo_and_tag_or_leaves_the_prompt() {
         let found = |r: &str, v: &str| Some(format!("{r}/archive/refs/tags/v{v}.tar.gz"));
         let out = auto_fixture_source(SPEC, &|_| false, PI, "", "1.2", &found).unwrap();
-        assert!(out.contains("Source1:        https://github.com/o/x/archive/refs/tags/v%{version}.tar.gz#/"));
+        assert!(out.contains(
+            "Source1:        https://github.com/o/x/archive/refs/tags/v%{version}.tar.gz#/"
+        ));
         // The file inside the directory does not add a second wildcard.
-        assert!(out.contains("--wildcards '*/tests/test_configs/*'\n"), "{out}");
+        assert!(
+            out.contains("--wildcards '*/tests/test_configs/*'\n"),
+            "{out}"
+        );
         assert_eq!(out.matches("--wildcards").count(), 1);
-        assert_eq!(auto_fixture_source(SPEC, &|_| false, PI, "", "1.2", &|_, _| None), None);
-        assert_eq!(auto_fixture_source(SPEC, &|_| false, "", "", "1.2", &found), None);
-        assert_eq!(auto_fixture_source(SPEC, &|_| true, PI, "", "1.2", &found), None);
+        assert_eq!(
+            auto_fixture_source(SPEC, &|_| false, PI, "", "1.2", &|_, _| None),
+            None
+        );
+        assert_eq!(
+            auto_fixture_source(SPEC, &|_| false, "", "", "1.2", &found),
+            None
+        );
+        assert_eq!(
+            auto_fixture_source(SPEC, &|_| true, PI, "", "1.2", &found),
+            None
+        );
     }
 }
 
@@ -7116,7 +7425,10 @@ mod sharp_edge_tests {
     fn a_licence_term_is_added_to_the_whole_expression() {
         let t = |l: &str| with_license_terms(l.to_string(), &["SUSE-NonFree"]);
         assert_eq!(t("MIT"), "MIT AND SUSE-NonFree");
-        assert_eq!(t("MIT OR Apache-2.0"), "(MIT OR Apache-2.0) AND SUSE-NonFree");
+        assert_eq!(
+            t("MIT OR Apache-2.0"),
+            "(MIT OR Apache-2.0) AND SUSE-NonFree"
+        );
         // Parenthesised at the start is not parenthesised as a whole.
         assert_eq!(
             t("(A OR B) AND C OR D"),
@@ -7132,7 +7444,10 @@ mod sharp_edge_tests {
 
     #[test]
     fn only_the_vendor_term_of_a_licence_expression_is_replaced() {
-        assert_eq!(spdx_expression_for_spec("LicenseRef-NVIDIA-Proprietary"), "SUSE-NonFree");
+        assert_eq!(
+            spdx_expression_for_spec("LicenseRef-NVIDIA-Proprietary"),
+            "SUSE-NonFree"
+        );
         assert_eq!(
             spdx_expression_for_spec("MIT AND LicenseRef-NVIDIA-Proprietary"),
             "MIT AND SUSE-NonFree"
@@ -7142,7 +7457,10 @@ mod sharp_edge_tests {
             "(Apache-2.0 OR MIT) AND SUSE-NonFree"
         );
         assert_eq!(spdx_expression_for_spec("MIT"), "MIT");
-        assert_eq!(spdx_expression_for_spec("MIT OR Apache-2.0"), "MIT OR Apache-2.0");
+        assert_eq!(
+            spdx_expression_for_spec("MIT OR Apache-2.0"),
+            "MIT OR Apache-2.0"
+        );
         // Two vendor terms are one, with no operator left dangling.
         assert_eq!(
             spdx_expression_for_spec("MIT AND LicenseRef-NVIDIA-A AND LicenseRef-NVIDIA-B"),
@@ -7177,8 +7495,14 @@ mod sharp_edge_tests {
             },
         };
         let spec = wheel_binary_skeleton("x", "1", "x-1-py3-none-any.whl", &r, Some(true), None);
-        assert!(spec.contains("Summary:        100%% pure %%{python_sitelib} tool\n"), "{spec}");
-        assert!(spec.contains("URL:            https://example.org/%%7Euser\n"), "{spec}");
+        assert!(
+            spec.contains("Summary:        100%% pure %%{python_sitelib} tool\n"),
+            "{spec}"
+        );
+        assert!(
+            spec.contains("URL:            https://example.org/%%7Euser\n"),
+            "{spec}"
+        );
         r.summary = Some("two\nlines".into());
         let spec = wheel_binary_skeleton("x", "1", "x-1-py3-none-any.whl", &r, Some(true), None);
         assert!(spec.contains("Summary:        two lines\n"), "{spec}");
@@ -7190,17 +7514,26 @@ mod sharp_edge_tests {
     fn ignore_options_are_counted_as_options() {
         let spec = format!(
             "%check\npip install --ignore-installed x\n%pytest {}\n",
-            (0..6).map(|i| format!("--ignore=t/{i}.py")).collect::<Vec<_>>().join(" ")
+            (0..6)
+                .map(|i| format!("--ignore=t/{i}.py"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         assert!(check_quality_problems(&spec).is_empty());
-        let seven = format!("%check\n%pytest {} --ignore t/x\n", "--ignore-glob=a ".repeat(6));
+        let seven = format!(
+            "%check\n%pytest {} --ignore t/x\n",
+            "--ignore-glob=a ".repeat(6)
+        );
         assert_eq!(check_quality_problems(&seven).len(), 1);
     }
 
     #[test]
     fn a_path_given_to_ignore_in_the_next_word_is_not_read() {
         let spec = "%check\n%pytest --ignore tests/gone --deselect tests/x.py::t tests/real\n";
-        assert_eq!(missing_check_paths(spec, &|_| false), vec!["tests/real".to_string()]);
+        assert_eq!(
+            missing_check_paths(spec, &|_| false),
+            vec!["tests/real".to_string()]
+        );
     }
 }
 
@@ -7221,10 +7554,9 @@ pub fn drop_unused_pytest_build_requires(spec: &str) -> String {
     for line in spec.lines() {
         let t = line.trim();
         let is_pytest = t.starts_with("BuildRequires:")
-            && t.trim_start_matches("BuildRequires:").split_whitespace().eq([
-                "%{python_module",
-                "pytest}",
-            ]);
+            && t.trim_start_matches("BuildRequires:")
+                .split_whitespace()
+                .eq(["%{python_module", "pytest}"]);
         if !is_pytest {
             out.push(line);
         }
@@ -7240,7 +7572,10 @@ mod check_quality_tests {
     fn many_ignores_are_flagged_and_few_are_not() {
         let many = format!(
             "%check\n%pytest {}\n\n%files\n",
-            (0..7).map(|i| format!("--ignore=t/{i}.py")).collect::<Vec<_>>().join(" ")
+            (0..7)
+                .map(|i| format!("--ignore=t/{i}.py"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         assert_eq!(check_quality_problems(&many).len(), 1);
         let few = "%check\n%pytest --ignore=a --ignore=b\n";
@@ -7330,12 +7665,21 @@ mod console_script_tests {
     fn scripts_get_clone_scriptlets_and_files_entries() {
         let out = add_console_script_alternatives(SPEC, &["xcli".to_string()]);
         assert!(out.contains("%pyproject_install\n%python_clone -a %{buildroot}%{_bindir}/xcli\n"));
-        assert!(out.contains("%post\n%python_install_alternative xcli\n"), "{out}");
-        assert!(out.contains("%postun\n%python_uninstall_alternative xcli\n"), "{out}");
+        assert!(
+            out.contains("%post\n%python_install_alternative xcli\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("%postun\n%python_uninstall_alternative xcli\n"),
+            "{out}"
+        );
         assert!(out.contains("%files %{python_files}\n%python_alternative %{_bindir}/xcli\n"));
         assert!(out.contains("Requires(post):   update-alternatives"));
         // Idempotent, and a no-script project is untouched.
-        assert_eq!(add_console_script_alternatives(&out, &["xcli".to_string()]), out);
+        assert_eq!(
+            add_console_script_alternatives(&out, &["xcli".to_string()]),
+            out
+        );
         assert_eq!(add_console_script_alternatives(SPEC, &[]), SPEC);
     }
 }
@@ -7497,9 +7841,11 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
 /// package's state records (`PkgState::relaxed_dependencies`): applied on every
 /// validation, root package included, before anything is built.
 pub fn relax_dependencies(spec: &str, relaxed: &[(String, String)]) -> String {
-    relaxed.iter().fold(spec.to_string(), |spec, (dep, shipped)| {
-        relax_dependency_bounds(&spec, dep, shipped)
-    })
+    relaxed
+        .iter()
+        .fold(spec.to_string(), |spec, (dep, shipped)| {
+            relax_dependency_bounds(&spec, dep, shipped)
+        })
 }
 
 #[cfg(test)]
@@ -7553,10 +7899,7 @@ mod relax_bound_tests {
             "BuildRequires:  %{python_module trio < 6}\n"
         );
         // Both met: untouched.
-        assert_eq!(
-            relax_dependency_bounds(spec, "trio", "0.30.0"),
-            spec
-        );
+        assert_eq!(relax_dependency_bounds(spec, "trio", "0.30.0"), spec);
     }
 
     /// open-webui declares `==` pins on packages the distro ships newer:
@@ -7762,7 +8105,9 @@ mod hashed_libs_exclude_tests {
         assert_eq!(out.matches("__requires_exclude").count(), 1, "{out}");
         let want = format!(
             r"^(lib(mpi|ucp)\.so.*|{})$",
-            hashed_libs_requires_exclude().trim_start_matches('^').trim_end_matches('$')
+            hashed_libs_requires_exclude()
+                .trim_start_matches('^')
+                .trim_end_matches('$')
         );
         assert!(out.contains(&want), "{out}");
     }
@@ -7785,7 +8130,10 @@ mod redist_requires_tests {
         {
             let _off = TestMode::set(false);
             let out = add_runtime_dependencies(SPEC, &reqs, "x");
-            assert!(out.contains("Requires:       python-nvidia-cublas >= 13.1\n"), "{out}");
+            assert!(
+                out.contains("Requires:       python-nvidia-cublas >= 13.1\n"),
+                "{out}"
+            );
         }
         let _on = TestMode::set(true);
         let deps = runtime_dependencies(&reqs, "x");
@@ -7810,7 +8158,10 @@ mod redist_requires_tests {
         {
             let _off = TestMode::set(false);
             let out = normalize_runtime_python_module(spec);
-            assert!(out.contains("Requires:       python-nvidia-cublas >= 13.1\n"), "{out}");
+            assert!(
+                out.contains("Requires:       python-nvidia-cublas >= 13.1\n"),
+                "{out}"
+            );
         }
         let _on = TestMode::set(true);
         let out = normalize_runtime_python_module(spec);
@@ -7898,7 +8249,11 @@ mod wheel_generator_tests {
             ..Default::default()
         };
         let spec = skeleton(&layout, License::Spdx("MIT".into()));
-        assert_eq!(spec.matches("bundled headers are not needed").count(), 1, "{spec}");
+        assert_eq!(
+            spec.matches("bundled headers are not needed").count(),
+            1,
+            "{spec}"
+        );
         assert!(spec.contains("rm -rf"), "{spec}");
         assert!(spec.contains("-name '*.h'"), "{spec}");
     }
@@ -7917,7 +8272,10 @@ mod wheel_generator_tests {
         let desc = spec.split("%description\n").nth(1).unwrap();
         let desc = desc.split("\n\n").next().unwrap();
         assert!(desc.contains("100%% of the work"), "{desc}");
-        assert!(desc.lines().count() >= 2 && desc.lines().all(|l| l.len() <= 80), "{desc}");
+        assert!(
+            desc.lines().count() >= 2 && desc.lines().all(|l| l.len() <= 80),
+            "{desc}"
+        );
         assert!(description_problems(&spec).is_empty(), "{spec}");
         // Without a paragraph the summary stays.
         let plain = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
@@ -7942,7 +8300,10 @@ mod wheel_generator_tests {
         assert!(spec.contains("License:        MIT\n"), "{spec}");
         let spec = skeleton(&WheelLayout::default(), pasted);
         assert!(spec.contains("License:        FIXME\n"), "{spec}");
-        let spec = skeleton(&WheelLayout::default(), License::FreeText("Apache 2.0".into()));
+        let spec = skeleton(
+            &WheelLayout::default(),
+            License::FreeText("Apache 2.0".into()),
+        );
         assert!(spec.contains("License:        Apache-2.0\n"), "{spec}");
     }
 
@@ -7960,8 +8321,14 @@ mod wheel_generator_tests {
             ..Default::default()
         };
         let spec = skeleton(&layout, License::Spdx("MIT".into()));
-        assert!(spec.contains("%license %{python_sitelib}/pkg-1.0.dist-info/licenses\n"), "{spec}");
-        assert!(spec.contains("%exclude %{python_sitelib}/pkg-1.0.dist-info/licenses\n"), "{spec}");
+        assert!(
+            spec.contains("%license %{python_sitelib}/pkg-1.0.dist-info/licenses\n"),
+            "{spec}"
+        );
+        assert!(
+            spec.contains("%exclude %{python_sitelib}/pkg-1.0.dist-info/licenses\n"),
+            "{spec}"
+        );
         assert_eq!(spec.matches("%license").count(), 1, "{spec}");
         // One file keeps its own entry.
         let one = WheelLayout {
@@ -7969,7 +8336,10 @@ mod wheel_generator_tests {
             ..layout
         };
         let spec = skeleton(&one, License::Spdx("MIT".into()));
-        assert!(spec.contains("%license %{python_sitelib}/pkg-1.0.dist-info/licenses/LICENSE\n"), "{spec}");
+        assert!(
+            spec.contains("%license %{python_sitelib}/pkg-1.0.dist-info/licenses/LICENSE\n"),
+            "{spec}"
+        );
     }
 
     #[test]
@@ -7980,8 +8350,14 @@ mod wheel_generator_tests {
         };
         let triton = layout(&["triton/backends/nvidia/bin/ptxas", "triton/__init__.py"]);
         let spec = skeleton(&triton, License::Spdx("MIT".into()));
-        assert!(spec.contains("License:        MIT AND SUSE-NonFree\n"), "{spec}");
-        let torch = layout(&["torch/lib/libgomp-a34b3233.so.1", "torch/lib/libcupti.so.13"]);
+        assert!(
+            spec.contains("License:        MIT AND SUSE-NonFree\n"),
+            "{spec}"
+        );
+        let torch = layout(&[
+            "torch/lib/libgomp-a34b3233.so.1",
+            "torch/lib/libcupti.so.13",
+        ]);
         let spec = skeleton(&torch, License::Spdx("BSD-3-Clause OR MIT".into()));
         assert!(
             spec.contains(
@@ -8015,7 +8391,15 @@ mod wheel_generator_tests {
         let names: Vec<&str> = deps.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(
             names,
-            ["psycopg", "psycopg-binary", "httpx", "brotli", "socksio", "foo", "uvloop"],
+            [
+                "psycopg",
+                "psycopg-binary",
+                "httpx",
+                "brotli",
+                "socksio",
+                "foo",
+                "uvloop"
+            ],
             "{names:?}"
         );
         assert_eq!(deps[0].bound.as_deref(), Some(">= 3.2"));
@@ -8024,7 +8408,10 @@ mod wheel_generator_tests {
             &["psycopg[binary]".to_string()],
             "own",
         );
-        assert!(spec.contains("Requires:       python-psycopg-binary\n"), "{spec}");
+        assert!(
+            spec.contains("Requires:       python-psycopg-binary\n"),
+            "{spec}"
+        );
     }
 
     #[test]
@@ -8035,9 +8422,20 @@ mod wheel_generator_tests {
             empty_files: vec!["p/custom.css".into()],
             ..Default::default()
         };
-        let (_, text) = wheel_rpmlintrc("p", "p-1-cp313-cp313-manylinux_2_28_x86_64.whl", Some(&layout)).unwrap();
-        for line in text.lines().filter(|l| l.contains("zero-length") || l.contains("rpath")) {
-            assert!(line.starts_with("addFilter(r\".*") || line.starts_with("addFilter(\".*"), "{line}");
+        let (_, text) = wheel_rpmlintrc(
+            "p",
+            "p-1-cp313-cp313-manylinux_2_28_x86_64.whl",
+            Some(&layout),
+        )
+        .unwrap();
+        for line in text
+            .lines()
+            .filter(|l| l.contains("zero-length") || l.contains("rpath"))
+        {
+            assert!(
+                line.starts_with("addFilter(r\".*") || line.starts_with("addFilter(\".*"),
+                "{line}"
+            );
         }
         // Nothing to filter: no file at all, never an empty one.
         let none = WheelLayout::default();
@@ -8060,12 +8458,25 @@ mod wheel_generator_tests {
         assert!(!requires_python_caps_below("<3.12", &flavors[..1]));
         let spec = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
         let out = with_pip_ignore_requires_python(&spec, Some("<3.12"), &flavors);
-        assert_eq!(out.matches("export PIP_IGNORE_REQUIRES_PYTHON=1").count(), 2, "{out}");
-        assert!(out.contains("%build\n# the wheel caps Requires-Python"), "{out}");
+        assert_eq!(
+            out.matches("export PIP_IGNORE_REQUIRES_PYTHON=1").count(),
+            2,
+            "{out}"
+        );
+        assert!(
+            out.contains("%build\n# the wheel caps Requires-Python"),
+            "{out}"
+        );
         assert!(out.contains("%install\n# the wheel caps"), "{out}");
         // Idempotent, and absent without a cap.
-        assert_eq!(with_pip_ignore_requires_python(&out, Some("<3.12"), &flavors), out);
-        assert_eq!(with_pip_ignore_requires_python(&spec, Some(">=3.9"), &flavors), spec);
+        assert_eq!(
+            with_pip_ignore_requires_python(&out, Some("<3.12"), &flavors),
+            out
+        );
+        assert_eq!(
+            with_pip_ignore_requires_python(&spec, Some(">=3.9"), &flavors),
+            spec
+        );
         assert_eq!(with_pip_ignore_requires_python(&spec, None, &flavors), spec);
     }
 

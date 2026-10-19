@@ -5,6 +5,7 @@
 - Requires: take the Requires-Dist entries from the upstream wheel METADATA. For 12.0.0.61 this adds nvidia-nvjitlink.
 - ExclusiveArch follows the platform tag of the upstream wheel. A manylinux tag means the wheel's architecture, not noarch.
 - Install into sitelib when the wheel's WHEEL file says Root-Is-Purelib: true.
+- The source is a prebuilt wheel with no build backend (no pyproject.toml or setup.cfg), so no Python build tooling is needed for the build.
 Checked against 12.0.0.61 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds

@@ -77,7 +77,9 @@ fn dependency_problem(lines: &[String]) -> Option<String> {
             || t.starts_with("ImportError:")
             || t.starts_with("ModuleNotFoundError:")
             || (t.starts_with("ERROR ")
-                && t.split_whitespace().nth(1).is_some_and(|f| !f.contains("::") && f.ends_with(".py")));
+                && t.split_whitespace()
+                    .nth(1)
+                    .is_some_and(|f| !f.contains("::") && f.ends_with(".py")));
         if hit {
             return Some(t.chars().take(160).collect());
         }
@@ -104,9 +106,9 @@ fn safe_pytest_id(id: &str) -> bool {
         && !path.split('/').any(|c| c == ".." || c.is_empty())
         && path.rsplit('/').next().is_some_and(|f| f.contains('.'))
         && !id.contains("...")
-        && id.chars().all(|c| {
-            c.is_ascii_alphanumeric() || "_./:[]-+,=@#()".contains(c)
-        })
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./:[]-+,=@#()".contains(c))
 }
 
 fn safe_ctest_name(name: &str) -> bool {
@@ -141,7 +143,10 @@ fn pytest_failures(lines: &[String]) -> Result<Vec<FailingTest>, String> {
     let mut out: Vec<FailingTest> = Vec::new();
     for l in lines {
         let t = l.trim();
-        let Some(rest) = t.strip_prefix("FAILED ").or_else(|| t.strip_prefix("ERROR ")) else {
+        let Some(rest) = t
+            .strip_prefix("FAILED ")
+            .or_else(|| t.strip_prefix("ERROR "))
+        else {
             continue;
         };
         let id = rest.split_whitespace().next().unwrap_or("");
@@ -160,7 +165,10 @@ fn unittest_failures(lines: &[String]) -> Vec<FailingTest> {
     let mut out: Vec<FailingTest> = Vec::new();
     for l in lines {
         let t = l.trim();
-        let Some(rest) = t.strip_prefix("FAIL: ").or_else(|| t.strip_prefix("ERROR: ")) else {
+        let Some(rest) = t
+            .strip_prefix("FAIL: ")
+            .or_else(|| t.strip_prefix("ERROR: "))
+        else {
             continue;
         };
         let Some((name, tail)) = rest.split_once(" (") else {
@@ -214,7 +222,13 @@ fn ctest_failures(lines: &[String]) -> Result<Vec<FailingTest>, String> {
                 "ctest could not run a test ({t}): that is a build problem, not a test to drop"
             ));
         }
-        let known = ["Failed", "Timeout", "SEGFAULT", "Exception", "Subprocess aborted"];
+        let known = [
+            "Failed",
+            "Timeout",
+            "SEGFAULT",
+            "Exception",
+            "Subprocess aborted",
+        ];
         if known.iter().any(|k| status.starts_with(k)) && safe_ctest_name(name) {
             out.push(FailingTest {
                 runner: Runner::Ctest,
@@ -349,8 +363,11 @@ fn apply_ctest(spec: &str, tests: &[&FailingTest]) -> Result<String, String> {
         .map(|i| start + i)
         .ok_or("the %check has no ctest invocation to narrow")?;
     let line = lines[idx];
-    if line.contains(" -E ") || line.contains("--exclude-regex") || line.trim_end().ends_with('\\') {
-        return Err("the ctest line already has an exclude regex or continues on the next line".into());
+    if line.contains(" -E ") || line.contains("--exclude-regex") || line.trim_end().ends_with('\\')
+    {
+        return Err(
+            "the ctest line already has an exclude regex or continues on the next line".into(),
+        );
     }
     let names: Vec<String> = tests
         .iter()
@@ -375,8 +392,15 @@ fn addopts_insertion_point(lines: &[&str], start: usize, end: usize) -> Result<u
     let mut at = start;
     for (i, l) in lines[start..end].iter().enumerate() {
         let t = l.trim_start();
-        let assigns = t.strip_prefix("export ").unwrap_or(t).starts_with("PYTEST_ADDOPTS=");
-        if assigns && !t.contains("PYTEST_ADDOPTS:-") && !t.contains("$PYTEST_ADDOPTS") && !t.contains("${PYTEST_ADDOPTS") {
+        let assigns = t
+            .strip_prefix("export ")
+            .unwrap_or(t)
+            .starts_with("PYTEST_ADDOPTS=");
+        if assigns
+            && !t.contains("PYTEST_ADDOPTS:-")
+            && !t.contains("$PYTEST_ADDOPTS")
+            && !t.contains("${PYTEST_ADDOPTS")
+        {
             if t.ends_with('\\') {
                 return Err("the %check sets PYTEST_ADDOPTS over several lines".into());
             }
@@ -397,16 +421,27 @@ const UNITTEST_MODULE: &str = "-m unittest";
 /// The runners of `%check` that offer no deselect interface this module can
 /// drive from outside: they pass their own arguments to the tests.
 const CUSTOM_RUNNERS: &[&str] = &[
-    "tox", "nox", "make", "stestr", "nosetests", "nose2", "behave", "%meson_test", "%cmake_build",
+    "tox",
+    "nox",
+    "make",
+    "stestr",
+    "nosetests",
+    "nose2",
+    "behave",
+    "%meson_test",
+    "%cmake_build",
     "pytest-xdist-runner",
 ];
 
 fn is_pytest_line(t: &str) -> bool {
-    t.split_whitespace()
-        .any(|w| w == "%pytest" || w == "pytest" || w.starts_with("%pytest_") || w.ends_with("/pytest") || w == "pytest3")
-        || t.contains("-m pytest")
-        || t.contains("%{python_expand")
-            && t.contains("pytest")
+    t.split_whitespace().any(|w| {
+        w == "%pytest"
+            || w == "pytest"
+            || w.starts_with("%pytest_")
+            || w.ends_with("/pytest")
+            || w == "pytest3"
+    }) || t.contains("-m pytest")
+        || t.contains("%{python_expand") && t.contains("pytest")
 }
 
 fn is_comment(t: &str) -> bool {
@@ -420,9 +455,14 @@ fn unittest_line_as_pytest(line: &str) -> Result<String, String> {
     let pos = line.find(UNITTEST_MODULE).ok_or("no unittest invocation")?;
     let (prefix, rest) = (&line[..pos], &line[pos + UNITTEST_MODULE.len()..]);
     if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
-        return Err(format!("the %check runs `{}`, which is not plain unittest", line.trim()));
+        return Err(format!(
+            "the %check runs `{}`, which is not plain unittest",
+            line.trim()
+        ));
     }
-    if rest.contains(['}', ';', '&', '|', '$', '"', '\'', '\\', '`', '(', ')', '<', '>']) {
+    if rest.contains([
+        '}', ';', '&', '|', '$', '"', '\'', '\\', '`', '(', ')', '<', '>',
+    ]) {
         return Err(format!(
             "the unittest line `{}` has shell or macro syntax after `-m unittest` that cannot be \
              translated to pytest arguments",
@@ -440,12 +480,16 @@ fn unittest_line_as_pytest(line: &str) -> Result<String, String> {
             "-s" | "--start-directory" => {
                 let dir = toks.next().ok_or("unittest `-s` without a directory")?;
                 if dir.starts_with('/') || dir.split('/').any(|c| c == "..") {
-                    return Err(format!("unittest start directory `{dir}` is not a plain relative path"));
+                    return Err(format!(
+                        "unittest start directory `{dir}` is not a plain relative path"
+                    ));
                 }
                 args.push(dir.to_string());
             }
             t if !t.starts_with('-')
-                && t.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) =>
+                && t.split('.').all(|p| {
+                    !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                }) =>
             {
                 args.push("--pyargs".into());
                 args.push(t.to_string());
@@ -470,9 +514,16 @@ fn unittest_line_as_pytest(line: &str) -> Result<String, String> {
 fn pytest_buildrequires(preamble: &[&str]) -> Result<Option<String>, String> {
     let brs: Vec<&&str> = preamble
         .iter()
-        .filter(|l| l.trim_start().to_ascii_lowercase().starts_with("buildrequires:"))
+        .filter(|l| {
+            l.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("buildrequires:")
+        })
         .collect();
-    if brs.iter().any(|l| l.to_ascii_lowercase().contains("pytest")) {
+    if brs
+        .iter()
+        .any(|l| l.to_ascii_lowercase().contains("pytest"))
+    {
         return Ok(None);
     }
     if brs.iter().any(|l| l.contains("%{python_module")) {
@@ -481,9 +532,11 @@ fn pytest_buildrequires(preamble: &[&str]) -> Result<Option<String>, String> {
     if brs.iter().any(|l| l.contains("python3-")) {
         return Ok(Some("BuildRequires:  python3-pytest".into()));
     }
-    Err("pytest is not a BuildRequires and the spec's BuildRequires use neither \
+    Err(
+        "pytest is not a BuildRequires and the spec's BuildRequires use neither \
          `%{python_module ...}` nor `python3-...`, so its spelling here is unknown"
-        .into())
+            .into(),
+    )
 }
 
 /// Skip installed-module unittest tests through the runner: `%check` is moved to
@@ -497,7 +550,11 @@ fn apply_unittest_through_pytest(spec: &str, tests: &[&FailingTest]) -> Result<S
     let view: Vec<&str> = lines.iter().map(String::as_str).collect();
     let (start, end) =
         section_body(&view, "%check").ok_or("the spec has no %check section to edit")?;
-    let body: Vec<&str> = view[start..end].iter().copied().filter(|l| !is_comment(l)).collect();
+    let body: Vec<&str> = view[start..end]
+        .iter()
+        .copied()
+        .filter(|l| !is_comment(l))
+        .collect();
     let unittest_lines: Vec<usize> = (start..end)
         .filter(|&i| !is_comment(view[i]) && view[i].contains(UNITTEST_MODULE))
         .collect();
@@ -521,7 +578,9 @@ fn apply_unittest_through_pytest(spec: &str, tests: &[&FailingTest]) -> Result<S
     // Another `-k` of the check would override ours (the last one wins).
     let ours = |l: &str| l.trim_start().starts_with(K_EXPORT_HEAD);
     if body.iter().any(|l| {
-        !ours(l) && l.split_whitespace().any(|w| w == "-k" || w.starts_with("-k=") || w.starts_with("--k"))
+        !ours(l)
+            && l.split_whitespace()
+                .any(|w| w == "-k" || w.starts_with("-k=") || w.starts_with("--k"))
     }) {
         return Err(
             "the %check already selects tests with its own `-k`, which would override or be \
@@ -535,11 +594,18 @@ fn apply_unittest_through_pytest(spec: &str, tests: &[&FailingTest]) -> Result<S
         rewritten.push((i, unittest_line_as_pytest(view[i])?));
     }
     // Where pytest must be a BuildRequires.
-    let first_section = view.iter().position(|l| is_section(l)).unwrap_or(view.len());
+    let first_section = view
+        .iter()
+        .position(|l| is_section(l))
+        .unwrap_or(view.len());
     let new_br = pytest_buildrequires(&view[..first_section])?;
     let br_at = view[..first_section]
         .iter()
-        .rposition(|l| l.trim_start().to_ascii_lowercase().starts_with("buildrequires:"))
+        .rposition(|l| {
+            l.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("buildrequires:")
+        })
         .map(|i| i + 1);
     if new_br.is_some() && br_at.is_none() {
         return Err("the spec has no BuildRequires line to add pytest after".into());
@@ -577,7 +643,11 @@ fn apply_unittest_through_pytest(spec: &str, tests: &[&FailingTest]) -> Result<S
             let expr = line[head..]
                 .strip_suffix(K_EXPORT_TAIL)
                 .ok_or("the earlier -k export was edited, so it cannot be extended")?;
-            let merged = format!("{}{expr} and {}{K_EXPORT_TAIL}", &line[..head], pieces.join(" and "));
+            let merged = format!(
+                "{}{expr} and {}{K_EXPORT_TAIL}",
+                &line[..head],
+                pieces.join(" and ")
+            );
             let mut v = comments.clone();
             v.push(merged);
             lines.remove(i);
@@ -585,7 +655,10 @@ fn apply_unittest_through_pytest(spec: &str, tests: &[&FailingTest]) -> Result<S
         }
         None => {
             let mut v = comments.clone();
-            v.push(format!("{K_EXPORT_HEAD}{}{K_EXPORT_TAIL}", pieces.join(" and ")));
+            v.push(format!(
+                "{K_EXPORT_HEAD}{}{K_EXPORT_TAIL}",
+                pieces.join(" and ")
+            ));
             (insert_at, v)
         }
     };
@@ -694,9 +767,12 @@ pub fn drop_failing_tests(
     }
     let failing = failing_tests(log)?;
     let already = already_dropped(spec);
-    let (fresh, repeated): (Vec<FailingTest>, Vec<FailingTest>) = failing
-        .into_iter()
-        .partition(|t| !already.iter().any(|a| *a == t.id || t.id.starts_with(&format!("{a}["))));
+    let (fresh, repeated): (Vec<FailingTest>, Vec<FailingTest>) =
+        failing.into_iter().partition(|t| {
+            !already
+                .iter()
+                .any(|a| *a == t.id || t.id.starts_with(&format!("{a}[")))
+        });
     if fresh.is_empty() {
         return Err(format!(
             "{} failing test(s) are already dropped here and still run: the drop does not take \
@@ -749,13 +825,23 @@ mod tests {
 
     #[test]
     fn pytest_failures_become_a_narrow_deselect_with_evidence() {
-        let log = pytest_log(&["tests/test_a.py::TestX::test_one", "tests/test_b.py::test_two[a-b]"], 40);
+        let log = pytest_log(
+            &[
+                "tests/test_a.py::TestX::test_one",
+                "tests/test_b.py::test_two[a-b]",
+            ],
+            40,
+        );
         let got = drop_failing_tests(SPEC, &log, &none).unwrap();
         assert_eq!(got.tests.len(), 2);
         assert_eq!(got.omitted, 0);
-        assert!(got.spec.contains(
-            "# evidence: FAILED tests/test_a.py::TestX::test_one - AssertionError: boom"
-        ), "{}", got.spec);
+        assert!(
+            got.spec.contains(
+                "# evidence: FAILED tests/test_a.py::TestX::test_one - AssertionError: boom"
+            ),
+            "{}",
+            got.spec
+        );
         assert!(got.spec.contains(
             "export PYTEST_ADDOPTS=\"${PYTEST_ADDOPTS:-} --deselect=tests/test_a.py::TestX::test_one --deselect=tests/test_b.py::test_two[a-b]\""
         ), "{}", got.spec);
@@ -799,7 +885,8 @@ mod tests {
         ] {
             assert!(!safe_pytest_id(bad), "{bad}");
         }
-        let err = drop_failing_tests(SPEC, &pytest_log(&["tests/test_a.py"], 5), &none).unwrap_err();
+        let err =
+            drop_failing_tests(SPEC, &pytest_log(&["tests/test_a.py"], 5), &none).unwrap_err();
         assert!(err.contains("no individual failing test"), "{err}");
     }
 
@@ -809,18 +896,27 @@ mod tests {
         let err = drop_failing_tests(SPEC, collection, &none).unwrap_err();
         assert!(err.contains("dependency problem"), "{err}");
         let summary = "FAILED tests/test_a.py::test_x - ImportError: cannot import name 'y' from 'z'\n== 1 failed, 9 passed in 1s ==\n";
-        assert!(drop_failing_tests(SPEC, summary, &none).unwrap_err().contains("dependency problem"));
+        assert!(
+            drop_failing_tests(SPEC, summary, &none)
+                .unwrap_err()
+                .contains("dependency problem")
+        );
         let in_test = "E   ModuleNotFoundError: No module named 'torch'\nFAILED tests/test_a.py::test_x - assert 0\n== 1 failed, 9 passed in 1s ==\n";
         assert!(drop_failing_tests(SPEC, in_test, &none).is_err());
         let unittest = "ERROR: tests.test_a (unittest.loader._FailedTest.tests.test_a)\n";
-        assert!(drop_failing_tests(SPEC, unittest, &none).unwrap_err().contains("dependency problem"));
+        assert!(
+            drop_failing_tests(SPEC, unittest, &none)
+                .unwrap_err()
+                .contains("dependency problem")
+        );
         let broken = "ERROR tests/test_a.py - SyntaxError: bad\n== 1 error in 0.1s ==\n";
         assert!(drop_failing_tests(SPEC, broken, &none).is_err());
     }
 
     #[test]
     fn a_suite_in_which_nothing_passes_is_not_dropped() {
-        let err = drop_failing_tests(SPEC, &pytest_log(&["tests/t.py::test_a"], 0), &none).unwrap_err();
+        let err =
+            drop_failing_tests(SPEC, &pytest_log(&["tests/t.py::test_a"], 0), &none).unwrap_err();
         assert!(err.contains("no test passed"), "{err}");
     }
 
@@ -832,7 +928,9 @@ mod tests {
         let ours = got.spec.find("--deselect=").unwrap();
         assert!(export_x < ours, "{}", got.spec);
         let multiline = "%check\nexport PYTEST_ADDOPTS=\"-x \\\n  -q\"\n%pytest\n";
-        assert!(drop_failing_tests(multiline, &pytest_log(&["tests/t.py::test_a"], 5), &none).is_err());
+        assert!(
+            drop_failing_tests(multiline, &pytest_log(&["tests/t.py::test_a"], 5), &none).is_err()
+        );
     }
 
     #[test]
@@ -841,11 +939,23 @@ mod tests {
         let spec = "%check\n%ctest\n\n%files\n";
         let got = drop_failing_tests(spec, log, &none).unwrap();
         assert_eq!(got.tests.len(), 2);
-        assert!(got.spec.contains("%ctest -E '^(test_foo\\.bar|test_baz)$'"), "{}", got.spec);
-        assert!(got.spec.contains("# evidence: 3 - test_foo.bar (Failed)"), "{}", got.spec);
+        assert!(
+            got.spec.contains("%ctest -E '^(test_foo\\.bar|test_baz)$'"),
+            "{}",
+            got.spec
+        );
+        assert!(
+            got.spec.contains("# evidence: 3 - test_foo.bar (Failed)"),
+            "{}",
+            got.spec
+        );
         // A test ctest could not run is a build problem.
         let not_run = "The following tests FAILED:\n\t  1 - test_a (Not Run)\n";
-        assert!(drop_failing_tests(spec, not_run, &none).unwrap_err().contains("build problem"));
+        assert!(
+            drop_failing_tests(spec, not_run, &none)
+                .unwrap_err()
+                .contains("build problem")
+        );
         // An existing exclude is not merged blindly.
         let with_e = "%check\n%ctest -E slow\n";
         assert!(drop_failing_tests(with_e, log, &none).is_err());
@@ -858,7 +968,11 @@ mod tests {
         let have = |p: &str| p == "pkg/tests/test_codec.py";
         let got = drop_failing_tests(spec, log, &have).unwrap();
         assert!(got.spec.contains("def test_roundtrip\\("), "{}", got.spec);
-        assert!(got.spec.contains("/^class CodecTest\\b/,/^class /"), "{}", got.spec);
+        assert!(
+            got.spec.contains("/^class CodecTest\\b/,/^class /"),
+            "{}",
+            got.spec
+        );
         assert!(got.spec.contains("pkg/tests/test_codec.py"), "{}", got.spec);
         assert!(!got.spec.contains("test_gone"), "{}", got.spec);
         let prep = got.spec.split("%prep\n").nth(1).unwrap();
@@ -877,7 +991,9 @@ mod tests {
     const INSTALLED_LOG: &str = "[  20s] FAIL: test_roundtrip (pkg.tests.test_codec.CodecTest.test_roundtrip)\n[  20s] ERROR: test_other (pkg.tests.test_codec.CodecTest)\n";
 
     fn installed_spec(check: &str) -> String {
-        format!("Name: python-pkg\nBuildRequires:  %{{python_module pip}}\nBuildRequires:  python-rpm-macros\n\n%prep\n%autosetup\n\n%build\n%pyproject_wheel\n\n%check\n{check}\n\n%files\n")
+        format!(
+            "Name: python-pkg\nBuildRequires:  %{{python_module pip}}\nBuildRequires:  python-rpm-macros\n\n%prep\n%autosetup\n\n%build\n%pyproject_wheel\n\n%check\n{check}\n\n%files\n"
+        )
     }
 
     #[test]
@@ -885,9 +1001,24 @@ mod tests {
         let spec = installed_spec("%python_exec -m unittest -v pkg.tests");
         let got = drop_failing_tests(&spec, INSTALLED_LOG, &none).unwrap();
         assert_eq!(got.tests.len(), 2);
-        assert!(got.spec.contains("%python_exec -m pytest -v --pyargs pkg.tests"), "{}", got.spec);
-        assert!(got.spec.contains("BuildRequires:  %{python_module pytest}"), "{}", got.spec);
-        assert!(got.spec.contains("# evidence: FAIL: test_roundtrip (pkg.tests.test_codec.CodecTest.test_roundtrip)"), "{}", got.spec);
+        assert!(
+            got.spec
+                .contains("%python_exec -m pytest -v --pyargs pkg.tests"),
+            "{}",
+            got.spec
+        );
+        assert!(
+            got.spec.contains("BuildRequires:  %{python_module pytest}"),
+            "{}",
+            got.spec
+        );
+        assert!(
+            got.spec.contains(
+                "# evidence: FAIL: test_roundtrip (pkg.tests.test_codec.CodecTest.test_roundtrip)"
+            ),
+            "{}",
+            got.spec
+        );
         assert!(got.spec.contains("-k 'not (test_codec and CodecTest and test_roundtrip) and not (test_codec and CodecTest and test_other)'"), "{}", got.spec);
         let check = got.spec.split("%check\n").nth(1).unwrap();
         assert!(check.find("-k 'not").unwrap() < check.find("-m pytest").unwrap());
@@ -895,7 +1026,11 @@ mod tests {
         assert!(got.spec.find("python_module pytest").unwrap() < got.spec.find("%prep").unwrap());
         assert_eq!(dropped_count(&got.spec), 2);
         // The same tests again are refused: the drop did not take effect.
-        assert!(drop_failing_tests(&got.spec, INSTALLED_LOG, &none).unwrap_err().contains("already dropped"));
+        assert!(
+            drop_failing_tests(&got.spec, INSTALLED_LOG, &none)
+                .unwrap_err()
+                .contains("already dropped")
+        );
     }
 
     #[test]
@@ -906,7 +1041,13 @@ mod tests {
         let more = "FAIL: test_new (pkg.tests.test_io.IoTest.test_new)\n";
         let second = drop_failing_tests(&first.spec, more, &none).unwrap();
         assert_eq!(second.spec.matches("-k '").count(), 1, "{}", second.spec);
-        assert!(second.spec.contains("and not (test_io and IoTest and test_new)'"), "{}", second.spec);
+        assert!(
+            second
+                .spec
+                .contains("and not (test_io and IoTest and test_new)'"),
+            "{}",
+            second.spec
+        );
         assert!(second.spec.contains("test_roundtrip"), "{}", second.spec);
         assert_eq!(second.spec.matches("python_module pytest").count(), 1);
     }
@@ -916,10 +1057,18 @@ mod tests {
         let spec = installed_spec("%pytest --pyargs pkg");
         let got = drop_failing_tests(&spec, INSTALLED_LOG, &none).unwrap();
         assert!(got.spec.contains("%pytest --pyargs pkg"), "{}", got.spec);
-        assert!(got.spec.contains("export PYTEST_ADDOPTS=\"${PYTEST_ADDOPTS:-} -k 'not (test_codec"), "{}", got.spec);
+        assert!(
+            got.spec
+                .contains("export PYTEST_ADDOPTS=\"${PYTEST_ADDOPTS:-} -k 'not (test_codec"),
+            "{}",
+            got.spec
+        );
         assert!(got.spec.contains("python_module pytest"), "{}", got.spec);
         // A spec that already requires pytest gets no second one.
-        let with = spec.replace("python-rpm-macros", "python-rpm-macros\nBuildRequires:  %{python_module pytest}");
+        let with = spec.replace(
+            "python-rpm-macros",
+            "python-rpm-macros\nBuildRequires:  %{python_module pytest}",
+        );
         let got = drop_failing_tests(&with, INSTALLED_LOG, &none).unwrap();
         assert_eq!(got.spec.matches("python_module pytest").count(), 1);
     }
@@ -931,7 +1080,10 @@ mod tests {
             ("make check", "through `make`"),
             ("echo nothing", "no unittest or pytest invocation"),
             ("%python_exec -m unittest -p x pkg", "no pytest equivalent"),
-            ("%{python_expand $python -m unittest pkg}", "shell or macro syntax"),
+            (
+                "%{python_expand $python -m unittest pkg}",
+                "shell or macro syntax",
+            ),
             ("%pytest -k 'not slow'", "own `-k`"),
         ] {
             let err = drop_failing_tests(&installed_spec(check), INSTALLED_LOG, &none).unwrap_err();
@@ -940,7 +1092,11 @@ mod tests {
         }
         // No spelling of pytest's BuildRequires known.
         let bare = "Name: x\n\n%prep\n%autosetup\n\n%check\n%python_exec -m unittest\n";
-        assert!(drop_failing_tests(bare, INSTALLED_LOG, &none).unwrap_err().contains("BuildRequires"));
+        assert!(
+            drop_failing_tests(bare, INSTALLED_LOG, &none)
+                .unwrap_err()
+                .contains("BuildRequires")
+        );
     }
 
     #[test]
@@ -951,7 +1107,11 @@ mod tests {
         let got = drop_failing_tests(&spec, log, &have).unwrap();
         assert_eq!(got.tests.len(), 2);
         assert!(got.spec.contains("sed -i -E '/^class A"), "{}", got.spec);
-        assert!(got.spec.contains("not (test_out and B and test_b)"), "{}", got.spec);
+        assert!(
+            got.spec.contains("not (test_out and B and test_b)"),
+            "{}",
+            got.spec
+        );
         // The runner cannot take it: only the source one is dropped, the other is omitted.
         let spec = installed_spec("tox");
         let got = drop_failing_tests(&spec, log, &have).unwrap();

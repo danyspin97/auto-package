@@ -94,7 +94,10 @@ fn human_name(name: &str) -> String {
 
 /// `text` for a spec tag or description: one line, `%` doubled.
 fn spec_text(text: &str) -> String {
-    text.replace('%', "%%").split_whitespace().collect::<Vec<_>>().join(" ")
+    text.replace('%', "%%")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A name that is safe to put unquoted into a shell command and a macro-free
@@ -102,7 +105,9 @@ fn spec_text(text: &str) -> String {
 fn is_plain_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
 }
 
 /// `13.4.3` -> `("13", "4")`.
@@ -419,9 +424,7 @@ fn devel_requires(key: &str) -> &'static [&'static str] {
     match key {
         "libcusolver" => &["cuda_cudart", "libcublas", "libcusparse"],
         "libcublas" | "libcufft" | "libcurand" | "libcusparse" | "libcufile" | "libnvjpeg"
-        | "libnpp" | "cuda_cupti" | "cudnn" | "libcusparse_lt" | "libnvshmem" => {
-            &["cuda_cudart"]
-        }
+        | "libnpp" | "cuda_cupti" | "cudnn" | "libcusparse_lt" | "libnvshmem" => &["cuda_cudart"],
         _ => &[],
     }
 }
@@ -468,10 +471,12 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
     let owners = dir_owners(&members);
     let libs = has_shared_libs(&layout);
     let arch = &input.arch;
-    let rdma_lib = layout
-        .members
-        .iter()
-        .any(|m| m.dest.rsplit('/').next().is_some_and(|f| f.starts_with("libcufile_rdma.so")));
+    let rdma_lib = layout.members.iter().any(|m| {
+        m.dest
+            .rsplit('/')
+            .next()
+            .is_some_and(|f| f.starts_with("libcufile_rdma.so"))
+    });
 
     let mut s = String::new();
     s.push_str(&format!(
@@ -958,7 +963,10 @@ bin/__nvcc_device_query
         let spec = redist_component_spec(&cudart());
         assert!(spec.contains("\n%ldconfig_scriptlets\n"), "{spec}");
         // The conf file is the filesystem package's: required, never shipped.
-        assert!(spec.contains("\nRequires:       cuda-13-4-filesystem\n"), "{spec}");
+        assert!(
+            spec.contains("\nRequires:       cuda-13-4-filesystem\n"),
+            "{spec}"
+        );
         assert!(!spec.contains("ld.so.conf.d"), "{spec}");
         assert!(
             spec.contains(&format!(
@@ -981,7 +989,10 @@ bin/__nvcc_device_query
         i.name = "cuBLAS 100% %{expand:x}".into();
         i.license = "EULA %{_bindir}".into();
         let spec = redist_component_spec(&i);
-        assert!(spec.contains("Summary:        NVIDIA cuBLAS 100%% %%{expand:x}\n"), "{spec}");
+        assert!(
+            spec.contains("Summary:        NVIDIA cuBLAS 100%% %%{expand:x}\n"),
+            "{spec}"
+        );
         assert!(spec.contains("EULA %%{_bindir} licensed archive"), "{spec}");
         // A member name the shell would act on makes the archive unusable.
         let files: Vec<String> = ["top/lib/libx.so.1", "top/--help/y", "top/LICENSE"]
@@ -989,7 +1000,10 @@ bin/__nvcc_device_query
             .map(|s| s.to_string())
             .collect();
         assert!(analyse(&files).is_none());
-        let files: Vec<String> = ["to p/lib/libx.so.1"].iter().map(|s| s.to_string()).collect();
+        let files: Vec<String> = ["to p/lib/libx.so.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert!(analyse(&files).is_none());
         let files: Vec<String> = ["top/lib/libx.so.1".to_string()].to_vec();
         assert!(analyse(&files).is_some());
@@ -1004,10 +1018,16 @@ bin/__nvcc_device_query
     #[test]
     fn the_filesystem_package_owns_the_one_conf_file() {
         let spec = redist_filesystem_spec("13.4.3", "13.4.3");
-        assert!(spec.contains("Name:           cuda-13-4-filesystem\n"), "{spec}");
+        assert!(
+            spec.contains("Name:           cuda-13-4-filesystem\n"),
+            "{spec}"
+        );
         assert!(spec.contains("BuildArch:      noarch\n"), "{spec}");
         assert!(spec.contains("Version:        13.4.3\n"), "{spec}");
-        assert!(!spec.contains("Source0") && !spec.contains("%setup"), "{spec}");
+        assert!(
+            !spec.contains("Source0") && !spec.contains("%setup"),
+            "{spec}"
+        );
         assert!(
             spec.contains("echo %{cuda_prefix}/lib64 > %{buildroot}%{_sysconfdir}/ld.so.conf.d/cuda-13-4.conf\n"),
             "{spec}"
@@ -1019,7 +1039,11 @@ bin/__nvcc_device_query
         assert!(!spec.contains("TODO"), "{spec}");
         // The package a library component requires is the one named here.
         assert_eq!(filesystem_package("13.0"), "cuda-13-0-filesystem");
-        assert!(redist_filesystem_rpmlintrc().lines().all(|l| l.starts_with('#')));
+        assert!(
+            redist_filesystem_rpmlintrc()
+                .lines()
+                .all(|l| l.starts_with('#'))
+        );
     }
 
     #[test]
@@ -1196,7 +1220,11 @@ samples/cufile_sample_001.cc
             assert!(dv.contains(&path.as_str()), "{f} in devel: {dv:?}");
             assert!(!rt.contains(&path.as_str()), "{f} in runtime: {rt:?}");
         }
-        for f in ["etc/cufile.json", "lib64/libcufile.so.0", "lib64/libcufile_rdma.so.1"] {
+        for f in [
+            "etc/cufile.json",
+            "lib64/libcufile.so.0",
+            "lib64/libcufile_rdma.so.1",
+        ] {
             let path = format!("{p}{f}");
             assert!(rt.contains(&path.as_str()), "{f}: {rt:?}");
         }
@@ -1205,7 +1233,10 @@ samples/cufile_sample_001.cc
             "{spec}"
         );
         // The RDMA plug-in's host libraries are Recommends, not Requires.
-        assert!(spec.contains("|^%{cuda_prefix}/lib64/libcufile_rdma\\.so\n"), "{spec}");
+        assert!(
+            spec.contains("|^%{cuda_prefix}/lib64/libcufile_rdma\\.so\n"),
+            "{spec}"
+        );
         for r in ["libmlx5-1", "librdmacm1", "libnuma1"] {
             assert!(spec.contains(&format!("Recommends:     {r}\n")), "{spec}");
         }
@@ -1226,8 +1257,15 @@ samples/cufile_sample_001.cc
             .split("%description devel")
             .next()
             .unwrap();
-        for dep in ["cuda-cudart-devel", "cuda-cublas-devel", "cuda-cusparse-devel"] {
-            assert!(devel.contains(&format!("Requires:       {dep}\n")), "{devel}");
+        for dep in [
+            "cuda-cudart-devel",
+            "cuda-cublas-devel",
+            "cuda-cusparse-devel",
+        ] {
+            assert!(
+                devel.contains(&format!("Requires:       {dep}\n")),
+                "{devel}"
+            );
         }
         // cudart includes nothing of another component.
         let spec = redist_component_spec(&cudart());

@@ -754,7 +754,10 @@ mod tests {
             ..Evidence::default()
         };
         for dirty in [false, true] {
-            let s = resolve(&entry("broken", Some("no source uploaded"), dirty), &confirm);
+            let s = resolve(
+                &entry("broken", Some("no source uploaded"), dirty),
+                &confirm,
+            );
             assert_eq!(s, BuildStatus::Unknown("stale: broken".into()));
             assert_eq!(accept_unconfirmed(&s), None);
         }
@@ -765,7 +768,10 @@ mod tests {
         );
         // Any other broken reason is a real verdict.
         assert_eq!(
-            resolve(&entry("broken", Some("bad build configuration"), false), &confirm),
+            resolve(
+                &entry("broken", Some("bad build configuration"), false),
+                &confirm
+            ),
             BuildStatus::Broken
         );
     }
@@ -1064,7 +1070,9 @@ mod tests {
     #[test]
     fn stale_and_unconfirmed_await_a_new_revision() {
         assert!(awaiting_new_revision(&unknown("stale: failed")));
-        assert!(awaiting_new_revision(&unknown("stale: outdated (was: blocked)")));
+        assert!(awaiting_new_revision(&unknown(
+            "stale: outdated (was: blocked)"
+        )));
         assert!(awaiting_new_revision(&unknown("unconfirmed: broken")));
         assert!(!awaiting_new_revision(&unknown("finished")));
         assert!(!awaiting_new_revision(&unknown("no results")));
@@ -1077,7 +1085,11 @@ mod tests {
         // The previous revision's `failed` is what a clean repository's table
         // shows right after a commit: it must not become the new verdict.
         for api in ["stale: failed", "stale: succeeded", "unconfirmed: broken"] {
-            for table in [BuildStatus::Failed, BuildStatus::Succeeded, BuildStatus::Broken] {
+            for table in [
+                BuildStatus::Failed,
+                BuildStatus::Succeeded,
+                BuildStatus::Broken,
+            ] {
                 assert_eq!(cross_check(&unknown(api), &table), CrossCheck::Ignore);
             }
         }
@@ -1109,7 +1121,10 @@ mod tests {
             CrossCheck::Adopt
         );
         assert_eq!(
-            cross_check(&BuildStatus::Blocked, &unknown("stale: outdated (was: blocked)")),
+            cross_check(
+                &BuildStatus::Blocked,
+                &unknown("stale: outdated (was: blocked)")
+            ),
             CrossCheck::Adopt
         );
         assert_eq!(
@@ -1135,14 +1150,20 @@ mod tests {
   </result>
 </resultlist>"#;
         let entries = parse_results(xml);
-        assert_eq!(entry_in(&entries, "r", "a", "foo").unwrap().code, "succeeded");
+        assert_eq!(
+            entry_in(&entries, "r", "a", "foo").unwrap().code,
+            "succeeded"
+        );
         assert_eq!(entry_in(&entries, "r", "b", "foo").unwrap().code, "blocked");
         assert!(entry_in(&entries, "r", "a", "foo:mini").is_some());
         assert!(entry_in(&entries, "r", "c", "foo").is_none());
         let flavors = flavors_in(&entries, "r", "a", "foo");
         assert_eq!(flavors.len(), 1);
         assert_eq!(flavors[0].pkg, "foo:mini");
-        assert_eq!(find_entry(xml, "r", "a", "foo"), entry_in(&entries, "r", "a", "foo").cloned());
+        assert_eq!(
+            find_entry(xml, "r", "a", "foo"),
+            entry_in(&entries, "r", "a", "foo").cloned()
+        );
         assert_eq!(flavor_entries(xml, "r", "a", "foo"), flavors);
     }
 }

@@ -1377,9 +1377,14 @@ pub fn tag_archive_url(repo_url: &str, version: &str) -> Option<String> {
     let tags = get_repo_tags(repo_url).ok()?;
     let tag = find_matching_tag(&tags, version, &parsed.repo_name)?;
     let base = parsed.canonical_https();
-    let is_gitlab = crate::http::host_of(&base)
-        .is_some_and(|h| h == "gitlab.com" || h.starts_with("gitlab."));
-    Some(tag_archive_url_for(&base, &parsed.repo_name, is_gitlab, &tag))
+    let is_gitlab =
+        crate::http::host_of(&base).is_some_and(|h| h == "gitlab.com" || h.starts_with("gitlab."));
+    Some(tag_archive_url_for(
+        &base,
+        &parsed.repo_name,
+        is_gitlab,
+        &tag,
+    ))
 }
 
 #[cfg(test)]
@@ -2108,7 +2113,10 @@ mod tests {
             Some("https://github.com/psf/requests/archive/refs/tags/v2.31.0.tar.gz")
         );
         // No such version: no guess.
-        assert_eq!(tag_archive_url("https://github.com/pallets/flask", "0.0.0.0.1"), None);
+        assert_eq!(
+            tag_archive_url("https://github.com/pallets/flask", "0.0.0.0.1"),
+            None
+        );
         // GitLab's layout (`-/archive/<tag>/<repo>-<tag>.tar.gz`): whichever tag
         // the API lists first must be found again by its own version.
         let repo = "https://gitlab.com/gitlab-org/cli";
@@ -2116,10 +2124,16 @@ mod tests {
         let tag = tags.first().expect("gitlab-org/cli has tags");
         let version = version_from_tag(tag, "cli");
         let url = tag_archive_url(repo, &version).unwrap_or_else(|| panic!("{tag} -> {version}"));
-        assert!(url.starts_with("https://gitlab.com/gitlab-org/cli/-/archive/"), "{url}");
+        assert!(
+            url.starts_with("https://gitlab.com/gitlab-org/cli/-/archive/"),
+            "{url}"
+        );
         assert!(url.ends_with(".tar.gz"), "{url}");
         // The URL it hands out exists (GET, headers only: the body is dropped).
-        let resp = crate::http::agent(crate::http::API_TIMEOUT, 5).get(&url).call().unwrap();
+        let resp = crate::http::agent(crate::http::API_TIMEOUT, 5)
+            .get(&url)
+            .call()
+            .unwrap();
         assert_eq!(resp.status().as_u16(), 200, "{url}");
     }
 }

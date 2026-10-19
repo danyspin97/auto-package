@@ -1,7 +1,7 @@
 # cuda-cusparse notes
 
 ## Test changes
-- No %check section. The archive holds prebuilt NVIDIA binaries with no test suite, so a comment stands where %check would go. rpmlint reports the missing section as a warning only.
+- No %check section. The archive holds prebuilt NVIDIA binaries with no test suite, so a comment stands where %check would go. rpmlint reports the missing section as a warning only, and the build does not fail on it.
 
 Checked against 12.8.6.72 on openSUSE_Tumbleweed, x86_64.
 
@@ -12,6 +12,6 @@ Checked against 12.8.6.72 on openSUSE_Tumbleweed, x86_64.
 Checked against 12.8.6.72 on openSUSE_Tumbleweed, x86_64.
 
 ## Failure history
-- Build failed in rpmlint, not in %check, on the two errors above. Fixed by stripping the RUNPATH and moving the Fortran source to devel.
+- Build failed in rpmlint, not in %check, on the two errors above. Fixed by stripping the RUNPATH and moving the Fortran source to devel; the build passes with both fixes.
 
 Checked against 12.8.6.72 on openSUSE_Tumbleweed, x86_64.

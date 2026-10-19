@@ -400,7 +400,12 @@ static SPLIT_TREE_SUBMODULE: LazyLock<Regex> = LazyLock::new(|| {
 /// Failures that have one known recipe, each seen in a real run: the cause and
 /// the exact fix, so the first attempt is right.
 fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
-    let find = |re: &Regex| haystack.iter().find(|l| re.is_match(l)).map(|l| l.trim().chars().take(300).collect::<String>());
+    let find = |re: &Regex| {
+        haystack
+            .iter()
+            .find(|l| re.is_match(l))
+            .map(|l| l.trim().chars().take(300).collect::<String>())
+    };
     // scikit-build-core `wheel.py-api = "cp38"` with Cython 3.3 (python-tilelang).
     if let Some(line) = find(&CYTHON_LIMITED_API) {
         let c = CYTHON_LIMITED_API.captures(&line)?;
@@ -421,12 +426,16 @@ fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                  an older Cython."
             ),
             evidence: vec![line],
-            kind: CauseKind::KnownRecipe { id: "cython-limited-api" },
+            kind: CauseKind::KnownRecipe {
+                id: "cython-limited-api",
+            },
         });
     }
     // torchcodec's wheel-state licence guard.
     if let Some(line) = find(&CMAKE_LICENCE_GUARD)
-        && haystack.iter().any(|l| l.contains("FATAL_ERROR") || l.contains("CMake Error"))
+        && haystack
+            .iter()
+            .any(|l| l.contains("FATAL_ERROR") || l.contains("CMake Error"))
     {
         return Some(ProbableCause {
             summary: "An upstream CMake licence guard stops the wheel build until a variable \
@@ -441,7 +450,9 @@ fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                      S3 download option (no network) and never return `blocked`."
                 .to_string(),
             evidence: vec![line],
-            kind: CauseKind::KnownRecipe { id: "cmake-licence-guard" },
+            kind: CauseKind::KnownRecipe {
+                id: "cmake-licence-guard",
+            },
         });
     }
     // A submodule of the CUTLASS DSL missing although `cutlass` imports: the
@@ -462,7 +473,9 @@ fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                      wait for the rebuilt siblings."
                 .to_string(),
             evidence: vec![line],
-            kind: CauseKind::KnownRecipe { id: "cutlass-split-tree" },
+            kind: CauseKind::KnownRecipe {
+                id: "cutlass-split-tree",
+            },
         });
     }
     None
@@ -729,7 +742,12 @@ mod tests {
             "error: Bad exit status from /var/tmp/rpm-tmp.abc (%build)",
         ]);
         let c = detect(&log, "tilelang", "").expect("recognised");
-        assert_eq!(c.kind, CauseKind::KnownRecipe { id: "cython-limited-api" });
+        assert_eq!(
+            c.kind,
+            CauseKind::KnownRecipe {
+                id: "cython-limited-api"
+            }
+        );
         assert!(c.action.contains("cp39"), "{}", c.action);
         assert!(c.action.contains("sed -i"), "{}", c.action);
     }
@@ -744,7 +762,12 @@ mod tests {
             "error: Bad exit status from /var/tmp/rpm-tmp.abc (%build)",
         ]);
         let c = detect(&log, "torchcodec", "").expect("recognised");
-        assert_eq!(c.kind, CauseKind::KnownRecipe { id: "cmake-licence-guard" });
+        assert_eq!(
+            c.kind,
+            CauseKind::KnownRecipe {
+                id: "cmake-licence-guard"
+            }
+        );
         assert!(c.action.contains("convention 78"), "{}", c.action);
     }
 
@@ -757,7 +780,12 @@ mod tests {
             "error: Bad exit status from /var/tmp/rpm-tmp.abc (%check)",
         ]);
         let c = detect(&log, "tokenspeed_mla", "").expect("recognised");
-        assert_eq!(c.kind, CauseKind::KnownRecipe { id: "cutlass-split-tree" });
+        assert_eq!(
+            c.kind,
+            CauseKind::KnownRecipe {
+                id: "cutlass-split-tree"
+            }
+        );
         assert!(c.action.contains("%{python_sitelib}"), "{}", c.action);
     }
 

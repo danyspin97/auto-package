@@ -8,9 +8,5 @@
 Checked against 1.15.1.6 on openSUSE_Tumbleweed, x86_64.
 
 ## Workarounds
-- The headers shipped in the wheel are left out of the package, and their RECORD entry is dropped from %files. This is a packaging choice, not a build fix.
-Checked against 1.15.1.6 on openSUSE_Tumbleweed, x86_64.
-
-## Failure history
-- No build failures recorded. The build succeeded on the first attempt. Runtime loading of the packaged libraries was not checked.
+- The headers shipped in the upstream wheel are left out of the package, and their RECORD entries are dropped from %files. This is a packaging choice, not a build fix.
 Checked against 1.15.1.6 on openSUSE_Tumbleweed, x86_64.

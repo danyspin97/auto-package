@@ -121,7 +121,9 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
     // directory the next time it runs the package.
     let state_has = |f: &str| ws.dir().join(f).is_file();
     let switched = state_has(&format!("{name}.spec.pre-wheel-switch"))
-        || checkout.join(format!("{name}.spec.pre-wheel-switch")).is_file()
+        || checkout
+            .join(format!("{name}.spec.pre-wheel-switch"))
+            .is_file()
         || checkout.join("wheel-origin.txt").is_file();
     if wheel_spec && switched && !state_has("wheel-origin.txt") {
         out.push(format!(
@@ -218,18 +220,35 @@ mod tests {
             s.last_outcome = Some("success".into());
             s.last_built_version = Some("1.0".into());
         });
-        write(&state_root, "python-b", |s| s.last_outcome = Some("failed".into()));
+        write(&state_root, "python-b", |s| {
+            s.last_outcome = Some("failed".into())
+        });
         let statuses = HashMap::from([
             ("python-a".to_string(), BuildStatus::Failed),
             ("Python-B".to_string(), BuildStatus::Succeeded),
         ]);
         let found = run(&state_root, &checkouts, || Some(statuses));
         let all = found.join("\n");
-        assert!(all.contains("python-a: the checkout has file(s)") && all.contains("stray.bin"), "{all}");
-        assert!(all.contains("python-a: state.json records a successful build of 1.0"), "{all}");
-        assert!(all.contains("python-a: the spec was switched to an upstream wheel"), "{all}");
-        assert!(all.contains("python-a: state.json says it built, but OBS shows Failed"), "{all}");
-        assert!(all.contains("python-b: state.json says failed, but OBS shows it built"), "{all}");
+        assert!(
+            all.contains("python-a: the checkout has file(s)") && all.contains("stray.bin"),
+            "{all}"
+        );
+        assert!(
+            all.contains("python-a: state.json records a successful build of 1.0"),
+            "{all}"
+        );
+        assert!(
+            all.contains("python-a: the spec was switched to an upstream wheel"),
+            "{all}"
+        );
+        assert!(
+            all.contains("python-a: state.json says it built, but OBS shows Failed"),
+            "{all}"
+        );
+        assert!(
+            all.contains("python-b: state.json says failed, but OBS shows it built"),
+            "{all}"
+        );
     }
 
     #[test]
@@ -244,25 +263,39 @@ mod tests {
         )
         .unwrap();
         std::fs::write(checkouts.join("python-a/a-1.0.tar.gz"), "x").unwrap();
-        write(&state_root, "python-a", |s| s.last_outcome = Some("failed".into()));
+        write(&state_root, "python-a", |s| {
+            s.last_outcome = Some("failed".into())
+        });
         std::fs::create_dir_all(state_root.join("python-b")).unwrap();
         std::fs::write(state_root.join("python-b/state.json"), "{not json").unwrap();
         let all = run(&state_root, &checkouts, || None).join("\n");
         assert!(
-            all.contains("python-a: the spec says 2.0 but the checkout's source archive(s) are a-1.0.tar.gz"),
+            all.contains(
+                "python-a: the spec says 2.0 but the checkout's source archive(s) are a-1.0.tar.gz"
+            ),
             "{all}"
         );
         assert!(all.contains("python-b: state.json cannot be read"), "{all}");
         // The matching archive is no finding.
         std::fs::write(checkouts.join("python-a/a-2.0.tar.gz"), "x").unwrap();
-        assert!(!run(&state_root, &checkouts, || None).join("\n").contains("python-a: the spec says"));
+        assert!(
+            !run(&state_root, &checkouts, || None)
+                .join("\n")
+                .contains("python-a: the spec says")
+        );
     }
 
     #[test]
     fn archive_names_match_the_spec_version_and_wheel_leftovers_are_not_noise() {
         assert!(names_version("a-1.0.tar.gz", "1.0"));
-        assert!(names_version("libcublas-linux-x86_64-13.8.0.4-archive.tar.xz", "13.8.0.4"));
-        assert!(names_version("cudnn-linux-x86_64-9.27.0.42_cuda13-archive.tar.xz", "9.27.0.42"));
+        assert!(names_version(
+            "libcublas-linux-x86_64-13.8.0.4-archive.tar.xz",
+            "13.8.0.4"
+        ));
+        assert!(names_version(
+            "cudnn-linux-x86_64-9.27.0.42_cuda13-archive.tar.xz",
+            "9.27.0.42"
+        ));
         assert!(names_version("v1.0.zip", "1.0"));
         assert!(!names_version("a-1.0.1.tar.gz", "1.0"));
         assert!(!names_version("a-11.0.tar.gz", "1.0.1"));
@@ -276,14 +309,24 @@ mod tests {
             "Name: python-w\nVersion: 1.0\nSource0: w-1.0-py3-none-any.whl\n",
         )
         .unwrap();
-        for f in ["w-1.0.tar.gz", "wheel-origin.txt", "python-w.spec.pre-wheel-switch", "stray.bin"] {
+        for f in [
+            "w-1.0.tar.gz",
+            "wheel-origin.txt",
+            "python-w.spec.pre-wheel-switch",
+            "stray.bin",
+        ] {
             std::fs::write(dir.join(f), "x").unwrap();
         }
-        write(&state_root, "python-w", |s| s.last_outcome = Some("failed".into()));
+        write(&state_root, "python-w", |s| {
+            s.last_outcome = Some("failed".into())
+        });
         let found = run(&state_root, &checkouts, || None).join("\n");
         // One finding for the leftovers a wheel switch makes, one for the stray file.
         assert!(found.contains("not committed: stray.bin"), "{found}");
-        assert!(!found.contains("wheel-origin.txt") || found.contains("wheel-origin.txt is missing"), "{found}");
+        assert!(
+            !found.contains("wheel-origin.txt") || found.contains("wheel-origin.txt is missing"),
+            "{found}"
+        );
         assert!(!found.contains("w-1.0.tar.gz"), "{found}");
     }
 

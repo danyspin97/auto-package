@@ -345,7 +345,11 @@ mod tests {
     fn wheel_workspace(tmp: &Path, stamp_name: &str) -> Workspace {
         let ws = Workspace::open(tmp, "python-foo").unwrap();
         fs::create_dir_all(ws.sdist_dir().join("foo.dist-info")).unwrap();
-        fs::write(ws.sdist_dir().join("foo.dist-info/METADATA"), vec![0u8; 2048]).unwrap();
+        fs::write(
+            ws.sdist_dir().join("foo.dist-info/METADATA"),
+            vec![0u8; 2048],
+        )
+        .unwrap();
         let tarball = tmp.join(stamp_name);
         fs::write(&tarball, b"abc").unwrap();
         ws.mark_sdist_extracted(&tarball).unwrap();
@@ -461,7 +465,10 @@ mod tests {
     fn the_start_warning_names_work_dir_below_ten_gib_only() {
         let dir = Path::new("/w");
         let msg = low_space_message(dir, 4 * GIB, 3 * GIB).unwrap();
-        assert!(msg.contains("--work-dir") && msg.contains("4.0 GiB"), "{msg}");
+        assert!(
+            msg.contains("--work-dir") && msg.contains("4.0 GiB"),
+            "{msg}"
+        );
         assert!(low_space_message(dir, 10 * GIB, 3 * GIB).is_none());
         assert!(low_space_message(dir, GIB, 0).is_none());
     }

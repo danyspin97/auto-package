@@ -120,7 +120,10 @@ fn entry_path(entry: &str) -> String {
         }
         token = rest[word_end..].trim_start();
     }
-    token.trim_start_matches('/').trim_end_matches('/').to_string()
+    token
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn owns_installed(file: &str, path: &str) -> bool {
@@ -217,8 +220,14 @@ pub fn check(cond: &FilesCondition, packages: &[PackageFiles], main: &str) -> Ve
     } else {
         Verdict::Violated(format!(
             "{path} is shipped by {}, not by {}",
-            owners.iter().map(|p| display(p)).collect::<Vec<_>>().join(", "),
-            cond.package.as_deref().unwrap_or("a package that is allowed")
+            owners
+                .iter()
+                .map(|p| display(p))
+                .collect::<Vec<_>>()
+                .join(", "),
+            cond.package
+                .as_deref()
+                .unwrap_or("a package that is allowed")
         ))
     }
 }
@@ -239,8 +248,17 @@ pub fn spec_packages(spec: &str) -> Vec<PackageFiles> {
                 .map_or(args, |r| r.trim())
                 .replace("%{python_files", "")
                 .replace('}', "");
-            let name = args.split_whitespace().next().unwrap_or("").trim().to_string();
-            let name = if name.starts_with('-') { String::new() } else { name };
+            let name = args
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let name = if name.starts_with('-') {
+                String::new()
+            } else {
+                name
+            };
             let idx = out.iter().position(|p| p.name == name).unwrap_or_else(|| {
                 out.push(PackageFiles {
                     name,
@@ -256,8 +274,18 @@ pub fn spec_packages(spec: &str) -> Vec<PackageFiles> {
         if t.starts_with('%') && !t.starts_with("%exclude") {
             let first = t.split_whitespace().next().unwrap_or("");
             let section = [
-                "%changelog", "%prep", "%build", "%install", "%check", "%package", "%description",
-                "%pre", "%post", "%preun", "%postun", "%generate_buildrequires",
+                "%changelog",
+                "%prep",
+                "%build",
+                "%install",
+                "%check",
+                "%package",
+                "%description",
+                "%pre",
+                "%post",
+                "%preun",
+                "%postun",
+                "%generate_buildrequires",
             ];
             if section.contains(&first) {
                 current = None;
@@ -303,8 +331,14 @@ mod tests {
     #[test]
     fn a_path_in_the_main_package_and_not_devel_is_satisfied() {
         let pkgs = [
-            rpm("python313-torch", &[&format!("{SP}/torch/utils/benchmark/utils/timer.py")]),
-            rpm("python313-torch-devel", &[&format!("{SP}/torch/include/x.h")]),
+            rpm(
+                "python313-torch",
+                &[&format!("{SP}/torch/utils/benchmark/utils/timer.py")],
+            ),
+            rpm(
+                "python313-torch-devel",
+                &[&format!("{SP}/torch/include/x.h")],
+            ),
         ];
         let c = cond("torch/utils/benchmark/utils", Some("python-torch"));
         assert_eq!(check(&c, &pkgs, "python-torch"), Verdict::Satisfied);
@@ -314,7 +348,10 @@ mod tests {
     fn the_devel_split_is_a_violation_with_the_package_named() {
         let pkgs = [
             rpm("python313-torch", &[&format!("{SP}/torch/__init__.py")]),
-            rpm("python313-torch-devel", &[&format!("{SP}/torch/utils/benchmark/utils/timer.py")]),
+            rpm(
+                "python313-torch-devel",
+                &[&format!("{SP}/torch/utils/benchmark/utils/timer.py")],
+            ),
         ];
         let c = cond("torch/utils/benchmark/utils", None);
         match check(&c, &pkgs, "python-torch") {
@@ -322,13 +359,24 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // Absent from every package.
-        let none = [rpm("python313-torch", &[&format!("{SP}/torch/__init__.py")])];
-        assert!(matches!(check(&c, &none, "python-torch"), Verdict::Violated(w) if w.contains("no package ships")));
+        let none = [rpm(
+            "python313-torch",
+            &[&format!("{SP}/torch/__init__.py")],
+        )];
+        assert!(
+            matches!(check(&c, &none, "python-torch"), Verdict::Violated(w) if w.contains("no package ships"))
+        );
         // Nothing to check against.
         assert_eq!(check(&c, &[], "python-torch"), Verdict::Unknown);
         // A prefix lookalike is not the path.
-        let look = [rpm("python313-torch", &[&format!("{SP}/torch/utils/benchmark/utils2/a.py")])];
-        assert!(matches!(check(&c, &look, "python-torch"), Verdict::Violated(_)));
+        let look = [rpm(
+            "python313-torch",
+            &[&format!("{SP}/torch/utils/benchmark/utils2/a.py")],
+        )];
+        assert!(matches!(
+            check(&c, &look, "python-torch"),
+            Verdict::Violated(_)
+        ));
     }
 
     #[test]
@@ -341,7 +389,9 @@ mod tests {
         assert_eq!(check(&main, &pkgs, "python-torch"), Verdict::Satisfied);
         // The excluded include tree belongs to devel, which the condition forbids.
         let inc = cond("torch/include", None);
-        assert!(matches!(check(&inc, &pkgs, "python-torch"), Verdict::Violated(w) if w.contains("devel")));
+        assert!(
+            matches!(check(&inc, &pkgs, "python-torch"), Verdict::Violated(w) if w.contains("devel"))
+        );
     }
 
     #[test]
@@ -349,7 +399,11 @@ mod tests {
         let spec = "%files\n%dir %{python_sitearch}/torch\n%attr(755,root,root) %{python_sitearch}/torch/utils/benchmark/utils/*\n";
         let pkgs = spec_packages(spec);
         assert_eq!(
-            check(&cond("torch/utils/benchmark/utils", None), &pkgs, "python-torch"),
+            check(
+                &cond("torch/utils/benchmark/utils", None),
+                &pkgs,
+                "python-torch"
+            ),
             Verdict::Satisfied
         );
         assert!(!cond("../x", None).is_valid());

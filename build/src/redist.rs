@@ -76,7 +76,10 @@ pub const FILESYSTEM_KEY: &str = "cuda_filesystem";
 
 /// `cuda-13-4-filesystem` -> `"13.4"`; `None` for any other name.
 fn filesystem_mm(name: &str) -> Option<String> {
-    let mm = name.trim().strip_prefix("cuda-")?.strip_suffix("-filesystem")?;
+    let mm = name
+        .trim()
+        .strip_prefix("cuda-")?
+        .strip_suffix("-filesystem")?;
     let (maj, min) = mm.split_once('-')?;
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     (digits(maj) && digits(min)).then(|| format!("{maj}.{min}"))
@@ -129,7 +132,9 @@ fn platform_for(arch: &str) -> Result<&'static str, String> {
     match arch {
         "x86_64" => Ok("linux-x86_64"),
         "aarch64" => Ok("linux-sbsa"),
-        other => Err(format!("NVIDIA ships no redistributable archive for {other}")),
+        other => Err(format!(
+            "NVIDIA ships no redistributable archive for {other}"
+        )),
     }
 }
 
@@ -204,7 +209,11 @@ pub fn latest_version(source: &dyn Source, name: &str) -> Option<Result<String, 
 fn filesystem_version(source: &dyn Source, mm: &str) -> Result<String, String> {
     let label = source.manifest(Product::Cuda)?.release_label;
     let mut parts = label.split('.');
-    let same = format!("{}.{}", parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let same = format!(
+        "{}.{}",
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or("")
+    );
     Ok(if same == mm { label } else { format!("{mm}.0") })
 }
 
@@ -381,13 +390,11 @@ pub fn generate(
         files,
     };
     let rpmlintrc = crate::nvidia_spec::redist_rpmlintrc(&input);
-    let mut spec = crate::nvidia_spec::redist_component_spec(&input);
+    let spec = crate::nvidia_spec::redist_component_spec(&input);
     // The same note a repository archive gets, so the commit keeps a digest of
     // what the spec was made from.
-    spec.push_str(&format!(
-        "\n# Source archive: {url}\n# Source archive sha256: {}\n",
-        archive.sha256.to_ascii_lowercase()
-    ));
+    let spec =
+        crate::spec_tidy::with_archive_note(&spec, &url, &archive.sha256.to_ascii_lowercase());
     Ok(Generated {
         spec,
         rpmlintrc_file: format!("{rpm_name}.rpmlintrc"),
@@ -407,7 +414,8 @@ fn generate_filesystem(
     version: &str,
     checkout_dir: &Path,
 ) -> Result<Generated, String> {
-    let mm = filesystem_mm(rpm_name).ok_or_else(|| format!("{rpm_name} is not a CUDA component"))?;
+    let mm =
+        filesystem_mm(rpm_name).ok_or_else(|| format!("{rpm_name} is not a CUDA component"))?;
     let have = filesystem_version(source, &mm)?;
     if !version.is_empty() && have != version {
         return Err(format!(
@@ -471,7 +479,11 @@ pub(crate) mod tests {
             dir.set_cksum();
             ar.append_data(&mut dir, format!("{top}/lib"), std::io::empty())
                 .unwrap();
-            for name in ["LICENSE", "lib/libcudart.so.13.4.92", "include/cuda_runtime.h"] {
+            for name in [
+                "LICENSE",
+                "lib/libcudart.so.13.4.92",
+                "include/cuda_runtime.h",
+            ] {
                 let mut h = tar::Header::new_gnu();
                 h.set_size(2);
                 h.set_mode(0o644);
@@ -482,8 +494,7 @@ pub(crate) mod tests {
             ar.finish().unwrap();
         }
         let mut out = Vec::new();
-        let mut w =
-            lzma_rust2::XzWriter::new(&mut out, lzma_rust2::XzOptions::default()).unwrap();
+        let mut w = lzma_rust2::XzWriter::new(&mut out, lzma_rust2::XzOptions::default()).unwrap();
         std::io::Write::write_all(&mut w, &raw).unwrap();
         w.finish().unwrap();
         out
@@ -544,12 +555,13 @@ pub(crate) mod tests {
     impl Source for Fake {
         fn manifest(&self, product: Product) -> Result<Manifest, String> {
             self.manifests.borrow_mut().push(product);
-            let name = if product == Product::Cudnn { "cudnn" } else { "cuda" };
-            nvidia_redist::parse(
-                &manifest_json(name, &self.advertised),
-                product.base_url(),
-            )
-            .map_err(|e| e.to_string())
+            let name = if product == Product::Cudnn {
+                "cudnn"
+            } else {
+                "cuda"
+            };
+            nvidia_redist::parse(&manifest_json(name, &self.advertised), product.base_url())
+                .map_err(|e| e.to_string())
         }
 
         fn download(&self, url: &str, dest: &Path) -> Result<String, String> {
@@ -580,15 +592,27 @@ pub(crate) mod tests {
             assert_eq!(component(name), Some("libcublas"), "{name}");
             assert_eq!(package_name(name).as_deref(), Some("cuda-cublas"), "{name}");
         }
-        assert_eq!(package_name("nvidia-cuda-runtime").as_deref(), Some("cuda-cudart"));
-        assert_eq!(package_name("nvidia-cudnn-cu13").as_deref(), Some("cuda-cudnn"));
+        assert_eq!(
+            package_name("nvidia-cuda-runtime").as_deref(),
+            Some("cuda-cudart")
+        );
+        assert_eq!(
+            package_name("nvidia-cudnn-cu13").as_deref(),
+            Some("cuda-cudnn")
+        );
         assert!(is_redist_package("cuda-cudart"));
     }
 
     #[test]
     fn the_driver_and_unrelated_names_are_not_components() {
         let _on = TestMode::set(true);
-        for name in ["libcuda.so.1()(64bit)", "numpy", "cuda-devel", "cuda-toolkit", "nvidia-smi"] {
+        for name in [
+            "libcuda.so.1()(64bit)",
+            "numpy",
+            "cuda-devel",
+            "cuda-toolkit",
+            "nvidia-smi",
+        ] {
             assert_eq!(component(name), None, "{name}");
         }
         assert!(!is_redist_package("python-nvidia-cublas"));
@@ -606,7 +630,10 @@ pub(crate) mod tests {
             is_requested: false,
             is_yanked: false,
         };
-        let mut nodes = vec![node("nvidia-cuda-runtime", "13.1.80"), node("numpy", "2.3.0")];
+        let mut nodes = vec![
+            node("nvidia-cuda-runtime", "13.1.80"),
+            node("numpy", "2.3.0"),
+        ];
         let fake = Fake::new("top");
         apply_manifest_versions(&mut nodes, &fake).unwrap();
         assert_eq!(nodes[0].version, "13.4.92");
@@ -618,9 +645,17 @@ pub(crate) mod tests {
     fn the_filesystem_package_is_a_component_a_node_and_a_spec() {
         let _on = TestMode::set(true);
         assert_eq!(component("cuda-13-4-filesystem"), Some(FILESYSTEM_KEY));
-        assert_eq!(package_name("cuda-13-4-filesystem").as_deref(), Some("cuda-13-4-filesystem"));
+        assert_eq!(
+            package_name("cuda-13-4-filesystem").as_deref(),
+            Some("cuda-13-4-filesystem")
+        );
         assert!(is_redist_package("cuda-13-4-filesystem"));
-        for no in ["cuda-13-filesystem", "cuda-x-4-filesystem", "cuda--4-filesystem", "cuda-13-4-filesystemx"] {
+        for no in [
+            "cuda-13-filesystem",
+            "cuda-x-4-filesystem",
+            "cuda--4-filesystem",
+            "cuda-13-4-filesystemx",
+        ] {
             assert_eq!(component(no), None, "{no}");
         }
         {
@@ -637,13 +672,20 @@ pub(crate) mod tests {
             is_yanked: false,
         };
         let fake = Fake::new("top");
-        let mut nodes = vec![node("nvidia-cuda-runtime"), node("nvidia-cublas"), node("numpy")];
+        let mut nodes = vec![
+            node("nvidia-cuda-runtime"),
+            node("nvidia-cublas"),
+            node("numpy"),
+        ];
         add_filesystem_nodes(&mut nodes, &fake).unwrap();
         assert_eq!(nodes.len(), 4);
         assert_eq!(nodes[0].requires_dist, ["cuda-13-4-filesystem"]);
         assert_eq!(nodes[1].requires_dist, ["cuda-13-4-filesystem"]);
         assert!(nodes[2].requires_dist.is_empty());
-        assert_eq!((nodes[3].name.as_str(), nodes[3].version.as_str()), ("cuda-13-4-filesystem", "13.4.3"));
+        assert_eq!(
+            (nodes[3].name.as_str(), nodes[3].version.as_str()),
+            ("cuda-13-4-filesystem", "13.4.3")
+        );
         // Once: a second pass adds neither the requirement nor the node.
         add_filesystem_nodes(&mut nodes, &fake).unwrap();
         assert_eq!(nodes.len(), 4);
@@ -653,15 +695,43 @@ pub(crate) mod tests {
         assert_eq!(none.len(), 1);
 
         let dir = tempfile::tempdir().unwrap();
-        let g = generate(&fake, "cuda-13-4-filesystem", "13.4.3", "x86_64", dir.path()).unwrap();
-        assert!(g.spec.contains("Name:           cuda-13-4-filesystem\n"), "{}", g.spec);
+        let g = generate(
+            &fake,
+            "cuda-13-4-filesystem",
+            "13.4.3",
+            "x86_64",
+            dir.path(),
+        )
+        .unwrap();
+        assert!(
+            g.spec.contains("Name:           cuda-13-4-filesystem\n"),
+            "{}",
+            g.spec
+        );
         assert!(fake.downloads.borrow().is_empty());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-        assert!(generate(&fake, "cuda-13-4-filesystem", "13.4.9", "x86_64", dir.path()).is_err());
+        assert!(
+            generate(
+                &fake,
+                "cuda-13-4-filesystem",
+                "13.4.9",
+                "x86_64",
+                dir.path()
+            )
+            .is_err()
+        );
         // The stale-archive sweep keeps its hands off the checkout.
-        std::fs::write(dir.path().join("cuda_cudart-linux-x86_64-1-archive.tar.xz"), "x").unwrap();
+        std::fs::write(
+            dir.path().join("cuda_cudart-linux-x86_64-1-archive.tar.xz"),
+            "x",
+        )
+        .unwrap();
         remove_stale_archives(dir.path(), &g.archive);
-        assert!(dir.path().join("cuda_cudart-linux-x86_64-1-archive.tar.xz").exists());
+        assert!(
+            dir.path()
+                .join("cuda_cudart-linux-x86_64-1-archive.tar.xz")
+                .exists()
+        );
     }
 
     #[test]
@@ -689,16 +759,28 @@ pub(crate) mod tests {
         assert_eq!(g.sha256, fake.advertised);
         assert_eq!(
             g.url,
-            format!("https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/{top}.tar.xz")
+            format!(
+                "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/{top}.tar.xz"
+            )
         );
-        assert!(g.spec.contains("Name:           cuda-cudart\n"), "{}", g.spec);
+        assert!(
+            g.spec.contains("Name:           cuda-cudart\n"),
+            "{}",
+            g.spec
+        );
         assert!(g.spec.contains("Version:        13.4.92\n"));
         assert!(g.spec.contains("%global cuda_mm 13.4\n"));
         assert!(g.spec.contains(&format!("%setup -q -n {top}\n")));
         assert!(g.spec.contains("%{cuda_prefix}/lib64/libcudart.so.13.4.92"));
         assert!(g.spec.contains("Source99:       cuda-cudart.rpmlintrc\n"));
-        assert!(g.spec.contains(&format!("# Source archive sha256: {}\n", g.sha256)));
-        assert!(g.spec.contains("# Source archive: https://developer.download.nvidia.com/"));
+        assert!(
+            g.spec
+                .contains(&format!("# Source archive sha256: {}\n", g.sha256))
+        );
+        assert!(
+            g.spec
+                .contains("# Source archive: https://developer.download.nvidia.com/")
+        );
         assert_eq!(g.rpmlintrc_file, "cuda-cudart.rpmlintrc");
         assert!(g.rpmlintrc.contains("filelist-forbidden-fhs23"));
         // No Python in it.
@@ -711,7 +793,12 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = Fake::new("cuda_cudart-linux-sbsa-13.4.92-archive");
         let g = generate(&fake, "cuda-cudart", "13.4.92", "aarch64", dir.path()).unwrap();
-        assert!(g.url.ends_with("cuda_cudart-linux-sbsa-13.4.92-archive.tar.xz"), "{}", g.url);
+        assert!(
+            g.url
+                .ends_with("cuda_cudart-linux-sbsa-13.4.92-archive.tar.xz"),
+            "{}",
+            g.url
+        );
         assert!(g.spec.contains("ExclusiveArch:  aarch64"));
         // The fixture has no sbsa archive for cublas.
         let err = generate(&fake, "cuda-cublas", "13.8.0.4", "aarch64", dir.path()).unwrap_err();
@@ -776,7 +863,9 @@ pub(crate) mod tests {
         ] {
             std::fs::write(dir.path().join(f), b"x").unwrap();
         }
-        let keep = dir.path().join("cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz");
+        let keep = dir
+            .path()
+            .join("cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz");
         remove_stale_archives(dir.path(), &keep);
         let mut left: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -797,9 +886,17 @@ pub(crate) mod tests {
     fn cusparselt_and_nvshmem_are_components_with_their_own_manifests() {
         let _on = TestMode::set(true);
         for (name, key, pkg) in [
-            ("nvidia-cusparselt-cu13", "libcusparse_lt", "cuda-cusparse-lt"),
+            (
+                "nvidia-cusparselt-cu13",
+                "libcusparse_lt",
+                "cuda-cusparse-lt",
+            ),
             ("nvidia_nvshmem_cu13", "libnvshmem", "cuda-nvshmem"),
-            ("libcusparseLt.so.0()(64bit)", "libcusparse_lt", "cuda-cusparse-lt"),
+            (
+                "libcusparseLt.so.0()(64bit)",
+                "libcusparse_lt",
+                "cuda-cusparse-lt",
+            ),
             ("libnvshmem_host.so.3", "libnvshmem", "cuda-nvshmem"),
             ("cuda-cusparse-lt", "libcusparse_lt", "cuda-cusparse-lt"),
             ("cuda-nvshmem", "libnvshmem", "cuda-nvshmem"),
@@ -810,8 +907,16 @@ pub(crate) mod tests {
         assert_eq!(product_for("libnvshmem"), Product::Nvshmem);
         assert_eq!(product_for("libcusparse_lt"), Product::Cusparselt);
         assert_eq!(product_for("libcublas"), Product::Cuda);
-        assert!(Product::Nvshmem.base_url().ends_with("/compute/nvshmem/redist"));
-        assert!(Product::Cusparselt.base_url().ends_with("/compute/cusparselt/redist"));
+        assert!(
+            Product::Nvshmem
+                .base_url()
+                .ends_with("/compute/nvshmem/redist")
+        );
+        assert!(
+            Product::Cusparselt
+                .base_url()
+                .ends_with("/compute/cusparselt/redist")
+        );
         assert!(Product::Nvshmem.per_cuda_major() && !Product::Cuda.per_cuda_major());
     }
 }
