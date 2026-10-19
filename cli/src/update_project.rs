@@ -264,6 +264,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 project: branch_project.clone(),
                 targets: a.only.clone(),
             },
+            false,
         )?)
     } else {
         None
@@ -333,9 +334,9 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
             .iter()
             .filter(|r| matches!(r.outcome, ItemOutcome::Failed(_)))
             .count();
-        Err(eyre!("{n} package(s) failed to update"))
+        vec![format!("{n} package(s) failed to update")]
     } else {
-        Ok(())
+        Vec::new()
     };
     match &ctx.tui_ctrl {
         Some(t) => {
@@ -344,7 +345,11 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         }
         None => {
             result?;
-            failures
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(eyre!(failures.join("; ")))
+            }
         }
     }
 }

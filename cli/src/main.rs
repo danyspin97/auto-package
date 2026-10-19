@@ -669,29 +669,40 @@ fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) -> color
 ///
 /// `settled` is the TUI's verdict ([`tui::TuiController::all_settled`]), read
 /// once it has closed. A settled run exits 0 even if a package failed along
-/// the way and was built by a later retry, so those errors are only printed
-/// as warnings. Any other run stays open until the user quits, and exits with
-/// the first error it has: the run's own, then a failed package's, or else
-/// the run ended before every package was built.
+/// the way and was built by a later retry, so each error is only printed as
+/// its own `warning:` line. `failures` holds one message per failed package.
+/// Any other run stays open until the user quits, and exits with the first
+/// error it has: the run's own, then the failed packages', or else the run
+/// ended before every package was built.
 fn tui_run_exit(
     settled: bool,
     run: color_eyre::Result<()>,
-    failures: color_eyre::Result<()>,
+    failures: Vec<String>,
 ) -> color_eyre::Result<()> {
     if settled {
-        if let Err(e) = &run {
-            eprintln!("warning: {e:#}");
-        }
-        if let Err(e) = &failures {
-            eprintln!("warning: {e:#}");
+        for line in settled_warnings(&run, &failures) {
+            eprintln!("{line}");
         }
         return Ok(());
     }
     run?;
-    failures?;
+    if !failures.is_empty() {
+        return Err(color_eyre::eyre::eyre!(failures.join("; ")));
+    }
     Err(color_eyre::eyre::eyre!(
         "the run ended before every package was built"
     ))
+}
+
+/// The `warning:` lines a settled run prints: the run's own error, if any,
+/// then one line per failed package.
+fn settled_warnings(run: &color_eyre::Result<()>, failures: &[String]) -> Vec<String> {
+    run.as_ref()
+        .err()
+        .map(|e| format!("warning: {e:#}"))
+        .into_iter()
+        .chain(failures.iter().map(|f| format!("warning: {f}")))
+        .collect()
 }
 
 /// Name of the per-project lock file, kept inside the project directory.
@@ -1145,6 +1156,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                         project: project.clone(),
                         targets: vec![target.clone().unwrap_or_else(|| name.clone())],
                     },
+                    true,
                 )?)
             } else {
                 None
@@ -1370,24 +1382,16 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // restored the terminal; printed here it would be wiped.
             *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
 
-            let failures = if added_failures.is_empty() {
-                Ok(())
-            } else {
-                Err(color_eyre::eyre::eyre!(
-                    "{} added package(s) failed: {}",
-                    added_failures.len(),
-                    added_failures.join("; ")
-                ))
-            };
+            // Only the TUI takes add requests, so without it there are no
+            // added failures to report.
             if tui_ctrl.is_some() {
                 tui_run_exit(
                     tui_ctrl.as_ref().is_some_and(|t| t.all_settled()),
                     result,
-                    failures,
+                    added_failures,
                 )?;
             } else {
                 result?;
-                failures?;
             }
         }
         Commands::UpdateProject(args) => update_project::run(args, summary)?,
@@ -1477,6 +1481,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                         project: project.clone(),
                         targets: only.iter().cloned().collect(),
                     },
+                    false,
                 )?)
             } else {
                 None
@@ -1572,7 +1577,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             match &tui_ctrl {
                 Some(t) => {
                     t.wait_closed();
-                    tui_run_exit(t.all_settled(), result, Ok(()))?;
+                    tui_run_exit(t.all_settled(), result, Vec::new())?;
                 }
                 None => result?,
             }
@@ -3937,10 +3942,25 @@ mod tests {
     #[test]
     fn a_settled_tui_run_exits_zero_even_after_failures() {
         let failed = || Err(color_eyre::eyre::eyre!("boom"));
-        assert!(super::tui_run_exit(true, failed(), Ok(())).is_ok());
-        assert!(super::tui_run_exit(true, Ok(()), failed()).is_ok());
-        assert!(super::tui_run_exit(true, failed(), failed()).is_ok());
-        assert!(super::tui_run_exit(true, Ok(()), Ok(())).is_ok());
+        let lines = || vec!["a: boom".to_string(), "b: boom".to_string()];
+        assert!(super::tui_run_exit(true, failed(), Vec::new()).is_ok());
+        assert!(super::tui_run_exit(true, Ok(()), lines()).is_ok());
+        assert!(super::tui_run_exit(true, failed(), lines()).is_ok());
+        assert!(super::tui_run_exit(true, Ok(()), Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn a_settled_run_prints_one_warning_line_per_failure() {
+        let failures = vec!["a: first".to_string(), "b: second".to_string()];
+        assert_eq!(
+            super::settled_warnings(&Ok(()), &failures),
+            ["warning: a: first", "warning: b: second"]
+        );
+        assert_eq!(
+            super::settled_warnings(&Err(color_eyre::eyre::eyre!("root")), &failures),
+            ["warning: root", "warning: a: first", "warning: b: second"]
+        );
+        assert!(super::settled_warnings(&Ok(()), &[]).is_empty());
     }
 
     #[test]
@@ -3948,7 +3968,7 @@ mod tests {
         let err = super::tui_run_exit(
             false,
             Err(color_eyre::eyre::eyre!("root failed")),
-            Err(color_eyre::eyre::eyre!("added failed")),
+            vec!["added failed".to_string()],
         )
         .unwrap_err();
         assert_eq!(format!("{err}"), "root failed");
@@ -3956,15 +3976,15 @@ mod tests {
         let err = super::tui_run_exit(
             false,
             Ok(()),
-            Err(color_eyre::eyre::eyre!("added failed")),
+            vec!["a: first".to_string(), "b: second".to_string()],
         )
         .unwrap_err();
-        assert_eq!(format!("{err}"), "added failed");
+        assert_eq!(format!("{err}"), "a: first; b: second");
     }
 
     #[test]
     fn an_unsettled_tui_run_without_errors_says_it_ended_early() {
-        let err = super::tui_run_exit(false, Ok(()), Ok(())).unwrap_err();
+        let err = super::tui_run_exit(false, Ok(()), Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "the run ended before every package was built"

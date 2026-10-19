@@ -65,6 +65,8 @@ pub struct TuiController {
     /// Package names the user typed into the TUI's `n` prompt. Handed out
     /// once, via [`TuiController::take_add_requests`]; disconnects when the
     /// render thread exits, which is how the consumer learns the user quit.
+    /// Only a run that accepts requests has `n` and `r` keys (see
+    /// [`TuiController::new`]); for any other run nothing is ever sent.
     add_rx: std::sync::Arc<std::sync::Mutex<Option<Receiver<String>>>>,
     /// Builds the run still owes: the root build until
     /// [`TuiController::work_finished`] is called for it, and each add request
@@ -122,8 +124,14 @@ impl TuiController {
     /// `memory` is only used for a Ctrl-C keypress inside the TUI — see
     /// `crate::handle_interrupt` for why the TUI cannot just rely on the
     /// process's real SIGINT handler firing. `scope` is only shown in the
-    /// summary header.
-    pub fn new(memory: std::sync::Arc<MemorySink>, scope: RunScope) -> io::Result<Self> {
+    /// summary header. `accepts_requests` says whether the run has a consumer
+    /// for the `n` and `r` keys (see [`TuiController::take_add_requests`]);
+    /// when it does not, those keys do nothing and are not shown.
+    pub fn new(
+        memory: std::sync::Arc<MemorySink>,
+        scope: RunScope,
+        accepts_requests: bool,
+    ) -> io::Result<Self> {
         let (tx, rx) = sync_channel(EVENT_QUEUE_CAP);
         let (add_tx, add_rx) = channel();
         // Starts at one for the root build, which the CLI releases when it returns.
@@ -131,6 +139,7 @@ impl TuiController {
         let thread_work = work.clone();
         let settled = std::sync::Arc::new(AtomicBool::new(false));
         let thread_settled = settled.clone();
+        let add_tx = accepts_requests.then_some(add_tx);
         let render = std::thread::spawn(move || {
             if let Err(e) = run(rx, add_tx, thread_work, memory, scope, thread_settled) {
                 eprintln!("TUI error: {e}");
@@ -639,6 +648,8 @@ struct TuiState {
     // way per-package logs do.
     last_global_log: Option<LogLine>,
     run_outcome: Option<RunOutcome>,
+    /// Whether the run takes the `n` and `r` keys (see `TuiController::new`).
+    accepts_requests: bool,
     run_start: Option<Instant>,
     /// Toggled with `a` — show every package, including ones `visible_order`
     /// would otherwise hide once they succeed.
@@ -660,6 +671,7 @@ impl TuiState {
             packages: HashMap::new(),
             last_global_log: None,
             run_outcome: None,
+            accepts_requests: false,
             resolve_total: None,
             resolve_in_distro: None,
             run_start: None,
@@ -1086,7 +1098,7 @@ impl TuiState {
 
 fn run(
     rx: Receiver<Msg>,
-    add_tx: Sender<String>,
+    add_tx: Option<Sender<String>>,
     work: std::sync::Arc<AtomicUsize>,
     memory: std::sync::Arc<MemorySink>,
     scope: RunScope,
@@ -1119,7 +1131,15 @@ fn run(
     // content showing through. One hard clear up front wipes the slate.
     terminal.clear()?;
 
-    let result = event_loop(&mut terminal, rx, &add_tx, &work, &memory, scope, &settled);
+    let result = event_loop(
+        &mut terminal,
+        rx,
+        add_tx.as_ref(),
+        &work,
+        &memory,
+        scope,
+        &settled,
+    );
     let _ = terminal.show_cursor();
     result
 }
@@ -1136,16 +1156,25 @@ fn run(
 /// [`TuiController::work_finished`]), so a run with work outstanding is never
 /// settled. Rows are all checked rather than only the scope's targets, since
 /// the targets are typed names and rows use rpm names, so matching them up is
-/// not reliable. An empty run is never settled, so a failure before anything
-/// started stays on screen.
+/// not reliable.
+///
+/// A run with no rows at all is settled only once it has ended successfully:
+/// `RunFinished` is reported after the root work is released, so until then a
+/// `build` that has not shown its first row yet stays open, while an `update`
+/// with nothing to do closes at once. A failure before anything started stays
+/// on screen.
 fn run_is_done(state: &TuiState, work_left: usize) -> bool {
-    work_left == 0
-        && !state.packages.is_empty()
-        && state.packages.values().all(|p| {
-            p.finished
-                && !p.retry_requested
-                && matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt)
-        })
+    if work_left != 0 {
+        return false;
+    }
+    if state.packages.is_empty() {
+        return matches!(state.run_outcome, Some(RunOutcome::Success));
+    }
+    state.packages.values().all(|p| {
+        p.finished
+            && !p.retry_requested
+            && matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt)
+    })
 }
 
 /// Whether the run has nothing left to do, built or not: `work_left` is zero
@@ -1165,10 +1194,17 @@ fn run_is_over(state: &TuiState, work_left: usize) -> bool {
 
 /// The footer line for a run that is over but not settled, so the user knows
 /// what to do next. `None` while the run is still going and once it is
-/// settled, since the TUI is about to close itself then.
-fn over_hint(over: bool, settled: bool) -> Option<&'static str> {
-    (over && !settled)
-        .then_some("Run over with packages not built: press n to add a package, q to quit")
+/// settled, since the TUI is about to close itself then. Only a run that
+/// accepts requests offers `n`.
+fn over_hint(over: bool, settled: bool, accepts_requests: bool) -> Option<&'static str> {
+    if !over || settled {
+        return None;
+    }
+    Some(if accepts_requests {
+        "Run over with packages not built: press n to add a package, q to quit"
+    } else {
+        "Run over with packages not built: press q to quit"
+    })
 }
 
 /// Hand `name` to the run as a new root build. It is counted as outstanding
@@ -1186,13 +1222,14 @@ fn request_build(add_tx: &Sender<String>, work: &AtomicUsize, name: &str) -> boo
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     rx: Receiver<Msg>,
-    add_tx: &Sender<String>,
+    add_tx: Option<&Sender<String>>,
     work: &AtomicUsize,
     memory: &MemorySink,
     scope: RunScope,
     settled: &AtomicBool,
 ) -> io::Result<()> {
     let mut state = TuiState::new(scope);
+    state.accepts_requests = add_tx.is_some();
     // `Some` while the "add package" prompt is open and capturing keys.
     let mut input: Option<String> = None;
     let mut table_state = TableState::default();
@@ -1260,6 +1297,7 @@ fn event_loop(
         let hint = over_hint(
             run_over(&state),
             run_is_done(&state, work.load(Ordering::SeqCst)),
+            state.accepts_requests,
         );
         let mut feedback = RenderFeedback::default();
         terminal.draw(|f| {
@@ -1285,7 +1323,7 @@ fn event_loop(
                     PromptAction::Cancel => input = None,
                     PromptAction::Submit(name) => {
                         input = None;
-                        if request_build(add_tx, work, &name) {
+                        if add_tx.is_some_and(|tx| request_build(tx, work, &name)) {
                             state.add_global_log(
                                 LogLevel::Info,
                                 format!("Queued {name} as a new root package"),
@@ -1326,7 +1364,9 @@ fn event_loop(
                 continue;
             }
             match key.code {
-                KeyCode::Char('n') | KeyCode::Char('+') => input = Some(String::new()),
+                KeyCode::Char('n') | KeyCode::Char('+') if add_tx.is_some() => {
+                    input = Some(String::new())
+                }
                 KeyCode::Char('/') if browse.focus == Focus::Log => {
                     browse.filter_input = Some(browse.filter.clone().unwrap_or_default());
                 }
@@ -1412,7 +1452,8 @@ fn event_loop(
                 // other status is a no-op: there is nothing a disk cleanup
                 // would fix for a real spec defect.
                 KeyCode::Char('r') => {
-                    if let Some(name) = selected.as_ref()
+                    if let Some(add_tx) = add_tx
+                        && let Some(name) = selected.as_ref()
                         && state
                             .packages
                             .get(name.as_str())
@@ -1835,11 +1876,12 @@ fn render(
         browse.focus == Focus::Table,
     );
     let feedback = render_detail(f, state, &visible, detail, table_state.selected(), browse);
-    let retryable = table_state
-        .selected()
-        .and_then(|i| visible.get(i))
-        .and_then(|name| state.packages.get(name.as_str()))
-        .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
+    let retryable = state.accepts_requests
+        && table_state
+            .selected()
+            .and_then(|i| visible.get(i))
+            .and_then(|name| state.packages.get(name.as_str()))
+            .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
     render_footer(f, state, input, browse, footer, retryable, hint);
     feedback
 }
@@ -2517,8 +2559,13 @@ fn render_footer(
         EscAction::Collapse => "Esc close │ q quit",
         EscAction::Quit => "q/Esc quit",
     };
+    let add = if state.accepts_requests {
+        " │ n add package"
+    } else {
+        ""
+    };
     let hints = format!(
-        "  {nav} │ Tab focus │ l lists │ n add package{} │ a {} succeeded │ {quit}",
+        "  {nav} │ Tab focus │ l lists{add}{} │ a {} succeeded │ {quit}",
         if retryable {
             " │ r retry (no space left)"
         } else {
@@ -3612,7 +3659,7 @@ mod run_end_tests {
     }
 
     #[test]
-    fn an_empty_run_is_neither_settled_nor_over() {
+    fn an_empty_run_is_neither_settled_nor_over_until_it_has_finished() {
         let state = TuiState::new(RunScope::default());
         assert!(!run_is_done(&state, 0));
         assert!(!run_is_over(&state, 0));
@@ -3677,10 +3724,39 @@ mod run_end_tests {
 
     #[test]
     fn the_hint_only_shows_once_the_run_is_over_and_not_settled() {
-        assert_eq!(over_hint(false, false), None);
-        assert_eq!(over_hint(false, true), None);
-        assert_eq!(over_hint(true, true), None);
-        assert!(over_hint(true, false).is_some());
+        assert_eq!(over_hint(false, false, true), None);
+        assert_eq!(over_hint(false, true, true), None);
+        assert_eq!(over_hint(true, true, true), None);
+        assert!(over_hint(true, false, true).is_some());
+    }
+
+    #[test]
+    fn a_run_that_takes_no_requests_is_told_to_quit_not_to_add() {
+        let hint = over_hint(true, false, false).unwrap();
+        assert!(hint.contains("q to quit"));
+        assert!(!hint.contains("add"));
+    }
+
+    #[test]
+    fn an_empty_run_that_succeeded_with_no_work_left_is_settled() {
+        let mut state = TuiState::new(RunScope::default());
+        state.run_outcome = Some(RunOutcome::Success);
+        assert!(run_is_done(&state, 0));
+    }
+
+    #[test]
+    fn an_empty_run_with_work_still_outstanding_is_not_settled() {
+        let mut state = TuiState::new(RunScope::default());
+        state.run_outcome = Some(RunOutcome::Success);
+        assert!(!run_is_done(&state, 1));
+    }
+
+    #[test]
+    fn an_empty_run_is_not_settled_before_its_outcome_or_after_a_failure() {
+        let mut state = TuiState::new(RunScope::default());
+        assert!(!run_is_done(&state, 0));
+        state.run_outcome = Some(RunOutcome::Failed);
+        assert!(!run_is_done(&state, 0));
     }
 
     #[test]
