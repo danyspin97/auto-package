@@ -327,16 +327,26 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         ));
     }
 
-    result?;
-    if failed {
+    let failures = if failed {
         let n = report
             .results
             .iter()
             .filter(|r| matches!(r.outcome, ItemOutcome::Failed(_)))
             .count();
-        return Err(eyre!("{n} package(s) failed to update"));
+        Err(eyre!("{n} package(s) failed to update"))
+    } else {
+        Ok(())
+    };
+    match &ctx.tui_ctrl {
+        Some(t) => {
+            t.wait_closed();
+            crate::tui_run_exit(t.all_settled(), result, failures)
+        }
+        None => {
+            result?;
+            failures
+        }
     }
-    Ok(())
 }
 
 /// The packages whose names `only` and `exclude` allow, as the listing spells

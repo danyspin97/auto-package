@@ -665,6 +665,35 @@ fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) -> color
         .map_err(|e| color_eyre::eyre::eyre!("failed to install the interrupt handler: {e}"))
 }
 
+/// How a run that was shown in the TUI ends, shared by `build` and `update`.
+///
+/// `settled` is the TUI's verdict ([`tui::TuiController::all_settled`]), read
+/// once it has closed. A settled run exits 0 even if a package failed along
+/// the way and was built by a later retry, so those errors are only printed
+/// as warnings. Any other run stays open until the user quits, and exits with
+/// the first error it has: the run's own, then a failed package's, or else
+/// the run ended before every package was built.
+fn tui_run_exit(
+    settled: bool,
+    run: color_eyre::Result<()>,
+    failures: color_eyre::Result<()>,
+) -> color_eyre::Result<()> {
+    if settled {
+        if let Err(e) = &run {
+            eprintln!("warning: {e:#}");
+        }
+        if let Err(e) = &failures {
+            eprintln!("warning: {e:#}");
+        }
+        return Ok(());
+    }
+    run?;
+    failures?;
+    Err(color_eyre::eyre::eyre!(
+        "the run ended before every package was built"
+    ))
+}
+
 /// Name of the per-project lock file, kept inside the project directory.
 const PROJECT_LOCK_NAME: &str = ".auto-package.lock";
 
@@ -1309,7 +1338,27 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                     }
                     if let Some(t) = tui_ctrl {
                         t.work_finished();
+                        // RunFinished says how the run went, so it waits for the
+                        // requests the TUI added as well. It must not wait for the
+                        // dispatcher above: that only ends once the TUI has closed,
+                        // and the TUI needs RunFinished to close.
+                        t.wait_until_idle();
                     }
+                    let failed = first.is_err()
+                        || !added_failures
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .is_empty();
+                    // Sum usage from all AgentReply events recorded during the run.
+                    reporter.report(&Event::RunFinished {
+                        outcome: if failed {
+                            RunOutcome::Failed
+                        } else {
+                            RunOutcome::Success
+                        },
+                        elapsed: start.elapsed(),
+                        usage: memory.usage(),
+                    });
                     first
                 })
             };
@@ -1317,46 +1366,28 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             let added_failures = added_failures
                 .into_inner()
                 .unwrap_or_else(|p| p.into_inner());
-            let outcome = if result.is_ok() && added_failures.is_empty() {
-                RunOutcome::Success
-            } else {
-                RunOutcome::Failed
-            };
-            // Sum usage from all AgentReply events recorded during the run.
-            reporter.report(&Event::RunFinished {
-                outcome,
-                elapsed: start.elapsed(),
-                usage: memory.usage(),
-            });
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
             *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
 
-            // With the TUI, a settled run (every package built, see
-            // `TuiController::all_settled`) exits 0 even if a root or added
-            // build failed along the way and was built by a later retry; those
-            // errors are still printed. Anything else is a failure.
-            if tui_ctrl.as_ref().is_some_and(|t| t.all_settled()) {
-                if let Err(e) = &result {
-                    eprintln!("warning: {e:#}");
-                }
-                for failure in &added_failures {
-                    eprintln!("warning: {failure}");
-                }
+            let failures = if added_failures.is_empty() {
+                Ok(())
+            } else {
+                Err(color_eyre::eyre::eyre!(
+                    "{} added package(s) failed: {}",
+                    added_failures.len(),
+                    added_failures.join("; ")
+                ))
+            };
+            if tui_ctrl.is_some() {
+                tui_run_exit(
+                    tui_ctrl.as_ref().is_some_and(|t| t.all_settled()),
+                    result,
+                    failures,
+                )?;
             } else {
                 result?;
-                if !added_failures.is_empty() {
-                    return Err(color_eyre::eyre::eyre!(
-                        "{} added package(s) failed: {}",
-                        added_failures.len(),
-                        added_failures.join("; ")
-                    ));
-                }
-                if tui_ctrl.is_some() {
-                    return Err(color_eyre::eyre::eyre!(
-                        "the run ended before every package was built"
-                    ));
-                }
+                failures?;
             }
         }
         Commands::UpdateProject(args) => update_project::run(args, summary)?,
@@ -1520,6 +1551,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 base_reporter.clone(),
                 tui_ctrl.clone(),
             );
+            if let Some(t) = &tui_ctrl {
+                t.work_finished();
+            }
 
             let outcome = if result.is_ok() {
                 RunOutcome::Success
@@ -1535,7 +1569,13 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // restored the terminal; printed here it would be wiped.
             *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
 
-            result?;
+            match &tui_ctrl {
+                Some(t) => {
+                    t.wait_closed();
+                    tui_run_exit(t.all_settled(), result, Ok(()))?;
+                }
+                None => result?,
+            }
         }
     }
 
@@ -3894,6 +3934,43 @@ fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts: usize) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_settled_tui_run_exits_zero_even_after_failures() {
+        let failed = || Err(color_eyre::eyre::eyre!("boom"));
+        assert!(super::tui_run_exit(true, failed(), Ok(())).is_ok());
+        assert!(super::tui_run_exit(true, Ok(()), failed()).is_ok());
+        assert!(super::tui_run_exit(true, failed(), failed()).is_ok());
+        assert!(super::tui_run_exit(true, Ok(()), Ok(())).is_ok());
+    }
+
+    #[test]
+    fn an_unsettled_tui_run_exits_with_its_own_error_first() {
+        let err = super::tui_run_exit(
+            false,
+            Err(color_eyre::eyre::eyre!("root failed")),
+            Err(color_eyre::eyre::eyre!("added failed")),
+        )
+        .unwrap_err();
+        assert_eq!(format!("{err}"), "root failed");
+
+        let err = super::tui_run_exit(
+            false,
+            Ok(()),
+            Err(color_eyre::eyre::eyre!("added failed")),
+        )
+        .unwrap_err();
+        assert_eq!(format!("{err}"), "added failed");
+    }
+
+    #[test]
+    fn an_unsettled_tui_run_without_errors_says_it_ended_early() {
+        let err = super::tui_run_exit(false, Ok(()), Ok(())).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "the run ended before every package was built"
+        );
+    }
+
     #[test]
     fn a_condition_failure_is_queued_again_in_the_same_run() {
         use super::{FailureKind as K, dep_failure_retries as r};

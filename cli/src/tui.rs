@@ -15,6 +15,8 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
+use std::sync::{Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -72,6 +74,11 @@ pub struct TuiController {
     /// Set by the render thread just before it returns: whether every package
     /// was built when it closed (see [`TuiController::all_settled`]).
     settled: std::sync::Arc<AtomicBool>,
+    /// Lets [`TuiController::work_finished`] wake a waiter in
+    /// [`TuiController::wait_until_idle`] once the work reaches zero.
+    idle: std::sync::Arc<(Mutex<()>, Condvar)>,
+    /// The render thread, taken by [`TuiController::wait_closed`].
+    render: std::sync::Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// Drop-based terminal restorer.
@@ -124,7 +131,7 @@ impl TuiController {
         let thread_work = work.clone();
         let settled = std::sync::Arc::new(AtomicBool::new(false));
         let thread_settled = settled.clone();
-        std::thread::spawn(move || {
+        let render = std::thread::spawn(move || {
             if let Err(e) = run(rx, add_tx, thread_work, memory, scope, thread_settled) {
                 eprintln!("TUI error: {e}");
             }
@@ -135,14 +142,16 @@ impl TuiController {
             add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
             work,
             settled,
+            idle: std::sync::Arc::new((Mutex::new(()), Condvar::new())),
+            render: std::sync::Arc::new(Mutex::new(Some(render))),
         })
     }
 
     /// Whether the TUI closed with every package built (see [`run_is_done`]).
-    /// The render thread stores this before it drops its add-request sender,
-    /// so once the CLI has waited for the add-request dispatcher to end (which
-    /// is how `main` waits for the TUI to close) this reads the final verdict.
-    /// It stays `false` if the TUI never closed normally.
+    /// The render thread stores this before it returns, so once the CLI has
+    /// waited for the TUI to close (see [`TuiController::wait_closed`]) this
+    /// reads the final verdict. It stays `false` if the TUI never closed
+    /// normally.
     pub fn all_settled(&self) -> bool {
         self.settled.load(Ordering::SeqCst)
     }
@@ -152,7 +161,35 @@ impl TuiController {
     /// build's last event has been reported, so the TUI never sees the run as
     /// finished while events are still on their way.
     pub fn work_finished(&self) {
-        self.work.fetch_sub(1, Ordering::SeqCst);
+        if self.work.fetch_sub(1, Ordering::SeqCst) == 1 {
+            // Taking the lock first means a waiter that has just seen the work
+            // outstanding is already parked on the condition when this notifies.
+            let _guard = self.idle.0.lock().unwrap_or_else(|p| p.into_inner());
+            self.idle.1.notify_all();
+        }
+    }
+
+    /// Block until no work is outstanding (see [`TuiController::work_finished`]).
+    /// Work the TUI adds while waiting is waited for too, so this returns at
+    /// the first moment the run has nothing left in flight. It does not wait
+    /// for the TUI to close, so it is safe to call before the add-request
+    /// dispatcher has ended.
+    pub fn wait_until_idle(&self) {
+        let (lock, cvar) = &*self.idle;
+        let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        while self.work.load(Ordering::SeqCst) != 0 {
+            guard = cvar.wait(guard).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    /// Block until the TUI has closed: its render thread has restored the
+    /// terminal and returned. Returns at once if it already has, or if it
+    /// was never started or has been waited for before.
+    pub fn wait_closed(&self) {
+        let handle = self.render.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
     }
 
     /// Take the receiver for package names entered at runtime (`n` key).
