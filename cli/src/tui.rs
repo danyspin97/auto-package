@@ -64,6 +64,11 @@ pub struct TuiController {
     /// once, via [`TuiController::take_add_requests`]; disconnects when the
     /// render thread exits, which is how the consumer learns the user quit.
     add_rx: std::sync::Arc<std::sync::Mutex<Option<Receiver<String>>>>,
+    /// Builds the run still owes: the root build until
+    /// [`TuiController::work_finished`] is called for it, and each add request
+    /// or retry from the time the TUI sends it until its build returns. The
+    /// TUI closes itself only once this is zero (see [`run_is_done`]).
+    work: std::sync::Arc<AtomicUsize>,
 }
 
 /// Drop-based terminal restorer.
@@ -111,8 +116,11 @@ impl TuiController {
     pub fn new(memory: std::sync::Arc<MemorySink>, scope: RunScope) -> io::Result<Self> {
         let (tx, rx) = sync_channel(EVENT_QUEUE_CAP);
         let (add_tx, add_rx) = channel();
+        // Starts at one for the root build, which the CLI releases when it returns.
+        let work = std::sync::Arc::new(AtomicUsize::new(1));
+        let thread_work = work.clone();
         std::thread::spawn(move || {
-            if let Err(e) = run(rx, add_tx, memory, scope) {
+            if let Err(e) = run(rx, add_tx, thread_work, memory, scope) {
                 eprintln!("TUI error: {e}");
             }
         });
@@ -120,7 +128,16 @@ impl TuiController {
             tx,
             dropped: std::sync::Arc::new(AtomicUsize::new(0)),
             add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
+            work,
         })
+    }
+
+    /// Release one unit of outstanding work: the root build once it returns,
+    /// or an add request once its build returns. Call it only after the
+    /// build's last event has been reported, so the TUI never sees the run as
+    /// finished while events are still on their way.
+    pub fn work_finished(&self) {
+        self.work.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Take the receiver for package names entered at runtime (`n` key).
@@ -1018,6 +1035,7 @@ impl TuiState {
 fn run(
     rx: Receiver<Msg>,
     add_tx: Sender<String>,
+    work: std::sync::Arc<AtomicUsize>,
     memory: std::sync::Arc<MemorySink>,
     scope: RunScope,
 ) -> io::Result<()> {
@@ -1048,15 +1066,47 @@ fn run(
     // content showing through. One hard clear up front wipes the slate.
     terminal.clear()?;
 
-    let result = event_loop(&mut terminal, rx, &add_tx, &memory, scope);
+    let result = event_loop(&mut terminal, rx, &add_tx, &work, &memory, scope);
     let _ = terminal.show_cursor();
     result
+}
+
+/// Whether the run has nothing left to do, so the TUI can close by itself.
+///
+/// `work_left` counts the builds still running (see
+/// [`TuiController::work_finished`]). Every row must be finished with no retry
+/// asked for. A row parked on missing deps counts as finished: its attempt has
+/// ended, and once `work_left` is zero nothing will re-queue it. Rows are all
+/// checked rather than only the scope's targets, since the targets are typed
+/// names and rows use rpm names, so matching them up is not reliable. Once the
+/// root build has returned every target has its outcome anyway. An empty run
+/// is never done, so a failure before anything started stays on screen.
+fn run_is_done(state: &TuiState, work_left: usize) -> bool {
+    work_left == 0
+        && !state.packages.is_empty()
+        && state
+            .packages
+            .values()
+            .all(|p| p.finished && !p.retry_requested)
+}
+
+/// Hand `name` to the run as a new root build. It is counted as outstanding
+/// work before it is sent, so the run cannot look finished in the gap between
+/// the request leaving and its build starting. `false` if the run is gone.
+fn request_build(add_tx: &Sender<String>, work: &AtomicUsize, name: &str) -> bool {
+    work.fetch_add(1, Ordering::SeqCst);
+    let sent = add_tx.send(name.to_string()).is_ok();
+    if !sent {
+        work.fetch_sub(1, Ordering::SeqCst);
+    }
+    sent
 }
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     rx: Receiver<Msg>,
     add_tx: &Sender<String>,
+    work: &AtomicUsize,
     memory: &MemorySink,
     scope: RunScope,
 ) -> io::Result<()> {
@@ -1077,6 +1127,10 @@ fn event_loop(
     let tick_rate = Duration::from_millis(150);
     let mut finished_at: Option<Instant> = None;
     let mut senders_dropped = false;
+    // Read fresh at each use: a key press can add work partway through a frame.
+    let run_over = |state: &TuiState| {
+        state.run_outcome.is_some() || run_is_done(state, work.load(Ordering::SeqCst))
+    };
 
     loop {
         // Drain everything currently queued so a burst of events (e.g. many
@@ -1145,7 +1199,7 @@ fn event_loop(
                     PromptAction::Cancel => input = None,
                     PromptAction::Submit(name) => {
                         input = None;
-                        if add_tx.send(name.clone()).is_ok() {
+                        if request_build(add_tx, work, &name) {
                             state.add_global_log(
                                 LogLevel::Info,
                                 format!("Queued {name} as a new root package"),
@@ -1204,16 +1258,17 @@ fn event_loop(
                 // builds), not just the UI. Detaching used to leave the
                 // pipeline running headless with nothing on screen and no
                 // way to stop it short of `kill`.
-                // After a successful run there is nothing to interrupt: leave
-                // normally so the process exits 0.
+                // Once the run is over there is nothing to interrupt: leave
+                // normally, so a successful run exits 0 and a failed one keeps
+                // the exit code the CLI gives it.
                 KeyCode::Char('q') | KeyCode::Esc => {
-                    if matches!(state.run_outcome, Some(RunOutcome::Success)) {
+                    if run_over(&state) {
                         break;
                     }
                     crate::handle_interrupt(true, memory)
                 }
                 KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                    if matches!(state.run_outcome, Some(RunOutcome::Success)) {
+                    if run_over(&state) {
                         break;
                     }
                     // Raw mode disables signal generation entirely, so the OS
@@ -1277,7 +1332,7 @@ fn event_loop(
                             .get(name.as_str())
                             .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested)
                     {
-                        if add_tx.send(name.clone()).is_ok() {
+                        if request_build(add_tx, work, name) {
                             if let Some(p) = state.packages.get_mut(name.as_str()) {
                                 p.retry_requested = true;
                             }
@@ -1348,7 +1403,10 @@ fn event_loop(
             }
         }
 
-        if state.run_outcome.is_some() {
+        // A finished run gets the same two-second grace as a `RunFinished`, so
+        // its final state can be read. Work added during the grace (`n` or `r`)
+        // cancels it, and the timer starts over once the run is done again.
+        if run_over(&state) {
             let at = finished_at.get_or_insert(Instant::now());
             if at.elapsed() >= Duration::from_secs(2) {
                 break;
@@ -1360,6 +1418,8 @@ fn event_loop(
             // only to let input finish and then exit so the terminal
             // teardown guard runs.
             break;
+        } else {
+            finished_at = None;
         }
     }
 
@@ -3394,5 +3454,102 @@ mod header_tests {
         let line = header_line(&scope_labels(&long), counters(), 20);
         assert!(line.width() <= 20, "{line:?}");
         assert!(line.ends_with("..."), "{line:?}");
+    }
+}
+
+#[cfg(test)]
+mod run_end_tests {
+    use super::*;
+    use ap_core::event::SelectionReason;
+
+    fn finish(state: &mut TuiState, pkg: &str, outcome: PackageOutcome) {
+        state.apply(Msg {
+            pkg: None,
+            event: Event::PackageFinished {
+                pkg: pkg.to_string(),
+                version: "1".to_string(),
+                outcome,
+            },
+        });
+    }
+
+    fn failed() -> PackageOutcome {
+        PackageOutcome::Failed {
+            reason: "x".to_string(),
+        }
+    }
+
+    #[test]
+    fn every_row_settled_with_no_work_left_is_done() {
+        let mut state = TuiState::new(RunScope::default());
+        finish(&mut state, "built", PackageOutcome::Built);
+        finish(&mut state, "failed", failed());
+        assert!(run_is_done(&state, 0));
+    }
+
+    #[test]
+    fn a_row_still_running_keeps_the_run_open() {
+        let mut state = TuiState::new(RunScope::default());
+        finish(&mut state, "built", PackageOutcome::Built);
+        state.pkg_mut("running").status = PkgStatus::Running;
+        assert!(!run_is_done(&state, 0));
+    }
+
+    #[test]
+    fn an_empty_run_is_not_done() {
+        assert!(!run_is_done(&TuiState::new(RunScope::default()), 0));
+    }
+
+    #[test]
+    fn a_retry_asked_for_keeps_the_run_open() {
+        let mut state = TuiState::new(RunScope::default());
+        finish(&mut state, "foo", failed());
+        state.pkg_mut("foo").retry_requested = true;
+        assert!(!run_is_done(&state, 0));
+    }
+
+    #[test]
+    fn a_failed_row_that_is_re_queued_is_not_done() {
+        let mut state = TuiState::new(RunScope::default());
+        finish(&mut state, "foo", failed());
+        assert!(run_is_done(&state, 0));
+        state.apply(Msg {
+            pkg: None,
+            event: Event::TargetSelected {
+                pkg: "foo".to_string(),
+                version: "1".to_string(),
+                reason: SelectionReason::RequestedRoot,
+                blocked_by: Vec::new(),
+            },
+        });
+        assert!(!run_is_done(&state, 0));
+    }
+
+    #[test]
+    fn outstanding_work_keeps_the_run_open_even_when_every_row_is_settled() {
+        let mut state = TuiState::new(RunScope::default());
+        finish(&mut state, "built", PackageOutcome::Built);
+        assert!(!run_is_done(&state, 1));
+    }
+
+    #[test]
+    fn a_row_parked_on_missing_deps_is_done_once_nothing_is_left() {
+        let mut state = TuiState::new(RunScope::default());
+        let deps = vec!["dep".to_string()];
+        finish(&mut state, "parked", PackageOutcome::MissingDeps { deps });
+        assert!(run_is_done(&state, 0));
+        assert!(!run_is_done(&state, 1));
+    }
+
+    #[test]
+    fn a_request_is_work_until_sent_and_is_released_if_the_run_is_gone() {
+        let work = AtomicUsize::new(0);
+        let (add_tx, add_rx) = channel::<String>();
+        assert!(request_build(&add_tx, &work, "foo"));
+        assert_eq!(work.load(Ordering::SeqCst), 1);
+        assert_eq!(add_rx.recv().unwrap(), "foo");
+        drop(add_rx);
+        assert!(!request_build(&add_tx, &work, "bar"));
+        assert_eq!(work.load(Ordering::SeqCst), 1);
     }
 }

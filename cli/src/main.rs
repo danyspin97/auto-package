@@ -1252,6 +1252,11 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                                 }
                                             }
                                         });
+                                        // Only now, with its last event reported, does the
+                                        // TUI stop counting this request as work.
+                                        if let Some(t) = tui_ctrl {
+                                            t.work_finished();
+                                        }
                                     }
                                 });
                             }
@@ -1289,10 +1294,11 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                         )
                     });
                     if tui_ctrl.is_some() {
-                        // The TUI stays open after the root build, and `result?`
-                        // below only runs once it quits — so a failure (e.g. pip
-                        // finding no version for this interpreter) must be shown
-                        // here, not left looking like a hang.
+                        // The TUI stays open after the root build until it finds
+                        // nothing left to do or is quit, and `result?` below only
+                        // runs after that — so a failure (e.g. pip finding no
+                        // version for this interpreter) must be shown here, not
+                        // left looking like a hang.
                         match &first {
                             Ok(_) => reporter.report(&Event::Progress {
                                 step: None,
@@ -1306,6 +1312,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                 ),
                             }),
                         }
+                    }
+                    if let Some(t) = tui_ctrl {
+                        t.work_finished();
                     }
                     first
                 })

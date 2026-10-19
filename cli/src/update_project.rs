@@ -305,6 +305,9 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     let start = Instant::now();
     let mut report = Report::default();
     let result = cmd_update_project(&a, &branch_project, &ctx, &mut report);
+    if let Some(t) = &ctx.tui_ctrl {
+        t.work_finished();
+    }
     let failed = up::any_failed(&report.results);
 
     reporter.report(&Event::RunFinished {
