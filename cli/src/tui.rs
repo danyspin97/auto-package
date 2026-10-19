@@ -286,6 +286,21 @@ fn prefix_within_width(s: &str, max_width: usize) -> &str {
     if used <= max_width { s } else { &s[..end] }
 }
 
+/// Longest suffix of `s` whose display width fits in `max_width` columns.
+fn suffix_within_width(s: &str, max_width: usize) -> &str {
+    let mut used = 0;
+    let mut start = s.len();
+    for (idx, c) in s.char_indices().rev() {
+        let width = c.width().unwrap_or(0);
+        if used + width > max_width {
+            break;
+        }
+        used += width;
+        start = idx;
+    }
+    &s[start..]
+}
+
 /// Shortens `s` to at most `max_width` display columns, ending in "..." when cut.
 fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
@@ -1631,41 +1646,145 @@ fn render(
     input: Option<&str>,
     browse: &BrowseState,
 ) -> RenderFeedback {
+    let area = f.area();
+    if too_small(area) {
+        render_too_small(f, area);
+        return RenderFeedback::default();
+    }
     let visible = state.visible_order();
-    let chunks = Layout::default()
+    let heights = stacked_heights(area.height, table_wanted(visible.len()));
+    let [summary, table, detail, footer] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),                                       // Summary header
-            Constraint::Length((visible.len() as u16 + 3).clamp(5, 12)), // Package table
-            Constraint::Min(8),                                          // Detail pane
-            Constraint::Length(3),                                       // Global log / footer
-        ])
-        .split(f.area());
+        .constraints(heights.map(Constraint::Length))
+        .areas(area);
 
-    render_summary(f, state, chunks[0]);
+    render_summary(f, state, summary);
     render_table(
         f,
         state,
         &visible,
-        chunks[1],
+        table,
         table_state,
         browse.focus == Focus::Table,
     );
-    let feedback = render_detail(
-        f,
-        state,
-        &visible,
-        chunks[2],
-        table_state.selected(),
-        browse,
-    );
+    let feedback = render_detail(f, state, &visible, detail, table_state.selected(), browse);
     let retryable = table_state
         .selected()
         .and_then(|i| visible.get(i))
         .and_then(|name| state.packages.get(name.as_str()))
         .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
-    render_footer(f, state, input, browse, chunks[3], retryable);
+    render_footer(f, state, input, browse, footer, retryable);
     feedback
+}
+
+/// Below this size nothing readable fits, so only a notice is drawn.
+const MIN_WIDTH: u16 = 20;
+const MIN_HEIGHT: u16 = 6;
+/// Rows from which the summary and footer keep their bordered three-row
+/// boxes; shorter terminals get them as one bare line each.
+const FULL_CHROME_MIN_HEIGHT: u16 = 20;
+/// Width from which two panes sit side by side; narrower ones are stacked.
+const SIDE_BY_SIDE_MIN_WIDTH: u16 = 60;
+
+fn too_small(area: Rect) -> bool {
+    area.width < MIN_WIDTH || area.height < MIN_HEIGHT
+}
+
+/// The one line drawn instead of the UI when the terminal is too small.
+fn render_too_small(f: &mut Frame, area: Rect) {
+    let line = truncate_with_ellipsis("terminal too small", area.width as usize);
+    let row = Rect {
+        height: area.height.min(1),
+        ..area
+    };
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().fg(Color::Red)),
+        row,
+    );
+}
+
+/// Rows the package table wants: its header and border, plus one per package,
+/// within a sensible range.
+fn table_wanted(rows: usize) -> u16 {
+    u16::try_from(rows)
+        .unwrap_or(u16::MAX)
+        .saturating_add(3)
+        .clamp(5, 12)
+}
+
+/// Heights of the summary, package table, detail pane and footer, top to
+/// bottom, for a terminal `height` rows tall. The summary and footer shrink
+/// to a single bare line when the terminal is short. The table takes what it
+/// wants up to half of the body, and the detail pane keeps the rest, so
+/// neither is squeezed out by the other.
+fn stacked_heights(height: u16, table_wanted: u16) -> [u16; 4] {
+    let chrome = if height >= FULL_CHROME_MIN_HEIGHT {
+        3
+    } else {
+        1
+    };
+    let body = height.saturating_sub(2 * chrome);
+    let table = table_wanted.min(body / 2);
+    [chrome, table, body - table, chrome]
+}
+
+/// Splits `area` into two panes: side by side when the width allows, stacked
+/// otherwise. `first` is the percentage of the space the first pane gets.
+fn two_panes(area: Rect, first: u16) -> [Rect; 2] {
+    let direction = if area.width >= SIDE_BY_SIDE_MIN_WIDTH {
+        Direction::Horizontal
+    } else {
+        Direction::Vertical
+    };
+    Layout::default()
+        .direction(direction)
+        .constraints([
+            Constraint::Percentage(first),
+            Constraint::Percentage(100 - first),
+        ])
+        .areas(area)
+}
+
+/// The first of `options` at most `width` columns wide, or the last option
+/// when none fits. Options are listed from the fullest to the most cut down.
+fn first_fitting<T>(options: Vec<T>, width: usize, measure: impl Fn(&T) -> usize) -> Option<T> {
+    let mut last = None;
+    for option in options {
+        if measure(&option) <= width {
+            return Some(option);
+        }
+        last = Some(option);
+    }
+    last
+}
+
+/// Columns left inside a bordered pane for its content.
+fn pane_inner_width(area: Rect) -> usize {
+    area.width.saturating_sub(2) as usize
+}
+
+/// Whether a one-line strip is drawn in a box. Short terminals get the
+/// summary and footer as bare lines instead.
+fn is_boxed(area: Rect) -> bool {
+    area.height >= 3
+}
+
+/// Columns of text that fit in a one-line strip, leaving out its border.
+fn text_width(area: Rect) -> usize {
+    if is_boxed(area) {
+        pane_inner_width(area)
+    } else {
+        area.width as usize
+    }
+}
+
+/// `p` inside a border, when `area` is tall enough to hold one.
+fn framed(area: Rect, p: Paragraph<'_>) -> Paragraph<'_> {
+    if is_boxed(area) {
+        p.block(Block::default().borders(Borders::ALL))
+    } else {
+        p
+    }
 }
 
 /// A bordered pane. The focused one gets a yellow border and a `▶` in its
@@ -1698,24 +1817,70 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
         .filter(|p| matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt))
         .count();
     let elapsed = state.run_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-    let title = match (state.resolve_total, state.resolve_in_distro) {
+    let cost = state.total_cost_usd();
+    let full = match (state.resolve_total, state.resolve_in_distro) {
         (Some(closure_total), Some(in_distro)) => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${:.4} ",
-            state.total_cost_usd()
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${cost:.4} "
         ),
         _ => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built) │ elapsed {elapsed}s │ cost ${:.4} ",
-            state.total_cost_usd()
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built) │ elapsed {elapsed}s │ cost ${cost:.4} "
         ),
     };
-    let header = Paragraph::new(title)
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(header, area);
+    // Narrower titles for narrower terminals, each dropping the least
+    // essential parts first.
+    let short =
+        format!(" {done}/{total} done, {pending} pending │ elapsed {elapsed}s │ ${cost:.4} ");
+    let shortest = format!(" {done}/{total} done │ ${cost:.4} ");
+    let title = first_fitting(vec![full, short, shortest], text_width(area), |t| t.width())
+        .unwrap_or_default();
+    let header = Paragraph::new(title).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(framed(area, header), area);
+}
+
+/// Package table columns as (header, fixed width), in display order. A `None`
+/// width is a flexible column that takes whatever the others leave.
+const TABLE_COLUMNS: [(&str, Option<u16>); 7] = [
+    ("Status", Some(11)),
+    ("Package", None),
+    ("Version", Some(12)),
+    ("Step", None),
+    ("Tries", Some(7)),
+    ("Time", Some(7)),
+    ("Cost", Some(9)),
+];
+/// Column indices by importance, most important first. On a narrow terminal
+/// the last ones are dropped first.
+const TABLE_PRIORITY: [usize; 7] = [1, 0, 3, 5, 2, 4, 6];
+/// Least width a flexible column needs before it is worth showing.
+const FLEX_MIN_WIDTH: u16 = 12;
+
+/// Indices into `TABLE_COLUMNS` of the columns a table `width` wide shows, in
+/// display order. Columns are added in priority order while they still fit,
+/// and the package name is always shown.
+fn visible_columns(width: u16) -> Vec<usize> {
+    let mut kept: Vec<usize> = Vec::new();
+    for col in TABLE_PRIORITY {
+        let mut trial = kept.clone();
+        trial.push(col);
+        trial.sort_unstable();
+        if kept.is_empty() || table_needs(&trial) <= width {
+            kept = trial;
+        }
+    }
+    kept
+}
+
+/// Width a table showing `columns` needs: each fixed column's width, a
+/// minimum for each flexible one, a space between columns and the borders.
+fn table_needs(columns: &[usize]) -> u16 {
+    let spaces = u16::try_from(columns.len().saturating_sub(1)).unwrap_or(u16::MAX);
+    columns.iter().fold(spaces.saturating_add(2), |need, &i| {
+        need.saturating_add(TABLE_COLUMNS[i].1.unwrap_or(FLEX_MIN_WIDTH))
+    })
 }
 
 fn render_table(
@@ -1726,6 +1891,7 @@ fn render_table(
     table_state: &mut TableState,
     focused: bool,
 ) {
+    let columns = visible_columns(area.width);
     let rows: Vec<Row> = visible
         .iter()
         .map(|name| {
@@ -1737,7 +1903,7 @@ fn render_table(
             } else {
                 "-".to_string()
             };
-            Row::new(vec![
+            let cells = [
                 Cell::from(pkg.status.label()).style(Style::default().fg(pkg.status.color())),
                 Cell::from(name.as_str()),
                 Cell::from(pkg.version.as_str()),
@@ -1745,27 +1911,28 @@ fn render_table(
                 Cell::from(tries),
                 Cell::from(format!("{elapsed}s")),
                 Cell::from(format!("${:.4}", pkg.cost_usd)),
-            ])
+            ];
+            let kept = cells
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| columns.contains(i))
+                .map(|(_, cell)| cell);
+            Row::new(kept)
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(11),
-        Constraint::Percentage(30),
-        Constraint::Length(12),
-        Constraint::Percentage(30),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(9),
-    ];
+    let widths = columns.iter().map(|&i| match TABLE_COLUMNS[i].1 {
+        Some(width) => Constraint::Length(width),
+        None => Constraint::Fill(1),
+    });
+    let titles = TABLE_COLUMNS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| columns.contains(i))
+        .map(|(_, (title, _))| *title);
 
     let table = Table::new(rows, widths)
-        .header(
-            Row::new(vec![
-                "Status", "Package", "Version", "Step", "Tries", "Time", "Cost",
-            ])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-        )
+        .header(Row::new(titles).style(Style::default().add_modifier(Modifier::BOLD)))
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(pane("Packages", focused));
 
@@ -1813,27 +1980,24 @@ fn render_detail(
         }
         None => area,
     };
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(body);
+    let [log_area, act_area] = two_panes(body, 65);
 
     let Some(pkg) = pkg else {
         f.render_widget(
             Paragraph::new("No package selected yet")
                 .block(pane("Event Log", browse.focus == Focus::Log)),
-            chunks[0],
+            log_area,
         );
         f.render_widget(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Agent Activity"),
-            chunks[1],
+            act_area,
         );
         return RenderFeedback::default();
     };
 
-    let log_viewport = viewport_height(chunks[0].height);
+    let log_viewport = viewport_height(log_area.height);
     // The filter narrows the log before windowing, so the offset and the
     // "more below" count are in filtered lines.
     let shown: Vec<usize> = match browse.filter.as_deref() {
@@ -1858,18 +2022,33 @@ fn render_detail(
         .as_deref()
         .map(|needle| format!(" [filter: {needle}]"))
         .unwrap_or_default();
-    let mut log_title = if scroll > 0 {
-        format!("Event Log{filter_note} — {scroll} more below, End to follow")
+    let (more_note, short_more_note) = if scroll > 0 {
+        (
+            format!(" — {scroll} more below, End to follow"),
+            format!(" ↓{scroll}"),
+        )
     } else {
-        format!("Event Log{filter_note}")
+        (String::new(), String::new())
     };
-    if !pkg.skipped.is_empty() {
+    let skipped_note = if pkg.skipped.is_empty() {
+        String::new()
+    } else {
         let labels: Vec<&str> = pkg.skipped.iter().map(|(k, _)| k.label()).collect();
-        log_title.push_str(&format!(" (skipped: {})", labels.join(", ")));
-    }
+        format!(" (skipped: {})", labels.join(", "))
+    };
+    let log_title = first_fitting(
+        vec![
+            format!("Event Log{filter_note}{more_note}{skipped_note}"),
+            format!("Event Log{filter_note}{more_note}"),
+            format!("Event Log{filter_note}{short_more_note}"),
+        ],
+        pane_inner_width(log_area),
+        |t| t.width(),
+    )
+    .unwrap_or_default();
     let log = List::new(log_items).block(pane(&log_title, browse.focus == Focus::Log));
 
-    let act_viewport = viewport_height(chunks[1].height);
+    let act_viewport = viewport_height(act_area.height);
     let act_len = pkg.agent_activity.len();
     let act_sel = browse.act_sel.min(act_len.saturating_sub(1));
     let act_top = activity_top(act_sel, browse.act_top, act_len, act_viewport);
@@ -1891,8 +2070,8 @@ fn render_detail(
         None
     };
     if let Some(entry) = expanded {
-        let text_viewport = viewport_height(chunks[0].height);
-        let text = wrap_text(&entry.text, chunks[0].width.saturating_sub(2) as usize);
+        let text_viewport = viewport_height(log_area.height);
+        let text = wrap_text(&entry.text, pane_inner_width(log_area));
         let off = clamp_offset(browse.detail_off, text.len(), text_viewport);
         let end = (off + text_viewport).min(text.len());
         let lines: Vec<Line> = text[off..end]
@@ -1902,16 +2081,16 @@ fn render_detail(
         let title = format!("{} — Esc close, ↑/↓ scroll", entry.kind.label());
         f.render_widget(
             Paragraph::new(lines).block(pane(&title, browse.focus == Focus::Activity)),
-            chunks[0],
+            log_area,
         );
         feedback.detail_total = text.len();
         feedback.detail_viewport = text_viewport;
         feedback.detail_off = off;
     } else {
-        f.render_widget(log, chunks[0]);
+        f.render_widget(log, log_area);
     }
 
-    let inner_w = chunks[1].width.saturating_sub(2) as usize;
+    let inner_w = pane_inner_width(act_area);
     let activity_items: Vec<ListItem> = pkg
         .agent_activity
         .iter()
@@ -1929,23 +2108,26 @@ fn render_detail(
     if browse.focus == Focus::Activity && act_len > 0 {
         list_state.select(Some(act_sel - act_top));
     }
-    let activity_title = if act_len > 0 {
-        format!(
-            "Agent Activity {}/{act_len} — {} in / {} out",
-            act_sel + 1,
-            pkg.input_tokens,
-            pkg.output_tokens
-        )
+    let position = if act_len > 0 {
+        format!(" {}/{act_len}", act_sel + 1)
     } else {
-        format!(
-            "Agent Activity — {} in / {} out",
-            pkg.input_tokens, pkg.output_tokens
-        )
+        String::new()
     };
+    let tokens = format!("{} in / {} out", pkg.input_tokens, pkg.output_tokens);
+    let activity_title = first_fitting(
+        vec![
+            format!("Agent Activity{position} — {tokens}"),
+            format!("Agent Activity{position}"),
+            "Activity".to_string(),
+        ],
+        pane_inner_width(act_area),
+        |t| t.width(),
+    )
+    .unwrap_or_default();
     let activity = List::new(activity_items)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(pane(&activity_title, browse.focus == Focus::Activity));
-    f.render_stateful_widget(activity, chunks[1], &mut list_state);
+    f.render_stateful_widget(activity, act_area, &mut list_state);
     feedback
 }
 
@@ -1999,8 +2181,9 @@ fn built_lines(state: &TuiState) -> Vec<String> {
         .collect()
 }
 
-/// The Queued and Built lists side by side in place of the detail panes. One
-/// offset is kept per list and clamped to that list's own length.
+/// The Queued and Built lists side by side (stacked on a narrow terminal) in
+/// place of the detail panes. One offset is kept per list and clamped to that
+/// list's own length.
 fn render_lists(
     f: &mut Frame,
     state: &TuiState,
@@ -2009,22 +2192,21 @@ fn render_lists(
 ) -> RenderFeedback {
     let queued = queued_lines(state);
     let built = built_lines(state);
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    let viewport = viewport_height(area.height);
+    let [queued_area, built_area] = two_panes(area, 50);
+    // Both lists page by the same amount, the smaller pane's height, so one
+    // offset per list means the same thing whichever list is scrolled.
+    let viewport = viewport_height(queued_area.height).min(viewport_height(built_area.height));
     for (lines, title, col, off) in [
         (
             &queued,
             format!("Queued ({})", queued.len()),
-            cols[0],
+            queued_area,
             clamp_offset(browse.queued_off, queued.len(), viewport),
         ),
         (
             &built,
             format!("Built ({})", built.len()),
-            cols[1],
+            built_area,
             clamp_offset(browse.built_off, built.len(), viewport),
         ),
     ] {
@@ -2066,23 +2248,39 @@ fn render_footer(
     retryable: bool,
 ) {
     let prompt = match (input, browse.filter_input.as_deref()) {
-        (Some(buf), _) => Some(prompt_line(
+        (Some(buf), _) => Some((
             "add package (name or repo URL): ",
+            "add: ",
             buf,
             "   Enter queue │ Esc cancel",
         )),
-        (None, Some(buf)) => Some(prompt_line(
+        (None, Some(buf)) => Some((
             "filter log: ",
+            "filter: ",
             buf,
             "   Enter apply │ Esc cancel",
         )),
         (None, None) => None,
     };
-    if let Some(line) = prompt {
-        f.render_widget(
-            Paragraph::new(line).block(Block::default().borders(Borders::ALL)),
-            area,
-        );
+    if let Some((label, short_label, buf, keys)) = prompt {
+        // The cursor must stay on screen, so when even the short label does
+        // not fit, only the end of what was typed is shown.
+        let width = text_width(area);
+        let line = first_fitting(
+            vec![
+                prompt_line(label, buf, keys),
+                prompt_line(label, buf, ""),
+                prompt_line(short_label, buf, ""),
+                Line::from(vec![
+                    Span::raw(suffix_within_width(buf, width.saturating_sub(1)).to_string()),
+                    Span::styled("█", Style::default().fg(Color::Cyan)),
+                ]),
+            ],
+            width,
+            |l| l.width(),
+        )
+        .unwrap_or_default();
+        f.render_widget(framed(area, Paragraph::new(line)), area);
         return;
     }
     let last = state
@@ -2103,23 +2301,30 @@ fn render_footer(
         EscAction::Collapse => "Esc close │ q quit",
         EscAction::Quit => "q/Esc quit",
     };
-    let hint = Span::styled(
-        format!(
-            "  {nav} │ Tab focus │ l lists │ n add package{} │ a {} succeeded │ {quit}",
-            if retryable {
-                " │ r retry (no space left)"
-            } else {
-                ""
-            },
-            if state.show_all { "hide" } else { "show" }
-        ),
-        Style::default().fg(Color::DarkGray),
+    let hint = format!(
+        "  {nav} │ Tab focus │ l lists │ n add package{} │ a {} succeeded │ {quit}",
+        if retryable {
+            " │ r retry (no space left)"
+        } else {
+            ""
+        },
+        if state.show_all { "hide" } else { "show" }
     );
-    let line = Line::from(vec![last, hint]);
-    let footer = Paragraph::new(line)
-        .block(Block::default().borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-    f.render_widget(footer, area);
+    let dim = Style::default().fg(Color::DarkGray);
+    // Fullest first: the log line and every key hint, then just the hints,
+    // then the focus and quit keys, then quit alone.
+    let line = first_fitting(
+        vec![
+            Line::from(vec![last, Span::styled(hint.clone(), dim)]),
+            Line::from(Span::styled(hint, dim)),
+            Line::from(Span::styled(format!("  Tab focus │ {quit}"), dim)),
+            Line::from(Span::styled(format!("  {quit}"), dim)),
+        ],
+        text_width(area),
+        |l| l.width(),
+    )
+    .unwrap_or_default();
+    f.render_widget(framed(area, Paragraph::new(line)), area);
 }
 
 #[cfg(test)]
@@ -2804,7 +3009,16 @@ mod render_smoke_tests {
     #[test]
     fn every_focus_and_size_renders_without_panicking() {
         let state = state_with_history();
-        for (w, h) in [(80u16, 30u16), (20, 8), (3, 3)] {
+        for (w, h) in [
+            (80u16, 30u16),
+            (80, 24),
+            (60, 15),
+            (40, 10),
+            (20, 6),
+            (20, 8),
+            (10, 3),
+            (3, 3),
+        ] {
             for focus in [Focus::Table, Focus::Log, Focus::Activity] {
                 for expanded in [false, true] {
                     for filter in [None, Some("line 4".to_string())] {
@@ -2853,6 +3067,120 @@ mod render_smoke_tests {
                 render(f, &state, &mut table_state, None, &browse);
             })
             .unwrap();
+    }
+
+    fn row_text(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    fn render_at(state: &TuiState, w: u16, h: u16) -> Terminal<TestBackend> {
+        let browse = BrowseState::default();
+        let mut table_state = TableState::default();
+        table_state.select(Some(0));
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                render(f, state, &mut table_state, None, &browse);
+            })
+            .unwrap();
+        terminal
+    }
+
+    #[test]
+    fn a_terminal_below_the_minimum_gets_one_notice_line() {
+        let state = state_with_history();
+        let terminal = render_at(&state, 19, 10);
+        assert!(row_text(&terminal, 0).starts_with("terminal too small"));
+        assert!(!row_text(&terminal, 1).contains("Event Log"));
+        // Cut to the width: "termina..." is all that fits in 10 columns.
+        let terminal = render_at(&state, 10, 3);
+        assert_eq!(row_text(&terminal, 0).trim_end(), "termina...");
+    }
+
+    #[test]
+    fn the_minimum_size_is_drawn_in_full() {
+        let state = state_with_history();
+        let terminal = render_at(&state, 20, 6);
+        assert!(!row_text(&terminal, 0).contains("terminal too small"));
+    }
+
+    #[test]
+    fn too_small_is_width_under_20_or_height_under_6() {
+        assert!(too_small(Rect::new(0, 0, 19, 30)));
+        assert!(too_small(Rect::new(0, 0, 80, 5)));
+        assert!(!too_small(Rect::new(0, 0, 20, 6)));
+    }
+
+    #[test]
+    fn short_terminals_get_bare_summary_and_footer_lines() {
+        assert_eq!(stacked_heights(30, 5), [3, 5, 19, 3]);
+        assert_eq!(stacked_heights(19, 5), [1, 5, 12, 1]);
+        assert_eq!(stacked_heights(6, 5), [1, 2, 2, 1]);
+    }
+
+    #[test]
+    fn stacked_heights_always_fill_the_terminal() {
+        for height in 6..=80u16 {
+            for wanted in 5..=12u16 {
+                let [summary, table, detail, footer] = stacked_heights(height, wanted);
+                assert_eq!(summary + table + detail + footer, height);
+                assert!(table <= wanted);
+                assert!(table <= detail + table, "table never outgrows the body");
+            }
+        }
+    }
+
+    #[test]
+    fn the_table_keeps_the_most_important_columns_when_narrow() {
+        assert_eq!(visible_columns(80), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(visible_columns(60), vec![0, 1, 2, 3, 5]);
+        assert_eq!(visible_columns(40), vec![0, 1, 3]);
+        // The package name is always there, even when nothing else fits.
+        assert_eq!(visible_columns(5), vec![1]);
+    }
+
+    #[test]
+    fn a_narrow_table_drops_cost_and_keeps_the_package_name() {
+        let state = state_with_history();
+        let terminal = render_at(&state, 40, 24);
+        // Summary takes rows 0-2, so the table header sits on row 4.
+        let header = row_text(&terminal, 4);
+        assert!(header.contains("Package"));
+        assert!(!header.contains("Cost"));
+    }
+
+    #[test]
+    fn panes_stack_when_narrow_and_sit_side_by_side_when_wide() {
+        let wide = two_panes(Rect::new(0, 0, 80, 10), 65);
+        assert_eq!(wide[0].y, wide[1].y);
+        assert_eq!(wide[0].width + wide[1].width, 80);
+        assert_eq!(wide[0].width, 52);
+
+        let narrow = two_panes(Rect::new(0, 0, 40, 10), 65);
+        assert_eq!(narrow[0].x, narrow[1].x);
+        assert_eq!(narrow[0].width, 40);
+        assert_eq!(narrow[0].height + narrow[1].height, 10);
+    }
+
+    #[test]
+    fn first_fitting_takes_the_first_option_that_fits_else_the_last() {
+        let options = vec!["abcdef", "abc", "a"];
+        assert_eq!(
+            first_fitting(options.clone(), 6, |s| s.len()),
+            Some("abcdef")
+        );
+        assert_eq!(first_fitting(options.clone(), 3, |s| s.len()), Some("abc"));
+        assert_eq!(first_fitting(options.clone(), 0, |s| s.len()), Some("a"));
+        assert_eq!(first_fitting(Vec::<&str>::new(), 5, |s| s.len()), None);
+    }
+
+    #[test]
+    fn suffix_keeps_the_end_of_the_text_within_its_width() {
+        assert_eq!(suffix_within_width("abcdef", 3), "def");
+        assert_eq!(suffix_within_width("abc", 10), "abc");
+        assert_eq!(suffix_within_width("abc", 0), "");
+        assert_eq!(suffix_within_width("日本", 3), "本");
     }
 }
 
