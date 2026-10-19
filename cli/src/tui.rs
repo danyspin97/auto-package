@@ -43,6 +43,15 @@ const MAX_AGENT_ACTIVITY: usize = 100;
 /// Bound on events queued for the render thread; beyond it events are dropped.
 const EVENT_QUEUE_CAP: usize = 8192;
 
+/// What a run is about, shown in the summary header: the OBS project it
+/// builds in and the packages it was asked for. No `targets` means the whole
+/// project.
+#[derive(Clone, Default)]
+pub struct RunScope {
+    pub project: String,
+    pub targets: Vec<String>,
+}
+
 /// Handle used by the CLI to obtain reporters that feed the TUI.
 ///
 /// Cheap to clone; every clone shares the same channel to the render thread.
@@ -97,12 +106,13 @@ impl TuiController {
     ///
     /// `memory` is only used for a Ctrl-C keypress inside the TUI — see
     /// `crate::handle_interrupt` for why the TUI cannot just rely on the
-    /// process's real SIGINT handler firing.
-    pub fn new(memory: std::sync::Arc<MemorySink>) -> io::Result<Self> {
+    /// process's real SIGINT handler firing. `scope` is only shown in the
+    /// summary header.
+    pub fn new(memory: std::sync::Arc<MemorySink>, scope: RunScope) -> io::Result<Self> {
         let (tx, rx) = sync_channel(EVENT_QUEUE_CAP);
         let (add_tx, add_rx) = channel();
         std::thread::spawn(move || {
-            if let Err(e) = run(rx, add_tx, memory) {
+            if let Err(e) = run(rx, add_tx, memory, scope) {
                 eprintln!("TUI error: {e}");
             }
         });
@@ -551,6 +561,8 @@ fn fmt_dur(d: Duration) -> String {
 }
 
 struct TuiState {
+    /// Project and requested packages, shown in the summary header.
+    scope: RunScope,
     order: Vec<String>,
     packages: HashMap<String, PkgState>,
     // Only the most recent run-level message is ever shown (the footer),
@@ -572,8 +584,9 @@ struct TuiState {
 }
 
 impl TuiState {
-    fn new() -> Self {
+    fn new(scope: RunScope) -> Self {
         Self {
+            scope,
             order: Vec::new(),
             packages: HashMap::new(),
             last_global_log: None,
@@ -1006,6 +1019,7 @@ fn run(
     rx: Receiver<Msg>,
     add_tx: Sender<String>,
     memory: std::sync::Arc<MemorySink>,
+    scope: RunScope,
 ) -> io::Result<()> {
     // Installed before the fallible calls: `enable_raw_mode` succeeding and
     // `EnterAlternateScreen` then failing must still restore the terminal.
@@ -1034,7 +1048,7 @@ fn run(
     // content showing through. One hard clear up front wipes the slate.
     terminal.clear()?;
 
-    let result = event_loop(&mut terminal, rx, &add_tx, &memory);
+    let result = event_loop(&mut terminal, rx, &add_tx, &memory, scope);
     let _ = terminal.show_cursor();
     result
 }
@@ -1044,8 +1058,9 @@ fn event_loop(
     rx: Receiver<Msg>,
     add_tx: &Sender<String>,
     memory: &MemorySink,
+    scope: RunScope,
 ) -> io::Result<()> {
-    let mut state = TuiState::new();
+    let mut state = TuiState::new(scope);
     // `Some` while the "add package" prompt is open and capturing keys.
     let mut input: Option<String> = None;
     let mut table_state = TableState::default();
@@ -1800,6 +1815,46 @@ fn pane(title: &str, focused: bool) -> Block<'static> {
     }
 }
 
+/// The run's scope as text, fullest first: every target, then the first few
+/// with `(+N)` for the rest, then the project alone. Without targets the
+/// whole project is the scope.
+fn scope_labels(scope: &RunScope) -> Vec<String> {
+    let project = format!("project: {}", scope.project);
+    let total = scope.targets.len();
+    if total == 0 {
+        return vec![format!("{project} | target: all packages"), project];
+    }
+    let mut labels: Vec<String> = (1..=total)
+        .rev()
+        .map(|shown| {
+            let names = scope.targets[..shown].join(", ");
+            let more = if shown < total {
+                format!(" (+{})", total - shown)
+            } else {
+                String::new()
+            };
+            format!("{project} | target: {names}{more}")
+        })
+        .collect();
+    labels.push(project);
+    labels
+}
+
+/// The summary line: the scope in front of the counters. Every combination is
+/// tried with the scope first, so the project and targets keep their place
+/// while there is room for them beside the counters, and the counters shrink
+/// before the scope does. Counters alone come last, for terminals too narrow
+/// for both. Whatever is picked is cut to `width` as a last resort.
+fn header_line(scope: &[String], counters: Vec<String>, width: usize) -> String {
+    let mut options: Vec<String> = scope
+        .iter()
+        .flat_map(|s| counters.iter().map(move |c| format!("{s} │{c}")))
+        .collect();
+    options.extend(counters);
+    let line = first_fitting(options, width, |t| t.width()).unwrap_or_default();
+    truncate_with_ellipsis(&line, width)
+}
+
 fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     let done = state.packages.values().filter(|p| p.finished).count();
     let total = state.order.len();
@@ -1831,8 +1886,11 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     let short =
         format!(" {done}/{total} done, {pending} pending │ elapsed {elapsed}s │ ${cost:.4} ");
     let shortest = format!(" {done}/{total} done │ ${cost:.4} ");
-    let title = first_fitting(vec![full, short, shortest], text_width(area), |t| t.width())
-        .unwrap_or_default();
+    let title = header_line(
+        &scope_labels(&state.scope),
+        vec![full, short, shortest],
+        text_width(area),
+    );
     let header = Paragraph::new(title).style(
         Style::default()
             .fg(Color::Cyan)
@@ -2479,7 +2537,7 @@ mod step_state_tests {
 
     #[test]
     fn a_waited_on_package_with_a_row_shows_its_status_not_a_second_entry() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.pkg_mut("python-logfire").status = PkgStatus::Running;
         let waiting = state.pkg_mut("python-mcp");
         waiting.status = PkgStatus::MissingDeps;
@@ -2492,7 +2550,7 @@ mod step_state_tests {
 
     #[test]
     fn missing_deps_sets_waiting_on_and_a_later_build_clears_it() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         let deps = ["b", "a", "b"].map(String::from).to_vec();
         state.apply(msg(
             "foo",
@@ -2505,7 +2563,7 @@ mod step_state_tests {
 
     #[test]
     fn pending_counts_only_rows_still_to_build() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.pkg_mut("running");
         state.pkg_mut("built");
         state.pkg_mut("parked");
@@ -2535,7 +2593,7 @@ mod step_state_tests {
 
     #[test]
     fn queued_and_built_lines_follow_table_order() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         let fin = |pkg: &str, outcome| Event::PackageFinished {
             pkg: pkg.to_string(),
             version: "2.0".to_string(),
@@ -2554,7 +2612,7 @@ mod step_state_tests {
 
     #[test]
     fn a_finished_step_between_steps_shows_its_label_not_a_dash() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.apply(msg("foo", started(StepKind::Checkout)));
         state.apply(msg("foo", finished(StepOutcome::Ok, 2)));
         let pkg = &state.packages["foo"];
@@ -2566,7 +2624,7 @@ mod step_state_tests {
 
     #[test]
     fn a_failed_step_then_failed_package_keeps_the_step_and_reason() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.apply(msg("foo", started(StepKind::Checkout)));
         state.apply(msg("foo", finished(StepOutcome::Failed, 2)));
         state.apply(Msg {
@@ -2585,7 +2643,7 @@ mod step_state_tests {
 
     #[test]
     fn a_built_package_has_no_step() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.apply(msg("foo", started(StepKind::Checkout)));
         state.apply(msg("foo", finished(StepOutcome::Ok, 2)));
         state.apply(Msg {
@@ -2599,7 +2657,7 @@ mod step_state_tests {
 
     #[test]
     fn a_new_attempt_clears_the_previous_failure() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.apply(msg("foo", started(StepKind::Checkout)));
         state.apply(msg("foo", finished(StepOutcome::Failed, 2)));
         state.apply(Msg {
@@ -2636,7 +2694,7 @@ mod step_state_tests {
 
     #[test]
     fn a_retry_resets_finished_and_tries() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.apply(msg(
             "foo",
             Event::AgentPrompt {
@@ -2664,7 +2722,7 @@ mod step_state_tests {
 
     #[test]
     fn disk_full_only_classifies_the_failure_that_hit_it() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state
             .packages
             .insert("foo".into(), PkgState::new("1.0".into()));
@@ -2681,7 +2739,7 @@ mod step_state_tests {
 
     #[test]
     fn a_repeated_step_shows_its_attempt_number() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.apply(msg(
             "foo",
             Event::StepStarted {
@@ -2698,7 +2756,7 @@ mod step_state_tests {
 
     #[test]
     fn a_skipped_step_is_recorded_without_replacing_the_current_step() {
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         state.apply(msg("foo", started(StepKind::Checkout)));
         state.apply(msg(
             "foo",
@@ -2991,7 +3049,11 @@ mod render_smoke_tests {
     use ratatui::backend::TestBackend;
 
     fn state_with_history() -> TuiState {
-        let mut state = TuiState::new();
+        let scope = RunScope {
+            project: "home:foo:bar".to_string(),
+            targets: vec!["foo".to_string(), "bar".to_string(), "baz".to_string()],
+        };
+        let mut state = TuiState::new(scope);
         let pkg = state.pkg_mut("foo");
         for i in 0..50 {
             pkg.add_log(LogLevel::Info, format!("log line {i} with some text"));
@@ -3053,7 +3115,7 @@ mod render_smoke_tests {
 
     #[test]
     fn an_empty_run_renders_without_panicking() {
-        let state = TuiState::new();
+        let state = TuiState::new(RunScope::default());
         let browse = BrowseState {
             focus: Focus::Activity,
             act_expanded: true,
@@ -3085,6 +3147,15 @@ mod render_smoke_tests {
             })
             .unwrap();
         terminal
+    }
+
+    #[test]
+    fn the_header_names_the_project_and_targets_when_there_is_room() {
+        let terminal = render_at(&state_with_history(), 120, 30);
+        assert!(row_text(&terminal, 1).contains("project: home:foo:bar | target: foo, bar, baz"));
+        // Narrower, but still a boxed header: the project survives the cut.
+        let terminal = render_at(&state_with_history(), 80, 30);
+        assert!(row_text(&terminal, 1).contains("project: home:foo:bar"));
     }
 
     #[test]
@@ -3197,7 +3268,7 @@ mod replay {
             return;
         };
         let text = std::fs::read_to_string(path).unwrap();
-        let mut state = TuiState::new();
+        let mut state = TuiState::new(RunScope::default());
         let mut skipped = 0;
         for line in text.lines() {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -3225,5 +3296,103 @@ mod replay {
         eprintln!("order: {:?}", state.order);
         eprintln!("queued: {:#?}", queued_lines(&state));
         eprintln!("built: {}", built_lines(&state).len());
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    fn scope(targets: &[&str]) -> RunScope {
+        RunScope {
+            project: "home:foo:bar".to_string(),
+            targets: targets.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    fn counters() -> Vec<String> {
+        vec![
+            " Auto-Package — 3/10 packages done, 7 pending (2 built) │ elapsed 12s │ cost $0.1234 "
+                .to_string(),
+            " 3/10 done, 7 pending │ elapsed 12s │ $0.1234 ".to_string(),
+            " 3/10 done │ $0.1234 ".to_string(),
+        ]
+    }
+
+    #[test]
+    fn one_target_is_named_with_the_project_alone_as_the_last_resort() {
+        assert_eq!(
+            scope_labels(&scope(&["pkg1"])),
+            [
+                "project: home:foo:bar | target: pkg1",
+                "project: home:foo:bar"
+            ]
+        );
+    }
+
+    #[test]
+    fn targets_that_do_not_fit_are_counted_from_the_end() {
+        assert_eq!(
+            scope_labels(&scope(&["pkg1", "pkg2", "pkg3"])),
+            [
+                "project: home:foo:bar | target: pkg1, pkg2, pkg3",
+                "project: home:foo:bar | target: pkg1, pkg2 (+1)",
+                "project: home:foo:bar | target: pkg1 (+2)",
+                "project: home:foo:bar",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_targets_means_the_whole_project() {
+        assert_eq!(
+            scope_labels(&scope(&[])),
+            [
+                "project: home:foo:bar | target: all packages",
+                "project: home:foo:bar",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wide_header_shows_the_full_scope_before_the_full_counters() {
+        let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 200);
+        assert!(
+            line.starts_with("project: home:foo:bar | target: pkg1, pkg2 │ Auto-Package"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_header_drops_the_scope_before_the_counters_it_cannot_share_room_with() {
+        let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 40);
+        assert_eq!(line, " 3/10 done │ $0.1234 ");
+    }
+
+    #[test]
+    fn the_targets_are_dropped_before_the_project() {
+        let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 60);
+        assert_eq!(line, "project: home:foo:bar │ 3/10 done │ $0.1234 ");
+    }
+
+    #[test]
+    fn a_header_never_outgrows_its_width() {
+        let scopes = scope_labels(&scope(&["a-long-package-name", "another-one", "third"]));
+        // From 3 columns up: narrower than the "..." cut mark, nothing fits.
+        for width in 3..=160 {
+            let line = header_line(&scopes, counters(), width);
+            assert!(line.width() <= width, "{width}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_too_long_for_any_width_is_cut_with_an_ellipsis() {
+        let long = RunScope {
+            project: "home:a-very-long-project-name:branches:openSUSE:Factory".to_string(),
+            targets: vec!["pkg".to_string()],
+        };
+        let line = header_line(&scope_labels(&long), counters(), 20);
+        assert!(line.width() <= 20, "{line:?}");
+        assert!(line.ends_with("..."), "{line:?}");
     }
 }

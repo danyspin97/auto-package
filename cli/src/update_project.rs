@@ -258,7 +258,13 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     // Declared before `tui_ctrl` so it drops last (see `Commands::Build`).
     let _terminal_restore = a.tui.then(tui::TerminalGuard::new);
     let tui_ctrl = if a.tui {
-        Some(tui::TuiController::new(memory.clone())?)
+        Some(tui::TuiController::new(
+            memory.clone(),
+            tui::RunScope {
+                project: branch_project.clone(),
+                targets: a.only.clone(),
+            },
+        )?)
     } else {
         None
     };

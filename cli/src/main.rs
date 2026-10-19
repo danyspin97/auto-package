@@ -1110,7 +1110,13 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // `Reporter` at all — left unguarded they'd print straight over
             // the TUI's alternate screen.
             let tui_ctrl = if enable_tui {
-                Some(tui::TuiController::new(memory.clone())?)
+                Some(tui::TuiController::new(
+                    memory.clone(),
+                    tui::RunScope {
+                        project: project.clone(),
+                        targets: vec![target.clone().unwrap_or_else(|| name.clone())],
+                    },
+                )?)
             } else {
                 None
             };
@@ -1413,7 +1419,13 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // `tui_ctrl` so it drops LAST.
             let _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
             let tui_ctrl = if enable_tui {
-                Some(tui::TuiController::new(memory.clone())?)
+                Some(tui::TuiController::new(
+                    memory.clone(),
+                    tui::RunScope {
+                        project: project.clone(),
+                        targets: only.iter().cloned().collect(),
+                    },
+                )?)
             } else {
                 None
             };
