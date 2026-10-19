@@ -13,7 +13,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -69,6 +69,9 @@ pub struct TuiController {
     /// or retry from the time the TUI sends it until its build returns. The
     /// TUI closes itself only once this is zero (see [`run_is_done`]).
     work: std::sync::Arc<AtomicUsize>,
+    /// Set by the render thread just before it returns: whether every package
+    /// was built when it closed (see [`TuiController::all_settled`]).
+    settled: std::sync::Arc<AtomicBool>,
 }
 
 /// Drop-based terminal restorer.
@@ -119,8 +122,10 @@ impl TuiController {
         // Starts at one for the root build, which the CLI releases when it returns.
         let work = std::sync::Arc::new(AtomicUsize::new(1));
         let thread_work = work.clone();
+        let settled = std::sync::Arc::new(AtomicBool::new(false));
+        let thread_settled = settled.clone();
         std::thread::spawn(move || {
-            if let Err(e) = run(rx, add_tx, thread_work, memory, scope) {
+            if let Err(e) = run(rx, add_tx, thread_work, memory, scope, thread_settled) {
                 eprintln!("TUI error: {e}");
             }
         });
@@ -129,7 +134,17 @@ impl TuiController {
             dropped: std::sync::Arc::new(AtomicUsize::new(0)),
             add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
             work,
+            settled,
         })
+    }
+
+    /// Whether the TUI closed with every package built (see [`run_is_done`]).
+    /// The render thread stores this before it drops its add-request sender,
+    /// so once the CLI has waited for the add-request dispatcher to end (which
+    /// is how `main` waits for the TUI to close) this reads the final verdict.
+    /// It stays `false` if the TUI never closed normally.
+    pub fn all_settled(&self) -> bool {
+        self.settled.load(Ordering::SeqCst)
     }
 
     /// Release one unit of outstanding work: the root build once it returns,
@@ -1038,6 +1053,7 @@ fn run(
     work: std::sync::Arc<AtomicUsize>,
     memory: std::sync::Arc<MemorySink>,
     scope: RunScope,
+    settled: std::sync::Arc<AtomicBool>,
 ) -> io::Result<()> {
     // Installed before the fallible calls: `enable_raw_mode` succeeding and
     // `EnterAlternateScreen` then failing must still restore the terminal.
@@ -1066,28 +1082,56 @@ fn run(
     // content showing through. One hard clear up front wipes the slate.
     terminal.clear()?;
 
-    let result = event_loop(&mut terminal, rx, &add_tx, &work, &memory, scope);
+    let result = event_loop(&mut terminal, rx, &add_tx, &work, &memory, scope, &settled);
     let _ = terminal.show_cursor();
     result
 }
 
-/// Whether the run has nothing left to do, so the TUI can close by itself.
+/// Whether every package the run was asked for is settled, so the TUI can
+/// close by itself and the run exits 0.
+///
+/// A package is settled once its own build has finished with a built outcome
+/// (`Built` or `AlreadyBuilt`) and no retry is asked for. Nothing else settles
+/// a row: one parked on missing deps is not settled, even once its dependencies
+/// are built, and neither is a failed row.
 ///
 /// `work_left` counts the builds still running (see
-/// [`TuiController::work_finished`]). Every row must be finished with no retry
-/// asked for. A row parked on missing deps counts as finished: its attempt has
-/// ended, and once `work_left` is zero nothing will re-queue it. Rows are all
-/// checked rather than only the scope's targets, since the targets are typed
-/// names and rows use rpm names, so matching them up is not reliable. Once the
-/// root build has returned every target has its outcome anyway. An empty run
-/// is never done, so a failure before anything started stays on screen.
+/// [`TuiController::work_finished`]), so a run with work outstanding is never
+/// settled. Rows are all checked rather than only the scope's targets, since
+/// the targets are typed names and rows use rpm names, so matching them up is
+/// not reliable. An empty run is never settled, so a failure before anything
+/// started stays on screen.
 fn run_is_done(state: &TuiState, work_left: usize) -> bool {
+    work_left == 0
+        && !state.packages.is_empty()
+        && state.packages.values().all(|p| {
+            p.finished
+                && !p.retry_requested
+                && matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt)
+        })
+}
+
+/// Whether the run has nothing left to do, built or not: `work_left` is zero
+/// and every row has finished with no retry asked for. Such a run is over but
+/// may not be settled (see [`run_is_done`]); then the TUI stays open so the
+/// user can add a package, retry one, or quit. A row parked on missing deps
+/// counts as finished here, since its attempt has ended and nothing will
+/// re-queue it once `work_left` is zero.
+fn run_is_over(state: &TuiState, work_left: usize) -> bool {
     work_left == 0
         && !state.packages.is_empty()
         && state
             .packages
             .values()
             .all(|p| p.finished && !p.retry_requested)
+}
+
+/// The footer line for a run that is over but not settled, so the user knows
+/// what to do next. `None` while the run is still going and once it is
+/// settled, since the TUI is about to close itself then.
+fn over_hint(over: bool, settled: bool) -> Option<&'static str> {
+    (over && !settled)
+        .then_some("Run over with packages not built: press n to add a package, q to quit")
 }
 
 /// Hand `name` to the run as a new root build. It is counted as outstanding
@@ -1109,6 +1153,7 @@ fn event_loop(
     work: &AtomicUsize,
     memory: &MemorySink,
     scope: RunScope,
+    settled: &AtomicBool,
 ) -> io::Result<()> {
     let mut state = TuiState::new(scope);
     // `Some` while the "add package" prompt is open and capturing keys.
@@ -1129,7 +1174,7 @@ fn event_loop(
     let mut senders_dropped = false;
     // Read fresh at each use: a key press can add work partway through a frame.
     let run_over = |state: &TuiState| {
-        state.run_outcome.is_some() || run_is_done(state, work.load(Ordering::SeqCst))
+        state.run_outcome.is_some() || run_is_over(state, work.load(Ordering::SeqCst))
     };
 
     loop {
@@ -1175,9 +1220,13 @@ fn event_loop(
             browse.log_seen = log_seq;
         }
 
+        let hint = over_hint(
+            run_over(&state),
+            run_is_done(&state, work.load(Ordering::SeqCst)),
+        );
         let mut feedback = RenderFeedback::default();
         terminal.draw(|f| {
-            feedback = render(f, &state, &mut table_state, input.as_deref(), &browse);
+            feedback = render(f, &state, &mut table_state, input.as_deref(), &browse, hint);
         })?;
         // Keep the offset within what rendering can show, or PageDown
         // appears dead after holding PageUp at the top.
@@ -1403,10 +1452,11 @@ fn event_loop(
             }
         }
 
-        // A finished run gets the same two-second grace as a `RunFinished`, so
-        // its final state can be read. Work added during the grace (`n` or `r`)
-        // cancels it, and the timer starts over once the run is done again.
-        if run_over(&state) {
+        // A settled run gets a two-second grace so its final state can be read.
+        // Work added during the grace (`n` or `r`) cancels it, and the timer
+        // starts over once the run is settled again. A run that is over but not
+        // settled stays open until the user quits.
+        if run_is_done(&state, work.load(Ordering::SeqCst)) {
             let at = finished_at.get_or_insert(Instant::now());
             if at.elapsed() >= Duration::from_secs(2) {
                 break;
@@ -1423,6 +1473,10 @@ fn event_loop(
         }
     }
 
+    settled.store(
+        run_is_done(&state, work.load(Ordering::SeqCst)),
+        Ordering::SeqCst,
+    );
     Ok(())
 }
 
@@ -1720,6 +1774,7 @@ fn render(
     table_state: &mut TableState,
     input: Option<&str>,
     browse: &BrowseState,
+    hint: Option<&str>,
 ) -> RenderFeedback {
     let area = f.area();
     if too_small(area) {
@@ -1748,7 +1803,7 @@ fn render(
         .and_then(|i| visible.get(i))
         .and_then(|name| state.packages.get(name.as_str()))
         .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
-    render_footer(f, state, input, browse, footer, retryable);
+    render_footer(f, state, input, browse, footer, retryable, hint);
     feedback
 }
 
@@ -2364,6 +2419,7 @@ fn render_footer(
     browse: &BrowseState,
     area: Rect,
     retryable: bool,
+    hint: Option<&str>,
 ) {
     let prompt = match (input, browse.filter_input.as_deref()) {
         (Some(buf), _) => Some((
@@ -2401,11 +2457,16 @@ fn render_footer(
         f.render_widget(framed(area, Paragraph::new(line)), area);
         return;
     }
-    let last = state
-        .last_global_log
-        .as_ref()
-        .map(|l| Span::styled(l.message.as_str(), Style::default().fg(l.level.color())))
-        .unwrap_or_else(|| Span::raw(""));
+    // The hint, when there is one, is the most useful thing to say, so it
+    // takes the place of the last log line.
+    let last = match hint {
+        Some(text) => Span::styled(text, Style::default().fg(LogLevel::Warn.color())),
+        None => state
+            .last_global_log
+            .as_ref()
+            .map(|l| Span::styled(l.message.as_str(), Style::default().fg(l.level.color())))
+            .unwrap_or_else(|| Span::raw("")),
+    };
     let nav = match browse.focus {
         Focus::Table => "↑/↓ select │ PgUp/PgDn/Home/End scroll log",
         Focus::Log => "↑/↓ PgUp/PgDn/Home/End scroll log │ / filter",
@@ -2419,7 +2480,7 @@ fn render_footer(
         EscAction::Collapse => "Esc close │ q quit",
         EscAction::Quit => "q/Esc quit",
     };
-    let hint = format!(
+    let hints = format!(
         "  {nav} │ Tab focus │ l lists │ n add package{} │ a {} succeeded │ {quit}",
         if retryable {
             " │ r retry (no space left)"
@@ -2433,8 +2494,8 @@ fn render_footer(
     // then the focus and quit keys, then quit alone.
     let line = first_fitting(
         vec![
-            Line::from(vec![last, Span::styled(hint.clone(), dim)]),
-            Line::from(Span::styled(hint, dim)),
+            Line::from(vec![last, Span::styled(hints.clone(), dim)]),
+            Line::from(Span::styled(hints, dim)),
             Line::from(Span::styled(format!("  Tab focus │ {quit}"), dim)),
             Line::from(Span::styled(format!("  {quit}"), dim)),
         ],
@@ -3161,7 +3222,14 @@ mod render_smoke_tests {
                                         Terminal::new(TestBackend::new(w, h)).unwrap();
                                     terminal
                                         .draw(|f| {
-                                            render(f, &state, &mut table_state, input, &browse);
+                                            render(
+                                                f,
+                                                &state,
+                                                &mut table_state,
+                                                input,
+                                                &browse,
+                                                None,
+                                            );
                                         })
                                         .unwrap();
                                 }
@@ -3186,7 +3254,7 @@ mod render_smoke_tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal
             .draw(|f| {
-                render(f, &state, &mut table_state, None, &browse);
+                render(f, &state, &mut table_state, None, &browse, None);
             })
             .unwrap();
     }
@@ -3203,7 +3271,7 @@ mod render_smoke_tests {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
             .draw(|f| {
-                render(f, state, &mut table_state, None, &browse);
+                render(f, state, &mut table_state, None, &browse, None);
             })
             .unwrap();
         terminal
@@ -3480,11 +3548,21 @@ mod run_end_tests {
     }
 
     #[test]
-    fn every_row_settled_with_no_work_left_is_done() {
+    fn every_row_built_with_no_work_left_is_settled() {
+        let mut state = TuiState::new(RunScope::default());
+        finish(&mut state, "built", PackageOutcome::Built);
+        finish(&mut state, "already", PackageOutcome::AlreadyBuilt);
+        assert!(run_is_done(&state, 0));
+        assert!(run_is_over(&state, 0));
+    }
+
+    #[test]
+    fn a_failed_row_is_over_but_not_settled() {
         let mut state = TuiState::new(RunScope::default());
         finish(&mut state, "built", PackageOutcome::Built);
         finish(&mut state, "failed", failed());
-        assert!(run_is_done(&state, 0));
+        assert!(!run_is_done(&state, 0));
+        assert!(run_is_over(&state, 0));
     }
 
     #[test]
@@ -3493,25 +3571,29 @@ mod run_end_tests {
         finish(&mut state, "built", PackageOutcome::Built);
         state.pkg_mut("running").status = PkgStatus::Running;
         assert!(!run_is_done(&state, 0));
+        assert!(!run_is_over(&state, 0));
     }
 
     #[test]
-    fn an_empty_run_is_not_done() {
-        assert!(!run_is_done(&TuiState::new(RunScope::default()), 0));
+    fn an_empty_run_is_neither_settled_nor_over() {
+        let state = TuiState::new(RunScope::default());
+        assert!(!run_is_done(&state, 0));
+        assert!(!run_is_over(&state, 0));
     }
 
     #[test]
     fn a_retry_asked_for_keeps_the_run_open() {
         let mut state = TuiState::new(RunScope::default());
-        finish(&mut state, "foo", failed());
+        finish(&mut state, "foo", PackageOutcome::Built);
         state.pkg_mut("foo").retry_requested = true;
         assert!(!run_is_done(&state, 0));
+        assert!(!run_is_over(&state, 0));
     }
 
     #[test]
-    fn a_failed_row_that_is_re_queued_is_not_done() {
+    fn a_built_row_that_is_re_queued_is_not_settled_until_it_builds_again() {
         let mut state = TuiState::new(RunScope::default());
-        finish(&mut state, "foo", failed());
+        finish(&mut state, "foo", PackageOutcome::Built);
         assert!(run_is_done(&state, 0));
         state.apply(Msg {
             pkg: None,
@@ -3523,6 +3605,9 @@ mod run_end_tests {
             },
         });
         assert!(!run_is_done(&state, 0));
+        assert!(!run_is_over(&state, 0));
+        finish(&mut state, "foo", PackageOutcome::Built);
+        assert!(run_is_done(&state, 0));
     }
 
     #[test]
@@ -3530,15 +3615,35 @@ mod run_end_tests {
         let mut state = TuiState::new(RunScope::default());
         finish(&mut state, "built", PackageOutcome::Built);
         assert!(!run_is_done(&state, 1));
+        assert!(!run_is_over(&state, 1));
     }
 
     #[test]
-    fn a_row_parked_on_missing_deps_is_done_once_nothing_is_left() {
+    fn a_row_parked_on_missing_deps_is_not_settled_even_when_nothing_is_left() {
         let mut state = TuiState::new(RunScope::default());
         let deps = vec!["dep".to_string()];
         finish(&mut state, "parked", PackageOutcome::MissingDeps { deps });
-        assert!(run_is_done(&state, 0));
+        assert!(!run_is_done(&state, 0));
+        assert!(run_is_over(&state, 0));
         assert!(!run_is_done(&state, 1));
+    }
+
+    #[test]
+    fn a_parked_row_stays_unsettled_once_its_dependency_is_built() {
+        let mut state = TuiState::new(RunScope::default());
+        let deps = vec!["dep".to_string()];
+        finish(&mut state, "parked", PackageOutcome::MissingDeps { deps });
+        finish(&mut state, "dep", PackageOutcome::Built);
+        assert!(!run_is_done(&state, 0));
+        assert!(run_is_over(&state, 0));
+    }
+
+    #[test]
+    fn the_hint_only_shows_once_the_run_is_over_and_not_settled() {
+        assert_eq!(over_hint(false, false), None);
+        assert_eq!(over_hint(false, true), None);
+        assert_eq!(over_hint(true, true), None);
+        assert!(over_hint(true, false).is_some());
     }
 
     #[test]

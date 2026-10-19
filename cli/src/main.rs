@@ -1293,25 +1293,19 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                             None,
                         )
                     });
-                    if tui_ctrl.is_some() {
-                        // The TUI stays open after the root build until it finds
-                        // nothing left to do or is quit, and `result?` below only
-                        // runs after that — so a failure (e.g. pip finding no
-                        // version for this interpreter) must be shown here, not
-                        // left looking like a hang.
-                        match &first {
-                            Ok(_) => reporter.report(&Event::Progress {
-                                step: None,
-                                message: "Root build finished — press n to add a package, q to quit"
-                                    .to_string(),
-                            }),
-                            Err(e) => reporter.report(&Event::Warning {
-                                step: None,
-                                message: format!(
-                                    "Root build of {name} failed: {e:#} — press n to add a package, q to quit"
-                                ),
-                            }),
-                        }
+                    // The TUI stays open after the root build until it finds
+                    // nothing left to do or is quit, and `result?` below only
+                    // runs after that — so a failure (e.g. pip finding no
+                    // version for this interpreter) must be shown here, not
+                    // left looking like a hang. What to do next is the TUI's to
+                    // say once it knows whether everything is built.
+                    if tui_ctrl.is_some()
+                        && let Err(e) = &first
+                    {
+                        reporter.report(&Event::Warning {
+                            step: None,
+                            message: format!("Root build of {name} failed: {e:#}"),
+                        });
                     }
                     if let Some(t) = tui_ctrl {
                         t.work_finished();
@@ -1338,13 +1332,31 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // restored the terminal; printed here it would be wiped.
             *summary = Some(print_run_summary(&memory, &project, &distro, &arch, &state_root));
 
-            result?;
-            if !added_failures.is_empty() {
-                return Err(color_eyre::eyre::eyre!(
-                    "{} added package(s) failed: {}",
-                    added_failures.len(),
-                    added_failures.join("; ")
-                ));
+            // With the TUI, a settled run (every package built, see
+            // `TuiController::all_settled`) exits 0 even if a root or added
+            // build failed along the way and was built by a later retry; those
+            // errors are still printed. Anything else is a failure.
+            if tui_ctrl.as_ref().is_some_and(|t| t.all_settled()) {
+                if let Err(e) = &result {
+                    eprintln!("warning: {e:#}");
+                }
+                for failure in &added_failures {
+                    eprintln!("warning: {failure}");
+                }
+            } else {
+                result?;
+                if !added_failures.is_empty() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "{} added package(s) failed: {}",
+                        added_failures.len(),
+                        added_failures.join("; ")
+                    ));
+                }
+                if tui_ctrl.is_some() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "the run ended before every package was built"
+                    ));
+                }
             }
         }
         Commands::UpdateProject(args) => update_project::run(args, summary)?,
