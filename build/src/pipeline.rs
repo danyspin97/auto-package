@@ -5414,10 +5414,19 @@ fn unresolvable_deps_round(
 
     // Filter out deps already satisfied by an RPM in rpms_dir so the
     // agent only sees packages that are genuinely not available yet.
+    // The names carry no version bound, so an RPM of any version would satisfy
+    // them: a package OBS says is too old for a bound (`got version 4.7.1`
+    // against `>= 4.8.0`) is outdated, and is brought up to date, not skipped
+    // because the old build is here.
+    let outdated_keys: Vec<String> = osc::outdated_packages(&detail)
+        .into_iter()
+        .map(|(n, _)| osc::fuzzy_key(&n))
+        .collect();
     let unresolvable_deps: Vec<String> = deps
         .into_iter()
         .filter(|dep| {
-            let satisfied = rpm_satisfies_dep(&config.rpms_dir, dep);
+            let satisfied =
+                rpm_satisfies_dep(&config.rpms_dir, dep) && !is_outdated_dep(&outdated_keys, dep);
             if satisfied {
                 reporter.report(&Event::Warning {
                     step: Some(build_step.id),
@@ -8736,6 +8745,13 @@ fn diff_counts(diff: &str) -> (usize, usize) {
 /// "ask the agent to look at this" list even though no actually-usable RPM
 /// existed. OBS would then keep reporting the same dep as unresolvable until
 /// the attempt counter ran out.
+/// Whether `dep` (an RPM name, flavor prefix included) is one of the packages
+/// OBS reported as older than a bound, given as `fuzzy_key`s of their bare names.
+fn is_outdated_dep(outdated_keys: &[String], dep: &str) -> bool {
+    let key = osc::fuzzy_key(osc::strip_rpm_prefix(dep));
+    outdated_keys.iter().any(|k| *k == key)
+}
+
 fn rpm_satisfies_dep(rpms_dir: &Path, dep: &str) -> bool {
     let (pkg_name, constraint) = parse_rpm_dep_constraint(dep);
     let prefix = format!("{pkg_name}-");
@@ -13332,6 +13348,37 @@ Patch0:         0001-fix.patch
         );
         assert!(rpm_satisfies_dep(tmp.path(), "python-foo>=0.1"));
         assert!(rpm_satisfies_dep(tmp.path(), "python-foo"));
+    }
+
+    /// OBS said `nothing provides python314-x-core >= 4.8.0 (got version 4.7.1)`;
+    /// the 4.7.1 RPM built here must not make the package count as available,
+    /// or the newer release is never built (vllm's cutlass-dsl-libs-core).
+    #[test]
+    fn a_package_obs_reports_too_old_is_outdated_whatever_rpm_is_here() {
+        let detail = vec![
+            "nothing provides python314-nvidia-cutlass-dsl-libs-core >= 4.8.0".to_string(),
+            "(got version 4.7.1-3.1)".to_string(),
+        ];
+        let keys: Vec<String> = osc::outdated_packages(&detail)
+            .into_iter()
+            .map(|(n, _)| osc::fuzzy_key(&n))
+            .collect();
+        assert!(is_outdated_dep(
+            &keys,
+            "python314-nvidia-cutlass-dsl-libs-core"
+        ));
+        assert!(is_outdated_dep(
+            &keys,
+            "python313-nvidia-cutlass-dsl-libs-core"
+        ));
+        assert!(!is_outdated_dep(
+            &keys,
+            "python314-nvidia-cutlass-dsl-libs-base"
+        ));
+        assert!(!is_outdated_dep(
+            &[],
+            "python314-nvidia-cutlass-dsl-libs-core"
+        ));
     }
 
     /// 1.20 is NOT less than 1.2 — numeric segments must compare as numbers.
