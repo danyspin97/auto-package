@@ -19,7 +19,7 @@ pub struct Item {
     pub new_version: String,
     /// The package this one was pulled in for (`--update-deps`).
     pub dependency_of: Option<String>,
-    /// What `improve-project` found wrong with the package, one line each.
+    /// What `lint` found wrong with the package, one line each.
     /// Empty for an update, where `old_version` and `new_version` differ.
     pub findings: Vec<String>,
 }

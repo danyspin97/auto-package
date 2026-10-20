@@ -1,4 +1,4 @@
-//! The checks of `improve-project`: what is wrong with a package that is
+//! The checks of `lint`: what is wrong with a package that is
 //! already in a project, judged from its spec, its build result and the
 //! rpmlint block of its build log.
 //!

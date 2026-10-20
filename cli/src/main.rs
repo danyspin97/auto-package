@@ -270,7 +270,7 @@ enum Commands {
     /// built in a branch project and, with `--submit`, sent back as requests;
     /// with `--in-place` they are committed into the project itself. `--dry-run`
     /// only prints the audit.
-    ImproveProject(update_project::UpdateProjectArgs),
+    Lint(update_project::UpdateProjectArgs),
 
     /// Print what auto-package has learned about a package: the build
     /// requirements, test changes and workarounds kept in its notes.
@@ -1428,7 +1428,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             }
         }
         Commands::UpdateProject(args) => update_project::run(args, summary)?,
-        Commands::ImproveProject(mut args) => {
+        Commands::Lint(mut args) => {
             args.improve = true;
             update_project::run(args, summary)?
         }

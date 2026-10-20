@@ -34,7 +34,7 @@ const MAX_DEPENDENCY_ITEMS: usize = 25;
 #[derive(clap::Args)]
 pub struct UpdateProjectArgs {
     /// OBS project to browse (e.g. Base:System): for packages with a newer
-    /// upstream release, or with `improve-project` for quality problems. It is
+    /// upstream release, or with `lint` for quality problems. It is
     /// only read, unless `--in-place` is given.
     pub source: String,
 
@@ -44,13 +44,13 @@ pub struct UpdateProjectArgs {
     #[arg(long)]
     pub branch_project: Option<String>,
 
-    /// `improve-project` only: commit the fixes straight into SOURCE instead of
+    /// `lint` only: commit the fixes straight into SOURCE instead of
     /// into a branch project. Nothing is submitted, since nothing is branched;
     /// use it on a project you own.
     #[arg(long, default_value_t = false)]
     pub in_place: bool,
 
-    /// Set by `improve-project`: take the packages from the quality audit of
+    /// Set by `lint`: take the packages from the quality audit of
     /// SOURCE instead of from the upstream release sweep.
     #[arg(skip)]
     pub improve: bool,
@@ -163,7 +163,7 @@ pub struct BranchBuild {
     pub rpm_name: Option<String>,
     /// Looks a missing dependency up on OBS before the pipeline builds it.
     pub resolver: Option<Arc<DepResolver>>,
-    /// `improve-project`: what the quality checks found, handed to the agent as
+    /// `lint`: what the quality checks found, handed to the agent as
     /// the problem to fix in the existing recipe.
     pub improve: Option<String>,
 }
@@ -208,7 +208,7 @@ impl Ctx<'_> {
 
 pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
     if a.in_place && !a.improve {
-        return Err(eyre!("--in-place is only for improve-project"));
+        return Err(eyre!("--in-place is only for lint"));
     }
     if a.in_place && (a.submit || a.branch_project.is_some()) {
         return Err(eyre!(
@@ -669,7 +669,7 @@ fn cmd_update_project(
     Ok(())
 }
 
-/// The audit of `improve-project`: what is wrong with each package of the
+/// The audit of `lint`: what is wrong with each package of the
 /// source, printed as a report. Returns an item for each package with findings
 /// that the pipeline can rebuild, and the names of those whose findings are all
 /// style slips, which are committed without a build.
@@ -766,7 +766,7 @@ fn improve_plan(
     Ok((items, only_style))
 }
 
-/// The problem the agent is asked to fix for an `improve-project` item.
+/// The problem the agent is asked to fix for an `lint` item.
 fn improve_problem(item: &Item) -> Option<String> {
     if item.findings.is_empty() {
         return None;
@@ -817,7 +817,7 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
     }
     osc::commit(
         &dir,
-        "Tidy the spec (auto-package improve-project)",
+        "Tidy the spec (auto-package lint)",
         &commit_files,
         emit,
     )
