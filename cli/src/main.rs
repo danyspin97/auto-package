@@ -270,6 +270,7 @@ enum Commands {
     /// built in a branch project and, with `--submit`, sent back as requests;
     /// with `--in-place` they are committed into the project itself. `--dry-run`
     /// only prints the audit.
+    #[command(mut_arg("source", |a| a.long("project").value_name("PROJECT")))]
     Lint(update_project::UpdateProjectArgs),
 
     /// Print what auto-package has learned about a package: the build

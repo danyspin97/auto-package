@@ -124,13 +124,13 @@ finds, with the same branch-build-submit flow as `update-project`.
 
 ```bash
 # Print the audit and what would be done, change nothing.
-auto-package lint home:you:python --dry-run
+auto-package lint --project home:you:python --dry-run
 
 # Fix in a branch project, then send the fixes back as requests.
-auto-package lint Base:System --only libfoo --submit
+auto-package lint --project Base:System --only libfoo --submit
 
 # Commit straight into a project you own.
-auto-package lint home:you:python --in-place
+auto-package lint --project home:you:python --in-place
 ```
 
 What it checks, per package:
