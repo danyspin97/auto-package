@@ -333,7 +333,7 @@ pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Stri
 ///    still produce a stable choice across runs.
 ///
 /// Returns `None` only when no `.spec` file is present at all.
-fn pick_spec_filename(pkg: &str, files: &[String]) -> Option<String> {
+pub fn pick_spec_filename(pkg: &str, files: &[String]) -> Option<String> {
     let mut specs: Vec<&String> = files.iter().filter(|f| f.ends_with(".spec")).collect();
     if specs.is_empty() {
         return None;

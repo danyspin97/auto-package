@@ -19,6 +19,9 @@ pub struct Item {
     pub new_version: String,
     /// The package this one was pulled in for (`--update-deps`).
     pub dependency_of: Option<String>,
+    /// What `improve-project` found wrong with the package, one line each.
+    /// Empty for an update, where `old_version` and `new_version` differ.
+    pub findings: Vec<String>,
 }
 
 /// Whether `pkg` is named by `list`, compared the way the rest of the tool
@@ -58,6 +61,7 @@ pub fn items_from_plan(origin: &str, candidates: &[Candidate], exclude: &[String
             old_version: old_version.clone(),
             new_version: new_version.clone(),
             dependency_of: None,
+            findings: Vec::new(),
         });
     }
     items
@@ -280,10 +284,19 @@ pub fn latest_changes_entry(changes: &str) -> Option<String> {
 
 /// The description of the submit request for `item`.
 pub fn sr_description(item: &Item, changes: Option<&str>) -> String {
-    let mut out = format!(
-        "Update {} to {} (was {}).",
-        item.pkg, item.new_version, item.old_version
-    );
+    let mut out = if item.findings.is_empty() {
+        format!(
+            "Update {} to {} (was {}).",
+            item.pkg, item.new_version, item.old_version
+        )
+    } else {
+        format!(
+            "Improve {} {}; the quality checks found:\n- {}",
+            item.pkg,
+            item.new_version,
+            item.findings.join("\n- ")
+        )
+    };
     if let Some(c) = changes {
         out.push_str("\n\nChangelog:\n");
         out.push_str(c);
@@ -399,6 +412,27 @@ mod tests {
     use super::*;
     use crate::update::SkipReason;
 
+    #[test]
+    fn an_improvement_request_lists_the_findings_not_a_version_bump() {
+        let mut i = Item {
+            pkg: "libfoo".into(),
+            origin: "Base:System".into(),
+            ecosystem: Ecosystem::GitRepo {
+                url: "https://github.com/a/b".into(),
+            },
+            old_version: "1.0".into(),
+            new_version: "1.0".into(),
+            dependency_of: None,
+            findings: vec!["no-check: the spec has no %check".into()],
+        };
+        let d = sr_description(&i, None);
+        assert!(d.starts_with("Improve libfoo 1.0"), "{d}");
+        assert!(d.contains("- no-check: the spec has no %check"));
+        assert!(!d.contains("was 1.0"));
+        i.findings.clear();
+        assert!(sr_description(&i, None).starts_with("Update libfoo to 1.0 (was 1.0)"));
+    }
+
     fn update(name: &str, old: &str, new: &str) -> Candidate {
         Candidate {
             rpm_name: name.into(),
@@ -422,6 +456,7 @@ mod tests {
             old_version: "1".into(),
             new_version: "2".into(),
             dependency_of: None,
+            findings: Vec::new(),
         }
     }
 

@@ -17,6 +17,7 @@ pub mod osc;
 pub mod package_notes;
 pub mod pipeline;
 pub mod proc;
+pub mod quality;
 pub mod redist;
 pub mod ship_condition;
 pub mod sources;

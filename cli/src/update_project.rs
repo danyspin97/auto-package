@@ -14,6 +14,7 @@ use std::time::Instant;
 use ap_build::depreach::{self, DepResolver, DepState, DryRunObs, LiveObs};
 use ap_build::osc::{self, BranchResult, PathAddition};
 use ap_build::proc::Emit;
+use ap_build::quality;
 use ap_build::update::{self, Ecosystem};
 use ap_build::update_project::{self as up, Item, ItemOutcome, ItemResult, SrOutcome};
 use ap_core::event::{Event, RunOutcome};
@@ -32,8 +33,9 @@ const MAX_DEPENDENCY_ITEMS: usize = 25;
 
 #[derive(clap::Args)]
 pub struct UpdateProjectArgs {
-    /// OBS project to browse for packages with a newer upstream release
-    /// (e.g. Base:System). It is only read, never written.
+    /// OBS project to browse (e.g. Base:System): for packages with a newer
+    /// upstream release, or with `improve-project` for quality problems. It is
+    /// only read, unless `--in-place` is given.
     pub source: String,
 
     /// Project to branch the packages into and build them in. Defaults to
@@ -41,6 +43,17 @@ pub struct UpdateProjectArgs {
     /// the first branch when it does not exist.
     #[arg(long)]
     pub branch_project: Option<String>,
+
+    /// `improve-project` only: commit the fixes straight into SOURCE instead of
+    /// into a branch project. Nothing is submitted, since nothing is branched;
+    /// use it on a project you own.
+    #[arg(long, default_value_t = false)]
+    pub in_place: bool,
+
+    /// Set by `improve-project`: take the packages from the quality audit of
+    /// SOURCE instead of from the upstream release sweep.
+    #[arg(skip)]
+    pub improve: bool,
 
     /// Only update these packages (comma separated).
     #[arg(long, value_delimiter = ',')]
@@ -150,6 +163,9 @@ pub struct BranchBuild {
     pub rpm_name: Option<String>,
     /// Looks a missing dependency up on OBS before the pipeline builds it.
     pub resolver: Option<Arc<DepResolver>>,
+    /// `improve-project`: what the quality checks found, handed to the agent as
+    /// the problem to fix in the existing recipe.
+    pub improve: Option<String>,
 }
 
 /// Everything a run produced, kept outside the `Result` so the summary is
@@ -191,7 +207,20 @@ impl Ctx<'_> {
 }
 
 pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
+    if a.in_place && !a.improve {
+        return Err(eyre!("--in-place is only for improve-project"));
+    }
+    if a.in_place && (a.submit || a.branch_project.is_some()) {
+        return Err(eyre!(
+            "--in-place changes {} itself: there is no branch to name and no request to submit",
+            a.source
+        ));
+    }
+    if a.improve && a.update_deps {
+        return Err(eyre!("--update-deps is only for update-project"));
+    }
     let branch_project = match &a.branch_project {
+        _ if a.in_place => a.source.clone(),
         Some(b) => b.clone(),
         None => {
             let user = osc::current_user(Emit::quiet()).map_err(|e| eyre!("{e}"))?;
@@ -203,7 +232,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
             return Err(eyre!("{name:?} is not a valid {what} project name"));
         }
     }
-    if branch_project == a.source {
+    if branch_project == a.source && !a.in_place {
         return Err(eyre!(
             "the branch project must not be the source project: {} is never written to",
             a.source
@@ -408,20 +437,34 @@ fn cmd_update_project(
         }
     }
 
-    // Plan: the same sweep as `update --check`, over the source.
-    let candidates =
-        update::plan_where(&a.source, &|n| wanted(a, n), emit).map_err(|e| eyre!("{e}"))?;
-    if candidates.is_empty() {
-        ctx.say(format!("no matching packages in {}", a.source));
-        return Ok(());
-    }
-    report_update_plan(&candidates, ctx.reporter.as_ref());
-    let mut items = up::items_from_plan(&a.source, &candidates, &a.exclude);
-    if items.is_empty() {
-        ctx.say("nothing to update");
-        return Ok(());
-    }
+    let mut mechanical: HashSet<String> = HashSet::new();
+    let mut items = if a.improve {
+        let (items, only_style) = improve_plan(a, ctx, emit)?;
+        mechanical = only_style;
+        if items.is_empty() {
+            ctx.say("nothing to improve");
+            return Ok(());
+        }
+        items
+    } else {
+        // Plan: the same sweep as `update --check`, over the source.
+        let candidates =
+            update::plan_where(&a.source, &|n| wanted(a, n), emit).map_err(|e| eyre!("{e}"))?;
+        if candidates.is_empty() {
+            ctx.say(format!("no matching packages in {}", a.source));
+            return Ok(());
+        }
+        report_update_plan(&candidates, ctx.reporter.as_ref());
+        let items = up::items_from_plan(&a.source, &candidates, &a.exclude);
+        if items.is_empty() {
+            ctx.say("nothing to update");
+            return Ok(());
+        }
+        items
+    };
     items.retain(|item| match up::check_pipeline_name(item) {
+        // A style commit does not run the pipeline, so its naming does not matter.
+        _ if mechanical.contains(&item.pkg) => true,
         Ok(()) => true,
         Err(why) => {
             ctx.warn(format!("skipping {}: {why}", item.pkg));
@@ -445,7 +488,7 @@ fn cmd_update_project(
         let resolver_for = |obs: Box<dyn depreach::Obs>| {
             DepResolver::new(obs, ctx.reporter.clone(), branch, &a.arch)
         };
-        if a.dry_run {
+        if a.dry_run && !a.in_place {
             resolver_for(Box::new(DryRunObs {
                 inner: live,
                 branch_project: branch.to_string(),
@@ -466,6 +509,12 @@ fn cmd_update_project(
     let mut dependency_count = 0;
     let mut branch_checked = false;
     while let Some(mut item) = queue.pop_front() {
+        if a.in_place {
+            // The package is already where it will be changed, and its
+            // BuildRequires resolve: it builds there today.
+            ready.push(item);
+            continue;
+        }
         if !a.dry_run {
             match branch_item(branch, &mut item, a.follow_devel, ctx) {
                 Ok(()) => {}
@@ -529,6 +578,39 @@ fn cmd_update_project(
         ready.push(item);
     }
 
+    if a.dry_run && a.improve {
+        ctx.say(format!(
+            "dry run: nothing is branched, built, edited or submitted; {} stays untouched",
+            a.source
+        ));
+        for i in &ready {
+            let how = if mechanical.contains(&i.pkg) {
+                "style fixes committed as they are"
+            } else if a.no_agent {
+                "needs the agent (--no-agent is set), would be skipped"
+            } else {
+                "rebuilt by the pipeline, the agent fixing the findings"
+            };
+            ctx.say(format!("  {}: {how}", i.pkg));
+        }
+        if a.in_place {
+            ctx.say(format!(
+                "the fixes would be committed into {} itself",
+                a.source
+            ));
+        } else if a.submit {
+            ctx.say(format!(
+                "each package that builds in {branch} would get a submit request to {}",
+                a.source
+            ));
+        } else {
+            ctx.say(format!(
+                "they would be branched into {branch}; submit requests: none (--submit not given)"
+            ));
+        }
+        report.paths.clear();
+        return Ok(());
+    }
     if a.dry_run {
         let planned: Vec<PathAddition> = report.paths.clone();
         for line in up::dry_run_lines(&up::DryRun {
@@ -549,11 +631,28 @@ fn cmd_update_project(
     // project like `update` builds in its own.
     ready.sort_by_key(|i| i.dependency_of.is_none());
     for item in ready {
-        ctx.say(format!(
-            "updating {} to {} in {branch}",
-            item.pkg, item.new_version
-        ));
-        let outcome = match build_item(a, branch, &item, &resolver, ctx) {
+        let done = if a.improve {
+            ctx.say(format!("improving {} in {branch}", item.pkg));
+            if mechanical.contains(&item.pkg) {
+                tidy_item(branch, &item, ctx)
+            } else if a.no_agent {
+                report.results.push(ItemResult {
+                    item,
+                    outcome: ItemOutcome::Skipped("the findings need the agent".to_string()),
+                    sr: SrOutcome::NotRequested,
+                });
+                continue;
+            } else {
+                build_item(a, branch, &item, &resolver, ctx)
+            }
+        } else {
+            ctx.say(format!(
+                "updating {} to {} in {branch}",
+                item.pkg, item.new_version
+            ));
+            build_item(a, branch, &item, &resolver, ctx)
+        };
+        let outcome = match done {
             Ok(()) => ItemOutcome::Updated,
             Err(why) => ItemOutcome::Failed(why),
         };
@@ -567,6 +666,166 @@ fn cmd_update_project(
     if a.submit {
         submit_requests(a, branch, &mut report.results, ctx);
     }
+    Ok(())
+}
+
+/// The audit of `improve-project`: what is wrong with each package of the
+/// source, printed as a report. Returns an item for each package with findings
+/// that the pipeline can rebuild, and the names of those whose findings are all
+/// style slips, which are committed without a build.
+fn improve_plan(
+    a: &UpdateProjectArgs,
+    ctx: &Ctx<'_>,
+    emit: Emit<'_>,
+) -> color_eyre::Result<(Vec<Item>, HashSet<String>)> {
+    let candidates =
+        update::plan_where(&a.source, &|n| wanted(a, n), emit).map_err(|e| eyre!("{e}"))?;
+    if candidates.is_empty() {
+        ctx.say(format!("no matching packages in {}", a.source));
+        return Ok((Vec::new(), HashSet::new()));
+    }
+    let statuses = osc::get_project_build_statuses(&a.source, &a.distro, &a.arch, emit)
+        .map_err(|e| {
+            ctx.warn(format!(
+                "could not read the build results of {}, so broken builds and rpmlint are not checked: {e}",
+                a.source
+            ))
+        })
+        .unwrap_or_default();
+
+    let mut audits: Vec<quality::PackageAudit> = Vec::new();
+    let mut items: Vec<Item> = Vec::new();
+    let mut only_style: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for c in &candidates {
+        let pkg = up::branch_name(&c.rpm_name);
+        if !seen.insert(pkg.to_string()) {
+            continue;
+        }
+        let Some(spec) = update::spec_for_package(&a.source, pkg, emit) else {
+            ctx.warn(format!(
+                "could not read the spec of {pkg}, so it is not checked"
+            ));
+            continue;
+        };
+        let mut findings = quality::audit_spec(&spec);
+        let status = statuses.get(&c.rpm_name).or_else(|| statuses.get(pkg));
+        if let Some(status) = status {
+            findings.extend(quality::audit_status(status));
+            if status.is_success()
+                && let Some(log) = osc::fetch_build_log_tail(&a.source, pkg, &a.distro, &a.arch)
+            {
+                findings.extend(quality::rpmlint_findings(&log));
+            }
+        }
+        findings.sort_by_key(|f| f.kind);
+
+        let (ecosystem, version) = match &c.decision {
+            update::Decision::Update {
+                ecosystem,
+                old_version,
+                ..
+            } => (Some(ecosystem.clone()), old_version.clone()),
+            update::Decision::UpToDate { ecosystem, version } => {
+                (Some(ecosystem.clone()), version.clone())
+            }
+            update::Decision::Skipped(_) => (None, String::new()),
+        };
+        if !findings.is_empty() {
+            match ecosystem {
+                Some(ecosystem) => {
+                    if !quality::needs_pipeline(&findings) {
+                        only_style.insert(pkg.to_string());
+                    }
+                    items.push(Item {
+                        pkg: pkg.to_string(),
+                        origin: a.source.clone(),
+                        ecosystem,
+                        old_version: version.clone(),
+                        new_version: version,
+                        dependency_of: None,
+                        findings: findings
+                            .iter()
+                            .map(|f| format!("{}: {}", f.kind.label(), f.detail))
+                            .collect(),
+                    });
+                }
+                None => ctx.say(format!(
+                    "{pkg}: its source is not one auto-package knows, so its findings are only reported"
+                )),
+            }
+        }
+        audits.push(quality::PackageAudit {
+            pkg: pkg.to_string(),
+            findings,
+        });
+    }
+    for line in quality::report_lines(&audits) {
+        ctx.say(line);
+    }
+    Ok((items, only_style))
+}
+
+/// The problem the agent is asked to fix for an `improve-project` item.
+fn improve_problem(item: &Item) -> Option<String> {
+    if item.findings.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} {} builds, but the quality checks of the project found these problems. Fix each \
+         one in the existing recipe where it is a real defect, and keep the version and every \
+         other decision. An rpmlint warning that is a false positive gets a justified \
+         `rpmlintrc` filter (convention 39), not a silent skip. Do not change `%check` into a \
+         disabled one to get a clean run.\n\nFindings:\n- {}",
+        item.pkg,
+        item.new_version,
+        item.findings.join("\n- ")
+    ))
+}
+
+/// Commit the style fixes of `quality::tidy` for `item` into `branch`, without
+/// a build of our own: OBS rebuilds the commit.
+fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
+    let emit = Emit::run(ctx.reporter.as_ref());
+    let dir = osc::checkout(branch, &item.pkg, &ctx.work_dir.join("improve"), emit)
+        .map_err(|e| e.to_string())?;
+    let files: Vec<String> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    let spec_name = update::pick_spec_filename(&item.pkg, &files)
+        .ok_or_else(|| "the package has no spec".to_string())?;
+    let spec_path = dir.join(&spec_name);
+    let before = std::fs::read_to_string(&spec_path).map_err(|e| e.to_string())?;
+    let after = quality::tidy(&before);
+    if after == before {
+        ctx.say(format!("{}: already tidy in {branch}", item.pkg));
+        return Ok(());
+    }
+    ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
+    osc::add_changes_entry(
+        &dir,
+        "Tidy the spec: section order, noarch, %{version}",
+        emit,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut commit_files = vec![spec_name];
+    let changes = format!("{}.changes", item.pkg);
+    if dir.join(&changes).exists() {
+        commit_files.push(changes);
+    }
+    osc::commit(
+        &dir,
+        "Tidy the spec (auto-package improve-project)",
+        &commit_files,
+        emit,
+    )
+    .map_err(|e| e.to_string())?;
+    ctx.say(format!(
+        "{}: committed the style fixes to {branch}",
+        item.pkg
+    ));
     Ok(())
 }
 
@@ -923,6 +1182,7 @@ fn build_item(
     let build = BranchBuild {
         rpm_name: Some(item.pkg.clone()),
         resolver: Some(resolver.clone()),
+        improve: improve_problem(item),
     };
     catch_panic(|| {
         cmd_build(
@@ -989,6 +1249,34 @@ mod tests {
         let a = args(&[]);
         assert!(!a.submit && !a.yes && !a.dry_run && !a.update_deps);
         assert_eq!(a.branch_project, None);
+    }
+
+    #[test]
+    fn improving_in_place_is_off_unless_asked_and_set_by_the_command() {
+        let a = args(&[]);
+        assert!(!a.in_place && !a.improve, "improve is never a flag");
+        assert!(args(&["--in-place"]).in_place);
+    }
+
+    #[test]
+    fn the_agent_is_told_the_findings_and_to_keep_the_version() {
+        let mut item = Item {
+            pkg: "libfoo".into(),
+            origin: "Base:System".into(),
+            ecosystem: Ecosystem::GitRepo {
+                url: "https://github.com/a/b".into(),
+            },
+            old_version: "1.0".into(),
+            new_version: "1.0".into(),
+            dependency_of: None,
+            findings: Vec::new(),
+        };
+        assert_eq!(improve_problem(&item), None, "an update has no findings");
+        item.findings = vec!["rpmlint-error: devel-file-in-non-devel-package x1".into()];
+        let p = improve_problem(&item).unwrap();
+        assert!(p.contains("libfoo 1.0"));
+        assert!(p.contains("- rpmlint-error: devel-file-in-non-devel-package x1"));
+        assert!(p.contains("keep the version"));
     }
 
     #[test]

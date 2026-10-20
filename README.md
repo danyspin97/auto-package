@@ -117,6 +117,40 @@ package next to it.
 The run ends with a summary (updated, failed, skipped, requests, build paths
 added, branch project) and exits non-zero when a package failed.
 
+### Improving the quality of a whole project
+
+`improve-project` checks every package of an OBS project and fixes what it
+finds, with the same branch-build-submit flow as `update-project`.
+
+```bash
+# Print the audit and what would be done, change nothing.
+auto-package improve-project home:you:python --dry-run
+
+# Fix in a branch project, then send the fixes back as requests.
+auto-package improve-project Base:System --only libfoo --submit
+
+# Commit straight into a project you own.
+auto-package improve-project home:you:python --in-place
+```
+
+What it checks, per package:
+
+- **build**: the latest build is failed, unresolvable or broken;
+- **rpmlint**: errors and warnings in the build log, grouped by tag;
+- **style**: `%check` after `%files`, a `%{python_expand #}` wrapper, a pure
+  Python package without `BuildArch: noarch`, a literal version where
+  `%{version}` belongs, unused Python `BuildRequires` of a wheel install;
+- **no-check**: the spec has no `%check`;
+- **dropped-tests**: tests removed from `%check` to get the package to build.
+
+Style slips are fixed deterministically and committed without a build. Every
+other finding sends the package through the ordinary pipeline at its current
+version, with the findings handed to the agent as the problem to fix in the
+existing recipe (so `--no-agent` skips those). A package whose source
+auto-package does not recognise is only reported. Takes the options of
+`update-project`, except `--update-deps`; `--in-place` cannot be combined with
+`--submit` or `--branch-project`.
+
 #### Dependencies in other projects
 
 A package in `Base:System` may build-require packages published by another

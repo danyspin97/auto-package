@@ -4358,6 +4358,29 @@ fn osc_api_checked(path: &str) -> Result<String, ApiFailure> {
     Ok(out.stdout)
 }
 
+/// The end of a package's latest build log for `repo`/`arch`, where the
+/// rpmlint block is, or `None` when OBS has no log for it.
+pub fn fetch_build_log_tail(project: &str, pkg: &str, repo: &str, arch: &str) -> Option<String> {
+    const KEEP: usize = 1 << 20;
+    check_obs_name("project", project).ok()?;
+    check_obs_name("package", pkg).ok()?;
+    let log = osc_api(&format!(
+        "/build/{}/{}/{}/{}/_log?nostream=1&start=0",
+        enc(project),
+        enc(repo),
+        enc(arch),
+        enc(pkg)
+    ))?;
+    if log.len() <= KEEP {
+        return Some(log);
+    }
+    let mut from = log.len() - KEEP;
+    while !log.is_char_boundary(from) {
+        from += 1;
+    }
+    Some(log[from..].to_string())
+}
+
 /// `osc api <path>` stdout, or `None` on any failure or timeout.
 fn osc_api(path: &str) -> Option<String> {
     osc_api_checked(path)

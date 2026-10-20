@@ -260,6 +260,18 @@ enum Commands {
     /// the project it was branched from.
     UpdateProject(update_project::UpdateProjectArgs),
 
+    /// Check every package of an OBS project and improve its quality.
+    ///
+    /// Audits each package's spec (style slips, no `%check`, tests dropped to
+    /// get it to build), its latest build result and the rpmlint findings of
+    /// its build log. Style slips are committed as they are; everything else
+    /// goes through the ordinary pipeline, which asks the agent to fix the
+    /// findings in the existing recipe at the same version. The fixes are
+    /// built in a branch project and, with `--submit`, sent back as requests;
+    /// with `--in-place` they are committed into the project itself. `--dry-run`
+    /// only prints the audit.
+    ImproveProject(update_project::UpdateProjectArgs),
+
     /// Print what auto-package has learned about a package: the build
     /// requirements, test changes and workarounds kept in its notes.
     Notes {
@@ -436,6 +448,9 @@ fn resolve_dependency_config(
                     version,
                     source_repo: None,
                     subprojects: Vec::new(),
+                    // The root package's findings are not a dependency's.
+                    patch_request: None,
+                    patch_condition: None,
                     ..config.clone()
                 })
             }
@@ -470,6 +485,9 @@ fn resolve_dependency_config(
                 // if the parent package the agent found it from did.
                 source_repo: None,
                 subprojects: Vec::new(),
+                // The root package's findings are not a dependency's.
+                patch_request: None,
+                patch_condition: None,
                 ..config.clone()
             });
         }
@@ -579,6 +597,9 @@ fn resolve_dependency_config(
                 version,
                 source_repo: Some(repo_url.clone()),
                 subprojects: probe.subprojects,
+                // The root package's findings are not a dependency's.
+                patch_request: None,
+                patch_condition: None,
                 ..config.clone()
             });
         }
@@ -1407,6 +1428,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             }
         }
         Commands::UpdateProject(args) => update_project::run(args, summary)?,
+        Commands::ImproveProject(mut args) => {
+            args.improve = true;
+            update_project::run(args, summary)?
+        }
         Commands::Notes { name, notes_dir } => {
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
             if ap_build::package_notes::path_for(&name).is_none() {
@@ -2463,7 +2488,7 @@ fn cmd_build(
         run_id: run_dir.run_id.clone().0,
         source_urls,
         python_flavors,
-        patch_request: None,
+        patch_request: branch.and_then(|b| b.improve.clone()),
         patch_condition: None,
         failed_deps: Vec::new(),
         unbuildable_deps: Vec::new(),
@@ -3421,6 +3446,9 @@ fn cmd_build(
                     pkg_name: target_info.name.clone(),
                     rpm_name: rpm_name.clone(),
                     version: target_info.version.clone(),
+                    // The root package's findings are not a dependency's.
+                    patch_request: None,
+                    patch_condition: None,
                     ..config.clone()
                 };
                 let pkg_run = run_dir.pkg(&rpm_name);
