@@ -53,31 +53,37 @@ fn xml_data_value(xml: &str, name: &str) -> Option<String> {
     Some(value.trim().to_string())
 }
 
-/// The OBS user `osc` is configured for.
+/// The OBS user `osc` is configured for. Newer `osc` has `whoami`; older
+/// versions only have `whois`, which prints `name: "Full Name" <email>`.
 pub fn current_user(emit: Emit<'_>) -> Result<String, Error> {
-    let out = proc::capture_with_timeout("osc", &["whoami"], &anywhere(), emit, OSC_QUERY_TIMEOUT)
-        .map_err(during("whoami"))?;
-    if !out.success() {
-        return Err(Error::OscFailed {
-            cmd: "whoami".into(),
-            code: out.code,
-            stderr: out.stderr,
+    let mut last = None;
+    for cmd in ["whoami", "whois"] {
+        let out = proc::capture_with_timeout("osc", &[cmd], &anywhere(), emit, OSC_QUERY_TIMEOUT)
+            .map_err(during(cmd))?;
+        if !out.success() {
+            last = Some(Error::OscFailed {
+                cmd: cmd.into(),
+                code: out.code,
+                stderr: out.stderr,
+            });
+            continue;
+        }
+        return parse_whoami(&out.stdout).ok_or_else(|| {
+            Error::NotActionable(format!(
+                "could not read the OBS user from `osc {cmd}` (got {:?}); pass --branch-project",
+                first_line(&out.stdout)
+            ))
         });
     }
-    parse_whoami(&out.stdout).ok_or_else(|| {
-        Error::NotActionable(format!(
-            "could not read the OBS user from `osc whoami` (got {:?}); pass --branch-project",
-            first_line(&out.stdout)
-        ))
-    })
+    Err(last.expect("two commands were tried"))
 }
 
-/// The user name in `osc whoami` output: either the bare name or a
-/// `Username: name` line.
+/// The user name in `osc whoami` or `osc whois` output: the bare name, a
+/// `Username: name` line, or `name: "Full Name" <email>`.
 fn parse_whoami(stdout: &str) -> Option<String> {
     let line = first_line(stdout);
     let name = line.strip_prefix("Username:").unwrap_or(line).trim();
-    let name = name.split_whitespace().next()?;
+    let name = name.split_whitespace().next()?.trim_end_matches(':');
     is_valid_obs_name(name).then(|| name.to_string())
 }
 
@@ -822,6 +828,11 @@ mod tests {
     fn whoami_reads_a_bare_name_or_a_labelled_one() {
         assert_eq!(parse_whoami("danyspin97\n").as_deref(), Some("danyspin97"));
         assert_eq!(parse_whoami("Username: dany\n").as_deref(), Some("dany"));
+        assert_eq!(
+            parse_whoami("dspinella: \"Danilo Spinella\" <d@example.org>\n").as_deref(),
+            Some("dspinella"),
+            "the osc whois form"
+        );
         assert_eq!(parse_whoami(""), None);
         assert_eq!(parse_whoami("-rf\n"), None);
     }
