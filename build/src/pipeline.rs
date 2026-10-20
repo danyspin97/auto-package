@@ -8749,7 +8749,7 @@ fn diff_counts(diff: &str) -> (usize, usize) {
 /// OBS reported as older than a bound, given as `fuzzy_key`s of their bare names.
 fn is_outdated_dep(outdated_keys: &[String], dep: &str) -> bool {
     let key = osc::fuzzy_key(osc::strip_rpm_prefix(dep));
-    outdated_keys.iter().any(|k| *k == key)
+    outdated_keys.contains(&key)
 }
 
 fn rpm_satisfies_dep(rpms_dir: &Path, dep: &str) -> bool {
