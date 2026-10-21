@@ -2626,14 +2626,27 @@ IMPORTANT: Do NOT add comments that reference RPM macros (e.g. `# uses %pytest`,
    relax it, do not use this. Do NOT queue the old release as its own package
    (it would conflict with the distro's), and do not vendor or rewrite the
    dependency's code inside this package.
+   First say whose code is out of date. A symbol the newer release REMOVED or
+   changed is a request to patch the dependency. But when this package bundles
+   its own copy of the dependency's code or headers (tilelang's `3rdparty/tvm`
+   against `apache-tvm-ffi`) and that older copy breaks against the newer
+   runtime (an `AttributeError`, a duplicate registration, an `undefined
+   symbol` from the bundled library), the newer release has behaviour the old
+   code never expected and no upstream commit restores anything: do not report
+   it in `patch_dependencies`. Patch this package's own sources instead, with
+   the upstream commit that made the bundled copy work with the newer runtime
+   when there is one, and otherwise say in your reasoning that no compatible
+   release is available, naming the newest release the bound allows.
    Report the dependency in `patch_dependencies` as `{"name": <upstream project
    name>, "problem": <text>}` (add `"condition": {"path": ..., "package": ...,
    "not_in": ["devel"]}` when the defect is a path the package ships in the
    wrong subpackage or not at all: the pipeline checks it itself and stops
    asking once it holds), and not in `unresolvable_packages`. The problem
    text must give: the exact error line from the log, the symbol or API that is
-   missing, the version that still had it and the version that dropped it, and
-   the upstream repository URL. The build system then branches the distro's
+   missing, the version that still had it and the version that dropped it, the
+   upstream repository URL, the bound this package declares (so the patch turn
+   knows the newest release that satisfies it), and whether this package
+   bundles its own copy of the dependency's code. The build system then branches the distro's
    package into this project and a separate turn patches it with the code
    upstream had, taken from the upstream repository's history. Make your own
    edit to this package's spec as well (relax the upper bound to what the
@@ -5084,9 +5097,18 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              Do not change the package's version, its sources or anything unrelated to \
              the problem. If you cannot find the code upstream, or the patch would \
              need more than restoring it, return `use_upstream_wheel` when this is a Python \
-             project with a wheel (it carries the unmodified code), otherwise `no_change` \
-             with `reasoning` naming what is missing, so the dependent relaxes its bound or \
-             skips the feature."
+             project with a wheel (it carries the unmodified code), otherwise `no_change`. \
+             The `reasoning` of a `no_change` is what the dependent reads next, so make it \
+             say: what you searched (the commits and files, with the range of releases), \
+             whether the problem is code the dependency REMOVED or new behaviour the \
+             dependent's own (bundled) code does not expect, which release of this package \
+             last worked with the dependent's bound if the problem names one, and what the \
+             dependent should do instead (patch its own sources, relax the bound, skip the \
+             feature).\n\
+             \n\
+             If the problem says the dependent bundles its own copy of this package's code \
+             and that copy fails against this release, there is nothing upstream to restore \
+             here: return `no_change` with that reasoning rather than inventing a shim."
         }
         Task::TranslateUnresolvableDeps => {
             "OBS could not resolve the dependencies listed below (see \"Missing \
