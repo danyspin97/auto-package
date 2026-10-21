@@ -1892,6 +1892,12 @@ fn render(
         table_state,
         browse.focus == Focus::Table,
     );
+    // The run's own log has a pane of its own below the package panes, so it
+    // never shares one with a package's log.
+    let (detail, run) = split_run_pane(detail, !state.run_log.is_empty());
+    if let Some(run) = run {
+        render_run_log(f, state, run);
+    }
     let feedback = render_detail(f, state, &visible, detail, table_state.selected(), browse);
     let retryable = state.accepts_requests
         && table_state
@@ -1901,6 +1907,38 @@ fn render(
             .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
     render_footer(f, state, input, browse, footer, retryable, hint);
     feedback
+}
+
+/// Rows of the run log pane at most, borders included.
+const RUN_PANE_MAX_HEIGHT: u16 = 7;
+/// Rows of the detail area below which the run log gets no pane, so the
+/// package panes are never squeezed for it.
+const RUN_PANE_MIN_DETAIL: u16 = 14;
+
+/// Carves the run log pane off the bottom of the detail `area`, when there is
+/// something to show and room for it beside the package panes.
+fn split_run_pane(area: Rect, has_log: bool) -> (Rect, Option<Rect>) {
+    if !has_log || area.height < RUN_PANE_MIN_DETAIL {
+        return (area, None);
+    }
+    let height = (area.height / 4).clamp(4, RUN_PANE_MAX_HEIGHT);
+    let [detail, run] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(height)])
+        .areas(area);
+    (detail, Some(run))
+}
+
+/// The newest run-level messages: the sweep that plans an `update` or audits
+/// a project, which goes on while packages are being built.
+fn render_run_log(f: &mut Frame, state: &TuiState, area: Rect) {
+    let tail = window(state.run_log.len(), viewport_height(area.height), 0);
+    let items: Vec<ListItem> = state
+        .run_log
+        .range(tail)
+        .map(|l| ListItem::new(l.message.as_str()).style(Style::default().fg(l.level.color())))
+        .collect();
+    f.render_widget(List::new(items).block(pane("Run", false)), area);
 }
 
 /// Below this size nothing readable fits, so only a notice is drawn.
@@ -2252,20 +2290,9 @@ fn render_detail(
     let [log_area, act_area] = two_panes(body, 65);
 
     let Some(pkg) = pkg else {
-        let viewport = viewport_height(log_area.height);
-        let tail = window(state.run_log.len(), viewport, 0);
-        let items: Vec<ListItem> = state
-            .run_log
-            .range(tail)
-            .map(|l| ListItem::new(l.message.as_str()).style(Style::default().fg(l.level.color())))
-            .collect();
-        let title = if state.run_log.is_empty() {
-            "Event Log — no package selected yet"
-        } else {
-            "Event Log"
-        };
         f.render_widget(
-            List::new(items).block(pane(title, browse.focus == Focus::Log)),
+            Paragraph::new("No package selected yet")
+                .block(pane("Event Log", browse.focus == Focus::Log)),
             log_area,
         );
         f.render_widget(
@@ -3476,6 +3503,19 @@ mod render_smoke_tests {
         let header = row_text(&terminal, 4);
         assert!(header.contains("Package"));
         assert!(!header.contains("Cost"));
+    }
+
+    #[test]
+    fn the_run_pane_is_carved_off_only_with_a_log_and_room() {
+        let area = Rect::new(0, 0, 80, 20);
+        assert_eq!(split_run_pane(area, false), (area, None));
+        let small = Rect::new(0, 0, 80, RUN_PANE_MIN_DETAIL - 1);
+        assert_eq!(split_run_pane(small, true), (small, None));
+        let (detail, run) = split_run_pane(area, true);
+        let run = run.expect("a log and room give a pane");
+        assert_eq!(detail.height + run.height, area.height);
+        assert!((4..=RUN_PANE_MAX_HEIGHT).contains(&run.height));
+        assert_eq!(run.y, detail.y + detail.height);
     }
 
     #[test]
