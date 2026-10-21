@@ -2872,8 +2872,18 @@ fn osc_service_stage(
 
             let normalized = config.pkg_name.replace('-', "_").to_lowercase();
             let locked = find_tarball(checkout_dir, &config.version)
-                .is_some_and(|t| tarball_has_cargo_lock(&t));
-            let service_xml = render_maturin_service_file(&normalized, &extra_manifests, locked);
+                .is_some_and(|t| tarball_has_cargo_lock(&t, &extra_manifests));
+            // A sdist whose crate lives in a subdirectory (safetensors:
+            // `bindings/python`) has no root manifest; naming one makes
+            // `obs-service-cargo` fail with "Path to manifest is not a file".
+            let root_manifest = find_tarball(checkout_dir, &config.version)
+                .is_none_or(|t| tarball_has_root_cargo_toml(&t));
+            let service_xml = render_maturin_service_file(
+                &normalized,
+                &extra_manifests,
+                locked,
+                root_manifest,
+            );
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| {
                     (
@@ -10352,8 +10362,8 @@ fn try_wheel_fallback_with(
 /// of npm vendoring, so the second request goes through.
 const NPM_VENDOR_NOTE_MARKER: &str = "[npm-vendor-route-suggested]";
 
-/// Whether a `.tar.gz` sdist ships a `Cargo.lock` at its top level.
-fn tarball_has_cargo_lock(tarball: &Path) -> bool {
+/// Whether a `.tar.gz` sdist ships a `Cargo.toml` at its top level.
+fn tarball_has_root_cargo_toml(tarball: &Path) -> bool {
     let Ok(file) = std::fs::File::open(tarball) else {
         return false;
     };
@@ -10363,7 +10373,33 @@ fn tarball_has_cargo_lock(tarball: &Path) -> bool {
     };
     entries.flatten().any(|e| {
         e.path()
-            .is_ok_and(|p| p.components().count() == 2 && p.ends_with("Cargo.lock"))
+            .is_ok_and(|p| p.components().count() == 2 && p.ends_with("Cargo.toml"))
+    })
+}
+
+/// Whether a `.tar.gz` sdist ships a `Cargo.lock` at its top level, or next to
+/// one of `manifests` (paths relative to the archive root).
+fn tarball_has_cargo_lock(tarball: &Path, manifests: &[String]) -> bool {
+    let Ok(file) = std::fs::File::open(tarball) else {
+        return false;
+    };
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let Ok(entries) = ar.entries() else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.path().is_ok_and(|p| {
+            if !p.ends_with("Cargo.lock") {
+                return false;
+            }
+            let rel: PathBuf = p.components().skip(1).collect();
+            rel.parent().is_some_and(|dir| {
+                dir.as_os_str().is_empty()
+                    || manifests
+                        .iter()
+                        .any(|m| Path::new(m).parent() == Some(dir))
+            })
+        })
     })
 }
 
@@ -11033,6 +11069,7 @@ fn render_maturin_service_file(
     normalized_name: &str,
     extra_manifests: &[String],
     locked: bool,
+    root_manifest: bool,
 ) -> String {
     use crate::osc::xml_escape;
     // The manifest path comes from the sdist's pyproject.toml.
@@ -11048,6 +11085,11 @@ fn render_maturin_service_file(
             )
         })
         .collect();
+    let root = if root_manifest {
+        "         \x20    <param name=\"cargotoml\">Cargo.toml</param>\n"
+    } else {
+        ""
+    };
     format!(
         "<?xml version=\"1.0\"?>\n\
          <services>\n\
@@ -11058,8 +11100,7 @@ fn render_maturin_service_file(
          \x20    <param name=\"update\">{update}</param>\n\
          \x20    <param name=\"compression\">zst</param>\n\
          \x20    <param name=\"no-root-manifest\">false</param>\n\
-         \x20    <param name=\"cargotoml\">Cargo.toml</param>\n\
-         {extra}\
+         {root}{extra}\
          \x20 </service>\n\
          </services>\n"
     )
@@ -12339,9 +12380,9 @@ mod tests {
 
     #[test]
     fn maturin_service_vendors_the_crate_maturin_builds() {
-        let plain = render_maturin_service_file("outlines_core", &[], false);
+        let plain = render_maturin_service_file("outlines_core", &[], false, true);
         assert_eq!(plain.matches("name=\"cargotoml\"").count(), 1);
-        let xml = render_maturin_service_file("hf_xet", &["hf_xet/Cargo.toml".to_string()], false);
+        let xml = render_maturin_service_file("hf_xet", &["hf_xet/Cargo.toml".to_string()], false, true);
         assert!(
             xml.contains("<param name=\"cargotoml\">Cargo.toml</param>"),
             "{xml}"
@@ -12353,13 +12394,25 @@ mod tests {
     }
 
     #[test]
+    fn maturin_service_omits_a_root_manifest_the_sdist_lacks() {
+        let xml = render_maturin_service_file(
+            "safetensors",
+            &["bindings/python/Cargo.toml".to_string()],
+            false,
+            false,
+        );
+        assert_eq!(xml.matches("name=\"cargotoml\"").count(), 1, "{xml}");
+        assert!(!xml.contains(">Cargo.toml<"), "{xml}");
+    }
+
+    #[test]
     fn a_locked_crate_is_vendored_without_cargo_update() {
-        let locked = render_maturin_service_file("chromadb", &[], true);
+        let locked = render_maturin_service_file("chromadb", &[], true, true);
         assert!(
             locked.contains("<param name=\"update\">false</param>"),
             "{locked}"
         );
-        let unlocked = render_maturin_service_file("chromadb", &[], false);
+        let unlocked = render_maturin_service_file("chromadb", &[], false, true);
         assert!(
             unlocked.contains("<param name=\"update\">true</param>"),
             "{unlocked}"
@@ -12369,7 +12422,7 @@ mod tests {
     #[test]
     fn service_files_escape_values_taken_from_upstream() {
         let xml =
-            render_maturin_service_file("x", &["a&b</param><evil/>/Cargo.toml".to_string()], false);
+            render_maturin_service_file("x", &["a&b</param><evil/>/Cargo.toml".to_string()], false, true);
         assert!(!xml.contains("<evil/>"), "{xml}");
         assert!(xml.contains("a&amp;b&lt;/param&gt;"), "{xml}");
         let xml = render_service_file("https://example.org/o/r?a=1&b=2", "1.0", "r");
