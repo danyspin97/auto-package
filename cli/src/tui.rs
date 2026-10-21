@@ -647,6 +647,10 @@ struct TuiState {
     // so there is nothing to gain from keeping a bounded history here the
     // way per-package logs do.
     last_global_log: Option<LogLine>,
+    /// Run-level messages, newest last: what the Event Log shows while no
+    /// package is selected, such as the sweep that plans an `update` before
+    /// any package has a row.
+    run_log: VecDeque<LogLine>,
     run_outcome: Option<RunOutcome>,
     /// Whether the run takes the `n` and `r` keys (see `TuiController::new`).
     accepts_requests: bool,
@@ -670,6 +674,7 @@ impl TuiState {
             order: Vec::new(),
             packages: HashMap::new(),
             last_global_log: None,
+            run_log: VecDeque::new(),
             run_outcome: None,
             accepts_requests: false,
             resolve_total: None,
@@ -688,11 +693,16 @@ impl TuiState {
     }
 
     fn add_global_log(&mut self, level: LogLevel, message: String) {
-        self.last_global_log = Some(LogLine {
+        let line = LogLine {
             level,
             message,
             emphasis: false,
-        });
+        };
+        self.run_log.push_back(line.clone());
+        if self.run_log.len() > MAX_LOG_LINES {
+            self.run_log.pop_front();
+        }
+        self.last_global_log = Some(line);
     }
 
     /// Packages still worth showing in the table: everything except ones that
@@ -883,6 +893,13 @@ impl TuiState {
                     },
                     msg,
                 );
+            }
+            // Run-level progress, from before any package has a row.
+            Event::Progress { message, .. } if msg.pkg.is_none() => {
+                self.add_global_log(LogLevel::Info, message.clone());
+            }
+            Event::Warning { message, .. } if msg.pkg.is_none() => {
+                self.add_global_log(LogLevel::Warn, message.clone());
             }
             // Everything below only makes sense scoped to a package; drop it
             // if it somehow arrives untagged.
@@ -2235,9 +2252,20 @@ fn render_detail(
     let [log_area, act_area] = two_panes(body, 65);
 
     let Some(pkg) = pkg else {
+        let viewport = viewport_height(log_area.height);
+        let tail = window(state.run_log.len(), viewport, 0);
+        let items: Vec<ListItem> = state
+            .run_log
+            .range(tail)
+            .map(|l| ListItem::new(l.message.as_str()).style(Style::default().fg(l.level.color())))
+            .collect();
+        let title = if state.run_log.is_empty() {
+            "Event Log — no package selected yet"
+        } else {
+            "Event Log"
+        };
         f.render_widget(
-            Paragraph::new("No package selected yet")
-                .block(pane("Event Log", browse.focus == Focus::Log)),
+            List::new(items).block(pane(title, browse.focus == Focus::Log)),
             log_area,
         );
         f.render_widget(
@@ -2813,6 +2841,23 @@ mod step_state_tests {
         state.apply(msg("t", fin("t", PackageOutcome::AlreadyBuilt)));
         assert_eq!(queued_lines(&state), ["w <- x, y", "u"]);
         assert_eq!(built_lines(&state), ["v 2.0", "t 2.0"]);
+    }
+
+    #[test]
+    fn run_level_progress_is_kept_for_the_event_log_before_any_package_has_a_row() {
+        let mut state = TuiState::new(RunScope::default());
+        for message in ["checking a (1/2)", "checking b (2/2)"] {
+            state.apply(Msg {
+                pkg: None,
+                event: Event::Progress {
+                    step: None,
+                    message: message.to_string(),
+                },
+            });
+        }
+        let kept: Vec<&str> = state.run_log.iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(kept, ["checking a (1/2)", "checking b (2/2)"]);
+        assert!(state.packages.is_empty());
     }
 
     #[test]

@@ -23,6 +23,7 @@
 use crate::osc;
 use crate::proc::Emit;
 use crate::spec;
+use ap_core::event::Event;
 use ap_ecosystem::pypi;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,9 +308,17 @@ pub fn plan_where(
         fetch_repo_latest: &fetch_repo_latest,
     };
 
+    let total = names.len();
     Ok(names
         .iter()
-        .map(|n| classify(n, &fetch_spec, &lookups))
+        .enumerate()
+        .map(|(i, n)| {
+            emit.reporter.report(&Event::Progress {
+                step: emit.step,
+                message: format!("checking {n} ({}/{total})", i + 1),
+            });
+            classify(n, &fetch_spec, &lookups)
+        })
         .collect())
 }
 
