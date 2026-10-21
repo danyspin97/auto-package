@@ -27,4 +27,5 @@ pub mod stage;
 pub mod step;
 pub mod update;
 pub mod update_project;
+pub mod upstream_cache;
 pub mod workspace;

@@ -23,8 +23,11 @@
 use crate::osc;
 use crate::proc::Emit;
 use crate::spec;
+use crate::upstream_cache;
 use ap_core::event::Event;
 use ap_ecosystem::pypi;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -299,17 +302,29 @@ pub fn plan_where(
     // OBS package name. The old guess silently missed every one of these
     // (Oct 6 review finding #3): `demo+1.0` looked for `demo+1.0.spec`,
     // not the actual `demo.spec`.
-    let fetch_spec = |rpm_name: &str| spec_for_package(project, rpm_name, emit);
-    let fetch_pypi_latest =
-        |pypi_name: &str| pypi::fetch_latest_version(pypi_name).map_err(|e| e.to_string());
-    let fetch_repo_latest = |url: &str| crate::sources::latest_release(url);
+    let fetch_spec = |rpm_name: &str| {
+        let spec = spec_for_package(project, rpm_name, emit);
+        stash_spec(project, rpm_name, spec.as_ref());
+        spec
+    };
+    let fetch_pypi_latest = |pypi_name: &str| {
+        upstream_cache::lookup(&format!("pypi:{pypi_name}"), || {
+            pypi::fetch_latest_version(pypi_name).map_err(|e| e.to_string())
+        })
+    };
+    let fetch_repo_latest = |url: &str| {
+        upstream_cache::lookup(&format!("repo:{url}"), || {
+            crate::sources::latest_release(url)
+        })
+    };
+    let (hits_before, fetched_before) = upstream_cache::stats();
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
         fetch_repo_latest: &fetch_repo_latest,
     };
 
     let total = names.len();
-    Ok(names
+    let candidates: Vec<Candidate> = names
         .iter()
         .enumerate()
         .map(|(i, n)| {
@@ -319,7 +334,45 @@ pub fn plan_where(
             });
             classify(n, &fetch_spec, &lookups)
         })
-        .collect())
+        .collect();
+    let (hits, fetched) = upstream_cache::stats();
+    let (hits, fetched) = (hits - hits_before, fetched - fetched_before);
+    if hits > 0 {
+        emit.reporter.report(&Event::Progress {
+            step: emit.step,
+            message: format!(
+                "upstream versions: {hits} from the cache, {fetched} asked upstream \
+                 (--refresh asks them all)"
+            ),
+        });
+    }
+    Ok(candidates)
+}
+
+/// Specs a plan has just read, by (project, package), for [`planned_spec`].
+static PLANNED_SPECS: Mutex<Option<HashMap<(String, String), String>>> = Mutex::new(None);
+
+fn stash_spec(project: &str, pkg: &str, spec: Option<&String>) {
+    if let Some(spec) = spec {
+        PLANNED_SPECS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert((project.to_string(), pkg.to_string()), spec.clone());
+    }
+}
+
+/// [`spec_for_package`] for a project that is only read during this run: the
+/// spec a plan fetched a moment ago is handed over, once, instead of fetching
+/// it again. Taken rather than kept, so a later read, after the package has
+/// been changed, always asks OBS.
+pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+    let kept = PLANNED_SPECS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .and_then(|m| m.remove(&(project.to_string(), pkg.to_string())));
+    kept.or_else(|| spec_for_package(project, pkg, emit))
 }
 
 /// Fetch the primary spec from an OBS package, picking the right filename

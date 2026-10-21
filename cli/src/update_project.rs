@@ -130,6 +130,11 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub no_agent: bool,
 
+    /// Ask PyPI and the forges for every package's newest version, instead of
+    /// reusing an answer from the last hour (kept in the work directory).
+    #[arg(long, default_value_t = false)]
+    pub refresh: bool,
+
     /// Resolve dependencies without the sandbox: pip runs on the host and
     /// may build sdists, running their build backends as you. Without
     /// this, pip runs in bubblewrap, or resolves wheels only when
@@ -229,6 +234,9 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         return Err(eyre!("--update-deps is only for update"));
     }
     ap_ecosystem::pip::set_unsafe_resolve(a.unsafe_resolve);
+    std::fs::create_dir_all(&a.work_dir)?;
+    ap_build::upstream_cache::set_dir(std::path::absolute(&a.work_dir)?);
+    ap_build::upstream_cache::set_refresh(a.refresh);
     if a.in_place && !a.improve {
         return super::update_in_place(a, summary);
     }
@@ -561,11 +569,19 @@ fn cmd_update_project(
             }
         }
 
+        // The origin is only read, so what the plan fetched from it is reused;
+        // the branch, and a project changed in place, are read fresh.
+        let origin_spec = |item: &Item| {
+            if a.in_place {
+                update::spec_for_package(&item.origin, &item.pkg, emit)
+            } else {
+                update::planned_spec(&item.origin, &item.pkg, emit)
+            }
+        };
         let spec = if a.dry_run {
-            update::spec_for_package(&item.origin, &item.pkg, emit)
+            origin_spec(&item)
         } else {
-            update::spec_for_package(branch, &item.pkg, emit)
-                .or_else(|| update::spec_for_package(&item.origin, &item.pkg, emit))
+            update::spec_for_package(branch, &item.pkg, emit).or_else(|| origin_spec(&item))
         };
         match spec {
             Some(spec) => {
@@ -720,7 +736,7 @@ fn improve_plan(
         if !seen.insert(pkg.to_string()) {
             continue;
         }
-        let Some(spec) = update::spec_for_package(&a.source, pkg, emit) else {
+        let Some(spec) = update::planned_spec(&a.source, pkg, emit) else {
             ctx.warn(format!(
                 "could not read the spec of {pkg}, so it is not checked"
             ));
@@ -1274,6 +1290,12 @@ mod tests {
         let a = args(&[]);
         assert!(!a.in_place && !a.improve, "improve is never a flag");
         assert!(args(&["--in-place"]).in_place);
+    }
+
+    #[test]
+    fn refresh_is_off_unless_asked() {
+        assert!(!args(&[]).refresh);
+        assert!(args(&["--refresh"]).refresh);
     }
 
     #[test]
