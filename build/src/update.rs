@@ -46,6 +46,32 @@ pub enum Ecosystem {
     Pypi { pypi_name: String },
     /// Resolved via a git forge's releases/tags API.
     GitRepo { url: String },
+    /// Resolved from the release tarballs listed beside the spec's `Source:`
+    /// URL (a directory listing, or SourceForge's file feed). `url` is that
+    /// source URL, expanded.
+    Index { url: String },
+    /// Resolved from Repology's record of the project, for a package whose spec
+    /// does not say where its source is kept.
+    Repology { project: String },
+}
+
+impl Ecosystem {
+    /// Whether the build pipeline can build a new version found this way. The
+    /// others are reported, since the pipeline can neither fetch nor unpack
+    /// what they name yet.
+    pub fn can_build(&self) -> bool {
+        matches!(self, Ecosystem::Pypi { .. } | Ecosystem::GitRepo { .. })
+    }
+
+    /// A short name for plan output.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Ecosystem::Pypi { .. } => "pypi",
+            Ecosystem::GitRepo { .. } => "git",
+            Ecosystem::Index { .. } => "index",
+            Ecosystem::Repology { .. } => "repology",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,28 +146,56 @@ impl std::fmt::Display for SkipReason {
 pub struct Lookups<'a> {
     pub fetch_pypi_latest: &'a dyn Fn(&str) -> Result<String, String>,
     pub fetch_repo_latest: &'a dyn Fn(&str) -> Result<String, String>,
+    /// Newest version in the release listing beside a source URL.
+    pub fetch_index_latest: &'a dyn Fn(&str) -> Result<String, String>,
+    /// Newest version Repology knows for a project.
+    pub fetch_repology_latest: &'a dyn Fn(&str) -> Result<String, String>,
 }
 
-/// Pick the ecosystem a spec's `Source:` line belongs to.
+/// The places a package's newest version may be looked up, most specific
+/// first. A package is checked against each until one answers, so a guess that
+/// turns out wrong (a bare tarball name that is not a PyPI project) only moves
+/// on to the next. Repology comes last and is always there, which is why a
+/// package with an odd or missing `Source:` line is still checked.
 ///
 /// The order mirrors how often the pattern appears in practice: direct PyPI
 /// URL first (the majority of python-* packages), then wheel filenames
 /// (NVIDIA's binary distributions), then bare `-%{version}.tar.gz` templates,
-/// then git forges.
-fn detect_ecosystem(source: &str, spec_version: &str) -> Option<Ecosystem> {
+/// then git forges, then release listings.
+fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
+    let mut out: Vec<Ecosystem> = Vec::new();
+    let mut add = |e: Ecosystem| {
+        if !out.contains(&e) {
+            out.push(e);
+        }
+    };
+    let source = header.source.as_deref().unwrap_or_default();
     if let Some(pypi_name) = pypi::pypi_name_from_source_url(source) {
-        return Some(Ecosystem::Pypi { pypi_name });
+        add(Ecosystem::Pypi { pypi_name });
     }
     if let Some((pypi_name, _version)) = pypi::pypi_name_and_version_from_wheel_filename(source) {
-        return Some(Ecosystem::Pypi { pypi_name });
+        add(Ecosystem::Pypi { pypi_name });
     }
-    if let Some(pypi_name) = pypi::pypi_name_from_versioned_tarball(source, spec_version) {
-        return Some(Ecosystem::Pypi { pypi_name });
+    if let Some(pypi_name) = pypi::pypi_name_from_versioned_tarball(source, &header.version) {
+        add(Ecosystem::Pypi { pypi_name });
     }
-    if let Some(url) = git_repo_url(source) {
-        return Some(Ecosystem::GitRepo { url });
+    let expanded = header.expanded_source.as_deref().unwrap_or_default();
+    for line in [source, expanded, header.url.as_deref().unwrap_or_default()] {
+        if let Some(url) = git_repo_url(line) {
+            add(Ecosystem::GitRepo { url });
+        }
     }
-    None
+    if (expanded.starts_with("http://") || expanded.starts_with("https://"))
+        && crate::sources::is_any_archive(crate::sources::last_segment(expanded))
+    {
+        add(Ecosystem::Index {
+            url: expanded.to_string(),
+        });
+    }
+    add(Ecosystem::Repology {
+        project: header.name.clone(),
+    });
+    out
 }
 
 /// Return a canonical `https://<host>/<project_path>` for a git-forge URL
@@ -210,35 +264,42 @@ where
     let Some(header) = spec::parse_header(&spec_text) else {
         return skipped(rpm_name, SkipReason::SpecHeaderMissing);
     };
-    let Some(source) = header.source else {
-        return skipped(rpm_name, SkipReason::NoSourceLine);
-    };
-    let Some(ecosystem) = detect_ecosystem(&source, &header.version) else {
-        return skipped(rpm_name, SkipReason::NotRecognized { source });
+    // The first place that knows a version decides. When none does, the first
+    // failure is the one reported: it belongs to the most specific guess.
+    let mut first_failure: Option<SkipReason> = None;
+    let mut found = None;
+    for ecosystem in ecosystems(&header) {
+        let (tag, name, latest) = match &ecosystem {
+            Ecosystem::Pypi { pypi_name } => {
+                ("PyPI", pypi_name, (lookups.fetch_pypi_latest)(pypi_name))
+            }
+            Ecosystem::GitRepo { url } => ("git", url, (lookups.fetch_repo_latest)(url)),
+            Ecosystem::Index { url } => ("release listing", url, (lookups.fetch_index_latest)(url)),
+            Ecosystem::Repology { project } => (
+                "Repology",
+                project,
+                (lookups.fetch_repology_latest)(project),
+            ),
+        };
+        match latest {
+            Ok(v) => {
+                found = Some((ecosystem, v));
+                break;
+            }
+            Err(error) => {
+                first_failure.get_or_insert(SkipReason::LookupFailed {
+                    ecosystem_tag: tag.into(),
+                    name: name.clone(),
+                    error,
+                });
+            }
+        }
+    }
+    let Some((ecosystem, latest)) = found else {
+        return skipped(rpm_name, first_failure.unwrap_or(SkipReason::NoSourceLine));
     };
 
-    let latest = match &ecosystem {
-        Ecosystem::Pypi { pypi_name } => {
-            (lookups.fetch_pypi_latest)(pypi_name).map_err(|e| SkipReason::LookupFailed {
-                ecosystem_tag: "PyPI".into(),
-                name: pypi_name.clone(),
-                error: e,
-            })
-        }
-        Ecosystem::GitRepo { url } => {
-            (lookups.fetch_repo_latest)(url).map_err(|e| SkipReason::LookupFailed {
-                ecosystem_tag: "git".into(),
-                name: url.clone(),
-                error: e,
-            })
-        }
-    };
-    let latest = match latest {
-        Ok(v) => v,
-        Err(reason) => return skipped(rpm_name, reason),
-    };
-
-    let decision = match pypi::compare_pep440(&latest, &header.version) {
+    let decision = match compare_versions(&latest, &header.version) {
         pypi::VersionCompare::Newer => Decision::Update {
             ecosystem,
             old_version: header.version,
@@ -257,6 +318,34 @@ where
         rpm_name: rpm_name.to_string(),
         decision,
     }
+}
+
+/// Whether `latest` is newer than `packaged`: by PEP 440 when both are, and by
+/// comparing their numeric and alphabetic parts otherwise, as most non-Python
+/// projects number their releases.
+fn compare_versions(latest: &str, packaged: &str) -> pypi::VersionCompare {
+    match pypi::compare_pep440(latest, packaged) {
+        // Only versions that look like release numbers: an unexpanded macro or a
+        // word as the packaged version must stay unknown, not become "current".
+        pypi::VersionCompare::Unparseable if plain_version(latest) && plain_version(packaged) => {
+            if crate::sources::version_cmp(latest, packaged).is_gt() {
+                pypi::VersionCompare::Newer
+            } else {
+                pypi::VersionCompare::NotNewer
+            }
+        }
+        decided => decided,
+    }
+}
+
+/// A version that starts like a release number (`2.3.1`, `v1.0-rc2`, `20240101`)
+/// and holds only the characters one is written with.
+fn plain_version(v: &str) -> bool {
+    v.strip_prefix(['v', 'V'])
+        .unwrap_or(v)
+        .starts_with(|c: char| c.is_ascii_digit())
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '~'))
 }
 
 fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
@@ -334,10 +423,22 @@ pub fn plan_each(
             crate::sources::latest_release(url)
         })
     };
+    let fetch_index_latest = |url: &str| {
+        upstream_cache::lookup(&format!("index:{url}"), || {
+            crate::upstream::latest_in_index(url)
+        })
+    };
+    let fetch_repology_latest = |name: &str| {
+        upstream_cache::lookup(&format!("repology:{name}"), || {
+            crate::upstream::latest_on_repology(name)
+        })
+    };
     let (hits_before, fetched_before) = upstream_cache::stats();
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
         fetch_repo_latest: &fetch_repo_latest,
+        fetch_index_latest: &fetch_index_latest,
+        fetch_repology_latest: &fetch_repology_latest,
     };
 
     let total = names.len();
@@ -458,6 +559,19 @@ Version:        14.1.0
 Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 ";
 
+    /// Lookups that find nothing, to fill the ones a test does not exercise.
+    fn unused_lookups() -> Lookups<'static> {
+        fn none(_: &str) -> Result<String, String> {
+            Err("not looked up in this test".to_string())
+        }
+        Lookups {
+            fetch_pypi_latest: &none,
+            fetch_repo_latest: &none,
+            fetch_index_latest: &none,
+            fetch_repology_latest: &none,
+        }
+    }
+
     fn only_pypi(latest: &'static str) -> Lookups<'static> {
         let p: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(move |_name: &str| Ok(latest.to_string())));
@@ -468,6 +582,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         Lookups {
             fetch_pypi_latest: p,
             fetch_repo_latest: r,
+            ..unused_lookups()
         }
     }
 
@@ -481,6 +596,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         Lookups {
             fetch_pypi_latest: p,
             fetch_repo_latest: r,
+            ..unused_lookups()
         }
     }
 
@@ -589,6 +705,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
         let lookups = Lookups {
             fetch_pypi_latest: p,
             fetch_repo_latest: r,
+            ..unused_lookups()
         };
         let c = classify("python-attrs", &spec, &lookups);
         assert_eq!(
@@ -610,10 +727,110 @@ Source:         file:///opt/thing.tar.gz
 ";
         let spec = |_: &str| Some(spec_text.to_string());
         let c = classify("weird", &spec, &only_pypi("x"));
+        // Nothing in the spec says where the source lives, so only Repology
+        // is left to ask.
         assert!(matches!(
             c.decision,
-            Decision::Skipped(SkipReason::NotRecognized { .. })
+            Decision::Skipped(SkipReason::LookupFailed { ref ecosystem_tag, .. })
+                if ecosystem_tag == "Repology"
         ));
+    }
+
+    fn lookups_for(
+        index: &'static dyn Fn(&str) -> Result<String, String>,
+        repology: &'static dyn Fn(&str) -> Result<String, String>,
+    ) -> Lookups<'static> {
+        Lookups {
+            fetch_index_latest: index,
+            fetch_repology_latest: repology,
+            ..unused_lookups()
+        }
+    }
+
+    #[test]
+    fn a_source_url_with_macros_is_expanded_and_its_listing_read() {
+        let spec_text = "\
+Name:           acl
+Version:        2.3.1
+Url:            https://savannah.nongnu.org/projects/acl
+Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{version}.tar.xz#/acl.tar.xz
+";
+        let spec = |_: &str| Some(spec_text.to_string());
+        let index: &'static dyn Fn(&str) -> Result<String, String> = &|url: &str| {
+            assert_eq!(
+                url,
+                "https://download.savannah.nongnu.org/releases/acl/acl-2.3.1.tar.xz"
+            );
+            Ok("2.3.2".to_string())
+        };
+        let c = classify("acl", &spec, &lookups_for(index, &|_| Err("no".into())));
+        assert_eq!(
+            c.decision,
+            Decision::Update {
+                ecosystem: Ecosystem::Index {
+                    url: "https://download.savannah.nongnu.org/releases/acl/acl-2.3.1.tar.xz"
+                        .into()
+                },
+                old_version: "2.3.1".into(),
+                new_version: "2.3.2".into(),
+            }
+        );
+        assert!(
+            !matches!(&c.decision, Decision::Update { ecosystem, .. } if ecosystem.can_build())
+        );
+    }
+
+    #[test]
+    fn a_package_without_a_source_line_is_asked_of_repology() {
+        let spec_text = "Name: fillup\nVersion: 1.42\n";
+        let spec = |_: &str| Some(spec_text.to_string());
+        let repology: &'static dyn Fn(&str) -> Result<String, String> = &|name: &str| {
+            assert_eq!(name, "fillup");
+            Ok("1.43".to_string())
+        };
+        let c = classify(
+            "fillup",
+            &spec,
+            &lookups_for(&|_| Err("no".into()), repology),
+        );
+        assert_eq!(
+            c.decision,
+            Decision::Update {
+                ecosystem: Ecosystem::Repology {
+                    project: "fillup".into()
+                },
+                old_version: "1.42".into(),
+                new_version: "1.43".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_wrong_pypi_guess_moves_on_instead_of_skipping() {
+        // `dracut-%{version}.tar.xz` looks like a PyPI project name to the
+        // name-based guess, which PyPI does not know.
+        let spec_text = "Name: dracut\nVersion: 059\nSource: dracut-%{version}.tar.xz\n";
+        let spec = |_: &str| Some(spec_text.to_string());
+        let pypi: &'static dyn Fn(&str) -> Result<String, String> =
+            &|_: &str| Err("404 Not Found".to_string());
+        let lookups = Lookups {
+            fetch_pypi_latest: pypi,
+            fetch_repology_latest: &|_: &str| Ok("060".to_string()),
+            ..unused_lookups()
+        };
+        let c = classify("dracut", &spec, &lookups);
+        assert!(
+            matches!(c.decision, Decision::Update { ref new_version, .. } if new_version == "060")
+        );
+    }
+
+    #[test]
+    fn dotted_numbers_compare_by_part_and_words_stay_unknown() {
+        use pypi::VersionCompare::{Newer, NotNewer, Unparseable};
+        assert!(matches!(compare_versions("2.10", "2.9"), Newer));
+        assert!(matches!(compare_versions("2.9", "2.10"), NotNewer));
+        assert!(matches!(compare_versions("059", "059"), NotNewer));
+        assert!(matches!(compare_versions("1.0", "%{ver}"), Unparseable));
     }
 
     #[test]

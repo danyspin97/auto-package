@@ -428,6 +428,12 @@ pub struct Header {
     pub name: String,
     pub version: String,
     pub source: Option<String>,
+    /// The `Url:` tag, with the simple macros expanded.
+    pub url: Option<String>,
+    /// `source` with `%{name}`, `%{version}`, `%{url}` and the spec's simple
+    /// defines expanded, and the `#/<file>` rename OBS reads off the end cut
+    /// away: the address a download would use.
+    pub expanded_source: Option<String>,
 }
 
 /// Parse `Name:`, `Version:`, and the first `Source:` / `Source0:` line out of
@@ -449,10 +455,27 @@ pub fn parse_header(spec: &str) -> Option<Header> {
     let source = tag_value(spec, "Source:")
         .or_else(|| tag_value(spec, "Source0:"))
         .map(str::to_string);
+    let mut macros = defines;
+    macros.insert("name".to_string(), name.clone());
+    macros.insert("version".to_string(), version.clone());
+    let url = tag_value(spec, "Url:")
+        .or_else(|| tag_value(spec, "URL:"))
+        .map(|u| expand_simple_defines(u, &macros));
+    if let Some(u) = &url {
+        macros.insert("url".to_string(), u.clone());
+    }
+    // Twice: a define may be spelled with another.
+    let expanded_source = source.as_deref().map(|s| {
+        let once = expand_simple_defines(s, &macros);
+        let twice = expand_simple_defines(&once, &macros);
+        twice.split('#').next().unwrap_or(&twice).trim().to_string()
+    });
     Some(Header {
         name,
         version,
         source,
+        url,
+        expanded_source,
     })
 }
 
@@ -753,6 +776,31 @@ pub fn autosetup_expected_dir(spec: &str, name: &str, version: &str) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_header_expands_the_source_and_reads_the_url_tag() {
+        let spec = "Name: acl\nVersion: 2.3.1\nURL: https://savannah.nongnu.org/projects/acl\n\
+                    Source: %{url}/../%{name}-%{version}.tar.xz#/renamed.tar.xz\n";
+        let h = parse_header(spec).unwrap();
+        assert_eq!(
+            h.url.as_deref(),
+            Some("https://savannah.nongnu.org/projects/acl")
+        );
+        assert_eq!(
+            h.expanded_source.as_deref(),
+            Some("https://savannah.nongnu.org/projects/acl/../acl-2.3.1.tar.xz")
+        );
+        assert!(
+            h.source.unwrap().contains("%{name}"),
+            "the verbatim line is kept"
+        );
+        assert_eq!(
+            parse_header("Name: a\nVersion: 1\n")
+                .unwrap()
+                .expanded_source,
+            None
+        );
+    }
+
     use super::*;
 
     #[test]

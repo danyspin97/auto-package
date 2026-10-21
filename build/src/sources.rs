@@ -823,7 +823,7 @@ const INDEX_HINTS: &[&str] = &[
     "archive",
 ];
 
-fn last_segment(url: &str) -> &str {
+pub(crate) fn last_segment(url: &str) -> &str {
     url.split(['?', '#'])
         .next()
         .unwrap_or(url)
@@ -838,7 +838,7 @@ fn is_gzip_archive(file: &str) -> bool {
     GZIP_EXTS.iter().any(|e| f.ends_with(e))
 }
 
-fn is_any_archive(file: &str) -> bool {
+pub(crate) fn is_any_archive(file: &str) -> bool {
     let f = file.to_ascii_lowercase();
     GZIP_EXTS
         .iter()
@@ -941,7 +941,7 @@ pub fn parse_index_links(html: &str) -> Vec<String> {
 /// Component-wise version comparison: numeric parts compare as numbers
 /// (`1.10 > 1.9`), anything else lexically. A shorter version that is a
 /// prefix of a longer one sorts first.
-fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let split = |v: &str| -> Vec<String> { v.split(['.', '-', '_']).map(str::to_string).collect() };
     let (pa, pb) = (split(a), split(b));
     for (x, y) in pa.iter().zip(&pb) {
@@ -956,7 +956,7 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     pa.len().cmp(&pb.len())
 }
 
-fn is_prerelease(version: &str) -> bool {
+pub(crate) fn is_prerelease(version: &str) -> bool {
     let v = version.to_ascii_lowercase();
     ["rc", "alpha", "beta", "pre", "dev", "snapshot", "git"]
         .iter()
@@ -995,7 +995,7 @@ pub fn index_has_only_unsupported(links: &[String]) -> bool {
     !links.iter().any(|f| is_gzip_archive(f)) && links.iter().any(|f| is_any_archive(f))
 }
 
-fn fetch_index(index_url: &str) -> Result<Vec<String>, String> {
+pub(crate) fn fetch_index(index_url: &str) -> Result<Vec<String>, String> {
     let body = crate::http::read_text(
         ap_ecosystem::net::call_with_retries(|| {
             crate::http::get(index_url).header("User-Agent", "auto-package")
@@ -1006,7 +1006,7 @@ fn fetch_index(index_url: &str) -> Result<Vec<String>, String> {
     Ok(parse_index_links(&body))
 }
 
-fn index_dir(index_url: &str) -> String {
+pub(crate) fn index_dir(index_url: &str) -> String {
     format!(
         "{}/",
         index_url

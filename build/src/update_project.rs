@@ -51,7 +51,10 @@ pub fn items_from_plan(origin: &str, candidates: &[Candidate], exclude: &[String
             continue;
         };
         let pkg = branch_name(&c.rpm_name);
-        if name_listed(exclude, pkg) || items.iter().any(|i| i.pkg == pkg) {
+        // A version found in a release listing or on Repology is reported, but
+        // the pipeline cannot build from what they name.
+        if !ecosystem.can_build() || name_listed(exclude, pkg) || items.iter().any(|i| i.pkg == pkg)
+        {
             continue;
         }
         items.push(Item {
@@ -86,6 +89,8 @@ pub fn check_pipeline_name(item: &Item) -> Result<(), String> {
             }
         }
         Ecosystem::GitRepo { .. } => Ok(()),
+        // Only reported, never built, so there is no name to mismatch.
+        Ecosystem::Index { .. } | Ecosystem::Repology { .. } => Ok(()),
     }
 }
 

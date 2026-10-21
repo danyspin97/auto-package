@@ -3755,6 +3755,11 @@ fn cmd_update(
         else {
             continue;
         };
+        // Found by a lookup the pipeline cannot build from: already reported
+        // in the plan.
+        if !ecosystem.can_build() {
+            continue;
+        }
         // The build pipeline wants a plain "name" positional and an optional
         // source-repo URL. For a PyPI update that's just the PyPI name; for a
         // git-forge update it's the repo's final path segment (what
@@ -3766,6 +3771,7 @@ fn cmd_update(
             ap_build::update::Ecosystem::GitRepo { url } => {
                 (repo_package_name(url), Some(url.clone()))
             }
+            _ => continue,
         };
         reporter.report(&Event::Progress {
             step: None,
@@ -3835,27 +3841,33 @@ fn cmd_update(
 /// The plan of an update, reported one package at a time as the sweep finds it.
 #[derive(Default)]
 struct PlanReport {
+    /// Updates the pipeline can build.
     n_update: usize,
+    /// Newer versions found where the pipeline cannot build them from.
+    n_found_only: usize,
     n_uptodate: usize,
     n_skipped: usize,
 }
 
 impl PlanReport {
     fn add(&mut self, c: &ap_build::update::Candidate, reporter: &(dyn Reporter + Send + Sync)) {
-        use ap_build::update::{Decision, Ecosystem};
-        let eco_tag = |e: &Ecosystem| match e {
-            Ecosystem::Pypi { .. } => "pypi",
-            Ecosystem::GitRepo { .. } => "git",
-        };
+        use ap_build::update::Decision;
+        let eco_tag = |e: &ap_build::update::Ecosystem| e.tag();
         let line = match &c.decision {
             Decision::Update {
                 ecosystem,
                 old_version,
                 new_version,
             } => {
-                self.n_update += 1;
+                let note = if ecosystem.can_build() {
+                    self.n_update += 1;
+                    ""
+                } else {
+                    self.n_found_only += 1;
+                    ", not built: the pipeline cannot fetch this source yet"
+                };
                 format!(
-                    "[update]  {}  {} → {}  ({})",
+                    "[update]  {}  {} → {}  ({}{note})",
                     c.rpm_name,
                     old_version,
                     new_version,
@@ -3883,15 +3895,15 @@ impl PlanReport {
     }
 
     fn total(&self) -> usize {
-        self.n_update + self.n_uptodate + self.n_skipped
+        self.n_update + self.n_found_only + self.n_uptodate + self.n_skipped
     }
 
     fn finish(&self, reporter: &(dyn Reporter + Send + Sync)) {
         reporter.report(&Event::Progress {
             step: None,
             message: format!(
-                "update plan: {} to update, {} up to date, {} skipped",
-                self.n_update, self.n_uptodate, self.n_skipped
+                "update plan: {} to update, {} newer but not buildable, {} up to date, {} skipped",
+                self.n_update, self.n_found_only, self.n_uptodate, self.n_skipped
             ),
         });
     }
@@ -3922,7 +3934,10 @@ impl Sweep {
                 ap_build::proc::Emit::run(reporter.as_ref()),
                 &mut |c| {
                     plan.add(&c, reporter.as_ref());
-                    let is_update = matches!(c.decision, ap_build::update::Decision::Update { .. });
+                    let is_update = matches!(
+                        &c.decision,
+                        ap_build::update::Decision::Update { ecosystem, .. } if ecosystem.can_build()
+                    );
                     // A closed channel means the run gave up: stop checking.
                     !is_update || tx.send(c).is_ok()
                 },

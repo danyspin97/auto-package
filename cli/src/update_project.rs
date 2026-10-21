@@ -1313,6 +1313,14 @@ fn build_item(
     let (name, source_repo) = match &item.ecosystem {
         Ecosystem::Pypi { pypi_name } => (pypi_name.clone(), None),
         Ecosystem::GitRepo { url } => (repo_package_name(url), Some(url.clone())),
+        Ecosystem::Index { .. } | Ecosystem::Repology { .. } => {
+            return Err(format!(
+                "{}'s source is known only through the {} lookup, which names nothing the pipeline \
+                 can fetch and unpack yet",
+                item.pkg,
+                item.ecosystem.tag()
+            ));
+        }
     };
     let build = BranchBuild {
         rpm_name: Some(item.pkg.clone()),
