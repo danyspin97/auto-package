@@ -6440,7 +6440,7 @@ fn obs_build_once(
     // this may be used for the status (see `get_build_status_after_commit`).
     let committed = Instant::now();
     ensure_builds_for(project, repo, arch)?;
-    const MAX_WAIT: Duration = Duration::from_secs(7200);
+    const MAX_WAIT: Duration = Duration::from_secs(4 * 3600);
     // Time spent `blocked` (waiting for other packages to build) does not
     // count against MAX_WAIT while the blocker is visibly moving, i.e. its
     // details changed within BLOCK_STALL; the wait as a whole is still
