@@ -29,9 +29,18 @@ pub fn latest_in_index(source: &str) -> Result<String, String> {
         .ok_or_else(|| format!("cannot read a project name from the file name in {source}"))?;
     let links = match sourceforge_project(source) {
         Some(project) => sourceforge_files(&project)?,
-        None => fetch_index(&index_dir(source))?,
+        None => fetch_index(&index_dir(parent_dir(source)))?,
     };
     newest_for(&links, &name).ok_or_else(|| format!("no release of {name} listed for {source}"))
+}
+
+/// The directory a file URL sits in: `https://h/pub/foo-1.tar.gz` is
+/// `https://h/pub`. A query or fragment is not part of it.
+fn parent_dir(url: &str) -> &str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.trim_end_matches('/')
+        .rsplit_once('/')
+        .map_or(path, |(dir, _)| dir)
 }
 
 /// The highest version among the archives in `links` named `name`; the
@@ -189,6 +198,22 @@ mod tests {
         ]);
         assert_eq!(newest_for(&l, "acl").as_deref(), Some("2.10.0"));
         assert_eq!(newest_for(&l, "nothing"), None);
+    }
+
+    #[test]
+    fn the_listing_read_is_the_directory_of_the_file_not_the_file() {
+        assert_eq!(
+            parent_dir("https://ftp.gnu.org/gnu/bc/bc-1.08.2.tar.gz"),
+            "https://ftp.gnu.org/gnu/bc"
+        );
+        assert_eq!(
+            parent_dir("https://h/pub/a.tar.gz?x=1#frag"),
+            "https://h/pub"
+        );
+        assert_eq!(
+            index_dir(parent_dir("https://h/pub/a.tar.gz")),
+            "https://h/pub/"
+        );
     }
 
     #[test]

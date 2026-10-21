@@ -3506,10 +3506,17 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
     )
     .map_err(during(format!("service ra in {}", checkout_dir.display())))?;
     if !out.success() {
+        // `osc service` reports a failing service on stdout and leaves stderr
+        // empty, which made the failure read as "failed (exit 1):" and nothing.
+        let stderr = if out.stderr.trim().is_empty() {
+            out.stdout
+        } else {
+            out.stderr
+        };
         return Err(Error::OscFailed {
             cmd: format!("service ra in {}", checkout_dir.display()),
             code: out.code,
-            stderr: out.stderr,
+            stderr,
         });
     }
     Ok(())

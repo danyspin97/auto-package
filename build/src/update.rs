@@ -112,6 +112,12 @@ pub enum SkipReason {
         packaged: String,
         latest: String,
     },
+    /// The package follows a repository's head (`2+git20260727.241e0ff`), so
+    /// the newest tag or release says nothing about whether it is current.
+    Snapshot {
+        packaged: String,
+        latest: String,
+    },
     /// The packaged `Version:` is computed by a shell macro (`%(…)`), so only
     /// the part before it is known, and upstream has the same there.
     ComputedVersion {
@@ -137,6 +143,11 @@ impl std::fmt::Display for SkipReason {
             } => {
                 write!(f, "{ecosystem_tag} lookup for {name} failed: {error}")
             }
+            SkipReason::Snapshot { packaged, latest } => write!(
+                f,
+                "packaged from a repository snapshot ({packaged}), which a release \
+                 ({latest}) cannot say is current or not"
+            ),
             SkipReason::ComputedVersion {
                 packaged,
                 known,
@@ -316,18 +327,40 @@ where
     };
 
     let latest = version_part(&latest);
+    if is_snapshot_version(&header.version) {
+        return skipped(
+            rpm_name,
+            SkipReason::Snapshot {
+                packaged: header.version,
+                latest,
+            },
+        );
+    }
     if let Some(known) = computed_prefix(&header.version) {
-        let decision = match newer_than_known(&latest, &known) {
-            true => Decision::Update {
+        // Repology's newest is numbered by whichever distribution it came from
+        // (ca-certificates "15-GA" against the spec's snapshot "2+git…"), so it
+        // is not taken as a release of a version the spec only half names.
+        let decision = if newer_than_known(&latest, &known)
+            && !matches!(ecosystem, Ecosystem::Repology { .. })
+        {
+            Decision::Update {
                 ecosystem,
                 old_version: header.version,
                 new_version: latest,
-            },
-            false => Decision::Skipped(SkipReason::ComputedVersion {
+            }
+        } else if older_than_known(&latest, &known) {
+            // Upstream is behind what the spec already names, whatever the
+            // macro adds.
+            Decision::UpToDate {
+                ecosystem,
+                version: header.version,
+            }
+        } else {
+            Decision::Skipped(SkipReason::ComputedVersion {
                 packaged: header.version,
                 known,
                 latest,
-            }),
+            })
         };
         return Candidate {
             rpm_name: rpm_name.to_string(),
@@ -400,7 +433,7 @@ fn version_part(found: &str) -> String {
 /// (`5.3.%(bash get_version_number.sh)` is `5.3`), when that start is a release
 /// number.
 fn computed_prefix(version: &str) -> Option<String> {
-    let start = version.find("%(")?;
+    let start = version.find("%(").or_else(|| version.find('%'))?;
     let known = version[..start].trim_end_matches(['.', '-', '_', '+']);
     plain_version(known).then(|| known.to_string())
 }
@@ -423,6 +456,26 @@ fn newer_than_known(latest: &str, known: &str) -> bool {
     let latest = leading_numbers(latest);
     let n = known.len().min(latest.len());
     n == known.len() && latest[..n] > known[..n]
+}
+
+/// Whether a version names a commit of a repository rather than a release:
+/// `1.2+git20260727.abc123`, `3.0~svn4411`.
+fn is_snapshot_version(version: &str) -> bool {
+    ["+git", "~git", "+svn", "~svn", "+hg", "+bzr", "+darcs"]
+        .iter()
+        .any(|marker| {
+            version.find(marker).is_some_and(|i| {
+                version[i + marker.len()..].starts_with(|c: char| c.is_ascii_digit())
+            })
+        })
+}
+
+/// Whether `latest` is behind `known` in the components both have.
+fn older_than_known(latest: &str, known: &str) -> bool {
+    let known = leading_numbers(known);
+    let latest = leading_numbers(latest);
+    let n = known.len().min(latest.len());
+    n > 0 && latest[..n] < known[..n]
 }
 
 /// A version that starts like a release number (`2.3.1`, `v1.0-rc2`, `20240101`)
@@ -485,7 +538,17 @@ pub fn plan_each(
     // A failed listing is an error: treating it as "no packages" would make
     // `update` report success for a project it never looked at.
     let packages = osc::try_list_project_packages(project, emit)?;
-    let mut names: Vec<String> = packages.iter().filter(|n| wanted(n)).cloned().collect();
+    // A multibuild flavor (`boost:base`) is part of its source package, which is
+    // listed too and has the spec; the flavor has none of its own.
+    let mut names: Vec<String> = packages
+        .iter()
+        .filter(|n| wanted(n))
+        .filter(|n| {
+            n.split_once(':')
+                .is_none_or(|(base, _)| !packages.iter().any(|p| p == base))
+        })
+        .cloned()
+        .collect();
     names.sort();
 
     // Enumerate the package's files instead of guessing `<pkg>.spec`.
@@ -919,6 +982,17 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
         assert_eq!(version_part("1.2.3"), "1.2.3");
         assert_eq!(version_part("not-a-version"), "not-a-version");
         assert_eq!(version_part("foo-2.0-rc1"), "2.0-rc1");
+    }
+
+    #[test]
+    fn a_repository_snapshot_is_not_judged_by_a_release() {
+        assert!(is_snapshot_version("2+git20260727.241e0ff"));
+        assert!(is_snapshot_version(
+            "84.87+git20260924.144354a1%{git_version}"
+        ));
+        assert!(is_snapshot_version("1.0~svn4411"));
+        assert!(!is_snapshot_version("1.2.3"));
+        assert!(!is_snapshot_version("1.0+gitlab")); // not a date or number after
     }
 
     #[test]
