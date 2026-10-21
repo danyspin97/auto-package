@@ -1,4 +1,4 @@
-//! The data and the text of `update-project`: which packages to update, what a
+//! The data and the text of `update`: which packages to update, what a
 //! dry run prints, and the end-of-run summary.
 //!
 //! The OBS and pipeline work that produces these lives in the CLI; this module
@@ -333,7 +333,7 @@ pub fn summary_text(
             let _ = writeln!(out, "  {l}");
         }
     };
-    let _ = writeln!(out, "\nupdate-project summary");
+    let _ = writeln!(out, "\nupdate summary");
     let _ = writeln!(out, "branch project: {branch_project}");
     section(
         &mut out,

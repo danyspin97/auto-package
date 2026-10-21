@@ -74,33 +74,38 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 
 ### Updating a whole project
 
-`update-project` browses a *source* OBS project, finds the packages that have
-a newer upstream release (the same sweep as `update --check`), branches them
-into a *branch* project, builds the new versions there with the ordinary
-pipeline, and optionally submits them back. The source project is only read.
+`update` browses a *source* OBS project, finds the packages that have a newer
+upstream release, branches them into a *branch* project, builds the new
+versions there with the ordinary pipeline, and optionally submits them back.
+The source project is only read, unless `--in-place` is given.
 
 ```bash
 # See what would happen: plan, branch project, build paths, requests.
-auto-package update-project Base:System --dry-run --submit
+auto-package update --project Base:System --dry-run --submit
 
 # Update the packages that have a release and build them in
 # home:<you>:branches:Base:System.
-auto-package update-project Base:System
+auto-package update --project Base:System
 
 # Only some packages, then submit requests for those that built.
-auto-package update-project Base:System --only libfoo,libbar --submit
+auto-package update --project Base:System --only libfoo,libbar --submit
 ```
 
 Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 `--arch`, `--log`, `--tui`, `--max-attempts`, `--budget-usd`, `--no-agent`,
-`--jobs`, `--regen` that `update` takes):
+`--jobs`, `--regen`, `--unsafe-resolve` that `build` takes):
 
 - `--branch-project`: where to branch and build (default
   `home:<osc user>:branches:<SOURCE>`, what `osc branch` uses). Created by the
   first branch if it does not exist. It must not be the source.
 - `--only`, `--exclude`: comma-separated package names.
-- `--dry-run`: print the plan, the branch project, the build paths that would
-  be added and the requests that would be created, and change nothing.
+- `--dry-run` (alias `--check`): print the plan, the branch project, the build
+  paths that would be added and the requests that would be created, and change
+  nothing.
+- `--in-place`: build the new versions straight in the project instead of in a
+  branch project, for a project you own. Nothing is branched or submitted, so it
+  cannot be combined with `--submit`, `--branch-project`, `--update-deps` or
+  `--follow-devel`.
 - `--update-deps`: also branch and update dependencies that live in another
   project and have a newer release themselves (see below).
 - `--min-free-gb`: as for `build` (default: 3, 0 = off).
@@ -120,7 +125,7 @@ added, branch project) and exits non-zero when a package failed.
 ### Improving the quality of a whole project
 
 `lint` checks every package of an OBS project and fixes what it
-finds, with the same branch-build-submit flow as `update-project`.
+finds, with the same branch-build-submit flow as `update`.
 
 ```bash
 # Print the audit and what would be done, change nothing.
@@ -148,7 +153,7 @@ other finding sends the package through the ordinary pipeline at its current
 version, with the findings handed to the agent as the problem to fix in the
 existing recipe (so `--no-agent` skips those). A package whose source
 auto-package does not recognise is only reported. Takes the options of
-`update-project`, except `--update-deps`; `--in-place` cannot be combined with
+`update`, except `--update-deps`; `--in-place` cannot be combined with
 `--submit` or `--branch-project`.
 
 #### Dependencies in other projects
@@ -211,7 +216,7 @@ deliberately conservative:
   run stops at once (running children are killed, queued packages are not
   started, in-flight packages are recorded as interrupted) instead of retrying
   every package. Run `claude` and `/login`, then re-run. `build` and
-  `update-project` check `claude auth status` (free) before starting.
+  `update` check `claude auth status` (free) before starting.
 - `130`: interrupted (Ctrl-C or SIGTERM).
 
 ### Licence guards

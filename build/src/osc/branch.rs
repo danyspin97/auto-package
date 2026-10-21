@@ -1,5 +1,5 @@
 //! Branching, project-meta build paths, binary search and submit requests:
-//! the OBS operations behind `update-project`.
+//! the OBS operations behind `update`.
 //!
 //! Everything that builds an argument list, a query or a document is a pure
 //! function with its own tests; the thin wrappers that run `osc` around them
@@ -336,7 +336,7 @@ pub struct RepoDef {
     pub arches: Vec<String>,
 }
 
-/// What `update-project` needs to know about a project meta.
+/// What `update` needs to know about a project meta.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectInfo {
     /// The `kind` attribute: absent for a standard project, `maintenance`,

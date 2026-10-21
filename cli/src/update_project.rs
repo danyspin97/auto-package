@@ -1,4 +1,4 @@
-//! `update-project`: update the packages of an OBS project that have a newer
+//! `update`: update the packages of an OBS project that have a newer
 //! upstream release, in a branch project, and optionally submit them back.
 //!
 //! The source project is only ever read (listing, spec fetches for the plan).
@@ -44,9 +44,9 @@ pub struct UpdateProjectArgs {
     #[arg(long)]
     pub branch_project: Option<String>,
 
-    /// `lint` only: commit the fixes straight into SOURCE instead of
-    /// into a branch project. Nothing is submitted, since nothing is branched;
-    /// use it on a project you own.
+    /// Build the new versions (`lint`: commit the fixes) straight in SOURCE
+    /// instead of in a branch project. Nothing is submitted, since nothing is
+    /// branched; use it on a project you own.
     #[arg(long, default_value_t = false)]
     pub in_place: bool,
 
@@ -76,7 +76,7 @@ pub struct UpdateProjectArgs {
     /// Print the plan, the branch project, the build paths that would be added
     /// and the requests that would be created, and stop. Changes nothing on
     /// OBS.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, alias = "check", default_value_t = false)]
     pub dry_run: bool,
 
     /// Also branch and update a dependency that lives in another project and
@@ -130,6 +130,13 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub no_agent: bool,
 
+    /// Resolve dependencies without the sandbox: pip runs on the host and
+    /// may build sdists, running their build backends as you. Without
+    /// this, pip runs in bubblewrap, or resolves wheels only when
+    /// bubblewrap is unusable. Same as AUTO_PACKAGE_UNSAFE_RESOLVE=1.
+    #[arg(long, default_value_t = false)]
+    pub unsafe_resolve: bool,
+
     /// Maximum number of packages to build concurrently (0 = unlimited). Each
     /// build still runs its own dependency closure, so this bounds the
     /// top-level loop, not every spawned sub-build.
@@ -156,7 +163,7 @@ pub struct UpdateProjectArgs {
     pub regen: bool,
 }
 
-/// What `update-project` changes about how one package is built.
+/// What `update` changes about how one package is built.
 pub struct BranchBuild {
     /// The package's name in the branch project, for a repository package whose
     /// name the pipeline would otherwise guess.
@@ -207,17 +214,23 @@ impl Ctx<'_> {
 }
 
 pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
-    if a.in_place && !a.improve {
-        return Err(eyre!("--in-place is only for lint"));
-    }
     if a.in_place && (a.submit || a.branch_project.is_some()) {
         return Err(eyre!(
             "--in-place changes {} itself: there is no branch to name and no request to submit",
             a.source
         ));
     }
+    if a.in_place && !a.improve && (a.update_deps || a.follow_devel) {
+        return Err(eyre!(
+            "--update-deps and --follow-devel branch other projects: they cannot be combined with --in-place"
+        ));
+    }
     if a.improve && a.update_deps {
-        return Err(eyre!("--update-deps is only for update-project"));
+        return Err(eyre!("--update-deps is only for update"));
+    }
+    ap_ecosystem::pip::set_unsafe_resolve(a.unsafe_resolve);
+    if a.in_place && !a.improve {
+        return super::update_in_place(a, summary);
     }
     let branch_project = match &a.branch_project {
         _ if a.in_place => a.source.clone(),
@@ -398,8 +411,13 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
 /// The packages whose names `only` and `exclude` allow, as the listing spells
 /// them.
 fn wanted(a: &UpdateProjectArgs, listed: &str) -> bool {
+    wanted_by(&a.only, &a.exclude, listed)
+}
+
+/// [`wanted`] for the two lists alone.
+pub fn wanted_by(only: &[String], exclude: &[String], listed: &str) -> bool {
     let pkg = up::branch_name(listed);
-    (a.only.is_empty() || up::name_listed(&a.only, pkg)) && !up::name_listed(&a.exclude, pkg)
+    (only.is_empty() || up::name_listed(only, pkg)) && !up::name_listed(exclude, pkg)
 }
 
 fn cmd_update_project(
@@ -1256,6 +1274,28 @@ mod tests {
         let a = args(&[]);
         assert!(!a.in_place && !a.improve, "improve is never a flag");
         assert!(args(&["--in-place"]).in_place);
+    }
+
+    #[test]
+    fn check_is_another_name_for_dry_run() {
+        assert!(args(&["--check"]).dry_run);
+        assert!(args(&["--dry-run"]).dry_run);
+        assert!(!args(&[]).unsafe_resolve);
+        assert!(args(&["--unsafe-resolve"]).unsafe_resolve);
+    }
+
+    #[test]
+    fn the_update_command_names_its_source_with_project_and_has_no_update_project() {
+        use clap::Parser as _;
+        let parse = |argv: &[&str]| crate::Cli::try_parse_from(argv);
+        let Ok(cli) = parse(&["ap", "update", "--project", "Base:System", "--in-place"]) else {
+            panic!("update --project --in-place must parse");
+        };
+        let crate::Commands::Update(a) = cli.command else {
+            panic!("not update");
+        };
+        assert_eq!((a.source.as_str(), a.in_place), ("Base:System", true));
+        assert!(parse(&["ap", "update-project", "Base:System"]).is_err());
     }
 
     #[test]

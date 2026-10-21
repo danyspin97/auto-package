@@ -165,100 +165,20 @@ enum Commands {
         sweep: bool,
     },
 
-    /// Scan an OBS project for packages with a newer upstream release and
-    /// optionally rebuild them at the new version.
-    ///
-    /// `--check` just prints the plan (which packages have updates, and from
-    /// what to what) without touching anything; without it, each package
-    /// needing an update runs through the ordinary build pipeline with the
-    /// new version pinned and `--force --regen` on, so a new release that
-    /// changes build system or deps is picked up correctly.
-    Update {
-        /// Limit the sweep to a single RPM package name (otherwise all
-        /// packages in the project are checked).
-        name: Option<String>,
-
-        /// OBS project (e.g. home:you:python).
-        #[arg(long)]
-        project: String,
-
-        #[arg(long, default_value = "ap-work")]
-        work_dir: PathBuf,
-
-        /// Directory for per-package notes, shared across projects. Kept outside
-        /// work_dir so they survive cleanup.
-        #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
-        notes_dir: PathBuf,
-
-        #[arg(long, default_value = "openSUSE_Tumbleweed")]
-        distro: String,
-
-        #[arg(long, default_value = "x86_64")]
-        arch: String,
-
-        /// Log level: error, warn, info, debug, trace.
-        #[arg(long, default_value = "info")]
-        log: String,
-
-        /// Enable interactive TUI mode for the per-package rebuilds.
-        #[arg(long, default_value_t = false)]
-        tui: bool,
-
-        /// Just report what would be updated; do not run any builds.
-        #[arg(long, default_value_t = false)]
-        check: bool,
-
-        /// Maximum agent fix attempts per package (passed through to each
-        /// rebuild).
-        #[arg(long, default_value_t = 10)]
-        max_attempts: usize,
-
-        /// USD budget cap for agent calls (per rebuild).
-        #[arg(long, default_value_t = 10.0)]
-        budget_usd: f64,
-
-        /// Build only; never call the model.
-        #[arg(long, default_value_t = false)]
-        no_agent: bool,
-
-        /// Resolve dependencies without the sandbox: pip runs on the host and
-        /// may build sdists, running their build backends as you. Without
-        /// this, pip runs in bubblewrap, or resolves wheels only when
-        /// bubblewrap is unusable. Same as AUTO_PACKAGE_UNSAFE_RESOLVE=1.
-        #[arg(long, default_value_t = false)]
-        unsafe_resolve: bool,
-
-        /// Maximum number of packages to rebuild concurrently (0 = unlimited).
-        /// Each rebuild still runs its own dep closure, so this bounds the
-        /// top-level update loop, not every spawned sub-build.
-        #[arg(long, default_value_t = 1)]
-        jobs: usize,
-
-        /// Regenerate each updated package's spec from scratch instead of
-        /// carrying the existing recipe forward.
-        ///
-        /// Off by default so a version bump preserves established patches,
-        /// BuildRequires choices, %check skips and other hand-tuned
-        /// decisions — a spec that already built the previous version
-        /// correctly is usually the right starting point. Pass this when
-        /// an upstream release changes build system or dependency layout
-        /// enough that reusing the old recipe is worse than starting over;
-        /// the Oct 6 review flagged the previous always-regenerate default
-        /// as silently discarding recipe-specific work.
-        #[arg(long, default_value_t = false)]
-        regen: bool,
-    },
-
     /// Update the packages of an OBS project that have a newer upstream
     /// release, in a branch project, and optionally submit them back.
     ///
-    /// Browses SOURCE_PROJECT (read only), branches each package with a newer
-    /// release into the branch project, makes the BuildRequires that live in
-    /// other projects resolvable by adding those projects as build paths of the
+    /// Browses PROJECT (read only), branches each package with a newer release
+    /// into the branch project, makes the BuildRequires that live in other
+    /// projects resolvable by adding those projects as build paths of the
     /// branch project, and builds the new versions there with the ordinary
-    /// pipeline. With `--submit`, a package that built gets a submit request to
-    /// the project it was branched from.
-    UpdateProject(update_project::UpdateProjectArgs),
+    /// pipeline, with the new version pinned and `--regen` as asked. With
+    /// `--submit`, a package that built gets a submit request to the project it
+    /// was branched from. With `--in-place` the new versions are built in
+    /// PROJECT itself instead, a project you own. `--dry-run` only prints the
+    /// plan.
+    #[command(mut_arg("source", |a| a.long("project").value_name("PROJECT")))]
+    Update(update_project::UpdateProjectArgs),
 
     /// Check every package of an OBS project and improve its quality.
     ///
@@ -1428,7 +1348,6 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 result?;
             }
         }
-        Commands::UpdateProject(args) => update_project::run(args, summary)?,
         Commands::Lint(mut args) => {
             args.improve = true;
             update_project::run(args, summary)?
@@ -1447,187 +1366,197 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 print!("{text}");
             }
         }
-        Commands::Update {
-            name: only,
-            project,
-            work_dir,
-            notes_dir,
-            distro,
-            arch,
-            log,
-            tui: enable_tui,
-            check,
-            max_attempts,
-            budget_usd,
-            no_agent,
-            unsafe_resolve,
-            jobs,
-            regen,
-        } => {
-            ap_build::discovery::set_agent_enabled(!no_agent);
-            if !no_agent {
-                ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
-            }
-            ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
-            ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
+        Commands::Update(args) => update_project::run(args, summary)?,
+    }
 
-            let level: LogLevel = log
-                .parse()
-                .map_err(|e: String| color_eyre::eyre::eyre!(e))?;
+    Ok(())
+}
 
-            // Same per-project-arch subdir layout as Build (see that arm for
-            // the rationale, including the Oct 6 cross-arch-bleed review) — a
-            // single `--work-dir` can hold state for multiple OBS projects
-            // (and arches) side by side.
-            std::fs::create_dir_all(&work_dir)?;
-            let project_dir = work_dir.join(format!(
-                "{}-{}",
-                ap_core::run::sanitize_name(&project),
-                ap_core::run::sanitize_name(&arch),
+/// `update --in-place`: rebuild the packages of PROJECT that have a newer upstream
+/// release in PROJECT itself, a project the user owns. Nothing is branched or
+/// submitted.
+fn update_in_place(
+    a: update_project::UpdateProjectArgs,
+    summary: &mut Option<String>,
+) -> color_eyre::Result<()> {
+    let update_project::UpdateProjectArgs {
+        source: project,
+        only,
+        exclude,
+        work_dir,
+        notes_dir,
+        distro,
+        arch,
+        log,
+        tui: enable_tui,
+        dry_run: check,
+        max_attempts,
+        budget_usd,
+        no_agent,
+        unsafe_resolve,
+        jobs,
+        regen,
+        ..
+    } = a;
+    ap_build::discovery::set_agent_enabled(!no_agent);
+    if !no_agent {
+        ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
+    }
+    ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
+    ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
+
+    let level: LogLevel = log
+        .parse()
+        .map_err(|e: String| color_eyre::eyre::eyre!(e))?;
+
+    // Same per-project-arch subdir layout as Build (see that arm for
+    // the rationale, including the Oct 6 cross-arch-bleed review) — a
+    // single `--work-dir` can hold state for multiple OBS projects
+    // (and arches) side by side.
+    std::fs::create_dir_all(&work_dir)?;
+    let project_dir = work_dir.join(format!(
+        "{}-{}",
+        ap_core::run::sanitize_name(&project),
+        ap_core::run::sanitize_name(&arch),
+    ));
+    reject_symlink_project_dir(&project_dir)?;
+    std::fs::create_dir_all(&project_dir)?;
+    let _project_lock = ProjectLock::acquire(&project_dir)?;
+    let work_dir = project_dir.canonicalize()?;
+
+    let rpms_dir = work_dir.join("rpms");
+    std::fs::create_dir_all(&rpms_dir)?;
+    let state_root = work_dir.join("state");
+    std::fs::create_dir_all(&state_root)?;
+
+    let source_urls = Arc::new(
+        ap_build::sources::SourceMap::load(&work_dir).map_err(|e| color_eyre::eyre::eyre!(e))?,
+    );
+    let python_flavors = Arc::new(
+        ap_build::flavors::PythonFlavors::load(&work_dir)
+            .map_err(|e| color_eyre::eyre::eyre!(e))?,
+    );
+
+    let run_dir = RunDir::allocate(&work_dir)?;
+    let memory = std::sync::Arc::new(MemorySink::new());
+    // See the matching guard in `Commands::Build` for the rationale
+    // (short version: the TUI render thread is detached, process
+    // exit kills it before its own terminal teardown runs, leaving
+    // raw mode and the alternate screen stuck on). Declared BEFORE
+    // `tui_ctrl` so it drops LAST.
+    let _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
+    let tui_ctrl = if enable_tui {
+        Some(tui::TuiController::new(
+            memory.clone(),
+            tui::RunScope {
+                project: project.clone(),
+                targets: only.to_vec(),
+            },
+            false,
+        )?)
+    } else {
+        None
+    };
+    ap_core::sink::set_quiet(tui_ctrl.is_some());
+
+    let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
+    if tui_ctrl.is_none() {
+        sinks.push(Box::new(HumanSink::new(level)));
+    }
+    sinks.push(Box::new(JsonlSink::open(&run_dir.jsonl())?));
+    sinks.push(Box::new(memory.clone()));
+
+    let base_reporter: Arc<dyn Reporter + Send + Sync> = Arc::new(FanoutReporter::new(sinks));
+    let reporter: Arc<dyn Reporter + Send + Sync> = match &tui_ctrl {
+        Some(t) => t.tap(base_reporter.clone(), None),
+        None => base_reporter.clone(),
+    };
+
+    install_interrupt_handler(tui_ctrl.is_some(), memory.clone())?;
+
+    let argv: Vec<String> = std::env::args().collect();
+    reporter.report(&Event::RunStarted {
+        run_id: run_dir.run_id.clone(),
+        argv,
+        work_dir: work_dir.clone(),
+    });
+
+    // Fail fast if the OBS project has no `<repository>` entries — otherwise
+    // every per-package `osc build` would fail downstream with "no
+    // repositories defined" after we had already checked each one out.
+    match ap_build::osc::project_has_repositories(
+        &project,
+        ap_build::proc::Emit::run(reporter.as_ref()),
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(color_eyre::eyre::eyre!(
+                "OBS project '{project}' has no build repositories defined — \
+                 configure at least one (e.g. openSUSE_Tumbleweed → openSUSE:Factory) \
+                 in its project meta before building."
             ));
-            reject_symlink_project_dir(&project_dir)?;
-            std::fs::create_dir_all(&project_dir)?;
-            let _project_lock = ProjectLock::acquire(&project_dir)?;
-            let work_dir = project_dir.canonicalize()?;
-
-            let rpms_dir = work_dir.join("rpms");
-            std::fs::create_dir_all(&rpms_dir)?;
-            let state_root = work_dir.join("state");
-            std::fs::create_dir_all(&state_root)?;
-
-            let source_urls = Arc::new(
-                ap_build::sources::SourceMap::load(&work_dir)
-                    .map_err(|e| color_eyre::eyre::eyre!(e))?,
-            );
-            let python_flavors = Arc::new(
-                ap_build::flavors::PythonFlavors::load(&work_dir)
-                    .map_err(|e| color_eyre::eyre::eyre!(e))?,
-            );
-
-            let run_dir = RunDir::allocate(&work_dir)?;
-            let memory = std::sync::Arc::new(MemorySink::new());
-            // See the matching guard in `Commands::Build` for the rationale
-            // (short version: the TUI render thread is detached, process
-            // exit kills it before its own terminal teardown runs, leaving
-            // raw mode and the alternate screen stuck on). Declared BEFORE
-            // `tui_ctrl` so it drops LAST.
-            let _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
-            let tui_ctrl = if enable_tui {
-                Some(tui::TuiController::new(
-                    memory.clone(),
-                    tui::RunScope {
-                        project: project.clone(),
-                        targets: only.iter().cloned().collect(),
-                    },
-                    false,
-                )?)
-            } else {
-                None
-            };
-            ap_core::sink::set_quiet(tui_ctrl.is_some());
-
-            let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
-            if tui_ctrl.is_none() {
-                sinks.push(Box::new(HumanSink::new(level)));
-            }
-            sinks.push(Box::new(JsonlSink::open(&run_dir.jsonl())?));
-            sinks.push(Box::new(memory.clone()));
-
-            let base_reporter: Arc<dyn Reporter + Send + Sync> =
-                Arc::new(FanoutReporter::new(sinks));
-            let reporter: Arc<dyn Reporter + Send + Sync> = match &tui_ctrl {
-                Some(t) => t.tap(base_reporter.clone(), None),
-                None => base_reporter.clone(),
-            };
-
-            install_interrupt_handler(tui_ctrl.is_some(), memory.clone())?;
-
-            let argv: Vec<String> = std::env::args().collect();
-            reporter.report(&Event::RunStarted {
-                run_id: run_dir.run_id.clone(),
-                argv,
-                work_dir: work_dir.clone(),
-            });
-
-            // Fail fast if the OBS project has no `<repository>` entries — otherwise
-            // every per-package `osc build` would fail downstream with "no
-            // repositories defined" after we had already checked each one out.
-            match ap_build::osc::project_has_repositories(
-                &project,
-                ap_build::proc::Emit::run(reporter.as_ref()),
-            ) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(color_eyre::eyre::eyre!(
-                        "OBS project '{project}' has no build repositories defined — \
-                         configure at least one (e.g. openSUSE_Tumbleweed → openSUSE:Factory) \
-                         in its project meta before building."
-                    ));
-                }
-                Err(e) => {
-                    return Err(color_eyre::eyre::eyre!(
-                        "could not read OBS meta for project '{project}' to verify its \
-                         build repositories: {e}"
-                    ));
-                }
-            }
-
-            let start = Instant::now();
-            let result = cmd_update(
-                &project,
-                only.as_deref(),
-                &work_dir,
-                &state_root,
-                &rpms_dir,
-                &distro,
-                &arch,
-                max_attempts,
-                budget_usd,
-                no_agent,
-                make_semaphore(jobs),
-                check,
-                regen,
-                source_urls,
-                python_flavors,
-                &run_dir,
-                reporter.clone(),
-                base_reporter.clone(),
-                tui_ctrl.clone(),
-            );
-            if let Some(t) = &tui_ctrl {
-                t.work_finished();
-            }
-
-            let outcome = if result.is_ok() {
-                RunOutcome::Success
-            } else {
-                RunOutcome::Failed
-            };
-            reporter.report(&Event::RunFinished {
-                outcome,
-                elapsed: start.elapsed(),
-                usage: memory.usage(),
-            });
-            // Built as text now and printed by `main`, once the TUI has
-            // restored the terminal; printed here it would be wiped.
-            *summary = Some(print_run_summary(
-                &memory,
-                &project,
-                &distro,
-                &arch,
-                &state_root,
+        }
+        Err(e) => {
+            return Err(color_eyre::eyre::eyre!(
+                "could not read OBS meta for project '{project}' to verify its \
+                 build repositories: {e}"
             ));
-
-            match &tui_ctrl {
-                Some(t) => {
-                    t.wait_closed();
-                    tui_run_exit(t.all_settled(), result, Vec::new())?;
-                }
-                None => result?,
-            }
         }
     }
 
+    let start = Instant::now();
+    let result = cmd_update(
+        &project,
+        &|n| update_project::wanted_by(&only, &exclude, n),
+        &work_dir,
+        &state_root,
+        &rpms_dir,
+        &distro,
+        &arch,
+        max_attempts,
+        budget_usd,
+        no_agent,
+        make_semaphore(jobs),
+        check,
+        regen,
+        source_urls,
+        python_flavors,
+        &run_dir,
+        reporter.clone(),
+        base_reporter.clone(),
+        tui_ctrl.clone(),
+    );
+    if let Some(t) = &tui_ctrl {
+        t.work_finished();
+    }
+
+    let outcome = if result.is_ok() {
+        RunOutcome::Success
+    } else {
+        RunOutcome::Failed
+    };
+    reporter.report(&Event::RunFinished {
+        outcome,
+        elapsed: start.elapsed(),
+        usage: memory.usage(),
+    });
+    // Built as text now and printed by `main`, once the TUI has
+    // restored the terminal; printed here it would be wiped.
+    *summary = Some(print_run_summary(
+        &memory,
+        &project,
+        &distro,
+        &arch,
+        &state_root,
+    ));
+
+    match &tui_ctrl {
+        Some(t) => {
+            t.wait_closed();
+            tui_run_exit(t.all_settled(), result, Vec::new())?;
+        }
+        None => result?,
+    }
     Ok(())
 }
 
@@ -2308,7 +2237,7 @@ fn cmd_build(
     reporter: Arc<dyn Reporter + Send + Sync>,
     base_reporter: Arc<dyn Reporter + Send + Sync>,
     tui_ctrl: Option<tui::TuiController>,
-    // Set by `update-project`, which builds in a branch project; `None` for
+    // Set by `update`, which builds in a branch project; `None` for
     // every other command.
     branch: Option<&update_project::BranchBuild>,
 ) -> color_eyre::Result<()> {
@@ -2453,14 +2382,14 @@ fn cmd_build(
     // A package branched from another project already has a name, and the
     // pipeline's guess at it (above) is only a guess. Only a repository package
     // is a single named package; a PyPI one is named for each node of its
-    // closure, and `update-project` refuses those whose name would differ.
+    // closure, and `update` refuses those whose name would differ.
     let rpm_name = match branch.and_then(|b| b.rpm_name.as_deref()) {
         Some(own) if source_repo.is_some() => own.to_string(),
         _ => rpm_name,
     };
     let name = name.as_str();
     // The binary names a Python dependency may be published under, for the
-    // search `update-project` does before building one (read once: it runs
+    // search `update` does before building one (read once: it runs
     // `rpmspec`).
     let cover_flavors: Vec<String> = if branch.is_some_and(|b| b.resolver.is_some()) {
         python_flavors.effective()
@@ -3097,7 +3026,7 @@ fn cmd_build(
                     keep
                 })
                 .filter(|dep| {
-                    // `update-project`: a dependency another project already
+                    // `update`: a dependency another project already
                     // publishes becomes a build path of the branch project, or
                     // is already reachable, instead of a second copy built here.
                     let Some(resolver) = branch.and_then(|b| b.resolver.as_ref()) else {
@@ -3786,7 +3715,7 @@ fn cmd_build(
 #[allow(clippy::too_many_arguments)]
 fn cmd_update(
     project: &str,
-    only: Option<&str>,
+    wanted: &dyn Fn(&str) -> bool,
     work_dir: &Path,
     state_root: &Path,
     rpms_dir: &Path,
@@ -3806,16 +3735,13 @@ fn cmd_update(
     tui_ctrl: Option<tui::TuiController>,
 ) -> color_eyre::Result<()> {
     let emit = ap_build::proc::Emit::run(reporter.as_ref());
-    let candidates =
-        ap_build::update::plan(project, only, emit).map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+    let candidates = ap_build::update::plan_where(project, wanted, emit)
+        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     if candidates.is_empty() {
         reporter.report(&Event::Progress {
             step: None,
-            message: match only {
-                Some(name) => format!("no package named {name} in {project}"),
-                None => format!("project {project} has no packages"),
-            },
+            message: format!("no package of {project} to update (is it empty, or do --only and --exclude leave nothing?)"),
         });
         return Ok(());
     }
@@ -4054,9 +3980,8 @@ mod tests {
     #[test]
     fn unsafe_resolve_is_off_unless_asked_for_on_build_and_update() {
         let unsafe_resolve = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
-            Commands::Build { unsafe_resolve, .. } | Commands::Update { unsafe_resolve, .. } => {
-                unsafe_resolve
-            }
+            Commands::Build { unsafe_resolve, .. } => unsafe_resolve,
+            Commands::Update(a) => a.unsafe_resolve,
             _ => panic!("not build or update"),
         };
         let build = ["auto-package", "build", "httpx", "--project", "home:u"];

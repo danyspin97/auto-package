@@ -2883,12 +2883,8 @@ fn osc_service_stage(
             // `obs-service-cargo` fail with "Path to manifest is not a file".
             let root_manifest = find_tarball(checkout_dir, &config.version)
                 .is_none_or(|t| tarball_has_root_cargo_toml(&t));
-            let service_xml = render_maturin_service_file(
-                &normalized,
-                &extra_manifests,
-                locked,
-                root_manifest,
-            );
+            let service_xml =
+                render_maturin_service_file(&normalized, &extra_manifests, locked, root_manifest);
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| {
                     (
@@ -10485,9 +10481,7 @@ fn tarball_has_cargo_lock(tarball: &Path, manifests: &[String]) -> bool {
             let rel: PathBuf = p.components().skip(1).collect();
             rel.parent().is_some_and(|dir| {
                 dir.as_os_str().is_empty()
-                    || manifests
-                        .iter()
-                        .any(|m| Path::new(m).parent() == Some(dir))
+                    || manifests.iter().any(|m| Path::new(m).parent() == Some(dir))
             })
         })
     })
@@ -12472,7 +12466,8 @@ mod tests {
     fn maturin_service_vendors_the_crate_maturin_builds() {
         let plain = render_maturin_service_file("outlines_core", &[], false, true);
         assert_eq!(plain.matches("name=\"cargotoml\"").count(), 1);
-        let xml = render_maturin_service_file("hf_xet", &["hf_xet/Cargo.toml".to_string()], false, true);
+        let xml =
+            render_maturin_service_file("hf_xet", &["hf_xet/Cargo.toml".to_string()], false, true);
         assert!(
             xml.contains("<param name=\"cargotoml\">Cargo.toml</param>"),
             "{xml}"
@@ -12511,8 +12506,12 @@ mod tests {
 
     #[test]
     fn service_files_escape_values_taken_from_upstream() {
-        let xml =
-            render_maturin_service_file("x", &["a&b</param><evil/>/Cargo.toml".to_string()], false, true);
+        let xml = render_maturin_service_file(
+            "x",
+            &["a&b</param><evil/>/Cargo.toml".to_string()],
+            false,
+            true,
+        );
         assert!(!xml.contains("<evil/>"), "{xml}");
         assert!(xml.contains("a&amp;b&lt;/param&gt;"), "{xml}");
         let xml = render_service_file("https://example.org/o/r?a=1&b=2", "1.0", "r");
