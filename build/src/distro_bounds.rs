@@ -49,7 +49,7 @@ fn parse_version(text: &str) -> Option<Version> {
 
 /// `>=1.2,<2` (or `(>=1.2, <2)`) as a bound. `None` when it is not understood,
 /// so a bound this cannot read is never held against a version.
-fn parse_specifier(text: &str) -> Option<VersionSpecifiers> {
+pub(crate) fn parse_specifier(text: &str) -> Option<VersionSpecifiers> {
     let text = text.trim().trim_start_matches('(').trim_end_matches(')');
     VersionSpecifiers::from_str(text).ok()
 }

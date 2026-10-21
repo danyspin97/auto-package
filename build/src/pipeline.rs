@@ -328,6 +328,11 @@ pub struct PkgState {
     /// new one, from a dependent that still fails, is.
     #[serde(default)]
     pub patched_problems: Vec<u64>,
+    /// Hashes of the patch requests a patch turn answered without a patch
+    /// (nothing upstream to restore). A dependent that asks again is not sent
+    /// back here: it gets the newest release its bound allows instead.
+    #[serde(default)]
+    pub declined_patches: Vec<u64>,
     /// Hashes of the machine-checkable conditions of patch requests that were
     /// found true of this package (already, or after a patch turn).
     #[serde(default)]
@@ -3458,6 +3463,14 @@ fn review_stage(
                 already_reviewed,
                 &outcome.action,
             ) {
+                if let Some(problem) = patching {
+                    let h = hash_spec(problem);
+                    update_state(ws, reporter, |state| {
+                        if !state.declined_patches.contains(&h) {
+                            state.declined_patches.push(h);
+                        }
+                    });
+                }
                 return Err(ctx.failed(format!(
                     "the agent did not patch {rpm_name} ({}): the package that needs the \
                      change cannot be built",
@@ -3841,6 +3854,48 @@ fn missing_deps_from_turn(
         })
         .collect();
     patches.extend(conflict_patches);
+    // A dependency whose patch turn found nothing to restore cannot be patched,
+    // however the request is worded: its release newest within this package's
+    // bound is built in the project in place of the distro's newer one.
+    let (declined, patches): (Vec<_>, Vec<_>) = patches
+        .into_iter()
+        .partition(|p| patch_declined_before(ctx, &p.name));
+    for p in declined {
+        let conflict = linked_bound_conflicts(ctx, step, std::slice::from_ref(&p.name))
+            .into_iter()
+            .find(|c| c.kind == crate::distro_bounds::Kind::DistroTooNew);
+        let release = conflict
+            .as_ref()
+            .and_then(|c| newest_pypi_release_within(&p.name, &c.specifier));
+        match (conflict, release) {
+            (Some(c), Some(version)) => {
+                ctx.reporter.report(&Event::Warning {
+                    step: Some(step),
+                    message: format!(
+                        "{} could not be patched for {} {}: building its {version}, the newest \
+                         release within `{}`, in {} instead of using {} {} from {}",
+                        p.name,
+                        ctx.config.pkg_name,
+                        ctx.config.version,
+                        c.specifier,
+                        ctx.config.project,
+                        p.name,
+                        c.shipped,
+                        c.linked_project
+                    ),
+                });
+                conflict_outdated.push((p.name.clone(), Some(version)));
+            }
+            _ => ctx.reporter.report(&Event::Warning {
+                step: Some(step),
+                message: format!(
+                    "{} could not be patched and no older release of it within this package's \
+                     bound was found",
+                    p.name
+                ),
+            }),
+        }
+    }
     for (dep, _) in &conflict_outdated {
         if !to_build
             .iter()
@@ -3868,6 +3923,41 @@ fn missing_deps_from_turn(
         native,
         outdated: conflict_outdated,
     })
+}
+
+/// Whether a patch turn already answered a request for `dep` without a patch.
+fn patch_declined_before(ctx: &RunCtx, dep: &str) -> bool {
+    Workspace::find_existing(&ctx.config.state_root, &[&osc::rpm_name(dep), dep])
+        .is_some_and(|w| !PkgState::load(&w).declined_patches.is_empty())
+}
+
+/// The newest of `versions` that `specifier` (`<=0.1.11,>=0.1.10`) allows,
+/// leaving out pre-releases. `None` when the bound cannot be read or nothing
+/// meets it.
+fn newest_within<'a>(versions: impl Iterator<Item = &'a str>, specifier: &str) -> Option<String> {
+    let bound = crate::distro_bounds::parse_specifier(specifier)?;
+    versions
+        .filter_map(|v| {
+            let parsed = <pep440_rs::Version as std::str::FromStr>::from_str(v).ok()?;
+            (!parsed.any_prerelease() && bound.contains(&parsed)).then_some((parsed, v))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, v)| v.to_string())
+}
+
+/// The newest PyPI release of `name` that `specifier` allows.
+fn newest_pypi_release_within(name: &str, specifier: &str) -> Option<String> {
+    let url = format!("https://pypi.org/pypi/{}/json", urlencoding::encode(name));
+    let body = crate::http::read_text(crate::http::get_with_retries(&url).ok()?).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let releases = json["releases"].as_object()?;
+    // A release with every file yanked cannot be installed.
+    let live = releases.iter().filter(|(_, files)| {
+        files
+            .as_array()
+            .is_some_and(|f| f.iter().any(|x| x["yanked"] != true))
+    });
+    newest_within(live.map(|(v, _)| v.as_str()), specifier)
 }
 
 /// A package a linked project ships whose version misses a bound this package
@@ -12669,6 +12759,21 @@ mod tests {
             );
         }
         assert_eq!(safe_file_part("Foo_bar-1.2+git"), "Foo_bar-1.2+git");
+    }
+
+    #[test]
+    fn the_newest_release_within_a_bound_is_picked() {
+        let all = ["0.1.5", "0.1.10", "0.1.11", "0.1.12rc1", "0.1.14.post1"];
+        assert_eq!(
+            newest_within(all.into_iter(), "<=0.1.11,>=0.1.10").as_deref(),
+            Some("0.1.11")
+        );
+        assert_eq!(
+            newest_within(all.into_iter(), "<0.2,>=0.1.11").as_deref(),
+            Some("0.1.14.post1")
+        );
+        assert_eq!(newest_within(all.into_iter(), ">=1"), None);
+        assert_eq!(newest_within(all.into_iter(), "not a bound"), None);
     }
 
     #[test]
