@@ -528,7 +528,7 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     let key = normalize(name);
     // A name already answered comes straight from the cache, without waiting
     // behind model calls in flight for other names.
-    if let Some(hit) = agent_cache().lock().ok()?.get(&key) {
+    if let Some(hit) = agent_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return hit.clone();
     }
     // Callers asking about the same name queue on that name's slot, so the
@@ -537,7 +537,7 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
     let slot = in_flight_slot(&key);
     let _turn = slot.lock().unwrap_or_else(|e| e.into_inner());
     // Another caller may have answered this name while we were queued.
-    if let Some(hit) = agent_cache().lock().ok()?.get(&key) {
+    if let Some(hit) = agent_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return hit.clone();
     }
     if AGENT_LOOKUPS.fetch_add(1, Ordering::Relaxed) >= MAX_AGENT_LOOKUPS {
@@ -600,9 +600,8 @@ pub fn is_rate_limited(stdout: &str) -> bool {
 }
 
 fn cache_agent_answer(key: &str, found: Option<String>) -> Option<String> {
-    if let Ok(mut cache) = agent_cache().lock() {
-        cache.insert(key.to_string(), found.clone());
-    }
+    let mut cache = agent_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.insert(key.to_string(), found.clone());
     found
 }
 
