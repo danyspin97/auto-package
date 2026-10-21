@@ -55,7 +55,7 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--version`: Pin a specific version (defaults to latest)
 - `--project`: OBS project name (required)
 - `--work-dir`: Working directory for build artifacts (default: `ap-work`)
-- `--distro`: Target distribution (default: `openSUSE_Tumbleweed`)
+- `--distro`: Repository to build for (default: the project's own, `openSUSE_Tumbleweed` first, then `openSUSE_Factory`, else the one that builds the architecture; a choice between several is printed)
 - `--arch`: Target architecture (default: `x86_64`)
 - `--tui`: Enable interactive TUI mode
 - `--log`: Log level when not using TUI: error, warn, info, debug, trace (default: `info`)

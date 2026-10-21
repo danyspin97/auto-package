@@ -45,8 +45,10 @@ enum Commands {
         #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
         notes_dir: PathBuf,
 
-        #[arg(long, default_value = "openSUSE_Tumbleweed")]
-        distro: String,
+        /// Repository to build for (default: the project's own, Tumbleweed
+        /// first).
+        #[arg(long)]
+        distro: Option<String>,
 
         #[arg(long, default_value = "x86_64")]
         arch: String,
@@ -826,6 +828,19 @@ fn main() -> color_eyre::Result<()> {
 
 /// Set the free-space minimum and warn once, before any TUI takes the
 /// terminal, when the work directory's disk is short of room.
+/// The repository to build `project` for, from `--distro` or, without it, the
+/// project's own. A choice between several is said, so it is not a surprise.
+pub(crate) fn choose_distro(requested: Option<&str>, project: &str, arch: &str) -> String {
+    let (chosen, others) = ap_build::osc::choose_repository(project, requested, arch);
+    if !others.is_empty() {
+        eprintln!(
+            "note: {project} builds for {chosen} and {}; using {chosen} (--distro picks another)",
+            others.join(", ")
+        );
+    }
+    chosen
+}
+
 pub(crate) fn init_disk_guard(
     work_dir: &Path,
     min_free_gb: u64,
@@ -928,6 +943,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             }
             ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
+            let distro = choose_distro(distro.as_deref(), &project, &arch);
 
             // `build https://github.com/owner/repo` — the URL is the source and
             // the repository name is the package name. `--url` does the same
@@ -1398,6 +1414,7 @@ fn update_in_place(
         regen,
         ..
     } = a;
+    let distro = choose_distro(distro.as_deref(), &project, &arch);
     ap_build::discovery::set_agent_enabled(!no_agent);
     if !no_agent {
         ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;

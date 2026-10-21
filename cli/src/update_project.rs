@@ -102,8 +102,10 @@ pub struct UpdateProjectArgs {
     #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
     pub notes_dir: PathBuf,
 
-    #[arg(long, default_value = "openSUSE_Tumbleweed")]
-    pub distro: String,
+    /// Repository to build for (default: the branch project's own, Tumbleweed
+    /// first; it is the one the source project builds for).
+    #[arg(long)]
+    pub distro: Option<String>,
 
     #[arg(long, default_value = "x86_64")]
     pub arch: String,
@@ -291,7 +293,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         &work_dir,
         a.min_free_gb,
         &branch_project,
-        &a.distro,
+        &osc::choose_repository(&branch_project, a.distro.as_deref(), &a.arch).0,
         &a.arch,
     );
     let nvidia_choice = a
@@ -382,7 +384,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
             print_run_summary(
                 &memory,
                 &branch_project,
-                &a.distro,
+                &osc::choose_repository(&branch_project, a.distro.as_deref(), &a.arch).0,
                 &a.arch,
                 &ctx.state_root
             ),
@@ -752,7 +754,7 @@ impl Audit {
                 })
             };
             let emit = Emit::run(reporter.as_ref());
-            let distro = osc::resolve_repository(&source, &distro, &arch);
+            let distro = osc::choose_repository(&source, distro.as_deref(), &arch).0;
             let statuses = osc::get_project_build_statuses(&source, &distro, &arch, emit)
                 .map_err(|e| {
                     warn(format!(
@@ -963,7 +965,7 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
                 osc::get_overall_build_status(
                     branch,
                     &r.item.pkg,
-                    &osc::resolve_repository(branch, &a.distro, &a.arch),
+                    &crate::choose_distro(a.distro.as_deref(), branch, &a.arch),
                     &a.arch,
                     emit,
                 )
@@ -1334,7 +1336,7 @@ fn build_item(
         resolver: Some(resolver.clone()),
         improve: improve_problem(item),
     };
-    let distro = osc::resolve_repository(branch, &a.distro, &a.arch);
+    let distro = crate::choose_distro(a.distro.as_deref(), branch, &a.arch);
     catch_panic(|| {
         cmd_build(
             &name,
@@ -1412,6 +1414,15 @@ mod tests {
         let a = args(&[]);
         assert!(!a.in_place && !a.improve, "improve is never a flag");
         assert!(args(&["--in-place"]).in_place);
+    }
+
+    #[test]
+    fn the_repository_is_the_projects_own_unless_distro_names_one() {
+        assert_eq!(args(&[]).distro, None);
+        assert_eq!(
+            args(&["--distro", "Leap_16"]).distro.as_deref(),
+            Some("Leap_16")
+        );
     }
 
     #[test]

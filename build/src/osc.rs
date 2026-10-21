@@ -6099,6 +6099,52 @@ fn pick_repository(info: &ProjectInfo, wanted: &str, arch: &str) -> Result<Strin
     }
 }
 
+/// The repository to build for when none was asked for: Tumbleweed, else
+/// Factory, else the one repository that builds `arch`, else the first by name.
+/// The others that build `arch` come second, so the caller can say what it
+/// passed over.
+fn default_repository(info: &ProjectInfo, arch: &str) -> Option<(String, Vec<String>)> {
+    let mut serving: Vec<&str> = info
+        .repositories
+        .iter()
+        .filter(|r| r.arches.iter().any(|a| a == arch))
+        .map(|r| r.name.as_str())
+        .collect();
+    serving.sort_unstable();
+    let chosen = ["openSUSE_Tumbleweed", "openSUSE_Factory"]
+        .into_iter()
+        .find(|p| serving.contains(p))
+        .or_else(|| serving.first().copied())?
+        .to_string();
+    let others = serving
+        .into_iter()
+        .filter(|n| *n != chosen)
+        .map(str::to_string)
+        .collect();
+    Some((chosen, others))
+}
+
+/// The repository of `project` to build for on `arch`: the one asked for, as
+/// [`resolve_repository`] reads it, or, when `requested` is `None`, the
+/// project's own preferred one. The second part is the other repositories that
+/// build `arch` when the choice was between several. A project that does not
+/// exist yet, or whose meta cannot be read, gets `openSUSE_Tumbleweed`.
+pub fn choose_repository(
+    project: &str,
+    requested: Option<&str>,
+    arch: &str,
+) -> (String, Vec<String>) {
+    const FALLBACK: &str = "openSUSE_Tumbleweed";
+    if let Some(wanted) = requested {
+        return (resolve_repository(project, wanted, arch), Vec::new());
+    }
+    let Ok(Some(meta)) = get_project_meta(project, Emit::quiet()) else {
+        return (FALLBACK.to_string(), Vec::new());
+    };
+    default_repository(&parse_project_info(&meta), arch)
+        .unwrap_or_else(|| (FALLBACK.to_string(), Vec::new()))
+}
+
 /// [`pick_repository`] for a project on OBS, remembered for the run. A project
 /// whose meta cannot be read keeps `wanted`, so the build's own check reports
 /// what is wrong.
@@ -7705,6 +7751,27 @@ mod repo_arch_tests {
             pick_repository(&exact, "openSUSE_Tumbleweed", "x86_64").as_deref(),
             Ok("openSUSE_Tumbleweed")
         );
+    }
+
+    #[test]
+    fn with_no_request_tumbleweed_then_factory_then_the_first_is_chosen() {
+        let repos = |names: &[&str]| {
+            let body: String = names
+                .iter()
+                .map(|n| format!(r#"<repository name="{n}"><arch>x86_64</arch></repository>"#))
+                .collect();
+            parse_project_info(&format!(r#"<project name="p">{body}</project>"#))
+        };
+        let both = repos(&["openSUSE_Factory", "openSUSE_Tumbleweed", "Leap_16"]);
+        let (chosen, others) = default_repository(&both, "x86_64").unwrap();
+        assert_eq!(chosen, "openSUSE_Tumbleweed");
+        assert_eq!(others, ["Leap_16", "openSUSE_Factory"]);
+        let (chosen, _) =
+            default_repository(&repos(&["Leap_16", "openSUSE_Factory"]), "x86_64").unwrap();
+        assert_eq!(chosen, "openSUSE_Factory");
+        let (chosen, others) = default_repository(&repos(&["b", "a"]), "x86_64").unwrap();
+        assert_eq!((chosen.as_str(), others.len()), ("a", 1));
+        assert_eq!(default_repository(&repos(&["a"]), "aarch64"), None);
     }
 
     #[test]
