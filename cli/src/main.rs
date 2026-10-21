@@ -1507,7 +1507,8 @@ fn update_in_place(
     let start = Instant::now();
     let result = cmd_update(
         &project,
-        &|n| update_project::wanted_by(&only, &exclude, n),
+        &only,
+        &exclude,
         &work_dir,
         &state_root,
         &rpms_dir,
@@ -3715,7 +3716,8 @@ fn cmd_build(
 #[allow(clippy::too_many_arguments)]
 fn cmd_update(
     project: &str,
-    wanted: &dyn Fn(&str) -> bool,
+    only: &[String],
+    exclude: &[String],
     work_dir: &Path,
     state_root: &Path,
     rpms_dir: &Path,
@@ -3734,46 +3736,25 @@ fn cmd_update(
     base_reporter: Arc<dyn Reporter + Send + Sync>,
     tui_ctrl: Option<tui::TuiController>,
 ) -> color_eyre::Result<()> {
-    let emit = ap_build::proc::Emit::run(reporter.as_ref());
-    let candidates = ap_build::update::plan_where(project, wanted, emit)
-        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
-
-    if candidates.is_empty() {
-        reporter.report(&Event::Progress {
-            step: None,
-            message: format!("no package of {project} to update (is it empty, or do --only and --exclude leave nothing?)"),
-        });
-        return Ok(());
-    }
-
-    report_update_plan(&candidates, reporter.as_ref());
-
-    if check {
-        return Ok(());
-    }
-
-    let to_build: Vec<(ap_build::update::Ecosystem, String)> = candidates
-        .iter()
-        .filter_map(|c| match &c.decision {
-            ap_build::update::Decision::Update {
-                ecosystem,
-                new_version,
-                ..
-            } => Some((ecosystem.clone(), new_version.clone())),
-            _ => None,
-        })
-        .collect();
-
-    if to_build.is_empty() {
-        reporter.report(&Event::Progress {
-            step: None,
-            message: "nothing to update".into(),
-        });
-        return Ok(());
-    }
-
+    let sweep = Sweep::start(project, only, exclude, reporter.clone());
+    // `--check` only reports the plan: the sweep runs to its end and nothing
+    // is built.
+    let updates: Box<dyn Iterator<Item = ap_build::update::Candidate>> = if check {
+        for _ in sweep.updates.iter() {}
+        Box::new(std::iter::empty())
+    } else {
+        Box::new(sweep.updates.iter())
+    };
     let mut failures: Vec<(String, String)> = Vec::new();
-    for (ecosystem, new_version) in to_build {
+    for c in updates {
+        let ap_build::update::Decision::Update {
+            ecosystem,
+            new_version,
+            ..
+        } = c.decision
+        else {
+            continue;
+        };
         // The build pipeline wants a plain "name" positional and an optional
         // source-repo URL. For a PyPI update that's just the PyPI name; for a
         // git-forge update it's the repo's final path segment (what
@@ -3829,6 +3810,19 @@ fn cmd_update(
         }
     }
 
+    let plan = sweep.finish().map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+    if plan.total() == 0 {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: format!("no package of {project} to update (is it empty, or do --only and --exclude leave nothing?)"),
+        });
+    } else if plan.n_update == 0 && !check {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: "nothing to update".into(),
+        });
+    }
+
     match failures.first() {
         Some((pkg, err)) => Err(color_eyre::eyre::eyre!(
             "{} update(s) failed; first: {pkg} ({err})",
@@ -3838,29 +3832,28 @@ fn cmd_update(
     }
 }
 
-/// Render the planned updates as per-line Progress events so the human/TUI
-/// sinks all see the same formatting without this function knowing which
-/// backend is active.
-fn report_update_plan(
-    candidates: &[ap_build::update::Candidate],
-    reporter: &(dyn Reporter + Send + Sync),
-) {
-    use ap_build::update::{Decision, Ecosystem};
-    let eco_tag = |e: &Ecosystem| match e {
-        Ecosystem::Pypi { .. } => "pypi",
-        Ecosystem::GitRepo { .. } => "git",
-    };
-    let mut n_update = 0;
-    let mut n_uptodate = 0;
-    let mut n_skipped = 0;
-    for c in candidates {
+/// The plan of an update, reported one package at a time as the sweep finds it.
+#[derive(Default)]
+struct PlanReport {
+    n_update: usize,
+    n_uptodate: usize,
+    n_skipped: usize,
+}
+
+impl PlanReport {
+    fn add(&mut self, c: &ap_build::update::Candidate, reporter: &(dyn Reporter + Send + Sync)) {
+        use ap_build::update::{Decision, Ecosystem};
+        let eco_tag = |e: &Ecosystem| match e {
+            Ecosystem::Pypi { .. } => "pypi",
+            Ecosystem::GitRepo { .. } => "git",
+        };
         let line = match &c.decision {
             Decision::Update {
                 ecosystem,
                 old_version,
                 new_version,
             } => {
-                n_update += 1;
+                self.n_update += 1;
                 format!(
                     "[update]  {}  {} → {}  ({})",
                     c.rpm_name,
@@ -3870,7 +3863,7 @@ fn report_update_plan(
                 )
             }
             Decision::UpToDate { ecosystem, version } => {
-                n_uptodate += 1;
+                self.n_uptodate += 1;
                 format!(
                     "[current] {}  {}  ({})",
                     c.rpm_name,
@@ -3879,7 +3872,7 @@ fn report_update_plan(
                 )
             }
             Decision::Skipped(reason) => {
-                n_skipped += 1;
+                self.n_skipped += 1;
                 format!("[skip]    {}  ({reason})", c.rpm_name)
             }
         };
@@ -3888,12 +3881,65 @@ fn report_update_plan(
             message: line,
         });
     }
-    reporter.report(&Event::Progress {
-        step: None,
-        message: format!(
-            "update plan: {n_update} to update, {n_uptodate} up to date, {n_skipped} skipped"
-        ),
-    });
+
+    fn total(&self) -> usize {
+        self.n_update + self.n_uptodate + self.n_skipped
+    }
+
+    fn finish(&self, reporter: &(dyn Reporter + Send + Sync)) {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: format!(
+                "update plan: {} to update, {} up to date, {} skipped",
+                self.n_update, self.n_uptodate, self.n_skipped
+            ),
+        });
+    }
+}
+
+/// The sweep of a project for newer releases, running on its own thread so
+/// that the packages it finds can be branched and built while it goes on with
+/// the rest. Each package that has an update arrives on `updates`.
+struct Sweep {
+    updates: std::sync::mpsc::Receiver<ap_build::update::Candidate>,
+    handle: std::thread::JoinHandle<Result<PlanReport, String>>,
+}
+
+impl Sweep {
+    fn start(
+        project: &str,
+        only: &[String],
+        exclude: &[String],
+        reporter: Arc<dyn Reporter + Send + Sync>,
+    ) -> Self {
+        let (tx, updates) = std::sync::mpsc::channel();
+        let (project, only, exclude) = (project.to_string(), only.to_vec(), exclude.to_vec());
+        let handle = std::thread::spawn(move || {
+            let mut plan = PlanReport::default();
+            ap_build::update::plan_each(
+                &project,
+                &|n| update_project::wanted_by(&only, &exclude, n),
+                ap_build::proc::Emit::run(reporter.as_ref()),
+                &mut |c| {
+                    plan.add(&c, reporter.as_ref());
+                    let is_update = matches!(c.decision, ap_build::update::Decision::Update { .. });
+                    // A closed channel means the run gave up: stop checking.
+                    !is_update || tx.send(c).is_ok()
+                },
+            )?;
+            plan.finish(reporter.as_ref());
+            Ok(plan)
+        });
+        Self { updates, handle }
+    }
+
+    /// How the sweep ended, once `updates` has run dry.
+    fn finish(self) -> Result<PlanReport, String> {
+        drop(self.updates);
+        self.handle
+            .join()
+            .unwrap_or_else(|_| Err("the sweep of the project panicked".to_string()))
+    }
 }
 
 /// Whether a failed dependency run is queued again within this run. A failure
@@ -3912,6 +3958,36 @@ fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts: usize) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_plan_counts_each_kind_of_package_as_it_is_added() {
+        use ap_build::update::{Candidate, Decision, Ecosystem};
+        let sink = ap_core::sink::MemorySink::new();
+        let mut plan = super::PlanReport::default();
+        let eco = || Ecosystem::Pypi {
+            pypi_name: "x".into(),
+        };
+        for decision in [
+            Decision::Update {
+                ecosystem: eco(),
+                old_version: "1".into(),
+                new_version: "2".into(),
+            },
+            Decision::UpToDate {
+                ecosystem: eco(),
+                version: "1".into(),
+            },
+        ] {
+            plan.add(
+                &Candidate {
+                    rpm_name: "python-x".into(),
+                    decision,
+                },
+                &sink,
+            );
+        }
+        assert_eq!((plan.n_update, plan.n_uptodate, plan.total()), (1, 1, 2));
+    }
+
     #[test]
     fn a_settled_tui_run_exits_zero_even_after_failures() {
         let failed = || Err(color_eyre::eyre::eyre!("boom"));

@@ -23,8 +23,8 @@ use ap_core::sink::{FanoutReporter, HumanSink, JsonlSink, LogLevel, MemorySink, 
 use color_eyre::eyre::eyre;
 
 use super::{
-    ProjectLock, Semaphore, catch_panic, cmd_build, install_interrupt_handler, make_semaphore,
-    print_run_summary, reject_symlink_project_dir, repo_package_name, report_update_plan, tui,
+    ProjectLock, Semaphore, Sweep, catch_panic, cmd_build, install_interrupt_handler,
+    make_semaphore, print_run_summary, reject_symlink_project_dir, repo_package_name, tui,
 };
 
 /// How many packages `--update-deps` may pull in, against a dependency chain
@@ -463,48 +463,42 @@ fn cmd_update_project(
         }
     }
 
+    // `lint` audits the whole project first. `update` sweeps it on its own
+    // thread, and each package with a newer release is branched and built as it
+    // turns up, while the sweep goes on with the others.
     let mut mechanical: HashSet<String> = HashSet::new();
-    let mut items = if a.improve {
+    let mut audited = Vec::new().into_iter();
+    let mut sweep = None;
+    if a.improve {
         let (items, only_style) = improve_plan(a, ctx, emit)?;
         mechanical = only_style;
         if items.is_empty() {
             ctx.say("nothing to improve");
             return Ok(());
         }
-        items
+        audited = items.into_iter();
     } else {
-        // Plan: the same sweep as `update --check`, over the source.
-        let candidates =
-            update::plan_where(&a.source, &|n| wanted(a, n), emit).map_err(|e| eyre!("{e}"))?;
-        if candidates.is_empty() {
-            ctx.say(format!("no matching packages in {}", a.source));
-            return Ok(());
-        }
-        report_update_plan(&candidates, ctx.reporter.as_ref());
-        let items = up::items_from_plan(&a.source, &candidates, &a.exclude);
-        if items.is_empty() {
-            ctx.say("nothing to update");
-            return Ok(());
-        }
-        items
-    };
-    items.retain(|item| match up::check_pipeline_name(item) {
-        // A style commit does not run the pipeline, so its naming does not matter.
-        _ if mechanical.contains(&item.pkg) => true,
-        Ok(()) => true,
-        Err(why) => {
-            ctx.warn(format!("skipping {}: {why}", item.pkg));
-            report.results.push(ItemResult {
-                item: item.clone(),
-                outcome: ItemOutcome::Skipped(why),
-                sr: SrOutcome::NotRequested,
-            });
-            false
-        }
-    });
-    if items.is_empty() {
-        return Ok(());
+        sweep = Some(Sweep::start(
+            &a.source,
+            &a.only,
+            &a.exclude,
+            ctx.reporter.clone(),
+        ));
     }
+    // The next package to work on, in the order the sweep or the audit has it.
+    let mut incoming = || -> Option<Item> {
+        loop {
+            let Some(sweep) = &sweep else {
+                return audited.next();
+            };
+            let candidate = sweep.updates.recv().ok()?;
+            let items =
+                up::items_from_plan(&a.source, std::slice::from_ref(&candidate), &a.exclude);
+            if let Some(item) = items.into_iter().next() {
+                return Some(item);
+            }
+        }
+    };
 
     // A dry run reads the branch project as branching would leave it.
     let resolver = {
@@ -529,12 +523,43 @@ fn cmd_update_project(
     // Branch, then make each package's BuildRequires reachable. With
     // `--update-deps` a dependency from another project that has a newer
     // release is queued behind the package that needs it.
-    let mut queue: VecDeque<Item> = items.into();
-    let mut visited: HashSet<String> = queue.iter().map(visit_key).collect();
+    let mut queue: VecDeque<Item> = VecDeque::new();
+    let mut visited: HashSet<String> = HashSet::new();
     let mut ready: Vec<Item> = Vec::new();
+    let mut admitted = 0;
     let mut dependency_count = 0;
     let mut branch_checked = false;
-    while let Some(mut item) = queue.pop_front() {
+    loop {
+        let mut item = match queue.pop_front() {
+            Some(item) => item,
+            None => {
+                // The package and what it needs are all prepared: build them
+                // now, then wait for the sweep to find the next.
+                if !a.dry_run {
+                    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                }
+                let Some(item) = incoming() else { break };
+                if !visited.insert(visit_key(&item)) {
+                    continue;
+                }
+                match up::check_pipeline_name(&item) {
+                    // A style commit does not run the pipeline, so its naming does not matter.
+                    _ if mechanical.contains(&item.pkg) => {}
+                    Ok(()) => {}
+                    Err(why) => {
+                        ctx.warn(format!("skipping {}: {why}", item.pkg));
+                        report.results.push(ItemResult {
+                            item,
+                            outcome: ItemOutcome::Skipped(why),
+                            sr: SrOutcome::NotRequested,
+                        });
+                        continue;
+                    }
+                }
+                admitted += 1;
+                item
+            }
+        };
         if a.in_place {
             // The package is already where it will be changed, and its
             // BuildRequires resolve: it builds there today.
@@ -612,6 +637,21 @@ fn cmd_update_project(
         ready.push(item);
     }
 
+    if let Some(sweep) = sweep.take() {
+        let plan = sweep.finish().map_err(|e| eyre!("{e}"))?;
+        if plan.total() == 0 {
+            ctx.say(format!("no matching packages in {}", a.source));
+            return Ok(());
+        }
+        if plan.n_update == 0 {
+            ctx.say("nothing to update");
+            return Ok(());
+        }
+    }
+    if admitted == 0 {
+        return Ok(());
+    }
+
     if a.dry_run && a.improve {
         ctx.say(format!(
             "dry run: nothing is branched, built, edited or submitted; {} stays untouched",
@@ -661,41 +701,7 @@ fn cmd_update_project(
         return Ok(());
     }
 
-    // Build the dependencies before what needs them, each in the branch
-    // project like `update` builds in its own.
-    ready.sort_by_key(|i| i.dependency_of.is_none());
-    for item in ready {
-        let done = if a.improve {
-            ctx.say(format!("improving {} in {branch}", item.pkg));
-            if mechanical.contains(&item.pkg) {
-                tidy_item(branch, &item, ctx)
-            } else if a.no_agent {
-                report.results.push(ItemResult {
-                    item,
-                    outcome: ItemOutcome::Skipped("the findings need the agent".to_string()),
-                    sr: SrOutcome::NotRequested,
-                });
-                continue;
-            } else {
-                build_item(a, branch, &item, &resolver, ctx)
-            }
-        } else {
-            ctx.say(format!(
-                "updating {} to {} in {branch}",
-                item.pkg, item.new_version
-            ));
-            build_item(a, branch, &item, &resolver, ctx)
-        };
-        let outcome = match done {
-            Ok(()) => ItemOutcome::Updated,
-            Err(why) => ItemOutcome::Failed(why),
-        };
-        report.results.push(ItemResult {
-            item,
-            outcome,
-            sr: SrOutcome::NotRequested,
-        });
-    }
+    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
 
     if a.submit {
         submit_requests(a, branch, &mut report.results, ctx);
@@ -1196,6 +1202,52 @@ fn dependency_items(
         }
     }
     out
+}
+
+/// Build what is ready in the branch project, the dependencies before what
+/// needs them, each like `update` builds in its own project.
+fn build_ready(
+    a: &UpdateProjectArgs,
+    branch: &str,
+    ready: &mut Vec<Item>,
+    mechanical: &HashSet<String>,
+    resolver: &Arc<DepResolver>,
+    ctx: &Ctx<'_>,
+    report: &mut Report,
+) {
+    ready.sort_by_key(|i| i.dependency_of.is_none());
+    for item in std::mem::take(ready) {
+        let done = if a.improve {
+            ctx.say(format!("improving {} in {branch}", item.pkg));
+            if mechanical.contains(&item.pkg) {
+                tidy_item(branch, &item, ctx)
+            } else if a.no_agent {
+                report.results.push(ItemResult {
+                    item,
+                    outcome: ItemOutcome::Skipped("the findings need the agent".to_string()),
+                    sr: SrOutcome::NotRequested,
+                });
+                continue;
+            } else {
+                build_item(a, branch, &item, resolver, ctx)
+            }
+        } else {
+            ctx.say(format!(
+                "updating {} to {} in {branch}",
+                item.pkg, item.new_version
+            ));
+            build_item(a, branch, &item, resolver, ctx)
+        };
+        let outcome = match done {
+            Ok(()) => ItemOutcome::Updated,
+            Err(why) => ItemOutcome::Failed(why),
+        };
+        report.results.push(ItemResult {
+            item,
+            outcome,
+            sr: SrOutcome::NotRequested,
+        });
+    }
 }
 
 /// Build `item` in the branch project with the ordinary pipeline.

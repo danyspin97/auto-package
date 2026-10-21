@@ -289,6 +289,23 @@ pub fn plan_where(
     wanted: &dyn Fn(&str) -> bool,
     emit: Emit<'_>,
 ) -> Result<Vec<Candidate>, String> {
+    let mut candidates = Vec::new();
+    plan_each(project, wanted, emit, &mut |c| {
+        candidates.push(c);
+        true
+    })?;
+    Ok(candidates)
+}
+
+/// [`plan_where`] handing each package to `on` as soon as it is classified,
+/// so a caller can start on the first update while the rest are still being
+/// checked. `on` returns whether to go on; `false` stops the sweep.
+pub fn plan_each(
+    project: &str,
+    wanted: &dyn Fn(&str) -> bool,
+    emit: Emit<'_>,
+    on: &mut dyn FnMut(Candidate) -> bool,
+) -> Result<(), String> {
     // A failed listing is an error: treating it as "no packages" would make
     // `update` report success for a project it never looked at.
     let packages = osc::try_list_project_packages(project, emit)?;
@@ -324,17 +341,15 @@ pub fn plan_where(
     };
 
     let total = names.len();
-    let candidates: Vec<Candidate> = names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| {
-            emit.reporter.report(&Event::Progress {
-                step: emit.step,
-                message: format!("checking {n} ({}/{total})", i + 1),
-            });
-            classify(n, &fetch_spec, &lookups)
-        })
-        .collect();
+    for (i, n) in names.iter().enumerate() {
+        emit.reporter.report(&Event::Progress {
+            step: emit.step,
+            message: format!("checking {n} ({}/{total})", i + 1),
+        });
+        if !on(classify(n, &fetch_spec, &lookups)) {
+            break;
+        }
+    }
     let (hits, fetched) = upstream_cache::stats();
     let (hits, fetched) = (hits - hits_before, fetched - fetched_before);
     if hits > 0 {
@@ -346,7 +361,7 @@ pub fn plan_where(
             ),
         });
     }
-    Ok(candidates)
+    Ok(())
 }
 
 /// Specs a plan has just read, by (project, package), for [`planned_spec`].
