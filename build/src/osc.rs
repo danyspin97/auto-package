@@ -6059,6 +6059,78 @@ fn check_repo_arch(
     Ok(())
 }
 
+/// The repository of a project that stands for `wanted` on `arch`: `wanted`
+/// itself when the project has it, else the one the distribution is also known
+/// by (`openSUSE_Tumbleweed` is built as `openSUSE_Factory` in Factory's devel
+/// projects, and a branch takes its repositories from the project it was
+/// branched from), else the only repository that builds `arch`.
+fn pick_repository(info: &ProjectInfo, wanted: &str, arch: &str) -> Result<String, String> {
+    let builds = |name: &str| {
+        info.repositories
+            .iter()
+            .find(|r| r.name == name)
+            .is_some_and(|r| r.arches.iter().any(|a| a == arch))
+    };
+    if builds(wanted) {
+        return Ok(wanted.to_string());
+    }
+    let aliases: &[&str] = match wanted {
+        "openSUSE_Tumbleweed" => &["openSUSE_Factory"],
+        "openSUSE_Factory" => &["openSUSE_Tumbleweed"],
+        _ => &[],
+    };
+    if let Some(alias) = aliases.iter().find(|a| builds(a)) {
+        return Ok((*alias).to_string());
+    }
+    let mut serving = info
+        .repositories
+        .iter()
+        .filter(|r| r.arches.iter().any(|a| a == arch));
+    match (serving.next(), serving.next()) {
+        (Some(only), None) => Ok(only.name.clone()),
+        _ => Err(format!(
+            "no repository for {wanted} on {arch} (it has: {})",
+            info.repositories
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// [`pick_repository`] for a project on OBS, remembered for the run. A project
+/// whose meta cannot be read keeps `wanted`, so the build's own check reports
+/// what is wrong.
+pub fn resolve_repository(project: &str, wanted: &str, arch: &str) -> String {
+    /// (project, wanted, arch) → the repository chosen.
+    type Known = HashMap<(String, String, String), String>;
+    static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
+    let key = (project.to_string(), wanted.to_string(), arch.to_string());
+    if let Some(hit) = KNOWN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&key))
+    {
+        return hit.clone();
+    }
+    let Ok(Some(meta)) = get_project_meta(project, Emit::quiet()) else {
+        return wanted.to_string();
+    };
+    let info = parse_project_info(&meta);
+    if info.repositories.is_empty() {
+        return wanted.to_string();
+    }
+    let chosen = pick_repository(&info, wanted, arch).unwrap_or_else(|_| wanted.to_string());
+    KNOWN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(key, chosen.clone());
+    chosen
+}
+
 /// Fail before waiting when the project does not build for `repo`/`arch`:
 /// OBS would answer with no result at all, forever. A meta that cannot be
 /// read skips the check; the wait's own "no results" limit still applies.
@@ -7618,6 +7690,37 @@ mod repo_arch_tests {
     fn a_repository_and_arch_the_project_builds_are_accepted() {
         let info = parse_project_info(META);
         assert!(check_repo_arch(&info, "home:u:p", "openSUSE_Tumbleweed", "aarch64").is_ok());
+    }
+
+    #[test]
+    fn a_repository_the_project_calls_by_another_name_is_found() {
+        let factory = META.replace("openSUSE_Tumbleweed", "openSUSE_Factory");
+        let info = parse_project_info(&factory);
+        assert_eq!(
+            pick_repository(&info, "openSUSE_Tumbleweed", "x86_64").as_deref(),
+            Ok("openSUSE_Factory")
+        );
+        let exact = parse_project_info(META);
+        assert_eq!(
+            pick_repository(&exact, "openSUSE_Tumbleweed", "x86_64").as_deref(),
+            Ok("openSUSE_Tumbleweed")
+        );
+    }
+
+    #[test]
+    fn the_only_repository_for_an_arch_stands_in_and_several_do_not() {
+        let one = parse_project_info(&META.replace("openSUSE_Tumbleweed", "Leap_16"));
+        assert_eq!(
+            pick_repository(&one, "openSUSE_Tumbleweed", "x86_64").as_deref(),
+            Ok("Leap_16")
+        );
+        let two = parse_project_info(
+            r#"<project name="p"><repository name="A"><arch>x86_64</arch></repository>
+               <repository name="B"><arch>x86_64</arch></repository></project>"#,
+        );
+        let e = pick_repository(&two, "openSUSE_Tumbleweed", "x86_64").unwrap_err();
+        assert!(e.contains("A, B"), "{e}");
+        assert!(pick_repository(&one, "openSUSE_Tumbleweed", "i586").is_err());
     }
 
     #[test]

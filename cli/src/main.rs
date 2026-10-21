@@ -3736,6 +3736,8 @@ fn cmd_update(
     base_reporter: Arc<dyn Reporter + Send + Sync>,
     tui_ctrl: Option<tui::TuiController>,
 ) -> color_eyre::Result<()> {
+    // The project may call the distribution by another name than `--distro`.
+    let distro = &ap_build::osc::resolve_repository(project, distro, arch);
     let sweep = Sweep::start(project, only, exclude, reporter.clone());
     // `--check` only reports the plan: the sweep runs to its end and nothing
     // is built.

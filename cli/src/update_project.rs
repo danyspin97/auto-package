@@ -752,6 +752,7 @@ impl Audit {
                 })
             };
             let emit = Emit::run(reporter.as_ref());
+            let distro = osc::resolve_repository(&source, &distro, &arch);
             let statuses = osc::get_project_build_statuses(&source, &distro, &arch, emit)
                 .map_err(|e| {
                     warn(format!(
@@ -959,19 +960,25 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
         let updated = r.outcome == ItemOutcome::Updated;
         let build = updated
             .then(|| {
-                osc::get_overall_build_status(branch, &r.item.pkg, &a.distro, &a.arch, emit)
-                    // Name the repository/arch that blocks, not just its status.
-                    .map(|(status, at)| match (&status, at) {
-                        (osc::BuildStatus::Succeeded, _) | (_, None) => status,
-                        (_, Some(at)) => osc::BuildStatus::Unknown(format!("{status} on {at}")),
-                    })
-                    .map_err(|e| {
-                        ctx.warn(format!(
-                            "could not read the build status of {}: {e}",
-                            r.item.pkg
-                        ))
-                    })
-                    .ok()
+                osc::get_overall_build_status(
+                    branch,
+                    &r.item.pkg,
+                    &osc::resolve_repository(branch, &a.distro, &a.arch),
+                    &a.arch,
+                    emit,
+                )
+                // Name the repository/arch that blocks, not just its status.
+                .map(|(status, at)| match (&status, at) {
+                    (osc::BuildStatus::Succeeded, _) | (_, None) => status,
+                    (_, Some(at)) => osc::BuildStatus::Unknown(format!("{status} on {at}")),
+                })
+                .map_err(|e| {
+                    ctx.warn(format!(
+                        "could not read the build status of {}: {e}",
+                        r.item.pkg
+                    ))
+                })
+                .ok()
             })
             .flatten();
         let spec_version = updated
@@ -1327,6 +1334,7 @@ fn build_item(
         resolver: Some(resolver.clone()),
         improve: improve_problem(item),
     };
+    let distro = osc::resolve_repository(branch, &a.distro, &a.arch);
     catch_panic(|| {
         cmd_build(
             &name,
@@ -1335,7 +1343,9 @@ fn build_item(
             &ctx.work_dir,
             &ctx.state_root,
             &ctx.rpms_dir,
-            &a.distro,
+            // The branch took its repositories from the project it was
+            // branched from, which may call the distribution by another name.
+            &distro,
             &a.arch,
             a.max_attempts,
             a.budget_usd,
