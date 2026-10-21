@@ -125,6 +125,13 @@ pub enum SkipReason {
         known: String,
         latest: String,
     },
+    /// The package is one series of a project that ships several side by side
+    /// (`fmt-9` stays on 9.x), and the newest release is of another series.
+    OtherSeries {
+        series: String,
+        packaged: String,
+        latest: String,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
@@ -156,6 +163,15 @@ impl std::fmt::Display for SkipReason {
                 f,
                 "the version is computed by a script ({packaged}), so only {known} of it is \
                  known, and upstream's {latest} starts the same"
+            ),
+            SkipReason::OtherSeries {
+                series,
+                packaged,
+                latest,
+            } => write!(
+                f,
+                "the package follows the {series} series ({packaged}), and upstream's \
+                 newest ({latest}) is of another one"
             ),
             SkipReason::VersionCompareFailed { packaged, latest } => {
                 write!(
@@ -368,10 +384,23 @@ where
         };
     }
     let decision = match compare_versions(&latest, &header.version) {
-        pypi::VersionCompare::Newer => Decision::Update {
-            ecosystem,
-            old_version: header.version,
-            new_version: latest,
+        pypi::VersionCompare::Newer => match series_of(rpm_name, &header.version) {
+            Some(series) if !in_series(&latest, &series) => {
+                Decision::Skipped(SkipReason::OtherSeries {
+                    series: series
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join("."),
+                    packaged: header.version,
+                    latest,
+                })
+            }
+            _ => Decision::Update {
+                ecosystem,
+                old_version: header.version,
+                new_version: latest,
+            },
         },
         pypi::VersionCompare::NotNewer => Decision::UpToDate {
             ecosystem,
@@ -448,6 +477,31 @@ fn leading_numbers(v: &str) -> Vec<u64> {
         .split('.')
         .map_while(|part| part.parse().ok())
         .collect()
+}
+
+/// The series a package is pinned to by its name: `fmt-9` and `boost-1.85`
+/// name `[9]` and `[1, 85]`. The number must also start the packaged version,
+/// or it is part of the name (`foo-2` packaging 1.4) and pins nothing.
+fn series_of(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
+    let (_, suffix) = rpm_name.rsplit_once('-')?;
+    if suffix.is_empty()
+        || !suffix
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let series: Vec<u64> = suffix.split('.').filter_map(|p| p.parse().ok()).collect();
+    let packaged = leading_numbers(version);
+    (series.len() == suffix.split('.').count()
+        && packaged.len() >= series.len()
+        && packaged[..series.len()] == series[..])
+        .then_some(series)
+}
+
+/// Whether `version` belongs to `series`: it starts with the same numbers.
+fn in_series(version: &str, series: &[u64]) -> bool {
+    leading_numbers(version).starts_with(series)
 }
 
 /// Whether `latest` is ahead of `known` in the components `known` has.
@@ -928,6 +982,39 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
         assert!(
             !matches!(&c.decision, Decision::Update { ecosystem, .. } if ecosystem.can_build())
         );
+    }
+
+    #[test]
+    fn a_series_package_stays_on_its_series() {
+        let spec_text = "Name: fmt-9\nVersion: 9.1.0\n";
+        let spec = |_: &str| Some(spec_text.to_string());
+        let newest = |v: &'static str| -> &'static dyn Fn(&str) -> Result<String, String> {
+            Box::leak(Box::new(move |_: &str| Ok(v.to_string())))
+        };
+        let c = classify(
+            "fmt-9",
+            &spec,
+            &lookups_for(&|_| Err("no".into()), newest("11.0.2")),
+        );
+        assert!(matches!(
+            c.decision,
+            Decision::Skipped(SkipReason::OtherSeries { ref series, .. }) if series == "9"
+        ));
+        let c = classify(
+            "fmt-9",
+            &spec,
+            &lookups_for(&|_| Err("no".into()), newest("9.1.1")),
+        );
+        assert!(matches!(c.decision, Decision::Update { .. }));
+    }
+
+    #[test]
+    fn a_number_in_a_name_pins_only_when_the_version_starts_with_it() {
+        assert_eq!(series_of("fmt-9", "9.1.0"), Some(vec![9]));
+        assert_eq!(series_of("boost-1.85", "1.85.0"), Some(vec![1, 85]));
+        assert_eq!(series_of("foo-2", "1.4"), None);
+        assert_eq!(series_of("python-3to2", "1.1"), None);
+        assert_eq!(series_of("fmt", "11.0"), None);
     }
 
     #[test]
