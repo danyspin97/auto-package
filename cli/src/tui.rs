@@ -31,7 +31,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table,
+        TableState, Wrap,
     },
 };
 
@@ -322,9 +323,24 @@ impl PkgStatus {
             PkgStatus::Between => "working",
             PkgStatus::Succeeded => "done",
             PkgStatus::AlreadyBuilt => "cached",
-            PkgStatus::MissingDeps => "needs deps",
+            PkgStatus::MissingDeps => "blocked",
             PkgStatus::Failed => "failed",
             PkgStatus::NoSpace => "no space",
+        }
+    }
+
+    /// A one-column symbol in front of the label, so a row's state reads at a
+    /// glance and still shows without colour. `tick` animates the running
+    /// symbol.
+    fn glyph(&self, tick: u64) -> &'static str {
+        match self {
+            PkgStatus::Queued => "○",
+            PkgStatus::Running => ["◐", "◓", "◑", "◒"][(tick % 4) as usize],
+            PkgStatus::Between => "◌",
+            PkgStatus::Succeeded => "✓",
+            PkgStatus::AlreadyBuilt => "✔",
+            PkgStatus::MissingDeps => "◇",
+            PkgStatus::Failed | PkgStatus::NoSpace => "✗",
         }
     }
 
@@ -2045,7 +2061,7 @@ fn text_width(area: Rect) -> usize {
 /// `p` inside a border, when `area` is tall enough to hold one.
 fn framed(area: Rect, p: Paragraph<'_>) -> Paragraph<'_> {
     if is_boxed(area) {
-        p.block(Block::default().borders(Borders::ALL))
+        p.block(chrome_block())
     } else {
         p
     }
@@ -2054,14 +2070,28 @@ fn framed(area: Rect, p: Paragraph<'_>) -> Paragraph<'_> {
 /// A bordered pane. The focused one gets a yellow border and a `▶` in its
 /// title, so focus still shows without colour.
 fn pane(title: &str, focused: bool) -> Block<'static> {
-    let block = Block::default().borders(Borders::ALL);
+    let block = chrome_block();
     if focused {
         block
             .border_style(Style::default().fg(Color::Yellow))
+            .title_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
             .title(format!("▶ {title}"))
     } else {
         block.title(title.to_string())
     }
+}
+
+/// The bordered box every pane and strip is drawn in: rounded, with a dim
+/// border so the content, not the frame, carries the eye.
+fn chrome_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
 }
 
 /// The run's scope as text, fullest first: every target, then the first few
@@ -2140,11 +2170,19 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
         vec![full, short, shortest],
         text_width(area),
     );
-    let header = Paragraph::new(title).style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
+    // The `│` dividers are dimmed so the scope and each counter group stand
+    // apart; the text itself is unchanged.
+    let strong = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    for (i, part) in title.split('│').enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+        }
+        spans.push(Span::styled(part.to_string(), strong));
+    }
+    let header = Paragraph::new(Line::from(spans));
     f.render_widget(framed(area, header), area);
 }
 
@@ -2199,6 +2237,9 @@ fn render_table(
     focused: bool,
 ) {
     let columns = visible_columns(area.width);
+    let spin = state
+        .run_start
+        .map_or(0, |s| s.elapsed().as_millis() as u64 / 250);
     let rows: Vec<Row> = visible
         .iter()
         .map(|name| {
@@ -2211,9 +2252,16 @@ fn render_table(
                 "-".to_string()
             };
             let cells = [
-                Cell::from(pkg.status.label()).style(Style::default().fg(pkg.status.color())),
-                Cell::from(name.as_str()),
-                Cell::from(pkg.version.as_str()),
+                Cell::from(format!("{} {}", pkg.status.glyph(spin), pkg.status.label()))
+                    .style(Style::default().fg(pkg.status.color())),
+                Cell::from(name.as_str()).style(
+                    if matches!(pkg.status, PkgStatus::Queued | PkgStatus::AlreadyBuilt) {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    },
+                ),
+                Cell::from(pkg.version.as_str()).style(Style::default().fg(Color::Gray)),
                 Cell::from(step),
                 Cell::from(tries),
                 Cell::from(format!("{elapsed}s")),
@@ -2239,7 +2287,13 @@ fn render_table(
         .map(|(_, (title, _))| *title);
 
     let table = Table::new(rows, widths)
-        .header(Row::new(titles).style(Style::default().add_modifier(Modifier::BOLD)))
+        .header(
+            Row::new(titles).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(pane("Packages", focused));
 
@@ -2280,7 +2334,14 @@ fn render_detail(
                 Paragraph::new(reason.as_str())
                     .style(Style::default().fg(Color::Red))
                     .wrap(Wrap { trim: true })
-                    .block(Block::default().borders(Borders::ALL).title(title)),
+                    .block(
+                        chrome_block()
+                            .border_style(Style::default().fg(Color::Red))
+                            .title_style(
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            )
+                            .title(format!("✗ {title}")),
+                    ),
                 rows[0],
             );
             rows[1]
@@ -2295,12 +2356,7 @@ fn render_detail(
                 .block(pane("Event Log", browse.focus == Focus::Log)),
             log_area,
         );
-        f.render_widget(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Agent Activity"),
-            act_area,
-        );
+        f.render_widget(chrome_block().title("Agent Activity"), act_area);
         return RenderFeedback::default();
     };
 

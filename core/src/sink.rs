@@ -313,26 +313,27 @@ impl HumanSink {
                 elapsed,
                 usage,
             } => {
-                let ms = elapsed.as_millis();
-                let (secs, frac) = (ms / 1000, ms % 1000);
                 let outcome_colored = match outcome {
                     RunOutcome::Success => format!(
                         "{}",
-                        "Success"
+                        "✓ run finished"
                             .if_supports_color(Stderr, |t| t.style(Style::new().green().bold()))
                     ),
                     _ => format!(
                         "{}",
-                        "Failed".if_supports_color(Stderr, |t| t.style(Style::new().red().bold()))
+                        "✗ run failed"
+                            .if_supports_color(Stderr, |t| t.style(Style::new().red().bold()))
                     ),
                 };
                 Some(format!(
-                    "run finished: {outcome_colored} in {secs}.{frac:03}s · {}",
+                    "\n{outcome_colored} in {} · {}",
+                    fmt_elapsed(*elapsed),
                     format!("${:.4}", usage.cost_usd).if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
             Event::ResolveStarted { root } => Some(format!(
-                "resolve {}",
+                "{} resolve {}",
+                "◆".if_supports_color(Stderr, |t| t.cyan()),
                 root.if_supports_color(Stderr, |t| t.bold()),
             )),
             Event::ResolveFinished {
@@ -354,7 +355,8 @@ impl HumanSink {
                 ..
             } => {
                 let mut s = format!(
-                    "building {} {}",
+                    "\n{} {} {}",
+                    "▶".if_supports_color(Stderr, |t| t.style(Style::new().cyan().bold())),
                     pkg.if_supports_color(Stderr, |t| t.bold()),
                     version.if_supports_color(Stderr, |t| t.dimmed()),
                 );
@@ -373,58 +375,57 @@ impl HumanSink {
                 outcome,
             } => {
                 let outcome_colored = match outcome {
-                    PackageOutcome::Built => {
-                        format!("{}", "built".if_supports_color(Stderr, |t| t.green()))
-                    }
+                    PackageOutcome::Built => format!(
+                        "{}",
+                        "✓ built"
+                            .if_supports_color(Stderr, |t| t.style(Style::new().green().bold()))
+                    ),
                     PackageOutcome::AlreadyBuilt => format!(
                         "{}",
-                        "already built".if_supports_color(Stderr, |t| t.green())
+                        "✔ already built".if_supports_color(Stderr, |t| t.green())
                     ),
                     PackageOutcome::MissingDeps { deps } => format!(
                         "{}",
-                        format!("needs: {}", deps.join(", "))
+                        format!("◇ blocked on {}", deps.join(", "))
                             .if_supports_color(Stderr, |t| t.yellow()),
                     ),
                     PackageOutcome::Failed { reason } => format!(
                         "{}",
-                        format!("failed: {reason}").if_supports_color(Stderr, |t| t.red()),
+                        format!("✗ failed: {reason}")
+                            .if_supports_color(Stderr, |t| t.style(Style::new().red().bold())),
                     ),
                 };
                 Some(format!(
-                    "{} {} {}: {outcome_colored}",
-                    "finished".if_supports_color(Stderr, |t| t.bold()),
+                    "{outcome_colored}  {} {}",
                     pkg.if_supports_color(Stderr, |t| t.bold()),
                     version.if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
             Event::StepStarted { kind, .. } => Some(format!(
-                "  {}",
+                "  {} {}",
+                "▸".if_supports_color(Stderr, |t| t.cyan()),
                 kind.label().if_supports_color(Stderr, |t| t.bold()),
             )),
             Event::StepSkipped { kind, reason } => Some(format!(
                 "  {}",
-                format!("skipped {}: {reason}", kind.label())
+                format!("⇥ skipped {}: {reason}", kind.label())
                     .if_supports_color(Stderr, |t| t.yellow()),
             )),
             Event::StepFinished {
                 outcome, elapsed, ..
             } => {
-                let ms = elapsed.as_millis();
-                let (secs, frac) = (ms / 1000, ms % 1000);
                 let outcome_colored = match outcome {
-                    StepOutcome::Ok => {
-                        format!("{}", "ok".if_supports_color(Stderr, |t| t.green()))
-                    }
+                    StepOutcome::Ok => format!("{}", "✓".if_supports_color(Stderr, |t| t.green())),
                     StepOutcome::Failed => {
-                        format!("{}", "failed".if_supports_color(Stderr, |t| t.red()))
+                        format!("{}", "✗ failed".if_supports_color(Stderr, |t| t.red()))
                     }
                     StepOutcome::Skipped => {
-                        format!("{}", "skipped".if_supports_color(Stderr, |t| t.yellow()))
+                        format!("{}", "⇥ skipped".if_supports_color(Stderr, |t| t.yellow()))
                     }
                 };
                 Some(format!(
-                    "  done  {}  {outcome_colored}",
-                    format!("{secs}.{frac:03}s").if_supports_color(Stderr, |t| t.dimmed()),
+                    "    {outcome_colored} {}",
+                    fmt_elapsed(*elapsed).if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
             Event::BuildFailed {
@@ -448,8 +449,8 @@ impl HumanSink {
                     }
                 };
                 Some(format!(
-                    "  {}: {label}\n  log: {}",
-                    "FAILED".if_supports_color(Stderr, |t| t.style(Style::new().red().bold())),
+                    "  {} {label}\n    log: {}",
+                    "✗ FAILED".if_supports_color(Stderr, |t| t.style(Style::new().red().bold())),
                     log.display().if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
@@ -458,12 +459,12 @@ impl HumanSink {
                 message.if_supports_color(Stderr, |t| t.dimmed()),
             )),
             Event::Warning { message, .. } => Some(format!(
-                "  {}: {message}",
-                "warning".if_supports_color(Stderr, |t| t.style(Style::new().yellow().bold())),
+                "  {} {message}",
+                "⚠ warning:".if_supports_color(Stderr, |t| t.style(Style::new().yellow().bold())),
             )),
             Event::MissingPackages { names, .. } => Some(format!(
-                "  {}: {}",
-                "missing packages".if_supports_color(Stderr, |t| t.yellow()),
+                "  {} {}",
+                "⚠ missing packages:".if_supports_color(Stderr, |t| t.yellow()),
                 names.join(", "),
             )),
             Event::SpecChanged {
@@ -600,6 +601,17 @@ impl HumanSink {
             }
             _ => None,
         }
+    }
+}
+
+/// A duration for people: `850ms`, `12.3s`, `4m07s`, `1h02m`.
+fn fmt_elapsed(d: Duration) -> String {
+    let ms = d.as_millis();
+    match ms {
+        0..1000 => format!("{ms}ms"),
+        1000..60_000 => format!("{:.1}s", ms as f64 / 1000.0),
+        60_000..3_600_000 => format!("{}m{:02}s", ms / 60_000, ms / 1000 % 60),
+        _ => format!("{}h{:02}m", ms / 3_600_000, ms / 60_000 % 60),
     }
 }
 
@@ -1104,5 +1116,18 @@ mod printable_tests {
         let msg = "\u{1b}[31mred\u{1b}[0m \u{1b}[2J\u{1b}]0;x\u{7}";
         let out = strip_controls(msg, true);
         assert_eq!(out, "\u{1b}[31mred\u{1b}[0m J]0;x");
+    }
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::*;
+
+    #[test]
+    fn durations_read_at_their_own_scale() {
+        assert_eq!(fmt_elapsed(Duration::from_millis(850)), "850ms");
+        assert_eq!(fmt_elapsed(Duration::from_millis(12_340)), "12.3s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(247)), "4m07s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(3720)), "1h02m");
     }
 }
