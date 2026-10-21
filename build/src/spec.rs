@@ -479,6 +479,61 @@ pub fn parse_header(spec: &str) -> Option<Header> {
     })
 }
 
+/// A `SourceN:` entry that names something to download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceEntry {
+    /// The address, macros expanded and the `#/<file>` rename cut off.
+    pub url: String,
+    /// The file name the source has in the package: the rename when there is
+    /// one, the last part of the address otherwise.
+    pub file: String,
+}
+
+/// Every `SourceN:` of the spec that is a web address, with `%{name}`,
+/// `%{version}`, `%{url}` and the spec's simple defines expanded.
+pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
+    let Some(header) = parse_header(spec) else {
+        return Vec::new();
+    };
+    let mut macros = collect_simple_defines(spec);
+    macros.insert("name".to_string(), header.name.clone());
+    macros.insert("version".to_string(), header.version.clone());
+    if let Some(url) = &header.url {
+        macros.insert("url".to_string(), url.clone());
+    }
+    let mut out = Vec::new();
+    for line in spec.lines() {
+        let Some(rest) = line.strip_prefix("Source") else {
+            continue;
+        };
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        let Some(value) = rest[digits..].strip_prefix(':') else {
+            continue;
+        };
+        let once = expand_simple_defines(value.trim(), &macros);
+        let expanded = expand_simple_defines(&once, &macros);
+        let (url, rename) = match expanded.split_once('#') {
+            Some((url, rename)) => (url, Some(rename.trim_start_matches('/'))),
+            None => (expanded.as_str(), None),
+        };
+        if !(url.starts_with("http://") || url.starts_with("https://")) || url.contains('%') {
+            continue;
+        }
+        let file = match rename {
+            Some(r) if !r.is_empty() && !r.contains('/') => r,
+            _ => url.rsplit('/').next().unwrap_or(url),
+        };
+        if file.is_empty() {
+            continue;
+        }
+        out.push(SourceEntry {
+            url: url.to_string(),
+            file: file.to_string(),
+        });
+    }
+    out
+}
+
 /// What one `BuildRequires:` entry asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildRequire {
@@ -776,6 +831,23 @@ pub fn autosetup_expected_dir(spec: &str, name: &str, version: &str) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn web_sources_are_listed_with_their_file_names() {
+        let spec = "Name: dtc\nVersion: 1.8.1\n\
+            Source0: https://k.org/dtc/dtc-%{version}.tar.gz\n\
+            Source1: https://k.org/dtc/dtc-%{version}.tar.sign\n\
+            Source2: https://x.org/a-%{version}.tar.xz#/renamed.tar.xz\n\
+            Source20: baselibs.conf\n";
+        let entries = expanded_sources(spec);
+        let files: Vec<&str> = entries.iter().map(|e| e.file.as_str()).collect();
+        assert_eq!(
+            files,
+            ["dtc-1.8.1.tar.gz", "dtc-1.8.1.tar.sign", "renamed.tar.xz"]
+        );
+        assert_eq!(entries[0].url, "https://k.org/dtc/dtc-1.8.1.tar.gz");
+        assert_eq!(entries[2].url, "https://x.org/a-1.8.1.tar.xz");
+    }
+
     #[test]
     fn the_header_expands_the_source_and_reads_the_url_tag() {
         let spec = "Name: acl\nVersion: 2.3.1\nURL: https://savannah.nongnu.org/projects/acl\n\

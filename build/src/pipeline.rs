@@ -9318,7 +9318,7 @@ fn carry_forward_spec(
     use ap_ecosystem::{pypi, sdist};
 
     if config.source_repo.is_some() {
-        return Err("the package builds from a source repository".to_string());
+        return carry_forward_repo_spec(config, checkout_dir, spec_path, step);
     }
     let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
     let old_version = crate::spec::parse_header(&old)
@@ -9362,6 +9362,66 @@ fn carry_forward_spec(
         is_maturin: info.build_system.is_maturin(),
         is_rust: false,
         from_repo_archive: false,
+    })
+}
+
+/// [`carry_forward_spec`] for a package built from a source repository's
+/// archive (a git forge release, a tarball in a download directory): set the
+/// new `Version:`, download what the spec's web sources are at that version in
+/// place of the old files, and fix the `%autosetup -n` directory. Nothing is
+/// regenerated, so the recipe of a package that is not Python is never mistaken
+/// for one: a C project that ships `setup.py` for its Python bindings (dtc's
+/// `pylibfdt`) keeps the build it has. `Err` says why the recipe cannot be
+/// carried: a source with no address, which a `_service` fetches.
+fn carry_forward_repo_spec(
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+) -> Result<GenSpecResult, String> {
+    let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
+    let bumped = crate::spec::set_version(&old, &config.version)
+        .ok_or("its Version: is not a plain value")?;
+    let sources = crate::spec::expanded_sources(&bumped);
+    if sources.is_empty() {
+        return Err("the spec's sources have no web address to download from".to_string());
+    }
+    // Only a source whose address changes with the version is fetched again;
+    // the others (a keyring, a rpmlintrc) stay as they are.
+    let old_sources = crate::spec::expanded_sources(&old);
+    let mut main: Option<PathBuf> = None;
+    for (i, source) in sources.iter().enumerate() {
+        if old_sources.get(i).is_some_and(|o| o.url == source.url) {
+            continue;
+        }
+        let dest = checkout_dir.join(&source.file);
+        crate::sources::fetch_archive_to(&source.url, &dest)
+            .map_err(|e| format!("downloading {}: {e}", source.url))?;
+        if main.is_none() {
+            main = Some(dest);
+        }
+        if let Some(old_file) = old_sources.get(i).map(|o| &o.file)
+            && old_file != &source.file
+        {
+            let _ = std::fs::remove_file(checkout_dir.join(old_file));
+        }
+    }
+    let main = main.ok_or("no source of the spec changes with the version")?;
+    let top = ap_ecosystem::sdist::inspect(&main)
+        .ok()
+        .and_then(|info| info.top_level_dir);
+    let bumped = match &top {
+        Some(top) => crate::spec::fix_autosetup_dir(&bumped, top).unwrap_or(bumped),
+        None => bumped,
+    };
+    ap_core::fsx::write_atomic(spec_path, &bumped).map_err(|e| format!("writing the spec: {e}"))?;
+    write_or_warn(step.file("spec.generated"), &bumped);
+    Ok(GenSpecResult {
+        sdist_top_level: top
+            .unwrap_or_else(|| format!("{}-{}", config.pkg_name.to_lowercase(), config.version)),
+        is_maturin: false,
+        is_rust: false,
+        from_repo_archive: true,
     })
 }
 

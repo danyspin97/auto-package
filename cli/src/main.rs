@@ -3747,6 +3747,14 @@ fn cmd_update(
     };
     let mut failures: Vec<(String, String)> = Vec::new();
     for c in updates {
+        // The package exists under this name: the pipeline must not rename it
+        // after what it makes of the source (a C project that ships Python
+        // bindings reads as `python-<name>`).
+        let existing = update_project::BranchBuild {
+            rpm_name: Some(ap_build::update_project::branch_name(&c.rpm_name).to_string()),
+            resolver: None,
+            improve: None,
+        };
         let ap_build::update::Decision::Update {
             ecosystem,
             new_version,
@@ -3809,7 +3817,7 @@ fn cmd_update(
             reporter.clone(),
             base_reporter.clone(),
             tui_ctrl.clone(),
-            None,
+            Some(&existing),
         );
         if let Err(e) = r {
             failures.push((name, e.to_string()));
