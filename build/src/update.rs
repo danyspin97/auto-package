@@ -112,6 +112,13 @@ pub enum SkipReason {
         packaged: String,
         latest: String,
     },
+    /// The packaged `Version:` is computed by a shell macro (`%(…)`), so only
+    /// the part before it is known, and upstream has the same there.
+    ComputedVersion {
+        packaged: String,
+        known: String,
+        latest: String,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
@@ -130,6 +137,15 @@ impl std::fmt::Display for SkipReason {
             } => {
                 write!(f, "{ecosystem_tag} lookup for {name} failed: {error}")
             }
+            SkipReason::ComputedVersion {
+                packaged,
+                known,
+                latest,
+            } => write!(
+                f,
+                "the version is computed by a script ({packaged}), so only {known} of it is \
+                 known, and upstream's {latest} starts the same"
+            ),
             SkipReason::VersionCompareFailed { packaged, latest } => {
                 write!(
                     f,
@@ -300,6 +316,24 @@ where
     };
 
     let latest = version_part(&latest);
+    if let Some(known) = computed_prefix(&header.version) {
+        let decision = match newer_than_known(&latest, &known) {
+            true => Decision::Update {
+                ecosystem,
+                old_version: header.version,
+                new_version: latest,
+            },
+            false => Decision::Skipped(SkipReason::ComputedVersion {
+                packaged: header.version,
+                known,
+                latest,
+            }),
+        };
+        return Candidate {
+            rpm_name: rpm_name.to_string(),
+            decision,
+        };
+    }
     let decision = match compare_versions(&latest, &header.version) {
         pypi::VersionCompare::Newer => Decision::Update {
             ecosystem,
@@ -360,6 +394,35 @@ fn version_part(found: &str) -> String {
         }
     }
     found.to_string()
+}
+
+/// The known start of a `Version:` that a shell macro finishes
+/// (`5.3.%(bash get_version_number.sh)` is `5.3`), when that start is a release
+/// number.
+fn computed_prefix(version: &str) -> Option<String> {
+    let start = version.find("%(")?;
+    let known = version[..start].trim_end_matches(['.', '-', '_', '+']);
+    plain_version(known).then(|| known.to_string())
+}
+
+/// The leading dotted numbers of a version: `5.3p20` is `[5, 3]`.
+fn leading_numbers(v: &str) -> Vec<u64> {
+    let v = v.strip_prefix(['v', 'V']).unwrap_or(v);
+    let end = v
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(v.len());
+    v[..end]
+        .split('.')
+        .map_while(|part| part.parse().ok())
+        .collect()
+}
+
+/// Whether `latest` is ahead of `known` in the components `known` has.
+fn newer_than_known(latest: &str, known: &str) -> bool {
+    let known = leading_numbers(known);
+    let latest = leading_numbers(latest);
+    let n = known.len().min(latest.len());
+    n == known.len() && latest[..n] > known[..n]
 }
 
 /// A version that starts like a release number (`2.3.1`, `v1.0-rc2`, `20240101`)
@@ -856,6 +919,24 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
         assert_eq!(version_part("1.2.3"), "1.2.3");
         assert_eq!(version_part("not-a-version"), "not-a-version");
         assert_eq!(version_part("foo-2.0-rc1"), "2.0-rc1");
+    }
+
+    #[test]
+    fn a_version_finished_by_a_script_is_compared_on_what_is_known() {
+        assert_eq!(
+            computed_prefix("5.3.%(bash %{_sourcedir}/get_version_number.sh %{_sourcedir})")
+                .as_deref(),
+            Some("5.3")
+        );
+        assert_eq!(computed_prefix("1.2"), None);
+        assert_eq!(computed_prefix("%(date)"), None);
+        assert!(!newer_than_known("5.3p20", "5.3"));
+        assert!(newer_than_known("5.4", "5.3"));
+        assert!(newer_than_known("6.0p1", "5.3"));
+        assert!(
+            !newer_than_known("5", "5.3"),
+            "upstream says less than is known"
+        );
     }
 
     #[test]
