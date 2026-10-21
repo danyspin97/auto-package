@@ -299,6 +299,7 @@ where
         return skipped(rpm_name, first_failure.unwrap_or(SkipReason::NoSourceLine));
     };
 
+    let latest = version_part(&latest);
     let decision = match compare_versions(&latest, &header.version) {
         pypi::VersionCompare::Newer => Decision::Update {
             ecosystem,
@@ -336,6 +337,29 @@ fn compare_versions(latest: &str, packaged: &str) -> pypi::VersionCompare {
         }
         decided => decided,
     }
+}
+
+/// The release number inside what a lookup returned. A tag may carry a project
+/// name that is not the repository's (`accel-config-v4.1.9` in the repository
+/// `idxd-config`), which no prefix rule can know; the version is what follows
+/// the last separator that is followed by a number, without its `v`.
+fn version_part(found: &str) -> String {
+    let found = found.trim();
+    if plain_version(found) {
+        return found.strip_prefix(['v', 'V']).unwrap_or(found).to_string();
+    }
+    let bytes = found.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if !matches!(b, b'-' | b'_' | b'/') {
+            continue;
+        }
+        let rest = &found[i + 1..];
+        let number = rest.strip_prefix(['v', 'V']).unwrap_or(rest);
+        if number.starts_with(|c: char| c.is_ascii_digit()) && plain_version(number) {
+            return number.to_string();
+        }
+    }
+    found.to_string()
 }
 
 /// A version that starts like a release number (`2.3.1`, `v1.0-rc2`, `20240101`)
@@ -822,6 +846,16 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
         assert!(
             matches!(c.decision, Decision::Update { ref new_version, .. } if new_version == "060")
         );
+    }
+
+    #[test]
+    fn a_project_name_in_front_of_a_tag_version_is_dropped() {
+        assert_eq!(version_part("accel-config-v4.1.9"), "4.1.9");
+        assert_eq!(version_part("release/2.3"), "2.3");
+        assert_eq!(version_part("v1.2.3"), "1.2.3");
+        assert_eq!(version_part("1.2.3"), "1.2.3");
+        assert_eq!(version_part("not-a-version"), "not-a-version");
+        assert_eq!(version_part("foo-2.0-rc1"), "2.0-rc1");
     }
 
     #[test]
