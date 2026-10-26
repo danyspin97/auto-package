@@ -85,15 +85,21 @@ pub fn sweep_stale_temp_files(dir: &Path, older_than: Duration) -> usize {
 
 /// Point `link` at `target`, replacing whatever is there, in one rename. A
 /// temp link is created beside `link` first, so there is never a moment with no
-/// link at all, and two writers never collide on one temp name.
+/// link at all. The temp name carries the process id and a process-wide counter,
+/// so concurrent calls, from threads of one process or from several processes,
+/// never share a temp name.
 #[cfg(unix)]
 pub fn replace_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
     let dir = link.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.tmp",
         link.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_file(&tmp);
     std::os::unix::fs::symlink(target, &tmp)?;
@@ -259,6 +265,27 @@ mod tests {
         std::os::unix::fs::symlink("run-1", &link).unwrap();
         replace_symlink(Path::new("run-2"), &link).unwrap();
         assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("run-2"));
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1, "no temp link may be left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_replace_symlink_calls_on_one_link_all_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("latest");
+        std::os::unix::fs::symlink("run-0", &link).unwrap();
+        let link = &link;
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                s.spawn(move || {
+                    for i in 0..50 {
+                        replace_symlink(Path::new(&format!("run-{t}-{i}")), link).unwrap();
+                    }
+                });
+            }
+        });
+        assert!(std::fs::read_link(link).unwrap().to_string_lossy().starts_with("run-"));
         let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(leftovers, 1, "no temp link may be left behind");
     }
