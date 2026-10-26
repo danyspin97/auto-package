@@ -203,8 +203,14 @@ pub fn check(cond: &FilesCondition, packages: &[PackageFiles], main: &str) -> Ve
         }
     };
     let owners: Vec<&PackageFiles> = packages.iter().filter(|p| owns(p, path)).collect();
+    // The default fragment is a split-package convention (`-devel`): the build's
+    // main package may ship the path whatever its name, so only the other
+    // packages are judged by it. An explicit `not_in` is honored as written.
+    let default_fragments = cond.not_in.is_empty();
+    let is_main = |p: &PackageFiles| norm(&display(p)) == norm(main);
     let bad: Vec<String> = owners
         .iter()
+        .filter(|p| !(default_fragments && is_main(p)))
         .map(|p| display(p))
         .filter(|n| {
             let l = n.to_lowercase();
@@ -459,6 +465,43 @@ mod tests {
         assert!(!cond("a/*", None).is_valid());
         assert!(!cond("", None).is_valid());
         assert_eq!(check(&cond("a/*", None), &pkgs, "x"), Verdict::Unknown);
+    }
+
+    #[test]
+    fn the_main_package_is_not_judged_by_the_default_fragment() {
+        // The main package of `python-develop` ships `develop/x`: its name
+        // contains `devel`, but it is the main package, which may ship anything.
+        let main_ships = [rpm("python313-develop", &[&format!("{SP}/develop/x")])];
+        let c = cond("develop/x", None);
+        assert_eq!(check(&c, &main_ships, "python-develop"), Verdict::Satisfied);
+        // The same path in a `-devel` subpackage of another package is forbidden.
+        let sub_ships = [rpm("python313-foo-devel", &[&format!("{SP}/develop/x")])];
+        assert!(matches!(
+            check(&c, &sub_ships, "python-develop"),
+            Verdict::Violated(w) if w.contains("python313-foo-devel")
+        ));
+        // Main and a `-devel` subpackage both ship it: the subpackage is named.
+        let both = [
+            rpm("python313-develop", &[&format!("{SP}/develop/x")]),
+            rpm("python313-foo-devel", &[&format!("{SP}/develop/x")]),
+        ];
+        match check(&c, &both, "python-develop") {
+            Verdict::Violated(w) => {
+                assert!(w.contains("python313-foo-devel"), "{w}");
+                assert!(!w.contains("python313-develop"), "{w}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // An explicit `not_in` is honored as written, the main package included.
+        let explicit = FilesCondition {
+            path: "develop/x".into(),
+            package: None,
+            not_in: vec!["devel".into()],
+        };
+        assert!(matches!(
+            check(&explicit, &main_ships, "python-develop"),
+            Verdict::Violated(w) if w.contains("python313-develop")
+        ));
     }
 
     #[test]

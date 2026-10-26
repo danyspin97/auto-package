@@ -1056,13 +1056,16 @@ fn same_version(a: &str, b: &str) -> bool {
 /// Whether the archive name `file` carries `version` as a whole token, for a
 /// name [`archive_name_version`] cannot split (`v1.0.tar.gz`, `foo.tar.gz`).
 /// The version must start the stem or follow a `-`/`_` (a `v` may come
-/// before it, as in `v1.0`), and must end the stem or precede a `-`/`_`, so
-/// `1.0` is not in `v1.0.5.tar.gz` or `x1.0.tar.gz`.
+/// before it, as in `v1.0`). After it the name must end, or continue with a
+/// wheel tag (`-py3-none-any`): the same boundary [`archive_name_version`]
+/// gives a parsed name, so `1.0` is not in `v1.0.5.tar.gz`, `x1.0.tar.gz` or
+/// `v1.0-docs.tar.gz`.
 fn file_names_version(file: &str, version: &str) -> bool {
     let lower = file.to_ascii_lowercase();
     let Some(ext) = GZIP_EXTS
         .iter()
         .chain(OTHER_ARCHIVE_EXTS)
+        .chain(&[".tar", ".whl"])
         .find(|e| lower.ends_with(**e))
     else {
         return false;
@@ -1075,8 +1078,24 @@ fn file_names_version(file: &str, version: &str) -> bool {
             let before = before.strip_suffix('v').unwrap_or(before);
             let after = &stem[at + want.len()..];
             (before.is_empty() || before.ends_with(['-', '_']))
-                && (after.is_empty() || after.starts_with(['-', '_']))
+                && (after.is_empty() || wheel_tags_follow(after))
         })
+}
+
+/// Whether `after` is a wheel's tag part after a version, `-py3-none-any`
+/// (or with a leading numeric build tag, `-1-py3-none-any`): dash-separated,
+/// non-empty components. A `-word` suffix such as `-docs` is not one.
+fn wheel_tags_follow(after: &str) -> bool {
+    let Some(rest) = after.strip_prefix('-') else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('-').collect();
+    let tags = match parts.as_slice() {
+        [build, tags @ ..] if build.chars().all(|c| c.is_ascii_digit()) && tags.len() == 3 => tags,
+        [_, _, _] => &parts[..],
+        _ => return false,
+    };
+    tags.iter().all(|t| !t.is_empty())
 }
 
 fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<String> {
@@ -1988,9 +2007,7 @@ mod tests {
             );
         }
         // The tag listing takes the same routes.
-        assert!(
-            tag_list_url("mygithub.com", "o/r").starts_with("https://mygithub.com/api/v1/"),
-        );
+        assert!(tag_list_url("mygithub.com", "o/r").starts_with("https://mygithub.com/api/v1/"),);
         assert!(
             tag_list_url("git.gitlab.corp.example", "o/r")
                 .starts_with("https://git.gitlab.corp.example/api/v4/"),
@@ -2250,6 +2267,26 @@ mod tests {
         assert!(!file_names_version("v1.0.5.tar.gz", "1.0"));
         assert!(!file_names_version("x1.0.tar.gz", "1.0"));
         assert!(!file_names_version("v1.0", "1.0"), "no archive extension");
+    }
+
+    #[test]
+    fn a_direct_archive_without_a_parsed_version_ends_its_version_at_the_name() {
+        // `-docs`/`-data` after the version is another file, not this release.
+        let docs = "https://github.com/o/r/archive/v1.0-docs.tar.gz";
+        assert!(archive_urls(docs, "1.0").is_empty());
+        let data = "https://github.com/o/r/archive/v1.0_data.tar.gz";
+        assert!(archive_urls(data, "1.0").is_empty());
+        // The name that ends at the version is the release.
+        let plain = "https://github.com/o/r/archive/v1.0.tar.gz";
+        assert_eq!(archive_urls(plain, "1.0"), [plain]);
+        // A wheel tag may follow it; an unversioned name names no version.
+        assert!(file_names_version("foo-v1.0-py3-none-any.whl", "1.0"));
+        assert!(file_names_version("v1.0-1-py3-none-any.whl", "1.0"));
+        assert!(!file_names_version("v1.0-docs-x.whl", "1.0"));
+        assert!(file_names_version("v1.0.tar", "1.0"));
+        let bare = "https://github.com/o/r/archive/source.tar.gz";
+        assert!(archive_urls(bare, "2.0").is_empty());
+        assert!(!file_names_version("v1.0-docs.tar.gz", "1.0"));
     }
 
     /// Live forge tag lookup: public, unauthenticated GETs of api.github.com and

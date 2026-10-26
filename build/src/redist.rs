@@ -443,12 +443,16 @@ pub fn remove_stale_archives(checkout_dir: &Path, keep: &Path) {
     let Some(keep_name) = keep.file_name().map(|n| n.to_string_lossy().into_owned()) else {
         return;
     };
-    // `<key>-linux-<arch>-<version>-archive.tar.xz`: the part before the
-    // version identifies the component and platform.
-    let Some((stem, _)) = keep_name.split_once("-linux-") else {
+    // `<key>-linux-<arch>-<version>-archive.tar.xz`: the part up to and
+    // including the platform identifies the component and the platform, so a
+    // release for another platform (`-linux-sbsa-`) is left alone.
+    let Some((stem, rest)) = keep_name.split_once("-linux-") else {
         return;
     };
-    let prefix = format!("{stem}-linux-");
+    let Some((platform, _)) = rest.split_once('-') else {
+        return;
+    };
+    let prefix = format!("{stem}-linux-{platform}-");
     let Ok(entries) = std::fs::read_dir(checkout_dir) else {
         return;
     };
@@ -940,6 +944,37 @@ pub(crate) mod tests {
                 "cuda-cudart.spec",
                 "cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz",
                 "cuda_nvtx-linux-x86_64-13.4.0-archive.tar.xz"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_archives_of_other_platforms_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [
+            "cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz",
+            "cuda_cudart-linux-x86_64-13.3.0-archive.tar.xz",
+            "cuda_cudart-linux-sbsa-13.4.92-archive.tar.xz",
+            "cuda_cudart-linux-sbsa-13.3.0-archive.tar.xz",
+        ] {
+            std::fs::write(dir.path().join(f), b"x").unwrap();
+        }
+        // Keeping the sbsa release drops only the older sbsa release.
+        let keep = dir
+            .path()
+            .join("cuda_cudart-linux-sbsa-13.4.92-archive.tar.xz");
+        remove_stale_archives(dir.path(), &keep);
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "cuda_cudart-linux-sbsa-13.4.92-archive.tar.xz",
+                "cuda_cudart-linux-x86_64-13.3.0-archive.tar.xz",
+                "cuda_cudart-linux-x86_64-13.4.92-archive.tar.xz",
             ]
         );
     }
