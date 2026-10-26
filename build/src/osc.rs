@@ -4690,12 +4690,14 @@ fn obs_package_entries(
     // single-package document; the project-wide one lists them anyway.
     let (project_path, package_path) = (
         format!(
-            "/build/{project}/_result?repository={}&arch={}",
+            "/build/{}/_result?repository={}&arch={}",
+            enc(project),
             enc(repo),
             enc(arch)
         ),
         format!(
-            "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
+            "/build/{}/_result?package={}&repository={}&arch={}&multibuild=1",
+            enc(project),
             enc(pkg),
             enc(repo),
             enc(arch)
@@ -4758,12 +4760,17 @@ fn get_build_status_xml(
                 confirm,
                 source: source
                     .get_or_insert_with(|| {
-                        osc_api(&format!("/source/{project}/{}?view=info", enc(pkg_name)))
+                        osc_api(&format!(
+                            "/source/{}/{}?view=info",
+                            enc(project),
+                            enc(pkg_name)
+                        ))
                             .and_then(|x| obs_status::parse_source_info(&x))
                     })
                     .clone(),
                 job: osc_api(&format!(
-                    "/build/{project}/{}/{}/_jobhistory?package={}&limit=1",
+                    "/build/{}/{}/{}/_jobhistory?package={}&limit=1",
+                    enc(project),
                     enc(repo),
                     enc(arch),
                     enc(&entry.pkg)
@@ -5571,7 +5578,8 @@ fn binary_rpm_listing(
     arch: &str,
 ) -> Option<Vec<String>> {
     osc_api(&format!(
-        "/build/{project}/{}/{}/{}",
+        "/build/{}/{}/{}/{}",
+        enc(project),
         enc(repo),
         enc(arch),
         enc(pkg_name)
@@ -5632,7 +5640,8 @@ fn failing_result(
         return pkg_name.to_string();
     }
     osc_api(&format!(
-        "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
+        "/build/{}/_result?package={}&repository={}&arch={}&multibuild=1",
+        enc(project),
         enc(pkg_name),
         enc(repo),
         enc(arch)
@@ -5669,7 +5678,8 @@ fn multibuild_flavors(project: &str, pkg_name: &str, repo: &str, arch: &str) -> 
         return Vec::new();
     }
     osc_api(&format!(
-        "/build/{project}/_result?package={}&repository={}&arch={}&multibuild=1",
+        "/build/{}/_result?package={}&repository={}&arch={}&multibuild=1",
+        enc(project),
         enc(pkg_name),
         enc(repo),
         enc(arch)
@@ -5847,7 +5857,8 @@ pub fn unresolvable_details(
     arch: &str,
 ) -> Option<String> {
     let xml = osc_api(&format!(
-        "/build/{project}/_result?package={}&repository={}&arch={}",
+        "/build/{}/_result?package={}&repository={}&arch={}",
+        enc(project),
         enc(pkg_name),
         enc(repo),
         enc(arch)

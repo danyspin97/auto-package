@@ -91,6 +91,11 @@ pub fn move_check_before_files(spec: &str) -> String {
         .iter()
         .position(|l| first_word(l) == "%install")
         .unwrap_or(0);
+    // A `%check` above `%install` (or above the scriptlets it would move into)
+    // is out of the usual order: leave the spec as it is rather than guess.
+    if install >= start {
+        return spec.to_string();
+    }
     let Some(anchor) = lines[install..start]
         .iter()
         .position(|l| AFTER_CHECK.contains(&first_word(l)))
@@ -369,6 +374,21 @@ mod tests {
             move_check_before_files(last),
             "%install\nx\n\n%check\nt\n\n%files\n/a\n"
         );
+    }
+
+    #[test]
+    fn check_above_install_leaves_the_spec_unchanged() {
+        // `%files` above `%check`, but `%check` above `%install`: the anchor
+        // search used to slice `lines[install..start]` with install > start.
+        let spec = "%files\n/a\n%check\nt\n%install\nx\n";
+        assert_eq!(move_check_before_files(spec), spec);
+    }
+
+    #[test]
+    fn files_above_prep_with_check_above_install_leaves_the_spec_unchanged() {
+        let spec = "%package devel\n%description devel\nd\n%files devel\n/d\n\
+                    %prep\np\n%check\nt\n%install\nx\n%files\n/a\n";
+        assert_eq!(move_check_before_files(spec), spec);
     }
 
     #[test]
