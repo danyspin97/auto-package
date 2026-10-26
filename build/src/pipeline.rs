@@ -9135,6 +9135,11 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
     let mut targets: Vec<String> = Vec::new();
     for name in &patches {
         let name = name.replace("%{version}", "");
+        // Only a bare file name is a patch in this checkout (see below); a
+        // `../x` must not be read from outside it.
+        if Path::new(&name).file_name() != Some(name.as_ref()) {
+            continue;
+        }
         if let Ok(diff) = std::fs::read(checkout.join(&name)) {
             targets.extend(patch_targets(&String::from_utf8_lossy(&diff)));
         }
@@ -9365,6 +9370,12 @@ fn carry_forward_spec(
     })
 }
 
+/// Whether the old source file `old_file` may be removed after a new spec
+/// replaces it: only when no source of `new` is named that file.
+fn is_superseded_source_file(old_file: &str, new: &[crate::spec::SourceEntry]) -> bool {
+    !new.iter().any(|s| s.file == old_file)
+}
+
 /// [`carry_forward_spec`] for a package built from a source repository's
 /// archive (a git forge release, a tarball in a download directory): set the
 /// new `Version:`, download what the spec's web sources are at that version in
@@ -9400,8 +9411,11 @@ fn carry_forward_repo_spec(
         if main.is_none() {
             main = Some(dest);
         }
+        // The old file this slot had is removed only when no source of the new
+        // spec is named that: sources can be reordered or shifted, and the
+        // file at this index may be one a later new source just needs.
         if let Some(old_file) = old_sources.get(i).map(|o| &o.file)
-            && old_file != &source.file
+            && is_superseded_source_file(old_file, &sources)
         {
             let _ = std::fs::remove_file(checkout_dir.join(old_file));
         }
@@ -14681,6 +14695,19 @@ mod hygiene_tests {
         std::fs::write(tp.join("XNNPACK/x"), "x").unwrap();
         assert!(empty_submodule_context(root.path()).is_none());
         assert!(empty_submodule_dirs(&root.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn an_old_source_file_is_kept_when_a_new_source_still_names_it() {
+        let src = |file: &str| crate::spec::SourceEntry {
+            url: format!("https://example.org/{file}"),
+            file: file.to_string(),
+        };
+        let new = [src("keyring.asc"), src("pkg-2.0.tar.gz")];
+        // The old slot 0 was `pkg-1.0.tar.gz`; it is superseded.
+        assert!(is_superseded_source_file("pkg-1.0.tar.gz", &new));
+        // A shifted slot: the old file at index 0 is a file a new source needs.
+        assert!(!is_superseded_source_file("keyring.asc", &new));
     }
 
     #[test]
