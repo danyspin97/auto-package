@@ -377,49 +377,6 @@ fn repository_spans(xml: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-/// Undo XML escaping in an attribute value or element text: the five
-/// predefined entities and decimal or hex character references. An unknown
-/// or malformed reference is kept as written.
-fn xml_unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after = &rest[amp..];
-        let Some(semi) = after.find(';') else {
-            out.push_str(after);
-            return out;
-        };
-        let entity = &after[1..semi];
-        let decoded = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => entity.strip_prefix('#').and_then(|num| {
-                let code = match num.strip_prefix(['x', 'X']) {
-                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
-                    None => num.parse::<u32>().ok(),
-                };
-                code.and_then(char::from_u32)
-            }),
-        };
-        match decoded {
-            Some(c) => {
-                out.push(c);
-                rest = &after[semi + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &after[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Parsing half of the project-meta read, split out so it is testable
 /// without shelling out to `osc`.
 pub fn parse_project_info(xml: &str) -> ProjectInfo {
@@ -427,7 +384,6 @@ pub fn parse_project_info(xml: &str) -> ProjectInfo {
         .find("<project ")
         .and_then(|i| xml[i..].find('>').map(|e| &xml[i..i + e]))
         .and_then(|tag| extract_xml_attr(tag, "kind"))
-        .map(|k| xml_unescape(&k))
         .filter(|k| !k.is_empty() && k != "standard");
     let locked = xml
         .find("<lock>")
@@ -438,12 +394,12 @@ pub fn parse_project_info(xml: &str) -> ProjectInfo {
         .filter_map(|(s, e)| {
             let block = &xml[s..e];
             let open = &block[..block.find('>')? + 1];
-            let name = xml_unescape(&extract_xml_attr(open, "name")?);
+            let name = extract_xml_attr(open, "name")?;
             let arches = block
                 .split("<arch>")
                 .skip(1)
                 .filter_map(|c| c.split("</arch>").next())
-                .map(|a| xml_unescape(a.trim()))
+                .map(|a| crate::osc::xml_unescape(a.trim()))
                 .collect();
             Some(RepoDef {
                 name,

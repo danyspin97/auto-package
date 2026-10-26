@@ -2163,13 +2163,15 @@ fn parse_has_repository(xml: &str) -> bool {
     xml.contains("<repository ") || xml.contains("<repository\n") || xml.contains("<repository\t")
 }
 
-/// Extract `attr="value"` from a fragment of XML attribute text.
+/// Extract `attr="value"` from a fragment of XML attribute text. The value is
+/// unescaped: every caller wants the name the attribute stands for, and the
+/// callers that write it back out escape it again.
 fn extract_xml_attr(tag: &str, attr: &str) -> Option<String> {
     let needle = format!("{attr}=\"");
     let start = tag.find(&needle)? + needle.len();
     let rest = &tag[start..];
     let end = rest.find('"')?;
-    Some(rest[..end].to_owned())
+    Some(xml_unescape(&rest[..end]))
 }
 
 static PROJECT_PACKAGES_CACHE: OnceLock<
@@ -4423,6 +4425,49 @@ pub(crate) fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Undo XML escaping in an attribute value or element text: the five
+/// predefined entities and decimal or hex character references. An unknown
+/// or malformed reference is kept as written.
+pub(crate) fn xml_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp..];
+        let Some(semi) = after.find(';') else {
+            out.push_str(after);
+            return out;
+        };
+        let entity = &after[1..semi];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => entity.strip_prefix('#').and_then(|num| {
+                let code = match num.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => num.parse::<u32>().ok(),
+                };
+                code.and_then(char::from_u32)
+            }),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &after[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &after[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Percent-encode one URL component. Package names like `libsigc++` contain
@@ -7184,6 +7229,61 @@ mod obs_name_tests {
     #[test]
     fn xml_escape_covers_attribute_metacharacters() {
         assert_eq!(xml_escape("a&b<c>\"d"), "a&amp;b&lt;c&gt;&quot;d");
+    }
+
+    #[test]
+    fn xml_unescape_decodes_predefined_entities_once() {
+        assert_eq!(xml_unescape("a&amp;b&lt;c&gt;&quot;d&apos;e"), "a&b<c>\"d'e");
+        // Decodes once: an escaped ampersand stays as the literal text `&lt;`.
+        assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
+    }
+
+    #[test]
+    fn xml_unescape_decodes_character_references() {
+        assert_eq!(xml_unescape("&#65;&#x42;&#X43;"), "ABC");
+        assert_eq!(xml_unescape("&#x2B;"), "+");
+    }
+
+    #[test]
+    fn xml_unescape_keeps_unknown_and_malformed_references() {
+        assert_eq!(xml_unescape("a&nbsp;b"), "a&nbsp;b");
+        assert_eq!(xml_unescape("a&#xZZ;b"), "a&#xZZ;b");
+        assert_eq!(xml_unescape("tail & more"), "tail & more");
+        assert_eq!(xml_unescape("no semicolon &amp"), "no semicolon &amp");
+        assert_eq!(xml_unescape("&#xD800;"), "&#xD800;");
+    }
+
+    #[test]
+    fn xml_unescape_inverts_xml_escape() {
+        let raw = "libsigc++ & \"<friends>\" 'x'";
+        assert_eq!(xml_unescape(&xml_escape(raw)), raw);
+    }
+
+    #[test]
+    fn extract_xml_attr_unescapes_value() {
+        let tag = r#"<path project="a&amp;b" repository="x&quot;y&lt;z"/"#;
+        assert_eq!(extract_xml_attr(tag, "project").as_deref(), Some("a&b"));
+        assert_eq!(extract_xml_attr(tag, "repository").as_deref(), Some("x\"y<z"));
+        assert_eq!(extract_xml_attr(tag, "missing"), None);
+    }
+
+    #[test]
+    fn parse_project_repo_paths_unescapes_names() {
+        let xml = concat!(
+            r#"<path project="Tools&amp;Co" repository="openSUSE_&quot;Tumbleweed&quot;"/>"#,
+            r#"<path project="A&lt;B" repository="standard"/>"#,
+            r#"<path project="Tools&amp;Co" repository="openSUSE_&quot;Tumbleweed&quot;"/>"#,
+        );
+        assert_eq!(
+            parse_project_repo_paths(xml),
+            vec![
+                (
+                    "Tools&Co".to_string(),
+                    "openSUSE_\"Tumbleweed\"".to_string()
+                ),
+                ("A<B".to_string(), "standard".to_string()),
+            ]
+        );
     }
 }
 
