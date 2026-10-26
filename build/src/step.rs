@@ -175,7 +175,7 @@ mod tests {
             &mut attempts,
         )
         .unwrap();
-        assert!(agent.path.ends_with("03-agent-review"));
+        assert!(agent.path.ends_with("003-agent-review"));
         agent.finish(StepOutcome::Ok);
 
         let events = recorder.0.lock().unwrap();
