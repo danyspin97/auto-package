@@ -1784,6 +1784,13 @@ pub fn sdist_files_entries(
         {
             return None;
         }
+        // A `.`, `..` or empty component anywhere can step out of the package
+        // directory (`pkg/../../x.py`): not listed blind.
+        if f.split('/')
+            .any(|p| p.is_empty() || p == "." || p == "..")
+        {
+            return None;
+        }
         let mut node = &mut tree;
         let mut parts = f.split('/').peekable();
         while let Some(part) = parts.next() {
@@ -2798,7 +2805,9 @@ fn wheel_files_entries(
     let odd = |path: &str| {
         path.chars().any(|c| {
             c.is_whitespace() || matches!(c, '%' | '*' | '?' | '[' | ']' | '$' | '"' | '\'' | '\\')
-        })
+        }) || path
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == "..")
     };
     let mut payload: Vec<&str> = Vec::new();
     let mut licenses: Vec<&str> = Vec::new();
@@ -6926,6 +6935,17 @@ mod sdist_files_tests {
         let two = files(&["x-1/a/__init__.py", "x-1/b/__init__.py"]);
         assert_eq!(sdist_files_entries(&two, "x-1", None), None);
     }
+
+    #[test]
+    fn a_traversing_member_is_not_listed_blind() {
+        // `pkg/../../x.py` would own `%{sitedir}/pkg/..` and reach outside it
+        let escape = files(&["x-1/pkg/__init__.py", "x-1/pkg/../../x.py"]);
+        assert_eq!(sdist_files_entries(&escape, "x-1", None), None);
+        let dot = files(&["x-1/pkg/__init__.py", "x-1/pkg/./a.py"]);
+        assert_eq!(sdist_files_entries(&dot, "x-1", None), None);
+        let empty = files(&["x-1/pkg/__init__.py", "x-1/pkg//a.py"]);
+        assert_eq!(sdist_files_entries(&empty, "x-1", None), None);
+    }
 }
 
 #[cfg(test)]
@@ -8771,6 +8791,23 @@ mod license_url_injection_tests {
         };
         // The bare entry is not a member of the dist-info directory: the layout
         // is not one that can be listed without guessing, so the review fills it in.
+        assert_eq!(wheel_files_entries(&layout, "sitedir", &[]), None);
+    }
+
+    #[test]
+    fn a_wheel_member_that_traverses_is_not_listed_blind() {
+        // `pkg/../../x.py` would own `%{sitedir}/pkg/..` and reach outside it
+        let layout = ap_ecosystem::sdist::WheelLayout {
+            importable: Some("pkg".into()),
+            files: vec![
+                "pkg/__init__.py".into(),
+                "pkg/../../x.py".into(),
+                "pkg-1.0.dist-info".into(),
+                "pkg-1.0.dist-info/METADATA".into(),
+            ],
+            dist_info: Some("pkg-1.0.dist-info".into()),
+            ..Default::default()
+        };
         assert_eq!(wheel_files_entries(&layout, "sitedir", &[]), None);
     }
 
