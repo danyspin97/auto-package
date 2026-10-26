@@ -1809,7 +1809,7 @@ fn branch_for_patch(
         ap_core::diag!("  fixing {real} {version} in {project} for another package");
         return Ok(PipelineConfig {
             pkg_name: dep.to_string(),
-            rpm_name: real,
+            rpm_name: real.to_lowercase(),
             version,
             source_repo: None,
             subprojects: Vec::new(),
@@ -1861,7 +1861,7 @@ fn branch_for_patch(
     ap_core::diag!("  patching {real} {version} (branched from {origin}) for another package");
     Ok(PipelineConfig {
         pkg_name: dep.to_string(),
-        rpm_name: real,
+        rpm_name: real.to_lowercase(),
         version,
         source_repo: None,
         subprojects: Vec::new(),
@@ -1980,7 +1980,7 @@ fn update_config_for_outdated(
     );
     Ok(PipelineConfig {
         pkg_name: dep.to_string(),
-        rpm_name: real,
+        rpm_name: real.to_lowercase(),
         version: newest,
         source_repo: None,
         subprojects: Vec::new(),
@@ -2309,20 +2309,29 @@ fn print_run_summary(
     out
 }
 
+/// The name a package is run, tracked and keyed under: its lowercase RPM guess
+/// (see [`ap_build::osc::rpm_name`]). The spelling OBS lists a package under is
+/// not used here: the pipeline resolves it from the own project's listing for
+/// the OBS calls, and keeping one key per package keeps its workspace, state,
+/// run directory and rows in one place (`python-APScheduler` and
+/// `python-apscheduler` are the same package).
+fn run_name(dep: &str) -> String {
+    ap_build::osc::rpm_name(dep)
+}
+
 /// The selected targets that are neither running nor already finished in this
-/// round: the ones the scheduler may start now, each with the name OBS lists
-/// the package under (see [`ap_build::osc::obs_name`]), which is how a running
-/// or finished package is tracked.
+/// round: the ones the scheduler may start now, each with the name it is run
+/// under (see [`run_name`]), which is how a running or finished package is
+/// tracked.
 fn unstarted_targets(
     targets: Vec<ap_build::pipeline::TargetInfo>,
-    own_listing: &std::collections::HashSet<String>,
     in_flight: &[String],
     done_this_round: &std::collections::HashSet<String>,
 ) -> Vec<(ap_build::pipeline::TargetInfo, String)> {
     targets
         .into_iter()
         .map(|t| {
-            let rpm = ap_build::osc::obs_name(own_listing, &ap_build::osc::rpm_name(&t.name));
+            let rpm = run_name(&t.name);
             (t, rpm)
         })
         .filter(|(_, rpm)| !in_flight.contains(rpm) && !done_this_round.contains(rpm))
@@ -2573,14 +2582,12 @@ fn cmd_build(
     // A repository tells us two things we were only guessing at: whether it is
     // a Python project or a Rust crate, and what it actually calls itself. Ask
     // it before anything is named after the guess.
-    // The package's OBS name is the spelling `project` already lists for it,
-    // if it has one: OBS names are case-sensitive, and a lowercase guess would
-    // check out, and so duplicate, a package OBS has as `python-APScheduler`.
-    let own_listing = ap_build::osc::try_list_project_packages(
-        project,
-        ap_build::proc::Emit::run(reporter.as_ref()),
-    )
-    .map_err(|e| color_eyre::eyre::eyre!(e))?;
+    // The project's listing is read here so an unreadable one stops the run
+    // before anything is named. The name itself is not taken from it: the
+    // pipeline resolves the spelling OBS lists the package under (a package
+    // OBS has as `python-APScheduler` is checked out under that spelling).
+    ap_build::osc::try_list_project_packages(project, ap_build::proc::Emit::run(reporter.as_ref()))
+        .map_err(|e| color_eyre::eyre::eyre!(e))?;
     let (name, rpm_name, subprojects) = match &source_repo {
         None => (name.to_string(), ap_build::osc::rpm_name(name), Vec::new()),
         Some(repo) => {
@@ -2625,13 +2632,14 @@ fn cmd_build(
             (effective_name, rpm, probe.subprojects)
         }
     };
-    let rpm_name = ap_build::osc::obs_name(&own_listing, &rpm_name);
+    // The run's key is the lowercase guess; the pipeline resolves the spelling
+    // OBS lists the package under (`PkgState::obs_name`) in its own preflight.
     // A package branched from another project already has a name, and the
     // pipeline's guess at it (above) is only a guess. Only a repository package
     // is a single named package; a PyPI one is named for each node of its
     // closure, and `update` refuses those whose name would differ.
     let rpm_name = match branch.and_then(|b| b.rpm_name.as_deref()) {
-        Some(own) if source_repo.is_some() => own.to_string(),
+        Some(own) if source_repo.is_some() => own.to_lowercase(),
         _ => rpm_name,
     };
     if let Some(t) = &tui_ctrl {
@@ -3317,7 +3325,7 @@ fn cmd_build(
                 })
                 .filter_map(|dep| {
                     let native = native_keys.contains(&ap_build::osc::fuzzy_key(&dep));
-                    let mut dep_config =
+                    let dep_config =
                         match resolve_dependency_config(&dep, native, &config, reporter.as_ref()) {
                             Some(c) => c,
                             None => {
@@ -3337,9 +3345,6 @@ fn cmd_build(
                                 return None;
                             }
                         };
-                    // Build it under the spelling OBS already lists, if any.
-                    dep_config.rpm_name =
-                        ap_build::osc::obs_name(&own_listing, &dep_config.rpm_name);
                     spawn_dep_build(dep_config, dep)
                 })
                 .collect();
@@ -3604,14 +3609,16 @@ fn cmd_build(
             )
             .map_err(|e| color_eyre::eyre::eyre!(e))
             .and_then(|targets| {
-                let listing = ap_build::osc::try_list_project_packages(
+                // The listing is still read, so an unreadable project stops
+                // the round here as it always has; the names do not use it.
+                ap_build::osc::try_list_project_packages(
                     project,
                     ap_build::proc::Emit::run(reporter.as_ref()),
                 )
                 .map_err(|e| color_eyre::eyre::eyre!(e))?;
-                Ok((targets, listing))
+                Ok(targets)
             });
-            let (targets, own_listing) = match selected {
+            let targets = match selected {
                 Ok(v) => v,
                 Err(e) => {
                     // Packages already running are not abandoned: let them
@@ -3620,7 +3627,7 @@ fn cmd_build(
                     return Err(e);
                 }
             };
-            let fresh = unstarted_targets(targets, &own_listing, &in_flight, &done_this_round);
+            let fresh = unstarted_targets(targets, &in_flight, &done_this_round);
             if fresh.is_empty() && in_flight.is_empty() {
                 break;
             }
@@ -4503,7 +4510,7 @@ mod tests {
         let in_flight = vec![ap_build::osc::rpm_name("beta")];
         let done: std::collections::HashSet<String> =
             [ap_build::osc::rpm_name("gamma")].into_iter().collect();
-        let fresh: Vec<String> = unstarted_targets(targets, &Default::default(), &in_flight, &done)
+        let fresh: Vec<String> = unstarted_targets(targets, &in_flight, &done)
             .into_iter()
             .map(|(t, _)| t.name)
             .collect();
@@ -4511,19 +4518,25 @@ mod tests {
     }
 
     #[test]
-    fn a_package_is_tracked_under_the_spelling_obs_lists() {
+    fn a_package_is_run_under_its_lowercase_name_whatever_obs_lists() {
         use ap_core::event::SelectionReason;
-        let target = ap_build::pipeline::TargetInfo {
-            name: "apscheduler".to_string(),
+        // OBS lists the package as `python-APScheduler`. The run key is the
+        // lowercase guess, so the state directory, the TUI row and the
+        // in-flight check all agree on one name.
+        assert_eq!(run_name("APScheduler"), "python-apscheduler");
+        assert_eq!(run_name("apscheduler"), "python-apscheduler");
+        let target = || ap_build::pipeline::TargetInfo {
+            name: "APScheduler".to_string(),
             version: "1.0".to_string(),
             reason: SelectionReason::FirstUnbuiltDependency,
             blocked_by: vec![],
         };
-        let listing: std::collections::HashSet<String> =
-            ["python-APScheduler".to_string()].into_iter().collect();
-        let running = vec!["python-APScheduler".to_string()];
-        let fresh = unstarted_targets(vec![target], &listing, &running, &Default::default());
-        assert!(fresh.is_empty());
+        let running = vec!["python-apscheduler".to_string()];
+        let fresh = unstarted_targets(vec![target()], &running, &Default::default());
+        assert!(fresh.is_empty(), "a running package is not started again");
+        let fresh = unstarted_targets(vec![target()], &[], &Default::default());
+        assert_eq!(fresh[0].1, "python-apscheduler");
+        assert!(!fresh[0].1.contains("APScheduler"));
     }
 
     #[test]

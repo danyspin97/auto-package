@@ -176,6 +176,11 @@ pub enum FailureKind {
     /// patch turn, then the upstream wheel), so the caller re-queues the
     /// request within the same run whatever its round count.
     ConditionUnmet,
+    /// The agent's turn itself failed: the process crashed or timed out, or its
+    /// answer could not be read. Not a refusal of the package's edit (the apply
+    /// gate's refusals are `Other`), and a style-only failure downgrades it like
+    /// the other agent-side kinds.
+    AgentFailed,
 }
 
 #[derive(Debug)]
@@ -1939,6 +1944,7 @@ pub fn run_package(
                 kind:
                     FailureKind::Other
                     | FailureKind::AgentUnavailable
+                    | FailureKind::AgentFailed
                     | FailureKind::Transient
                     | FailureKind::ConditionUnmet,
                 ..
@@ -3647,6 +3653,8 @@ fn review_stage(
             // specific PyPI release (convention 24 Exception 3's caveat
             // about verified-but-mismatched repos) is exactly the kind of
             // "cannot be compiled here" call `UseUpstreamWheel` covers.
+            // Files this turn staged, kept by the ladder if the turn is blocked.
+            let mut staged: Vec<String> = Vec::new();
             let effect = match apply_turn_and_reset(
                 ApplyTurnCtx {
                     config,
@@ -3664,7 +3672,7 @@ fn review_stage(
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
-                    staged_out: None,
+                    staged_out: Some(&mut staged),
                 },
                 &outcome,
                 reporter,
@@ -3677,6 +3685,7 @@ fn review_stage(
                     st,
                     LadderSite {
                         build_log: None,
+                        staged: &staged,
                         task: if patching.is_some() {
                             crate::agent::Task::PatchDependency
                         } else {
@@ -3711,7 +3720,9 @@ fn review_stage(
                             && matches!(
                                 result,
                                 PipelineResult::Failed {
-                                    kind: FailureKind::Exhausted | FailureKind::Other,
+                                    kind: FailureKind::Exhausted
+                                        | FailureKind::Other
+                                        | FailureKind::AgentFailed,
                                     ..
                                 }
                             )
@@ -3788,10 +3799,10 @@ fn review_stage(
         } else if let Err((e, kind)) = turn {
             // A patch turn that failed on the agent's side is a declined
             // request too, as a patch turn that edited nothing is (see
-            // `patch_turn_failed`). Only `Other` counts: AgentUnavailable,
-            // RateLimited and Busy say nothing about the package.
+            // `patch_turn_failed`). Only the package-side kinds count:
+            // AgentUnavailable, RateLimited and Busy say nothing about the package.
             if let Some(problem) = patching
-                && matches!(kind, FailureKind::Other)
+                && matches!(kind, FailureKind::Other | FailureKind::AgentFailed)
             {
                 decline_patch_request(ws, reporter, problem);
             }
@@ -3948,6 +3959,7 @@ fn prefix_stage(
             // Everything the turn called missing is already built here, so
             // the turn's edit (and the build that follows it) goes ahead.
 
+            let mut staged: Vec<String> = Vec::new();
             let effect = match apply_turn_and_reset(
                 ApplyTurnCtx {
                     config,
@@ -3961,7 +3973,7 @@ fn prefix_stage(
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
-                    staged_out: None,
+                    staged_out: Some(&mut staged),
                 },
                 &outcome,
                 reporter,
@@ -3982,6 +3994,7 @@ fn prefix_stage(
                         st,
                         LadderSite {
                             build_log: Some(&prefix_log),
+                            staged: &staged,
                             task: crate::agent::Task::FixAfterBuild,
                             event_task: ap_core::event::Task::FixAfterBuild {
                                 attempt: attempts as u32 + 1,
@@ -4128,8 +4141,9 @@ fn missing_deps_from_turn(
     // its own that a dependent found wrong) is not a reason to drop it, since
     // being built is exactly what the defect is about.
     let already_patched = |p: &crate::agent::PatchRequest| {
-        // `p.name` is an RPM name (`ffmpeg-8`) as often as a PyPI one.
-        Workspace::find_existing(&ctx.config.state_root, &[&osc::rpm_name(&p.name), &p.name])
+        // `p.name` is an RPM name (`ffmpeg-8`, `python-APScheduler`) as often as
+        // a PyPI one; the workspace is found by its dependency key.
+        dependency_workspace(&ctx.config.state_root, &p.name)
             .map(|w| {
                 let real = w
                     .dir()
@@ -4137,14 +4151,13 @@ fn missing_deps_from_turn(
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let state = PkgState::load(&w);
+                // The checkout is made under the OBS spelling the state records
+                // (`PkgState::obs_name`), which is not always the workspace name.
+                let checkout = state.obs_name.clone().unwrap_or_else(|| real.clone());
+                let guess = osc::rpm_name(osc::strip_rpm_prefix(&p.name));
                 let over = patch_request_over(&state, p, &|c| {
-                    condition_holds_now(ctx.config, &real, &real, c)
-                        || condition_holds_now(
-                            ctx.config,
-                            &osc::rpm_name(&p.name),
-                            &osc::rpm_name(&p.name),
-                            c,
-                        )
+                    condition_holds_now(ctx.config, &real, &checkout, c)
+                        || condition_holds_now(ctx.config, &guess, &checkout, c)
                 });
                 if over && let Some(cond) = &p.condition {
                     let key = condition_key(cond);
@@ -4269,8 +4282,36 @@ fn missing_deps_from_turn(
 /// dependency is a new request and gets its turn.
 fn patch_declined_before(ctx: &RunCtx, dep: &str, problem: &str) -> bool {
     let h = hash_spec(problem);
-    Workspace::find_existing(&ctx.config.state_root, &[&osc::rpm_name(dep), dep])
+    dependency_workspace(&ctx.config.state_root, dep)
         .is_some_and(|w| PkgState::load(&w).declined_patches.contains(&h))
+}
+
+/// The key a dependency's workspace is found by: its name with the Python
+/// prefix stripped once, compared without case or separators. `python-APScheduler`,
+/// `APScheduler` and `python-apscheduler` share one; `ffmpeg-8` keeps its suffix
+/// and matches `python-ffmpeg-8`.
+fn dependency_key(name: &str) -> String {
+    osc::fuzzy_key(osc::strip_rpm_prefix(name))
+}
+
+/// The workspace of dependency `name` under whatever spelling its request used.
+/// An exact workspace name (the RPM guess, then the name itself) wins; otherwise
+/// the first workspace directory, in sorted order, with the same [`dependency_key`].
+fn dependency_workspace(state_root: &Path, name: &str) -> Option<Workspace> {
+    if let Some(ws) = Workspace::find_existing(state_root, &[&osc::rpm_name(name), name]) {
+        return Some(ws);
+    }
+    let key = dependency_key(name);
+    let mut dirs: Vec<String> = std::fs::read_dir(state_root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    dirs.sort();
+    dirs.into_iter()
+        .find(|d| dependency_key(d) == key)
+        .and_then(|d| Workspace::find_existing(state_root, &[&d]))
 }
 
 /// The newest of `versions` that `specifier` (`<=0.1.11,>=0.1.10`) allows,
@@ -4827,6 +4868,7 @@ fn fix_after_validation(
 
     match turn {
         Ok((agent_step, outcome)) => {
+            let mut staged: Vec<String> = Vec::new();
             let effect = match apply_turn_and_reset(
                 ApplyTurnCtx {
                     config,
@@ -4840,7 +4882,7 @@ fn fix_after_validation(
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
-                    staged_out: None,
+                    staged_out: Some(&mut staged),
                 },
                 &outcome,
                 *reporter,
@@ -4853,6 +4895,7 @@ fn fix_after_validation(
                     st,
                     LadderSite {
                         build_log: None,
+                        staged: &staged,
                         task: crate::agent::Task::FixAfterValidation,
                         event_task: ap_core::event::Task::FixAfterBuild {
                             attempt: attempts as u32,
@@ -5341,6 +5384,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                             if matches!(
                                 kind,
                                 FailureKind::AgentUnavailable
+                                    | FailureKind::AgentFailed
                                     | FailureKind::RateLimited
                                     | FailureKind::Busy
                                     | FailureKind::Transient
@@ -6606,6 +6650,7 @@ fn fix_after_build(
     // Everything the turn called missing is already built here: its edit
     // is applied below and the build runs again.
 
+    let mut staged: Vec<String> = Vec::new();
     let effect = match apply_turn_and_reset(
         ApplyTurnCtx {
             config,
@@ -6619,7 +6664,7 @@ fn fix_after_build(
             notes_path: ws.notes(),
             snapshot: Some(&checkout_snapshot),
             kept: &[],
-            staged_out: None,
+            staged_out: Some(&mut staged),
         },
         &outcome,
         reporter,
@@ -6632,6 +6677,7 @@ fn fix_after_build(
             st,
             LadderSite {
                 build_log: Some(build_log),
+                staged: &staged,
                 task: crate::agent::Task::FixAfterBuild,
                 event_task: ap_core::event::Task::FixAfterBuild {
                     attempt: attempts as u32,
@@ -6907,6 +6953,15 @@ const SIBLING_CUES: &[&str] = &[
     "owned by",
     "in the dependency",
 ];
+
+/// The problem text of the patch request a blocked package sends to the sibling
+/// its reason names. The request carries it, and the sibling records its hash
+/// once it takes the request, so the check before asking uses this same text.
+fn sibling_patch_problem(rpm_name: &str, reason: &str) -> String {
+    format!(
+        "{rpm_name} cannot be built and an agent found the fix belongs in this package: {reason}"
+    )
+}
 
 /// The packages of `available` that a reason names as the place of the fix: a
 /// name from it, or a `prefix-*` glob, when the reason has one of the
@@ -7245,6 +7300,10 @@ struct LadderSite<'a> {
     before: &'a str,
     snapshot: &'a CheckoutSnapshot,
     step: &'a StepDir,
+    /// The files the failed turn itself staged into the checkout (its
+    /// `staged_out`). They are not in `snapshot`, so every later round of the
+    /// ladder keeps them, as it keeps the files of its own rounds.
+    staged: &'a [String],
 }
 
 /// A turn's failed outcome, taken through the resolution ladder when it was a
@@ -7346,29 +7405,38 @@ fn resolve_blocked_with(
         .collect();
     let is_python = rpm_name.starts_with("python-");
     // The files each round asked to be copied into the checkout, kept by every
-    // later rollback in the ladder.
-    let mut kept_staged: Vec<String> = Vec::new();
+    // later rollback in the ladder. The failed turn's own staged files start it.
+    let mut kept_staged: Vec<String> = site.staged.to_vec();
+    // The state every round starts from: the spec and snapshot the failed turn
+    // had, moved forward by a round that answers `no_change` with edits still on
+    // disk (a deferred npm vendoring route). Rollbacks go back to this state, not
+    // to the pre-ladder one, so such edits survive later rounds.
+    let mut base_spec: String = site.before.to_string();
+    let mut base_snapshot: Option<CheckoutSnapshot> = None;
     let result = run_ladder(&first, LADDER_ROUNDS, |round, history| {
         let latest = history.last().map(String::as_str).unwrap_or("");
         // Mechanical: a fix the reason puts in a sibling goes to that package
         // through the patch request, with no turn spent.
         if round == 1 || round == 3 {
+            // The text the sibling stores when it takes the request (its
+            // `patched_problems` and `declined_patches` hash it), so the checks
+            // below see a request it already answered.
+            let problem = sibling_patch_problem(rpm_name, latest);
             let patches: Vec<crate::agent::PatchRequest> =
                 named_sibling_fix(latest, &available, rpm_name)
                     .into_iter()
+                    // The same two checks the dependency producer makes before it
+                    // asks (see `patch_declined_before` and `already_patched`).
+                    .filter(|n| !patch_declined_before(ctx, n, &problem))
                     .filter(|n| {
-                        !Workspace::find_existing(&config.state_root, &[&osc::rpm_name(n), n])
-                            .is_some_and(|w| {
-                                patch_request_settled(&PkgState::load(&w).patched_problems, latest)
-                            })
+                        !dependency_workspace(&config.state_root, n).is_some_and(|w| {
+                            patch_request_settled(&PkgState::load(&w).patched_problems, &problem)
+                        })
                     })
                     .map(|n| crate::agent::PatchRequest {
                         condition: None,
                         name: osc::strip_rpm_prefix(&n).to_string(),
-                        problem: format!(
-                            "{rpm_name} cannot be built and an agent found the fix belongs in \
-                             this package: {latest}"
-                        ),
+                        problem: problem.clone(),
                     })
                     .collect();
             if !patches.is_empty() {
@@ -7496,12 +7564,12 @@ fn resolve_blocked_with(
                     checkout_dir,
                     spec_path,
                     step: site.step,
-                    before: site.before,
+                    before: &base_spec,
                     rpm_name,
                     label: "Resolve — upstream wheel",
                     attempt: site.attempt,
                     notes_path: ws.notes(),
-                    snapshot: Some(site.snapshot),
+                    snapshot: Some(base_snapshot.as_ref().unwrap_or(site.snapshot)),
                     kept: &kept_staged,
                     staged_out: None,
                 },
@@ -7560,12 +7628,12 @@ fn resolve_blocked_with(
                 checkout_dir,
                 spec_path,
                 step: &step,
-                before: site.before,
+                before: &base_spec,
                 rpm_name,
                 label: &label,
                 attempt: site.attempt,
                 notes_path: ws.notes(),
-                snapshot: Some(site.snapshot),
+                snapshot: Some(base_snapshot.as_ref().unwrap_or(site.snapshot)),
                 kept: &kept_before,
                 staged_out: Some(&mut kept_staged),
             },
@@ -7574,10 +7642,16 @@ fn resolve_blocked_with(
             &mut st.sdist_top_level,
             &mut st.from_repo_archive,
         ) {
-            Ok(TurnEffect::NoChange) => Rung::Blocked(format!(
-                "round {round} answered no_change: {}",
-                brief(&out.reasoning)
-            )),
+            Ok(TurnEffect::NoChange) => {
+                // Whatever the round left on disk (a kept npm vendoring route,
+                // the files it staged) is the base for the rounds after it.
+                base_spec = std::fs::read_to_string(spec_path).unwrap_or_default();
+                base_snapshot = Some(CheckoutSnapshot::take(checkout_dir));
+                Rung::Blocked(format!(
+                    "round {round} answered no_change: {}",
+                    brief(&out.reasoning)
+                ))
+            }
             Ok(effect) => Rung::Resolved(effect),
             Err(r) => match &out.action {
                 crate::agent::Action::Blocked { why } if !why.trim().is_empty() => {
@@ -7878,7 +7952,9 @@ fn agent_turn(
             } else if e.is_rate_limited() {
                 FailureKind::RateLimited
             } else {
-                FailureKind::Other
+                // The turn itself failed (a crash, a timeout, an answer that
+                // could not be read): not the edit the gate refuses.
+                FailureKind::AgentFailed
             };
             reporter.report(&Event::Warning {
                 step: Some(step.id),
@@ -8824,7 +8900,7 @@ fn apply_turn_outcome_with(
         notes_path,
         snapshot,
         kept,
-        staged_out,
+        mut staged_out,
     } = ctx;
     // Files the turn asked the pipeline to copy into the checkout: its shell
     // cannot write there. Done first, and kept even by a `blocked` or
@@ -8838,7 +8914,7 @@ fn apply_turn_outcome_with(
         &notes_path,
         label,
     );
-    if let Some(out) = staged_out {
+    if let Some(out) = staged_out.as_mut() {
         out.extend(staged.iter().cloned());
     }
     // Everything an earlier round staged, and this turn's own staged files.
@@ -9005,7 +9081,14 @@ fn apply_turn_outcome_with(
                 // lock file into the checkout and the `node_modules` service
                 // entry. The turn only has to wire the spec to them.
                 let staged = match stage_npm_vendor_route(checkout_dir, &config.version) {
-                    Ok(done) => format!("The pipeline already {}. ", done.join(" and ")),
+                    Ok(done) => {
+                        // The files the route wrote are the staged files of this
+                        // turn: a later round of the ladder keeps them.
+                        if let Some(out) = staged_out.as_mut() {
+                            out.extend(NPM_VENDOR_FILES.iter().map(|f| f.to_string()));
+                        }
+                        format!("The pipeline already {}. ", done.join(" and "))
+                    }
                     Err(e) => format!(
                         "The pipeline could not stage the lock file or the service ({e}): \
                          ask for it with `stage_files` and write the `_service` entry. "
@@ -9570,8 +9653,15 @@ fn patch_condition_gate(
         "{failures} patch turns did not make this true ({why}): {}",
         cond.describe()
     ));
+    // The switch writes files the caller's snapshot does not hold (the wheel,
+    // its spec, the rpmlintrc): a rejected switch removes them too, which needs
+    // a snapshot taken right before it.
+    let switch_snapshot = CheckoutSnapshot::take(apply.checkout_dir);
     let effect = apply_turn_and_reset_with(
-        apply,
+        ApplyTurnCtx {
+            snapshot: Some(&switch_snapshot),
+            ..apply
+        },
         &wheel,
         ctx.reporter,
         &mut st.sdist_top_level,
@@ -10121,11 +10211,15 @@ fn spec_patch_level(spec: &str, number: &str) -> u32 {
             .skip(1)
             .find_map(|tok| tok.strip_prefix("-p")?.parse::<u32>().ok())
     };
-    let own = format!("%patch{number}");
     let mut general = None;
     for line in spec.lines() {
         let first = line.split_whitespace().next().unwrap_or("");
-        if first == own || (number == "0" && first == "%patch") {
+        // The `%patch` line that applies `number`, in any of its forms (see
+        // `applied_patch_number`): `%patchN`, `%patch -PN`, `%patch -P N`, or
+        // the bare `%patch` for patch 0.
+        if first.starts_with("%patch")
+            && applied_patch_number(line).is_some_and(|n| same_patch_number(&n, number))
+        {
             if let Some(level) = level_of(line) {
                 return level;
             }
@@ -10582,17 +10676,32 @@ fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
             .then(|| e.path())
         })
         .collect();
-    let named_for_version = |p: &PathBuf| {
-        !version.is_empty()
-            && p.file_name()
-                .is_some_and(|n| names_version(&n.to_string_lossy(), version))
+    // Ranked by (the main archive `<name>-<version>.<ext>`, a name that carries
+    // the version); `true` sorts first, then the path decides.
+    let rank = |p: &PathBuf| {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (
+            !version.is_empty() && is_main_archive(&name, version),
+            !version.is_empty() && names_version(&name, version),
+        )
     };
-    found.sort_by(|a, b| {
-        named_for_version(b)
-            .cmp(&named_for_version(a))
-            .then_with(|| a.cmp(b))
-    });
+    found.sort_by(|a, b| rank(b).cmp(&rank(a)).then_with(|| a.cmp(b)));
     found.into_iter().next()
+}
+
+/// Whether `name` is the main source archive of `version`: the version ends the
+/// project name and the archive extension follows it directly
+/// (`foo-1.2.tar.gz`, `foo_1.2.zip`), with nothing in between (no `-cpp`, `-docs`).
+fn is_main_archive(name: &str, version: &str) -> bool {
+    const EXTS: [&str; 6] = [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip"];
+    EXTS.iter().any(|ext| {
+        name.strip_suffix(ext)
+            .and_then(|stem| stem.strip_suffix(version))
+            .is_some_and(|before| before.len() >= 2 && before.ends_with(['-', '_']))
+    })
 }
 
 /// Whether the archive file name `name` carries `version` as a whole version:
@@ -10618,8 +10727,8 @@ fn names_version(name: &str, version: &str) -> bool {
                     || [".tar", ".zip", ".whl", ".tgz"]
                         .iter()
                         .any(|ext| rest.starts_with(ext))
-                    || rest.starts_with("-py")
-                    || rest.starts_with("-cp")
+                    // Only a wheel's name is a tag list: `-cpp.tar.gz` or
+                    // `-python.tar.gz` is another archive, not this version's.
                     || (is_wheel && rest.starts_with('-')))
         })
 }
@@ -11582,11 +11691,13 @@ fn package_notes_for_prompt(text: &str) -> String {
     if text.len() <= MAX_PROMPT_NOTES_BYTES {
         return text.to_string();
     }
-    // A section starts at a markdown heading or a bold label at the line start.
-    // Text before the first heading is kept with the highest priority.
+    // A section starts at a markdown heading (`#`, `##`, ...) only: a bold line
+    // is text inside the section it is in, so a `**Label**` under `## Build
+    // requirements` keeps that section's rank. Text before the first heading is
+    // kept with the highest priority.
     let mut sections: Vec<(u8, String)> = Vec::new();
     for line in text.lines() {
-        let heading = line.starts_with('#') || line.starts_with("**");
+        let heading = line.starts_with('#');
         if heading || sections.is_empty() {
             let rank = if heading { notes_section_rank(line) } else { 0 };
             sections.push((rank, String::new()));
@@ -12091,6 +12202,10 @@ fn with_node_modules_service(existing: Option<&str>) -> Option<String> {
         }
     }
 }
+
+/// The checkout files the npm vendoring route writes (see
+/// [`stage_npm_vendor_route`]).
+const NPM_VENDOR_FILES: [&str; 2] = ["package-lock.json", "_service"];
 
 /// The file work of the npm vendoring route, done by the pipeline: copy the
 /// sdist's `package-lock.json` into the checkout and add the `node_modules`
@@ -14408,6 +14523,50 @@ mod tests {
     }
 
     #[test]
+    fn a_dependency_key_ignores_the_python_prefix_case_and_separators() {
+        for name in [
+            "python-APScheduler",
+            "APScheduler",
+            "python-apscheduler",
+            "python3-apscheduler",
+        ] {
+            assert_eq!(dependency_key(name), "apscheduler", "{name}");
+        }
+        assert_eq!(dependency_key("python-ruamel.yaml"), dependency_key("ruamel_yaml"));
+        assert_eq!(dependency_key("ffmpeg-8"), dependency_key("python-ffmpeg-8"));
+        assert_ne!(dependency_key("ffmpeg-8"), dependency_key("ffmpeg"));
+    }
+
+    #[test]
+    fn a_sibling_request_is_checked_under_the_text_it_is_sent_as() {
+        let reason = "the fix belongs in python-foo: patch its setup";
+        // The sibling records the hash of the request text it was sent.
+        let recorded = vec![hash_spec(&sibling_patch_problem("python-bar", reason))];
+        // The check before asking hashes the same text, so the request is over.
+        assert!(patch_request_settled(
+            &recorded,
+            &sibling_patch_problem("python-bar", reason)
+        ));
+        // The raw reason is not the text that was sent: it does not match.
+        assert!(!patch_request_settled(&recorded, reason));
+    }
+
+    #[test]
+    fn a_dependency_workspace_is_found_under_any_spelling_of_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The workspace is keyed by the lowercase run name.
+        std::fs::create_dir(tmp.path().join("python-apscheduler")).unwrap();
+        for name in ["python-APScheduler", "APScheduler", "python-apscheduler"] {
+            let ws = dependency_workspace(tmp.path(), name)
+                .unwrap_or_else(|| panic!("{name} finds the workspace"));
+            assert!(ws.dir().ends_with("python-apscheduler"), "{name}");
+        }
+        assert!(dependency_workspace(tmp.path(), "python-croniter").is_none());
+        // Nothing is created by the lookup.
+        assert!(!tmp.path().join("python-APScheduler").exists());
+    }
+
+    #[test]
     fn the_obs_name_is_the_listed_spelling_of_a_case_variant_and_rpm_name_otherwise() {
         let own: std::collections::HashSet<String> = ["python-APScheduler", "python-pyyaml"]
             .iter()
@@ -14524,6 +14683,55 @@ mod tests {
         assert_eq!(spec_patch_level(per_patch, "1"), 1);
         // A bare `%patch` applies patch 0.
         assert_eq!(spec_patch_level("%prep\n%patch -p0\n", "0"), 0);
+    }
+
+    #[test]
+    fn spec_patch_level_reads_every_form_of_the_patch_line() {
+        // `%autosetup -N` does not apply the patch; the `%patch -P 1 -p0` line does.
+        let spec = "%prep\n%autosetup -p1 -N\n%patch -P 1 -p0\n";
+        assert_eq!(spec_patch_level(spec, "1"), 0);
+        assert_eq!(spec_patch_level("%prep\n%autosetup -p1 -N\n%patch1 -p0\n", "1"), 0);
+        assert_eq!(spec_patch_level("%prep\n%autosetup -N\n%patch -p0 -P 1\n", "1"), 0);
+        // A `%patch -P` line with no `-p` takes the macro level, as before.
+        assert_eq!(spec_patch_level("%prep\n%autosetup -p2\n%patch -P 1\n", "1"), 2);
+        // The `%autosetup` default is 1, and an explicit `-p1` is the same.
+        assert_eq!(spec_patch_level("%prep\n%autosetup -p1\n", "3"), 1);
+        assert_eq!(spec_patch_level("%prep\n%autosetup\n", "3"), 1);
+        // A `%patch` line for another number does not give this one's level.
+        assert_eq!(spec_patch_level("%prep\n%patch -P 2 -p0\n%autosetup -p1\n", "1"), 1);
+    }
+
+    #[test]
+    fn a_companion_archive_is_not_the_main_one_unless_it_is_a_wheel() {
+        assert!(!names_version("foo-1.2-cpp.tar.gz", "1.2"));
+        assert!(!names_version("foo-1.2-python.tar.gz", "1.2"));
+        assert!(!names_version("foo-1.2-cp.zip", "1.2"));
+        // Wheel tags still match after the version.
+        assert!(names_version("foo-1.2-cp311-cp311-linux_x86_64.whl", "1.2"));
+        assert!(names_version("foo-1.2-py3-none-any.whl", "1.2"));
+        assert!(is_main_archive("foo-1.2.tar.gz", "1.2"));
+        assert!(is_main_archive("foo_1.2.zip", "1.2"));
+        assert!(!is_main_archive("foo-1.2-cpp.tar.gz", "1.2"));
+        assert!(!is_main_archive("foo-1.2.whl", "1.2"));
+    }
+
+    #[test]
+    fn find_tarball_prefers_the_exact_main_archive_over_a_companion() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["foo-1.2-cpp.tar.gz", "foo-1.2-python.tar.gz", "foo-1.2.tar.gz"] {
+            std::fs::write(tmp.path().join(name), b"x").unwrap();
+        }
+        assert_eq!(
+            find_tarball(tmp.path(), "1.2").unwrap().file_name().unwrap(),
+            "foo-1.2.tar.gz"
+        );
+        // A wheel of the version is still a match when no sdist is there.
+        let wheels = tempfile::tempdir().unwrap();
+        std::fs::write(wheels.path().join("foo-1.2-py3-none-any.whl"), b"x").unwrap();
+        assert_eq!(
+            find_tarball(wheels.path(), "1.2").unwrap().file_name().unwrap(),
+            "foo-1.2-py3-none-any.whl"
+        );
     }
 
     #[test]
@@ -16203,6 +16411,20 @@ mod prompt_notes_tests {
         assert!(cut.contains("## Workarounds\n- patch X"));
         assert!(!cut.contains("## Failure history"));
         assert!(cut.contains("## Test changes"));
+    }
+
+    #[test]
+    fn a_bold_line_stays_with_the_section_it_is_in() {
+        let filler = "- a fact about the build\n".repeat(1000);
+        let text = format!(
+            "## Build requirements\n**gcc**: needed for the C extension\n- gcc\n\
+             ## Failure history\n{filler}"
+        );
+        assert!(text.len() > MAX_PROMPT_NOTES_BYTES);
+        let cut = package_notes_for_prompt(&text);
+        // The bold line is body text of the kept section, not a rank-2 section.
+        assert!(cut.contains("**gcc**: needed for the C extension"));
+        assert!(!cut.contains("## Failure history"));
     }
 }
 
@@ -18514,6 +18736,7 @@ mod ladder_tests {
             before: &before,
             snapshot: &snapshot,
             step: &step,
+            staged: &[],
         };
         let queue = std::cell::RefCell::new(std::collections::VecDeque::from(turns));
         let contexts = std::cell::RefCell::new(Vec::new());
