@@ -53,7 +53,7 @@ pub struct StepGuard<'a> {
 }
 
 impl<'a> StepGuard<'a> {
-    /// Allocate the step directory (`NN-<dir>[-<detail>]`) and report the start.
+    /// Allocate the step directory (`NNN-<dir>[-<detail>]`) and report the start.
     pub fn begin(
         pkg_run: &PkgRunDir,
         reporter: &'a dyn Reporter,

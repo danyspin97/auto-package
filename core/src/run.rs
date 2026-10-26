@@ -190,37 +190,55 @@ impl PkgRunDir {
 
     /// Allocate the next numbered step directory: `<pkg-dir>/<NNN>-<label>/`.
     ///
-    /// Uses `create_dir` (not `create_dir_all`) so a step dir that already
-    /// exists is a hard failure instead of silently reused — reusing a
-    /// step dir lets a later attempt's `build.log` overwrite an earlier
-    /// one's, which the earlier review probe reproduced. Combined with
+    /// Uses `create_dir` (not `create_dir_all`) so an existing step dir is
+    /// never reused: reusing one lets a later attempt's `build.log`
+    /// overwrite an earlier one's. If the next number is already taken (a
+    /// stray directory left behind), the number is skipped and the next
+    /// free one is used, up to `MAX_TRIES` candidates. Combined with
     /// `RunDir::pkg_counters` sharing the counter across retries, two
     /// attempts of the same package get distinct numbered dirs
     /// (`001-build/`, `002-build/`) rather than colliding.
     pub fn step(&self, label: &str) -> io::Result<StepDir> {
-        // Only advance the shared counter once the directory exists, so a
-        // failed create does not burn a number. Step dirs of one package
-        // are allocated sequentially, so load-then-bump is race-free here;
-        // `fetch_max` keeps the counter monotonic regardless.
-        let n = self.counter.load(Ordering::SeqCst);
-        let dir_name = format!("{:03}-{}", n + 1, sanitize_name(label));
-        let path = self.path.join(dir_name);
-        match fs::create_dir(&path) {
-            Ok(()) => {}
-            // The parent directory may not exist yet (callers often skip
-            // calling `ensure()`); let that case through so it isn't a
-            // regression. Any other error — including AlreadyExists —
-            // is still fatal.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(&path)?;
+        const MAX_TRIES: usize = 256;
+        let label = sanitize_name(label);
+        for _ in 0..MAX_TRIES {
+            // The counter holds the last allocated number. Step dirs of one
+            // package are allocated sequentially, so load-then-bump is
+            // race-free here; `fetch_max` keeps the counter monotonic.
+            let n = self.counter.load(Ordering::SeqCst) + 1;
+            let path = self.path.join(format!("{n:03}-{label}"));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    self.counter.fetch_max(n, Ordering::SeqCst);
+                    return Ok(StepDir {
+                        path,
+                        id: StepId(n - 1),
+                    });
+                }
+                // The number is taken: move the counter past it so the next
+                // try (and every later call) does not compute the same name.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    self.counter.fetch_max(n, Ordering::SeqCst);
+                }
+                // The parent directory may not exist yet (callers often skip
+                // calling `ensure()`); let that case through so it isn't a
+                // regression.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir_all(&path)?;
+                    self.counter.fetch_max(n, Ordering::SeqCst);
+                    return Ok(StepDir {
+                        path,
+                        id: StepId(n - 1),
+                    });
+                }
+                // Any other error: fail without burning the number.
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         }
-        self.counter.fetch_max(n + 1, Ordering::SeqCst);
-        Ok(StepDir {
-            path,
-            id: StepId(n),
-        })
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("could not allocate a free step directory for {label:?}"),
+        ))
     }
 }
 
@@ -303,7 +321,7 @@ mod tests {
         assert!(s1.path.ends_with("001-build"));
 
         // Retry: a new PkgRunDir handle for the same package. The counter
-        // is shared, so the next step is 02, not 01 — the first attempt's
+        // is shared, so the next step is 002, not 001 — the first attempt's
         // 001-build/ directory is preserved.
         let p2 = run.pkg("python-foo");
         let s2 = p2.step("build").unwrap();
@@ -333,11 +351,11 @@ mod tests {
         assert!(s.path.ends_with("001-build"), "got {:?}", s.path);
     }
 
-    /// `step()` must refuse to hand back a directory that already exists
-    /// — the pre-fix `create_dir_all` quietly reused it and the next
-    /// write to `build.log` overwrote whatever was there.
+    /// `step()` must never hand back a directory that already exists — an
+    /// existing `001-build/` keeps its `build.log` untouched, and the
+    /// allocation moves on to the next free number.
     #[test]
-    fn step_refuses_to_reuse_an_existing_directory() {
+    fn step_skips_an_existing_directory_instead_of_reusing_it() {
         let tmp = tempfile::tempdir().unwrap();
         let run = RunDir::allocate(tmp.path()).unwrap();
 
@@ -346,17 +364,39 @@ mod tests {
         let s = p1.step("build").unwrap();
         std::fs::write(s.file("build.log"), b"first attempt").unwrap();
 
-        // Simulate a code path that somehow allocated the same step name
-        // again (counter corruption, external interference). The second
-        // attempt must fail hard instead of overwriting the first.
-        //
-        // In practice the shared counter prevents this at the allocation
-        // layer; the create_dir fallthrough is the belt-and-braces check.
+        // Simulate counter corruption / external interference: the counter
+        // is rewound so the next allocation would target 001-build again.
         p1.counter.store(0, Ordering::SeqCst);
-        let err = p1
-            .step("build")
-            .err()
-            .expect("re-allocating 001-build must fail");
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let s2 = p1.step("build").unwrap();
+        assert!(s2.path.ends_with("002-build"), "got {:?}", s2.path);
+        assert_ne!(s.path, s2.path);
+        assert_eq!(
+            std::fs::read(s.file("build.log")).unwrap(),
+            b"first attempt",
+            "the existing step dir must not be touched"
+        );
+
+        // The counter has advanced past the taken number, so later calls
+        // keep making progress instead of failing forever.
+        let s3 = p1.step("fix").unwrap();
+        assert!(s3.path.ends_with("003-fix"), "got {:?}", s3.path);
+    }
+
+    /// A stray directory must not wedge the package: the counter advances
+    /// past every taken number, so the next call succeeds.
+    #[test]
+    fn step_does_not_wedge_after_a_stray_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = RunDir::allocate(tmp.path()).unwrap();
+
+        let p = run.pkg("python-foo");
+        p.ensure().unwrap();
+        std::fs::create_dir(p.path.join("001-build")).unwrap();
+        std::fs::create_dir(p.path.join("002-build")).unwrap();
+
+        let s = p.step("build").unwrap();
+        assert!(s.path.ends_with("003-build"), "got {:?}", s.path);
+        let s2 = p.step("build").unwrap();
+        assert!(s2.path.ends_with("004-build"), "got {:?}", s2.path);
     }
 }
