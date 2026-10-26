@@ -1436,8 +1436,9 @@ fn blocked_dependents(
 ///
 /// A `missing_deps` package whose waited-on dependencies include a blocked or
 /// `waiting_on_failed` package waits on that blocker too, so it converts, and
-/// so does whatever waits on it in turn (to a fixpoint). A package that is
-/// `running` or `success` is never touched. Returns the packages whose outcome
+/// so does whatever waits on it in turn (to a fixpoint). A package with its own
+/// terminal outcome (`running`, `success`, `failed`, `wheel-only`) is never
+/// touched: it keeps its own reason rather than the blocker's. Returns the packages whose outcome
 /// changed, and the errors of state writes that failed.
 pub(crate) fn sync_blocked_waiters(
     state_root: &Path,
@@ -1525,7 +1526,12 @@ pub(crate) fn sync_blocked_waiters(
     // Hold: graph dependents of a given-up package.
     for (dependent, blocker) in edges {
         let Some(n) = find(dependent) else { continue };
-        if matches!(cur[&n].0.as_deref(), Some("running" | "success")) {
+        // Only a package with no outcome of its own (or a non-terminal one) is
+        // held; one that failed or was built as a wheel keeps its own reason.
+        if !matches!(
+            cur[&n].0.as_deref(),
+            None | Some("interrupted" | "missing_deps" | WAITING_ON_FAILED)
+        ) {
             continue;
         }
         cur.insert(
@@ -3324,6 +3330,7 @@ fn switch_for_missing_submodules(
                 attempt: 0,
                 notes_path: ws.notes(),
                 snapshot: None,
+                kept: &[],
             },
             &outcome,
             *reporter,
@@ -3546,6 +3553,7 @@ fn review_stage(
                     attempt: 0,
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
+                    kept: &[],
                 },
                 &outcome,
                 reporter,
@@ -3586,12 +3594,7 @@ fn review_stage(
             };
             // A patch an earlier run already made (the turn finds nothing left
             // to do) is not a failure to patch.
-            if patch_turn_failed(
-                patching.is_some(),
-                effect,
-                already_reviewed,
-                &outcome.action,
-            ) {
+            if patch_turn_failed(patching.is_some(), effect, &outcome.action) {
                 if let Some(problem) = patching {
                     let h = hash_spec(problem);
                     update_state(ws, reporter, |state| {
@@ -3624,6 +3627,7 @@ fn review_stage(
                         attempt: 0,
                         notes_path: ws.notes(),
                         snapshot: None,
+                        kept: &[],
                     },
                     cond,
                     &fetch_release_json,
@@ -3835,6 +3839,7 @@ fn prefix_stage(
                     attempt: attempts + 1,
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
+                    kept: &[],
                 },
                 &outcome,
                 reporter,
@@ -4707,6 +4712,7 @@ fn fix_after_validation(
                     attempt: attempts,
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
+                    kept: &[],
                 },
                 &outcome,
                 *reporter,
@@ -5460,8 +5466,13 @@ fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<Stri
     // Last line of the patch-escape gate: whatever path kept the agent's
     // edits, a patch that escapes the tree is never committed. Patches OBS
     // already publishes are not judged here: they are not this run's edits.
+    // Only the patches the commit would publish are judged (`publish_plan`):
+    // an unreferenced patch left in the checkout never ships.
     let published = PatchBaseline::NotPublished(obs_tracked_names(&ctx.checkout_dir));
-    if let Some(problem) = patch_escape_problem(&ctx.spec_path, &spec, &published) {
+    let publishable = osc::publish_plan(&ctx.checkout_dir).files;
+    if let Some((_, problem)) =
+        patch_escape_offender(&ctx.spec_path, &spec, &published, Some(&publishable))
+    {
         return Err(format!(
             "a patch escapes the source tree, so it is not committed: {problem}"
         ));
@@ -5714,6 +5725,10 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
         state.last_built_version = Some(config.version.clone());
         state.last_outcome = Some("success".to_string());
         state.last_failure_reason = None;
+        // A ladder spent on an earlier spec no longer holds back this build,
+        // and a later rebuild of the same spec must not be refused for it.
+        state.ladder_spec_hash = None;
+        state.ladder_reason = None;
     });
     warn_if_err(
         reporter,
@@ -6440,6 +6455,7 @@ fn fix_after_build(
             attempt: attempts,
             notes_path: ws.notes(),
             snapshot: Some(&checkout_snapshot),
+            kept: &[],
         },
         &outcome,
         reporter,
@@ -7163,6 +7179,9 @@ fn resolve_blocked_with(
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
     let is_python = rpm_name.starts_with("python-");
+    // The files each round asked to be copied into the checkout, kept by every
+    // later rollback in the ladder.
+    let mut kept_staged: Vec<String> = Vec::new();
     let result = run_ladder(&first, LADDER_ROUNDS, |round, history| {
         let latest = history.last().map(String::as_str).unwrap_or("");
         // Mechanical: a fix the reason puts in a sibling goes to that package
@@ -7315,6 +7334,7 @@ fn resolve_blocked_with(
                     attempt: site.attempt,
                     notes_path: ws.notes(),
                     snapshot: Some(site.snapshot),
+                    kept: &kept_staged,
                 },
                 &wheel,
                 *reporter,
@@ -7361,6 +7381,7 @@ fn resolve_blocked_with(
             restore_spec(spec_path, &round_spec, Some(&step), *reporter);
             return Rung::Abort(missing);
         }
+        kept_staged.extend(out.stage_files.iter().map(|f| f.to.clone()));
         let label = format!("{} — resolve round {round}", site.apply_label);
         match apply_turn_and_reset(
             ApplyTurnCtx {
@@ -7374,6 +7395,7 @@ fn resolve_blocked_with(
                 attempt: site.attempt,
                 notes_path: ws.notes(),
                 snapshot: Some(site.snapshot),
+                kept: &kept_staged,
             },
             &out,
             *reporter,
@@ -8312,7 +8334,8 @@ fn reject_patch_escape(
 ) -> bool {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
     let baseline = patch_baseline(snapshot, spec_path);
-    let Some(problem) = patch_escape_problem(spec_path, &after, &baseline) else {
+    let Some((offender, problem)) = patch_escape_offender(spec_path, &after, &baseline, None)
+    else {
         return false;
     };
     note_spec_rejection(spec_path, &problem);
@@ -8327,14 +8350,35 @@ fn reject_patch_escape(
     if let Some(snap) = snapshot {
         snap.restore_keeping(reporter, Some(step), keep);
     }
-    // Without a snapshot the patch files were never copied, so they cannot be
-    // put back: the note says so rather than claiming a full rollback.
-    let rollback = if snapshot.is_some() {
-        "The edit was rolled back."
-    } else {
-        "The spec is back at its pre-turn text, but the patch files were not restored \
-         (no pre-turn copy of the checkout was kept): the offending patch stays as the \
-         turn left it and must be fixed."
+    // Without a snapshot there is no pre-turn copy of the patch files. A patch
+    // the turn created (the spec before the turn did not name it, OBS does not
+    // publish it, and it is not a staged file) is deleted, so the rejected
+    // patch does not stay behind as an unreferenced file. Any other patch is
+    // left as the turn wrote it and the note says so.
+    let mut removed = false;
+    if snapshot.is_none() {
+        let published = match &baseline {
+            PatchBaseline::NoBaseline(p) | PatchBaseline::NotPublished(p) => p.as_slice(),
+            PatchBaseline::Snapshot(_) => &[],
+        };
+        let created_by_turn = !before.contains(&offender)
+            && !published.contains(&offender)
+            && !keep.contains(&offender);
+        if created_by_turn {
+            removed = std::fs::remove_file(spec_path.with_file_name(&offender)).is_ok();
+        }
+    }
+    let rollback = match (snapshot.is_some(), removed) {
+        (true, _) => "The edit was rolled back.",
+        (false, true) => {
+            "The spec is back at its pre-turn text, and the offending patch, which the \
+             turn created, was deleted."
+        }
+        (false, false) => {
+            "The spec is back at its pre-turn text, but the patch files were not restored \
+             (no pre-turn copy of the checkout was kept): the offending patch stays as the \
+             turn left it and must be fixed."
+        }
     };
     append_notes(
         notes_path,
@@ -8518,6 +8562,10 @@ struct ApplyTurnCtx<'a> {
     /// and passing `Some(&snap)` here. Sites that don't opt in get the
     /// pre-fix spec-only restore (safe default).
     snapshot: Option<&'a CheckoutSnapshot>,
+    /// Files staged into the checkout by earlier rounds of the same resolution
+    /// ladder. Every restore keeps them, so a later round's rollback does not
+    /// delete what an earlier round was asked to copy in.
+    kept: &'a [String],
 }
 
 /// Apply one agent turn's outcome the same way at every call site that runs
@@ -8560,6 +8608,7 @@ fn apply_turn_outcome_with(
         attempt,
         notes_path,
         snapshot,
+        kept,
     } = ctx;
     // Files the turn asked the pipeline to copy into the checkout: its shell
     // cannot write there. Done first, and kept even by a `blocked` or
@@ -8573,6 +8622,8 @@ fn apply_turn_outcome_with(
         &notes_path,
         label,
     );
+    // Everything an earlier round staged, and this turn's own staged files.
+    let keep: Vec<String> = kept.iter().chain(staged.iter()).cloned().collect();
     let effect = match &outcome.action {
         crate::agent::Action::Blocked { .. } | crate::agent::Action::NoChange
             if !staged.is_empty() =>
@@ -8605,7 +8656,7 @@ fn apply_turn_outcome_with(
                 step,
                 reporter,
                 notes_path.clone(),
-                &staged,
+                &keep,
             ) {
                 return match repeated_spec_rejection(spec_path) {
                     Some(msg) => Err(format!("{label}: {msg}")),
@@ -8625,7 +8676,7 @@ fn apply_turn_outcome_with(
                         brief(&outcome.reasoning)
                     ),
                     notes_path,
-                    &staged,
+                    &keep,
                 );
                 if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
                     return Err(format!("{label}: {msg}"));
@@ -8641,7 +8692,7 @@ fn apply_turn_outcome_with(
             // patches/_service files before deciding it's blocked, and
             // those should not survive the rejection.
             if let Some(snap) = snapshot {
-                snap.restore(reporter, Some(step));
+                snap.restore_keeping(reporter, Some(step), kept);
             }
             restore_spec(spec_path, before, Some(step), reporter);
             // Journaled like an edit: a turn that changed nothing is still what
@@ -8660,7 +8711,7 @@ fn apply_turn_outcome_with(
             // On NoChange, also restore — the agent's "no change needed"
             // verdict shouldn't paper over an unreported partial edit.
             if let Some(snap) = snapshot {
-                snap.restore(reporter, Some(step));
+                snap.restore_keeping(reporter, Some(step), kept);
             }
             append_notes(
                 notes_path,
@@ -8685,7 +8736,7 @@ fn apply_turn_outcome_with(
                     outcome.confidence
                 ),
                 notes_path.clone(),
-                &staged,
+                &keep,
             );
             if !changed && !staged.is_empty() {
                 append_notes(
@@ -9359,22 +9410,17 @@ fn patch_request_settled(patched_problems: &[u64], problem: &str) -> bool {
 }
 
 /// Whether a patch turn (convention 62) failed to deliver what a dependent asked
-/// for. Not when it edited, not when an earlier run already did, and not when it
-/// answered `no_change`: that is the turn finding the change already in the
-/// recipe (the project's `ffmpeg-8` was licence-clean already), and the dependent
-/// is waiting on a package that is built, not on an edit. Failing it re-queued
-/// the same request ten times. A `blocked` or other answer is still a failure.
-fn patch_turn_failed(
-    patching: bool,
-    effect: TurnEffect,
-    already_reviewed: bool,
-    action: &crate::agent::Action,
-) -> bool {
+/// for. Not when it edited, and not when it answered `no_change`: that is the
+/// turn finding the change already in the recipe (the project's `ffmpeg-8` was
+/// licence-clean already), and the dependent is waiting on a package that is
+/// built, not on an edit. Failing it re-queued the same request ten times. A
+/// `blocked` or other answer is a failure, whether or not the spec was reviewed
+/// earlier: a reviewed spec says nothing about whether this request was met.
+fn patch_turn_failed(patching: bool, effect: TurnEffect, action: &crate::agent::Action) -> bool {
     // A switch to the upstream wheel replaces the recipe: the wheel carries every
     // file the dependent looked for, so the request is met, not refused.
     patching
         && !matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel)
-        && !already_reviewed
         && !matches!(action, crate::agent::Action::NoChange)
 }
 
@@ -9788,6 +9834,15 @@ fn applied_patch_number(line: &str) -> Option<String> {
     (after.is_empty() || after.starts_with('-')).then(|| "0".to_string())
 }
 
+/// Whether two patch numbers name the same patch: `Patch01:` and `%patch1` are
+/// both patch 1. Numbers that do not parse compare as text.
+fn same_patch_number(a: &str, b: &str) -> bool {
+    match (a.parse::<u32>(), b.parse::<u32>()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// `spec` without the `PatchN:` lines (and `%patchN` applications) of `names`.
 fn without_patches(spec: &str, names: &[String]) -> String {
     let mut nums: Vec<String> = Vec::new();
@@ -9798,8 +9853,8 @@ fn without_patches(spec: &str, names: &[String]) -> String {
                 .trim()
                 .get(..5)
                 .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
-            && names.iter().any(|n| n == value.trim())
             && tag.trim()[5..].chars().all(|c| c.is_ascii_digit())
+            && names.contains(&expand_patch_name(value, spec))
         {
             // A bare `Patch:` is patch 0, as rpm reads it.
             let num = tag.trim()[5..].to_string();
@@ -9814,7 +9869,9 @@ fn without_patches(spec: &str, names: &[String]) -> String {
     }
     let mut kept = String::new();
     for line in out.lines() {
-        if !applied_patch_number(line).is_some_and(|n| nums.contains(&n)) {
+        if !applied_patch_number(line)
+            .is_some_and(|n| nums.iter().any(|m| same_patch_number(m, &n)))
+        {
             kept.push_str(line);
             kept.push('\n');
         }
@@ -9870,7 +9927,7 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
     // unpacking the whole sdist for every build is the cost to avoid.
     let mut targets: Vec<String> = Vec::new();
     for name in &patches {
-        let name = name.replace("%{version}", "");
+        let name = expand_patch_name(name, spec);
         // Only a bare file name is a patch in this checkout (see below); a
         // `../x` must not be read from outside it.
         if Path::new(&name).file_name() != Some(name.as_ref()) {
@@ -9900,8 +9957,9 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
         _ => scratch.path().to_path_buf(),
     };
     let mut check = PatchCheck::default();
+    let mut notes: Vec<String> = Vec::new();
     for name in patches {
-        let name = name.replace("%{version}", "");
+        let name = expand_patch_name(&name, spec);
         // Patch names come from spec text. Only a bare file name is a patch in
         // this checkout; `/etc/x` or `../x` would read outside it.
         if Path::new(&name).file_name() != Some(name.as_ref()) {
@@ -9909,7 +9967,9 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
         }
         let patch_file = checkout.join(&name);
         if !patch_file.is_file() {
-            // A missing patch file is reported by the missing-source check.
+            // Not on disk even after the macros are expanded: the patch is not
+            // checked, and that is said rather than skipped silently.
+            notes.push(format!("{name} is not on disk, so it was not checked"));
             continue;
         }
         // An absolute path: `patch` runs in the scratch tree, and a project
@@ -9948,7 +10008,24 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
                 .push((name, detail.trim().chars().take(600).collect::<String>()));
         }
     }
+    if !notes.is_empty() {
+        check.unchecked = Some(notes.join("; "));
+    }
     Ok(check)
+}
+
+/// A `PatchN:` value with the spec's `%{name}` and `%{version}` (or the bare
+/// `%name`, `%version`) expanded, so `foo-%{version}-fix.patch` names the file
+/// `foo-1.2-fix.patch`. A spec whose header cannot be read is left as written.
+fn expand_patch_name(raw: &str, spec: &str) -> String {
+    let raw = raw.trim();
+    let Some(header) = crate::spec::parse_header(spec) else {
+        return raw.to_string();
+    };
+    raw.replace("%{name}", &header.name)
+        .replace("%name", &header.name)
+        .replace("%{version}", &header.version)
+        .replace("%version", &header.version)
 }
 
 /// [`try_patches`] as a gate for an edit: `Err` names the first patch that does
@@ -9966,6 +10043,26 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
             "{name} does not apply to the pristine source with `patch -p1 --fuzz=0`: {detail}"
         )),
         None => Ok(check.unchecked),
+    }
+}
+
+/// Whether `path` starts with a home directory reference: `~`, `~/...` or
+/// `~user/...`. A `~` followed by anything else (`~build.log`) is a plain name.
+fn is_home_directory_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix('~') else {
+        return false;
+    };
+    if rest.is_empty() || rest.starts_with('/') {
+        return true;
+    }
+    match rest.split_once('/') {
+        Some((user, _)) => {
+            !user.is_empty()
+                && user
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        }
+        None => false,
     }
 }
 
@@ -10021,13 +10118,15 @@ fn patch_escapes_tree(patch_text: &str) -> Option<String> {
         if raw.is_empty() || first_word == "/dev/null" {
             return None;
         }
-        let path = raw
-            .strip_prefix("a/")
-            .or_else(|| raw.strip_prefix("b/"))
-            .unwrap_or(raw);
+        // A `~` is a home directory only when it leads the path as written: after
+        // an `a/` or `b/` prefix it is an ordinary name (`a/~build.log`).
+        let (path, prefixed) = match raw.strip_prefix("a/").or_else(|| raw.strip_prefix("b/")) {
+            Some(rest) => (rest, true),
+            None => (raw, false),
+        };
         let reason = if path.starts_with('/') {
             "an absolute path"
-        } else if path.starts_with('~') {
+        } else if !prefixed && is_home_directory_path(path) {
             "a home-directory path"
         } else if path.split('/').any(|c| c == "..") {
             "a path with a `..` component"
@@ -10084,20 +10183,25 @@ fn obs_tracked_names(checkout: &Path) -> Vec<String> {
 }
 
 /// The patch files the gate reads: every top-level `*.patch` or `*.diff` in the
-/// checkout, plus each bare file name the spec gives as a `PatchN:` line. Returns
-/// the first one that escapes the tree and that the baseline makes the turn's
-/// concern, as an error naming the file.
-fn patch_escape_problem(
+/// checkout (only those in `publishable`, when given), plus each bare file name
+/// the spec gives as a `PatchN:` line. Returns the first one that escapes the
+/// tree and that the baseline makes the turn's concern: its file name, and the
+/// problem as an error naming the file.
+fn patch_escape_offender(
     spec_path: &Path,
     spec: &str,
     baseline: &PatchBaseline<'_>,
-) -> Option<String> {
+    publishable: Option<&[String]>,
+) -> Option<(String, String)> {
     let checkout = spec_path.parent()?;
     let mut names: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(checkout) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if (name.ends_with(".patch") || name.ends_with(".diff")) && entry.path().is_file() {
+            if (name.ends_with(".patch") || name.ends_with(".diff"))
+                && entry.path().is_file()
+                && publishable.is_none_or(|p| p.contains(&name))
+            {
                 names.push(name);
             }
         }
@@ -10115,7 +10219,7 @@ fn patch_escape_problem(
         {
             continue;
         }
-        let name = value.trim().replace("%{version}", "");
+        let name = expand_patch_name(value, spec);
         // A name with a directory part is not a file of this checkout.
         if Path::new(&name).file_name() == Some(name.as_ref()) {
             names.push(name);
@@ -10148,12 +10252,23 @@ fn patch_escape_problem(
             PatchBaseline::NotPublished(_) => "is not published by OBS yet",
             PatchBaseline::NoBaseline(_) => "is a new or changed patch",
         };
-        Some(format!(
+        let problem = format!(
             "{name} {origin}, and its headers would write outside the source tree: {why}. \
              A patch may only name paths relative to the source tree: regenerate it with \
              paths like `a/src/x.c` and `b/src/x.c`, not absolute or `..` paths."
-        ))
+        );
+        Some((name, problem))
     })
+}
+
+/// [`patch_escape_offender`] without the file name: the problem alone.
+#[cfg(test)]
+fn patch_escape_problem(
+    spec_path: &Path,
+    spec: &str,
+    baseline: &PatchBaseline<'_>,
+) -> Option<String> {
+    patch_escape_offender(spec_path, spec, baseline, None).map(|(_, problem)| problem)
 }
 
 /// The source archive in the checkout. A checkout can hold several (an old
@@ -10192,14 +10307,16 @@ fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
 }
 
 /// Whether the archive file name `name` carries `version` as a whole version:
-/// `1.2` is in `pkg-1.2.tar.gz` and `pkg-1.2-py3.whl`, but not in `pkg-1.2.1.tar.gz`.
+/// `1.2` is in `pkg-1.2.tar.gz` and `pkg-1.2-py3.whl`, but not in `pkg-1.2.1.tar.gz`,
+/// `pkg-13.3.1.tar.gz` (for `3.1`) or `pkg-11.2.tar.gz`. The version must follow
+/// the `-` or `_` that ends the project name (or start the name).
 fn names_version(name: &str, version: &str) -> bool {
     !version.is_empty()
         && name.match_indices(version).any(|(i, _)| {
             let starts_here = name[..i]
                 .chars()
                 .last()
-                .is_none_or(|c| !c.is_ascii_alphanumeric());
+                .is_none_or(|c| c == '-' || c == '_');
             let rest = &name[i + version.len()..];
             starts_here
                 && (rest.is_empty()
@@ -14240,6 +14357,100 @@ mod tests {
     }
 
     #[test]
+    fn names_version_needs_a_dash_or_underscore_before_the_version() {
+        assert!(names_version("foo-3.1.tar.gz", "3.1"));
+        assert!(names_version("foo_bar-3.1-py3-none-any.whl", "3.1"));
+        assert!(!names_version("foo-13.3.1.tar.gz", "3.1"));
+        assert!(!names_version("foo-3.1.2.tar.gz", "3.1"));
+        assert!(!names_version("foo-1.2.1.tar.gz", "1.2"));
+        assert!(names_version("foo-1.2.tar.gz", "1.2"));
+    }
+
+    #[test]
+    fn find_tarball_prefers_the_archive_named_for_the_version() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["foo-13.3.1.tar.gz", "foo-3.1.tar.gz"] {
+            std::fs::write(dir.path().join(f), b"").unwrap();
+        }
+        assert_eq!(
+            find_tarball(dir.path(), "3.1"),
+            Some(dir.path().join("foo-3.1.tar.gz"))
+        );
+    }
+
+    #[test]
+    fn patch_names_expand_the_name_and_version_macros() {
+        let spec = "Name: foo\nVersion: 1.2\nPatch0: foo-%{version}-fix.patch\n";
+        assert_eq!(
+            expand_patch_name("foo-%{version}-fix.patch", spec),
+            "foo-1.2-fix.patch"
+        );
+        assert_eq!(
+            expand_patch_name("%{name}-%version.diff", spec),
+            "foo-1.2.diff"
+        );
+        // Without a readable header the name is left as written.
+        assert_eq!(
+            expand_patch_name("foo-%{version}.patch", "%autosetup\n"),
+            "foo-%{version}.patch"
+        );
+    }
+
+    #[test]
+    fn a_patch_named_by_a_macro_that_is_not_on_disk_is_unchecked_not_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("checkout");
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let enc = flate2::write::GzEncoder::new(
+                std::fs::File::create(dir.join("pkg-1.0.tar.gz")).unwrap(),
+                flate2::Compression::default(),
+            );
+            let mut tb = tar::Builder::new(enc);
+            let data = b"a\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tb.append_data(&mut h, "pkg-1.0/f.txt", &data[..]).unwrap();
+            tb.into_inner().unwrap().finish().unwrap();
+        }
+        let spec = "Name: pkg\nVersion: 1.0\n%autosetup -p1 -n pkg-%{version}\n\
+                    Patch0: pkg-%{version}-fix.patch\n";
+        let spec_path = dir.join("pkg.spec");
+        std::fs::write(&spec_path, spec).unwrap();
+        let check = try_patches(&spec_path, spec).unwrap();
+        assert!(check.failed.is_empty(), "{check:?}");
+        let note = check.unchecked.expect("a missing patch is reported");
+        assert!(note.contains("pkg-1.0-fix.patch"), "{note}");
+    }
+
+    #[test]
+    fn without_patches_matches_patch_numbers_by_value() {
+        let spec = "Name: foo\nVersion: 1.0\nPatch01: fix.patch\nPatch2: other.patch\n\
+                    %prep\n%patch1 -p1\n%patch2 -p1\n";
+        let kept = without_patches(spec, &["fix.patch".to_string()]);
+        assert!(!kept.contains("Patch01"), "{kept}");
+        assert!(!kept.contains("%patch1"), "{kept}");
+        assert!(kept.contains("Patch2: other.patch"), "{kept}");
+        assert!(kept.contains("%patch2 -p1"), "{kept}");
+    }
+
+    #[test]
+    fn tilde_is_a_home_directory_only_when_it_leads_the_unprefixed_path() {
+        let header = |p: &str| format!("--- {p}\n+++ {p}\n@@ -1 +1 @@\n-a\n+b\n");
+        // After an `a/` or `b/` prefix a leading `~` is an ordinary name.
+        assert_eq!(patch_escapes_tree(&header("a/~build.log")), None);
+        assert_eq!(patch_escapes_tree(&header("b/~build.log")), None);
+        // Unprefixed, a home directory is refused.
+        assert!(patch_escapes_tree(&header("~/.config/osc/oscrc")).is_some());
+        assert!(patch_escapes_tree(&header("~user/x")).is_some());
+        assert!(patch_escapes_tree(&header("~")).is_some());
+        // A plain unprefixed name starting with `~` is not a home directory.
+        assert_eq!(patch_escapes_tree(&header("~build.log")), None);
+    }
+
+    #[test]
     fn superseded_tarball_is_the_old_version_never_the_new_one() {
         let dir = tempfile::tempdir().unwrap();
         for f in ["pkg-1.2.tar.gz", "pkg-1.2.1.tar.gz"] {
@@ -15873,40 +16084,17 @@ mod patch_turn_tests {
         assert!(!patch_turn_failed(
             true,
             TurnEffect::NoChange,
-            false,
             &Action::NoChange
         ));
-        // It edited, an earlier run did, or this is not a patch turn.
-        assert!(!patch_turn_failed(
-            true,
-            TurnEffect::Edited,
-            false,
-            &Action::Edited
-        ));
-        assert!(!patch_turn_failed(
-            true,
-            TurnEffect::NoChange,
-            true,
-            &blocked
-        ));
-        assert!(!patch_turn_failed(
-            false,
-            TurnEffect::NoChange,
-            false,
-            &blocked
-        ));
-        // Blocked is still a failure to patch.
-        assert!(patch_turn_failed(
-            true,
-            TurnEffect::NoChange,
-            false,
-            &blocked
-        ));
+        // It edited, or this is not a patch turn.
+        assert!(!patch_turn_failed(true, TurnEffect::Edited, &Action::Edited));
+        assert!(!patch_turn_failed(false, TurnEffect::NoChange, &blocked));
+        // Blocked is a failure to patch, on a spec reviewed earlier too.
+        assert!(patch_turn_failed(true, TurnEffect::NoChange, &blocked));
         // python-torch: the wheel switch meets the request.
         assert!(!patch_turn_failed(
             true,
             TurnEffect::SwitchedToWheel,
-            false,
             &Action::UseUpstreamWheel { why: "x".into() }
         ));
     }
@@ -17187,6 +17375,7 @@ mod hygiene_tests {
                 attempt: 0,
                 notes_path: ctx.ws.notes(),
                 snapshot: None,
+                kept: &[],
             },
             &cond,
             &lookup,
