@@ -404,10 +404,18 @@ pub fn parse_release(json: &str) -> Result<Release, Error> {
 /// A release usually has one sdist and many wheels, but the format is not
 /// guaranteed: older uploads are `.zip`, and a few have both. Prefer
 /// `.tar.gz`, which is what every openSUSE Python spec expects.
+///
+/// A yanked file is disqualifying for the release (see `parse_release`), so a
+/// live sdist of any format beats a yanked `.tar.gz`. Among candidates with the
+/// same yanked state the format preference still applies; if every sdist is
+/// yanked, the result is the same as before this rule existed.
 fn pick_sdist(urls: &[RawFile]) -> Option<&RawFile> {
     let sdists = || urls.iter().filter(|f| f.packagetype == "sdist");
-    sdists()
+    let live = || sdists().filter(|f| !f.yanked);
+    live()
         .find(|f| f.filename.ends_with(".tar.gz"))
+        .or_else(|| live().next())
+        .or_else(|| sdists().find(|f| f.filename.ends_with(".tar.gz")))
         .or_else(|| sdists().next())
 }
 
@@ -764,11 +772,17 @@ struct RawDigests {
 pub fn parse_release_with_tarball(json: &str, tarball_filename: &str) -> Result<Release, Error> {
     let raw: Envelope = serde_json::from_str(json)?;
     let info = raw.info;
+    // The tarball is identified by filename, so its file entry (if PyPI lists
+    // it) carries the same per-file `yanked` flag `parse_release` consults.
+    let file_yanked = raw
+        .urls
+        .iter()
+        .any(|f| f.filename == tarball_filename && f.yanked);
 
     Ok(Release {
         homepage: homepage(&info),
         license: license(&info),
-        yanked: info.yanked,
+        yanked: info.yanked || file_yanked,
         sdist: Sdist {
             filename: tarball_filename.to_string(),
             url: String::new(),
@@ -1344,6 +1358,72 @@ mod tests {
         );
         assert!(parse_release(&json).unwrap().yanked);
         assert!(!markupsafe().yanked);
+    }
+
+    /// A release with one `.tar.gz` and one `.zip` sdist, each with its own
+    /// file-level `yanked` flag.
+    fn two_sdists(tar_yanked: bool, zip_yanked: bool) -> String {
+        format!(
+            r#"{{"info": {{"name": "pkg", "version": "1.0", "yanked": false}},
+              "urls": [
+                {{"digests": {{"sha256": "aaaa"}}, "filename": "pkg-1.0.tar.gz",
+                  "packagetype": "sdist", "size": 1,
+                  "url": "https://example.test/pkg-1.0.tar.gz", "yanked": {tar_yanked}}},
+                {{"digests": {{"sha256": "bbbb"}}, "filename": "pkg-1.0.zip",
+                  "packagetype": "sdist", "size": 2,
+                  "url": "https://example.test/pkg-1.0.zip", "yanked": {zip_yanked}}}
+              ]}}"#
+        )
+    }
+
+    #[test]
+    fn a_yanked_tarball_yields_to_a_live_zip_sdist() {
+        let r = parse_release(&two_sdists(true, false)).expect("parses");
+        assert_eq!(r.sdist.filename, "pkg-1.0.zip");
+        assert!(!r.yanked, "the chosen sdist is live, so the release is too");
+    }
+
+    #[test]
+    fn a_live_tarball_keeps_its_format_preference() {
+        for zip_yanked in [false, true] {
+            let r = parse_release(&two_sdists(false, zip_yanked)).expect("parses");
+            assert_eq!(r.sdist.filename, "pkg-1.0.tar.gz");
+            assert!(!r.yanked);
+        }
+    }
+
+    #[test]
+    fn when_every_sdist_is_yanked_the_tarball_is_still_picked_and_taints_the_release() {
+        let r = parse_release(&two_sdists(true, true)).expect("parses");
+        assert_eq!(r.sdist.filename, "pkg-1.0.tar.gz");
+        assert!(r.yanked);
+    }
+
+    #[test]
+    fn tarball_path_honours_the_file_level_yanked_flag() {
+        let yanked = MARKUPSAFE.replacen(
+            r#""url": "https://files.pythonhosted.org/packages/7e/99/markupsafe-3.0.3.tar.gz",
+          "yanked": false"#,
+            r#""url": "https://files.pythonhosted.org/packages/7e/99/markupsafe-3.0.3.tar.gz",
+          "yanked": true"#,
+            1,
+        );
+        let r = parse_release_with_tarball(&yanked, "markupsafe-3.0.3.tar.gz").expect("parses");
+        assert!(r.yanked, "a yanked tarball file must taint the release");
+        assert_eq!(r.sdist.filename, "markupsafe-3.0.3.tar.gz");
+
+        let live = parse_release_with_tarball(MARKUPSAFE, "markupsafe-3.0.3.tar.gz")
+            .expect("parses");
+        assert!(!live.yanked);
+    }
+
+    #[test]
+    fn tarball_path_honours_the_release_level_yanked_flag() {
+        let json = MARKUPSAFE.replacen(r#""yanked": false
+      },"#, r#""yanked": true
+      },"#, 1);
+        let r = parse_release_with_tarball(&json, "markupsafe-3.0.3.tar.gz").expect("parses");
+        assert!(r.yanked);
     }
 
     #[test]
