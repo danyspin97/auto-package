@@ -7,7 +7,7 @@
 //! the spec and the tarball so `osc status` stays clean.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -123,6 +123,22 @@ fn low_space_message(dir: &Path, free: u64, min_bytes: u64) -> Option<String> {
     })
 }
 
+/// Resolve `.` and `..` textually, without touching the file system (the link
+/// target may already be gone when this runs).
+fn lexically_normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub struct Workspace {
     dir: PathBuf,
 }
@@ -189,11 +205,19 @@ impl Workspace {
         self.dir.join("sdist.stamp")
     }
 
-    /// `name size` of a tarball, the identity the stamp records.
+    /// `name size mtime_ns` of a tarball, the identity the stamp records. The
+    /// mtime tells a regenerated tarball with the same name and size apart.
     fn tarball_identity(tarball: &Path) -> Option<String> {
         let name = tarball.file_name()?.to_string_lossy().into_owned();
-        let len = fs::metadata(tarball).ok()?.len();
-        Some(format!("{name} {len}"))
+        let meta = fs::metadata(tarball).ok()?;
+        let len = meta.len();
+        let mtime = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        Some(format!("{name} {len} {mtime}"))
     }
 
     /// True when sdist_dir holds a completed extraction of this very tarball.
@@ -253,7 +277,10 @@ impl Workspace {
         let stamp = self.sdist_stamp();
         let is_wheel = fs::read_to_string(&stamp)
             .ok()
-            .and_then(|s| s.rsplit_once(' ').map(|(name, _)| name.ends_with(".whl")))
+            .and_then(|s| {
+                // Stamp is `name size mtime_ns`; the name is everything before the last two fields.
+                s.rsplitn(3, ' ').nth(2).map(|name| name.ends_with(".whl"))
+            })
             .unwrap_or(false);
         if !is_wheel {
             return Ok(0);
@@ -289,10 +316,12 @@ impl Workspace {
         let _ = fs::remove_file(&stamp);
         fs::remove_dir_all(&tree)?;
         let link = self.dir.join("source");
-        if let Ok(target) = fs::read_link(&link)
-            && (target.starts_with(&sdist) || target.starts_with(&tree))
-        {
-            let _ = fs::remove_file(&link);
+        if let Ok(target) = fs::read_link(&link) {
+            // A relative target is relative to the link's own directory, the state dir.
+            let resolved = lexically_normalize(&self.dir.join(&target));
+            if resolved.starts_with(&sdist) || resolved.starts_with(&tree) {
+                let _ = fs::remove_file(&link);
+            }
         }
         Ok(freed)
     }
@@ -342,6 +371,29 @@ mod tests {
         ws.clear_sdist().unwrap();
     }
 
+    #[test]
+    fn a_regenerated_tarball_with_same_name_and_size_is_not_the_extracted_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(tmp.path(), "python-foo").unwrap();
+        let tarball = tmp.path().join("foo-1.0.tar.gz");
+        fs::write(&tarball, b"same").unwrap();
+        fs::create_dir_all(ws.sdist_dir().join("foo-1.0")).unwrap();
+        ws.mark_sdist_extracted(&tarball).unwrap();
+        assert!(ws.sdist_extracted_from(&tarball));
+
+        // Rewrite with the same length but a later mtime.
+        fs::write(&tarball, b"that").unwrap();
+        let later = fs::metadata(&tarball).unwrap().modified().unwrap()
+            + Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&tarball)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(!ws.sdist_extracted_from(&tarball));
+    }
+
     fn wheel_workspace(tmp: &Path, stamp_name: &str) -> Workspace {
         let ws = Workspace::open(tmp, "python-foo").unwrap();
         fs::create_dir_all(ws.sdist_dir().join("foo.dist-info")).unwrap();
@@ -376,6 +428,16 @@ mod tests {
         let wheel = tmp.path().join("foo-1.0-py3-none-any.whl");
         assert!(!ws.sdist_extracted_from(&wheel));
         assert_eq!(ws.prune_wheel_extraction().unwrap(), 0);
+    }
+
+    #[test]
+    fn pruning_removes_a_relative_source_link_into_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = wheel_workspace(tmp.path(), "foo-1.0-py3-none-any.whl");
+        fs::remove_file(ws.dir().join("source")).unwrap();
+        std::os::unix::fs::symlink("sdist", ws.dir().join("source")).unwrap();
+        assert_eq!(ws.prune_wheel_extraction().unwrap(), 2048);
+        assert!(ws.dir().join("source").symlink_metadata().is_err());
     }
 
     #[test]
