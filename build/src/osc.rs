@@ -3535,6 +3535,27 @@ fn code_macro_marker(text: &str) -> Option<&'static str> {
         .find(|m| text.contains(m))
 }
 
+/// Directives that make `rpmspec` read another file from the host while
+/// parsing. Matched at the start of a line, after leading whitespace.
+const INCLUDE_MARKERS: &[&str] = &["%include", "%{include"];
+
+/// The first file-including directive at the start of a line in `text`, if any.
+fn include_marker(text: &str) -> Option<&'static str> {
+    text.lines().find_map(|line| {
+        let line = line.trim_start();
+        INCLUDE_MARKERS
+            .iter()
+            .copied()
+            .find(|m| line.starts_with(m))
+    })
+}
+
+/// The first form in `text` that would make an unsandboxed `rpmspec` run
+/// code or read a host file: a code-running macro or a file include.
+fn unsandboxed_marker(text: &str) -> Option<&'static str> {
+    code_macro_marker(text).or_else(|| include_marker(text))
+}
+
 /// Whether `rpmspec` can run inside bubblewrap here. Probed once: `bwrap`
 /// installed is not enough, unprivileged user namespaces are often disabled.
 fn rpmspec_sandbox_works() -> bool {
@@ -3629,7 +3650,7 @@ pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> 
         proc::capture("bwrap", &args, &anywhere(), emit)?
     } else {
         let text = fs::read(spec_path).unwrap_or_default();
-        if let Some(marker) = code_macro_marker(&String::from_utf8_lossy(&text)) {
+        if let Some(marker) = unsandboxed_marker(&String::from_utf8_lossy(&text)) {
             return Err(Error::UnsandboxedMacro {
                 spec,
                 marker: marker.to_string(),
@@ -7463,6 +7484,48 @@ mod rpmspec_sandbox_tests {
             let out = result.expect("rpmspec should expand inside the sandbox");
             assert!(out.contains("Summary: x"), "{out}");
         }
+    }
+
+    #[test]
+    fn file_includes_are_recognised_at_line_start() {
+        assert_eq!(include_marker("%include /etc/passwd\n"), Some("%include"));
+        assert_eq!(include_marker("  \t%include /etc/passwd"), Some("%include"));
+        assert_eq!(
+            include_marker("Name: x\n%{include /etc/passwd}\n"),
+            Some("%{include")
+        );
+        assert_eq!(
+            include_marker("Name: x\r\n%include /etc/passwd\r\n"),
+            Some("%include")
+        );
+        assert_eq!(include_marker("Summary: see %include docs\n"), None);
+        assert_eq!(include_marker("%description\nno includes here\n"), None);
+    }
+
+    #[test]
+    fn unsandboxed_refusal_covers_includes_and_code_macros() {
+        assert_eq!(
+            unsandboxed_marker("Name: x\n%include /etc/hostname\n"),
+            Some("%include")
+        );
+        assert_eq!(unsandboxed_marker("Summary: %(id -u)"), Some("%("));
+        assert_eq!(
+            unsandboxed_marker("Name: demo\nVersion: 1.0\n%description\nplain\n%files\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn include_refusal_names_the_directive_and_the_spec() {
+        let err = Error::UnsandboxedMacro {
+            spec: "/co/demo.spec".into(),
+            marker: "%include".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/co/demo.spec") && msg.contains("`%include`"),
+            "{msg}"
+        );
     }
 
     #[test]
