@@ -2154,31 +2154,60 @@ struct RunState {
 /// the starting point. `Ok(None)` when nothing needs branching (the project has
 /// it, no linked project ships it, or the shipped name differs in spelling, in
 /// which case a branch would land under the wrong name).
+/// Why [`branch_from_linked`] did not branch the package.
+enum BranchError {
+    /// The distro ships the package under another name: nothing is branched,
+    /// and the package is packaged under its own name as before.
+    Renamed(String),
+    /// A listing or the branch call failed. A package the distro ships must not
+    /// be packaged from scratch behind that failure, so the stage fails.
+    Failed { reason: String, transient: bool },
+}
+
+impl BranchError {
+    /// A failure of a listing, which reports only its text: a listing that
+    /// could not be read is a network or OBS failure.
+    fn listing(reason: String) -> Self {
+        Self::Failed {
+            reason,
+            transient: true,
+        }
+    }
+
+    fn osc(e: &osc::Error) -> Self {
+        Self::Failed {
+            reason: e.to_string(),
+            transient: e.is_transient(),
+        }
+    }
+}
+
 fn branch_from_linked(
     config: &PipelineConfig,
     rpm_name: &str,
     emit: Emit<'_>,
-) -> Result<Option<String>, String> {
-    let own = osc::try_list_project_packages(&config.project, emit).map_err(|e| e.to_string())?;
+) -> Result<Option<String>, BranchError> {
+    let own =
+        osc::try_list_project_packages(&config.project, emit).map_err(BranchError::listing)?;
     let key = osc::fuzzy_key(rpm_name);
     if own.iter().any(|p| osc::fuzzy_key(p) == key) {
         return Ok(None);
     }
     for (path_project, _repo) in
-        osc::get_project_repo_paths(&config.project, emit).map_err(|e| e.to_string())?
+        osc::get_project_repo_paths(&config.project, emit).map_err(|e| BranchError::osc(&e))?
     {
         let listing =
-            osc::try_list_project_packages(&path_project, emit).map_err(|e| e.to_string())?;
+            osc::try_list_project_packages(&path_project, emit).map_err(BranchError::listing)?;
         let Some(shipped) = listing.iter().find(|p| osc::fuzzy_key(p) == key) else {
             continue;
         };
         if shipped != rpm_name {
-            return Err(format!(
+            return Err(BranchError::Renamed(format!(
                 "{path_project} ships it as {shipped}, not {rpm_name}"
-            ));
+            )));
         }
         let result = osc::branch_package(&path_project, rpm_name, &config.project, false, emit)
-            .map_err(|e| e.to_string());
+            .map_err(|e| BranchError::osc(&e));
         osc::invalidate_project_packages_cache(&config.project);
         return result.map(|_| Some(path_project));
     }
@@ -2243,7 +2272,7 @@ fn run_stages(
     let spec = generate_spec_stage(&ctx, &mut st)?;
     osc_service_stage(&ctx, &mut st, &spec)?;
     fetch_sdist_stage(&ctx, &mut st, spec.need_spec)?;
-    resume_budget(&ctx, &mut st);
+    resume_budget(&ctx, &mut st)?;
 
     let build_log_nonempty = ctx
         .ws
@@ -2392,10 +2421,23 @@ fn checkout_stage(
                 message: format!("branched {origin}/{rpm_name} into {}", config.project),
             }),
             Ok(None) => {}
-            Err(why) => reporter.report(&Event::Warning {
+            Err(BranchError::Renamed(why)) => reporter.report(&Event::Warning {
                 step: Some(step.id),
                 message: format!("not branching {rpm_name} from the distro: {why}"),
             }),
+            // Falling through would create an empty package when OBS answers
+            // 404 for the project, and the pipeline would then generate the
+            // package from scratch and commit it into the project.
+            Err(BranchError::Failed { reason, transient }) => {
+                let id = step.id;
+                step.finish(StepOutcome::Failed);
+                let message = format!("branching {rpm_name} from the distro failed: {reason}");
+                reporter.report(&Event::Warning {
+                    step: Some(id),
+                    message: message.clone(),
+                });
+                return Err(ctx.failed_text(transient, message));
+            }
         }
         let result = osc::ensure_package(&config.project, rpm_name, &config.work_dir, emit)
             .and_then(|()| {
@@ -3065,9 +3107,16 @@ fn fetch_sdist_stage(
 /// asked for the restart-reset explicitly, and it matches the mental
 /// model that a new command is a new budget. See
 /// `PkgState::cumulative_spent_run_id`.
-fn resume_budget(ctx: &RunCtx, st: &mut RunState) {
+fn resume_budget(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     let config = ctx.config;
-    let prior = PkgState::load(&ctx.ws);
+    // A state file that cannot be read must not reset the budget: the spend
+    // of an earlier attempt would be forgotten. The read is retried later.
+    let prior = PkgState::try_load(&ctx.ws).map_err(|e| {
+        ctx.failed_text(
+            true,
+            format!("cannot read the package state, so the budget is unknown: {e}"),
+        )
+    })?;
     let resuming_this_run =
         prior.cumulative_spent_run_id.as_deref() == Some(config.run_id.as_str());
     st.attempts = if resuming_this_run {
@@ -3092,6 +3141,7 @@ fn resume_budget(ctx: &RunCtx, st: &mut RunState) {
             ),
         });
     }
+    Ok(())
 }
 
 /// Whether the review turn runs for a package nobody asked to patch. A spec
@@ -3943,7 +3993,7 @@ fn missing_deps_from_turn(
     // bound is built in the project in place of the distro's newer one.
     let (declined, patches): (Vec<_>, Vec<_>) = patches
         .into_iter()
-        .partition(|p| patch_declined_before(ctx, &p.name));
+        .partition(|p| patch_declined_before(ctx, &p.name, &p.problem));
     for p in declined {
         let conflict = linked_bound_conflicts(ctx, step, std::slice::from_ref(&p.name))
             .into_iter()
@@ -4009,10 +4059,13 @@ fn missing_deps_from_turn(
     })
 }
 
-/// Whether a patch turn already answered a request for `dep` without a patch.
-fn patch_declined_before(ctx: &RunCtx, dep: &str) -> bool {
+/// Whether a patch turn already answered this request for `dep` without a
+/// patch. Keyed on the request's text: a different problem with the same
+/// dependency is a new request and gets its turn.
+fn patch_declined_before(ctx: &RunCtx, dep: &str, problem: &str) -> bool {
+    let h = hash_spec(problem);
     Workspace::find_existing(&ctx.config.state_root, &[&osc::rpm_name(dep), dep])
-        .is_some_and(|w| !PkgState::load(&w).declined_patches.is_empty())
+        .is_some_and(|w| PkgState::load(&w).declined_patches.contains(&h))
 }
 
 /// The newest of `versions` that `specifier` (`<=0.1.11,>=0.1.10`) allows,
@@ -5141,11 +5194,16 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     );
     // The only write to OBS: nothing without a spec, without its sources, or
     // with a placeholder in it goes there, whatever an earlier stage let by.
-    if let Err(reason) = ensure_publishable(ctx, commit_step.id) {
-        commit_step.finish(StepOutcome::Failed);
-        return Err(ctx.failed(reason));
-    }
-    // A source the spec names must not be missing from what is published.
+    let expanded = match ensure_publishable(ctx, commit_step.id) {
+        Ok(expanded) => expanded,
+        Err(reason) => {
+            commit_step.finish(StepOutcome::Failed);
+            return Err(ctx.failed(reason));
+        }
+    };
+    // A source the spec names must not be missing from what is published. The
+    // restore runs first: a source OBS still tracks but the checkout lost is
+    // brought back here, and only what is still missing afterwards is refused.
     let restored =
         osc::restore_named_sources(&ctx.checkout_dir, Emit::new(ctx.reporter, commit_step.id));
     for name in &restored {
@@ -5153,6 +5211,10 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
             step: Some(commit_step.id),
             message: format!("restored '{name}' from OBS: the spec names it as a source"),
         });
+    }
+    if let Err(reason) = ensure_sources_present(ctx, &expanded) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(reason));
     }
     for name in osc::drop_unused_recipe_files(&ctx.checkout_dir) {
         ctx.reporter.report(&Event::Warning {
@@ -5268,10 +5330,12 @@ fn missing_license_entry(ws: &Workspace, spec_path: &Path) -> Option<String> {
     ))
 }
 
-/// Why the checkout must not be committed to OBS yet, or `Ok`: the spec is
-/// missing, it still has a TODO/FIXME placeholder or is an unfinished skeleton,
-/// or a `Source`/`Patch` it names is not in the checkout.
-fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<(), String> {
+/// Why the checkout must not be committed to OBS yet, or the expanded spec when
+/// it may be: the spec is missing, it still has a TODO/FIXME placeholder or is
+/// an unfinished skeleton, it does not parse, or a patch escapes the tree. The
+/// sources the spec names are checked afterwards by [`ensure_sources_present`],
+/// once the commit has restored the ones OBS still tracks.
+fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<String, String> {
     let spec = std::fs::read_to_string(&ctx.spec_path)
         .map_err(|_| format!("there is no spec ({}) to commit", ctx.spec_path.display()))?;
     let todos = crate::spec::todo_placeholders(&spec);
@@ -5289,22 +5353,29 @@ fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<(), 
         return Err(format!("the spec is an unfinished skeleton ({why})"));
     }
     // Last line of the patch-escape gate: whatever path kept the agent's
-    // edits, a patch that escapes the tree is never committed.
-    if let Some(problem) = patch_escape_problem(&ctx.spec_path, &spec) {
+    // edits, a patch that escapes the tree is never committed. Patches OBS
+    // already publishes are not judged here: they are not this run's edits.
+    let published = PatchBaseline::NotPublished(obs_tracked_names(&ctx.checkout_dir));
+    if let Some(problem) = patch_escape_problem(&ctx.spec_path, &spec, &published) {
         return Err(format!(
             "a patch escapes the source tree, so it is not committed: {problem}"
         ));
     }
-    let expanded = osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step))
-        .map_err(|e| format!("the spec does not parse, so it is not committed: {e}"))?;
-    let missing = missing_source_files(&expanded, &ctx.checkout_dir);
-    if !missing.is_empty() {
-        return Err(format!(
-            "the sources the spec names are not in the checkout, so it is not committed: {}",
-            missing.join(", ")
-        ));
+    osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step))
+        .map_err(|e| format!("the spec does not parse, so it is not committed: {e}"))
+}
+
+/// The sources and patches the expanded spec names that are not in the
+/// checkout, as the reason the commit is refused, or `Ok`.
+fn ensure_sources_present(ctx: &RunCtx, expanded: &str) -> Result<(), String> {
+    let missing = missing_source_files(expanded, &ctx.checkout_dir);
+    if missing.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    Err(format!(
+        "the sources the spec names are not in the checkout, so it is not committed: {}",
+        missing.join(", ")
+    ))
 }
 
 /// The `last_outcome` and reason recorded for an unsuccessful result; `None`
@@ -5748,7 +5819,9 @@ fn unresolvable_deps_round(
             false
         })
         .collect();
-    if !alternatives.is_empty() && unresolvable_deps.is_empty() {
+    // The alternatives are reported whether or not other dependencies are
+    // still unresolvable: the agent needs the distro's names either way.
+    let alternatives_context = (!alternatives.is_empty()).then(|| {
         let lines: Vec<String> = alternatives
             .iter()
             .map(|(dep, similar)| {
@@ -5774,7 +5847,7 @@ fn unresolvable_deps_round(
                 lines.join("\n")
             ),
         });
-        let context = format!(
+        format!(
             "OBS cannot install what the spec asks for, but the distro has it under another \
              name or flavor; it is not a package to build. Change the BuildRequires/Requires \
              to a name that is published, or drop the requirement if nothing published \
@@ -5782,8 +5855,12 @@ fn unresolvable_deps_round(
              `-mini` flavor and skip what needs the rest). Do not report these in \
              `unresolvable_packages`.\n\n{}",
             crate::agent::fenced_data(&lines.join("\n"))
-        );
-        return fix_after_build(ctx, st, build_step, build_log, Some(&context));
+        )
+    });
+    if unresolvable_deps.is_empty()
+        && let Some(context) = &alternatives_context
+    {
+        return fix_after_build(ctx, st, build_step, build_log, Some(context));
     }
 
     // A package OBS has at a version NEWER than a bound the spec wrote is not
@@ -5931,7 +6008,7 @@ fn unresolvable_deps_round(
                 checkout_dir: None,
                 from_repo_archive: st.from_repo_archive,
                 resume: false,
-                context: None,
+                context: alternatives_context.as_deref(),
             },
             ctx.turn_env(),
             &mut st.spent_usd,
@@ -7144,7 +7221,19 @@ fn resolve_blocked_with(
         let turn = turn(ctx, st, &site, &label, site.attempt + round, &context);
         let (step, out) = match turn {
             Ok(v) => v,
-            Err((e, kind)) => return Rung::Abort(ctx.failed_as(kind, e)),
+            Err((e, kind)) => {
+                // A turn that failed on the agent's side may have edited the
+                // checkout or the spec; nothing validates those edits.
+                discard_failed_turn(
+                    ws.notes(),
+                    *reporter,
+                    &round_snapshot,
+                    spec_path,
+                    &round_spec,
+                    &label,
+                );
+                return Rung::Abort(ctx.failed_as(kind, e));
+            }
         };
         if let Some(missing) = missing_deps_from_turn(ctx, step.id, &out) {
             // Not applied, so not validated or journaled: undo it (see
@@ -7954,6 +8043,15 @@ impl CheckoutSnapshot {
         }
     }
 
+    /// Whether `name` is in the snapshot with exactly these bytes. A file whose
+    /// contents were not kept is never reported unchanged.
+    fn holds_unchanged(&self, name: &str, bytes: &[u8]) -> bool {
+        matches!(
+            self.files.get(std::ffi::OsStr::new(name)),
+            Some(SnapshotEntry { content: Some(old), .. }) if old.as_slice() == bytes
+        )
+    }
+
     /// Restore every top-level file to its snapshot state: restore
     /// modified files, re-create deleted ones, and delete any top-level
     /// files the agent added. Idempotent — called on reject only.
@@ -8094,7 +8192,8 @@ fn reject_patch_escape(
     keep: &[String],
 ) -> bool {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
-    let Some(problem) = patch_escape_problem(spec_path, &after) else {
+    let baseline = patch_baseline(snapshot, spec_path);
+    let Some(problem) = patch_escape_problem(spec_path, &after, &baseline) else {
         return false;
     };
     note_spec_rejection(spec_path, &problem);
@@ -8109,11 +8208,20 @@ fn reject_patch_escape(
     if let Some(snap) = snapshot {
         snap.restore_keeping(reporter, Some(step), keep);
     }
+    // Without a snapshot the patch files were never copied, so they cannot be
+    // put back: the note says so rather than claiming a full rollback.
+    let rollback = if snapshot.is_some() {
+        "The edit was rolled back."
+    } else {
+        "The spec is back at its pre-turn text, but the patch files were not restored \
+         (no pre-turn copy of the checkout was kept): the offending patch stays as the \
+         turn left it and must be fixed."
+    };
     append_notes(
         notes_path,
         &format!(
             "\n## Edit rejected — a patch escapes the source tree\n{problem}\n\
-             The edit was rolled back. Patch headers must name paths relative to the \
+             {rollback} Patch headers must name paths relative to the \
              source tree, with no leading `/`, `~`, or `..` component.\n"
         ),
     );
@@ -8369,13 +8477,23 @@ fn apply_turn_outcome_with(
             // is not run. The patch-escape check still runs: a turn may have
             // written a patch whatever the spec says.
             let spec_edited = std::fs::read_to_string(spec_path).ok().as_deref() != Some(before);
-            if !spec_edited {
-                if reject_patch_escape(spec_path, before, None, step, reporter, notes_path, &staged)
-                    && let Some(msg) = repeated_spec_rejection(spec_path)
-                {
-                    return Err(format!("{label}: {msg}"));
-                }
-            } else {
+            // A patch the turn wrote that escapes the tree is refused whatever
+            // the spec did. The staged files stay, but the turn is not an edit.
+            if reject_patch_escape(
+                spec_path,
+                before,
+                None,
+                step,
+                reporter,
+                notes_path.clone(),
+                &staged,
+            ) {
+                return match repeated_spec_rejection(spec_path) {
+                    Some(msg) => Err(format!("{label}: {msg}")),
+                    None => Ok(TurnEffect::NoChange),
+                };
+            }
+            if spec_edited {
                 let changed = accept_or_restore_with_snapshot(
                     spec_path,
                     before,
@@ -8986,15 +9104,18 @@ fn patch_condition_gate(
     // The count comes from the stored state. If the state cannot be saved (the
     // lock timed out, the file is unreadable), it is kept in memory for this
     // process instead, so the cap is still reached.
+    // Keyed by package as well as condition: two packages can name the same
+    // condition, and one's failures must not count against the other.
     static UNSAVED_FAILURES: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<u64, u32>>,
+        std::sync::Mutex<std::collections::HashMap<(PathBuf, u64), u32>>,
     > = std::sync::LazyLock::new(Default::default);
+    let slot = (ctx.ws.dir().to_path_buf(), key);
     // Failures counted in memory by earlier turns that could not be saved are
     // added to the stored count, so the total is never short.
     let unsaved = UNSAVED_FAILURES
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .get(&key)
+        .get(&slot)
         .copied()
         .unwrap_or(0);
     let failures = match PkgState::update(&ctx.ws, |s| {
@@ -9004,7 +9125,7 @@ fn patch_condition_gate(
             UNSAVED_FAILURES
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .remove(&key);
+                .remove(&slot);
             state.condition_failures_of(key)
         }
         Err(e) => {
@@ -9016,7 +9137,7 @@ fn patch_condition_gate(
                 ),
             });
             let mut counts = UNSAVED_FAILURES.lock().unwrap_or_else(|p| p.into_inner());
-            let n = counts.entry(key).or_insert(0);
+            let n = counts.entry(slot).or_insert(0);
             *n += 1;
             *n
         }
@@ -9492,6 +9613,35 @@ fn stale_patches(
     out
 }
 
+/// The patch number a `%patch` line applies, or `None` for any other line.
+/// Covers `%patchN`, `%patch -PN`, `%patch -P N` and the bare `%patch`, which
+/// applies patch 0 as rpm does.
+fn applied_patch_number(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("%patch")?;
+    let digits_len = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let (digits, after) = rest.split_at(digits_len);
+    if !digits.is_empty() {
+        // `%patchN`: the number is glued to the macro.
+        let ends_macro =
+            after.is_empty() || after.starts_with(char::is_whitespace) || after.starts_with('-');
+        return ends_macro.then(|| digits.to_string());
+    }
+    let after = after.trim_start();
+    match after.strip_prefix("-P") {
+        Some(num_part) => {
+            let n: String = num_part
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            (!n.is_empty()).then_some(n)
+        }
+        None => (after.is_empty() || after.starts_with('-')).then(|| "0".to_string()),
+    }
+}
+
 /// `spec` without the `PatchN:` lines (and `%patchN` applications) of `names`.
 fn without_patches(spec: &str, names: &[String]) -> String {
     let mut nums: Vec<String> = Vec::new();
@@ -9503,8 +9653,11 @@ fn without_patches(spec: &str, names: &[String]) -> String {
                 .get(..5)
                 .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
             && names.iter().any(|n| n == value.trim())
+            && tag.trim()[5..].chars().all(|c| c.is_ascii_digit())
         {
-            nums.push(tag.trim()[5..].to_string());
+            // A bare `Patch:` is patch 0, as rpm reads it.
+            let num = tag.trim()[5..].to_string();
+            nums.push(if num.is_empty() { "0".to_string() } else { num });
             continue;
         }
         out.push_str(line);
@@ -9513,22 +9666,9 @@ fn without_patches(spec: &str, names: &[String]) -> String {
     if nums.is_empty() {
         return spec.to_string();
     }
-    let applies = |l: &str| {
-        let t = l.trim_start();
-        t.starts_with("%patch")
-            && nums.iter().any(|n| {
-                t.strip_prefix("%patch").is_some_and(|r| {
-                    r.trim_start_matches("-P ").starts_with(n.as_str())
-                        && r.trim_start_matches("-P ")[n.len()..]
-                            .chars()
-                            .next()
-                            .is_none_or(|c| !c.is_ascii_digit())
-                })
-            })
-    };
     let mut kept = String::new();
     for line in out.lines() {
-        if !applies(line) {
+        if !applied_patch_number(line).is_some_and(|n| nums.contains(&n)) {
             kept.push_str(line);
             kept.push('\n');
         }
@@ -9685,8 +9825,9 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
 
 /// The first path a patch's file headers name that would reach outside the
 /// tree it is applied to: an absolute path, a `..` component, or a leading `~`.
-/// The `a/` or `b/` prefix and any timestamp after a tab are stripped first, and
-/// `/dev/null` (the add/delete marker) is allowed. Returns a description of the
+/// Unified (`---`/`+++`), context (`***`/`---`), `Index:`, `diff --git` and
+/// rename/copy headers are read. The `a/` or `b/` prefix and any timestamp after
+/// a tab are stripped first, and `/dev/null` (the add/delete marker) is allowed. Returns a description of the
 /// offending path, or `None` if every header stays inside the tree.
 fn patch_escapes_tree(patch_text: &str) -> Option<String> {
     let lines: Vec<&str> = patch_text.lines().collect();
@@ -9696,6 +9837,15 @@ fn patch_escapes_tree(patch_text: &str) -> Option<String> {
             // `---` opens a file header only when a `+++` follows it; anywhere
             // else it is a removed line of a hunk.
             if let Some(new) = lines.get(i + 1).and_then(|n| n.strip_prefix("+++ ")) {
+                raw_paths.push(rest);
+                raw_paths.push(new);
+            }
+        } else if let Some(rest) = line.strip_prefix("*** ") {
+            // A context-diff file header is `*** old` followed by `--- new`. A
+            // hunk's range line (`*** 1,3 ****`) is not a header.
+            if !rest.trim_end().ends_with("****")
+                && let Some(new) = lines.get(i + 1).and_then(|n| n.strip_prefix("--- "))
+            {
                 raw_paths.push(rest);
                 raw_paths.push(new);
             }
@@ -9719,7 +9869,10 @@ fn patch_escapes_tree(patch_text: &str) -> Option<String> {
             .unwrap_or_default()
             .trim()
             .trim_matches('"');
-        if raw.is_empty() || raw == "/dev/null" {
+        // `/dev/null` may carry a space-separated timestamp, so only its first
+        // word is compared.
+        let first_word = raw.split_whitespace().next().unwrap_or_default();
+        if raw.is_empty() || first_word == "/dev/null" {
             return None;
         }
         let path = raw
@@ -9739,10 +9892,60 @@ fn patch_escapes_tree(patch_text: &str) -> Option<String> {
     })
 }
 
+/// What the checkout held before the turn, for deciding which of its patches
+/// the turn answers for.
+enum PatchBaseline<'a> {
+    /// The pre-turn snapshot. A patch the turn left byte-identical is not judged.
+    Snapshot(&'a CheckoutSnapshot),
+    /// No pre-turn copy, but OBS publishes these names (`.osc/_files`). A
+    /// published patch is what was committed, not this run's edit, so only the
+    /// unpublished patches are judged.
+    NotPublished(Vec<String>),
+    /// No pre-turn copy at all. Every patch is judged; one OBS already publishes
+    /// is reported as pre-existing rather than as the turn's doing.
+    NoBaseline(Vec<String>),
+}
+
+/// The baseline for a call site: the snapshot when there is one, otherwise the
+/// names OBS publishes for the checkout.
+fn patch_baseline<'a>(
+    snapshot: Option<&'a CheckoutSnapshot>,
+    spec_path: &Path,
+) -> PatchBaseline<'a> {
+    match snapshot {
+        Some(snap) => PatchBaseline::Snapshot(snap),
+        None => PatchBaseline::NoBaseline(
+            spec_path
+                .parent()
+                .map(obs_tracked_names)
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+/// The file names OBS tracks for a checkout, from `.osc/_files`.
+fn obs_tracked_names(checkout: &Path) -> Vec<String> {
+    let xml = std::fs::read_to_string(checkout.join(".osc").join("_files")).unwrap_or_default();
+    xml.split("<entry ")
+        .skip(1)
+        .filter_map(|chunk| {
+            let head = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+            let start = head.find("name=\"")? + "name=\"".len();
+            let end = start + head[start..].find('"')?;
+            Some(head[start..end].to_string())
+        })
+        .collect()
+}
+
 /// The patch files the gate reads: every top-level `*.patch` or `*.diff` in the
 /// checkout, plus each bare file name the spec gives as a `PatchN:` line. Returns
-/// the first one whose headers escape the tree, as an error naming the file.
-fn patch_escape_problem(spec_path: &Path, spec: &str) -> Option<String> {
+/// the first one that escapes the tree and that the baseline makes the turn's
+/// concern, as an error naming the file.
+fn patch_escape_problem(
+    spec_path: &Path,
+    spec: &str,
+    baseline: &PatchBaseline<'_>,
+) -> Option<String> {
     let checkout = spec_path.parent()?;
     let mut names: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(checkout) {
@@ -9774,12 +9977,39 @@ fn patch_escape_problem(spec_path: &Path, spec: &str) -> Option<String> {
     }
     names.sort();
     names.dedup();
+    let published: &[String] = match baseline {
+        PatchBaseline::Snapshot(_) => &[],
+        PatchBaseline::NotPublished(p) | PatchBaseline::NoBaseline(p) => p,
+    };
     names.into_iter().find_map(|name| {
+        let is_published = published.contains(&name);
         let bytes = std::fs::read(checkout.join(&name)).ok()?;
+        match baseline {
+            PatchBaseline::Snapshot(snap) => {
+                if snap.holds_unchanged(&name, &bytes) {
+                    return None;
+                }
+            }
+            PatchBaseline::NotPublished(_) => {
+                if is_published {
+                    return None;
+                }
+            }
+            PatchBaseline::NoBaseline(_) => {}
+        }
         let why = patch_escapes_tree(&String::from_utf8_lossy(&bytes))?;
+        let origin = match baseline {
+            PatchBaseline::Snapshot(_) => "was added or changed by this turn",
+            PatchBaseline::NotPublished(_) => "is not published by OBS yet",
+            PatchBaseline::NoBaseline(_) if is_published => {
+                "is already published by OBS, so it is pre-existing and not this turn's edit"
+            }
+            PatchBaseline::NoBaseline(_) => "is a new or changed patch",
+        };
         Some(format!(
-            "{name} would write outside the source tree: {why}. \
-             A patch may only name paths relative to the source tree."
+            "{name} {origin}, and its headers would write outside the source tree: {why}. \
+             A patch may only name paths relative to the source tree: regenerate it with \
+             paths like `a/src/x.c` and `b/src/x.c`, not absolute or `..` paths."
         ))
     })
 }
@@ -9841,8 +10071,15 @@ fn names_version(name: &str, version: &str) -> bool {
 
 /// The source archive of `old_version` in `dir` that a new version replaces.
 /// `keep` (the new tarball) is never returned, and a longer version that
-/// merely starts with `old_version` (`1.2.1` for `1.2`) does not match.
-fn superseded_tarball(dir: &Path, old_version: &str, keep: &Path) -> Option<PathBuf> {
+/// merely starts with `old_version` (`1.2.1` for `1.2`) does not match. An
+/// archive the new spec still names as a source (`Source1:` for a second
+/// tarball of the old version) is not superseded either.
+fn superseded_tarball(
+    dir: &Path,
+    old_version: &str,
+    keep: &Path,
+    new_sources: &[crate::spec::SourceEntry],
+) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| {
@@ -9854,7 +10091,8 @@ fn superseded_tarball(dir: &Path, old_version: &str, keep: &Path) -> Option<Path
             (archive
                 && path != keep
                 && !matches!(name.as_str(), "vendor.tar.zst" | "registry.tar.zst")
-                && names_version(&name, old_version))
+                && names_version(&name, old_version)
+                && is_superseded_source_file(&name, new_sources))
             .then_some(path)
         })
         .collect();
@@ -9947,7 +10185,12 @@ fn carry_forward_spec(
     // The old source goes once the new spec is written: the spec names the new
     // one. Until then the old file is kept, so a failed write leaves the
     // checkout as it was.
-    let stale = superseded_tarball(checkout_dir, &old_version, &tarball);
+    let stale = superseded_tarball(
+        checkout_dir,
+        &old_version,
+        &tarball,
+        &crate::spec::expanded_sources(&bumped),
+    );
 
     let top = info
         .top_level_dir
@@ -11495,7 +11738,9 @@ fn generate_multi_flavor_wheel_spec(
             wheels.push((flavor.clone(), wheel.filename.clone()));
         }
         let Some((_, first_wheel)) = wheels.first().cloned() else {
-            return Err(GenSpecError::Other("no wheel was picked for any flavor".into()));
+            return Err(GenSpecError::Other(
+                "no wheel was picked for any flavor".into(),
+            ));
         };
         let release = ap_ecosystem::pypi::parse_release_with_tarball(json, &first_wheel)
             .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
@@ -12486,7 +12731,7 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
     for (pattern, repo_url) in known_mappings {
         if lower.starts_with(pattern) {
             ap_core::diag!("  checking known mapping: {}", repo_url);
-            if verify_repo_exists(repo_url) {
+            if verify_repo_exists(repo_url) == RepoProbe::Exists {
                 ap_core::diag!("  ✓ verified: {}", repo_url);
                 verified_candidates.push(repo_url.to_string());
             } else {
@@ -12500,6 +12745,10 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
 
     // For NVIDIA packages, try NVIDIA org URLs FIRST and with high priority
     // This ensures we prefer official NVIDIA repos over any random GitHub repos
+    // The NVIDIA-org repositories derived from the name, whatever their probe
+    // said. Only these are vouched for as NVIDIA's: a search hit under the same
+    // org is a search result like any other.
+    let mut from_name: Vec<String> = Vec::new();
     let is_nvidia_package = is_nvidia_package_name(&lower)
         || known_mappings
             .iter()
@@ -12521,8 +12770,9 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
 
         // Try NVIDIA org with the cleaned package name
         let nvidia_url = format!("https://github.com/NVIDIA/{}", clean);
+        from_name.push(nvidia_url.clone());
         ap_core::diag!("  checking NVIDIA org: {}", nvidia_url);
-        if verify_repo_exists(&nvidia_url) {
+        if verify_repo_exists(&nvidia_url) == RepoProbe::Exists {
             ap_core::diag!("  ✓ verified NVIDIA repo: {}", nvidia_url);
             verified_candidates.insert(0, nvidia_url.clone());
         } else {
@@ -12532,11 +12782,12 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
         // Also try without cuda- prefix for packages like cuda-python
         if let Some(after_cuda) = clean.strip_prefix("cuda-") {
             let nvidia_url2 = format!("https://github.com/NVIDIA/{}", after_cuda);
+            from_name.push(nvidia_url2.clone());
             ap_core::diag!(
                 "  checking NVIDIA org (without cuda- prefix): {}",
                 nvidia_url2
             );
-            if verify_repo_exists(&nvidia_url2) {
+            if verify_repo_exists(&nvidia_url2) == RepoProbe::Exists {
                 ap_core::diag!("  ✓ verified NVIDIA repo: {}", nvidia_url2);
                 verified_candidates.insert(0, nvidia_url2.clone());
             } else {
@@ -12546,9 +12797,10 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
 
         // Try the exact package name under NVIDIA org
         let nvidia_exact = format!("https://github.com/NVIDIA/{}", pkg_name);
+        from_name.push(nvidia_exact.clone());
         if nvidia_exact != format!("https://github.com/NVIDIA/{}", clean) {
             ap_core::diag!("  checking NVIDIA org (exact name): {}", nvidia_exact);
-            if verify_repo_exists(&nvidia_exact) {
+            if verify_repo_exists(&nvidia_exact) == RepoProbe::Exists {
                 ap_core::diag!("  ✓ verified NVIDIA repo: {}", nvidia_exact);
                 verified_candidates.insert(0, nvidia_exact.clone());
             } else {
@@ -12657,12 +12909,12 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             to_check.push(url.clone());
         }
     }
-    let exists = verify_repos_exist(&to_check);
+    let probes = verify_repos_exist(&to_check);
     for url in &candidates {
         if !verified_candidates.contains(url) {
             ap_core::diag!("  checking: {}", url);
             if let Some(i) = to_check.iter().position(|c| c == url)
-                && exists[i]
+                && probes[i] == RepoProbe::Exists
             {
                 ap_core::diag!("  ✓ verified: {}", url);
                 verified_candidates.push(url.clone());
@@ -12691,6 +12943,7 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
             known_mappings,
             recorded.as_deref(),
             distro_evidence.as_ref(),
+            &from_name,
         )
     };
     let (trusted, unvetted): (Vec<String>, Vec<String>) =
@@ -12851,13 +13104,15 @@ fn on_recorded_site(url: &str, recorded: &[String]) -> bool {
 
 /// Whether discovery may use `url` without confirmation: a curated mapping,
 /// the repository PyPI records for the project, what another distribution's
-/// spec records as its upstream, or an NVIDIA-org repository (the vendor's own
-/// org, which discovery derives from the package name).
+/// spec records as its upstream, or an NVIDIA-org repository derived from the
+/// package name (`from_name`). A search hit that happens to live under the
+/// NVIDIA org is not vouched for.
 fn is_vouched_for(
     url: &str,
     known: &[(&str, &str)],
     recorded: Option<&str>,
     distro: Option<&crate::discovery::DistroInfo>,
+    from_name: &[String],
 ) -> bool {
     known.iter().any(|(_, k)| same_repo_url(k, url))
         || recorded.is_some_and(|r| same_repo_url(r, url))
@@ -12867,9 +13122,7 @@ fn is_vouched_for(
                 .chain(&d.index_candidates)
                 .any(|r| same_repo_url(r, url))
         })
-        || url
-            .to_ascii_lowercase()
-            .starts_with("https://github.com/nvidia/")
+        || from_name.iter().any(|r| same_repo_url(r, url))
 }
 
 /// Search GitHub for repositories matching the package name.
@@ -12943,28 +13196,48 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Verify that a repository URL exists by making a HEAD request.
-///
-/// `false` only when the host definitively says the repository is not there
-/// (404 or 410). A probe that cannot tell (a rate limit, a 5xx, a timeout) is
-/// retried by the request wrapper; if it still cannot tell, the repository is
-/// kept as unverified rather than counted as missing. A transient failure must
-/// not drop a real repository, which would let a wheel-only release be
-/// repackaged from its binary wheel. Whether an unverified candidate is used
-/// is still decided by the vouching rules.
-fn verify_repo_exists(url: &str) -> bool {
-    match ap_ecosystem::net::call_with_retries(|| crate::http::head(url)) {
-        Ok(_) => true,
-        Err(ureq::Error::StatusCode(404 | 410)) => false,
-        Err(e) => {
-            ap_core::diag!("  warning: could not check {url} ({e}); keeping it as unverified");
-            true
-        }
+/// What a reachability probe of a repository URL established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoProbe {
+    /// The host answered and the repository is there.
+    Exists,
+    /// The host said the repository is not there (404 or 410).
+    Missing,
+    /// The host could not tell: a rate limit, a 5xx, a timeout or another
+    /// transport failure. Not evidence that the repository exists.
+    Unknown,
+}
+
+/// Classify the final answer of a probe. Only a definite answer from the host
+/// counts; anything else is `Unknown`.
+fn classify_repo_probe<T>(answer: &Result<T, ureq::Error>) -> RepoProbe {
+    match answer {
+        Ok(_) => RepoProbe::Exists,
+        Err(ureq::Error::StatusCode(404 | 410)) => RepoProbe::Missing,
+        Err(_) => RepoProbe::Unknown,
     }
 }
 
+/// Verify that a repository URL exists by making a HEAD request.
+///
+/// A probe that cannot tell (a rate limit, a 5xx, a timeout) is retried by the
+/// request wrapper; if it still cannot tell the result is `Unknown`. Only
+/// `Exists` may make a candidate verified. An `Unknown` candidate is kept as an
+/// unverified guess, so it is not built automatically, and it is probed again
+/// when the candidate list is checked.
+fn verify_repo_exists(url: &str) -> RepoProbe {
+    let answer = ap_ecosystem::net::call_with_retries(|| crate::http::head(url));
+    let probe = classify_repo_probe(&answer);
+    if probe == RepoProbe::Unknown {
+        if let Err(e) = &answer {
+            ap_core::diag!("  warning: could not check {url} ({e}); not used automatically");
+        }
+    }
+    probe
+}
+
 /// [`verify_repo_exists`] for several URLs, each probe on its own thread.
-fn verify_repos_exist(urls: &[String]) -> Vec<bool> {
+fn verify_repos_exist(urls: &[String]) -> Vec<RepoProbe> {
     std::thread::scope(|s| {
         let probes: Vec<_> = urls
             .iter()
@@ -13198,7 +13471,10 @@ mod tests {
         std::fs::create_dir_all(ws.state_json()).unwrap();
         assert!(PkgState::try_load(&ws).is_err());
         assert!(PkgState::update(&ws, |s| s.cumulative_attempts = 1).is_err());
-        assert!(ws.state_json().is_dir(), "the unreadable entry must be left alone");
+        assert!(
+            ws.state_json().is_dir(),
+            "the unreadable entry must be left alone"
+        );
         // A missing file is still the default state.
         std::fs::remove_dir(ws.state_json()).unwrap();
         assert_eq!(PkgState::try_load(&ws).unwrap().cumulative_attempts, 0);
@@ -13539,13 +13815,133 @@ mod tests {
     }
 
     #[test]
+    fn patch_escapes_tree_reads_a_space_separated_dev_null_timestamp() {
+        assert_eq!(
+            patch_escapes_tree(
+                "--- /dev/null 1970-01-01 00:00:00 +0000\n+++ b/new.txt\n@@ -0,0 +1 @@\n+x\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn patch_escapes_tree_reads_context_diff_headers() {
+        let escaping = "*** ../../x\t2020-01-01\n--- ../../x\t2020-01-01\n***************\n*** 1 ****\n! a\n--- 1 ----\n! b\n";
+        assert!(patch_escapes_tree(escaping).is_some());
+        let inside = "*** a/src/x.c\t2020-01-01\n--- b/src/x.c\t2020-01-01\n***************\n*** 1,3 ****\n--- 1,3 ----\n";
+        assert_eq!(patch_escapes_tree(inside), None);
+    }
+
+    #[test]
+    fn pre_existing_absolute_header_patch_is_not_the_turns_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("pkg.spec");
+        let spec = "Name: pkg\nPatch0: old.patch\n";
+        std::fs::write(&spec_path, spec).unwrap();
+        let old = "--- /tmp/orig/x\n+++ /tmp/new/x\n@@ -1 +1 @@\n-a\n+b\n";
+        std::fs::write(dir.path().join("old.patch"), old).unwrap();
+
+        // Untouched since the pre-turn snapshot: not rejected.
+        let snap = CheckoutSnapshot::take(dir.path());
+        assert_eq!(
+            patch_escape_problem(&spec_path, spec, &PatchBaseline::Snapshot(&snap)),
+            None
+        );
+        // OBS already publishes it: not judged at commit.
+        let published = PatchBaseline::NotPublished(vec!["old.patch".to_string()]);
+        assert_eq!(patch_escape_problem(&spec_path, spec, &published), None);
+        // With no pre-turn copy it is still reported, as pre-existing.
+        let no_baseline = PatchBaseline::NoBaseline(vec!["old.patch".to_string()]);
+        let problem = patch_escape_problem(&spec_path, spec, &no_baseline).expect("escape");
+        assert!(problem.contains("pre-existing"), "{problem}");
+        assert!(!problem.contains("changed by this turn"), "{problem}");
+    }
+
+    #[test]
+    fn patch_the_turn_modified_with_an_escaping_header_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("pkg.spec");
+        let spec = "Name: pkg\nPatch0: old.patch\n";
+        std::fs::write(&spec_path, spec).unwrap();
+        std::fs::write(
+            dir.path().join("old.patch"),
+            "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .unwrap();
+        let snap = CheckoutSnapshot::take(dir.path());
+
+        // The turn rewrites the patch with an absolute header.
+        std::fs::write(
+            dir.path().join("old.patch"),
+            "--- /tmp/orig/x\n+++ /tmp/new/x\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .unwrap();
+        let problem = patch_escape_problem(&spec_path, spec, &PatchBaseline::Snapshot(&snap))
+            .expect("the turn's edit escapes");
+        assert!(problem.contains("old.patch"), "{problem}");
+        assert!(problem.contains("changed by this turn"), "{problem}");
+
+        // A patch the turn added with a `..` header is rejected too.
+        std::fs::write(
+            dir.path().join("new.patch"),
+            "--- ../../x\n+++ ../../x\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .unwrap();
+        assert!(patch_escape_problem(&spec_path, spec, &PatchBaseline::Snapshot(&snap)).is_some());
+    }
+
+    #[test]
+    fn superseded_tarball_keeps_an_archive_the_new_spec_still_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["pkg-1.2.tar.gz", "pkg-1.2-data.tar.gz"] {
+            std::fs::write(dir.path().join(f), b"").unwrap();
+        }
+        let new = dir.path().join("pkg-1.3.tar.gz");
+        let sources = vec![crate::spec::SourceEntry {
+            url: "https://example.com/pkg-1.2-data.tar.gz".to_string(),
+            file: "pkg-1.2-data.tar.gz".to_string(),
+        }];
+        assert_eq!(
+            superseded_tarball(dir.path(), "1.2", &new, &sources),
+            Some(dir.path().join("pkg-1.2.tar.gz"))
+        );
+    }
+
+    #[test]
+    fn only_a_definite_answer_makes_a_repository_probe_exist_or_missing() {
+        assert_eq!(classify_repo_probe::<()>(&Ok(())), RepoProbe::Exists);
+        assert_eq!(
+            classify_repo_probe::<()>(&Err(ureq::Error::StatusCode(404))),
+            RepoProbe::Missing
+        );
+        assert_eq!(
+            classify_repo_probe::<()>(&Err(ureq::Error::StatusCode(410))),
+            RepoProbe::Missing
+        );
+        for status in [403, 429, 500, 503] {
+            assert_eq!(
+                classify_repo_probe::<()>(&Err(ureq::Error::StatusCode(status))),
+                RepoProbe::Unknown,
+                "status {status}"
+            );
+        }
+        assert_eq!(
+            classify_repo_probe::<()>(&Err(ureq::Error::Io(std::io::Error::other("reset")))),
+            RepoProbe::Unknown
+        );
+    }
+
+    #[test]
     fn escaping_patch_in_checkout_is_named_by_the_gate() {
         let dir = tempfile::tempdir().unwrap();
         let spec = "Name: pkg\nPatch0: bad.patch\nPatch1: good.patch\n";
         let spec_path = dir.path().join("pkg.spec");
         std::fs::write(&spec_path, spec).unwrap();
         std::fs::write(dir.path().join("good.patch"), "--- a/x\n+++ b/x\n").unwrap();
-        assert_eq!(patch_escape_problem(&spec_path, spec), None);
+        assert_eq!(
+            patch_escape_problem(&spec_path, spec, &PatchBaseline::NoBaseline(Vec::new())),
+            None
+        );
 
         // an unreferenced top-level .diff is still scanned
         std::fs::write(
@@ -13553,7 +13949,9 @@ mod tests {
             "--- a/x\n+++ /home/u/.config/osc/oscrc\n",
         )
         .unwrap();
-        let problem = patch_escape_problem(&spec_path, spec).expect("escape found");
+        let problem =
+            patch_escape_problem(&spec_path, spec, &PatchBaseline::NoBaseline(Vec::new()))
+                .expect("escape found");
         assert!(problem.starts_with("stray.diff"), "{problem}");
         std::fs::remove_file(dir.path().join("stray.diff")).unwrap();
 
@@ -13562,7 +13960,9 @@ mod tests {
             "--- a/../../../etc/x\n+++ b/../../../etc/x\n",
         )
         .unwrap();
-        let problem = patch_escape_problem(&spec_path, spec).expect("escape found");
+        let problem =
+            patch_escape_problem(&spec_path, spec, &PatchBaseline::NoBaseline(Vec::new()))
+                .expect("escape found");
         assert!(problem.starts_with("bad.patch"), "{problem}");
         assert!(problem.contains("`..`"), "{problem}");
     }
@@ -13669,11 +14069,11 @@ mod tests {
         let new = dir.path().join("pkg-1.2.1.tar.gz");
         // The old 1.2 tarball is found even though 1.2.1 also contains "1.2".
         assert_eq!(
-            superseded_tarball(dir.path(), "1.2", &new),
+            superseded_tarball(dir.path(), "1.2", &new, &[]),
             Some(dir.path().join("pkg-1.2.tar.gz"))
         );
         // Nothing is superseded when the only match is the new tarball.
-        assert_eq!(superseded_tarball(dir.path(), "1.2.1", &new), None);
+        assert_eq!(superseded_tarball(dir.path(), "1.2.1", &new, &[]), None);
         assert!(names_version("pkg-1.2-py3-none-any.whl", "1.2"));
         assert!(!names_version("pkg-1.2.1.tar.gz", "1.2"));
         assert!(!names_version("pkg-11.2.tar.gz", "1.2"));
@@ -15039,49 +15439,66 @@ mod discovery_vouching_tests {
             "https://github.com/acme/widget/",
             known,
             recorded,
-            None
+            None,
+            &[]
         ));
         assert!(is_vouched_for(
             "https://github.com/acme/widget.git",
             known,
             recorded,
-            None
+            None,
+            &[]
         ));
+        let from_name = vec!["https://github.com/NVIDIA/nvjitlink".to_string()];
         assert!(is_vouched_for(
             "https://github.com/NVIDIA/cuda-python",
             known,
             None,
-            None
+            None,
+            &[]
         ));
         assert!(is_vouched_for(
+            "https://github.com/NVIDIA/nvjitlink",
+            known,
+            None,
+            None,
+            &from_name
+        ));
+        // A search hit under the NVIDIA org is not a name-derived repository.
+        assert!(!is_vouched_for(
             "https://github.com/NVIDIA/nvjitlink-python",
             known,
             None,
-            None
+            None,
+            &from_name
         ));
         assert!(is_vouched_for(
             "https://gitlab.com/Acme/Gadget",
             known,
             None,
-            Some(&distro)
+            Some(&distro),
+            &[]
         ));
         assert!(is_vouched_for(
             "https://ftp.gnu.org/gnu/lzip",
             known,
             None,
-            Some(&distro)
+            Some(&distro),
+            &[]
         ));
         assert!(!is_vouched_for(
             "https://github.com/attacker/widget",
             known,
             recorded,
-            None
+            None,
+            &[]
         ));
         assert!(!is_vouched_for(
             "https://github.com/attacker/widget",
             known,
             None,
-            Some(&distro)
+            Some(&distro),
+            &[]
         ));
     }
 
@@ -15710,6 +16127,37 @@ mod hygiene_tests {
             without_patches(spec, &["old.patch".to_string()]),
             "Name: x\nPatch1: ok.patch\n%prep\n%patch -P 1 -p1\n"
         );
+    }
+
+    #[test]
+    fn without_patches_removes_every_form_of_the_applied_patch_only() {
+        let spec = "Name: x\nPatch: bare.patch\nPatch1: spaced.patch\nPatch2: glued.patch\nPatch3: keep.patch\n%prep\n%patch -p1\n%patch -P 1 -p1\n%patch -P2 -p1\n%patch3 -p1\n%patchfoo\n";
+        let kept = without_patches(
+            spec,
+            &[
+                "bare.patch".to_string(),
+                "spaced.patch".to_string(),
+                "glued.patch".to_string(),
+            ],
+        );
+        assert_eq!(
+            kept,
+            "Name: x\nPatch3: keep.patch\n%prep\n%patch3 -p1\n%patchfoo\n"
+        );
+    }
+
+    #[test]
+    fn applied_patch_number_reads_each_macro_form() {
+        assert_eq!(applied_patch_number("%patch -p1").as_deref(), Some("0"));
+        assert_eq!(applied_patch_number("%patch").as_deref(), Some("0"));
+        assert_eq!(applied_patch_number("%patch0 -p1").as_deref(), Some("0"));
+        assert_eq!(
+            applied_patch_number("%patch -P 12 -p1").as_deref(),
+            Some("12")
+        );
+        assert_eq!(applied_patch_number("%patch -P3").as_deref(), Some("3"));
+        assert_eq!(applied_patch_number("%patchfoo"), None);
+        assert_eq!(applied_patch_number("echo %patch1"), None);
     }
 
     #[test]
