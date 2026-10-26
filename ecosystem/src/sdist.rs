@@ -855,7 +855,10 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
 /// paragraph is prose only when none of its lines starts like markup. `None`
 /// when nothing qualifies or the text carries a `TODO`/`FIXME` word.
 fn metadata_description(metadata: &str) -> Option<String> {
-    let body = metadata
+    // CRLF files have no bare "\n\n": normalise first so the header/body split
+    // happens at the first blank line whichever line ending it uses.
+    let normalised = metadata.replace("\r\n", "\n");
+    let body = normalised
         .split_once("\n\n")
         .map(|(_, body)| body)
         .unwrap_or("");
@@ -3088,6 +3091,19 @@ build-backend = "flit_core.buildapi"
             Some("Pkg is a fast thing that does useful work, 100% of the time.")
         );
         assert_eq!(metadata_description("Name: x\n\n# only a heading\n"), None);
+    }
+
+    #[test]
+    fn metadata_description_reads_a_crlf_metadata_file() {
+        let crlf = "Metadata-Version: 2.4\r\nName: pkg\r\nSummary: s\r\n\r\n# pkg\r\n\r\nPkg is a fast thing that does\r\nuseful work.\r\n\r\nSecond paragraph.\r\n";
+        assert_eq!(
+            metadata_description(crlf).as_deref(),
+            Some("Pkg is a fast thing that does useful work.")
+        );
+        assert_eq!(
+            metadata_description(&crlf.replace("\r\n", "\n")),
+            metadata_description(crlf)
+        );
     }
 
     #[test]
