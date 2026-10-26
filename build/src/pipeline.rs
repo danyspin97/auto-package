@@ -525,14 +525,16 @@ pub fn reconcile_with_obs(
     out
 }
 
-/// Hash spec content for [`PkgState::reviewed_spec_hash`]. Not cryptographic —
-/// only used to detect "did the spec change since it was reviewed", not for
-/// anything security-sensitive.
+/// Hash spec content for [`PkgState::reviewed_spec_hash`] and the other hashes
+/// persisted in state.json. The value is the first 8 bytes of SHA-256, so it is
+/// stable across Rust releases (`DefaultHasher` is not). Hashes stored by older
+/// builds no longer match, which costs one extra turn per package at most.
 pub(crate) fn hash_spec(content: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(content.as_bytes());
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(first)
 }
 
 /// Hash a sorted+deduped dependency-name list for
@@ -543,20 +545,32 @@ fn hash_deps(sorted_deps: &[String]) -> u64 {
 }
 
 impl PkgState {
+    /// Read-only callers may fall back to the default state (see [`Self::load`]);
+    /// anything that saves must use this or [`Self::update`], so an unreadable
+    /// file is never replaced by an empty state.
     pub fn load(ws: &Workspace) -> Self {
+        Self::try_load(ws).unwrap_or_else(|e| {
+            ap_core::diag!("  cannot read {e}; starting from empty state");
+            Self::default()
+        })
+    }
+
+    /// Like [`Self::load`], but a read failure other than "not found" is an
+    /// error instead of an empty state. A corrupt file is still moved aside
+    /// and yields the default state.
+    pub fn try_load(ws: &Workspace) -> std::io::Result<Self> {
         let path = ws.state_json();
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => {
-                ap_core::diag!(
-                    "  cannot read {} ({e}); starting from empty state",
-                    path.display()
-                );
-                return Self::default();
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", path.display()),
+                ));
             }
         };
-        serde_json::from_str(&text).unwrap_or_else(|e| {
+        Ok(serde_json::from_str(&text).unwrap_or_else(|e| {
             // Keep the unreadable file: defaulting and then saving would
             // otherwise erase the package's history without a trace.
             let bad = path.with_extension("json.bad");
@@ -572,7 +586,7 @@ impl PkgState {
                 );
             }
             Self::default()
-        })
+        }))
     }
 
     /// Written to a temporary file and renamed, so a crash mid-write leaves
@@ -600,7 +614,9 @@ impl PkgState {
             .map_err(|e| {
                 std::io::Error::other(format!("{}: {}", lock_path.display(), lock_error_text(&e)))
             })?;
-        let mut state = Self::load(ws);
+        // A file that cannot be read fails the update instead of being
+        // replaced by the default state (which would reset the budget counters).
+        let mut state = Self::try_load(ws)?;
         f(&mut state);
         state.save(ws)?;
         Ok(state)
@@ -3541,6 +3557,18 @@ fn review_stage(
                     }
                 });
             }
+            discard_failed_turn(
+                ws.notes(),
+                reporter,
+                &checkout_snapshot,
+                spec_path,
+                &spec_before,
+                if patching.is_some() {
+                    "PatchDependency"
+                } else {
+                    "Review"
+                },
+            );
             return Err(ctx.failed_as(kind, format!("the agent turn failed: {e}")));
         }
     }
@@ -3674,8 +3702,8 @@ fn prefix_stage(
             if let Some(missing) = missing_deps_from_turn(ctx, prefix_step.id, &outcome) {
                 // Not applied, so not validated or journaled: undo the turn's
                 // edits (see `fix_after_build`).
-                checkout_snapshot.restore(reporter, &prefix_step);
-                restore_spec(spec_path, &clean, &prefix_step, reporter);
+                checkout_snapshot.restore(reporter, Some(&prefix_step));
+                restore_spec(spec_path, &clean, Some(&prefix_step), reporter);
                 return Err(missing);
             }
             // Everything the turn called missing is already built here, so
@@ -3732,6 +3760,14 @@ fn prefix_stage(
                 return Err(missing);
             }
         } else if let Err((e, kind)) = turn {
+            discard_failed_turn(
+                ws.notes(),
+                reporter,
+                &checkout_snapshot,
+                spec_path,
+                &clean,
+                "PreFix",
+            );
             return Err(ctx.failed_as(kind, format!("the agent turn failed: {e}")));
         }
     }
@@ -4531,7 +4567,17 @@ fn fix_after_validation(
             }
             Ok(())
         }
-        Err((e, kind)) => Err(ctx.failed_as(kind, format!("{agent_failed_prefix}{e}"))),
+        Err((e, kind)) => {
+            discard_failed_turn(
+                ws.notes(),
+                *reporter,
+                &checkout_snapshot,
+                spec_path,
+                &clean,
+                "FixAfterValidation",
+            );
+            Err(ctx.failed_as(kind, format!("{agent_failed_prefix}{e}")))
+        }
     }
 }
 
@@ -5752,6 +5798,17 @@ fn unresolvable_deps_round(
     }
 
     if unresolvable_deps.is_empty() {
+        // The driver libraries were seen but the spec already excludes them:
+        // a retry would build the same spec and get the same answer.
+        if !driver_deps.is_empty() && !driver_fixed {
+            return Err(ctx.failed(format!(
+                "OBS reports {} unresolvable, but the spec already has them in \
+                 `%global __requires_exclude` (the NVIDIA driver relaxation is present) \
+                 and OBS still reports them; log: {}",
+                driver_deps.join(", "),
+                build_log.display()
+            )));
+        }
         // Every dep has a local RPM, so OBS should pick them up on
         // retry. Count the round anyway — if OBS keeps saying
         // unresolvable we would otherwise spin here forever.
@@ -6090,15 +6147,25 @@ fn fix_after_build(
         // `agent_turn` already routed the Error through
         // `friendly_agent_error`, so this is a user-ready message
         // (budget-exhausted hint included); pass it through verbatim.
-        Err((e, kind)) => return Err(ctx.failed_as(kind, e)),
+        Err((e, kind)) => {
+            discard_failed_turn(
+                ws.notes(),
+                reporter,
+                &checkout_snapshot,
+                spec_path,
+                &clean,
+                "FixAfterBuild",
+            );
+            return Err(ctx.failed_as(kind, e));
+        }
     };
 
     if let Some(missing) = missing_deps_from_turn(ctx, agent_step.id, &outcome) {
         // This path skips the apply gate, so the turn's edit would reach the
         // next build unvalidated and unjournaled. Roll back to the state the
         // turn started from, and journal the discarded turn.
-        checkout_snapshot.restore(reporter, &agent_step);
-        restore_spec(spec_path, &clean, &agent_step, reporter);
+        checkout_snapshot.restore(reporter, Some(&agent_step));
+        restore_spec(spec_path, &clean, Some(&agent_step), reporter);
         append_notes(
             ws.notes(),
             &format!(
@@ -6908,34 +6975,47 @@ fn resolve_blocked_with(
                     // Written like any other edit: snapshot first, then the
                     // same acceptance gate (rpmspec, patches, rollback on reject).
                     let drop_snapshot = CheckoutSnapshot::take(checkout_dir);
-                    write_or_warn(spec_path, &dropped.spec);
+                    // A spec that could not be written is a rung that did not
+                    // resolve: the next rung runs, and nothing is journaled as skipped.
+                    let written = ap_core::fsx::write_atomic(spec_path, &dropped.spec);
                     let names: Vec<&str> = dropped.tests.iter().map(|t| t.id.as_str()).collect();
-                    let accepted = accept_or_restore_with_snapshot(
-                        spec_path,
-                        &spec_now,
-                        Some(&drop_snapshot),
-                        site.step,
-                        *reporter,
-                        &format!(
-                            "\n## {} - resolve round {round} - failing tests skipped\n{}\n{}",
-                            site.apply_label,
-                            dropped
-                                .tests
-                                .iter()
-                                .map(|t| format!("- {} ({})", t.id, brief(&t.line)))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            if dropped.omitted > 0 {
-                                format!(
-                                    "{} more failing test(s) are left for the next round.\n",
-                                    dropped.omitted
-                                )
-                            } else {
-                                String::new()
-                            }
-                        ),
-                        ws.notes(),
-                    );
+                    let accepted = written.is_ok()
+                        && accept_or_restore_with_snapshot(
+                            spec_path,
+                            &spec_now,
+                            Some(&drop_snapshot),
+                            site.step,
+                            *reporter,
+                            &format!(
+                                "\n## {} - resolve round {round} - failing tests skipped\n{}\n{}",
+                                site.apply_label,
+                                dropped
+                                    .tests
+                                    .iter()
+                                    .map(|t| format!("- {} ({})", t.id, brief(&t.line)))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                                if dropped.omitted > 0 {
+                                    format!(
+                                        "{} more failing test(s) are left for the next round.\n",
+                                        dropped.omitted
+                                    )
+                                } else {
+                                    String::new()
+                                }
+                            ),
+                            ws.notes(),
+                            &[],
+                        );
+                    if let Err(e) = &written {
+                        append_notes(
+                            ws.notes(),
+                            &format!(
+                                "\n## resolve round {round} - failing tests not skipped\n\
+                                 writing the spec failed: {e}\n"
+                            ),
+                        );
+                    }
                     if accepted {
                         warn_if_err(
                             *reporter,
@@ -7012,8 +7092,8 @@ fn resolve_blocked_with(
         if let Some(missing) = missing_deps_from_turn(ctx, step.id, &out) {
             // Not applied, so not validated or journaled: undo it (see
             // `fix_after_build`).
-            round_snapshot.restore(*reporter, &step);
-            restore_spec(spec_path, &round_spec, &step, *reporter);
+            round_snapshot.restore(*reporter, Some(&step));
+            restore_spec(spec_path, &round_spec, Some(&step), *reporter);
             return Rung::Abort(missing);
         }
         let label = format!("{} — resolve round {round}", site.apply_label);
@@ -7451,7 +7531,7 @@ fn strip_and_rewrite(spec_path: &Path) -> String {
 /// [`strip_and_rewrite`]); no real spec is empty, so writing it would
 /// destroy the file the agent edited instead of restoring it. A failed
 /// write is reported rather than dropped.
-fn restore_spec(spec_path: &Path, before: &str, step: &StepDir, reporter: &dyn Reporter) {
+fn restore_spec(spec_path: &Path, before: &str, step: Option<&StepDir>, reporter: &dyn Reporter) {
     let problem = if before.trim().is_empty() {
         Some("no readable roll-back point; leaving the spec as the agent left it".to_string())
     } else {
@@ -7461,10 +7541,51 @@ fn restore_spec(spec_path: &Path, before: &str, step: &StepDir, reporter: &dyn R
     };
     if let Some(message) = problem {
         reporter.report(&Event::Warning {
-            step: Some(step.id),
+            step: step.map(|s| s.id),
             message: format!("{}: {message}", spec_path.display()),
         });
     }
+}
+
+/// A spec check that could not run. The edit is kept (the check did not judge
+/// it), but the skip is warned about and journaled so it is not silent.
+fn skipped_check_note(
+    reporter: &dyn Reporter,
+    step: &StepDir,
+    notes_path: PathBuf,
+    check: &str,
+    why: &str,
+) {
+    reporter.report(&Event::Warning {
+        step: Some(step.id),
+        message: format!("the {check} check was skipped, so the edit is kept unchecked: {why}"),
+    });
+    append_notes(
+        notes_path,
+        &format!(
+            "\n## {check} check skipped\nThe check could not run, so the edit was kept without \
+             it: {why}\n"
+        ),
+    );
+}
+
+/// Undo a turn that failed on the agent's side. The agent may have edited the
+/// checkout or the spec before it failed, and nothing validates those edits,
+/// so both go back to the state taken before the turn and the journal says so.
+fn discard_failed_turn(
+    notes_path: PathBuf,
+    reporter: &dyn Reporter,
+    snapshot: &CheckoutSnapshot,
+    spec_path: &Path,
+    before: &str,
+    label: &str,
+) {
+    snapshot.restore(reporter, None);
+    restore_spec(spec_path, before, None, reporter);
+    append_notes(
+        notes_path,
+        &format!("\n## {label} — the agent turn failed\nIts edits were discarded.\n"),
+    );
 }
 
 /// Point the durable workspace's `build.log` at this run's build log.
@@ -7782,7 +7903,14 @@ impl CheckoutSnapshot {
     ///
     /// A file whose contents already match is never rewritten, so its mtime
     /// and inode stay as they were.
-    fn restore(&self, reporter: &dyn Reporter, step: &StepDir) {
+    fn restore(&self, reporter: &dyn Reporter, step: Option<&StepDir>) {
+        self.restore_keeping(reporter, step, &[]);
+    }
+
+    /// Like [`Self::restore`], but top-level files named in `keep` are left as they
+    /// are: the files a turn asked to be staged, which are not in the snapshot.
+    fn restore_keeping(&self, reporter: &dyn Reporter, step: Option<&StepDir>, keep: &[String]) {
+        let step_id = step.map(|s| s.id);
         // 1) Put back every snapshotted file the agent changed or deleted.
         for (name, entry) in &self.files {
             let path = self.checkout_dir.join(name);
@@ -7797,7 +7925,7 @@ impl CheckoutSnapshot {
                 };
                 if changed {
                     reporter.report(&Event::Warning {
-                        step: Some(step.id),
+                        step: step_id,
                         message: format!(
                             "cannot roll back {}: its contents were not snapshotted",
                             path.display()
@@ -7816,7 +7944,7 @@ impl CheckoutSnapshot {
             }
             if let Err(e) = ap_core::fsx::write_atomic(&path, bytes) {
                 reporter.report(&Event::Warning {
-                    step: Some(step.id),
+                    step: step_id,
                     message: format!("could not restore {}: {e}", path.display()),
                 });
             }
@@ -7833,11 +7961,11 @@ impl CheckoutSnapshot {
                     continue;
                 }
                 let name = entry.file_name();
-                if !self.files.contains_key(&name) {
+                if !self.files.contains_key(&name) && !keep.iter().any(|k| name == k.as_str()) {
                     let path = entry.path();
                     if let Err(e) = std::fs::remove_file(&path) {
                         reporter.report(&Event::Warning {
-                            step: Some(step.id),
+                            step: step_id,
                             message: format!(
                                 "could not delete agent-added file {}: {e}",
                                 path.display()
@@ -7913,6 +8041,7 @@ fn accept_or_restore_with_snapshot(
     reporter: &dyn Reporter,
     notes_entry: &str,
     notes_path: PathBuf,
+    keep: &[String],
 ) -> bool {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
 
@@ -7927,25 +8056,40 @@ fn accept_or_restore_with_snapshot(
         });
     }
 
-    if let Err(e) = osc::rpmspec_check(spec_path, Emit::new(reporter, step.id)) {
-        note_spec_rejection(spec_path, &e.to_string());
-        reporter.report(&Event::SpecRejected {
-            step: step.id,
-            reason: ap_core::event::SpecRejection::RpmspecParseFailed {
-                stderr: e.to_string(),
-            },
-            restored_from: spec_path.to_path_buf(),
-        });
-        restore_spec(spec_path, before, step, reporter);
-        // When we have a full-checkout snapshot, roll back patches /
-        // `.changes` / `_service` / etc. too — the agent's edits are an
-        // atomic unit, and a half-reverted checkout is a worse state
-        // than any version this run has actually validated.
-        if let Some(snap) = snapshot {
-            snap.restore(reporter, step);
+    match osc::rpmspec_check(spec_path, Emit::new(reporter, step.id)) {
+        Ok(_) => {}
+        // Only a verdict on the spec is a rejection. A check that could not run
+        // (bwrap or rpmspec missing, a spawn failure, a timeout) says nothing
+        // about the edit: it is journaled and the edit is kept.
+        Err(e @ (osc::Error::RpmspecFailed { .. } | osc::Error::UnsandboxedMacro { .. })) => {
+            note_spec_rejection(spec_path, &e.to_string());
+            reporter.report(&Event::SpecRejected {
+                step: step.id,
+                reason: ap_core::event::SpecRejection::RpmspecParseFailed {
+                    stderr: e.to_string(),
+                },
+                restored_from: spec_path.to_path_buf(),
+            });
+            restore_spec(spec_path, before, Some(step), reporter);
+            // When we have a full-checkout snapshot, roll back patches /
+            // `.changes` / `_service` / etc. too — the agent's edits are an
+            // atomic unit, and a half-reverted checkout is a worse state
+            // than any version this run has actually validated.
+            if let Some(snap) = snapshot {
+                snap.restore_keeping(reporter, Some(step), keep);
+            }
+            append_notes(notes_path, &rollback_note(&e.to_string()));
+            return false;
         }
-        append_notes(notes_path, &rollback_note(&e.to_string()));
-        return false;
+        Err(e) => {
+            skipped_check_note(
+                reporter,
+                step,
+                notes_path.clone(),
+                "rpmspec",
+                &e.to_string(),
+            );
+        }
     }
 
     // A patch header naming an absolute path or a `..` component would let the
@@ -7960,9 +8104,9 @@ fn accept_or_restore_with_snapshot(
             },
             restored_from: spec_path.to_path_buf(),
         });
-        restore_spec(spec_path, before, step, reporter);
+        restore_spec(spec_path, before, Some(step), reporter);
         if let Some(snap) = snapshot {
-            snap.restore(reporter, step);
+            snap.restore_keeping(reporter, Some(step), keep);
         }
         append_notes(
             notes_path,
@@ -7980,10 +8124,7 @@ fn accept_or_restore_with_snapshot(
     // with wrong hunk counts ("malformed patch") are the usual culprit.
     let patch_check = check_patches_apply(spec_path, &after);
     if let Ok(Some(unchecked)) = &patch_check {
-        reporter.report(&Event::Warning {
-            step: Some(step.id),
-            message: unchecked.clone(),
-        });
+        skipped_check_note(reporter, step, notes_path.clone(), "patch", unchecked);
     }
     if let Err(problem) = patch_check {
         note_spec_rejection(spec_path, &problem);
@@ -7994,9 +8135,9 @@ fn accept_or_restore_with_snapshot(
             },
             restored_from: spec_path.to_path_buf(),
         });
-        restore_spec(spec_path, before, step, reporter);
+        restore_spec(spec_path, before, Some(step), reporter);
         if let Some(snap) = snapshot {
-            snap.restore(reporter, step);
+            snap.restore_keeping(reporter, Some(step), keep);
         }
         append_notes(
             notes_path,
@@ -8138,21 +8279,27 @@ fn apply_turn_outcome_with(
             // rejection) before anything else runs on them. The full-checkout
             // snapshot is not used here: restoring it would delete the staged
             // files, which are not in it.
-            let changed = accept_or_restore_with_snapshot(
-                spec_path,
-                before,
-                None,
-                step,
-                reporter,
-                &format!(
-                    "\n## Attempt {attempt} — {label} — edits kept with the staged files\n\
-                     Reasoning: {}\n",
-                    brief(&outcome.reasoning)
-                ),
-                notes_path,
-            );
-            if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
-                return Err(format!("{label}: {msg}"));
+            // An unchanged spec has nothing for the gate to judge: it is not
+            // run, and a rejection is not counted against the package.
+            let spec_edited = std::fs::read_to_string(spec_path).ok().as_deref() != Some(before);
+            if spec_edited {
+                let changed = accept_or_restore_with_snapshot(
+                    spec_path,
+                    before,
+                    None,
+                    step,
+                    reporter,
+                    &format!(
+                        "\n## Attempt {attempt} — {label} — edits kept with the staged files\n\
+                         Reasoning: {}\n",
+                        brief(&outcome.reasoning)
+                    ),
+                    notes_path,
+                    &staged,
+                );
+                if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
+                    return Err(format!("{label}: {msg}"));
+                }
             }
             // The staged files are changes in their own right, kept whatever
             // the gate decided about the spec.
@@ -8164,9 +8311,9 @@ fn apply_turn_outcome_with(
             // patches/_service files before deciding it's blocked, and
             // those should not survive the rejection.
             if let Some(snap) = snapshot {
-                snap.restore(reporter, step);
+                snap.restore(reporter, Some(step));
             }
-            restore_spec(spec_path, before, step, reporter);
+            restore_spec(spec_path, before, Some(step), reporter);
             // Journaled like an edit: a turn that changed nothing is still what
             // the next turn, and whoever reads the notes, needs to know about
             // (python-chromadb's ten identical turns left no trace in them).
@@ -8183,7 +8330,7 @@ fn apply_turn_outcome_with(
             // On NoChange, also restore — the agent's "no change needed"
             // verdict shouldn't paper over an unreported partial edit.
             if let Some(snap) = snapshot {
-                snap.restore(reporter, step);
+                snap.restore(reporter, Some(step));
             }
             append_notes(
                 notes_path,
@@ -8207,8 +8354,19 @@ fn apply_turn_outcome_with(
                     evidence_lines(&outcome.evidence),
                     outcome.confidence
                 ),
-                notes_path,
+                notes_path.clone(),
+                &staged,
             );
+            if !changed && !staged.is_empty() {
+                append_notes(
+                    notes_path.clone(),
+                    &format!(
+                        "\n## {label} — staged files kept\nThe edit was rolled back, but the \
+                         files staged for this turn were kept: {}\n",
+                        staged.join(", ")
+                    ),
+                );
+            }
             if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
                 return Err(format!("{label}: {msg}"));
             }
@@ -8322,6 +8480,7 @@ fn apply_turn_outcome_with(
                             wheel.filename, wheel.sha256,
                         ),
                         notes_path,
+                        &staged,
                     );
                     Ok(if changed {
                         TurnEffect::SwitchedToWheel
@@ -8696,10 +8855,30 @@ fn patch_condition_gate(
         Verdict::Unknown => return Ok(()),
         Verdict::Violated(why) => why,
     };
-    let mut failures = 0;
-    update_state(&ctx.ws, ctx.reporter, |s| {
-        failures = s.record_condition_failure(key)
-    });
+    // The count comes from the stored state. If the state cannot be saved (the
+    // lock timed out, the file is unreadable), it is kept in memory for this
+    // process instead, so the cap is still reached.
+    static UNSAVED_FAILURES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<u64, u32>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let failures = match PkgState::update(&ctx.ws, |s| {
+        s.record_condition_failure(key);
+    }) {
+        Ok(state) => state.condition_failures_of(key),
+        Err(e) => {
+            ctx.reporter.report(&Event::Warning {
+                step: None,
+                message: format!(
+                    "{}: cannot save the condition failure count: {e}",
+                    ctx.rpm_name
+                ),
+            });
+            let mut counts = UNSAVED_FAILURES.lock().unwrap_or_else(|p| p.into_inner());
+            let n = counts.entry(key).or_insert(0);
+            *n += 1;
+            *n
+        }
+    };
     append_notes(
         ctx.ws.notes(),
         &format!(
@@ -9346,8 +9525,14 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
 
 /// [`try_patches`] as a gate for an edit: `Err` names the first patch that does
 /// not apply. The `Ok` value is what could not be checked, to be reported.
+/// `Err` only for a patch that does not apply. A check that could not run
+/// comes back as `Ok(Some(..))`, the same "unchecked" note an archive that
+/// will not unpack gets: it says nothing about the patches.
 fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, String> {
-    let check = try_patches(spec_path, spec)?;
+    let check = match try_patches(spec_path, spec) {
+        Ok(check) => check,
+        Err(e) => return Ok(Some(format!("the patch check could not run: {e}"))),
+    };
     match check.failed.first() {
         Some((name, detail)) => Err(format!(
             "{name} does not apply to the pristine source with `patch -p1 --fuzz=0`: {detail}"
@@ -12757,6 +12942,31 @@ mod tests {
         assert!(!ws.state_json().with_extension("json.tmp").exists());
     }
 
+    /// A state file that cannot be read must fail an update, not be replaced
+    /// by the default state (which would reset the budget counters on save).
+    #[test]
+    fn update_fails_instead_of_overwriting_an_unreadable_state_file() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        // A directory where the file should be: reading it fails with a
+        // non-NotFound error.
+        std::fs::create_dir_all(ws.state_json()).unwrap();
+        assert!(PkgState::try_load(&ws).is_err());
+        assert!(PkgState::update(&ws, |s| s.cumulative_attempts = 1).is_err());
+        assert!(ws.state_json().is_dir(), "the unreadable entry must be left alone");
+        // A missing file is still the default state.
+        std::fs::remove_dir(ws.state_json()).unwrap();
+        assert_eq!(PkgState::try_load(&ws).unwrap().cumulative_attempts, 0);
+    }
+
+    /// The persisted spec hash is SHA-256, not `DefaultHasher`, so it does not
+    /// change between Rust releases: this pins the value.
+    #[test]
+    fn hash_spec_is_the_first_eight_bytes_of_sha256() {
+        // SHA-256("abc") = ba7816bf 8f01cfea 414140de 5dae2223 ...
+        assert_eq!(hash_spec("abc"), 0xba78_16bf_8f01_cfea);
+    }
+
     /// Two writers each doing 50 read-modify-writes must not lose any: without
     /// the lock, both load the same count and the later save erases the other.
     #[test]
@@ -14141,7 +14351,7 @@ Patch0:         0001-fix.patch
             path: dir.to_path_buf(),
             id: ap_core::event::StepId(0),
         };
-        snap.restore(&Null, &step);
+        snap.restore(&Null, Some(&step));
 
         // Edited file restored.
         assert_eq!(
@@ -14196,7 +14406,7 @@ Patch0:         0001-fix.patch
             path: dir.to_path_buf(),
             id: ap_core::event::StepId(0),
         };
-        snap.restore(&Null, &step);
+        snap.restore(&Null, Some(&step));
         // Nothing changed, so nothing was rewritten: the mtimes are the old ones.
         for name in ["foo.spec", "foo-1.0.tar.zst"] {
             let mtime = std::fs::metadata(dir.join(name))
