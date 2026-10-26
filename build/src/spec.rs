@@ -156,6 +156,18 @@ fn recase_python_module_name(inner: &str) -> String {
     }
 }
 
+/// Whether `name` is a distribution or RPM package name a rewrite may write
+/// into a spec: letters and digits first, then `.`, `_`, `+` and `-`. The
+/// names come from the review agent, so anything else (a capability with
+/// `()` or `:`, whitespace, a macro, a quote, a shell operator) is refused.
+fn is_plain_dependency_name(name: &str) -> bool {
+    name.len() <= 200
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+}
+
 /// Normalize `%{python_module ...}` tokens.
 ///
 /// Adds spaces around `>=`, `<=`, `>`, `<`, `==`, `!=` that are missing them,
@@ -195,7 +207,7 @@ pub fn normalize_python_module_versions(spec: &str) -> String {
 /// revisits the spec and the package is stuck until it hits the retry limit
 /// and gets marked permanently failed.
 pub fn rewrite_python_module_name(spec: &str, from: &str, to: &str) -> String {
-    if from == to {
+    if from == to || !is_plain_dependency_name(from) || !is_plain_dependency_name(to) {
         return spec.to_string();
     }
     let from_key = crate::osc::fuzzy_key(from);
@@ -236,7 +248,7 @@ pub fn rewrite_dependency_name(spec: &str, from: &str, to: &str) -> String {
     static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"[A-Za-z0-9][A-Za-z0-9._+-]*").expect("static pattern")
     });
-    if from == to {
+    if from == to || !is_plain_dependency_name(from) || !is_plain_dependency_name(to) {
         return spec.to_string();
     }
     let from_key = crate::osc::fuzzy_key(from);
@@ -1313,6 +1325,11 @@ pub fn first_macro_in_comment(spec: &str) -> Option<(usize, String)> {
 /// (`cuda_python/`, `python/`), so `%autosetup` lands one level above the
 /// project and every build macro would run in the wrong place.
 pub fn build_in_subdir(spec: &str, dir: &str) -> String {
+    // The directory is written into `%build`/`%install`: an unsafe one leaves
+    // the spec as it is rather than running a `cd` built from archive text.
+    if !ap_ecosystem::sdist::is_safe_manifest_dir(dir) || dir.is_empty() {
+        return spec.to_string();
+    }
     let mut out = String::with_capacity(spec.len() + 64);
     for line in spec.lines() {
         out.push_str(line);
@@ -1439,6 +1456,15 @@ fn post_process(
             out.push_str(line);
             out.push('\n');
             for req in &build_system.requires {
+                // A newline in a TOML string would open new spec lines, and a
+                // `%` or `{` would expand: only a plain PEP 508 requirement
+                // goes in, and a bad one is dropped without failing the spec.
+                if !ap_ecosystem::sdist::is_safe_build_requirement(req) {
+                    tracing::warn!(
+                        "dropping build requirement {req:?}: not a plain PEP 508 requirement"
+                    );
+                    continue;
+                }
                 // `setuptools>=42` as it appears in pyproject.toml is exactly
                 // the form the conventions document as wrong; OBS needs
                 // `setuptools >= 42` inside the macro.
@@ -1786,9 +1812,7 @@ pub fn sdist_files_entries(
         }
         // A `.`, `..` or empty component anywhere can step out of the package
         // directory (`pkg/../../x.py`): not listed blind.
-        if f.split('/')
-            .any(|p| p.is_empty() || p == "." || p == "..")
-        {
+        if f.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
             return None;
         }
         let mut node = &mut tree;
@@ -2285,6 +2309,12 @@ pub fn monorepo_skeleton(
 
     let sub_list: String = subprojects
         .iter()
+        .filter(|s| {
+            ap_ecosystem::sdist::is_safe_manifest_dir(&s.dir)
+                && s.name
+                    .as_deref()
+                    .is_none_or(ap_ecosystem::sdist::is_safe_top_level_dir)
+        })
         .map(|s| {
             format!(
                 "# TODO: add %package -n python-%{{name}}-{sub} for {dir}/\n",
@@ -2770,10 +2800,7 @@ fn wheel_payload_probe(layout: &ap_ecosystem::sdist::WheelLayout) -> Option<Stri
                 && top != "__pycache__"
                 && !f.ends_with(".pyc")
                 && !cleanups.iter().any(|c| c.removes(f))
-                && !f.chars().any(|c| {
-                    c.is_whitespace()
-                        || matches!(c, '%' | '*' | '?' | '[' | ']' | '$' | '"' | '\'' | '\\')
-                })
+                && ap_ecosystem::sdist::is_shell_safe_member(f)
         })
         .min_by_key(|f| (f.len(), f.as_str()))
         .cloned()
@@ -3030,7 +3057,7 @@ pub fn wheel_binary_skeleton_shared(
     // PYTHONPATH (the build directory is not on `sys.path`), and everything runs
     // inside `%python_expand` so each flavor gets its own interpreter and path.
     let check_block = match layout {
-        Some(l) if l.importable.is_some() => format!(
+        Some(l) if l.importable.as_deref().is_some_and(ap_ecosystem::sdist::is_python_identifier) => format!(
             "%check\n%python_expand PYTHONPATH=%{{buildroot}}%{{${sitedir}}} $python -c \"import {}\"\n",
             l.importable.as_deref().unwrap_or_default()
         ),
@@ -3048,7 +3075,7 @@ pub fn wheel_binary_skeleton_shared(
                 &format!("%{{buildroot}}%{{${sitedir}}}")
             )
         ),
-        Some(l) if l.first_shared_lib.is_some() => format!(
+        Some(l) if l.first_shared_lib.as_deref().is_some_and(ap_ecosystem::sdist::is_shell_safe_member) => format!(
             "%check\n%python_expand test -e %{{buildroot}}%{{${sitedir}}}/{}\n",
             l.first_shared_lib.as_deref().unwrap_or_default()
         ),
@@ -3059,7 +3086,7 @@ pub fn wheel_binary_skeleton_shared(
             wheel_payload_probe(l).unwrap_or_default()
         ),
         // A metapackage wheel (`cuda-toolkit`) installs only its dist-info.
-        Some(l) if l.dist_info.is_some() && !l.files.is_empty() => format!(
+        Some(l) if l.dist_info.as_deref().is_some_and(ap_ecosystem::sdist::is_shell_safe_member) && !l.files.is_empty() => format!(
             "%check\n%python_expand test -d %{{buildroot}}%{{${sitedir}}}/{}\n",
             l.dist_info.as_deref().unwrap_or_default()
         ),
@@ -3265,6 +3292,7 @@ fn payload_tops(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<&str> {
         .filter(|f| f.contains('/'))
         .filter_map(|f| f.split('/').next())
         .filter(|t| !t.ends_with(".dist-info") && !t.ends_with(".data") && *t != "__pycache__")
+        .filter(|t| ap_ecosystem::sdist::is_shell_safe_member(t))
         .collect();
     tops.sort_unstable();
     tops.dedup();
@@ -3297,7 +3325,9 @@ fn sitelib_relocation(layout: &ap_ecosystem::sdist::WheelLayout) -> String {
          %python_expand mkdir -p %{buildroot}%{$python_sitelib}\n",
     );
     let mut tops: Vec<&str> = payload_tops(layout);
-    if let Some(d) = layout.dist_info.as_deref() {
+    if let Some(d) = layout.dist_info.as_deref()
+        && ap_ecosystem::sdist::is_shell_safe_member(d)
+    {
         tops.push(d);
     }
     for top in tops {
@@ -8877,5 +8907,164 @@ mod license_url_injection_tests {
             "{spec}"
         );
         no_injected_line(&spec);
+    }
+
+    /// A dependency name the agent proposed with a newline, macro, quote or
+    /// shell operator is not written: the spec comes back unchanged.
+    #[test]
+    fn an_injected_dependency_name_leaves_the_spec_unchanged() {
+        let spec = "BuildRequires:  %{python_module huggingface_hub >= 0.21}\n\
+                    Requires:       python-huggingface_hub >= 0.21\n";
+        for bad in [
+            "huggingface-hub\n%pre\necho pwned",
+            "huggingface-hub%{x}",
+            "huggingface-hub$(x)",
+            "huggingface-hub`x`",
+            "huggingface-hub;x",
+            "huggingface-hub|x",
+            "huggingface-hub&x",
+            "huggingface hub",
+            "huggingface-hub'x'",
+            "huggingface-hub\"x\"",
+            "(huggingface-hub)",
+            "",
+        ] {
+            assert_eq!(
+                rewrite_python_module_name(spec, "huggingface_hub", bad),
+                spec,
+                "{bad:?}"
+            );
+            assert_eq!(
+                rewrite_dependency_name(spec, "huggingface_hub", bad),
+                spec,
+                "{bad:?}"
+            );
+            assert_eq!(
+                rewrite_dependency_name(spec, bad, "huggingface-hub"),
+                spec,
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// `[build-system] requires` with an injected entry: the entry is dropped,
+    /// the valid ones are written, and the spec gets no extra line.
+    #[test]
+    fn an_injected_build_requirement_is_dropped_not_written() {
+        let release = release(
+            ap_ecosystem::pypi::License::Spdx("MIT".to_string()),
+            Some("https://example.org"),
+        );
+        let build_system = BuildSystem {
+            requires: vec![
+                "setuptools\n%pre\necho pwned".to_string(),
+                "wheel".to_string(),
+                "cython>=3 $(x)".to_string(),
+                "a%{x}".to_string(),
+                "numpy >= 2, < 3".to_string(),
+            ],
+            backend: None,
+        };
+        let spec = "BuildRequires:  %{python_module pip}\n%changelog\n";
+        let out = post_process_with_sdist(
+            spec,
+            &release,
+            &build_system,
+            SdistFacts {
+                has_tests: false,
+                has_c_extensions: false,
+                top_level_tests_dir: None,
+                install_entries: None,
+                console_scripts: Vec::new(),
+            },
+        );
+        assert!(
+            !out.lines().any(|l| l == "%pre" || l.starts_with("%pre ")),
+            "{out}"
+        );
+        assert!(!out.contains("pwned"), "{out}");
+        assert!(!out.contains("$(x)") && !out.contains("%{x}"), "{out}");
+        assert!(
+            out.contains("BuildRequires:  %{python_module wheel}\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("BuildRequires:  %{python_module numpy >= 2, < 3}\n"),
+            "{out}"
+        );
+    }
+
+    /// A manifest directory with a shell or newline payload is never written
+    /// into the `cd` of `%build`/`%install` or into the monorepo skeleton.
+    #[test]
+    fn an_unsafe_directory_is_never_written_into_the_spec() {
+        let spec = "%build\n%py3_build\n%install\n%py3_install\n";
+        for bad in [
+            "pkgs/$(touch x)",
+            "pkgs/a\n%pre\necho pwned",
+            "pkgs/%{x}",
+            "a b",
+            "../escape",
+            "/abs",
+        ] {
+            assert_eq!(build_in_subdir(spec, bad), spec, "{bad:?}");
+        }
+        assert!(
+            build_in_subdir(spec, "python/cuda_core").contains("%build\ncd python/cuda_core\n"),
+        );
+
+        let release = release(
+            ap_ecosystem::pypi::License::Spdx("MIT".to_string()),
+            Some("https://example.org"),
+        );
+        let subprojects = vec![
+            ap_ecosystem::sdist::Subproject {
+                dir: "ok_pkg".to_string(),
+                name: Some("ok-pkg".to_string()),
+            },
+            ap_ecosystem::sdist::Subproject {
+                dir: "bad\n%pre\necho pwned".to_string(),
+                name: Some("bad".to_string()),
+            },
+            ap_ecosystem::sdist::Subproject {
+                dir: "ok2".to_string(),
+                name: Some("x\n%pre".to_string()),
+            },
+        ];
+        let out = monorepo_skeleton("pkg", "1.0", &subprojects, Some(&release));
+        assert!(
+            !out.lines().any(|l| l == "%pre" || l.starts_with("%pre ")),
+            "{out}"
+        );
+        assert!(!out.contains("pwned"), "{out}");
+        assert!(out.contains("for ok_pkg/"), "{out}");
+    }
+
+    /// A wheel whose import name or shared library path is not shell-safe gets
+    /// no `%check` that runs it; the default TODO is written instead.
+    #[test]
+    fn an_unsafe_wheel_member_name_never_reaches_the_check() {
+        use ap_ecosystem::sdist::WheelLayout;
+        let release = release(
+            ap_ecosystem::pypi::License::Spdx("MIT".to_string()),
+            Some("https://example.org"),
+        );
+        let wheel = "pkg-1.0-py3-none-any.whl";
+        let bad_import = WheelLayout {
+            importable: Some("pkg;touch x".into()),
+            ..Default::default()
+        };
+        let spec =
+            wheel_binary_skeleton("pkg", "1.0", wheel, &release, Some(true), Some(&bad_import));
+        assert!(!spec.contains("pkg;touch x"), "{spec}");
+
+        let bad_lib = WheelLayout {
+            importable: None,
+            first_shared_lib: Some("a$(touch x)/lib.so.1".into()),
+            ..Default::default()
+        };
+        let spec = wheel_binary_skeleton("pkg", "1.0", wheel, &release, Some(true), Some(&bad_lib));
+        assert!(!spec.contains("$(touch x)"), "{spec}");
+        assert!(!spec.contains("test -e"), "{spec}");
     }
 }

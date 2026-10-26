@@ -635,11 +635,7 @@ fn any_origin_runpath<R: Read + std::io::Seek>(
 /// (`cuda/bindings/__init__.py` is `cuda.bindings`). Every component must be a
 /// plain identifier, and test directories are not offered.
 fn namespace_module_of(names: &[String], skip: &dyn Fn(&str) -> bool) -> Option<String> {
-    let is_ident = |c: &str| {
-        !c.is_empty()
-            && !c.starts_with(|ch: char| ch.is_ascii_digit())
-            && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    };
+    let is_ident = is_python_identifier;
     names
         .iter()
         .filter_map(|n| n.strip_suffix("/__init__.py"))
@@ -650,6 +646,116 @@ fn namespace_module_of(names: &[String], skip: &dyn Fn(&str) -> bool) -> Option<
         })
         .min_by_key(|dir| (dir.matches('/').count(), dir.len()))
         .map(|dir| dir.replace('/', "."))
+}
+
+/// Whether `name` is a plain ASCII Python identifier: what a wheel's import
+/// name is written as in `python -c "import <name>"`, in a spec's `%check`.
+pub fn is_python_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with(|ch: char| ch.is_ascii_digit())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// Whether a wheel member path (or a top-level name taken from one) may be
+/// written unescaped into a spec line or a shell command: `/`-separated
+/// components, none empty, `.` or `..`, and no whitespace, control character
+/// or shell, spec or RPM metacharacter. Stricter than the `%files` listing,
+/// which only needs to avoid globs: the paths here are expanded by `sh`.
+pub fn is_shell_safe_member(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 4096
+        && !path.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(
+                    c,
+                    '%' | '*'
+                        | '?'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '$'
+                        | '"'
+                        | '\''
+                        | '\\'
+                        | '`'
+                        | ';'
+                        | '&'
+                        | '|'
+                        | '('
+                        | ')'
+                        | '<'
+                        | '>'
+                        | '!'
+                        | '#'
+                )
+        })
+        && path
+            .split('/')
+            .all(|p| !p.is_empty() && p != "." && p != "..")
+}
+
+/// Whether a `/`-separated directory of the archive (a manifest's directory
+/// below the top-level one) may be written into a spec. Each component must
+/// pass [`is_safe_top_level_dir`]; the archive root (empty) is allowed.
+pub fn is_safe_manifest_dir(dir: &str) -> bool {
+    dir.is_empty() || dir.split('/').all(is_safe_top_level_dir)
+}
+
+/// Whether a `[build-system] requires` entry is a PEP 508 requirement a spec
+/// can carry verbatim inside `%{python_module ...}`: a distribution name, an
+/// optional `[extras]` list, and optional comma-separated version clauses
+/// (`setuptools >= 42, < 80`). Markers, URLs, parentheses and anything that
+/// could open a spec line or a macro (newline, `%`, `{`, `}`, `$`, quotes,
+/// backticks, `;`, `|`, `&`, backslash) are refused.
+pub fn is_safe_build_requirement(req: &str) -> bool {
+    if req.len() > 200 || !req.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        return false;
+    }
+    let req = req.trim();
+    let is_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    let name_end = req.find(|c: char| !is_word(c)).unwrap_or(req.len());
+    let name = &req[..name_end];
+    let starts_alnum = |s: &str| s.starts_with(|c: char| c.is_ascii_alphanumeric());
+    if name.is_empty()
+        || !starts_alnum(name)
+        || !name.ends_with(|c: char| c.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let mut rest = req[name_end..].trim_start();
+    if let Some(inner) = rest.strip_prefix('[') {
+        let Some(end) = inner.find(']') else {
+            return false;
+        };
+        let extras_ok = inner[..end].split(',').all(|e| {
+            let e = e.trim();
+            starts_alnum(e) && e.chars().all(is_word)
+        });
+        if !extras_ok {
+            return false;
+        }
+        rest = inner[end + 1..].trim_start();
+    }
+    if rest.is_empty() {
+        return true;
+    }
+    const OPS: [&str; 8] = ["===", "~=", "==", "!=", "<=", ">=", "<", ">"];
+    rest.split(',').all(|clause| {
+        let clause = clause.trim();
+        let Some(op) = OPS.iter().find(|op| clause.starts_with(**op)) else {
+            return false;
+        };
+        let version = clause[op.len()..].trim();
+        starts_alnum(version)
+            && version.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '*' | '+' | '!' | '_' | '-')
+            })
+    })
 }
 
 /// Whether a wheel's file names show auditwheel-bundled libraries: a
@@ -701,7 +807,7 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
     let dist_info = names
         .iter()
         .filter_map(|n| n.split('/').next())
-        .find(|top| top.ends_with(".dist-info"))
+        .find(|top| top.ends_with(".dist-info") && is_shell_safe_member(top))
         .map(str::to_string);
     let metadata = dist_info.as_ref().and_then(|d| {
         let mut entry = zip_archive.by_name(&format!("{d}/METADATA")).ok()?;
@@ -745,12 +851,15 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         }
         let is_pkg = n == &format!("{top}/__init__.py");
         let is_mod = n.ends_with(".py") && !n.contains('/');
-        if is_pkg {
+        if is_pkg && is_python_identifier(&top) {
             importable = Some(top);
             break;
         }
         if is_mod && importable.is_none() {
-            importable = Some(n.trim_end_matches(".py").to_string());
+            let module = n.trim_end_matches(".py");
+            if is_python_identifier(module) {
+                importable = Some(module.to_string());
+            }
         }
     }
     let namespace_module = if importable.is_none() {
@@ -762,7 +871,9 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         .iter()
         .filter(|n| {
             let file = n.rsplit('/').next().unwrap_or("");
-            !skip(&top_of(n)) && (file.ends_with(".so") || file.contains(".so."))
+            !skip(&top_of(n))
+                && (file.ends_with(".so") || file.contains(".so."))
+                && is_shell_safe_member(n)
         })
         .min_by_key(|n| n.len())
         .cloned();
@@ -1506,7 +1617,11 @@ fn inspect_from_entries(
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            py_manifests.push((depth, dir, src.clone()));
+            // The directory ends up in `cd` and in a monorepo's spec comments:
+            // a manifest under an unsafe component is not recorded at all.
+            if is_safe_manifest_dir(&dir) {
+                py_manifests.push((depth, dir, src.clone()));
+            }
             continue;
         }
 
@@ -1722,8 +1837,22 @@ impl BuildSystem {
 
 impl From<RawBuildSystem> for BuildSystem {
     fn from(raw: RawBuildSystem) -> Self {
+        // An entry a spec cannot carry verbatim is dropped, not the whole list.
+        let requires = raw
+            .requires
+            .into_iter()
+            .filter(|r| {
+                let ok = is_safe_build_requirement(r);
+                if !ok {
+                    tracing::warn!(
+                        "ignoring build-system requirement {r:?}: not a plain PEP 508 requirement"
+                    );
+                }
+                ok
+            })
+            .collect();
         Self {
-            requires: raw.requires,
+            requires,
             backend: raw.build_backend,
         }
     }
@@ -2267,10 +2396,7 @@ mod tests {
         let tarball = dir.path().join("bare.tar.gz");
         write_tar(
             &tarball,
-            &[(
-                "pyproject.toml",
-                b"[project]\nname = \"bare\"\n".as_slice(),
-            )],
+            &[("pyproject.toml", b"[project]\nname = \"bare\"\n".as_slice())],
         );
         // Must return rather than panic; the outcome itself is not asserted.
         let _ = inspect(&tarball);
@@ -3543,5 +3669,166 @@ build-backend = "flit_core.buildapi"
                 "{project}: {pkg_info}"
             );
         }
+    }
+
+    /// Every requirement a spec can carry verbatim is accepted; anything that
+    /// could open a spec line or expand a macro is refused.
+    #[test]
+    fn build_requirement_gate_accepts_pep508_and_refuses_injection() {
+        for good in [
+            "setuptools",
+            "setuptools>=42",
+            "setuptools >= 42, < 80",
+            "flit_core>=3.2.0,<4",
+            "numpy==1.*",
+            "cython~=3.0",
+            "pkg[extra1,extra2]>=1.0",
+            "Foo.Bar-baz_qux",
+            "pkg!=1.0",
+        ] {
+            assert!(is_safe_build_requirement(good), "{good:?}");
+        }
+        for bad in [
+            "",
+            " ",
+            "setuptools\n%pre\necho pwned",
+            "setuptools\n>=1",
+            "setuptools\r\nBuildRequires: x",
+            "a%{x}",
+            "a{b}",
+            "a$(x)",
+            "a`x`",
+            "a;b",
+            "a|b",
+            "a&b",
+            "a'b",
+            "a\"b",
+            "a\\b",
+            "a#b",
+            "a\tb",
+            "pkg ; python_version < '3'",
+            "pkg (>=1.0)",
+            "pkg @ https://example.org/x.tar.gz",
+            "pkg[extra",
+            "pkg[]",
+            "pkg>=",
+            "pkg>=1.0 $(x)",
+            "-r requirements.txt",
+            "pkg==1.0 %{version}",
+            "é",
+        ] {
+            assert!(!is_safe_build_requirement(bad), "{bad:?}");
+        }
+    }
+
+    /// A hostile `[build-system] requires` loses only the bad entries.
+    #[test]
+    fn build_system_requires_drops_injected_entries_at_the_source() {
+        let src = "[build-system]\nrequires = [\"setuptools\\n%pre\\necho x\", \"wheel\", \"a;b\", \"cython>=3\"]\nbuild-backend = \"setuptools.build_meta\"\n";
+        let bs = build_system_from_toml(src);
+        assert_eq!(bs.requires, ["wheel", "cython>=3"]);
+    }
+
+    #[test]
+    fn shell_safe_member_and_manifest_dir_checks() {
+        for good in [
+            "pkg/__init__.py",
+            "pkg-1.0.dist-info/METADATA",
+            "a/b/c.so.1",
+        ] {
+            assert!(is_shell_safe_member(good), "{good}");
+        }
+        for bad in [
+            "", "a b", "a\nb", "a%b", "a{b}", "a$(x)", "a`x`", "a;b", "a&b", "a|b", "a(b)", "a<b",
+            "a>b", "a!b", "a#b", "a/../b", "a//b", "./a", "a\\b", "a*b", "a?b",
+        ] {
+            assert!(!is_shell_safe_member(bad), "{bad:?}");
+        }
+        assert!(is_safe_manifest_dir(""));
+        assert!(is_safe_manifest_dir("python/cuda_core"));
+        for bad in [
+            "a/$(x)", "a/b c", "a/../b", "a/`x`", "a/%{x}", "/abs", "a/;b",
+        ] {
+            assert!(!is_safe_manifest_dir(bad), "{bad:?}");
+        }
+        assert!(is_python_identifier("cuda_core2"));
+        for bad in ["", "2pkg", "a-b", "a.b", "a b", "a;b", "a$(x)", "é"] {
+            assert!(!is_python_identifier(bad), "{bad:?}");
+        }
+    }
+
+    /// A manifest under an unsafe directory component is not recorded, so the
+    /// monorepo siblings that remain are the only ones a spec ever names.
+    #[test]
+    fn a_manifest_under_an_unsafe_directory_is_not_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("mono-1.0.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                (
+                    "mono-1.0/pyproject.toml",
+                    b"[project]\nname = \"root\"\n".as_slice(),
+                ),
+                (
+                    "mono-1.0/pkgs/a/pyproject.toml",
+                    b"[project]\nname = \"a\"\n".as_slice(),
+                ),
+                (
+                    "mono-1.0/pkgs/b/pyproject.toml",
+                    b"[project]\nname = \"b\"\n".as_slice(),
+                ),
+                (
+                    "mono-1.0/pkgs/$(touch x)/pyproject.toml",
+                    b"[project]\nname = \"c\"\n".as_slice(),
+                ),
+                (
+                    "mono-1.0/pkgs/d e/pyproject.toml",
+                    b"[project]\nname = \"d\"\n".as_slice(),
+                ),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        for sub in &info.subprojects {
+            assert!(is_safe_manifest_dir(&sub.dir), "{:?}", sub.dir);
+            assert!(
+                !sub.dir.contains('$') && !sub.dir.contains(' '),
+                "{:?}",
+                sub.dir
+            );
+        }
+    }
+
+    /// An importable name or a shared-library path that is not shell-safe is
+    /// not offered: the layout reports no name the spec would write.
+    #[test]
+    fn wheel_names_that_are_not_shell_safe_are_not_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("evil.whl");
+        write_wheel_with(
+            &w,
+            &[
+                ("evil;touch x/__init__.py", b""),
+                ("a$(touch y)/__init__.py", b""),
+                ("a$(touch y)/lib/libz.so.1", b""),
+                ("bad`x`.dist-info/METADATA", b"Name: bad\n"),
+            ],
+        );
+        let layout = wheel_layout(&w).unwrap();
+        assert_eq!(layout.importable, None);
+        assert_eq!(layout.first_shared_lib, None);
+        assert_eq!(layout.dist_info, None);
+
+        let ok = dir.path().join("ok.whl");
+        write_wheel_with(
+            &ok,
+            &[("pkg/__init__.py", b""), ("pkg/_native.abi3.so", b"")],
+        );
+        let layout = wheel_layout(&ok).unwrap();
+        assert_eq!(layout.importable.as_deref(), Some("pkg"));
+        assert_eq!(
+            layout.first_shared_lib.as_deref(),
+            Some("pkg/_native.abi3.so")
+        );
     }
 }
