@@ -106,12 +106,19 @@ fn cache_dir() -> std::path::PathBuf {
 
 /// Get the cache file path for a specific package resolution.
 ///
-/// Delegates to [`cache_key`], which also folds in the host interpreter and
-/// platform so a cache populated under one Python/arch is not reused under
-/// another. The old narrow key (`<name>-<version>.json`) is simply never
-/// matched; the existing TTL prunes those stale files.
-fn cache_path(name: &str, version: Option<&str>) -> std::path::PathBuf {
-    cache_dir().join(cache_key(name, version, &host_python(), &host_platform()))
+/// Delegates to [`cache_key`], which also folds in the host interpreter,
+/// platform and resolve mode so a cache populated under one Python/arch or
+/// one mode (sdists allowed or not) is not reused under another. The old
+/// narrow key (`<name>-<version>.json`) is simply never matched; the existing
+/// TTL prunes those stale files.
+fn cache_path(name: &str, version: Option<&str>, mode: ResolveMode) -> std::path::PathBuf {
+    cache_dir().join(cache_key(
+        name,
+        version,
+        &host_python(),
+        &host_platform(),
+        mode,
+    ))
 }
 
 /// Build the cache filename for a resolve result.
@@ -122,12 +129,24 @@ fn cache_path(name: &str, version: Option<&str>) -> std::path::PathBuf {
 /// knob that works in the default (non-wheel-download) mode. Two concurrent
 /// runs on different Python majors or different arches must not share a
 /// cached result, so interpreter + platform go into the key as a short hash.
-pub(crate) fn cache_key(name: &str, version: Option<&str>, python: &str, platform: &str) -> String {
+///
+/// The resolve mode goes in too: a wheels-only closure lacks sdist-only
+/// releases and dependencies, and a closure resolved with sdists may contain
+/// releases a wheels-only run must reject, so the modes never share an entry.
+pub(crate) fn cache_key(
+    name: &str,
+    version: Option<&str>,
+    python: &str,
+    platform: &str,
+    mode: ResolveMode,
+) -> String {
     let norm_name = normalize_name(name);
     let mut hasher = Sha256::new();
     hasher.update(python.as_bytes());
     hasher.update([0u8]);
     hasher.update(platform.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(mode.cache_tag().as_bytes());
     // The raw name/version go into the hash too, so two inputs that
     // sanitize to the same filename part still get distinct keys.
     hasher.update([0u8]);
@@ -229,8 +248,8 @@ fn probe_host_platform() -> String {
 ///
 /// Cache is considered stale if older than 7 days (for pinned versions) or
 /// 1 day (for "latest").
-fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
-    let path = cache_path(name, version);
+fn load_cached_resolve(name: &str, version: Option<&str>, mode: ResolveMode) -> Option<Vec<Node>> {
+    let path = cache_path(name, version, mode);
 
     // Check if cache file exists
     let metadata = std::fs::metadata(&path).ok()?;
@@ -271,8 +290,8 @@ fn load_cached_resolve(name: &str, version: Option<&str>) -> Option<Vec<Node>> {
 }
 
 /// Save resolution result to cache.
-fn save_cached_resolve(name: &str, version: Option<&str>, nodes: &[Node]) {
-    let path = cache_path(name, version);
+fn save_cached_resolve(name: &str, version: Option<&str>, mode: ResolveMode, nodes: &[Node]) {
+    let path = cache_path(name, version, mode);
 
     // Create cache directory if it doesn't exist
     if let Some(parent) = path.parent() {
@@ -380,6 +399,15 @@ pub enum ResolveMode {
 }
 
 impl ResolveMode {
+    /// Stable label for this mode, folded into the resolution cache key.
+    fn cache_tag(self) -> &'static str {
+        match self {
+            ResolveMode::Sandboxed => "sandboxed",
+            ResolveMode::WheelsOnly => "wheels-only",
+            ResolveMode::Unsandboxed => "unsandboxed",
+        }
+    }
+
     /// What the user should be told about this mode, when it is not the
     /// ordinary sandboxed one.
     pub fn notice(self) -> Option<String> {
@@ -456,6 +484,8 @@ fn sandboxed_command(
     let args = match pip_sandbox::bwrap_args(program, &host) {
         Ok(args) => args,
         // A missing interpreter is how the alternate-Python search moves on.
+        // An unsafe prefix stays a Sandbox error, which `select_candidate`
+        // also moves on from.
         Err(SandboxError::ProgramNotFound(p)) => {
             return Err(Error::Launch(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -652,9 +682,62 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
     }
 }
 
+/// Pick the pip whose report is used: the default pip's, or else the first of
+/// `alternates` whose pip works. Returns the alternate used (`None` for the
+/// default) with the report.
+///
+/// The default is passed over when its Python is outside every release's
+/// `Requires-Python` ([`Error::IncompatiblePython`]) or its prefix may not be
+/// sandboxed ([`SandboxError::UnsafePrefix`]): another interpreter may be fine.
+/// Any other default failure is final. Alternates that cannot launch or fail
+/// either of those ways are skipped; other alternate failures are surfaced.
+/// When nothing works, the default's error is returned.
+fn select_candidate(
+    first: Result<Vec<u8>, Error>,
+    alternates: &[String],
+    mut attempt: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+) -> Result<(Option<String>, Vec<u8>), Error> {
+    let e = match first {
+        Ok(out) => return Ok((None, out)),
+        Err(e) if is_candidate_skip(&e) => e,
+        Err(e) => return Err(e),
+    };
+    let mut last_err: Option<Error> = None;
+    for py in alternates {
+        match attempt(py) {
+            Ok(out) => return Ok((Some(py.clone()), out)),
+            // A missing interpreter or another incompatibility says
+            // nothing new; anything else is worth surfacing.
+            Err(Error::Launch(_) | Error::IncompatiblePython { .. }) => {}
+            Err(Error::Sandbox(SandboxError::UnsafePrefix { .. })) => {}
+            Err(other) => last_err = Some(other),
+        }
+    }
+    match last_err {
+        Some(other) => Err(Error::Failed {
+            code: -1,
+            stderr: format!("{e}; alternate interpreters also failed: {other}"),
+        }),
+        None => Err(e),
+    }
+}
+
+/// Errors that mean "this interpreter is not the one to use", not "the
+/// project cannot be resolved".
+fn is_candidate_skip(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::IncompatiblePython { .. } | Error::Sandbox(SandboxError::UnsafePrefix { .. })
+    )
+}
+
 pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
+    // The mode is part of the cache key, so it is decided before the cache
+    // is read.
+    let mode = resolve_mode();
+
     // Try to load from cache first
-    if let Some(cached) = load_cached_resolve(name, version) {
+    if let Some(cached) = load_cached_resolve(name, version, mode) {
         return Ok(cached);
     }
 
@@ -665,43 +748,22 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         None => name.to_string(),
     };
 
-    let mode = resolve_mode();
-    let stdout = match run_pip_report(&["pip"], name, &spec, mode) {
-        Err(e @ Error::IncompatiblePython { .. }) => {
-            // The default pip's interpreter is outside every release's
-            // Requires-Python (open-webui needs <3.13 on a 3.13 system):
-            // the project is fine, so resolve under another installed Python.
-            let mut found = None;
-            let mut last_err: Option<Error> = None;
-            for minor in ALTERNATE_PYTHON_MINORS {
-                let py = format!("python3.{minor}");
-                match run_pip_report(&[&py, "-m", "pip"], name, &spec, mode) {
-                    Ok(out) => {
-                        ap_core::diag!(
-                            "  default pip's Python is incompatible with {name}; resolved with {py}"
-                        );
-                        found = Some(out);
-                        break;
-                    }
-                    // A missing interpreter or another incompatibility says
-                    // nothing new; anything else is worth surfacing.
-                    Err(Error::Launch(_) | Error::IncompatiblePython { .. }) => {}
-                    Err(other) => last_err = Some(other),
-                }
-            }
-            match (found, last_err) {
-                (Some(out), _) => out,
-                (None, Some(other)) => {
-                    return Err(Error::Failed {
-                        code: -1,
-                        stderr: format!("{e}; alternate interpreters also failed: {other}"),
-                    });
-                }
-                (None, None) => return Err(e),
-            }
-        }
-        other => other?,
-    };
+    // The default pip's interpreter may be outside every release's
+    // Requires-Python (open-webui needs <3.13 on a 3.13 system), or the pip on
+    // PATH may sit where it cannot be sandboxed: the project is fine, so try
+    // another installed Python.
+    let alternates: Vec<String> = ALTERNATE_PYTHON_MINORS
+        .iter()
+        .map(|minor| format!("python3.{minor}"))
+        .collect();
+    let (alternate, stdout) = select_candidate(
+        run_pip_report(&["pip"], name, &spec, mode),
+        &alternates,
+        |py| run_pip_report(&[py, "-m", "pip"], name, &spec, mode),
+    )?;
+    if let Some(py) = alternate {
+        ap_core::diag!("  default pip was not usable for {name}; resolved with {py}");
+    }
 
     let report: Report = serde_json::from_slice(&stdout)?;
     let nodes: Vec<Node> = report
@@ -727,7 +789,7 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         .collect::<Result<Vec<_>, Error>>()?;
 
     // Save to cache for future use
-    save_cached_resolve(name, version, &nodes);
+    save_cached_resolve(name, version, mode, &nodes);
 
     Ok(nodes)
 }
@@ -991,7 +1053,13 @@ mod tests {
 
     #[test]
     fn cache_key_folds_interpreter_and_platform_into_a_short_hash() {
-        let key = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        let key = cache_key(
+            "httpx",
+            Some("0.28.1"),
+            "Python 3.13.1",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+        );
         assert!(key.starts_with("httpx-0.28.1-"), "{key}");
         assert!(key.ends_with(".json"), "{key}");
         // 12-char hex hash segment between the version and `.json`.
@@ -1003,22 +1071,58 @@ mod tests {
 
     #[test]
     fn cache_key_changes_when_interpreter_changes() {
-        let a = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
-        let b = cache_key("httpx", Some("0.28.1"), "Python 3.14.0", "linux-x86_64");
+        let a = cache_key(
+            "httpx",
+            Some("0.28.1"),
+            "Python 3.13.1",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+        );
+        let b = cache_key(
+            "httpx",
+            Some("0.28.1"),
+            "Python 3.14.0",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+        );
         assert_ne!(a, b, "interpreter must change the cache key");
     }
 
     #[test]
     fn cache_key_changes_when_platform_changes() {
-        let a = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
-        let b = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-aarch64");
+        let a = cache_key(
+            "httpx",
+            Some("0.28.1"),
+            "Python 3.13.1",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+        );
+        let b = cache_key(
+            "httpx",
+            Some("0.28.1"),
+            "Python 3.13.1",
+            "linux-aarch64",
+            ResolveMode::Sandboxed,
+        );
         assert_ne!(a, b, "platform must change the cache key");
     }
 
     #[test]
     fn cache_key_is_deterministic_for_the_same_inputs() {
-        let a = cache_key("Httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
-        let b = cache_key("Httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        let a = cache_key(
+            "Httpx",
+            Some("0.28.1"),
+            "Python 3.13.1",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+        );
+        let b = cache_key(
+            "Httpx",
+            Some("0.28.1"),
+            "Python 3.13.1",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+        );
         assert_eq!(a, b);
     }
 
@@ -1026,26 +1130,44 @@ mod tests {
     fn cache_key_lowercases_the_package_name() {
         // Avoids `MarkupSafe` vs `markupsafe` producing two different cache
         // entries for the same release.
-        let a = cache_key("MarkupSafe", Some("3.0.3"), "p", "l");
-        let b = cache_key("markupsafe", Some("3.0.3"), "p", "l");
+        let a = cache_key(
+            "MarkupSafe",
+            Some("3.0.3"),
+            "p",
+            "l",
+            ResolveMode::Sandboxed,
+        );
+        let b = cache_key(
+            "markupsafe",
+            Some("3.0.3"),
+            "p",
+            "l",
+            ResolveMode::Sandboxed,
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn cache_key_distinguishes_latest_from_pinned() {
-        let latest = cache_key("httpx", None, "p", "l");
-        let pinned = cache_key("httpx", Some("0.28.1"), "p", "l");
+        let latest = cache_key("httpx", None, "p", "l", ResolveMode::Sandboxed);
+        let pinned = cache_key("httpx", Some("0.28.1"), "p", "l", ResolveMode::Sandboxed);
         assert_ne!(latest, pinned);
         assert!(latest.contains("httpx-latest-"), "{latest}");
     }
 
     #[test]
     fn cache_key_cannot_escape_the_cache_dir() {
-        let key = cache_key("../../etc/passwd", Some("1/../2"), "p", "l");
+        let key = cache_key(
+            "../../etc/passwd",
+            Some("1/../2"),
+            "p",
+            "l",
+            ResolveMode::Sandboxed,
+        );
         assert!(!key.contains('/'), "{key}");
         assert!(!key.contains(".."), "{key}");
-        let a = cache_key("Foo_Bar.baz", Some("1.0"), "p", "l");
-        let b = cache_key("foo-bar-baz", Some("1.0"), "p", "l");
+        let a = cache_key("Foo_Bar.baz", Some("1.0"), "p", "l", ResolveMode::Sandboxed);
+        let b = cache_key("foo-bar-baz", Some("1.0"), "p", "l", ResolveMode::Sandboxed);
         assert_eq!(a, b);
         assert!(a.starts_with("foo-bar-baz-1.0-"), "{a}");
     }
@@ -1096,8 +1218,125 @@ mod tests {
         // so stale entries from before this change are simply ignored (the TTL
         // in load_cached_resolve prunes them).
         let old = "httpx-0.28.1.json";
-        let new = cache_key("httpx", Some("0.28.1"), "Python 3.13.1", "linux-x86_64");
+        let new = cache_key(
+            "httpx",
+            Some("0.28.1"),
+            "Python 3.13.1",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+        );
         assert_ne!(old, new);
+    }
+
+    #[test]
+    fn resolve_modes_do_not_share_a_cache_entry() {
+        // A wheels-only closure lacks sdist-only releases, and a closure
+        // resolved with sdists may hold releases a wheels-only run must
+        // reject: each mode gets its own entry.
+        let key = |mode| {
+            cache_key(
+                "httpx",
+                Some("0.28.1"),
+                "Python 3.13.1",
+                "linux-x86_64",
+                mode,
+            )
+        };
+        let sandboxed = key(ResolveMode::Sandboxed);
+        let wheels = key(ResolveMode::WheelsOnly);
+        let unsandboxed = key(ResolveMode::Unsandboxed);
+        assert_ne!(sandboxed, wheels);
+        assert_ne!(sandboxed, unsandboxed);
+        assert_ne!(wheels, unsandboxed);
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+    use std::io;
+
+    const PREFIX: &str = "/home/u/.local";
+
+    fn unsafe_prefix() -> Error {
+        Error::Sandbox(SandboxError::UnsafePrefix {
+            program: "pip".into(),
+            prefix: PREFIX.into(),
+            why: "it is inside a configuration or cache directory and is not a virtualenv or Python installation",
+        })
+    }
+
+    fn missing() -> Error {
+        Error::Launch(io::Error::new(io::ErrorKind::NotFound, "not on PATH"))
+    }
+
+    fn alternates() -> Vec<String> {
+        vec!["python3.12".into(), "python3.11".into()]
+    }
+
+    #[test]
+    fn unsafe_default_prefix_moves_on_to_the_next_interpreter() {
+        // ~/.local/bin/pip is refused, but the alternate that works is used.
+        let mut tried = Vec::new();
+        let (alternate, out) = select_candidate(Err(unsafe_prefix()), &alternates(), |py| {
+            tried.push(py.to_string());
+            if py == "python3.12" {
+                Ok(b"report".to_vec())
+            } else {
+                Err(missing())
+            }
+        })
+        .unwrap();
+        assert_eq!(alternate.as_deref(), Some("python3.12"));
+        assert_eq!(out, b"report");
+        assert_eq!(tried, ["python3.12"]);
+    }
+
+    #[test]
+    fn unsafe_prefix_on_every_candidate_names_the_prefix() {
+        let err = select_candidate(
+            Err(unsafe_prefix()),
+            &alternates(),
+            |_| Err(unsafe_prefix()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Sandbox(SandboxError::UnsafePrefix { .. })),
+            "{err}"
+        );
+        assert!(err.to_string().contains(PREFIX), "{err}");
+    }
+
+    #[test]
+    fn incompatible_python_still_moves_on() {
+        let incompatible = || Error::IncompatiblePython {
+            name: "open-webui".into(),
+            example: "0.8.12".into(),
+        };
+        let (alternate, _) = select_candidate(Err(incompatible()), &alternates(), |py| {
+            if py == "python3.11" {
+                Ok(Vec::new())
+            } else {
+                Err(incompatible())
+            }
+        })
+        .unwrap();
+        assert_eq!(alternate.as_deref(), Some("python3.11"));
+    }
+
+    #[test]
+    fn other_default_failures_are_final() {
+        let mut tried = false;
+        let err = select_candidate(Err(Error::NotFound("nope".into())), &alternates(), |_| {
+            tried = true;
+            Ok(Vec::new())
+        })
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "{err}");
+        assert!(
+            !tried,
+            "no alternate is tried after a final default failure"
+        );
     }
 }
 
