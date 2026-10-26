@@ -43,7 +43,9 @@ pub fn run(
             ));
         }
         let state = PkgState::load(&ws);
-        let checkout = checkout_root.join(&name);
+        // The checkout is named by the OBS name the state records, as the
+        // pipeline and `reconcile_with_obs` name it; `rpm_name` otherwise.
+        let checkout = checkout_root.join(state.obs_name.as_deref().unwrap_or(&name));
         findings.extend(check_checkout(&name, &state, &ws, &checkout));
         if let Some(statuses) = &statuses
             && let Some(f) = check_obs(&name, &state, statuses.get(&name.to_lowercase()))
@@ -57,7 +59,8 @@ pub fn run(
 /// What the checkout and the state directory of one package say about each other.
 fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path) -> Vec<String> {
     let mut out = Vec::new();
-    let spec = std::fs::read_to_string(checkout.join(format!("{name}.spec"))).ok();
+    let obs = state.obs_name.as_deref().unwrap_or(name);
+    let spec = std::fs::read_to_string(checkout.join(format!("{obs}.spec"))).ok();
     // A spec that builds from a wheel got there by a switch that wrote its
     // provenance into the state directory (see the check below).
     let wheel_spec = spec.as_deref().is_some_and(|spec| {
@@ -257,6 +260,36 @@ mod tests {
             all.contains("python-b: state.json says failed, but OBS shows it built"),
             "{all}"
         );
+    }
+
+    #[test]
+    fn the_checkout_is_looked_up_under_the_obs_name_the_state_records() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let checkouts = root.path().join("proj");
+        // The workspace is keyed by the rpm name; the checkout by the OBS name.
+        std::fs::create_dir_all(checkouts.join("python-APScheduler")).unwrap();
+        std::fs::write(
+            checkouts.join("python-APScheduler/python-APScheduler.spec"),
+            "Name: python-APScheduler\nVersion: 2.0\n",
+        )
+        .unwrap();
+        std::fs::write(checkouts.join("python-APScheduler/stray.bin"), "x").unwrap();
+        write(&state_root, "python-apscheduler", |s| {
+            s.obs_name = Some("python-APScheduler".into());
+            s.last_outcome = Some("success".into());
+            s.last_built_version = Some("1.0".into());
+        });
+        let all = run(&state_root, &checkouts, || None).join("\n");
+        assert!(
+            all.contains("python-apscheduler: state.json records a successful build of 1.0 but the spec says 2.0"),
+            "{all}"
+        );
+        assert!(all.contains("not committed: stray.bin"), "{all}");
+        // Without obs_name the rpm name is the checkout: nothing is there to find.
+        write(&state_root, "python-apscheduler", |s| s.obs_name = None);
+        let all = run(&state_root, &checkouts, || None).join("\n");
+        assert!(!all.contains("python-apscheduler"), "{all}");
     }
 
     #[test]

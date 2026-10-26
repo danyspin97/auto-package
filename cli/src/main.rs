@@ -2407,9 +2407,18 @@ fn withdraw_settled_failures(
     }
     failures.retain(|f| {
         !last.iter().any(|(row, (at, built))| {
-            *built
-                && *at >= f.after
-                && (*row == f.label.as_str() || origin_of(row).as_deref() == Some(f.label.as_str()))
+            // A row built as a dependency has no recorded request name unless
+            // one was noted for it; then the label names the package through
+            // its RPM name (`foo` is `python-foo`), compared without case or
+            // separators.
+            let named = match origin_of(row) {
+                Some(origin) => origin == f.label,
+                None => {
+                    ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(&f.label))
+                        == ap_build::osc::fuzzy_key(row)
+                }
+            };
+            *built && *at >= f.after && (*row == f.label.as_str() || named)
         })
     });
 }
@@ -2868,6 +2877,11 @@ fn cmd_build(
                     reason: SelectionReason::FirstUnbuiltDependency,
                     blocked_by: vec![],
                 });
+                // A failed request under the dependency's name is settled by this
+                // row (see `withdraw_settled_failures`).
+                if let Some(t) = &tui_ctrl {
+                    t.note_origin(&dep_rpm, &dep);
+                }
                 let dep_version = dep_config.version.clone();
                 let r = pkg_reporter(&dep_rpm);
                 let sem2 = sem.clone();
@@ -4931,9 +4945,10 @@ mod settle_tests {
         }
     }
 
-    fn origin(row: &str) -> Option<String> {
-        // `python-foo` was requested as `foo`.
-        (row == "python-foo").then(|| "foo".to_string())
+    // A dependency row is started without a request name: nothing is noted
+    // for it unless the dependency queue notes one (see `spawn_dep_build`).
+    fn no_origin(_row: &str) -> Option<String> {
+        None
     }
 
     fn labels(failures: &[AddFailure]) -> Vec<&str> {
@@ -4961,15 +4976,38 @@ mod settle_tests {
             fin("python-foo", PackageOutcome::Built),
         ];
         let mut failures = vec![failed("foo", 1)];
-        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);
         assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn a_dependency_build_settles_the_request_under_the_pypi_name_only() {
+        // `foo` fails; `python-bar` builds as a dependency: `foo` stands.
+        // `python-foo` builds as a dependency: `foo` is withdrawn.
+        let events = vec![fin("python-bar", PackageOutcome::Built)];
+        let mut failures = vec![failed("foo", 0)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);
+        assert_eq!(labels(&failures), vec!["foo"]);
+        let events = vec![fin("python-foo", PackageOutcome::Built)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn a_recorded_origin_names_the_row_over_the_rpm_name_guess() {
+        // The row was requested as `baz`; a failure of `foo` is not its.
+        let origin = |row: &str| (row == "python-foo").then(|| "baz".to_string());
+        let events = vec![fin("python-foo", PackageOutcome::Built)];
+        let mut failures = vec![failed("foo", 0), failed("baz", 0)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        assert_eq!(labels(&failures), vec!["foo"]);
     }
 
     #[test]
     fn failure_is_withdrawn_by_the_rpm_name_too() {
         let events = vec![fin("python-foo", PackageOutcome::AlreadyBuilt)];
         let mut failures = vec![failed("python-foo", 0)];
-        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);
         assert!(failures.is_empty());
     }
 
@@ -4978,7 +5016,7 @@ mod settle_tests {
         // Built first, then the request failed: the later failure is not settled.
         let events = vec![fin("python-foo", PackageOutcome::Built)];
         let mut failures = vec![failed("foo", 1)];
-        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);
         assert_eq!(labels(&failures), vec!["foo"]);
     }
 
@@ -4989,17 +5027,17 @@ mod settle_tests {
             fin("python-foo", PackageOutcome::Failed { reason: "x".into() }),
         ];
         let mut failures = vec![failed("foo", 0)];
-        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);
         assert_eq!(labels(&failures), vec!["foo"]);
     }
 
     #[test]
     fn failure_of_another_package_stands() {
-        // `python-bar` has no recorded request name here, and `bar` is not its
-        // RPM name, so neither failure is settled by it.
+        // `python-bar` is the RPM name of `bar` only, so neither `foo` nor
+        // `baz` is settled by it.
         let events = vec![fin("python-bar", PackageOutcome::Built)];
-        let mut failures = vec![failed("foo", 0), failed("bar", 0)];
-        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
-        assert_eq!(labels(&failures), vec!["foo", "bar"]);
+        let mut failures = vec![failed("foo", 0), failed("baz", 0)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);
+        assert_eq!(labels(&failures), vec!["foo", "baz"]);
     }
 }
