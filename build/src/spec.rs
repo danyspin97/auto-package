@@ -30,6 +30,11 @@ pub enum Error {
 /// if no correction was needed.
 pub fn fix_autosetup_dir(spec: &str, actual_top_level: &str) -> Option<String> {
     let actual = actual_top_level;
+    // The directory is written verbatim into the `%autosetup` line: a name
+    // carrying a newline, an RPM macro or whitespace would inject spec lines.
+    if !is_safe_autosetup_dir(actual) {
+        return None;
+    }
     let name = tag_value(spec, "Name:")?;
     let version = tag_value(spec, "Version:")?;
     let expanded = autosetup_expected_dir(spec, name, version)?;
@@ -807,6 +812,18 @@ fn replace_version_component(dir: &str, version: &str) -> String {
         }
     }
     out
+}
+
+/// Whether a directory name may be written unescaped into a `%autosetup -n`
+/// line. Only characters found in real source-tree names are accepted: no
+/// whitespace or control characters, no `%` macro, no `/` or shell
+/// metacharacters.
+fn is_safe_autosetup_dir(dir: &str) -> bool {
+    !matches!(dir, "" | "." | "..")
+        && dir.len() <= 255
+        && dir
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~'))
 }
 
 /// The expanded `%autosetup -n` directory for a spec with the given name and
@@ -6673,6 +6690,25 @@ mod review_fix_tests {
         let spec = "Name: markupsafe\nVersion: 3.0.3\n%autosetup -n wrong\n";
         let out = fix_autosetup_dir(spec, "MarkupSafe-3.0.3").unwrap();
         assert!(out.contains("-n MarkupSafe-%{version}"), "{out}");
+    }
+
+    /// A hostile top-level name must never reach the spec text: no line is
+    /// injected and the spec is left alone.
+    #[test]
+    fn autosetup_fix_refuses_unsafe_top_level_names() {
+        let spec = "Name: thing\nVersion: 1.0\n%autosetup -n thing-1.0\n";
+        for bad in [
+            "thing-1.0\n%post\nrm -rf /",
+            "thing-%{version}",
+            "thing 1.0",
+            "thing-1.0;reboot",
+            "thing/../x",
+            "",
+        ] {
+            assert_eq!(fix_autosetup_dir(spec, bad), None, "accepted {bad:?}");
+        }
+        assert!(is_safe_autosetup_dir("thing-1.0"));
+        assert!(is_safe_autosetup_dir("MarkupSafe-3.0.3"));
     }
 
     #[test]

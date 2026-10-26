@@ -1352,7 +1352,9 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
             continue;
         }
         let path_str = entry_path.to_string_lossy().into_owned();
-        let is_dir = path_str.ends_with('/');
+        // Python's tarfile writes directory entries without a trailing slash,
+        // so the entry type is the reliable signal; the slash is a fallback.
+        let is_dir = entry.header().entry_type().is_dir() || path_str.ends_with('/');
         let file_name = entry_path.file_name().and_then(|n| n.to_str());
         let contents = if matches!(file_name, Some("pyproject.toml" | "Cargo.toml")) {
             read_manifest(&mut entry)
@@ -1435,6 +1437,7 @@ fn inspect_from_entries(
     };
 
     let mut top_level_dir: Option<String> = None;
+    let mut top_level_seen = false;
     // Shallowest manifest of each kind, with its depth below the top level.
     // Shallowest wins: a vendored dependency's Cargo.toml is not the project's.
     // Every Python manifest, with its depth below the top level and the
@@ -1471,9 +1474,13 @@ fn inspect_from_entries(
         // git-archive (and therefore every GitHub source tarball) writes
         // first — and every such spec ends up with
         // `%autosetup -n pax_global_header`.
-        if top_level_dir.is_none() && components.len() >= 2 {
+        // The name ends up unescaped in the spec's `%autosetup -n` line, so a
+        // hostile archive must not get to pick it: an unsafe name is treated
+        // as no top-level directory at all, and the first candidate is final.
+        if !top_level_seen && components.len() >= 2 {
+            top_level_seen = true;
             let name = components[0].as_os_str().to_string_lossy().into_owned();
-            if !name.is_empty() {
+            if is_safe_top_level_dir(&name) {
                 top_level_dir = Some(name);
             }
         }
@@ -1733,6 +1740,18 @@ struct RawProject {
     scripts: Option<toml::Value>,
     #[serde(rename = "gui-scripts")]
     gui_scripts: Option<toml::Value>,
+}
+
+/// Whether an archive's top-level directory name can be written verbatim into
+/// a spec (`%autosetup -n <name>`) and a shell command. Only the characters
+/// that appear in real source-tree names are allowed: no whitespace, newline,
+/// `%` (RPM macro), `/` or other shell or spec metacharacters.
+fn is_safe_top_level_dir(name: &str) -> bool {
+    name.len() <= 255
+        && !matches!(name, "" | "." | "..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~'))
 }
 
 /// Whether an upstream-declared project name is safe to build a package, a
@@ -2842,6 +2861,74 @@ build-backend = "flit_core.buildapi"
         assert_eq!(info.top_level_dir.as_deref(), Some("thing-1.0"));
         assert_eq!(info.files, vec!["thing-1.0/pyproject.toml".to_string()]);
         assert_eq!(info.project_name.as_deref(), Some("thing"));
+    }
+
+    /// A top-level name that would be written unescaped into the spec must not
+    /// be taken: newline, RPM macro, whitespace and shell metacharacters.
+    #[test]
+    fn unsafe_top_level_names_are_not_taken() {
+        for bad in [
+            "evil\n%post\nrm -rf /\n-1.0",
+            "pct%{name}-1.0",
+            "sp ace-1.0",
+            "semi;rm-1.0",
+            "dollar$(x)-1.0",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let tarball = dir.path().join("src.tar.gz");
+            let member = format!("{bad}/setup.py");
+            write_tar(&tarball, &[(member.as_str(), b"x".as_slice())]);
+            let info = inspect(&tarball).unwrap();
+            assert_eq!(info.top_level_dir, None, "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn is_safe_top_level_dir_accepts_real_source_tree_names() {
+        for good in [
+            "thing-1.0",
+            "MarkupSafe-3.0.3",
+            "sqlite3-3",
+            "a_b+c~1",
+            "v1.2",
+        ] {
+            assert!(is_safe_top_level_dir(good), "{good}");
+        }
+        for bad in [
+            "", ".", "..", "a/b", "a b", "a\nb", "a%b", "a;b", "a$b", "a\"b",
+        ] {
+            assert!(!is_safe_top_level_dir(bad), "{bad:?}");
+        }
+    }
+
+    /// Python's tarfile writes directory members without a trailing slash; they
+    /// must be recognised as directories and kept out of the file listing.
+    #[test]
+    fn directory_entries_without_trailing_slash_are_not_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        {
+            let file = std::fs::File::create(&tarball).unwrap();
+            let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut ar = tar::Builder::new(enc);
+            let mut d = tar::Header::new_gnu();
+            d.set_entry_type(tar::EntryType::Directory);
+            d.set_size(0);
+            d.set_mode(0o755);
+            d.set_cksum();
+            ar.append_data(&mut d, "thing-1.0/lib", std::io::empty())
+                .unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_size(2);
+            h.set_mode(0o644);
+            h.set_cksum();
+            ar.append_data(&mut h, "thing-1.0/lib/x.py", &b"hi"[..])
+                .unwrap();
+            ar.into_inner().unwrap().finish().unwrap();
+        }
+        let info = inspect(&tarball).unwrap();
+        assert_eq!(info.files, vec!["thing-1.0/lib/x.py".to_string()]);
+        assert_eq!(info.top_level_dir.as_deref(), Some("thing-1.0"));
     }
 
     #[test]
