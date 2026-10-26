@@ -3538,17 +3538,21 @@ fn code_macro_marker(text: &str) -> Option<&'static str> {
 }
 
 /// Directives that make `rpmspec` read another file from the host while
-/// parsing. Matched at the start of a line, after leading whitespace.
+/// parsing. Matched at the start of a line, after leading whitespace, and only
+/// when the keyword ends there (so `%{includedir}` or `%includes_foo` do not match).
 const INCLUDE_MARKERS: &[&str] = &["%include", "%{include"];
 
 /// The first file-including directive at the start of a line in `text`, if any.
 fn include_marker(text: &str) -> Option<&'static str> {
     text.lines().find_map(|line| {
         let line = line.trim_start();
-        INCLUDE_MARKERS
-            .iter()
-            .copied()
-            .find(|m| line.starts_with(m))
+        INCLUDE_MARKERS.iter().copied().find(|m| {
+            line.strip_prefix(m).is_some_and(|rest| {
+                rest.is_empty()
+                    || rest.starts_with(char::is_whitespace)
+                    || (m.starts_with("%{") && rest.starts_with('}'))
+            })
+        })
     })
 }
 
@@ -7611,6 +7615,11 @@ mod rpmspec_sandbox_tests {
         );
         assert_eq!(include_marker("Summary: see %include docs\n"), None);
         assert_eq!(include_marker("%description\nno includes here\n"), None);
+        assert_eq!(include_marker("%include\r\n"), Some("%include"));
+        assert_eq!(include_marker("  \t%include\t/x\n"), Some("%include"));
+        assert_eq!(include_marker("%files\n%{includedir}/foo\n"), None);
+        assert_eq!(include_marker("%files\n%{_includedir}/x\n"), None);
+        assert_eq!(include_marker("%includes_foo\n"), None);
     }
 
     #[test]
