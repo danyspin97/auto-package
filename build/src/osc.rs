@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ap_core::event::Event;
 
@@ -1824,6 +1824,29 @@ fn parse_published_binary_names(xml: &str) -> Vec<String> {
 static PUBLISHED_BINARIES_CACHE: std::sync::Mutex<Option<HashMap<String, Vec<String>>>> =
     std::sync::Mutex::new(None);
 
+/// Bumped by every [`forget_published_binaries`]. A search that started before
+/// an invalidation may have read the projects before the change; its answer is
+/// stored only if the generation is still the one it started under.
+static PUBLISHED_BINARIES_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn published_binaries_generation() -> u64 {
+    PUBLISHED_BINARIES_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Store `names` for `expr` unless the cache was invalidated since
+/// `generation` was read. Checked under the cache lock, like
+/// `insert_if_current`, and invalidation bumps the generation under the same
+/// lock, so a stale answer cannot land after the removal.
+fn insert_published_if_current(expr: String, generation: u64, names: Vec<String>) {
+    let mut guard = PUBLISHED_BINARIES_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if published_binaries_generation() == generation {
+        guard.get_or_insert_with(HashMap::new).insert(expr, names);
+    }
+}
+
 /// The names of binaries the projects `project` builds against publish for
 /// `arch` that match `name`. `None` when the search could not be made (no
 /// answer is not "nothing published").
@@ -1834,6 +1857,7 @@ fn published_binaries(
     by: NameMatch,
     emit: Emit<'_>,
 ) -> Option<Vec<String>> {
+    let generation = published_binaries_generation();
     let paths = get_project_repo_paths(project, emit).ok()?;
     let mut projects: Vec<String> = paths.into_iter().map(|(p, _)| p).collect();
     projects.sort();
@@ -1856,11 +1880,7 @@ fn published_binaries(
         return None;
     }
     let names = parse_published_binary_names(&xml);
-    PUBLISHED_BINARIES_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(expr, names.clone());
+    insert_published_if_current(expr, generation, names.clone());
     Some(names)
 }
 
@@ -2203,6 +2223,47 @@ mod published_binary_tests {
     }
 
     #[test]
+    fn only_the_source_lines_of_removed_rpmlintrc_files_go() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.spec"),
+            "Name: p\nSource0: p-1.tar.gz\nSource1: b.rpmlintrc\nSource2: a.rpmlintrc\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("a.rpmlintrc"), "").unwrap();
+        std::fs::write(dir.path().join("b.rpmlintrc"), "x".repeat(200)).unwrap();
+        assert_eq!(drop_empty_rpmlintrc(dir.path()), ["a.rpmlintrc"]);
+        let spec = std::fs::read_to_string(dir.path().join("p.spec")).unwrap();
+        assert_eq!(spec, "Name: p\nSource0: p-1.tar.gz\nSource1: b.rpmlintrc\n");
+        assert!(dir.path().join("b.rpmlintrc").exists());
+    }
+
+    #[test]
+    fn a_removed_rpmlintrc_source_is_matched_by_file_name() {
+        let removed = ["a.rpmlintrc".to_string()];
+        assert!(is_removed_rpmlintrc_source(
+            "Source3: https://h/x/a.rpmlintrc\n",
+            &removed
+        ));
+        assert!(is_removed_rpmlintrc_source(
+            "source4: https://h/x.tar#/a.rpmlintrc\n",
+            &removed
+        ));
+        assert!(!is_removed_rpmlintrc_source(
+            "Source3: https://h/x/xa.rpmlintrc\n",
+            &removed
+        ));
+        assert!(!is_removed_rpmlintrc_source(
+            "SourceX: a.rpmlintrc\n",
+            &removed
+        ));
+        assert!(!is_removed_rpmlintrc_source(
+            "Patch1: a.rpmlintrc\n",
+            &removed
+        ));
+    }
+
+    #[test]
     fn a_wheel_spec_drops_source_recipe_leftovers() {
         let dir = tempfile::tempdir().unwrap();
         let spec = "Name: python-x\nVersion: 2\nSource0: https://h/x-2-py3-none-any.whl#/x-2-py3-none-any.whl\n";
@@ -2380,6 +2441,16 @@ pub fn try_list_project_packages(
     project: &str,
     emit: Emit<'_>,
 ) -> Result<Arc<std::collections::HashSet<String>>, String> {
+    list_project_packages(project, emit)
+        .map_err(|e| format!("could not list packages of {project}: {e}"))
+}
+
+/// [`try_list_project_packages`] keeping the failure as an [`Error`], so that
+/// its transience (a timeout, an OBS 5xx) reaches the caller.
+fn list_project_packages(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<Arc<std::collections::HashSet<String>>, Error> {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     {
@@ -2402,9 +2473,7 @@ pub fn try_list_project_packages(
         std::thread::sleep(Duration::from_secs(backoff));
         listing = fetch_project_packages(project, Emit::quiet());
     }
-    let pkgs = listing
-        .map(Arc::new)
-        .map_err(|e| format!("could not list packages of {project}: {e}"))?;
+    let pkgs = listing.map(Arc::new)?;
     insert_if_current(project, generation, &pkgs);
     Ok(pkgs)
 }
@@ -2414,9 +2483,11 @@ pub fn try_list_project_packages(
 /// into can be one of those, so the answers are not keyed well enough to drop
 /// only the ones that changed. Losing them costs one re-search each.
 fn forget_published_binaries() {
-    *PUBLISHED_BINARIES_CACHE
+    let mut guard = PUBLISHED_BINARIES_CACHE
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = None;
+        .unwrap_or_else(|e| e.into_inner());
+    PUBLISHED_BINARIES_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *guard = None;
 }
 
 /// Drop `project`'s cached package listing so the next [`try_list_project_packages`]
@@ -2484,6 +2555,33 @@ mod project_packages_cache_tests {
 
         let cache = PUBLISHED_BINARIES_CACHE.lock().unwrap();
         assert!(cache.as_ref().is_none_or(|c| !c.contains_key(&key)));
+    }
+
+    /// A published-binary search that started before an invalidation must not
+    /// store its answer afterwards; one that started after is stored.
+    #[test]
+    fn published_answer_from_a_search_started_before_invalidation_is_dropped() {
+        let stale_key = "ap-test-published-generation-stale".to_string();
+        let fresh_key = "ap-test-published-generation-fresh".to_string();
+
+        let generation = published_binaries_generation();
+        forget_published_binaries();
+        insert_published_if_current(stale_key.clone(), generation, vec!["a".into()]);
+        {
+            let cache = PUBLISHED_BINARIES_CACHE.lock().unwrap();
+            assert!(cache.as_ref().is_none_or(|c| !c.contains_key(&stale_key)));
+        }
+
+        insert_published_if_current(
+            fresh_key.clone(),
+            published_binaries_generation(),
+            vec!["b".into()],
+        );
+        let cache = PUBLISHED_BINARIES_CACHE.lock().unwrap();
+        assert_eq!(
+            cache.as_ref().and_then(|c| c.get(&fresh_key)),
+            Some(&vec!["b".to_string()])
+        );
     }
 
     /// A worker that read the listing before an invalidation must not put its
@@ -2621,11 +2719,11 @@ pub fn cat_file(project: &str, pkg: &str, filename: &str, emit: Emit<'_>) -> Opt
 fn fetch_project_packages(
     project: &str,
     emit: Emit<'_>,
-) -> Result<std::collections::HashSet<String>, String> {
+) -> Result<std::collections::HashSet<String>, Error> {
     if !is_valid_obs_name(project) {
-        return Err(format!(
+        return Err(Error::NotActionable(format!(
             "refusing to use project {project:?}: not a valid OBS name"
-        ));
+        )));
     }
     let out = proc::capture_with_timeout(
         "osc",
@@ -2635,9 +2733,13 @@ fn fetch_project_packages(
         // A whole distro project (openSUSE:Factory) is a long listing.
         Duration::from_secs(180),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(during(format!("ls {project}")))?;
     if !out.success() {
-        return Err(format!("osc ls exited {}: {}", out.code, out.stderr.trim()));
+        return Err(Error::OscFailed {
+            cmd: format!("ls {project}"),
+            code: out.code,
+            stderr: out.stderr.trim().to_string(),
+        });
     }
     Ok(parse_package_listing(&out.stdout))
 }
@@ -2828,6 +2930,17 @@ fn newest_changes_entry_says(changes: &str, message: &str) -> bool {
     false
 }
 
+/// The error `ensure_package` reports when the project listing cannot be read.
+/// A transient failure keeps its classification so that the caller retries;
+/// any other one stops the build, as it always has.
+fn listing_failure_for_create(project: &str, e: Error) -> Error {
+    if e.is_transient() {
+        e
+    } else {
+        Error::NotActionable(format!("could not list packages of {project}: {e}"))
+    }
+}
+
 /// Ensure the package exists in `project`, creating it if not.
 ///
 /// Creates it by pushing package meta directly (`osc meta pkg ... -F -`,
@@ -2875,7 +2988,8 @@ pub fn ensure_package(
     // (`python-apscheduler` vs. `python-APScheduler`). Creating one would
     // leave the project with two packages for one upstream, so refuse and let
     // the caller use the existing name.
-    let listing = try_list_project_packages(project, emit).map_err(Error::NotActionable)?;
+    let listing =
+        list_project_packages(project, emit).map_err(|e| listing_failure_for_create(project, e))?;
     if let Some(existing) = listing
         .iter()
         .filter(|p| fuzzy_key(p) == fuzzy_key(pkg_name))
@@ -4505,6 +4619,29 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[Str
     is_patch && (series.iter().any(|s| s == name) || spec_text.contains(name))
 }
 
+/// Whether `line` is a `SourceN:` line whose file name is one of `removed`.
+/// A `#/` rename names the file the checkout actually holds, as in
+/// `spec_source_names`. Macros are not expanded: a name written with one
+/// never matches a removed file.
+fn is_removed_rpmlintrc_source(line: &str, removed: &[String]) -> bool {
+    let Some((tag, value)) = line.split_once(':') else {
+        return false;
+    };
+    let tag = tag.trim().to_ascii_lowercase();
+    let is_source = tag
+        .strip_prefix("source")
+        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()));
+    if !is_source {
+        return false;
+    }
+    let value = value.trim();
+    let name = match value.split_once("#/") {
+        Some((_, renamed)) => renamed,
+        None => value.rsplit('/').next().unwrap_or(value),
+    };
+    removed.iter().any(|r| r == name)
+}
+
 /// Delete zero-byte `*.rpmlintrc` files and the `SourceN:` lines of the spec
 /// that name them: an empty filter file is noise in the package. Returns the
 /// names removed.
@@ -4537,16 +4674,7 @@ pub fn drop_empty_rpmlintrc(checkout_dir: &Path) -> Vec<String> {
         };
         let kept: String = text
             .split_inclusive('\n')
-            .filter(|l| {
-                let Some((tag, value)) = l.split_once(':') else {
-                    return true;
-                };
-                let tag = tag.trim().to_ascii_lowercase();
-                let is_source = tag
-                    .strip_prefix("source")
-                    .is_some_and(|r| r.chars().all(|c| c.is_ascii_digit()));
-                !(is_source && value.contains("rpmlintrc"))
-            })
+            .filter(|l| !is_removed_rpmlintrc_source(l, &removed))
             .collect();
         if kept != text {
             let _ = fs::write(&path, kept);
@@ -6154,11 +6282,17 @@ pub fn rebuild(
 /// names OBS lists, NOT by the source package name: a multi-flavor Python
 /// package `python-events` ships `python313-Events-…rpm`, which no
 /// `python-events-` prefix would ever match. If the listing cannot be read,
-/// fall back to counting RPMs written in the last few minutes.
-fn downloaded_rpm_count(listing: Option<&[String]>, rpms_dir: &std::path::Path) -> usize {
+/// fall back to counting the RPMs of `pkg` written since `since` (the start of
+/// this package's download), see [`count_package_rpms_since`].
+fn downloaded_rpm_count(
+    listing: Option<&[String]>,
+    rpms_dir: &std::path::Path,
+    pkg: &str,
+    since: SystemTime,
+) -> usize {
     match listing {
         Some(names) => names.iter().filter(|n| rpms_dir.join(n).is_file()).count(),
-        None => count_recent_rpms(rpms_dir, Duration::from_secs(600)),
+        None => count_package_rpms_since_in_dir(rpms_dir, pkg, since),
     }
 }
 
@@ -6293,26 +6427,69 @@ fn multibuild_flavors(project: &str, pkg_name: &str, repo: &str, arch: &str) -> 
     .unwrap_or_default()
 }
 
-/// `.rpm` files (not `.src.rpm`) in `rpms_dir` modified within `window`.
+/// Whether the file name `file` is a binary RPM of package `pkg`: `<pkg>-` and
+/// then `<version>-<release>.<arch>.rpm`, the same shape `sibling_rpms` takes
+/// (a version starting with a digit, exactly two `-` fields after the name).
+/// A sibling whose name extends `pkg` (`pkg-libs-1.0-1.x86_64.rpm`) does not
+/// match, and neither does a `.src.rpm`.
+fn is_package_rpm(file: &str, pkg: &str) -> bool {
+    if file.ends_with(".src.rpm") {
+        return false;
+    }
+    let Some(rest) = file.strip_prefix(pkg).and_then(|r| r.strip_prefix('-')) else {
+        return false;
+    };
+    let Some(stem) = rest.strip_suffix(".rpm") else {
+        return false;
+    };
+    match stem.split('-').collect::<Vec<_>>().as_slice() {
+        [version, release_arch] => {
+            version.starts_with(|c: char| c.is_ascii_digit())
+                && release_arch
+                    .rsplit_once('.')
+                    .is_some_and(|(release, arch)| !release.is_empty() && !arch.is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// How many of `files` (name, modification time; `None` when unknown) are
+/// binary RPMs of `pkg` modified at or after `since`. Pure: the caller reads
+/// the directory.
+fn count_package_rpms_since(
+    files: &[(String, Option<SystemTime>)],
+    pkg: &str,
+    since: SystemTime,
+) -> usize {
+    files
+        .iter()
+        .filter(|(name, modified)| {
+            is_package_rpm(name, pkg) && modified.is_some_and(|m| m >= since)
+        })
+        .count()
+}
+
+/// [`count_package_rpms_since`] over the files currently in `rpms_dir`.
 /// Returns 0 when the directory doesn't exist or can't be read.
-fn count_recent_rpms(rpms_dir: &std::path::Path, window: Duration) -> usize {
+fn count_package_rpms_since_in_dir(
+    rpms_dir: &std::path::Path,
+    pkg: &str,
+    since: SystemTime,
+) -> usize {
     let Ok(iter) = std::fs::read_dir(rpms_dir) else {
         return 0;
     };
-    iter.filter_map(|e| e.ok())
-        .filter(|e| {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            n.ends_with(".rpm") && !n.ends_with(".src.rpm")
+    let files: Vec<(String, Option<SystemTime>)> = iter
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                e.metadata().and_then(|m| m.modified()).ok(),
+            )
         })
-        .filter(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age <= window)
-        })
-        .count()
+        .collect();
+    count_package_rpms_since(&files, pkg, since)
 }
 
 /// Runs `osc getbinaries --destdir=<dest> <project> <package> <repo> <arch>`.
@@ -7178,6 +7355,9 @@ pub fn download_built_rpms(
         if let Some(names) = &listing {
             remove_superseded_rpms(rpms_dir, names);
         }
+        // A flavor `pkg:flavor` ships RPMs named `pkg-flavor-<version>…`.
+        let file_prefix = name.replace(':', "-");
+        let started = SystemTime::now();
         fetch_with_retries(
             project,
             name,
@@ -7190,7 +7370,8 @@ pub fn download_built_rpms(
             || get_binaries(project, name, repo, arch, rpms_dir, emit),
         )?;
         stash_rpmlint_log(rpms_dir, name);
-        downloaded_count += downloaded_rpm_count(listing.as_deref(), rpms_dir);
+        downloaded_count +=
+            downloaded_rpm_count(listing.as_deref(), rpms_dir, &file_prefix, started);
     }
     Ok(downloaded_count)
 }
@@ -7906,27 +8087,117 @@ mod obs_name_tests {
 }
 
 #[cfg(test)]
-mod count_rpms_tests {
+mod listing_failure_tests {
     use super::*;
 
     #[test]
-    fn recent_rpms_exclude_source_rpms_and_other_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("python313-Events-0.5-2.1.noarch.rpm"), b"").unwrap();
-        std::fs::write(tmp.path().join("python-events-0.5-2.1.src.rpm"), b"").unwrap();
-        std::fs::write(tmp.path().join("_buildenv"), b"").unwrap();
-        assert_eq!(count_recent_rpms(tmp.path(), Duration::from_secs(60)), 1);
+    fn a_transient_listing_failure_stays_retryable() {
+        let timeout = Error::Command {
+            cmd: "ls project".into(),
+            source: proc::ProcessError::Timeout {
+                program: "osc".into(),
+                secs: 180,
+            },
+        };
+        assert!(listing_failure_for_create("project", timeout).is_transient());
+
+        let bad_gateway = Error::OscFailed {
+            cmd: "ls project".into(),
+            code: 1,
+            stderr: "HTTP Error 502: Bad Gateway".into(),
+        };
+        assert!(listing_failure_for_create("project", bad_gateway).is_transient());
     }
 
     #[test]
-    fn recent_rpms_tolerates_missing_dir() {
+    fn a_permanent_listing_failure_is_not_actionable() {
+        let refused = Error::OscFailed {
+            cmd: "ls project".into(),
+            code: 1,
+            stderr: "HTTP Error 403: Forbidden".into(),
+        };
+        match listing_failure_for_create("project", refused) {
+            Error::NotActionable(m) => assert!(m.contains("could not list packages of project")),
+            other => panic!("expected NotActionable, got {other:?}"),
+        }
+        let invalid = Error::NotActionable("refusing to use project".into());
+        assert!(!listing_failure_for_create("project", invalid).is_transient());
+    }
+}
+
+#[cfg(test)]
+mod count_rpms_tests {
+    use super::*;
+
+    fn at(secs: u64) -> Option<SystemTime> {
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn only_this_packages_rpms_written_since_the_start_count() {
+        let since = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let files = [
+            // This package, written during the download.
+            ("python-events-0.5-2.1.noarch.rpm".to_string(), at(1_010)),
+            // This package, left by an earlier download.
+            ("python-events-0.4-1.1.noarch.rpm".to_string(), at(900)),
+            // Another package written during the download.
+            ("python-other-1.0-1.1.noarch.rpm".to_string(), at(1_010)),
+            // A sibling whose name extends this package: not its RPM.
+            ("python-events-extra-1.0-1.1.noarch.rpm".to_string(), at(1_010)),
+            // Source RPM and other files.
+            ("python-events-0.5-2.1.src.rpm".to_string(), at(1_010)),
+            ("_buildenv".to_string(), at(1_010)),
+            // Unknown mtime is not counted.
+            ("python-events-0.6-1.1.noarch.rpm".to_string(), None),
+        ];
+        assert_eq!(count_package_rpms_since(&files, "python-events", since), 1);
+        assert_eq!(count_package_rpms_since(&files, "python-other", since), 1);
+        assert_eq!(count_package_rpms_since(&[], "python-events", since), 0);
+    }
+
+    #[test]
+    fn a_flavor_prefix_matches_its_own_rpms() {
+        let since = SystemTime::UNIX_EPOCH;
+        let files = [
+            ("pkg-flavor-1.0-1.1.noarch.rpm".to_string(), at(5)),
+            ("pkg-1.0-1.1.noarch.rpm".to_string(), at(5)),
+        ];
+        assert_eq!(count_package_rpms_since(&files, "pkg-flavor", since), 1);
+    }
+
+    #[test]
+    fn package_rpm_boundary_rule() {
+        assert!(is_package_rpm("ffmpeg-8.0-1.x86_64.rpm", "ffmpeg"));
+        assert!(!is_package_rpm("ffmpeg-8-libs-8.0-1.x86_64.rpm", "ffmpeg"));
+        assert!(!is_package_rpm("ffmpeg-libs-8.0-1.x86_64.rpm", "ffmpeg"));
+        assert!(!is_package_rpm("ffmpeg8-8.0-1.x86_64.rpm", "ffmpeg"));
+        assert!(!is_package_rpm("ffmpeg-8.0-1.x86_64.src.rpm", "ffmpeg"));
+        assert!(!is_package_rpm("ffmpeg-8.0-1.rpm", "ffmpeg"));
+    }
+
+    #[test]
+    fn package_rpms_since_tolerates_missing_dir() {
         assert_eq!(
-            count_recent_rpms(
+            count_package_rpms_since_in_dir(
                 std::path::Path::new("/does/not/exist"),
-                Duration::from_secs(60)
+                "pkg",
+                SystemTime::UNIX_EPOCH,
             ),
             0
         );
+    }
+
+    #[test]
+    fn package_rpms_since_reads_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pkg-1.0-1.1.noarch.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("pkg-1.0-1.1.src.rpm"), b"").unwrap();
+        std::fs::write(tmp.path().join("other-1.0-1.1.noarch.rpm"), b"").unwrap();
+        let before = SystemTime::now() - Duration::from_secs(3600);
+        assert_eq!(count_package_rpms_since_in_dir(tmp.path(), "pkg", before), 1);
+        let after = SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(count_package_rpms_since_in_dir(tmp.path(), "pkg", after), 0);
     }
 }
 

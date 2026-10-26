@@ -149,16 +149,29 @@ fn truncated_match(msg: &str, needle: &str) -> bool {
 
 fn classify_message(msg: &str) -> &'static str {
     let m = msg.to_lowercase();
+    // Real network phrases only: a bare `connect` or `socket` also matches a
+    // file name such as `connect_fixture.csv`, and a bare `network` matches
+    // `networkx`. Matched in lower case.
     const NETWORK: &[&str] = &[
         "connectionerror",
-        "connect",
-        "timeout",
+        "connecterror",
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "connection timed out",
+        "readtimeout",
+        "connecttimeout",
+        "timed out",
+        "socket.timeout",
+        "socket.gaierror",
+        "sslerror",
         "urllib",
-        "socket",
         "httpx",
         "resolutionimpossible",
-        "resolution",
-        "network",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "network is unreachable",
+        "no route to host",
     ];
     const MISSING_FILE: &[&str] = &["filenotfounderror", "no such file"];
     const MISSING_MODULE: &[&str] = &["modulenotfounderror", "importerror"];
@@ -400,15 +413,20 @@ static SPLIT_TREE_SUBMODULE: LazyLock<Regex> = LazyLock::new(|| {
 /// Failures that have one known recipe, each seen in a real run: the cause and
 /// the exact fix, so the first attempt is right.
 fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
+    // The whole line is matched; only the evidence is cut to 300 characters.
     let find = |re: &Regex| {
         haystack
             .iter()
             .find(|l| re.is_match(l))
-            .map(|l| l.trim().chars().take(300).collect::<String>())
+            .map(|l| l.trim().to_string())
     };
+    let short = |line: &str| line.chars().take(300).collect::<String>();
     // scikit-build-core `wheel.py-api = "cp38"` with Cython 3.3 (python-tilelang).
-    if let Some(line) = find(&CYTHON_LIMITED_API) {
-        let c = CYTHON_LIMITED_API.captures(&line)?;
+    // Each recipe is a branch of its own: a line that does not capture here
+    // must not end the search for the others.
+    if let Some(line) = find(&CYTHON_LIMITED_API)
+        && let Some(c) = CYTHON_LIMITED_API.captures(&line)
+    {
         let (cython, floor) = (c["c"].to_string(), c["v"].to_string());
         let tag = format!("cp{}", floor.replace('.', ""));
         return Some(ProbableCause {
@@ -425,7 +443,7 @@ fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                  A floor of {floor} loses nothing: every flavor built here is newer. Do not pin \
                  an older Cython."
             ),
-            evidence: vec![line],
+            evidence: vec![short(&line)],
             kind: CauseKind::KnownRecipe {
                 id: "cython-limited-api",
             },
@@ -449,7 +467,7 @@ fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                      `ffmpeg-<N>` in `patch_dependencies` for a licence-clean copy. Never use the \
                      S3 download option (no network) and never return `blocked`."
                 .to_string(),
-            evidence: vec![line],
+            evidence: vec![short(&line)],
             kind: CauseKind::KnownRecipe {
                 id: "cmake-licence-guard",
             },
@@ -472,7 +490,7 @@ fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                      `patch_dependencies` if its spec still uses `%{python_sitearch}`; otherwise \
                      wait for the rebuilt siblings."
                 .to_string(),
-            evidence: vec![line],
+            evidence: vec![short(&line)],
             kind: CauseKind::KnownRecipe {
                 id: "cutlass-split-tree",
             },
@@ -787,6 +805,73 @@ mod tests {
             }
         );
         assert!(c.action.contains("%{python_sitelib}"), "{}", c.action);
+    }
+
+    #[test]
+    fn a_file_named_like_a_network_word_is_not_network() {
+        let msg = "FileNotFoundError: [Errno 2] No such file or directory: 'connect_fixture.csv'";
+        assert_eq!(classify_message(msg), "missing_file");
+        assert_eq!(
+            classify_message("ModuleNotFoundError: No module named 'socket_helpers'"),
+            "missing_module"
+        );
+        assert_eq!(
+            classify_message("networkx.exception.NetworkXError: graph is empty"),
+            "other"
+        );
+    }
+
+    #[test]
+    fn real_network_failures_are_network() {
+        for msg in [
+            "ConnectionRefusedError: [Errno 111] Connection refused",
+            "ConnectionResetError: [Errno 104] Connection reset by peer",
+            "socket.timeout: timed out",
+            "socket.gaierror: [Errno -2] Name or service not known",
+            "[Errno -3] Temporary failure in name resolution",
+            "ssl.SSLError: [SSL: CERTIFICATE_VERIFY_FAILED]",
+            "httpx2.ConnectError: boom",
+        ] {
+            assert_eq!(classify_message(msg), "network", "{msg}");
+        }
+    }
+
+    /// The Cython recipe's line starts past character 230, so its text is
+    /// cut off by the 300-character limit. The match must still be found, and
+    /// the later recipe's line must still be reachable.
+    #[test]
+    fn a_long_line_does_not_hide_the_recipes_after_it() {
+        let cython = format!(
+            "{}Cython 3.3 requires the Python Limited API version to be 3.8 or greater",
+            "x".repeat(230)
+        );
+        assert!(cython.len() > 300);
+        let haystack = [
+            cython.as_str(),
+            "CMake Error at CMakeLists.txt:3 (message):",
+            "  set I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION",
+        ];
+        let c = known_recipe(&haystack).expect("recognised");
+        assert_eq!(
+            c.kind,
+            CauseKind::KnownRecipe {
+                id: "cython-limited-api"
+            }
+        );
+        assert!(c.evidence[0].chars().count() <= 300);
+
+        // Without the Cython line, the licence guard further down is found.
+        let haystack = [
+            "CMake Error at CMakeLists.txt:3 (message):",
+            "  set I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION",
+        ];
+        let c = known_recipe(&haystack).expect("recognised");
+        assert_eq!(
+            c.kind,
+            CauseKind::KnownRecipe {
+                id: "cmake-licence-guard"
+            }
+        );
     }
 
     #[test]

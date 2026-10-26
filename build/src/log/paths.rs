@@ -162,8 +162,12 @@ impl PathMapper {
             // name inside it is source too, not the path to cut at.
             let tail = &path[path.rfind("/BUILD/")?..];
             if let Some(at) = tail.find(&marker) {
+                let relative = &tail[at + marker.len()..];
+                if has_parent_component(relative) {
+                    return None;
+                }
                 self.matched.store(true, Ordering::Relaxed);
-                return Some(tail[at + marker.len()..].to_string());
+                return Some(relative.to_string());
             }
             // Path is under /BUILD/ but not under the sdist root — a generated
             // wheel, a scratch dir. Not our source.
@@ -178,11 +182,17 @@ impl PathMapper {
         let wrapper = parts.next()?;
         let _sdist_root = parts.next()?;
         let relative = parts.next()?;
-        if !wrapper.ends_with("-build") || relative.is_empty() {
+        if !wrapper.ends_with("-build") || relative.is_empty() || has_parent_component(relative) {
             return None;
         }
         Some(relative.to_string())
     }
+}
+
+/// Whether a path has a `..` component. Such a path, taken from a log, can
+/// climb out of the unpacked sdist, so it is not source of this package.
+fn has_parent_component(path: &str) -> bool {
+    path.split('/').any(|c| c == "..")
 }
 
 /// Everything after the last occurrence of `marker`.
@@ -256,6 +266,25 @@ mod tests {
         classes.sort_by_key(|c| c.priority());
         assert!(classes[0].is_readable_from_sdist());
         assert_eq!(classes[2].priority(), 2);
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_the_sdist_is_not_source() {
+        let escape = "/home/abuild/rpmbuild/BUILD/python-glances-4.3.0-build/glances-4.3.0/../../../../etc/shadow";
+        assert!(!mapper().classify(escape).is_readable_from_sdist());
+        assert_eq!(mapper().sdist_relative(escape), None);
+        assert!(!mapper().did_match_root());
+        let blind = PathMapper::default();
+        let blind_escape =
+            "/home/abuild/rpmbuild/BUILD/python-glances-4.3.0-build/glances-4.3.0/../secret.py";
+        assert_eq!(blind.sdist_relative(blind_escape), None);
+        // A `..` inside a name is not a parent component.
+        assert_eq!(
+            mapper().sdist_relative(
+                "/home/abuild/rpmbuild/BUILD/python-glances-4.3.0-build/glances-4.3.0/a..b/c.py"
+            ),
+            Some("a..b/c.py".to_string())
+        );
     }
 
     #[test]
