@@ -1459,12 +1459,13 @@ fn post_process(
                 // A newline in a TOML string would open new spec lines, and a
                 // `%` or `{` would expand: only a plain PEP 508 requirement
                 // goes in, and a bad one is dropped without failing the spec.
-                if !ap_ecosystem::sdist::is_safe_build_requirement(req) {
+                // A marker is not written (a BuildRequires cannot carry one).
+                let Some(req) = ap_ecosystem::sdist::build_requirement_part(req) else {
                     tracing::warn!(
                         "dropping build requirement {req:?}: not a plain PEP 508 requirement"
                     );
                     continue;
-                }
+                };
                 // `setuptools>=42` as it appears in pyproject.toml is exactly
                 // the form the conventions document as wrong; OBS needs
                 // `setuptools >= 42` inside the macro.
@@ -8990,6 +8991,43 @@ mod license_url_injection_tests {
                 "{bad:?}"
             );
         }
+    }
+
+    /// A PEP 508 marker is not written: the requirement is kept, the marker is
+    /// dropped. A marker with a macro or a newline drops the whole entry.
+    #[test]
+    fn a_build_requirement_marker_is_dropped_and_the_requirement_kept() {
+        let release = release(
+            ap_ecosystem::pypi::License::Spdx("MIT".to_string()),
+            Some("https://example.org"),
+        );
+        let build_system = BuildSystem {
+            requires: vec![
+                "numpy>=2; python_version>='3.9'".to_string(),
+                "tomli; python_version < \"3.11\"".to_string(),
+                "x; python_version%{lua:y}".to_string(),
+                "z; python_version\n%pre".to_string(),
+            ],
+            backend: None,
+        };
+        let spec = "BuildRequires:  %{python_module pip}\n%changelog\n";
+        let out = post_process_with_sdist(
+            spec,
+            &release,
+            &build_system,
+            SdistFacts {
+                has_tests: false,
+                has_c_extensions: false,
+                top_level_tests_dir: None,
+                install_entries: None,
+                console_scripts: Vec::new(),
+            },
+        );
+        assert!(out.contains("BuildRequires:  %{python_module numpy >= 2}\n"), "{out}");
+        assert!(out.contains("BuildRequires:  %{python_module tomli}\n"), "{out}");
+        assert!(!out.contains("python_version"), "{out}");
+        assert!(!out.contains("lua"), "{out}");
+        assert!(!out.contains("%pre"), "{out}");
     }
 
     /// `[build-system] requires` with an injected entry: the entry is dropped,

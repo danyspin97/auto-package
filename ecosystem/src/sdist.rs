@@ -758,6 +758,40 @@ pub fn is_safe_build_requirement(req: &str) -> bool {
     })
 }
 
+/// What a `[build-system] requires` entry contributes to a spec: its requirement
+/// part, with any PEP 508 environment marker (`; python_version < "3.11"`)
+/// removed. A `BuildRequires` cannot carry a marker, so the requirement is kept
+/// unconditionally: at worst an extra build dependency is installed. `None`
+/// when the requirement part is not plain, or the marker holds a character a
+/// spec or shell could expand (see [`is_safe_marker`]).
+pub fn build_requirement_part(entry: &str) -> Option<&str> {
+    let (req, marker) = match entry.split_once(';') {
+        Some((req, marker)) => (req, Some(marker)),
+        None => (entry, None),
+    };
+    if marker.is_some_and(|m| !is_safe_marker(m)) {
+        return None;
+    }
+    let req = req.trim();
+    is_safe_build_requirement(req).then_some(req)
+}
+
+/// Whether a PEP 508 marker is made only of what a marker needs: letters
+/// (marker names and the `and`/`or`/`in`/`not` operators), digits, spaces,
+/// `. _ - + * ! = < > ~ ( )` and quotes. Newline, `%`, `{`, `}`, `$`, backtick,
+/// `;`, `|`, `&`, backslash and `#` are refused.
+fn is_safe_marker(marker: &str) -> bool {
+    marker.len() <= 300
+        && marker.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    ' ' | '.' | '_' | '-' | '+' | '*' | '!' | '=' | '<' | '>' | '~' | '(' | ')'
+                        | '\'' | '"'
+                )
+        })
+}
+
 /// Whether a wheel's file names show auditwheel-bundled libraries: a
 /// `<name>.libs/` directory or a hash-suffixed `.so`.
 fn names_have_hashed_libs(names: &[String]) -> bool {
@@ -895,13 +929,13 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
         // one top-level `include/`, and rpmlint's `addFilter` is an
         // unanchored substring match — a filter for the parent already
         // matches every path under it, so emitting one per nested
-        // subdirectory too would just be redundant noise. Sorting first
-        // guarantees a parent directory always sorts immediately before its
-        // descendants (it's a string prefix of each one), so checking only
-        // the most recently kept entry is enough to drop every descendant.
+        // subdirectory too would just be redundant noise. Sorting puts a
+        // parent before its descendants (a string prefix sorts first), but
+        // not right after them: `a/b`, `a/b-x`, `a/b/c` puts `a/b-x` in
+        // between. So each directory is checked against every kept one.
         let mut kept: Vec<String> = Vec::with_capacity(dirs.len());
         for dir in dirs {
-            let is_nested_under_kept = kept.last().is_some_and(|parent: &String| {
+            let is_nested_under_kept = kept.iter().any(|parent: &String| {
                 dir.starts_with(parent.as_str()) && dir.as_bytes().get(parent.len()) == Some(&b'/')
             });
             if !is_nested_under_kept {
@@ -1773,11 +1807,13 @@ fn inspect_from_entries(
     };
     let project_depth = python_depth.or(cargo.as_ref().map(|((d, _), _)| *d));
 
-    // Name the subdirectory the packaging lives in, by finding a file at that
-    // depth and taking its leading path components below the top level.
-    let project_dir = match project_depth {
-        None | Some(0) => None,
-        Some(depth) => {
+    // Name the subdirectory the packaging lives in. A chosen pyproject.toml
+    // decides it: its directory is the one the build reads the metadata from.
+    // Only without one is a setup.py/setup.cfg/Cargo.toml at the depth used.
+    let project_dir = match (&pyproject, project_depth) {
+        (Some((depth, dir, _)), _) => (*depth > 0).then(|| dir.clone()),
+        (None, None | Some(0)) => None,
+        (None, Some(depth)) => {
             let mut dirs: Vec<String> = files
                 .iter()
                 .filter_map(|f| {
@@ -1840,17 +1876,24 @@ impl BuildSystem {
 impl From<RawBuildSystem> for BuildSystem {
     fn from(raw: RawBuildSystem) -> Self {
         // An entry a spec cannot carry verbatim is dropped, not the whole list.
+        // A marker is dropped and the requirement kept (see `build_requirement_part`).
         let requires = raw
             .requires
             .into_iter()
-            .filter(|r| {
-                let ok = is_safe_build_requirement(r);
-                if !ok {
-                    tracing::warn!(
-                        "ignoring build-system requirement {r:?}: not a plain PEP 508 requirement"
-                    );
+            .filter_map(|r| {
+                let part = build_requirement_part(&r).map(str::to_string);
+                if part.is_none() {
+                    if r.split(';').next().is_some_and(|req| req.contains('@')) {
+                        tracing::warn!(
+                            "ignoring build-system requirement {r:?}: a direct reference (`@ url`) cannot be written in a spec"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "ignoring build-system requirement {r:?}: not a plain PEP 508 requirement"
+                        );
+                    }
                 }
-                ok
+                part
             })
             .collect();
         Self {
@@ -1885,10 +1928,13 @@ struct RawProject {
 /// a spec (`%autosetup -n <name>`) and a shell command. Letters and digits in
 /// any script are allowed (e.g. `Pyöpt-1.0`), plus `. _ - + ~`: no whitespace,
 /// control character, newline, `%` (RPM macro), `/` or other shell or spec
-/// metacharacters. Shared with `ap-build` so both sides accept the same names.
+/// metacharacters. A leading `-` would be read as an option and a leading `~`
+/// tilde-expands (`~root`) in the generated `cd`, so neither may start a name.
+/// Shared with `ap-build` so both sides accept the same names.
 pub fn is_safe_top_level_dir(name: &str) -> bool {
     name.len() <= 255
         && !matches!(name, "" | "." | "..")
+        && !name.starts_with(['-', '~'])
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~'))
@@ -2505,6 +2551,29 @@ mod tests {
         assert_eq!(info.project_dir.as_deref(), Some("cuda_core"));
     }
 
+    /// The chosen pyproject decides the project directory. Here `cuda_bindings`
+    /// has only a legacy setup.py and `cuda_core` the pyproject, and neither
+    /// directory matches the package name: the build must `cd` into `cuda_core`.
+    #[test]
+    fn project_dir_follows_the_chosen_pyproject_not_the_first_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                ("thing-1.0/cuda_bindings/setup.py", b"x".as_slice()),
+                (
+                    "thing-1.0/cuda_core/pyproject.toml",
+                    b"[build-system]\nrequires = [\"setuptools\"]\n[project]\nname = \"other-pkg\"\n"
+                        .as_slice(),
+                ),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert_eq!(info.project_name.as_deref(), Some("other-pkg"));
+        assert_eq!(info.project_dir.as_deref(), Some("cuda_core"));
+    }
+
     #[test]
     fn a_manifest_at_the_root_beats_a_matching_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
@@ -3052,9 +3121,59 @@ build-backend = "flit_core.buildapi"
         for bad in [
             "", ".", "..", "a/b", "a\\b", "a b", "a\nb", "a\u{7}b", "a%b", "a;b", "a$b", "a\"b",
             "a'b", "a`b", "a(b)", "a{b}", "a|b", "a&b", "a<b>", "a*b", "a?b", "a!b", "a#b",
+            "-x", "--option", "~root", "~",
         ] {
             assert!(!is_safe_top_level_dir(bad), "{bad:?}");
         }
+        // Only a leading `-` or `~` is refused; interior ones are fine.
+        for good in ["a-b", "a~b"] {
+            assert!(is_safe_top_level_dir(good), "{good}");
+        }
+    }
+
+    /// A `[build-system] requires` entry with a PEP 508 marker keeps its
+    /// requirement; a marker with a spec- or shell-special character drops it.
+    #[test]
+    fn build_requirement_part_keeps_the_requirement_and_refuses_unsafe_markers() {
+        for (entry, want) in [
+            ("numpy>=2; python_version>='3.9'", Some("numpy>=2")),
+            ("tomli; python_version < \"3.11\"", Some("tomli")),
+            (
+                "pkg[extra] >= 1.0 ; python_version < '3' and sys_platform == \"linux\"",
+                Some("pkg[extra] >= 1.0"),
+            ),
+            ("setuptools >= 42, < 80", Some("setuptools >= 42, < 80")),
+            ("numpy>=2;", Some("numpy>=2")),
+            ("tomli; python_version%{lua:x}", None),
+            ("tomli; python_version\n%pre", None),
+            ("tomli; python_version < '3'; x", None),
+            ("tomli; $(x) == '3'", None),
+            ("tomli; a`x` == 'b'", None),
+            ("tomli; a|b", None),
+            ("tomli; a&b", None),
+            ("tomli; a\\b", None),
+            ("tomli; a # b", None),
+            ("tomli; a{b}", None),
+            ("setuptools\n%pre; python_version < '3'", None),
+            ("pkg @ https://example.org/x.tar.gz; python_version < '3'", None),
+            ("pkg @ https://example.org/x.tar.gz", None),
+        ] {
+            assert_eq!(build_requirement_part(entry), want, "{entry:?}");
+        }
+    }
+
+    /// Through the `[build-system]` parse: a marker is dropped, the
+    /// requirement kept, and a direct reference is refused.
+    #[test]
+    fn build_system_keeps_requirements_whose_marker_is_dropped() {
+        let doc: PyprojectToml = toml::from_str(
+            r#"[build-system]
+requires = ["numpy>=2; python_version>='3.9'", 'tomli; python_version < "3.11"', "pkg @ https://example.org/x.tar.gz", "wheel"]
+"#,
+        )
+        .unwrap();
+        let bs = BuildSystem::from(doc.build_system.unwrap());
+        assert_eq!(bs.requires, vec!["numpy>=2", "tomli", "wheel"]);
     }
 
     /// Python's tarfile writes directory members without a trailing slash; they
@@ -3343,6 +3462,23 @@ build-backend = "flit_core.buildapi"
         );
         let l = wheel_layout(&w).unwrap();
         assert_eq!(l.header_dirs, vec!["nvidia/nccl/include".to_string()]);
+    }
+
+    /// `a/b-x` sorts between `a/b` and its child `a/b/c`, so a check against
+    /// only the last kept directory would keep `a/b/c` as a redundant filter.
+    #[test]
+    fn wheel_layout_collapses_children_even_when_a_sibling_sorts_between() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("between.whl");
+        write_wheel(
+            &w,
+            &["pkg/b/x.h", "pkg/b-x/y.h", "pkg/b/c/z.h"],
+        );
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(
+            l.header_dirs,
+            vec!["pkg/b".to_string(), "pkg/b-x".to_string()]
+        );
     }
 
     fn write_wheel_with(path: &Path, files: &[(&str, &[u8])]) {
@@ -3751,7 +3887,7 @@ build-backend = "flit_core.buildapi"
     /// A hostile `[build-system] requires` loses only the bad entries.
     #[test]
     fn build_system_requires_drops_injected_entries_at_the_source() {
-        let src = "[build-system]\nrequires = [\"setuptools\\n%pre\\necho x\", \"wheel\", \"a;b\", \"cython>=3\"]\nbuild-backend = \"setuptools.build_meta\"\n";
+        let src = "[build-system]\nrequires = [\"setuptools\\n%pre\\necho x\", \"wheel\", \"a; $(x)\", \"cython>=3\"]\nbuild-backend = \"setuptools.build_meta\"\n";
         let bs = build_system_from_toml(src);
         assert_eq!(bs.requires, ["wheel", "cython>=3"]);
     }

@@ -100,6 +100,17 @@ fn spec_text(text: &str) -> String {
         .join(" ")
 }
 
+/// `text` as an RPM `Version:`: only letters, digits and `. _ + ~`, the
+/// characters a version may carry. Anything else is removed, so a newline or a
+/// `%` cannot open a spec line or a macro; an empty result becomes `0`.
+fn version_text(text: &str) -> String {
+    let v: String = text
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '~'))
+        .collect();
+    if v.is_empty() { "0".to_string() } else { v }
+}
+
 /// A name that is safe to put unquoted into a shell command and a macro-free
 /// spec line: the archive's directory names come from a member list.
 fn is_plain_name(name: &str) -> bool {
@@ -453,8 +464,16 @@ fn devel_requires(key: &str) -> &'static [&'static str] {
 ///   stubs). A component with nothing at run time (cccl: headers and cmake
 ///   files only) is one package `cuda-<short>` that also provides `-devel`.
 pub fn redist_component_spec(input: &RedistSpecInput) -> String {
+    // `Name:` is written verbatim and the key comes from a manifest: a key that
+    // is not a plain name gets a fixed one, not a line break or a macro.
     let short = short_name(&input.component_key);
+    let short = if is_plain_name(&format!("cuda-{short}")) {
+        short
+    } else {
+        "component".to_string()
+    };
     let name = format!("cuda-{short}");
+    let version = version_text(&input.version);
     let (maj, min) = major_minor(&input.cuda_release);
     let layout = analyse(&input.files).unwrap_or(Layout {
         // `%setup -n` names this directory: only a plain name may be written.
@@ -579,7 +598,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
          Source0:        {url}\n\
          Source99:       {name}.rpmlintrc\n\
          ExclusiveArch:  {arch}\n",
-        version = input.version,
+        version = version,
         human = human_name(&input.name),
         license = NVIDIA_PROPRIETARY,
         url = input.archive_url,
@@ -607,7 +626,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
          and installed under %{{cuda_prefix}}.\n",
         human = human_name(&input.name),
         key = input.component_key,
-        version = input.version,
+        version = version,
         rel = spec_text(&input.cuda_release),
         lic = spec_text(&input.license),
     ));
@@ -624,7 +643,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
              {human} ({key} {version}), installed under %{{cuda_prefix}}.\n",
             human = human_name(&input.name),
             key = input.component_key,
-            version = input.version,
+            version = version,
             devel_requires = devel_requires(&input.component_key)
                 .iter()
                 .map(|k| format!("Requires:       cuda-{}-devel\n", short_name(k)))
@@ -1036,6 +1055,29 @@ bin/__nvcc_device_query
         assert!(!spec.contains("\nRequires: x"), "{spec}");
         assert!(!spec.contains("$(x)"), "{spec}");
         assert!(spec.contains("%setup -q -n archive\n"), "{spec}");
+    }
+
+    /// `Version:` and `Name:` take manifest text: a newline or a macro in
+    /// either cannot open a line of its own or expand.
+    #[test]
+    fn version_and_name_cannot_inject_spec_lines_or_macros() {
+        let mut i = cudart();
+        i.version = "13.4.92\nRequires: pwned%{lua:x}".into();
+        i.component_key = "cuda_x\nRequires: pwned".into();
+        let spec = redist_component_spec(&i);
+        // Tags live in the preamble; the description body is free text.
+        let preamble = spec.split("%description").next().unwrap_or_default();
+        assert!(!preamble.lines().any(|l| l.starts_with("Requires: pwned")), "{spec}");
+        assert!(!spec.contains("%{lua"), "{spec}");
+        assert_eq!(
+            spec.lines().filter(|l| l.starts_with("Version:")).count(),
+            1,
+            "{spec}"
+        );
+        assert!(spec.contains("Name:           cuda-component\n"), "{spec}");
+        // A clean version is written as it is.
+        let clean = redist_component_spec(&cudart());
+        assert!(clean.contains("Version:        13.4.92\n"), "{clean}");
     }
 
     #[test]
