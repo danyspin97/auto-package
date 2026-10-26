@@ -393,12 +393,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     }
 
     let failures = if failed {
-        let n = report
-            .results
-            .iter()
-            .filter(|r| matches!(r.outcome, ItemOutcome::Failed(_)))
-            .count();
-        vec![format!("{n} package(s) failed to update")]
+        up::failure_lines(&report.results)
     } else {
         Vec::new()
     };

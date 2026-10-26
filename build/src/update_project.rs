@@ -196,11 +196,35 @@ pub struct ItemResult {
     pub sr: SrOutcome,
 }
 
-/// Whether the run counts as failed: a package that could not be updated.
+/// Whether the run counts as failed: a package that could not be updated, or a
+/// submit request that could not be made.
 pub fn any_failed(results: &[ItemResult]) -> bool {
+    !failure_lines(results).is_empty()
+}
+
+/// Why the run failed, one line per kind of failure, empty when it did not.
+pub fn failure_lines(results: &[ItemResult]) -> Vec<String> {
+    let items = results
+        .iter()
+        .filter(|r| matches!(r.outcome, ItemOutcome::Failed(_)))
+        .count();
+    let submits = failed_submits(results);
+    let mut lines = Vec::new();
+    if items > 0 {
+        lines.push(format!("{items} package(s) failed to update"));
+    }
+    if submits > 0 {
+        lines.push(format!("{submits} submit request(s) failed"));
+    }
+    lines
+}
+
+/// How many submit requests could not be made.
+fn failed_submits(results: &[ItemResult]) -> usize {
     results
         .iter()
-        .any(|r| matches!(r.outcome, ItemOutcome::Failed(_)))
+        .filter(|r| matches!(r.sr, SrOutcome::Failed(_)))
+        .count()
 }
 
 /// Whether two version strings name the same release (`1.0` and `1.0.0` do).
@@ -395,6 +419,10 @@ pub fn summary_text(
                 })
                 .collect(),
         );
+        let submits = failed_submits(results);
+        if submits > 0 {
+            let _ = writeln!(out, "{submits} submit request(s) failed");
+        }
     }
     section(
         &mut out,
@@ -655,6 +683,51 @@ Mon Sep  1 09:00:00 UTC 2026 - Dev <dev@example.org>\n\
     }
 
     #[test]
+    fn a_failed_submit_request_fails_the_run() {
+        let failed_sr = vec![
+            result("a", ItemOutcome::Updated, SrOutcome::Failed("boom".into())),
+            result("b", ItemOutcome::Updated, SrOutcome::Failed("boom".into())),
+        ];
+        assert!(any_failed(&failed_sr));
+        assert_eq!(failure_lines(&failed_sr), ["2 submit request(s) failed"]);
+        let text = summary_text("home:u:b", &failed_sr, &[], true);
+        assert!(text.contains("2 submit request(s) failed\n"), "{text}");
+        assert!(text.contains("  a -> Base:System: failed: boom"), "{text}");
+
+        // A package failure and a submit failure are reported separately.
+        let both = vec![
+            result(
+                "a",
+                ItemOutcome::Failed("build".into()),
+                SrOutcome::NotRequested,
+            ),
+            result("b", ItemOutcome::Updated, SrOutcome::Failed("boom".into())),
+        ];
+        assert_eq!(
+            failure_lines(&both),
+            [
+                "1 package(s) failed to update",
+                "1 submit request(s) failed"
+            ]
+        );
+
+        // Requests that were declined, not eligible, or already open are not failures.
+        let quiet = vec![
+            result("a", ItemOutcome::Updated, SrOutcome::Declined),
+            result(
+                "b",
+                ItemOutcome::Updated,
+                SrOutcome::NotEligible("x".into()),
+            ),
+            result("c", ItemOutcome::Updated, SrOutcome::Existing("7".into())),
+            result("d", ItemOutcome::Updated, SrOutcome::Created("1".into())),
+        ];
+        assert!(!any_failed(&quiet));
+        assert!(failure_lines(&quiet).is_empty());
+        assert!(!summary_text("home:u:b", &quiet, &[], true).contains("failed\n"));
+    }
+
+    #[test]
     fn the_confirmation_lists_each_request_with_its_origin() {
         let a = item("foo");
         let mut b = item("bar");
@@ -686,6 +759,7 @@ Mon Sep  1 09:00:00 UTC 2026 - Dev <dev@example.org>\n\
         ];
         assert!(any_failed(&results));
         assert!(!any_failed(&results[..1]));
+        assert_eq!(failure_lines(&results), ["1 package(s) failed to update"]);
         let text = summary_text("home:u:b", &results, &[path("r", "devel:x")], true);
         for needle in [
             "branch project: home:u:b",

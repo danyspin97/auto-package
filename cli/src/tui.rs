@@ -69,10 +69,9 @@ pub struct TuiController {
     /// Only a run that accepts requests has `n` and `r` keys (see
     /// [`TuiController::new`]); for any other run nothing is ever sent.
     add_rx: std::sync::Arc<std::sync::Mutex<Option<Receiver<AddRequest>>>>,
-    /// The name each row was requested under, keyed by the row's RPM name.
-    /// Filled by the build (see [`TuiController::note_origin`]) and read when
-    /// a row is retried, since the RPM name is not what a build takes.
-    origins: std::sync::Arc<Mutex<HashMap<String, String>>>,
+    /// The names rows are known by, keyed by the row's RPM name (see
+    /// [`RowNames`]).
+    names: std::sync::Arc<Mutex<RowNames>>,
     /// The error that ended the render loop early, if it did (see
     /// [`TuiController::failure`]).
     failure: std::sync::Arc<Mutex<Option<String>>>,
@@ -172,6 +171,44 @@ impl Screen {
             terminal,
             _restore: restore,
         })
+    }
+}
+
+/// The names rows are known by, keyed by the row's RPM name. Two maps with two
+/// uses, kept apart so that one never answers for the other:
+///
+/// - `origins` holds the name a root build was requested under. A retry resends
+///   it, so it must only ever hold names that a build takes as a request.
+/// - `labels` holds the package name a dependency row was built for. Only the
+///   withdrawal of failures reads it; a retry never does, since `foo` as a
+///   request is a different package from the dependency `python-foo`.
+#[derive(Default)]
+pub struct RowNames {
+    origins: HashMap<String, String>,
+    labels: HashMap<String, String>,
+}
+
+impl RowNames {
+    /// The first request name recorded for `row` is kept.
+    pub fn note_origin(&mut self, row: &str, request: &str) {
+        self.origins
+            .entry(row.to_string())
+            .or_insert_with(|| request.to_string());
+    }
+
+    pub fn origin_of(&self, row: &str) -> Option<&str> {
+        self.origins.get(row).map(String::as_str)
+    }
+
+    /// The first label recorded for `row` is kept.
+    pub fn note_label(&mut self, row: &str, label: &str) {
+        self.labels
+            .entry(row.to_string())
+            .or_insert_with(|| label.to_string());
+    }
+
+    pub fn label_of(&self, row: &str) -> Option<&str> {
+        self.labels.get(row).map(String::as_str)
     }
 }
 
@@ -320,7 +357,7 @@ impl TuiController {
             tx,
             dropped: std::sync::Arc::new(AtomicUsize::new(0)),
             add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
-            origins: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            names: std::sync::Arc::new(Mutex::new(RowNames::default())),
             failure,
             death,
             work,
@@ -343,21 +380,29 @@ impl TuiController {
     /// Record the name `row` (an RPM name) was requested under, so a retry
     /// can resend that name. The first name recorded for a row is kept.
     pub fn note_origin(&self, row: &str, request: &str) {
-        self.origins
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .entry(row.to_string())
-            .or_insert_with(|| request.to_string());
+        self.with_names(|n| n.note_origin(row, request));
     }
 
     /// The name `row` was requested under, if one was recorded. Rows a
     /// build did not start from a request (dependencies, for one) have none.
     pub fn origin_of(&self, row: &str) -> Option<String> {
-        self.origins
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(row)
-            .cloned()
+        self.with_names(|n| n.origin_of(row).map(str::to_string))
+    }
+
+    /// Record the package name a dependency row `row` was built for, so a
+    /// failure of that name can be settled by the row (see
+    /// `withdraw_settled_failures`). Not a request, so a retry never resends it.
+    pub fn note_label(&self, row: &str, label: &str) {
+        self.with_names(|n| n.note_label(row, label));
+    }
+
+    /// The package name recorded for `row` by [`TuiController::note_label`].
+    pub fn label_of(&self, row: &str) -> Option<String> {
+        self.with_names(|n| n.label_of(row).map(str::to_string))
+    }
+
+    fn with_names<T>(&self, f: impl FnOnce(&mut RowNames) -> T) -> T {
+        f(&mut self.names.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
     /// Whether the TUI closed with every package built (see [`run_is_done`]).
@@ -4167,5 +4212,40 @@ mod render_death_tests {
         death.mark_died();
         assert!(death.should_switch());
         assert!(!death.should_switch());
+    }
+}
+
+#[cfg(test)]
+mod row_names_tests {
+    use super::RowNames;
+
+    #[test]
+    fn a_dependency_label_is_not_a_request_name() {
+        // `python-trantor` is built as a dependency of something else: its
+        // label is `trantor`, but a retry must not resend `trantor` as a root
+        // request, so no origin is recorded for it.
+        let mut names = RowNames::default();
+        names.note_label("python-trantor", "trantor");
+        assert_eq!(names.label_of("python-trantor"), Some("trantor"));
+        assert_eq!(names.origin_of("python-trantor"), None);
+    }
+
+    #[test]
+    fn a_root_request_is_not_a_label() {
+        let mut names = RowNames::default();
+        names.note_origin("python-foo", "foo");
+        assert_eq!(names.origin_of("python-foo"), Some("foo"));
+        assert_eq!(names.label_of("python-foo"), None);
+    }
+
+    #[test]
+    fn the_first_name_recorded_for_a_row_is_kept_in_each_map() {
+        let mut names = RowNames::default();
+        names.note_origin("python-foo", "foo");
+        names.note_origin("python-foo", "other");
+        names.note_label("python-foo", "foo");
+        names.note_label("python-foo", "other");
+        assert_eq!(names.origin_of("python-foo"), Some("foo"));
+        assert_eq!(names.label_of("python-foo"), Some("foo"));
     }
 }

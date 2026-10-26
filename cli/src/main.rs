@@ -1246,13 +1246,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                     // requested with. The row's own key is an RPM name,
                                     // which a build cannot take back (`python-foo` is
                                     // `foo` on PyPI).
-                                    let (raw, retry_of) = match req {
-                                        tui::AddRequest::New(name) => (Some(name), None),
-                                        tui::AddRequest::Retry(row) => (
-                                            tui_ctrl.as_ref().and_then(|t| t.origin_of(&row)),
-                                            Some(row),
-                                        ),
-                                    };
+                                    let (raw, retry_of) = request_names(req, |row| {
+                                        tui_ctrl.as_ref().and_then(|t| t.origin_of(row))
+                                    });
                                     let label = raw
                                         .clone()
                                         .or_else(|| retry_of.clone())
@@ -1264,9 +1260,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                     // record: events from before this retry are not its.
                                     let finished_before = memory.finished().len();
                                     let r = match &raw {
-                                        None => Err(color_eyre::eyre::eyre!(
-                                            "no name was recorded for this package to retry it with"
-                                        )),
+                                        None => Err(color_eyre::eyre::eyre!(NO_REQUEST_NAME)),
                                         Some(raw) => {
                                             let (extra, extra_repo) = if looks_like_url(raw) {
                                                 (repo_package_name(raw), Some(raw.clone()))
@@ -2408,7 +2402,7 @@ fn finished_since(finished: &[Event], from: usize, row: &str) -> bool {
 fn withdraw_settled_failures(
     failures: &mut Vec<AddFailure>,
     ends: &[(String, bool)],
-    origin_of: impl Fn(&str) -> Option<String>,
+    label_of: impl Fn(&str) -> Option<String>,
 ) {
     let mut last: std::collections::HashMap<&str, (usize, bool)> = Default::default();
     for (at, (row, built)) in ends.iter().enumerate() {
@@ -2416,12 +2410,12 @@ fn withdraw_settled_failures(
     }
     failures.retain(|f| {
         !last.iter().any(|(row, (at, built))| {
-            // A row built as a dependency has no recorded request name unless
-            // one was noted for it; then the label names the package through
+            // A row has a recorded name when it was requested or built as a
+            // dependency under one; otherwise the label names the package through
             // its RPM name (`foo` is `python-foo`), compared without case or
             // separators.
-            let named = match origin_of(row) {
-                Some(origin) => origin == f.label,
+            let named = match label_of(row) {
+                Some(label) => label == f.label,
                 None => {
                     ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(&f.label))
                         == ap_build::osc::fuzzy_key(row)
@@ -2456,8 +2450,27 @@ fn withdraw_settled(
     tui: &Option<tui::TuiController>,
 ) {
     withdraw_settled_failures(failures, &row_ends(&memory.finished()), |row| {
-        tui.as_ref().and_then(|t| t.origin_of(row))
+        tui.as_ref()
+            .and_then(|t| t.label_of(row).or_else(|| t.origin_of(row)))
     });
+}
+
+/// The message of a retry that has no request name to resend. A dependency
+/// row was never requested by name, and building its RPM name as a request
+/// builds a different package (`python-foo` is `foo` on PyPI).
+const NO_REQUEST_NAME: &str = "dependency rows cannot be retried from the TUI: rerun the build";
+
+/// The name a TUI request is built under, and the row it retries (if it is a
+/// retry). A retry takes the name its row was requested with, from `origin_of`;
+/// a row with none gets no name, so nothing is built for it.
+fn request_names(
+    req: tui::AddRequest,
+    origin_of: impl Fn(&str) -> Option<String>,
+) -> (Option<String>, Option<String>) {
+    match req {
+        tui::AddRequest::New(name) => (Some(name), None),
+        tui::AddRequest::Retry(row) => (origin_of(&row), Some(row)),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2886,9 +2899,10 @@ fn cmd_build(
                     blocked_by: vec![],
                 });
                 // A failed request under the dependency's name is settled by this
-                // row (see `withdraw_settled_failures`).
+                // row (see `withdraw_settled_failures`). It is not a request, so
+                // a retry of this row must not resend the name (see `request_names`).
                 if let Some(t) = &tui_ctrl {
-                    t.note_origin(&dep_rpm, &dep);
+                    t.note_label(&dep_rpm, &dep);
                 }
                 let dep_version = dep_config.version.clone();
                 let r = pkg_reporter(&dep_rpm);
@@ -5014,6 +5028,39 @@ mod settle_tests {
         let mut failures = vec![failed("foo", 0), failed("baz", 0)];
         withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
         assert_eq!(labels(&failures), vec!["foo"]);
+    }
+
+    #[test]
+    fn a_dependency_label_settles_a_request_only_under_its_own_name() {
+        // `python-foo` was built as the dependency `foo`: it settles a failed
+        // request `foo`. `python-bar` settles nothing of `foo`.
+        let label = |row: &str| (row == "python-foo").then(|| "foo".to_string());
+        let events = vec![fin("python-bar", PackageOutcome::Built)];
+        let mut failures = vec![failed("foo", 0)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), label);
+        assert_eq!(labels(&failures), vec!["foo"]);
+        let events = vec![fin("python-foo", PackageOutcome::Built)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), label);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn a_retry_resends_only_the_name_its_row_was_requested_with() {
+        let origin = |row: &str| (row == "python-foo").then(|| "foo".to_string());
+        // A new request names itself.
+        let (raw, retry_of) = request_names(tui::AddRequest::New("bar".into()), no_origin);
+        assert_eq!((raw.as_deref(), retry_of), (Some("bar"), None));
+        // A retry of a root row resends its request name.
+        let (raw, retry_of) = request_names(tui::AddRequest::Retry("python-foo".into()), origin);
+        assert_eq!(
+            (raw.as_deref(), retry_of.as_deref()),
+            (Some("foo"), Some("python-foo"))
+        );
+        // A retry of a dependency row has no name to resend: it builds nothing.
+        let (raw, retry_of) =
+            request_names(tui::AddRequest::Retry("python-trantor".into()), no_origin);
+        assert_eq!(raw, None);
+        assert_eq!(retry_of.as_deref(), Some("python-trantor"));
     }
 
     #[test]
