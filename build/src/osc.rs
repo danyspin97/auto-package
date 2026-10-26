@@ -3822,7 +3822,19 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 /// Macro forms that run a program or read a file while `rpmspec` expands them.
 /// The spec may come from upstream or from the agent, so these are only
 /// expanded inside the sandbox.
-const CODE_MACRO_MARKERS: &[&str] = &["%(", "%{lua:", "%lua", "%{expand:", "%{load:", "%{getenv:"];
+const CODE_MACRO_MARKERS: &[&str] = &["%(", "%{lua:", "%{expand:", "%{load:", "%{getenv:"];
+
+/// Whether `text` has a bare `%lua` form: `%lua` not followed by an identifier
+/// character, so `%lua:`, `%lua ` and `%lua` at the end count, and `%luajit`
+/// does not.
+fn bare_lua_marker(text: &str) -> bool {
+    text.match_indices("%lua").any(|(i, _)| {
+        text[i + "%lua".len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+    })
+}
 
 /// The first code-running macro form in `text`, if any.
 fn code_macro_marker(text: &str) -> Option<&'static str> {
@@ -3830,6 +3842,7 @@ fn code_macro_marker(text: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|m| text.contains(m))
+        .or_else(|| bare_lua_marker(text).then_some("%lua"))
 }
 
 /// Directives that make `rpmspec` read another file from the host while
@@ -7932,6 +7945,28 @@ mod rpmspec_sandbox_tests {
             let out = result.expect("rpmspec should expand inside the sandbox");
             assert!(out.contains("Summary: x"), "{out}");
         }
+    }
+
+    #[test]
+    fn bare_lua_is_refused_but_luajit_is_not() {
+        // `%luajit` is an ordinary macro name, not the Lua expansion form.
+        assert_eq!(code_macro_marker("BuildRequires: %luajit-devel"), None);
+        assert_eq!(code_macro_marker("%global v %luajit_version"), None);
+        // A bare `%lua` at the end, before a space, or before `:` is refused.
+        assert_eq!(code_macro_marker("Summary: %lua"), Some("%lua"));
+        assert_eq!(code_macro_marker("Summary: %lua x"), Some("%lua"));
+        assert_eq!(code_macro_marker("Summary: %lua:x"), Some("%lua"));
+        assert_eq!(code_macro_marker("Summary: %lua{x}"), Some("%lua"));
+        assert_eq!(code_macro_marker("Summary: %lua(x)"), Some("%lua"));
+        // A later bare `%lua` after a `%luajit` is still found.
+        assert_eq!(
+            code_macro_marker("%luajit %lua x"),
+            Some("%lua")
+        );
+        // The braced form stays refused.
+        assert_eq!(code_macro_marker("%{lua:x}"), Some("%{lua:"));
+        assert_eq!(code_macro_marker("%global x %{lua: print(1)}"), Some("%{lua:"));
+        assert_eq!(unsandboxed_marker("Summary: %lua"), Some("%lua"));
     }
 
     #[test]

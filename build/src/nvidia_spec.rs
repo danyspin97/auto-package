@@ -120,7 +120,11 @@ fn version_text(text: &str) -> String {
 /// A name that is safe to put unquoted into a shell command and a macro-free
 /// spec line: the archive's directory names come from a member list.
 fn is_plain_name(name: &str) -> bool {
+    // `.` and `..` are made of plain characters but name the directory itself
+    // or its parent: `cp -a ..` would copy the unpack directory's parent.
     !name.is_empty()
+        && name != "."
+        && name != ".."
         && !name.starts_with('-')
         && name
             .chars()
@@ -144,7 +148,7 @@ fn major_minor(release: &str) -> (String, String) {
 fn top_dir(files: &[String]) -> Option<String> {
     files
         .iter()
-        .find_map(|f| f.split('/').next().filter(|s| !s.is_empty()))
+        .find_map(|f| member_path(f).split('/').next().filter(|s| !s.is_empty()))
         .filter(|t| is_plain_name(t))
         .map(str::to_string)
 }
@@ -223,6 +227,17 @@ fn classify(dest: &str, all: &BTreeSet<&str>) -> Role {
     Role::Runtime
 }
 
+/// A member name without the leading `./` that tar listings commonly carry.
+/// Only the prefix is removed: `.` and `..` inside the name stay, and the
+/// checks in [`analyse`] refuse them.
+fn member_path(name: &str) -> &str {
+    let mut name = name;
+    while let Some(rest) = name.strip_prefix("./") {
+        name = rest;
+    }
+    name
+}
+
 fn analyse(files: &[String]) -> Option<Layout> {
     let top = top_dir(files)?;
     let prefix = format!("{top}/");
@@ -230,7 +245,7 @@ fn analyse(files: &[String]) -> Option<Layout> {
     let mut raw: Vec<String> = Vec::new();
     let mut top_entries: BTreeMap<String, (String, bool)> = BTreeMap::new();
     for f in files {
-        let Some(rel) = f.strip_prefix(&prefix) else {
+        let Some(rel) = member_path(f).strip_prefix(&prefix) else {
             continue;
         };
         let is_dir = rel.ends_with('/');
@@ -1112,6 +1127,54 @@ bin/__nvcc_device_query
         let spec = redist_component_spec(&i);
         assert!(spec.contains("%setup -q -n archive\n"), "{spec}");
         assert!(!spec.contains("x y"), "{spec}");
+    }
+
+    #[test]
+    fn dot_and_dotdot_names_are_never_plain() {
+        assert!(!is_plain_name("."));
+        assert!(!is_plain_name(".."));
+        assert!(!is_plain_name(""));
+        assert!(!is_plain_name("./x"));
+        assert!(is_plain_name("..x"));
+        assert!(is_plain_name(".hidden"));
+        assert!(is_plain_name("lib64"));
+    }
+
+    #[test]
+    fn parent_references_in_members_refuse_the_archive() {
+        for odd in ["cuda/../../evil", "top/lib/../x.so", "top/./lib/x.so", "top/lib/./x.so"] {
+            let files = vec![odd.to_string()];
+            assert!(analyse(&files).is_none(), "{odd}");
+        }
+        // The `..` must not reach the spec either: no `cp -a ..` line.
+        let mut i = cudart();
+        i.files = vec!["top/../../evil".into(), "top/LICENSE".into()];
+        let spec = redist_component_spec(&i);
+        assert!(!spec.contains("cp -a .."), "{spec}");
+        assert!(!spec.contains("cp -a ."), "{spec}");
+    }
+
+    #[test]
+    fn dot_slash_prefix_is_stripped_before_the_checks() {
+        // tar listings carry `./`: the archive is still analysed, and the
+        // result is the one a bare listing gives.
+        let bare = vec![
+            "top/lib/libx.so.1".to_string(),
+            "top/include/x.h".to_string(),
+            "top/LICENSE".to_string(),
+        ];
+        let dotted: Vec<String> = bare.iter().map(|f| format!("./{f}")).collect();
+        assert!(analyse(&dotted).is_some());
+        let mut a = cudart();
+        a.files = bare.clone();
+        let mut b = cudart();
+        b.files = dotted;
+        assert_eq!(redist_component_spec(&a), redist_component_spec(&b));
+        // `./` directly on the top directory is the same archive too.
+        let files = vec!["./cuda/lib/foo.so".to_string()];
+        assert!(analyse(&files).is_some());
+        assert_eq!(member_path("./././x"), "x");
+        assert_eq!(member_path("cuda/../x"), "cuda/../x");
     }
 
     #[test]
