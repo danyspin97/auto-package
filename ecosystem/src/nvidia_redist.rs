@@ -134,6 +134,19 @@ fn str_field(obj: &Value, key: &str) -> Option<String> {
     obj.get(key)?.as_str().map(str::to_string)
 }
 
+/// A `relative_path` that can be joined onto a base URL: non-empty `/`-separated
+/// segments, none of them `.` or `..`, no leading `/` or drive letter, no
+/// scheme (`://`) and no backslashes.
+fn valid_relative_path(p: &str) -> bool {
+    !p.is_empty()
+        && !p.starts_with('/')
+        && !p.contains("://")
+        && !p.contains('\\')
+        && p.as_bytes().get(1) != Some(&b':')
+        && p.split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 fn parse_archive(
     v: &Value,
     platform: &str,
@@ -146,10 +159,13 @@ fn parse_archive(
         Some(Value::Number(n)) => n.as_u64().ok_or_else(|| bad("size"))?,
         _ => return Err(bad("size")),
     };
+    let relative_path = str_field(v, "relative_path")
+        .filter(|p| valid_relative_path(p))
+        .ok_or_else(|| bad("relative_path"))?;
     Ok(Archive {
         platform: platform.to_string(),
         cuda_variant: variant.map(|v| v.strip_prefix("cuda").unwrap_or(v).to_string()),
-        relative_path: str_field(v, "relative_path").ok_or_else(|| bad("relative_path"))?,
+        relative_path,
         sha256: str_field(v, "sha256").ok_or_else(|| bad("sha256"))?,
         size,
     })
@@ -514,6 +530,53 @@ mod tests {
         let bad = r#"{"release_label":"1","release_product":"cuda","x":{"name":"n","version":"1",
             "linux-x86_64":{"relative_path":"p","sha256":"s","size":"big"}}}"#;
         assert!(parse(bad, "b").is_err());
+    }
+
+    /// A one-component manifest whose only archive has `relative_path` `path`.
+    fn manifest_with_path(path: &str) -> String {
+        serde_json::json!({
+            "release_label": "1",
+            "release_product": "cuda",
+            "x": {
+                "name": "n",
+                "version": "1",
+                "linux-x86_64": {"relative_path": path, "sha256": "s", "size": "1"}
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn rejects_unsafe_relative_paths() {
+        for bad in [
+            "",
+            "/abs/x.tar.xz",
+            "C:/x.tar.xz",
+            "https://evil.example/x.tar.xz",
+            "a/b://c.tar.xz",
+            "a//b.tar.xz",
+            "a/b/",
+            "a/./b.tar.xz",
+            "a/../b.tar.xz",
+            "a/..",
+            "a\\b.tar.xz",
+        ] {
+            let err = parse(&manifest_with_path(bad), "https://x/redist");
+            assert!(err.is_err(), "{bad:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn accepts_plain_relative_paths() {
+        for ok in [
+            "cuda_cudart/linux-x86_64/a-archive.tar.xz",
+            "a.tar.xz",
+            "x/..y/a.tar.xz",
+        ] {
+            let m = parse(&manifest_with_path(ok), "https://x/redist/").unwrap();
+            let a = &m.components[0].archives[0];
+            assert_eq!(a.url(&m.base_url), format!("https://x/redist/{ok}"));
+        }
     }
 
     #[test]
