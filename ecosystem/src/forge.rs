@@ -170,6 +170,10 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
 
     // GitLab uses `/-/` to separate the repo path from sub-paths (tree,
     // blob, issues, …). Everything before `/-/` is the project path.
+    // `/api/v4/projects/<id>/...` is GitLab's API, not a project path.
+    if is_gitlab_style(&host) && path.starts_with("api/") {
+        return None;
+    }
     let project_path = if let Some(idx) = path.find("/-/") {
         &path[..idx]
     } else if is_gitlab_style(&host) {
@@ -230,6 +234,16 @@ pub fn canonical_https(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gitlab_api_url_is_not_a_project() {
+        assert!(
+            parse(
+                "https://gitlab.freedesktop.org/api/v4/projects/26558/packages/generic/a/1/a.tar.xz"
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn plain_github_https_url() {

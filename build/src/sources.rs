@@ -1202,7 +1202,15 @@ pub fn latest_release(repo_url: &str) -> Result<String, String> {
     for url in &endpoints {
         match get_json(url) {
             Ok(v) => match first_tag(&v) {
-                Some(tag) => return Ok(version_from_tag(&tag, &repo_name)),
+                Some(tag) => {
+                    let version = version_from_tag(&tag, &repo_name);
+                    // A tag such as `start` or `latest` marks no release; the
+                    // tag list may still have one.
+                    if version.chars().any(|c| c.is_ascii_digit()) {
+                        return Ok(version);
+                    }
+                    last_err = Some(format!("{url}: the newest tag {tag:?} is not a version"));
+                }
                 None => last_err = Some(format!("{url}: no release or tag in the answer")),
             },
             Err(e) => last_err = Some(e),

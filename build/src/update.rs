@@ -310,6 +310,13 @@ where
     // The first place that knows a version decides. When none does, the first
     // failure is the one reported: it belongs to the most specific guess.
     let mut first_failure: Option<SkipReason> = None;
+    let mut pypi_miss: Option<SkipReason> = None;
+    // The PyPI name came from the tarball's file name, not from a PyPI URL.
+    let pypi_guessed = {
+        let source = header.source.as_deref().unwrap_or_default();
+        pypi::pypi_name_from_source_url(source).is_none()
+            && pypi::pypi_name_and_version_from_wheel_filename(source).is_none()
+    };
     let mut found = None;
     for ecosystem in ecosystems(&header) {
         let (tag, name, latest) = match &ecosystem {
@@ -330,16 +337,32 @@ where
                 break;
             }
             Err(error) => {
-                first_failure.get_or_insert(SkipReason::LookupFailed {
+                let failure = SkipReason::LookupFailed {
                     ecosystem_tag: tag.into(),
                     name: name.clone(),
                     error,
-                });
+                };
+                // A PyPI name guessed from a tarball that PyPI has never
+                // heard of says nothing about the package; keep it only if no
+                // other place has a more telling failure.
+                let guessed_miss = matches!(&ecosystem, Ecosystem::Pypi { .. })
+                    && pypi_guessed
+                    && matches!(&failure, SkipReason::LookupFailed { error, .. } if error.contains("404"));
+                if guessed_miss {
+                    pypi_miss.get_or_insert(failure);
+                } else {
+                    first_failure.get_or_insert(failure);
+                }
             }
         }
     }
     let Some((ecosystem, latest)) = found else {
-        return skipped(rpm_name, first_failure.unwrap_or(SkipReason::NoSourceLine));
+        return skipped(
+            rpm_name,
+            first_failure
+                .or(pypi_miss)
+                .unwrap_or(SkipReason::NoSourceLine),
+        );
     };
 
     let latest = version_part(&latest);

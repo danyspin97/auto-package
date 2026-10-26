@@ -24,6 +24,12 @@ const REPOLOGY_SPACING: Duration = Duration::from_secs(1);
 /// among the archives that carry the same project name as the file `source`
 /// names. SourceForge file URLs are read from the project's feed instead.
 pub fn latest_in_index(source: &str) -> Result<String, String> {
+    // Every request here is https only, and a site that still names itself
+    // over http in the spec nearly always serves the same listing over https.
+    let upgraded = source
+        .strip_prefix("http://")
+        .map(|rest| format!("https://{rest}"));
+    let source = upgraded.as_deref().unwrap_or(source);
     let file = last_segment(source);
     let (name, _) = archive_name_version(file)
         .ok_or_else(|| format!("cannot read a project name from the file name in {source}"))?;

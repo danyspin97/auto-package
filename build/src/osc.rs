@@ -4164,6 +4164,13 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
         } else {
             out.stderr
         };
+        // gpg prints one `aka` line per user id of the signing key, which
+        // buries the line that says what failed.
+        let stderr = stderr
+            .lines()
+            .filter(|l| !l.starts_with("gpg:") || !l.contains(" aka "))
+            .collect::<Vec<_>>()
+            .join("\n");
         return Err(Error::OscFailed {
             cmd: format!("service ra in {}", checkout_dir.display()),
             code: out.code,

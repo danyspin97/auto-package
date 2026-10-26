@@ -301,6 +301,12 @@ pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebase
     if !link.success() && is_not_found(&link.stderr) {
         return Ok(Rebased::NotALink);
     }
+    let listing_path = format!("/source/{project}/{}", enc(pkg));
+    // A link whose base is already the origin's current revision has nothing
+    // to rebase onto, and OBS answers the request with a 404 then.
+    if !linkinfo_is_behind(&api_get(&listing_path, emit)?) {
+        return check_link(project, pkg, emit);
+    }
     let path = rebase_api_path(project, pkg);
     let out = api_call(Some("POST"), &path, None, emit)?;
     if !out.success() {
@@ -310,6 +316,29 @@ pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebase
             stderr: out.stderr,
         });
     }
+    check_link(project, pkg, emit)
+}
+
+/// Whether a package listing's `<linkinfo>` shows the link based on a revision
+/// of its origin other than the current one. Unknown counts as behind, so the
+/// rebase is still asked for.
+fn linkinfo_is_behind(xml: &str) -> bool {
+    let Some(rest) = xml.find("<linkinfo").map(|i| &xml[i..]) else {
+        return true;
+    };
+    let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
+    match (
+        extract_xml_attr(tag, "srcmd5"),
+        extract_xml_attr(tag, "baserev"),
+    ) {
+        (Some(current), Some(base)) => current != base,
+        _ => true,
+    }
+}
+
+/// The state of the link after a rebase (or when none was needed): a conflict
+/// leaves sources that cannot be built or submitted.
+fn check_link(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebased, Error> {
     let listing = api_get(&format!("/source/{project}/{}", enc(pkg)), emit)?;
     if let Some(e) = linkinfo_error(&listing) {
         return Ok(Rebased::Conflict(e));
@@ -818,6 +847,18 @@ pub fn open_submit_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linkinfo_behind_only_when_base_differs_from_origin() {
+        let at = |src: &str, base: &str| {
+            format!(
+                r#"<directory><linkinfo project="P" srcmd5="{src}" baserev="{base}"/></directory>"#
+            )
+        };
+        assert!(!linkinfo_is_behind(&at("aa", "aa")));
+        assert!(linkinfo_is_behind(&at("bb", "aa")));
+        assert!(linkinfo_is_behind("<directory/>"));
+    }
 
     const META: &str = r#"<project name="home:u:branches:Base:System">
   <title>Branch</title>
