@@ -76,6 +76,9 @@ pub struct TuiController {
     /// The error that ended the render loop early, if it did (see
     /// [`TuiController::failure`]).
     failure: std::sync::Arc<Mutex<Option<String>>>,
+    /// Set once the render loop has died before the run closed, so events
+    /// from then on are printed as plain output (see [`RenderDeath`]).
+    death: std::sync::Arc<RenderDeath>,
     /// Builds the run still owes: the root build until
     /// [`TuiController::work_finished`] is called for it, and each add request
     /// or retry from the time the TUI sends it until its build returns. The
@@ -170,6 +173,58 @@ struct Msg {
     event: Event,
 }
 
+/// Whether the render loop has died before the run closed, and whether the
+/// run has already switched back to plain output because of it.
+///
+/// The render thread calls [`RenderDeath::mark_died`] once it has restored the
+/// terminal. The event forwarding (see `Tapped`) calls
+/// [`RenderDeath::should_switch`] on every event, and that returns `true` once,
+/// so the switch (`set_quiet(false)`) happens exactly once.
+#[derive(Default)]
+pub struct RenderDeath {
+    died: AtomicBool,
+    switched: AtomicBool,
+}
+
+impl RenderDeath {
+    /// Record that the render loop died mid-run.
+    pub fn mark_died(&self) {
+        self.died.store(true, Ordering::SeqCst);
+    }
+
+    /// `true` on the first call after the render loop died, `false` otherwise.
+    pub fn should_switch(&self) -> bool {
+        self.died.load(Ordering::SeqCst)
+            && self
+                .switched
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+    }
+}
+
+/// The plain-text sink, attached whether or not the run shows the TUI. While a
+/// TUI owns the terminal it is quiet (see `ap_core::sink::set_quiet`), so this
+/// prints nothing; once the render loop dies and [`RenderDeath::should_switch`]
+/// clears quiet, it prints the rest of the run.
+pub struct PlainOutput {
+    inner: ap_core::sink::HumanSink,
+}
+
+impl PlainOutput {
+    pub fn new(inner: ap_core::sink::HumanSink) -> Self {
+        Self { inner }
+    }
+}
+
+impl Reporter for PlainOutput {
+    fn report(&self, event: &Event) {
+        if ap_core::sink::is_quiet() {
+            return;
+        }
+        self.inner.report(event);
+    }
+}
+
 impl TuiController {
     /// Take over the terminal, spawn the render thread, and return a handle to
     /// feed it events.
@@ -198,6 +253,8 @@ impl TuiController {
         let thread_settled = settled.clone();
         let failure = std::sync::Arc::new(Mutex::new(None));
         let thread_failure = failure.clone();
+        let death = std::sync::Arc::new(RenderDeath::default());
+        let thread_death = death.clone();
         let add_tx = accepts_requests.then_some(add_tx);
         // The render thread reports whether it could take the terminal over
         // before it does anything else, so a failure comes back here, with
@@ -223,6 +280,8 @@ impl TuiController {
             ) {
                 eprintln!("TUI error: {e}");
                 *thread_failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
+                // After `run` returned, so the terminal is already restored.
+                thread_death.mark_died();
             }
         });
         match ready_rx.recv() {
@@ -242,6 +301,7 @@ impl TuiController {
             add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
             origins: std::sync::Arc::new(Mutex::new(HashMap::new())),
             failure,
+            death,
             work,
             settled,
             idle: std::sync::Arc::new((Mutex::new(()), Condvar::new())),
@@ -344,6 +404,7 @@ impl TuiController {
             pkg,
             tx: self.tx.clone(),
             dropped: self.dropped.clone(),
+            death: self.death.clone(),
         })
     }
 }
@@ -353,10 +414,16 @@ struct Tapped {
     pkg: Option<String>,
     tx: SyncSender<Msg>,
     dropped: std::sync::Arc<AtomicUsize>,
+    death: std::sync::Arc<RenderDeath>,
 }
 
 impl Reporter for Tapped {
     fn report(&self, event: &Event) {
+        // The render loop died mid-run: nobody is drawing the TUI any more, so
+        // release the quiet flag (once) and let the plain sink print from here on.
+        if self.death.should_switch() {
+            ap_core::sink::set_quiet(false);
+        }
         self.base.report(event);
         let msg = Msg {
             pkg: self.pkg.clone(),
@@ -4016,5 +4083,26 @@ mod run_end_tests {
             AddRequest::Retry("bar".into())
         ));
         assert_eq!(work.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod render_death_tests {
+    use super::RenderDeath;
+
+    #[test]
+    fn a_live_render_loop_never_switches_to_plain_output() {
+        let death = RenderDeath::default();
+        assert!(!death.should_switch());
+        assert!(!death.should_switch());
+    }
+
+    #[test]
+    fn the_switch_happens_once_after_the_render_loop_dies() {
+        let death = RenderDeath::default();
+        death.mark_died();
+        assert!(death.should_switch());
+        assert!(!death.should_switch());
+        assert!(!death.should_switch());
     }
 }

@@ -330,9 +330,9 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     ap_core::sink::set_quiet(tui_ctrl.is_some());
 
     let mut sinks: Vec<Box<dyn Reporter>> = Vec::new();
-    if tui_ctrl.is_none() {
-        sinks.push(Box::new(HumanSink::new(level)));
-    }
+    // Always attached: quiet while the TUI owns the terminal, and it starts
+    // printing if the TUI dies mid-run (see `tui::PlainOutput`).
+    sinks.push(Box::new(tui::PlainOutput::new(HumanSink::new(level))));
     sinks.push(Box::new(JsonlSink::open(&run_dir.jsonl())?));
     sinks.push(Box::new(memory.clone()));
     let base_reporter: Arc<dyn Reporter + Send + Sync> = Arc::new(FanoutReporter::new(sinks));
