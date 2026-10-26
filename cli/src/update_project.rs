@@ -581,12 +581,28 @@ fn cmd_update_project(
                 match osc::project_has_repositories(branch, emit) {
                     Ok(true) => branch_checked = true,
                     Ok(false) => {
-                        return Err(eyre!(
+                        let why = format!(
                             "branch project {branch} has no build repositories; configure one \
                              in its meta before building"
-                        ));
+                        );
+                        ctx.warn(format!("{}: {why}", item.pkg));
+                        report.results.push(ItemResult {
+                            item,
+                            outcome: ItemOutcome::Failed(why),
+                            sr: SrOutcome::NotRequested,
+                        });
+                        continue;
                     }
-                    Err(e) => return Err(eyre!("could not read the meta of {branch}: {e}")),
+                    Err(e) => {
+                        let why = format!("could not read the meta of {branch}: {e}");
+                        ctx.warn(format!("{}: {why}", item.pkg));
+                        report.results.push(ItemResult {
+                            item,
+                            outcome: ItemOutcome::Failed(why),
+                            sr: SrOutcome::NotRequested,
+                        });
+                        continue;
+                    }
                 }
             }
         }
@@ -607,7 +623,20 @@ fn cmd_update_project(
         };
         match spec {
             Some(spec) => {
-                let (adds, verdicts) = reach_dependencies(a, &item, &spec, &resolver, ctx, report)?;
+                let (adds, verdicts) =
+                    match reach_dependencies(a, &item, &spec, &resolver, ctx, report) {
+                        Ok(found) => found,
+                        Err(e) => {
+                            let why = e.to_string();
+                            ctx.warn(format!("{}: {why}", item.pkg));
+                            report.results.push(ItemResult {
+                                item,
+                                outcome: ItemOutcome::Failed(why),
+                                sr: SrOutcome::NotRequested,
+                            });
+                            continue;
+                        }
+                    };
                 if a.update_deps {
                     for dep in dependency_items(a, branch, &item, &verdicts, &adds, ctx, emit) {
                         if dependency_count >= MAX_DEPENDENCY_ITEMS {
@@ -895,25 +924,44 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
         ctx.say(format!("{}: already tidy in {branch}", item.pkg));
         return Ok(());
     }
-    ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
-    osc::add_changes_entry(
-        &dir,
-        "Tidy the spec: section order, noarch, %{version}",
-        emit,
-    )
-    .map_err(|e| e.to_string())?;
-    let mut commit_files = vec![spec_name];
+    // Kept so that a failure after the write leaves the reused checkout as it was.
     let changes = format!("{}.changes", item.pkg);
-    if dir.join(&changes).exists() {
-        commit_files.push(changes);
+    let changes_path = dir.join(&changes);
+    let changes_before = std::fs::read(&changes_path).ok();
+    ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
+    let committed = (|| -> Result<(), String> {
+        osc::add_changes_entry(
+            &dir,
+            "Tidy the spec: section order, noarch, %{version}",
+            emit,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut commit_files = vec![spec_name.clone()];
+        if changes_path.exists() {
+            commit_files.push(changes.clone());
+        }
+        osc::commit(
+            &dir,
+            "Tidy the spec (auto-package lint)",
+            &commit_files,
+            emit,
+        )
+        .map_err(|e| e.to_string())
+    })();
+    if let Err(why) = committed {
+        let restored_spec = ap_core::fsx::write_atomic(&spec_path, before.as_bytes());
+        let restored_changes = match changes_before {
+            Some(bytes) => ap_core::fsx::write_atomic(&changes_path, bytes),
+            None => match std::fs::remove_file(&changes_path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            },
+        };
+        if let Err(e) = restored_spec.and(restored_changes) {
+            return Err(format!("{why}; could not restore the checkout of {branch}: {e}"));
+        }
+        return Err(why);
     }
-    osc::commit(
-        &dir,
-        "Tidy the spec (auto-package lint)",
-        &commit_files,
-        emit,
-    )
-    .map_err(|e| e.to_string())?;
     ctx.say(format!(
         "{}: committed the style fixes to {branch}",
         item.pkg
