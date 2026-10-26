@@ -112,10 +112,10 @@ pub struct RunDir {
     /// Shared step counters, keyed by sanitized rpm name. The outer build loop calls
     /// `pkg(rpm_name)` once per retry — if each call allocated a fresh
     /// counter, two attempts of the same package would both allocate
-    /// `01-build/`, `02-fix/`, etc., and the second attempt's log would
+    /// `001-build/`, `002-fix/`, etc., and the second attempt's log would
     /// overwrite the first. Sharing an `Arc<AtomicU32>` per rpm name
     /// across all `PkgRunDir`s for that name means retries get the next
-    /// number (`03-build/`, …) and no attempt's artifacts can be lost.
+    /// number (`003-build/`, …) and no attempt's artifacts can be lost.
     pkg_counters: Mutex<HashMap<String, Arc<AtomicU32>>>,
 }
 
@@ -188,7 +188,7 @@ impl PkgRunDir {
         fs::create_dir_all(&self.path)
     }
 
-    /// Allocate the next numbered step directory: `<pkg-dir>/<NN>-<label>/`.
+    /// Allocate the next numbered step directory: `<pkg-dir>/<NNN>-<label>/`.
     ///
     /// Uses `create_dir` (not `create_dir_all`) so a step dir that already
     /// exists is a hard failure instead of silently reused — reusing a
@@ -196,10 +196,14 @@ impl PkgRunDir {
     /// one's, which the earlier review probe reproduced. Combined with
     /// `RunDir::pkg_counters` sharing the counter across retries, two
     /// attempts of the same package get distinct numbered dirs
-    /// (`01-build/`, `02-build/`) rather than colliding.
+    /// (`001-build/`, `002-build/`) rather than colliding.
     pub fn step(&self, label: &str) -> io::Result<StepDir> {
-        let n = self.counter.fetch_add(1, Ordering::SeqCst);
-        let dir_name = format!("{:02}-{}", n + 1, sanitize_name(label));
+        // Only advance the shared counter once the directory exists, so a
+        // failed create does not burn a number. Step dirs of one package
+        // are allocated sequentially, so load-then-bump is race-free here;
+        // `fetch_max` keeps the counter monotonic regardless.
+        let n = self.counter.load(Ordering::SeqCst);
+        let dir_name = format!("{:03}-{}", n + 1, sanitize_name(label));
         let path = self.path.join(dir_name);
         match fs::create_dir(&path) {
             Ok(()) => {}
@@ -212,6 +216,7 @@ impl PkgRunDir {
             }
             Err(e) => return Err(e),
         }
+        self.counter.fetch_max(n + 1, Ordering::SeqCst);
         Ok(StepDir {
             path,
             id: StepId(n),
@@ -282,7 +287,7 @@ mod tests {
     }
 
     /// Earlier review probe: two attempts of the same package allocated
-    /// the same `01-build/build.log` because each `RunDir::pkg()` call
+    /// the same `001-build/build.log` because each `RunDir::pkg()` call
     /// handed back a fresh counter starting at zero. Retries must get
     /// distinct numbered step dirs so the first attempt's artifacts
     /// survive long enough to be inspected.
@@ -295,14 +300,14 @@ mod tests {
         let p1 = run.pkg("python-foo");
         p1.ensure().unwrap();
         let s1 = p1.step("build").unwrap();
-        assert!(s1.path.ends_with("01-build"));
+        assert!(s1.path.ends_with("001-build"));
 
         // Retry: a new PkgRunDir handle for the same package. The counter
         // is shared, so the next step is 02, not 01 — the first attempt's
-        // 01-build/ directory is preserved.
+        // 001-build/ directory is preserved.
         let p2 = run.pkg("python-foo");
         let s2 = p2.step("build").unwrap();
-        assert!(s2.path.ends_with("02-build"), "got {:?}", s2.path);
+        assert!(s2.path.ends_with("002-build"), "got {:?}", s2.path);
         assert_ne!(
             s1.path, s2.path,
             "retry must not reuse the first attempt's dir"
@@ -325,7 +330,7 @@ mod tests {
         let bar = run.pkg("python-bar");
         bar.ensure().unwrap();
         let s = bar.step("build").unwrap();
-        assert!(s.path.ends_with("01-build"), "got {:?}", s.path);
+        assert!(s.path.ends_with("001-build"), "got {:?}", s.path);
     }
 
     /// `step()` must refuse to hand back a directory that already exists
@@ -351,7 +356,7 @@ mod tests {
         let err = p1
             .step("build")
             .err()
-            .expect("re-allocating 01-build must fail");
+            .expect("re-allocating 001-build must fail");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     }
 }
