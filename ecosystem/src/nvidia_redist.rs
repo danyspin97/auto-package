@@ -171,6 +171,25 @@ fn parse_archive(
     })
 }
 
+/// Push the archive `v` describes onto `archives`. A malformed entry is
+/// skipped with a warning, so one bad platform does not fail the whole
+/// manifest; a lookup for that platform then finds no archive.
+fn keep_archive(
+    archives: &mut Vec<Archive>,
+    v: &Value,
+    platform: &str,
+    variant: Option<&str>,
+    component: &str,
+) {
+    match parse_archive(v, platform, variant, component) {
+        Ok(a) => archives.push(a),
+        Err(e) => {
+            let variant = variant.map(|v| format!(" (CUDA {v})")).unwrap_or_default();
+            tracing::warn!("skipping {component} {platform}{variant} in NVIDIA's manifest: {e}");
+        }
+    }
+}
+
 /// Parse a manifest. `base_url` is where `relative_path`s are rooted.
 pub fn parse(json: &str, base_url: &str) -> Result<Manifest, Error> {
     let root: Value = serde_json::from_str(json)?;
@@ -190,11 +209,11 @@ pub fn parse(json: &str, base_url: &str) -> Result<Manifest, Error> {
                 continue;
             }
             if entry.get("relative_path").is_some() {
-                archives.push(parse_archive(entry, platform, None, key)?);
+                keep_archive(&mut archives, entry, platform, None, key);
             } else {
                 for (variant, inner) in entry.as_object().into_iter().flatten() {
                     if inner.get("relative_path").is_some() {
-                        archives.push(parse_archive(inner, platform, Some(variant), key)?);
+                        keep_archive(&mut archives, inner, platform, Some(variant), key);
                     }
                 }
             }
@@ -529,7 +548,45 @@ mod tests {
         assert!(parse(r#"{"release_label":"1"}"#, "b").is_err());
         let bad = r#"{"release_label":"1","release_product":"cuda","x":{"name":"n","version":"1",
             "linux-x86_64":{"relative_path":"p","sha256":"s","size":"big"}}}"#;
-        assert!(parse(bad, "b").is_err());
+        // A bad archive entry is skipped, not fatal.
+        let m = parse(bad, "b").unwrap();
+        assert!(m.components[0].archives.is_empty());
+    }
+
+    #[test]
+    fn bad_windows_entry_keeps_linux() {
+        let json = r#"{"release_label":"1","release_product":"cuda","x":{"name":"n","version":"1",
+            "linux-x86_64":{"relative_path":"x/linux.tar.xz","sha256":"s","size":"5"},
+            "windows-x86_64":{"relative_path":"x/win.tar.xz","sha256":"s","size":"big"}}}"#;
+        let m = parse(json, "https://x/redist").unwrap();
+        let c = &m.components[0];
+        assert_eq!(c.archives.len(), 1);
+        assert_eq!(c.archive_for("linux-x86_64", None).unwrap().size, 5);
+        assert!(c.archive_for("windows-x86_64", None).is_none());
+    }
+
+    #[test]
+    fn bad_linux_entry_leaves_platform_missing() {
+        // Missing sha256: the linux archive is dropped, the component survives.
+        let json = r#"{"release_label":"1","release_product":"cuda","x":{"name":"n","version":"1",
+            "linux-x86_64":{"relative_path":"x/linux.tar.xz","size":"5"},
+            "linux-sbsa":{"relative_path":"x/sbsa.tar.xz","sha256":"s","size":"6"}}}"#;
+        let m = parse(json, "https://x/redist").unwrap();
+        let c = &m.components[0];
+        assert!(c.archive_for("linux-x86_64", None).is_none());
+        assert_eq!(c.archive_for("linux-sbsa", None).unwrap().size, 6);
+    }
+
+    #[test]
+    fn bad_cuda_variant_keeps_the_other() {
+        let json = r#"{"release_label":"1","release_product":"cudnn","x":{"name":"n","version":"1",
+            "linux-x86_64":{
+                "cuda12":{"relative_path":"x/a.tar.xz","sha256":"s","size":"1"},
+                "cuda13":{"relative_path":"/abs.tar.xz","sha256":"s","size":"2"}}}}"#;
+        let m = parse(json, "https://x/redist").unwrap();
+        let c = &m.components[0];
+        assert!(c.archive_for("linux-x86_64", Some("13")).is_none());
+        assert_eq!(c.archive_for("linux-x86_64", Some("12")).unwrap().size, 1);
     }
 
     /// A one-component manifest whose only archive has `relative_path` `path`.
@@ -561,8 +618,11 @@ mod tests {
             "a/..",
             "a\\b.tar.xz",
         ] {
-            let err = parse(&manifest_with_path(bad), "https://x/redist");
-            assert!(err.is_err(), "{bad:?} was accepted");
+            let m = parse(&manifest_with_path(bad), "https://x/redist").unwrap();
+            assert!(
+                m.components[0].archive_for("linux-x86_64", None).is_none(),
+                "{bad:?} was accepted"
+            );
         }
     }
 
