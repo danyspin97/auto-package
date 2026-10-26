@@ -282,6 +282,11 @@ impl TuiController {
                 *thread_failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
                 // After `run` returned, so the terminal is already restored.
                 thread_death.mark_died();
+                // Release quiet now rather than waiting for the next tapped event:
+                // events reported before one arrives, or with none coming at all,
+                // would otherwise be dropped. `should_switch` stays once-only, so
+                // a later call only re-clears an already-cleared flag.
+                ap_core::sink::set_quiet(false);
             }
         });
         match ready_rx.recv() {
@@ -4103,6 +4108,15 @@ mod render_death_tests {
         death.mark_died();
         assert!(death.should_switch());
         assert!(!death.should_switch());
+        assert!(!death.should_switch());
+    }
+
+    #[test]
+    fn repeated_deaths_still_switch_once() {
+        let death = RenderDeath::default();
+        death.mark_died();
+        death.mark_died();
+        assert!(death.should_switch());
         assert!(!death.should_switch());
     }
 }
