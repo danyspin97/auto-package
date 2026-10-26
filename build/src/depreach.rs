@@ -1124,10 +1124,29 @@ mod tests {
             xml.contains("<path project=\"S&amp;&lt;\" repository=\"r&quot;&lt;x\"/>"),
             "{xml}"
         );
-        // The raw name does not open an element of its own.
+        // The raw name does not open an element of its own, and the parser
+        // hands back the original name.
         let got = osc::parse_project_info(&xml);
         assert_eq!(got.repositories.len(), 1);
-        assert_eq!(got.repositories[0].name, "r&quot;&lt;x");
+        assert_eq!(got.repositories[0].name, "r\"<x");
+        assert_eq!(got.repositories[0].arches, ["x86_64"]);
+    }
+
+    #[test]
+    fn an_ampersand_in_a_name_round_trips_without_double_escaping() {
+        let info = ProjectInfo {
+            kind: None,
+            locked: false,
+            repositories: vec![osc::RepoDef {
+                name: "a&amp;b".into(),
+                paths: vec![],
+                arches: vec!["x86_64".into()],
+            }],
+        };
+        let xml = synthetic_branch_meta("B&C", "S", &info);
+        assert!(xml.contains("<repository name=\"a&amp;amp;b\">"), "{xml}");
+        let got = osc::parse_project_info(&xml);
+        assert_eq!(got.repositories[0].name, "a&amp;b");
         assert_eq!(got.repositories[0].arches, ["x86_64"]);
     }
 
