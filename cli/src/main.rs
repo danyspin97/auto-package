@@ -612,9 +612,11 @@ fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) -> color
 /// How a run that was shown in the TUI ends, shared by `build` and `update`.
 ///
 /// `settled` is the TUI's verdict ([`tui::TuiController::all_settled`]), read
-/// once it has closed. A settled run exits 0 even if a package failed along
-/// the way and was built by a later retry, so each error is only printed as
-/// its own `warning:` line. `failures` holds one message per failed package.
+/// once it has closed. A settled run has every package built, so it exits 0
+/// only if its own run succeeded and no failure is left standing. `failures`
+/// holds one message per failure that no later build fixed: a retry that
+/// built the package has already removed its earlier failure, and a request
+/// that failed before it had a row has no row to retry, so it stays here.
 /// Any other run stays open until the user quits, and exits with the first
 /// error it has: the run's own, then the failed packages', or else the run
 /// ended before every package was built.
@@ -629,37 +631,29 @@ fn tui_run_exit(
     failures: Vec<String>,
 ) -> color_eyre::Result<()> {
     if settled {
-        for line in settled_warnings(&run, &failures) {
-            eprintln!("{line}");
-        }
-        return Ok(());
+        return run_and_failures(run, failures);
     }
     if let Some(e) = tui_failure {
         eprintln!("warning: the TUI stopped before the run ended ({e})");
-        run?;
-        if !failures.is_empty() {
-            return Err(color_eyre::eyre::eyre!(failures.join("; ")));
-        }
-        return Ok(());
+        return run_and_failures(run, failures);
     }
-    run?;
-    if !failures.is_empty() {
-        return Err(color_eyre::eyre::eyre!(failures.join("; ")));
+    if run.is_err() || !failures.is_empty() {
+        return run_and_failures(run, failures);
     }
     Err(color_eyre::eyre::eyre!(
         "the run ended before every package was built"
     ))
 }
 
-/// The `warning:` lines a settled run prints: the run's own error, if any,
-/// then one line per failed package.
-fn settled_warnings(run: &color_eyre::Result<()>, failures: &[String]) -> Vec<String> {
-    run.as_ref()
-        .err()
-        .map(|e| format!("warning: {e:#}"))
-        .into_iter()
-        .chain(failures.iter().map(|f| format!("warning: {f}")))
-        .collect()
+/// The run's own error if it has one, else every failure joined into one
+/// error, else `Ok`.
+fn run_and_failures(run: color_eyre::Result<()>, failures: Vec<String>) -> color_eyre::Result<()> {
+    run?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(color_eyre::eyre::eyre!(failures.join("; ")))
+    }
 }
 
 /// The TUI for a run that asked for it, or `None` when it cannot be shown
@@ -1228,8 +1222,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // builds across the root build and every TUI-added root.
             let sem = make_semaphore(jobs);
             // Roots added in the TUI run on their own threads; their failures
-            // are collected here so they reach the outcome and exit code.
-            let added_failures: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            // are collected here so they reach the outcome and exit code. Each
+            // is keyed by the name it was requested under, so a retry that
+            // builds the package clears the failure it follows.
+            let added_failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
             let result = {
                 let sem = &sem;
                 let added_failures = &added_failures;
@@ -1305,15 +1301,23 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                         }
                                     };
                                     reporter.report(&match &r {
-                                        Ok(()) => Event::Progress {
-                                            step: None,
-                                            message: format!("{label}: build finished"),
-                                        },
+                                        Ok(()) => {
+                                            // The package is built, so an earlier
+                                            // failure of the same request is fixed.
+                                            added_failures
+                                                .lock()
+                                                .unwrap_or_else(|p| p.into_inner())
+                                                .retain(|(l, _)| *l != label);
+                                            Event::Progress {
+                                                step: None,
+                                                message: format!("{label}: build finished"),
+                                            }
+                                        }
                                         Err(e) => {
                                             added_failures
                                                 .lock()
                                                 .unwrap_or_else(|p| p.into_inner())
-                                                .push(format!("{label}: {e:#}"));
+                                                .push((label.clone(), format!("{label}: {e:#}")));
                                             Event::Warning {
                                                 step: None,
                                                 message: format!("{label}: {e}"),
@@ -1328,7 +1332,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                     // as already built, instead of leaving it marked
                                     // as retrying.
                                     match (&r, retry_of) {
-                                        (Err(e), Some(row)) => {
+                                        // Only a retry that never started needs a row
+                                        // settled here; a started build reports its own.
+                                        (Err(e), Some(row)) if !watch.started() => {
                                             reporter.report(&Event::PackageFinished {
                                                 pkg: row,
                                                 version: String::new(),
@@ -1427,9 +1433,12 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 })
             };
 
-            let added_failures = added_failures
+            let added_failures: Vec<String> = added_failures
                 .into_inner()
-                .unwrap_or_else(|p| p.into_inner());
+                .unwrap_or_else(|p| p.into_inner())
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect();
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
             *summary = Some(print_run_summary(
@@ -4174,13 +4183,28 @@ mod tests {
     }
 
     #[test]
-    fn a_settled_tui_run_exits_zero_even_after_failures() {
-        let failed = || Err(color_eyre::eyre::eyre!("boom"));
-        let lines = || vec!["a: boom".to_string(), "b: boom".to_string()];
-        assert!(super::tui_run_exit(true, None, failed(), Vec::new()).is_ok());
-        assert!(super::tui_run_exit(true, None, Ok(()), lines()).is_ok());
-        assert!(super::tui_run_exit(true, None, failed(), lines()).is_ok());
+    fn a_settled_tui_run_exits_zero_only_without_errors() {
         assert!(super::tui_run_exit(true, None, Ok(()), Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn a_settled_tui_run_with_a_standing_failure_exits_with_it() {
+        // A request that failed before it had a row: no retry can fix it.
+        let err = super::tui_run_exit(
+            true,
+            None,
+            Ok(()),
+            vec!["bad name: invalid package name".to_string()],
+        )
+        .unwrap_err();
+        assert_eq!(format!("{err}"), "bad name: invalid package name");
+    }
+
+    #[test]
+    fn a_settled_tui_run_whose_root_failed_exits_with_its_error() {
+        let err = super::tui_run_exit(true, None, Err(color_eyre::eyre::eyre!("root")), Vec::new())
+            .unwrap_err();
+        assert_eq!(format!("{err}"), "root");
     }
 
     #[test]
@@ -4200,20 +4224,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(format!("{err}"), "root failed");
-    }
-
-    #[test]
-    fn a_settled_run_prints_one_warning_line_per_failure() {
-        let failures = vec!["a: first".to_string(), "b: second".to_string()];
-        assert_eq!(
-            super::settled_warnings(&Ok(()), &failures),
-            ["warning: a: first", "warning: b: second"]
-        );
-        assert_eq!(
-            super::settled_warnings(&Err(color_eyre::eyre::eyre!("root")), &failures),
-            ["warning: root", "warning: a: first", "warning: b: second"]
-        );
-        assert!(super::settled_warnings(&Ok(()), &[]).is_empty());
     }
 
     #[test]

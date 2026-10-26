@@ -111,6 +111,19 @@ pub struct TerminalGuard {
     _priv: (),
 }
 
+/// Set once [`Screen::open`] has taken the terminal over (raw mode is on). A
+/// run whose TUI never started leaves it clear, so its guards write nothing:
+/// stdout may be a file, and an escape sequence there would be garbage.
+static TERMINAL_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// Runs `restore` only when `taken` is set, that is when the terminal was
+/// actually taken over.
+fn restore_if_taken(taken: &AtomicBool, restore: impl FnOnce()) {
+    if taken.load(Ordering::SeqCst) {
+        restore();
+    }
+}
+
 impl TerminalGuard {
     pub fn new() -> Self {
         Self { _priv: () }
@@ -119,8 +132,10 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        restore_if_taken(&TERMINAL_TAKEN, || {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        });
     }
 }
 
@@ -141,6 +156,7 @@ impl Screen {
             return Err(io::Error::other("stdout is not a terminal"));
         }
         enable_raw_mode()?;
+        TERMINAL_TAKEN.store(true, Ordering::SeqCst);
         let restore = TerminalGuard::new();
         execute!(io::stdout(), EnterAlternateScreen)?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -1347,6 +1363,16 @@ fn run(
         &settled,
     );
     let _ = screen.terminal.show_cursor();
+    drop(screen);
+    // The TUI can be left with builds still running: the user quit once the
+    // run was over but added a package afterwards (see `run_over`). Nothing
+    // interrupts those builds, and the TUI no longer draws them, so the run
+    // would look hung until its summary. Once the terminal is back, plain
+    // output takes over for the rest of the run. It is switched on only here,
+    // after the alternate screen is left, so no line lands in the TUI's buffer.
+    if work.load(Ordering::SeqCst) != 0 {
+        ap_core::sink::set_quiet(false);
+    }
     result
 }
 
@@ -4088,6 +4114,29 @@ mod run_end_tests {
             AddRequest::Retry("bar".into())
         ));
         assert_eq!(work.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod terminal_guard_tests {
+    use super::restore_if_taken;
+    use std::cell::Cell;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn a_guard_for_a_tui_that_never_started_restores_nothing() {
+        let taken = AtomicBool::new(false);
+        let restored = Cell::new(false);
+        restore_if_taken(&taken, || restored.set(true));
+        assert!(!restored.get());
+    }
+
+    #[test]
+    fn a_guard_for_a_running_tui_restores_the_terminal() {
+        let taken = AtomicBool::new(true);
+        let restored = Cell::new(false);
+        restore_if_taken(&taken, || restored.set(true));
+        assert!(restored.get());
     }
 }
 
