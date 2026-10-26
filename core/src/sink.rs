@@ -33,7 +33,10 @@ pub fn is_quiet() -> bool {
 macro_rules! diag {
     ($($arg:tt)*) => {
         if !$crate::sink::is_quiet() {
-            eprintln!("{}", $crate::sink::printable(&format!($($arg)*)));
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("{}\n", $crate::sink::printable(&format!($($arg)*))),
+            );
         }
     };
 }
@@ -633,7 +636,7 @@ impl Reporter for HumanSink {
             return;
         }
         if let Some(msg) = self.format(event) {
-            eprintln!("{}", strip_controls(&msg, true));
+            let _ = writeln!(std::io::stderr(), "{}", strip_controls(&msg, true));
         }
     }
 }
