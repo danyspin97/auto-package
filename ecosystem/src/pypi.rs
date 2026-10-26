@@ -644,7 +644,9 @@ fn wheel_is_flavor_agnostic(filename: &str, single_locked_flavor_abi: Option<&st
 /// `Documentation` but no `Homepage`. The last resort is the PyPI page, which
 /// is a poor `URL:` tag but better than an empty one.
 fn homepage(info: &RawInfo) -> Option<String> {
-    let from_urls = |key: &str| info.project_urls.get(key).cloned();
+    // An empty or whitespace-only `project_urls` value is "unset" too; if it
+    // were returned as `Some("")` it would stop the fallbacks below.
+    let from_urls = |key: &str| non_empty(info.project_urls.get(key).cloned());
     non_empty(info.home_page.clone())
         .or_else(|| from_urls("Homepage"))
         .or_else(|| from_urls("Home"))
@@ -1078,6 +1080,38 @@ mod tests {
             markupsafe().homepage.as_deref(),
             Some("https://github.com/pallets/markupsafe/")
         );
+    }
+
+    #[test]
+    fn an_empty_project_url_does_not_hide_the_fallbacks() {
+        // `"Homepage": ""` is unset, so the `Source` URL is the homepage, and
+        // whitespace-only values are unset too.
+        let info = |urls: &str| -> RawInfo {
+            serde_json::from_str(&format!(
+                r#"{{"name": "x", "version": "1", "home_page": null,
+                    "project_urls": {urls}}}"#
+            ))
+            .unwrap()
+        };
+        let empty_homepage = info(
+            r#"{"Homepage": "", "Source": "https://github.com/example/x"}"#,
+        );
+        assert_eq!(
+            homepage(&empty_homepage).as_deref(),
+            Some("https://github.com/example/x")
+        );
+        let blank_homepage = info(
+            r#"{"Homepage": "  \t ", "Source": "https://github.com/example/x"}"#,
+        );
+        assert_eq!(
+            homepage(&blank_homepage).as_deref(),
+            Some("https://github.com/example/x")
+        );
+        // A real value is trimmed, and nothing usable leaves the homepage unset.
+        let padded = info(r#"{"Homepage": " https://example.org/x "}"#);
+        assert_eq!(homepage(&padded).as_deref(), Some("https://example.org/x"));
+        let nothing = info(r#"{"Homepage": "", "Source": ""}"#);
+        assert_eq!(homepage(&nothing), None);
     }
 
     #[test]

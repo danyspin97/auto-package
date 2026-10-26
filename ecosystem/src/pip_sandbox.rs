@@ -158,7 +158,12 @@ pub fn bwrap_args(program: &[&str], host: &Host) -> Result<Vec<OsString>, Sandbo
             continue;
         }
         if CA_FILE_VARS.contains(&key) || key == "SSL_CERT_DIR" {
-            bind_ca(&mut a, key, v, host)?;
+            // The variable is passed on with only the entries that the
+            // sandbox actually has; when none are usable it is not set.
+            if let Some(usable) = bind_ca(&mut a, key, v, host)? {
+                env.push((k.clone(), usable));
+            }
+            continue;
         }
         env.push((k.clone(), v.clone()));
     }
@@ -232,10 +237,9 @@ fn bind_interpreter(
 
     let mut prefixes: BTreeSet<PathBuf> = BTreeSet::new();
     for file in &files {
-        let prefix = prefix_of(file);
-        if is_under_any(&prefix, SYSTEM_DIRS) {
+        let Some(prefix) = interpreter_prefix(file) else {
             continue;
-        }
+        };
         check_prefix(program, &prefix, &host.home)?;
         prefixes.insert(prefix);
     }
@@ -296,6 +300,19 @@ fn prefix_of(file: &Path) -> PathBuf {
     } else {
         dir.to_path_buf()
     }
+}
+
+/// The prefix to bind for `file`, or `None` when nothing needs binding.
+///
+/// A file under [`SYSTEM_DIRS`] is already in the sandbox through
+/// `system_ro_binds`, whatever its prefix would be: `/bin/pip` has the prefix
+/// `/`, which must never be bound (it holds the home directory), but `/bin` is
+/// bound on its own. Any other file is bound by its prefix, which is checked.
+fn interpreter_prefix(file: &Path) -> Option<PathBuf> {
+    if is_under_any(file, SYSTEM_DIRS) {
+        return None;
+    }
+    Some(prefix_of(file))
 }
 
 fn is_under_any(path: &Path, dirs: &[&str]) -> bool {
@@ -454,25 +471,70 @@ fn pip_config_env(a: &mut Args, host: &Host) -> Option<OsString> {
     Some(SANDBOX_PIP_CONFIG_FILE.into())
 }
 
-/// Bind a CA bundle (file or directory) named by `var` at its own path when
-/// the sandbox does not already have it.
-fn bind_ca(a: &mut Args, var: &str, value: &OsString, host: &Host) -> Result<(), SandboxError> {
-    let path = PathBuf::from(value);
-    if !path.is_absolute() || !path.exists() {
-        return Ok(());
+/// Make the CA bundle files or directories named by `var` usable in the
+/// sandbox. `SSL_CERT_DIR` is a colon-separated list and each entry is handled
+/// as a single path; the others name one path.
+///
+/// An entry is bound at its own path when it exists and is not already in the
+/// sandbox. An entry that is relative, missing or unusable is skipped with a
+/// warning. An entry that names credentials is refused with an error, as
+/// before.
+///
+/// Returns the value to pass into the sandbox: the usable entries joined the
+/// same way, or `None` when no entry is usable and the variable should not be
+/// set at all.
+fn bind_ca(
+    a: &mut Args,
+    var: &str,
+    value: &OsString,
+    host: &Host,
+) -> Result<Option<OsString>, SandboxError> {
+    let raw = value.as_bytes();
+    let sep = if var == "SSL_CERT_DIR" { Some(b':') } else { None };
+    let entries: Vec<&[u8]> = match sep {
+        Some(c) => raw.split(|b| *b == c).collect(),
+        None => vec![raw],
+    };
+    let mut usable: Vec<&[u8]> = Vec::new();
+    for entry in entries {
+        if entry.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(OsStr::from_bytes(entry));
+        if !path.is_absolute() {
+            tracing::warn!(
+                "{var} entry {} is not an absolute path; not exposing it to the sandbox",
+                path.display()
+            );
+            continue;
+        }
+        if !path.exists() {
+            tracing::warn!(
+                "{var} entry {} does not exist; not exposing it to the sandbox",
+                path.display()
+            );
+            continue;
+        }
+        if is_under_any(&path, SYSTEM_DIRS) || is_under_any(&path, ETC_ENTRIES) {
+            // Already present in the sandbox at this path.
+            usable.push(entry);
+            continue;
+        }
+        if let Some(why) = sensitive_file(&path, &host.home) {
+            return Err(SandboxError::UnsafePath {
+                var: var.to_string(),
+                path,
+                why,
+            });
+        }
+        a.ro_bind(&path, &path);
+        usable.push(entry);
     }
-    if is_under_any(&path, SYSTEM_DIRS) || is_under_any(&path, ETC_ENTRIES) {
-        return Ok(());
+    if usable.is_empty() {
+        return Ok(None);
     }
-    if let Some(why) = sensitive_file(&path, &host.home) {
-        return Err(SandboxError::UnsafePath {
-            var: var.to_string(),
-            path,
-            why,
-        });
-    }
-    a.ro_bind(&path, &path);
-    Ok(())
+    let joined: Vec<u8> = usable.join(&b':');
+    Ok(Some(OsStr::from_bytes(&joined).to_owned()))
 }
 
 #[cfg(test)]
@@ -752,6 +814,68 @@ mod tests {
         f.host.vars.push(("SSL_CERT_FILE".into(), key.into()));
         let err = bwrap_args(&["pip"], &f.host).unwrap_err();
         assert!(matches!(err, SandboxError::UnsafePath { .. }), "{err}");
+    }
+
+    #[test]
+    fn ca_dir_entries_are_bound_one_by_one_and_only_usable_ones_are_passed_on() {
+        let mut f = fixture();
+        let good = f.home.join("corp-certs");
+        fs::create_dir_all(&good).unwrap();
+        let good_s = good.to_string_lossy().into_owned();
+        let value = format!("/nonexistent/one:{good_s}::/nonexistent/two");
+        f.host
+            .vars
+            .push(("SSL_CERT_DIR".into(), value.into()));
+        let args = build(&f);
+        let b = binds(&args);
+        assert!(b.contains(&("--ro-bind".into(), good_s.clone(), good_s.clone())));
+        assert!(!b.iter().any(|(_, s, _)| s.starts_with("/nonexistent")));
+        // Only the entry that is bound survives in the sandbox's environment.
+        let env = setenvs(&args);
+        assert!(env.contains(&("SSL_CERT_DIR".into(), good_s)), "{env:?}");
+    }
+
+    #[test]
+    fn a_missing_ca_file_is_not_passed_on_to_the_sandbox() {
+        let mut f = fixture();
+        f.host
+            .vars
+            .push(("SSL_CERT_FILE".into(), "/nonexistent/ca.pem".into()));
+        let args = build(&f);
+        assert!(!setenvs(&args).iter().any(|(k, _)| k == "SSL_CERT_FILE"));
+        assert!(!binds(&args).iter().any(|(_, s, _)| s.contains("nonexistent")));
+    }
+
+    #[test]
+    fn a_ca_dir_entry_naming_credentials_is_still_refused() {
+        let mut f = fixture();
+        let key = f.home.join(".ssh");
+        let value = format!("{}:{}", f.home.join("corp-certs").display(), key.display());
+        f.host.vars.push(("SSL_CERT_DIR".into(), value.into()));
+        let err = bwrap_args(&["pip"], &f.host).unwrap_err();
+        assert!(matches!(err, SandboxError::UnsafePath { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_program_under_bin_is_not_refused_as_a_prefix_of_root() {
+        // `/bin/<x>` has the prefix `/`, which holds the home directory. The
+        // file is in the system directories, so nothing is bound for it.
+        assert_eq!(interpreter_prefix(Path::new("/bin/pip")), None);
+        assert_eq!(interpreter_prefix(Path::new("/usr/bin/python3")), None);
+        assert_eq!(
+            interpreter_prefix(Path::new("/opt/py/bin/python")),
+            Some(PathBuf::from("/opt/py"))
+        );
+        // A file directly under `/` outside the system dirs is still refused.
+        let f = fixture();
+        let prefix = interpreter_prefix(Path::new("/x")).unwrap();
+        assert!(check_prefix("x", &prefix, &f.home).is_err());
+        if Path::new("/bin/sh").is_file() {
+            let mut f = fixture();
+            f.host.path = "/bin:/usr/bin".into();
+            let args = bwrap_args(&["/bin/sh"], &f.host).expect("/bin/sh is sandboxed");
+            assert!(args.iter().any(|a| a == "/bin/sh"));
+        }
     }
 
     #[test]

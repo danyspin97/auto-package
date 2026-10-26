@@ -111,11 +111,20 @@ fn cache_dir() -> std::path::PathBuf {
 /// one mode (sdists allowed or not) is not reused under another. The old
 /// narrow key (`<name>-<version>.json`) is simply never matched; the existing
 /// TTL prunes those stale files.
-fn cache_path(name: &str, version: Option<&str>, mode: ResolveMode) -> std::path::PathBuf {
-    cache_dir().join(cache_key(
+///
+/// `python` is the version string of the interpreter whose pip produced the
+/// closure (see [`resolve`]), not necessarily the host's.
+fn cache_path(
+    dir: &std::path::Path,
+    name: &str,
+    version: Option<&str>,
+    python: &str,
+    mode: ResolveMode,
+) -> std::path::PathBuf {
+    dir.join(cache_key(
         name,
         version,
-        &host_python(),
+        python,
         &host_platform(),
         mode,
     ))
@@ -204,11 +213,12 @@ fn filename_safe(s: &str) -> String {
 /// key, and `resolve` itself will fail loudly on the subsequent `pip` call.
 fn host_python() -> String {
     static CACHE: OnceLock<String> = OnceLock::new();
-    CACHE.get_or_init(probe_host_python).clone()
+    CACHE.get_or_init(|| probe_python("python3")).clone()
 }
 
-fn probe_host_python() -> String {
-    Command::new("python3")
+/// The `--version` line of `program`, or the empty string when it cannot run.
+fn probe_python(program: &str) -> String {
+    Command::new(program)
         .arg("--version")
         .output()
         .ok()
@@ -248,8 +258,14 @@ fn probe_host_platform() -> String {
 ///
 /// Cache is considered stale if older than 7 days (for pinned versions) or
 /// 1 day (for "latest").
-fn load_cached_resolve(name: &str, version: Option<&str>, mode: ResolveMode) -> Option<Vec<Node>> {
-    let path = cache_path(name, version, mode);
+fn load_cached_resolve(
+    dir: &std::path::Path,
+    name: &str,
+    version: Option<&str>,
+    python: &str,
+    mode: ResolveMode,
+) -> Option<Vec<Node>> {
+    let path = cache_path(dir, name, version, python, mode);
 
     // Check if cache file exists
     let metadata = std::fs::metadata(&path).ok()?;
@@ -289,9 +305,16 @@ fn load_cached_resolve(name: &str, version: Option<&str>, mode: ResolveMode) -> 
     Some(nodes)
 }
 
-/// Save resolution result to cache.
-fn save_cached_resolve(name: &str, version: Option<&str>, mode: ResolveMode, nodes: &[Node]) {
-    let path = cache_path(name, version, mode);
+/// Save resolution result to cache, keyed by the interpreter that produced it.
+fn save_cached_resolve(
+    dir: &std::path::Path,
+    name: &str,
+    version: Option<&str>,
+    python: &str,
+    mode: ResolveMode,
+    nodes: &[Node],
+) {
+    let path = cache_path(dir, name, version, python, mode);
 
     // Create cache directory if it doesn't exist
     if let Some(parent) = path.parent() {
@@ -735,9 +758,13 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
     // The mode is part of the cache key, so it is decided before the cache
     // is read.
     let mode = resolve_mode();
+    let dir = cache_dir();
+    let host = host_python();
 
-    // Try to load from cache first
-    if let Some(cached) = load_cached_resolve(name, version, mode) {
+    // Try to load from cache first. Only entries recorded under the host
+    // interpreter are read: an entry produced by an alternate interpreter is
+    // stored under that interpreter's key, so it is never served to the host.
+    if let Some(cached) = load_cached_resolve(&dir, name, version, &host, mode) {
         return Ok(cached);
     }
 
@@ -761,6 +788,12 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         &alternates,
         |py| run_pip_report(&[py, "-m", "pip"], name, &spec, mode),
     )?;
+    // The interpreter whose pip produced `stdout`: the host's, or the alternate
+    // that was used. The cache entry is keyed by it.
+    let produced_by = match &alternate {
+        Some(py) => probe_python(py),
+        None => host.clone(),
+    };
     if let Some(py) = alternate {
         ap_core::diag!("  default pip was not usable for {name}; resolved with {py}");
     }
@@ -788,8 +821,11 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
-    // Save to cache for future use
-    save_cached_resolve(name, version, mode, &nodes);
+    // Save to cache for future use. A result whose interpreter version cannot
+    // be probed is not cached: there is no key that would describe it.
+    if !produced_by.is_empty() {
+        save_cached_resolve(&dir, name, version, &produced_by, mode, &nodes);
+    }
 
     Ok(nodes)
 }
@@ -1248,6 +1284,40 @@ mod tests {
         assert_ne!(sandboxed, wheels);
         assert_ne!(sandboxed, unsandboxed);
         assert_ne!(wheels, unsandboxed);
+    }
+
+    #[test]
+    fn an_entry_recorded_for_312_is_not_served_to_a_313_host() {
+        // A closure resolved by `python3.12 -m pip` (the host's default was
+        // incompatible) is stored under 3.12's key. A later run on a 3.13 host
+        // must miss and resolve again, not get a closure from another Python.
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = vec![Node {
+            name: "httpx".into(),
+            version: "0.28.1".into(),
+            sha256: "ab".into(),
+            requires_dist: vec![],
+            requires_python: None,
+            is_requested: true,
+            is_yanked: false,
+        }];
+        let mode = ResolveMode::Sandboxed;
+        save_cached_resolve(
+            dir.path(),
+            "httpx",
+            Some("0.28.1"),
+            "Python 3.12.7",
+            mode,
+            &nodes,
+        );
+        assert_eq!(
+            load_cached_resolve(dir.path(), "httpx", Some("0.28.1"), "Python 3.12.7", mode),
+            Some(nodes)
+        );
+        assert_eq!(
+            load_cached_resolve(dir.path(), "httpx", Some("0.28.1"), "Python 3.13.1", mode),
+            None
+        );
     }
 }
 
