@@ -1998,7 +1998,19 @@ fn package_notes_step(
 ) {
     // The notes turn is a model call and counts against the run's budget like
     // any other, so it is refused when its cap would not fit under the budget.
-    let spent_this_run = spent_in_run(&PkgState::load(ws), &config.run_id);
+    // An unreadable state file would show no spend: the notes turn is skipped
+    // rather than run against a budget it cannot see.
+    let prior = match PkgState::try_load(ws) {
+        Ok(prior) => prior,
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!("package notes not updated: cannot read the package state: {e}"),
+            });
+            return;
+        }
+    };
+    let spent_this_run = spent_in_run(&prior, &config.run_id);
     if spent_this_run + crate::package_notes::NOTES_CAP_USD > config.budget_usd {
         reporter.report(&Event::Warning {
             step: None,
@@ -2857,7 +2869,9 @@ fn osc_service_stage(
     // `tar_scm` fetches the tag and `cargo_vendor` produces vendor.tar.zst, the
     // two sources the Rust spec template references. It has to run before the
     // commit, not before spec generation — the spec is a template either way.
-    if is_rust && let Some(ref repo_url) = config.source_repo {
+    // A maturin package writes its own `_service` below, which replaces this
+    // one: running `tar_scm` first would only leave its output unreferenced.
+    if is_rust && !is_maturin && let Some(ref repo_url) = config.source_repo {
         let need_service = need_spec || !checkout_dir.join("_service").exists();
         if need_service {
             let step = begin_or_fail!(
@@ -3994,6 +4008,7 @@ fn missing_deps_from_turn(
     let (declined, patches): (Vec<_>, Vec<_>) = patches
         .into_iter()
         .partition(|p| patch_declined_before(ctx, &p.name, &p.problem));
+    let declined_count = declined.len();
     for p in declined {
         let conflict = linked_bound_conflicts(ctx, step, std::slice::from_ref(&p.name))
             .into_iter()
@@ -4020,15 +4035,39 @@ fn missing_deps_from_turn(
                 });
                 conflict_outdated.push((p.name.clone(), Some(version)));
             }
-            _ => ctx.reporter.report(&Event::Warning {
+            // No DistroTooNew conflict bounds this package against the
+            // dependency, so there is no bound to build an older release under.
+            (None, _) => ctx.reporter.report(&Event::Warning {
                 step: Some(step),
                 message: format!(
-                    "{} could not be patched and no older release of it within this package's \
-                     bound was found",
-                    p.name
+                    "{} could not be patched, and no distro version of it conflicts with {} {}, \
+                     so there is no older release to build in its place",
+                    p.name, ctx.config.pkg_name, ctx.config.version
+                ),
+            }),
+            // A conflict bounds it, but PyPI has no release within that bound.
+            (Some(c), None) => ctx.reporter.report(&Event::Warning {
+                step: Some(step),
+                message: format!(
+                    "{} could not be patched, and PyPI has no release of it within `{}` to \
+                     build in its place",
+                    p.name, c.specifier
                 ),
             }),
         }
+    }
+    if declined_count > 0
+        && to_build.is_empty()
+        && conflict_outdated.is_empty()
+        && patches.is_empty()
+    {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(step),
+            message: format!(
+                "the declined dependency requests leave nothing to build or patch for {}",
+                ctx.config.pkg_name
+            ),
+        });
     }
     for (dep, _) in &conflict_outdated {
         if !to_build
@@ -5065,7 +5104,9 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                 );
             }
             if !style.is_empty() {
-                let validate_step = validate_step.finish(StepOutcome::Failed);
+                // Only style problems reach this point: every other problem
+                // returned above. The step's outcome is decided after the fix
+                // turn, so a style-only agent failure does not fail it.
                 reporter.report(&Event::SpecRejected {
                     step: validate_step.id,
                     reason: ap_core::event::SpecRejection::Placeholders {
@@ -5082,6 +5123,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                         "  not fixing spec style problems without an agent turn: {}",
                         style.join("; ")
                     );
+                    validate_step.finish(StepOutcome::Failed);
                     return Ok(Flow::Proceed);
                 }
                 let context = format!(
@@ -5096,15 +5138,33 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                 // Once per package run: a turn that cannot satisfy a point must
                 // not loop here.
                 if st.step_attempts.round <= 1 {
-                    fix_after_validation(
+                    return match fix_after_validation(
                         ctx,
                         st,
                         Some(&context),
                         "spec style",
                         "spec style and agent failed: ",
-                    )?;
-                    return Ok(Flow::Retry);
+                    ) {
+                        Ok(()) => {
+                            validate_step.finish(StepOutcome::Failed);
+                            Ok(Flow::Retry)
+                        }
+                        Err(PipelineResult::Failed { reason, .. }) => {
+                            // Style is not worth failing a package that builds:
+                            // the failure is a warning and the package proceeds.
+                            ap_core::diag!(
+                                "  warning: spec style fix failed, building the spec as it is: {reason}"
+                            );
+                            validate_step.finish(StepOutcome::Ok);
+                            Ok(Flow::Proceed)
+                        }
+                        Err(other) => {
+                            validate_step.finish(StepOutcome::Failed);
+                            Err(other)
+                        }
+                    };
                 }
+                validate_step.finish(StepOutcome::Failed);
                 return Ok(Flow::Proceed);
             }
 
@@ -6894,7 +6954,10 @@ fn sibling_facts(config: &PipelineConfig, dirs: &[PathBuf]) -> Option<String> {
 /// The key a failed ladder is remembered under: the spec, and the specs of the
 /// packages it depends on, so a sibling's patch counts as changed input.
 fn ladder_key(config: &PipelineConfig, spec: &str) -> u64 {
-    let mut all = spec.to_string();
+    // The memo is written from the stripped spec the agent edited, and the
+    // check reads the spec on disk, which may still carry `# ap: fix` lines the
+    // agent kept: both sides hash the same stripped text.
+    let mut all = crate::spec::strip_ap_fix_comments(spec);
     for dir in sibling_checkouts(config, spec, "") {
         if let Some(name) = dir.file_name() {
             all.push_str(
@@ -9628,18 +9691,23 @@ fn applied_patch_number(line: &str) -> Option<String> {
             after.is_empty() || after.starts_with(char::is_whitespace) || after.starts_with('-');
         return ends_macro.then(|| digits.to_string());
     }
-    let after = after.trim_start();
-    match after.strip_prefix("-P") {
-        Some(num_part) => {
-            let n: String = num_part
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            (!n.is_empty()).then_some(n)
+    // Any option word may carry the patch number: `-PN` or `-P N`, anywhere
+    // among the options (`-p1 -P 2`, `-P 2 -p1`).
+    let words: Vec<&str> = after.split_whitespace().collect();
+    for (i, word) in words.iter().enumerate() {
+        if let Some(num_part) = word.strip_prefix("-P") {
+            let digits = if num_part.is_empty() {
+                words.get(i + 1).copied().unwrap_or("")
+            } else {
+                num_part
+            };
+            let n: String = digits.chars().take_while(|c| c.is_ascii_digit()).collect();
+            return (!n.is_empty()).then_some(n);
         }
-        None => (after.is_empty() || after.starts_with('-')).then(|| "0".to_string()),
     }
+    // No `-P` at all: the bare `%patch` applies patch 0.
+    let after = after.trim_start();
+    (after.is_empty() || after.starts_with('-')).then(|| "0".to_string())
 }
 
 /// `spec` without the `PatchN:` lines (and `%patchN` applications) of `names`.
@@ -9990,20 +10058,16 @@ fn patch_escape_problem(
                     return None;
                 }
             }
-            PatchBaseline::NotPublished(_) => {
+            PatchBaseline::NotPublished(_) | PatchBaseline::NoBaseline(_) => {
                 if is_published {
                     return None;
                 }
             }
-            PatchBaseline::NoBaseline(_) => {}
         }
         let why = patch_escapes_tree(&String::from_utf8_lossy(&bytes))?;
         let origin = match baseline {
             PatchBaseline::Snapshot(_) => "was added or changed by this turn",
             PatchBaseline::NotPublished(_) => "is not published by OBS yet",
-            PatchBaseline::NoBaseline(_) if is_published => {
-                "is already published by OBS, so it is pre-existing and not this turn's edit"
-            }
             PatchBaseline::NoBaseline(_) => "is a new or changed patch",
         };
         Some(format!(
@@ -10039,7 +10103,7 @@ fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
     let named_for_version = |p: &PathBuf| {
         !version.is_empty()
             && p.file_name()
-                .is_some_and(|n| n.to_string_lossy().contains(version))
+                .is_some_and(|n| names_version(&n.to_string_lossy(), version))
     };
     found.sort_by(|a, b| {
         named_for_version(b)
@@ -13850,11 +13914,37 @@ mod tests {
         // OBS already publishes it: not judged at commit.
         let published = PatchBaseline::NotPublished(vec!["old.patch".to_string()]);
         assert_eq!(patch_escape_problem(&spec_path, spec, &published), None);
-        // With no pre-turn copy it is still reported, as pre-existing.
+        // With no pre-turn copy, a patch OBS publishes is not judged either.
         let no_baseline = PatchBaseline::NoBaseline(vec!["old.patch".to_string()]);
-        let problem = patch_escape_problem(&spec_path, spec, &no_baseline).expect("escape");
-        assert!(problem.contains("pre-existing"), "{problem}");
-        assert!(!problem.contains("changed by this turn"), "{problem}");
+        assert_eq!(patch_escape_problem(&spec_path, spec, &no_baseline), None);
+    }
+
+    #[test]
+    fn no_baseline_judges_only_the_patches_obs_does_not_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("pkg.spec");
+        let spec = "Name: pkg\nPatch0: published.patch\nPatch1: new.patch\n";
+        std::fs::write(&spec_path, spec).unwrap();
+        let escaping = "--- ../../x\n+++ ../../x\n@@ -1 +1 @@\n-a\n+b\n";
+        std::fs::write(dir.path().join("published.patch"), escaping).unwrap();
+        std::fs::write(dir.path().join("new.patch"), escaping).unwrap();
+
+        // The published `..` header is what was committed: not this turn's, so
+        // only the unpublished patch is judged.
+        let published = PatchBaseline::NoBaseline(vec!["published.patch".to_string()]);
+        let problem = patch_escape_problem(&spec_path, spec, &published).expect("escape");
+        assert!(problem.starts_with("new.patch"), "{problem}");
+
+        // Nothing published: both are judged, and the first is named.
+        let none = PatchBaseline::NoBaseline(Vec::new());
+        let problem = patch_escape_problem(&spec_path, spec, &none).expect("escape");
+        assert!(problem.starts_with("new.patch"), "{problem}");
+
+        // Only the unpublished one is judged: a published `new.patch` leaves
+        // `published.patch` as the one reported.
+        let only_new = PatchBaseline::NoBaseline(vec!["new.patch".to_string()]);
+        let problem = patch_escape_problem(&spec_path, spec, &only_new).expect("escape");
+        assert!(problem.starts_with("published.patch"), "{problem}");
     }
 
     #[test]
@@ -14058,6 +14148,17 @@ mod tests {
         assert_eq!(name("2.0").as_deref(), Some("foo-2.0.tar.gz"));
         assert_eq!(name("1.0").as_deref(), Some("a-1.0.tar.gz"));
         assert_eq!(name("9").as_deref(), Some("a-1.0.tar.gz"));
+    }
+
+    #[test]
+    fn find_tarball_ranks_a_longer_version_below_the_exact_one() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["pkg-1.2.1.tar.gz", "pkg-1.2.tar.gz"] {
+            std::fs::write(dir.path().join(f), b"").unwrap();
+        }
+        let name = find_tarball(dir.path(), "1.2")
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        assert_eq!(name.as_deref(), Some("pkg-1.2.tar.gz"));
     }
 
     #[test]
@@ -16156,6 +16257,16 @@ mod hygiene_tests {
             Some("12")
         );
         assert_eq!(applied_patch_number("%patch -P3").as_deref(), Some("3"));
+        // The number may follow another option, or come after the -p level.
+        assert_eq!(
+            applied_patch_number("%patch -p1 -P 2").as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            applied_patch_number("%patch -P 2 -p1").as_deref(),
+            Some("2")
+        );
+        assert_eq!(applied_patch_number("%patch -p1 -P2").as_deref(), Some("2"));
         assert_eq!(applied_patch_number("%patchfoo"), None);
         assert_eq!(applied_patch_number("echo %patch1"), None);
     }
