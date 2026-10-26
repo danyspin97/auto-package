@@ -6086,6 +6086,18 @@ fn fix_after_build(
     };
 
     if let Some(missing) = missing_deps_from_turn(ctx, agent_step.id, &outcome) {
+        // This path skips the apply gate, so the turn's edit would reach the
+        // next build unvalidated and unjournaled. Roll back to the state the
+        // turn started from, and journal the discarded turn.
+        checkout_snapshot.restore(reporter, &agent_step);
+        restore_spec(spec_path, &clean, &agent_step, reporter);
+        append_notes(
+            ws.notes(),
+            &format!(
+                "\n## Attempt {attempts} — FixAfterBuild — missing dependencies; edits discarded\nReasoning: {}\n",
+                brief(&outcome.reasoning)
+            ),
+        );
         return Err(missing);
     }
     // Everything the turn called missing is already built here: its edit
@@ -6554,6 +6566,26 @@ fn sibling_checkouts(config: &PipelineConfig, spec: &str, extra_text: &str) -> V
         .collect()
 }
 
+/// Whether `rest`, the part of a file name after `<name>-`, is
+/// `<version>-<release>.<arch>.rpm`. Exactly two `-` fields: a version that
+/// starts with a digit, then a release with the arch after its last dot. A
+/// sibling package whose name extends `name` (`ffmpeg-8-libs-8.0-1.x86_64.rpm`
+/// for `ffmpeg`) has more fields and does not match.
+fn is_version_release_arch_rpm(rest: &str) -> bool {
+    let Some(stem) = rest.strip_suffix(".rpm") else {
+        return false;
+    };
+    match stem.split('-').collect::<Vec<_>>().as_slice() {
+        [version, release_arch] => {
+            version.starts_with(|c: char| c.is_ascii_digit())
+                && release_arch
+                    .rsplit_once('.')
+                    .is_some_and(|(release, arch)| !release.is_empty() && !arch.is_empty())
+        }
+        _ => false,
+    }
+}
+
 /// The `.rpm` files of a sibling the project built, found under `rpms_dir`.
 fn sibling_rpms(rpms_dir: &Path, name: &str) -> Vec<PathBuf> {
     fn walk(dir: &Path, name: &str, depth: usize, out: &mut Vec<PathBuf>) {
@@ -6565,8 +6597,7 @@ fn sibling_rpms(rpms_dir: &Path, name: &str) -> Vec<PathBuf> {
                     walk(&path, name, depth + 1, out);
                 }
             } else if let Some(rest) = file.strip_prefix(&format!("{name}-"))
-                && rest.starts_with(|c: char| c.is_ascii_digit())
-                && file.ends_with(".rpm")
+                && is_version_release_arch_rpm(rest)
                 && !file.ends_with(".src.rpm")
             {
                 out.push(path);
@@ -6950,12 +6981,20 @@ fn resolve_blocked_with(
         }
         let context = ladder_context(round, LADDER_ROUNDS, history, site.context);
         let label = format!("resolve-{round}");
+        // What this round may change, so a MissingDeps answer can undo it
+        // without touching the edits of earlier, validated rounds.
+        let round_snapshot = CheckoutSnapshot::take(checkout_dir);
+        let round_spec = std::fs::read_to_string(spec_path).unwrap_or_default();
         let turn = turn(ctx, st, &site, &label, site.attempt + round, &context);
         let (step, out) = match turn {
             Ok(v) => v,
             Err((e, kind)) => return Rung::Abort(ctx.failed_as(kind, e)),
         };
         if let Some(missing) = missing_deps_from_turn(ctx, step.id, &out) {
+            // Not applied, so not validated or journaled: undo it (see
+            // `fix_after_build`).
+            round_snapshot.restore(*reporter, &step);
+            restore_spec(spec_path, &round_spec, &step, *reporter);
             return Rung::Abort(missing);
         }
         let label = format!("{} — resolve round {round}", site.apply_label);
@@ -8783,11 +8822,18 @@ fn licence_guard_facts(
                         )
                     })
                 });
-                CACHE
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get_or_insert_with(Default::default)
-                    .insert(key, found.clone());
+                // `spec_for_package` answers `None` both when the recipe is
+                // absent and when an osc call failed transiently, and the two
+                // cannot be told apart here. Only a found recipe is cached: a
+                // `None` cached for the whole process would hide the recipe
+                // for every later guard in this run.
+                if found.is_some() {
+                    CACHE
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_or_insert_with(Default::default)
+                        .insert(key, found.clone());
+                }
                 found
             }
         };
@@ -11490,6 +11536,9 @@ fn append_notes(notes_path: PathBuf, section: &str) {
 ///   txt` is written alongside the tarball naming each removed member;
 ///   that file lands in the OBS commit so the reviewer sees what changed.
 fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> Result<(), String> {
+    // Refuse before extracting: a non-gzip archive would be rewritten as gzip.
+    require_gzip_tarball(tarball)?;
+
     // Extract to temp directory
     let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let extract_dir = temp_dir.path();
@@ -11655,9 +11704,36 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
 /// not turn into a copy of whatever it points at on this host. Anything that
 /// is neither a file, a directory nor a link is left out.
 fn repack_tarball(extract_dir: &Path, tarball: &Path) -> Result<(), String> {
+    require_gzip_tarball(tarball)?;
     let temp_tarball = tarball.with_extension("tar.gz.tmp");
-    let tar_file = std::fs::File::create(&temp_tarball)
-        .map_err(|e| format!("creating temp tarball: {}", e))?;
+    let result = write_gzip_tarball(extract_dir, &temp_tarball).and_then(|()| {
+        std::fs::rename(&temp_tarball, tarball).map_err(|e| format!("replacing tarball: {}", e))
+    });
+    if result.is_err() {
+        // Never leave a partial temp archive behind.
+        let _ = std::fs::remove_file(&temp_tarball);
+    }
+    result
+}
+
+/// Repacking always writes gzip, so only a `.tar.gz` original may be replaced.
+/// Anything else is refused and left untouched: no bz2/zstd/xz encoder is a
+/// dependency of this crate, and silently changing the format would break the
+/// file name the spec refers to.
+fn require_gzip_tarball(tarball: &Path) -> Result<(), String> {
+    if tarball.to_string_lossy().ends_with(".tar.gz") {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not a .tar.gz archive; not repacked, left as downloaded",
+            tarball.display()
+        ))
+    }
+}
+
+fn write_gzip_tarball(extract_dir: &Path, temp_tarball: &Path) -> Result<(), String> {
+    let tar_file =
+        std::fs::File::create(temp_tarball).map_err(|e| format!("creating temp tarball: {}", e))?;
     let enc = flate2::write::GzEncoder::new(tar_file, flate2::Compression::default());
     let mut tar_builder = tar::Builder::new(enc);
     tar_builder.follow_symlinks(false);
@@ -11698,9 +11774,6 @@ fn repack_tarball(extract_dir: &Path, tarball: &Path) -> Result<(), String> {
         .and_then(|enc| enc.finish())
         .and_then(|file| file.sync_all())
         .map_err(|e| format!("finalizing tarball: {}", e))?;
-
-    // Replace original tarball
-    std::fs::rename(&temp_tarball, tarball).map_err(|e| format!("replacing tarball: {}", e))?;
     Ok(())
 }
 
@@ -11766,6 +11839,16 @@ fn glob_matches_single_segment(pattern: &str, candidate: &str) -> bool {
         }
     }
     true
+}
+
+/// Whether a lowercased package name is NVIDIA's, by its name: `nvidia-`,
+/// `nvidia_`, `cuda-`, `cuda_` or the bare `nvidia`. A bare `nv` prefix is not
+/// a signal (`nvim`, `nvector` are unrelated).
+fn is_nvidia_package_name(lower: &str) -> bool {
+    ["nvidia-", "nvidia_", "cuda-", "cuda_"]
+        .iter()
+        .any(|p| lower.starts_with(p))
+        || lower == "nvidia"
 }
 
 /// Source repository candidates for a package with no (or no usable) PyPI
@@ -11837,8 +11920,10 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
 
     // For NVIDIA packages, try NVIDIA org URLs FIRST and with high priority
     // This ensures we prefer official NVIDIA repos over any random GitHub repos
-    let is_nvidia_package =
-        lower.starts_with("nvidia-") || lower.starts_with("cuda-") || lower.starts_with("nv");
+    let is_nvidia_package = is_nvidia_package_name(&lower)
+        || known_mappings
+            .iter()
+            .any(|(p, u)| lower.starts_with(p) && u.starts_with("https://github.com/NVIDIA/"));
 
     if is_nvidia_package {
         ap_core::diag!("  detected NVIDIA package, preferring github.com/NVIDIA organization");
@@ -12120,10 +12205,40 @@ fn same_repo_url(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
+/// Hosts that serve many unrelated projects, one project page or download
+/// directory per name. A host match on these says nothing about the project.
+const SHARED_HOSTS: &[&str] = &[
+    "sourceforge.net",
+    "savannah.gnu.org",
+    "savannah.nongnu.org",
+    "ftp.gnu.org",
+];
+
+/// Whether `host` is one of [`SHARED_HOSTS`] or a subdomain of one.
+fn is_shared_host(host: &str) -> bool {
+    SHARED_HOSTS
+        .iter()
+        .any(|s| host == *s || host.strip_suffix(s).is_some_and(|h| h.ends_with('.')))
+}
+
+/// The project a URL on a shared host names: the first path segment that is
+/// not a generic directory (`/projects/<name>`, `/p/<name>`, `/gnu/<name>`,
+/// `/releases/<name>`, `/cgit/<name>.git`). `None` when the path names none.
+fn shared_host_project(url: &str) -> Option<String> {
+    const GENERIC: &[&str] = &["projects", "p", "releases", "gnu", "cgit", "files", "pub"];
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    uri.path()
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .find(|s| !GENERIC.contains(&s.to_ascii_lowercase().as_str()))
+        .map(|s| s.trim_end_matches(".git").to_ascii_lowercase())
+}
+
 /// Whether `url` is on a site the project itself records in `recorded`: the
 /// same host, or for a shared forge (github.com, gitlab.com ...) the same
 /// owner, since a host shared by everyone says nothing about who owns the
-/// repository.
+/// repository. A shared host that serves many projects (SourceForge,
+/// Savannah, ftp.gnu.org) needs the same project name as well.
 fn on_recorded_site(url: &str, recorded: &[String]) -> bool {
     let Some(host) = crate::http::host_of(url) else {
         return false;
@@ -12143,6 +12258,11 @@ fn on_recorded_site(url: &str, recorded: &[String]) -> bool {
         }
         if ap_ecosystem::forge::is_known_host(&host) {
             matches!((owner(url), owner(r)), (Some(a), Some(b)) if a == b)
+        } else if is_shared_host(&host) {
+            matches!(
+                (shared_host_project(url), shared_host_project(r)),
+                (Some(a), Some(b)) if a == b
+            )
         } else {
             true
         }
@@ -14287,6 +14407,78 @@ mod discovery_vouching_tests {
             &recorded
         ));
         assert!(!on_recorded_site("https://github.com/acme/widget", &[]));
+    }
+
+    /// A sibling's RPM is `<name>-<version>-<release>.<arch>.rpm`. A package
+    /// whose name extends `ffmpeg` is not a sibling of `ffmpeg`.
+    #[test]
+    fn sibling_rpm_shape_is_name_version_release_arch() {
+        assert!(is_version_release_arch_rpm("8.0-1.x86_64.rpm"));
+        assert!(is_version_release_arch_rpm("8.0-1.fc41.noarch.rpm"));
+        assert!(!is_version_release_arch_rpm("8-libs-8.0-1.x86_64.rpm"));
+        assert!(!is_version_release_arch_rpm("libs-8.0-1.x86_64.rpm"));
+        assert!(!is_version_release_arch_rpm("8.0-1.x86_64.src.rpm.txt"));
+        assert!(!is_version_release_arch_rpm("8.0-1.rpm"));
+        assert!(!is_version_release_arch_rpm("8.0-1x86_64.rpm"));
+    }
+
+    /// The NVIDIA org is only preferred for names that say NVIDIA or CUDA. An
+    /// `nv` prefix alone matches unrelated packages such as `nvim`.
+    #[test]
+    fn nvidia_packages_are_recognised_by_name_not_by_an_nv_prefix() {
+        for name in [
+            "nvidia-cublas-cu12",
+            "nvidia_cudnn_cu12",
+            "cuda-python",
+            "cuda_bindings",
+            "nvidia",
+        ] {
+            assert!(is_nvidia_package_name(name), "{name}");
+        }
+        for name in [
+            "nvim",
+            "nvector",
+            "nvme-cli",
+            "nvtop",
+            "cudf",
+            "cudatoolkit-shim",
+        ] {
+            assert!(!is_nvidia_package_name(name), "{name}");
+        }
+    }
+
+    /// On a shared host, a host match is not enough: the project name must
+    /// match too, or an agent's pick for an unrelated project gets trusted.
+    #[test]
+    fn a_shared_host_needs_the_same_project() {
+        let sf = vec!["https://sourceforge.net/projects/lzip/".to_string()];
+        assert!(on_recorded_site(
+            "https://sourceforge.net/projects/lzip/files/",
+            &sf
+        ));
+        assert!(on_recorded_site("https://sourceforge.net/p/lzip/code", &sf));
+        assert!(!on_recorded_site(
+            "https://sourceforge.net/projects/evil/",
+            &sf
+        ));
+        assert!(!on_recorded_site("https://sourceforge.net/", &sf));
+
+        let gnu = vec!["https://ftp.gnu.org/gnu/lzip/".to_string()];
+        assert!(on_recorded_site(
+            "https://ftp.gnu.org/gnu/lzip/lzip-1.2.tar.gz",
+            &gnu
+        ));
+        assert!(!on_recorded_site("https://ftp.gnu.org/gnu/hello/", &gnu));
+
+        let savannah = vec!["https://savannah.gnu.org/projects/lzip".to_string()];
+        assert!(on_recorded_site(
+            "https://savannah.gnu.org/projects/lzip/",
+            &savannah
+        ));
+        assert!(!on_recorded_site(
+            "https://savannah.gnu.org/projects/other/",
+            &savannah
+        ));
     }
 
     #[test]
