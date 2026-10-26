@@ -7948,6 +7948,33 @@ fn accept_or_restore_with_snapshot(
         return false;
     }
 
+    // A patch header naming an absolute path or a `..` component would let the
+    // patch carry files from outside the checkout into the commit. Checked for
+    // every turn outcome, before anything else reads the patch.
+    if let Some(problem) = patch_escape_problem(spec_path, &after) {
+        note_spec_rejection(spec_path, &problem);
+        reporter.report(&Event::SpecRejected {
+            step: step.id,
+            reason: ap_core::event::SpecRejection::RpmspecParseFailed {
+                stderr: problem.clone(),
+            },
+            restored_from: spec_path.to_path_buf(),
+        });
+        restore_spec(spec_path, before, step, reporter);
+        if let Some(snap) = snapshot {
+            snap.restore(reporter, step);
+        }
+        append_notes(
+            notes_path,
+            &format!(
+                "\n## Edit rejected — a patch escapes the source tree\n{problem}\n\
+                 The edit was rolled back. Patch headers must name paths relative to the \
+                 source tree, with no leading `/`, `~`, or `..` component.\n"
+            ),
+        );
+        return false;
+    }
+
     // `rpmspec --parse` cannot see a patch that does not apply; that would only
     // surface as a `%prep` failure after a full OBS cycle. Hand-written patches
     // with wrong hunk counts ("malformed patch") are the usual culprit.
@@ -9327,6 +9354,107 @@ fn check_patches_apply(spec_path: &Path, spec: &str) -> Result<Option<String>, S
         )),
         None => Ok(check.unchecked),
     }
+}
+
+/// The first path a patch's file headers name that would reach outside the
+/// tree it is applied to: an absolute path, a `..` component, or a leading `~`.
+/// The `a/` or `b/` prefix and any timestamp after a tab are stripped first, and
+/// `/dev/null` (the add/delete marker) is allowed. Returns a description of the
+/// offending path, or `None` if every header stays inside the tree.
+fn patch_escapes_tree(patch_text: &str) -> Option<String> {
+    let lines: Vec<&str> = patch_text.lines().collect();
+    let mut raw_paths: Vec<&str> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(rest) = line.strip_prefix("--- ") {
+            // `---` opens a file header only when a `+++` follows it; anywhere
+            // else it is a removed line of a hunk.
+            if let Some(new) = lines.get(i + 1).and_then(|n| n.strip_prefix("+++ ")) {
+                raw_paths.push(rest);
+                raw_paths.push(new);
+            }
+        } else if let Some(rest) = line.strip_prefix("Index: ") {
+            raw_paths.push(rest);
+        } else if let Some(rest) = line.strip_prefix("diff --git ") {
+            raw_paths.extend(rest.split_whitespace());
+        } else {
+            for key in ["rename from ", "rename to ", "copy from ", "copy to "] {
+                if let Some(rest) = line.strip_prefix(key) {
+                    raw_paths.push(rest);
+                }
+            }
+        }
+    }
+    raw_paths.into_iter().find_map(|raw| {
+        // A timestamp follows a tab; quotes are how git spells odd names.
+        let raw = raw
+            .split('\t')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('"');
+        if raw.is_empty() || raw == "/dev/null" {
+            return None;
+        }
+        let path = raw
+            .strip_prefix("a/")
+            .or_else(|| raw.strip_prefix("b/"))
+            .unwrap_or(raw);
+        let reason = if path.starts_with('/') {
+            "an absolute path"
+        } else if path.starts_with('~') {
+            "a home-directory path"
+        } else if path.split('/').any(|c| c == "..") {
+            "a path with a `..` component"
+        } else {
+            return None;
+        };
+        Some(format!("header path `{path}` is {reason}"))
+    })
+}
+
+/// The patch files the gate reads: every top-level `*.patch` or `*.diff` in the
+/// checkout, plus each bare file name the spec gives as a `PatchN:` line. Returns
+/// the first one whose headers escape the tree, as an error naming the file.
+fn patch_escape_problem(spec_path: &Path, spec: &str) -> Option<String> {
+    let checkout = spec_path.parent()?;
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(checkout) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if (name.ends_with(".patch") || name.ends_with(".diff")) && entry.path().is_file() {
+                names.push(name);
+            }
+        }
+    }
+    for line in spec.lines() {
+        let Some((tag, value)) = line.split_once(':') else {
+            continue;
+        };
+        let tag = tag.trim();
+        if !(tag.len() > 5
+            && tag
+                .get(..5)
+                .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
+            && tag[5..].chars().all(|c| c.is_ascii_digit()))
+        {
+            continue;
+        }
+        let name = value.trim().replace("%{version}", "");
+        // A name with a directory part is not a file of this checkout.
+        if Path::new(&name).file_name() == Some(name.as_ref()) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
+    names.into_iter().find_map(|name| {
+        let bytes = std::fs::read(checkout.join(&name)).ok()?;
+        let why = patch_escapes_tree(&String::from_utf8_lossy(&bytes))?;
+        Some(format!(
+            "{name} would write outside the source tree: {why}. \
+             A patch may only name paths relative to the source tree."
+        ))
+    })
 }
 
 /// The source archive in the checkout. A checkout can hold several (an old
@@ -12917,6 +13045,71 @@ mod tests {
 
         // nothing to check without patches
         assert!(check_patches_apply(&spec_path, "%autosetup -p1\n").is_ok());
+    }
+
+    #[test]
+    fn patch_escapes_tree_rejects_absolute_home_and_dotdot_headers() {
+        let abs = "--- a/etc/passwd\n+++ /home/u/.config/osc/oscrc\n@@ -1 +1 @@\n-a\n+b\n";
+        let got = patch_escapes_tree(abs).expect("absolute path");
+        assert!(got.contains("/home/u/.config/osc/oscrc"), "{got}");
+        assert!(patch_escapes_tree("--- /etc/x\n+++ /etc/x\n").is_some());
+        assert!(patch_escapes_tree("--- a/../../x\n+++ b/../../x\n").is_some());
+        assert!(patch_escapes_tree("--- ../x\n+++ ../x\n").is_some());
+        assert!(patch_escapes_tree("--- a/src/../../x\t2020-01-01\n+++ b/x\n").is_some());
+        assert!(patch_escapes_tree("--- ~/.ssh/id\n+++ ~/.ssh/id\n").is_some());
+        assert!(patch_escapes_tree("diff --git a/src/x b/../../y\n").is_some());
+        assert!(patch_escapes_tree("Index: /etc/shadow\n").is_some());
+        assert!(patch_escapes_tree("rename from ../a\nrename to b\n").is_some());
+    }
+
+    #[test]
+    fn patch_escapes_tree_allows_dev_null_and_normal_paths() {
+        assert_eq!(
+            patch_escapes_tree("--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+x\n"),
+            None
+        );
+        assert_eq!(
+            patch_escapes_tree("--- a/src/x.c\t2020-01-01 00:00:00\n+++ b/src/x.c\n"),
+            None
+        );
+        assert_eq!(
+            patch_escapes_tree("diff --git a/src/x.c b/src/x.c\n--- a/src/x.c\n+++ b/src/x.c\n"),
+            None
+        );
+        // A removed line that happens to start with `-- ` is a hunk line, not a header.
+        assert_eq!(
+            patch_escapes_tree("--- a/x.sql\n+++ b/x.sql\n@@ -1 +0,0 @@\n--- /etc/x\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn escaping_patch_in_checkout_is_named_by_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "Name: pkg\nPatch0: bad.patch\nPatch1: good.patch\n";
+        let spec_path = dir.path().join("pkg.spec");
+        std::fs::write(&spec_path, spec).unwrap();
+        std::fs::write(dir.path().join("good.patch"), "--- a/x\n+++ b/x\n").unwrap();
+        assert_eq!(patch_escape_problem(&spec_path, spec), None);
+
+        // an unreferenced top-level .diff is still scanned
+        std::fs::write(
+            dir.path().join("stray.diff"),
+            "--- a/x\n+++ /home/u/.config/osc/oscrc\n",
+        )
+        .unwrap();
+        let problem = patch_escape_problem(&spec_path, spec).expect("escape found");
+        assert!(problem.starts_with("stray.diff"), "{problem}");
+        std::fs::remove_file(dir.path().join("stray.diff")).unwrap();
+
+        std::fs::write(
+            dir.path().join("bad.patch"),
+            "--- a/../../../etc/x\n+++ b/../../../etc/x\n",
+        )
+        .unwrap();
+        let problem = patch_escape_problem(&spec_path, spec).expect("escape found");
+        assert!(problem.starts_with("bad.patch"), "{problem}");
+        assert!(problem.contains("`..`"), "{problem}");
     }
 
     #[test]
