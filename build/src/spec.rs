@@ -2738,6 +2738,14 @@ impl HeaderCleanup<'_> {
 /// header tree), and stripping the headers leaves an empty package. Those are
 /// split into a `-devel` package by the review (convention 24).
 fn wheel_header_cleanups(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<HeaderCleanup<'_>> {
+    // A hand-built layout can carry any directory name; one that is not shell
+    // and RPM safe (`%{lua:...}`, `;`, `$(...)`, spaces) is never written into
+    // `%install`, so it is left out of the cleanup and its headers stay.
+    let header_dirs: Vec<&String> = layout
+        .header_dirs
+        .iter()
+        .filter(|d| ap_ecosystem::sdist::is_shell_safe_member(d))
+        .collect();
     let under = |d: &str, f: &str| f.starts_with(&format!("{d}/"));
     let is_payload = |f: &str| {
         let top = f.split('/').next().unwrap_or("");
@@ -2750,8 +2758,8 @@ fn wheel_header_cleanups(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<Heade
             || file.contains(".so.")
             || f.split('/').rev().skip(1).any(|c| c == "bin")
     };
-    let outside = |f: &String| is_payload(f) && !layout.header_dirs.iter().any(|d| under(d, f));
-    if layout.header_dirs.is_empty()
+    let outside = |f: &String| is_payload(f) && !header_dirs.iter().any(|d| under(d, f));
+    if header_dirs.is_empty()
         || !layout
             .files
             .iter()
@@ -2767,9 +2775,8 @@ fn wheel_header_cleanups(layout: &ap_ecosystem::sdist::WheelLayout) -> Vec<Heade
             Some((_, ext)) => matches!(ext, "h" | "hpp" | "hh" | "hxx" | "cuh" | "inl" | "ipp"),
         }
     };
-    layout
-        .header_dirs
-        .iter()
+    header_dirs
+        .into_iter()
         .map(|d| {
             if layout
                 .files
@@ -5761,6 +5768,44 @@ BuildRequires:  %{python_module pip}
     /// NVIDIA's shape (cublas, cufft, nvjitlink ...): a namespace shared with
     /// other wheels, headers removed in %install, one licence in the dist-info.
     /// Every one of those specs had its %files written by hand.
+    /// A hand-built layout (not from `wheel_layout`, which already filters)
+    /// with a header directory that would run Lua or the shell in `%install`:
+    /// the directory is left out of the cleanup, and so is every header in it.
+    #[test]
+    fn unsafe_header_dirs_are_never_written_into_install() {
+        let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));
+        for bad in [
+            "nvidia/%{lua:os.execute(\"id\")}",
+            "nvidia/a;touch x",
+            "nvidia/$(x)",
+            "nvidia/a b",
+        ] {
+            let mut layout = layout_of(
+                &[
+                    "nvidia/cu13/lib/libnvJitLink.so.13",
+                    "nvidia/cu13/include/nvJitLink.h",
+                    "nvidia_nvjitlink-1.0.dist-info/METADATA",
+                ],
+                &[],
+            );
+            layout.header_dirs = vec![bad.into(), "nvidia/cu13/include".into()];
+            let spec = wheel_binary_skeleton(
+                "nvidia-nvjitlink",
+                "1.0",
+                "nvidia_nvjitlink-1.0-py3-none-manylinux_2_27_x86_64.whl",
+                &release,
+                Some(true),
+                Some(&layout),
+            );
+            assert!(!spec.contains("%{lua:os"), "{bad}: {spec}");
+            assert!(!spec.contains(";touch"), "{bad}: {spec}");
+            assert!(!spec.contains("$(x)"), "{bad}: {spec}");
+            assert!(!spec.contains("rm -rf %{buildroot}%{$sitedir}/nvidia/a"), "{bad}");
+            // The safe directory is still cleaned up.
+            assert!(spec.contains("/nvidia/cu13/include"), "{bad}: {spec}");
+        }
+    }
+
     #[test]
     fn a_namespace_wheel_lists_its_files_without_a_todo() {
         let release = dummy_release("https://example.org", License::Spdx("MIT".to_string()));

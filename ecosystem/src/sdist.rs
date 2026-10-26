@@ -882,7 +882,9 @@ pub fn wheel_layout(wheel: &Path) -> Option<WheelLayout> {
             .iter()
             .filter(|n| {
                 let file = n.rsplit('/').next().unwrap_or("");
-                !skip(&top_of(n)) && (file.ends_with(".h") || file.ends_with(".hpp"))
+                !skip(&top_of(n))
+                    && (file.ends_with(".h") || file.ends_with(".hpp"))
+                    && is_shell_safe_member(n)
             })
             .filter_map(|n| n.rsplit_once('/').map(|(dir, _)| dir.to_string()))
             .collect();
@@ -3267,6 +3269,31 @@ build-backend = "flit_core.buildapi"
             Some("nvidia/cu13/lib/libnvJitLink.so.13")
         );
         assert_eq!(l.header_dirs, vec!["nvidia/cu13/include".to_string()]);
+    }
+
+    /// A header whose directory is not shell and RPM safe never reaches
+    /// `header_dirs`: it is written into `%install` by the spec generator.
+    #[test]
+    fn wheel_layout_drops_header_dirs_that_are_not_shell_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path().join("evil.whl");
+        write_wheel(
+            &w,
+            &[
+                "pkg/%{lua:os.execute(\"id\")}/a.h",
+                "pkg/a;touch x/b.h",
+                "pkg/$(x)/c.hpp",
+                "pkg/a b/d.h",
+                "pkg/ok/include/e.h",
+                "pkg/q`x`/g.h",
+                "pkg/__init__.py",
+            ],
+        );
+        let l = wheel_layout(&w).unwrap();
+        assert_eq!(l.header_dirs, vec!["pkg/ok/include".to_string()]);
+        for bad in ["%{lua", ";", "$(", " ", "`"] {
+            assert!(l.header_dirs.iter().all(|d| !d.contains(bad)), "{bad}");
+        }
     }
 
     /// Multiple headers in the same directory collapse to one entry;

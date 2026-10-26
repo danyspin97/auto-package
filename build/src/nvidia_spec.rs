@@ -112,11 +112,15 @@ fn is_plain_name(name: &str) -> bool {
 
 /// `13.4.3` -> `("13", "4")`.
 fn major_minor(release: &str) -> (String, String) {
+    // Digits only: the release reaches `%global` lines and the `Requires` of
+    // the filesystem package, so nothing else may pass through it.
+    let num = |p: Option<&str>| {
+        p.map(|p| p.chars().filter(char::is_ascii_digit).collect::<String>())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "0".to_string())
+    };
     let mut it = release.split('.');
-    (
-        it.next().unwrap_or("0").to_string(),
-        it.next().unwrap_or("0").to_string(),
-    )
+    (num(it.next()), num(it.next()))
 }
 
 /// The archive's top directory: the first path component every member shares.
@@ -453,9 +457,10 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
     let name = format!("cuda-{short}");
     let (maj, min) = major_minor(&input.cuda_release);
     let layout = analyse(&input.files).unwrap_or(Layout {
-        top: input
-            .archive_filename
-            .trim_end_matches(".tar.xz")
+        // `%setup -n` names this directory: only a plain name may be written.
+        top: Some(input.archive_filename.trim_end_matches(".tar.xz"))
+            .filter(|t| is_plain_name(t))
+            .unwrap_or("archive")
             .to_string(),
         licenses: Vec::new(),
         members: Vec::new(),
@@ -513,7 +518,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
          %global debug_package %{{nil}}\n\
          %global __strip /bin/true\n\
          %global __os_install_post %{{nil}}\n",
-        rel = input.cuda_release
+        rel = spec_text(&input.cuda_release)
     ));
     if has_stubs(&layout) {
         s.push_str(
@@ -603,7 +608,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
         human = human_name(&input.name),
         key = input.component_key,
         version = input.version,
-        rel = input.cuda_release,
+        rel = spec_text(&input.cuda_release),
         lic = spec_text(&input.license),
     ));
     if split {
@@ -1017,6 +1022,30 @@ bin/__nvcc_device_query
         let spec = redist_component_spec(&empty);
         assert!(spec.contains("%files\n"), "{spec}");
         assert!(!redist_rpmlintrc(&empty).is_empty());
+    }
+
+    #[test]
+    fn release_and_archive_names_cannot_inject_spec_lines_or_macros() {
+        let mut i = cudart();
+        i.cuda_release = "13.4%{lua:os.execute(\"id\")}\nRequires: x".into();
+        i.archive_filename = "a%{lua:x}.tar.xz".into();
+        i.files = vec!["top/lib/a b$(x)/y.so".into()];
+        let spec = redist_component_spec(&i);
+        // Every `%` left is half of a `%%`: no bare macro survives.
+        assert!(!spec.replace("%%", "").contains("%{lua"), "{spec}");
+        assert!(!spec.contains("\nRequires: x"), "{spec}");
+        assert!(!spec.contains("$(x)"), "{spec}");
+        assert!(spec.contains("%setup -q -n archive\n"), "{spec}");
+    }
+
+    #[test]
+    fn fallback_setup_directory_must_be_plain() {
+        let mut i = cudart();
+        i.archive_filename = "x y.tar.xz".into();
+        i.files = vec!["top/lib/a b$(x)/y.so".into()];
+        let spec = redist_component_spec(&i);
+        assert!(spec.contains("%setup -q -n archive\n"), "{spec}");
+        assert!(!spec.contains("x y"), "{spec}");
     }
 
     #[test]
