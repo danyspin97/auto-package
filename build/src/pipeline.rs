@@ -2222,6 +2222,34 @@ fn lookup_failure<T: Default>(
     Ok(T::default())
 }
 
+/// How a project's package list stands against the name the pipeline uses.
+#[derive(Debug, PartialEq, Eq)]
+enum OwnName<'a> {
+    /// No package of the project matches the name, up to case and separators.
+    Absent,
+    /// The project has the package spelled exactly as the pipeline names it.
+    Exact,
+    /// The project has it under another spelling, which OBS keeps distinct.
+    Variant(&'a str),
+}
+
+/// Where `rpm_name` stands in `own`. An exact spelling wins over a variant, and
+/// the variant reported is the smallest one, so the answer does not depend on
+/// the order of the listing.
+fn own_name<'a>(rpm_name: &str, own: &'a std::collections::HashSet<String>) -> OwnName<'a> {
+    let key = osc::fuzzy_key(rpm_name);
+    let mut variant: Option<&'a str> = None;
+    for p in own.iter().filter(|p| osc::fuzzy_key(p) == key) {
+        if p == rpm_name {
+            return OwnName::Exact;
+        }
+        if variant.is_none_or(|v| p.as_str() < v) {
+            variant = Some(p.as_str());
+        }
+    }
+    variant.map_or(OwnName::Absent, OwnName::Variant)
+}
+
 fn branch_from_linked(
     config: &PipelineConfig,
     rpm_name: &str,
@@ -2235,8 +2263,18 @@ fn branch_from_linked(
         }
     };
     let key = osc::fuzzy_key(rpm_name);
-    if own.iter().any(|p| osc::fuzzy_key(p) == key) {
-        return Ok(None);
+    match own_name(rpm_name, &own) {
+        OwnName::Exact => return Ok(None),
+        // OBS keeps the two spellings apart, and the checkout uses
+        // `rpm_name`: the warning says why the distro copy is not branched
+        // here (the checkout then refuses to create the second name).
+        OwnName::Variant(existing) => {
+            return Err(BranchError::Renamed(format!(
+                "{} already has {existing}, not {rpm_name}",
+                config.project
+            )));
+        }
+        OwnName::Absent => {}
     }
     let paths = match osc::get_project_repo_paths(&config.project, emit) {
         Ok(paths) => paths,
@@ -2255,14 +2293,24 @@ fn branch_from_linked(
         };
         // The lookup is fuzzy and the names are lowercased here, so a name
         // that differs only in case (PyYAML vs pyyaml) is the same package. The
-        // listed spelling is the one the path project ships and is branched.
+        // distro's spelling is the source of the branch; the branch itself is
+        // named `rpm_name`, the spelling the checkout and the rest of the
+        // pipeline use. OBS names are case-sensitive, so branching under the
+        // listed spelling would leave a package the checkout then refuses.
         if !shipped.eq_ignore_ascii_case(rpm_name) {
             return Err(BranchError::Renamed(format!(
                 "{path_project} ships it as {shipped}, not {rpm_name}"
             )));
         }
-        let result = osc::branch_package(&path_project, shipped, &config.project, false, emit)
-            .map_err(|e| BranchError::osc(&e));
+        let result = osc::branch_package_as(
+            &path_project,
+            shipped,
+            rpm_name,
+            &config.project,
+            false,
+            emit,
+        )
+        .map_err(|e| BranchError::osc(&e));
         osc::invalidate_project_packages_cache(&config.project);
         return result.map(|_| Some(path_project));
     }
@@ -3334,6 +3382,7 @@ fn switch_for_missing_submodules(
                 notes_path: ws.notes(),
                 snapshot: None,
                 kept: &[],
+                staged_out: None,
             },
             &outcome,
             *reporter,
@@ -3557,6 +3606,7 @@ fn review_stage(
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
+                    staged_out: None,
                 },
                 &outcome,
                 reporter,
@@ -3564,7 +3614,7 @@ fn review_stage(
                 &mut st.from_repo_archive,
             ) {
                 Ok(effect) => effect,
-                Err(reason) => resolve_blocked(
+                Err(reason) => match resolve_blocked(
                     ctx,
                     st,
                     LadderSite {
@@ -3593,18 +3643,32 @@ fn review_stage(
                     },
                     &outcome,
                     reason,
-                )?,
+                ) {
+                    Ok(effect) => effect,
+                    Err(result) => {
+                        // A ladder that ends without a resolution declines the
+                        // request like a turn that edited nothing does; without
+                        // this the dependent asks for the same patch again.
+                        if let Some(problem) = patching
+                            && matches!(
+                                result,
+                                PipelineResult::Failed {
+                                    kind: FailureKind::Exhausted | FailureKind::Other,
+                                    ..
+                                }
+                            )
+                        {
+                            decline_patch_request(ws, reporter, problem);
+                        }
+                        return Err(result);
+                    }
+                },
             };
             // A patch an earlier run already made (the turn finds nothing left
             // to do) is not a failure to patch.
             if patch_turn_failed(patching.is_some(), effect, &outcome.action) {
                 if let Some(problem) = patching {
-                    let h = hash_spec(problem);
-                    update_state(ws, reporter, |state| {
-                        if !state.declined_patches.contains(&h) {
-                            state.declined_patches.push(h);
-                        }
-                    });
+                    decline_patch_request(ws, reporter, problem);
                 }
                 return Err(ctx.failed(format!(
                     "the agent did not patch {rpm_name} ({}): the package that needs the \
@@ -3631,6 +3695,7 @@ fn review_stage(
                         notes_path: ws.notes(),
                         snapshot: None,
                         kept: &[],
+                        staged_out: None,
                     },
                     cond,
                     &fetch_release_json,
@@ -3670,12 +3735,7 @@ fn review_stage(
             if let Some(problem) = patching
                 && matches!(kind, FailureKind::Other)
             {
-                let h = hash_spec(problem);
-                update_state(ws, reporter, |state| {
-                    if !state.declined_patches.contains(&h) {
-                        state.declined_patches.push(h);
-                    }
-                });
+                decline_patch_request(ws, reporter, problem);
             }
             discard_failed_turn(
                 ws.notes(),
@@ -3843,6 +3903,7 @@ fn prefix_stage(
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
+                    staged_out: None,
                 },
                 &outcome,
                 reporter,
@@ -4716,6 +4777,7 @@ fn fix_after_validation(
                     notes_path: ws.notes(),
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
+                    staged_out: None,
                 },
                 &outcome,
                 *reporter,
@@ -6484,6 +6546,7 @@ fn fix_after_build(
             notes_path: ws.notes(),
             snapshot: Some(&checkout_snapshot),
             kept: &[],
+            staged_out: None,
         },
         &outcome,
         reporter,
@@ -7365,6 +7428,7 @@ fn resolve_blocked_with(
                     notes_path: ws.notes(),
                     snapshot: Some(site.snapshot),
                     kept: &kept_staged,
+                    staged_out: None,
                 },
                 &wheel,
                 *reporter,
@@ -7411,7 +7475,9 @@ fn resolve_blocked_with(
             restore_spec(spec_path, &round_spec, Some(&step), *reporter);
             return Rung::Abort(missing);
         }
-        kept_staged.extend(out.stage_files.iter().map(|f| f.to.clone()));
+        // Only the files actually copied are kept (the apply step appends them
+        // to `kept_staged`); the rounds before this one are kept as they were.
+        let kept_before = kept_staged.clone();
         let label = format!("{} — resolve round {round}", site.apply_label);
         match apply_turn_and_reset(
             ApplyTurnCtx {
@@ -7425,7 +7491,8 @@ fn resolve_blocked_with(
                 attempt: site.attempt,
                 notes_path: ws.notes(),
                 snapshot: Some(site.snapshot),
-                kept: &kept_staged,
+                kept: &kept_before,
+                staged_out: Some(&mut kept_staged),
             },
             &out,
             *reporter,
@@ -7479,12 +7546,18 @@ fn resolve_blocked_with(
                         .join("\n")
                 ),
             );
-            let key = ladder_key(config, site.before);
-            let memo = text.clone();
-            update_state(ws, *reporter, |state| {
-                state.ladder_spec_hash = Some(key);
-                state.ladder_reason = Some(memo);
-            });
+            // A patch-driven ladder (the package is a dependency being patched)
+            // writes no memo: the spec it failed on is the dependency's, and
+            // an ordinary run of that package must not find it spent.
+            // `spent_ladder_refusal` likewise skips the check for a patch run.
+            if site.task != crate::agent::Task::PatchDependency {
+                let key = ladder_key(config, site.before);
+                let memo = text.clone();
+                update_state(ws, *reporter, |state| {
+                    state.ladder_spec_hash = Some(key);
+                    state.ladder_reason = Some(memo);
+                });
+            }
             Err(ctx.failed_as(
                 FailureKind::Exhausted,
                 format!("{LADDER_FAILED_PREFIX}{rpm_name}: {text}"),
@@ -8628,6 +8701,10 @@ struct ApplyTurnCtx<'a> {
     /// ladder. Every restore keeps them, so a later round's rollback does not
     /// delete what an earlier round was asked to copy in.
     kept: &'a [String],
+    /// Where the names of the files this turn actually copied into the checkout
+    /// are appended (a refused request is not one of them). The resolution
+    /// ladder keeps them for its later rounds; every other caller passes `None`.
+    staged_out: Option<&'a mut Vec<String>>,
 }
 
 /// Apply one agent turn's outcome the same way at every call site that runs
@@ -8671,6 +8748,7 @@ fn apply_turn_outcome_with(
         notes_path,
         snapshot,
         kept,
+        staged_out,
     } = ctx;
     // Files the turn asked the pipeline to copy into the checkout: its shell
     // cannot write there. Done first, and kept even by a `blocked` or
@@ -8684,77 +8762,50 @@ fn apply_turn_outcome_with(
         &notes_path,
         label,
     );
+    if let Some(out) = staged_out {
+        out.extend(staged.iter().cloned());
+    }
     // Everything an earlier round staged, and this turn's own staged files.
     let keep: Vec<String> = kept.iter().chain(staged.iter()).cloned().collect();
-    let effect = match &outcome.action {
+    // A `blocked` or `no_change` answer that staged files: the staged files
+    // are kept by every restore below (`keep`), and the outcome is the one the
+    // plain arm gives for the same answer. A patch the turn wrote that escapes
+    // the tree is rolled back here, with the staged files kept, before that.
+    if matches!(
+        outcome.action,
         crate::agent::Action::Blocked { .. } | crate::agent::Action::NoChange
-            if !staged.is_empty() =>
-        {
-            append_notes(
-                notes_path.clone(),
-                &format!(
-                    "\n## Attempt {attempt} — {label} — staged files\nStaged into the checkout: \
-                     {}\nReasoning: {}\n",
-                    staged.join(", "),
-                    brief(&outcome.reasoning)
-                ),
-            );
-            // The turn may also have edited the spec or a patch before it
-            // answered. Those edits go through the same gate as any other
-            // edit before anything else runs on them. The snapshot is passed
-            // so that the patch-escape check judges the patches this turn
-            // changed (a published patch rewritten by the turn is not skipped),
-            // and a rollback keeps the staged files and anything kept earlier.
-            // An unchanged spec has nothing for the spec gate to judge, so it
-            // is not run. The patch-escape check still runs: a turn may have
-            // written a patch whatever the spec says.
-            let spec_edited = std::fs::read_to_string(spec_path).ok().as_deref() != Some(before);
-            // A patch the turn wrote that escapes the tree is refused whatever
-            // the spec did. The staged files stay, but the turn is not an edit.
-            if reject_patch_escape(
-                spec_path,
-                before,
-                snapshot,
-                step,
-                reporter,
-                notes_path.clone(),
-                &keep,
-            ) {
-                return match repeated_spec_rejection(spec_path) {
-                    Some(msg) => Err(format!("{label}: {msg}")),
-                    None => Ok(TurnEffect::NoChange),
-                };
-            }
-            if spec_edited {
-                let changed = accept_or_restore_with_snapshot(
-                    spec_path,
-                    before,
-                    snapshot,
-                    step,
-                    reporter,
-                    &format!(
-                        "\n## Attempt {attempt} — {label} — edits kept with the staged files\n\
-                         Reasoning: {}\n",
-                        brief(&outcome.reasoning)
-                    ),
-                    notes_path,
-                    &keep,
-                );
-                if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
-                    return Err(format!("{label}: {msg}"));
-                }
-            }
-            // The staged files are changes in their own right, kept whatever
-            // the gate decided about the spec.
-            Ok(TurnEffect::Edited)
+    ) && !staged.is_empty()
+    {
+        append_notes(
+            notes_path.clone(),
+            &format!(
+                "\n## Attempt {attempt} — {label} — staged files\nStaged into the checkout: \
+                 {}\nReasoning: {}\n",
+                staged.join(", "),
+                brief(&outcome.reasoning)
+            ),
+        );
+        let escaped = reject_patch_escape(
+            spec_path,
+            before,
+            snapshot,
+            step,
+            reporter,
+            notes_path.clone(),
+            &keep,
+        );
+        if escaped && let Some(msg) = repeated_spec_rejection(spec_path) {
+            return Err(format!("{label}: {msg}"));
         }
+    }
+    let effect = match &outcome.action {
         crate::agent::Action::Blocked { why } => {
             // Oct 6 finding (sibling of #7): on Blocked, restore the full
             // checkout too — the agent may have written speculative
             // patches/_service files before deciding it's blocked, and
             // those should not survive the rejection.
             if let Some(snap) = snapshot {
-                snap.restore_keeping(reporter, Some(step), kept);
+                snap.restore_keeping(reporter, Some(step), &keep);
             }
             restore_spec(spec_path, before, Some(step), reporter);
             // Journaled like an edit: a turn that changed nothing is still what
@@ -8773,7 +8824,7 @@ fn apply_turn_outcome_with(
             // On NoChange, also restore — the agent's "no change needed"
             // verdict shouldn't paper over an unreported partial edit.
             if let Some(snap) = snapshot {
-                snap.restore_keeping(reporter, Some(step), kept);
+                snap.restore_keeping(reporter, Some(step), &keep);
             }
             append_notes(
                 notes_path,
@@ -8844,6 +8895,13 @@ fn apply_turn_outcome_with(
             // evidence rejects the switch outright instead of silently
             // swapping the recipe based on an empty `why`.
             if let Err(e) = validate_wheel_switch_why(why) {
+                // A rejected switch is a rejected turn: the spec and the
+                // checkout go back as they are for Blocked and NoChange,
+                // keeping the staged files.
+                if let Some(snap) = snapshot {
+                    snap.restore_keeping(reporter, Some(step), &keep);
+                }
+                restore_spec(spec_path, before, Some(step), reporter);
                 return Err(format!("{label}: {e}"));
             }
             // An npm failure in an sdist that ships a package-lock.json is
@@ -9475,6 +9533,17 @@ fn patch_request_settled(patched_problems: &[u64], problem: &str) -> bool {
         || patched_problems.len() >= MAX_PATCH_REQUESTS_PER_PACKAGE
 }
 
+/// Remember that the patch request `problem` was declined, so the dependent
+/// does not ask for the same change again (see `patch_request_settled`).
+fn decline_patch_request(ws: &Workspace, reporter: &dyn Reporter, problem: &str) {
+    let h = hash_spec(problem);
+    update_state(ws, reporter, |state| {
+        if !state.declined_patches.contains(&h) {
+            state.declined_patches.push(h);
+        }
+    });
+}
+
 /// Whether a patch turn (convention 62) failed to deliver what a dependent asked
 /// for. Not when it edited, and not when it answered `no_change`: that is the
 /// turn finding the change already in the recipe (the project's `ffmpeg-8` was
@@ -9812,7 +9881,15 @@ fn stale_patch_prefix(diff: &str, top_level: &str, version: &str) -> Option<Stri
         .filter_map(|l| l.strip_prefix("--- ").or_else(|| l.strip_prefix("+++ ")))
         .map(|n| n.split('\t').next().unwrap_or("").trim())
         .filter(|n| *n != "/dev/null")
-        .filter_map(|n| n.split_once('/').map(|(first, _)| first))
+        // A git diff prefixes its names with `a/` and `b/`: the directory that
+        // names the release is the one under them.
+        .filter_map(|n| {
+            let n = n
+                .strip_prefix("a/")
+                .or_else(|| n.strip_prefix("b/"))
+                .unwrap_or(n);
+            n.split_once('/').map(|(first, _)| first)
+        })
         .find(|first| {
             let Some((_, ver)) = first.rsplit_once('-') else {
                 return false;
@@ -9849,18 +9926,20 @@ fn stale_patches(
         {
             continue;
         }
-        let name = value.trim();
+        // Expanded as try_patches expands it (`foo-%{version}.patch`), so the
+        // file the spec really names is judged.
+        let name = expand_patch_name(value.trim(), spec);
         if name.is_empty()
             || name.contains('%')
-            || Path::new(name).file_name() != Some(name.as_ref())
+            || Path::new(&name).file_name() != Some(name.as_ref())
         {
             continue;
         }
-        if let Ok(diff) = std::fs::read(checkout.join(name))
+        if let Ok(diff) = std::fs::read(checkout.join(&name))
             && let Some(prefix) =
                 stale_patch_prefix(&String::from_utf8_lossy(&diff), top_level, version)
         {
-            out.push((name.to_string(), prefix));
+            out.push((name, prefix));
         }
     }
     out
@@ -9956,14 +10035,42 @@ struct PatchCheck {
     unchecked: Option<String>,
 }
 
+/// The `-pN` strip level the spec applies patch `number` with (`"0"` for a bare
+/// `Patch:`): the `%patchN` line that applies it when that gives one, else the
+/// `%autosetup`/`%autopatch` line, else 1, the default of both macros. Only the
+/// macro lines are read, so a `-p1` anywhere else in the spec is not a level.
+fn spec_patch_level(spec: &str, number: &str) -> u32 {
+    let level_of = |line: &str| -> Option<u32> {
+        line.split_whitespace()
+            .skip(1)
+            .find_map(|tok| tok.strip_prefix("-p")?.parse::<u32>().ok())
+    };
+    let own = format!("%patch{number}");
+    let mut general = None;
+    for line in spec.lines() {
+        let first = line.split_whitespace().next().unwrap_or("");
+        if first == own || (number == "0" && first == "%patch") {
+            if let Some(level) = level_of(line) {
+                return level;
+            }
+        } else if general.is_none() && matches!(first, "%autosetup" | "%autopatch" | "%setup") {
+            general = level_of(line);
+        }
+    }
+    general.unwrap_or(1)
+}
+
 /// Try the spec's `PatchN:` files, in order, on a scratch copy of the source
 /// tarball the way `%autosetup -p1` will: each is first run with
 /// `patch -p1 --dry-run`, and only one that passes is applied, so a patch that
 /// fails costs the ones after it nothing. Nothing is checked when there are no
-/// patches, no tarball, or the spec is not a `-p1` autosetup. `Err` is for
-/// failures of the check itself (no scratch directory, no `patch` binary).
+/// patches, no tarball, or the spec has no `%autosetup`; a patch the spec
+/// applies with another `-pN` is reported as not checked. `Err` is for
+/// failures of the check itself (no scratch directory, no `patch` binary) with
+/// nothing found failing before it.
 fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
-    let patches: Vec<String> = spec
+    // (patch number, file name): a bare `Patch:` is number 0.
+    let patches: Vec<(String, String)> = spec
         .lines()
         .filter_map(|l| {
             let (tag, value) = l.split_once(':')?;
@@ -9975,12 +10082,29 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
                     .get(..5)
                     .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
                 && tag[5..].chars().all(|c| c.is_ascii_digit()))
-            .then(|| value.trim().to_string())
+            .then(|| {
+                let number = if tag.len() == 5 {
+                    "0".to_string()
+                } else {
+                    tag[5..].to_string()
+                };
+                (number, value.trim().to_string())
+            })
         })
         .collect();
-    if patches.is_empty() || !spec.contains("%autosetup") || !spec.contains("-p1") {
+    if patches.is_empty() || !spec.contains("%autosetup") {
         return Ok(PatchCheck::default());
     }
+    // Each patch with the `-pN` level the spec applies it with. Only a `-p1`
+    // patch is checked here: the dry run below is a `-p1` run, and the other
+    // levels would need their own path rules.
+    let patches: Vec<(String, String, u32)> = patches
+        .into_iter()
+        .map(|(number, file)| {
+            let level = spec_patch_level(spec, &number);
+            (number, file, level)
+        })
+        .collect();
     let Some(checkout) = spec_path.parent() else {
         return Ok(PatchCheck::default());
     };
@@ -9992,8 +10116,11 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
     // Unpack only what the patches touch: `patch` reads nothing else, and
     // unpacking the whole sdist for every build is the cost to avoid.
     let mut targets: Vec<String> = Vec::new();
-    for name in &patches {
-        let name = expand_patch_name(name, spec);
+    for (_, file, level) in &patches {
+        if *level != 1 {
+            continue;
+        }
+        let name = expand_patch_name(file, spec);
         // Only a bare file name is a patch in this checkout (see below); a
         // `../x` must not be read from outside it.
         if Path::new(&name).file_name() != Some(name.as_ref()) {
@@ -10024,11 +10151,15 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
     };
     let mut check = PatchCheck::default();
     let mut notes: Vec<String> = Vec::new();
-    for name in patches {
-        let name = expand_patch_name(&name, spec);
+    for (_, raw, level) in &patches {
+        let name = expand_patch_name(raw, spec);
         // Patch names come from spec text. Only a bare file name is a patch in
         // this checkout; `/etc/x` or `../x` would read outside it.
         if Path::new(&name).file_name() != Some(name.as_ref()) {
+            continue;
+        }
+        if *level != 1 {
+            notes.push(format!("{name} applies with -p{level}, so it was not checked"));
             continue;
         }
         let patch_file = checkout.join(&name);
@@ -10065,8 +10196,21 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
                 format!("could not run patch for {name} ({spec_name}): {e}")
             })
         };
-        let dry = run(true)?;
-        let out = if dry.success() { run(false)? } else { dry };
+        let verdict = run(true).and_then(|dry| if dry.success() { run(false) } else { Ok(dry) });
+        let out = match verdict {
+            Ok(out) => out,
+            // A patch the check could not run (no `patch`, a timeout) says
+            // nothing about this one. The failures already found are still
+            // failures, so they are returned with the rest said to be unchecked;
+            // with none found the check itself is the error.
+            Err(e) => {
+                if check.failed.is_empty() {
+                    return Err(e);
+                }
+                notes.push(format!("{e}; the patches from {name} on were not checked"));
+                break;
+            }
+        };
         if !out.success() {
             let detail = out.stdout + &out.stderr;
             check
@@ -10212,8 +10356,9 @@ enum PatchBaseline<'a> {
     /// published patch is what was committed, not this run's edit, so only the
     /// unpublished patches are judged.
     NotPublished(Vec<String>),
-    /// No pre-turn copy at all. Every patch is judged; one OBS already publishes
-    /// is reported as pre-existing rather than as the turn's doing.
+    /// No pre-turn copy at all. The patches OBS publishes are not judged (they
+    /// are what was committed, as with `NotPublished`, and are skipped without a
+    /// note); every other patch is judged as the turn's doing.
     NoBaseline(Vec<String>),
 }
 
@@ -10380,8 +10525,11 @@ fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
 /// the `-` or `_` that ends the project name (or start the name). What follows
 /// the version is the end of the name, an archive extension, or a wheel tag
 /// (`-py3-none-any.whl`, `-cp311-...`): a suffix such as `-docs` or `-data`
-/// names another archive, not this version's main one.
+/// names another archive, not this version's main one. A wheel takes any tag
+/// after the version (`-pp310-...`, a build tag `-1-py3-none-any`): every wheel
+/// name is a tag list, so none of them is another archive.
 fn names_version(name: &str, version: &str) -> bool {
+    let is_wheel = name.ends_with(".whl");
     !version.is_empty()
         && name.match_indices(version).any(|(i, _)| {
             let starts_here = name[..i]
@@ -10395,7 +10543,8 @@ fn names_version(name: &str, version: &str) -> bool {
                         .iter()
                         .any(|ext| rest.starts_with(ext))
                     || rest.starts_with("-py")
-                    || rest.starts_with("-cp"))
+                    || rest.starts_with("-cp")
+                    || (is_wheel && rest.starts_with('-')))
         })
 }
 
@@ -10824,13 +10973,13 @@ fn generate_spec(
                 }
             };
 
-            let tarball = checkout_dir.join(format!(
-                "{}-{}.tar.gz",
+            let stem = checkout_dir.join(format!(
+                "{}-{}",
                 safe_file_part(&config.pkg_name.to_lowercase()),
                 safe_file_part(&config.version)
             ));
-            let url = match fetch_release_archive(&source_url, &config.version, &tarball) {
-                Ok(url) => url,
+            let (url, tarball) = match fetch_release_archive(&source_url, &config.version, &stem) {
+                Ok(found) => found,
                 // The repository exists but has no archive for THIS version (a
                 // guessed repo for a vendor wheel such as nvidia-nccl-cu13, or an
                 // unusual tag scheme): it cannot be this release's source. Use
@@ -10966,13 +11115,13 @@ fn generate_from_repo(
     step: &StepDir,
 ) -> Result<GenSpecResult, GenSpecError> {
     let name = config.pkg_name.to_lowercase();
-    let tarball = checkout_dir.join(format!(
-        "{}-{}.tar.gz",
+    let stem = checkout_dir.join(format!(
+        "{}-{}",
         safe_file_part(&name),
         safe_file_part(&config.version)
     ));
 
-    let url = fetch_release_archive(repo_url, &config.version, &tarball)?;
+    let (url, tarball) = fetch_release_archive(repo_url, &config.version, &stem)?;
     let digest = sha256_file(&tarball)
         .map_err(|e| GenSpecError::Other(format!("hashing {}: {e}", tarball.display())))?;
 
@@ -11170,16 +11319,56 @@ fn record_archive_digest(spec_path: &Path, url: &str, digest: &str) {
 /// (timeout, dropped connection, rate limit, size cap) is no evidence that the
 /// archive does not exist, so it is reported as a failure, not as a missing
 /// archive: the caller falls back to PyPI only for the latter.
+/// The suffix a release archive is saved under: the kind its URL names, so the
+/// inspector picks the decoder from the file name (`.tgz` is saved as
+/// `.tar.gz`). `None` for a kind the inspector cannot read. Mirrors the kinds
+/// `ap_ecosystem::sdist` opens.
+fn archive_save_suffix(url: &str) -> Option<&'static str> {
+    let lower = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    const KINDS: [(&str, &str); 9] = [
+        (".tar.gz", ".tar.gz"),
+        (".tgz", ".tar.gz"),
+        (".tar.bz2", ".tar.bz2"),
+        (".tbz2", ".tar.bz2"),
+        (".tar.zst", ".tar.zst"),
+        (".tzst", ".tar.zst"),
+        (".tar.xz", ".tar.xz"),
+        (".txz", ".tar.xz"),
+        (".zip", ".zip"),
+    ];
+    KINDS
+        .iter()
+        .find(|(ext, _)| lower.ends_with(ext))
+        .map(|(_, save)| *save)
+}
+
+/// Download the release archive of `version` from `repo_url`, saved as
+/// `dest_stem` plus the suffix of its own kind. Returns the URL it came from
+/// and the file it was saved to. A candidate of a kind the inspector cannot
+/// read is refused before anything is downloaded.
 fn fetch_release_archive(
     repo_url: &str,
     version: &str,
-    dest: &Path,
-) -> Result<String, GenSpecError> {
+    dest_stem: &Path,
+) -> Result<(String, PathBuf), GenSpecError> {
     let candidates = crate::sources::archive_urls(repo_url, version);
     let mut failures = Vec::new();
     for url in &candidates {
-        match crate::sources::fetch_archive_to(url, dest) {
-            Ok(()) => return Ok(url.clone()),
+        let Some(suffix) = archive_save_suffix(url) else {
+            return Err(GenSpecError::Other(format!(
+                "{url} is not a release archive this tool can read (expected .tar.gz/.tgz, \
+                 .tar.bz2/.tbz2, .tar.xz/.txz, .tar.zst/.tzst or .zip); not downloaded"
+            )));
+        };
+        let mut dest = dest_stem.as_os_str().to_owned();
+        dest.push(suffix);
+        let dest = PathBuf::from(dest);
+        match crate::sources::fetch_archive_to(url, &dest) {
+            Ok(()) => return Ok((url.clone(), dest)),
             Err(crate::http::FetchFailure::NotFound) => {}
             Err(e) => failures.push(format!("{url}: {e}")),
         }
@@ -12511,23 +12700,53 @@ fn render_maturin_service_file(
     )
 }
 
-/// The source paths a unified diff names, as `patch -p1` resolves them: the
-/// `---` and `+++` names with their first component dropped. `/dev/null`
-/// (a created or removed file) names nothing.
+/// The source paths a unified or git diff names, as `patch -p1` resolves them:
+/// the `---` and `+++` names and the `diff --git a/x b/y` names with their first
+/// component dropped, and the `rename`/`copy` names (source and destination).
+/// `/dev/null` (a created or removed file) names nothing.
+///
+/// `rename from`/`copy from` names are written without the `a/`/`b/` prefix, and
+/// whether `patch` drops a component from them is not something to rely on, so
+/// both the name as written and the one with its first component dropped are
+/// targets. Naming one file too many only extracts it; naming the source side
+/// too few fails the dry run of a valid pure rename.
 fn patch_targets(diff: &str) -> Vec<String> {
-    diff.lines()
-        .filter_map(|l| l.strip_prefix("--- ").or_else(|| l.strip_prefix("+++ ")))
-        .map(|name| name.split('\t').next().unwrap_or("").trim())
+    let mut stripped_names: Vec<&str> = Vec::new();
+    let mut bare_names: Vec<&str> = Vec::new();
+    for line in diff.lines() {
+        if let Some(name) = line.strip_prefix("--- ").or_else(|| line.strip_prefix("+++ ")) {
+            stripped_names.push(name.split('\t').next().unwrap_or("").trim());
+        } else if let Some(rest) = line.strip_prefix("diff --git ") {
+            stripped_names.extend(rest.split_whitespace());
+        } else if let Some(name) = ["rename from ", "rename to ", "copy from ", "copy to "]
+            .iter()
+            .find_map(|p| line.strip_prefix(p))
+        {
+            bare_names.push(name.trim());
+        }
+    }
+    stripped_names
+        .into_iter()
         .filter(|name| *name != "/dev/null")
-        // `patch -p1` drops the first directory component. A name with no
-        // directory part has none to drop, so the name is its own target
-        // (`--- setup.py.orig` / `+++ setup.py` patches `setup.py`).
-        .map(|name| match name.split_once('/') {
-            Some((_, rest)) => rest.to_string(),
-            None => name.to_string(),
-        })
+        .map(drop_first_component)
+        .chain(
+            bare_names
+                .into_iter()
+                .filter(|name| !name.is_empty() && *name != "/dev/null")
+                .flat_map(|name| [name.to_string(), drop_first_component(name)]),
+        )
         .filter(|rest| !rest.is_empty())
         .collect()
+}
+
+/// A patch name with its first directory component dropped (`-p1`). A name with
+/// no directory part has none to drop, so it is its own target (`--- setup.py.orig`
+/// / `+++ setup.py` patches `setup.py`).
+fn drop_first_component(name: &str) -> String {
+    match name.split_once('/') {
+        Some((_, rest)) => rest.to_string(),
+        None => name.to_string(),
+    }
 }
 
 /// The `[tool.maturin] manifest-path` of an sdist's root `pyproject.toml`,
@@ -14079,6 +14298,58 @@ mod tests {
     }
 
     #[test]
+    fn own_name_matches_a_package_up_to_case_and_separators() {
+        let own: std::collections::HashSet<String> = ["python-APScheduler", "python-pyyaml"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            own_name("python-APScheduler", &own),
+            OwnName::Exact,
+            "the exact spelling"
+        );
+        assert_eq!(
+            own_name("python-apscheduler", &own),
+            OwnName::Variant("python-APScheduler"),
+            "a case variant is reported, not taken as the pipeline's name"
+        );
+        assert_eq!(
+            own_name("python-pyyaml", &own),
+            OwnName::Exact,
+            "the lowercase spelling is exact here"
+        );
+        assert_eq!(own_name("python-yaml", &own), OwnName::Absent);
+        // With both spellings present the exact one wins, whatever the order.
+        let both: std::collections::HashSet<String> = ["python-APScheduler", "python-apscheduler"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(own_name("python-apscheduler", &both), OwnName::Exact);
+        assert_eq!(
+            own_name("python-APSCHEDULER", &both),
+            OwnName::Variant("python-APScheduler")
+        );
+    }
+
+    #[test]
+    fn a_release_archive_is_saved_under_the_suffix_of_its_own_kind() {
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.gz"), Some(".tar.gz"));
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.tgz"), Some(".tar.gz"));
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.xz"), Some(".tar.xz"));
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.txz"), Some(".tar.xz"));
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.bz2"), Some(".tar.bz2"));
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.zst"), Some(".tar.zst"));
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.zip"), Some(".zip"));
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0.tar.xz?download=1"),
+            Some(".tar.xz")
+        );
+        // Not an archive the inspector reads: refused, not saved as .tar.gz.
+        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.lz"), None);
+        assert_eq!(archive_save_suffix("https://x/foo-1.0-py3-none-any.whl"), None);
+    }
+
+    #[test]
     fn names_version_ends_the_version_at_an_archive_or_a_wheel_tag() {
         assert!(names_version("foo-1.2.tar.gz", "1.2"));
         assert!(names_version("foo-1.2.tgz", "1.2"));
@@ -14089,6 +14360,60 @@ mod tests {
         assert!(!names_version("foo-1.2-docs.tar.gz", "1.2"));
         assert!(!names_version("foo-1.2-data.tar.gz", "1.2"));
         assert!(!names_version("foo-1.2.post1.tar.gz", "1.2"));
+    }
+
+    #[test]
+    fn names_version_takes_any_wheel_tag_but_no_sdist_suffix() {
+        // PyPy tags and build tags are wheel tags too.
+        assert!(names_version("foo-1.2-pp310-pypy310_pp73-linux_x86_64.whl", "1.2"));
+        assert!(names_version("foo-1.2-1-py3-none-any.whl", "1.2"));
+        assert!(names_version("foo-1.2-cp311-abi3-manylinux_2_17.whl", "1.2"));
+        // A suffix on an sdist still names another archive.
+        assert!(!names_version("foo-1.2-docs.tar.gz", "1.2"));
+        assert!(!names_version("foo-1.2-data.zip", "1.2"));
+        assert!(!names_version("foo-1.2-pp310.tar.gz", "1.2"));
+    }
+
+    #[test]
+    fn a_pure_git_rename_names_its_source_and_destination() {
+        let diff = "diff --git a/pkg-1.0/old.c b/pkg-1.0/new.c\n\
+                    similarity index 100%\n\
+                    rename from pkg-1.0/old.c\n\
+                    rename to pkg-1.0/new.c\n";
+        let targets = patch_targets(diff);
+        for want in ["pkg-1.0/old.c", "pkg-1.0/new.c", "old.c", "new.c"] {
+            assert!(targets.contains(&want.to_string()), "{want} in {targets:?}");
+        }
+        let copy = "diff --git a/x/src.c b/x/dst.c\ncopy from x/src.c\ncopy to x/dst.c\n";
+        assert!(patch_targets(copy).contains(&"x/src.c".to_string()));
+    }
+
+    #[test]
+    fn spec_patch_level_is_the_level_of_the_line_that_applies_the_patch() {
+        // `%autosetup -p0` is level 0, whatever `-p1` text the spec carries.
+        let spec = "Patch0: fix.patch\n%description\nbuild with -p1 here\n%prep\n%autosetup -p0\n";
+        assert_eq!(spec_patch_level(spec, "0"), 0);
+        // No level on the line: the macro default, 1.
+        assert_eq!(spec_patch_level("%prep\n%autosetup\n", "0"), 1);
+        assert_eq!(spec_patch_level("Patch0: a.patch\n", "0"), 1);
+        // A `%patchN` line gives its own level.
+        let per_patch = "%prep\n%patch0 -p0\n%patch1 -p1\n";
+        assert_eq!(spec_patch_level(per_patch, "0"), 0);
+        assert_eq!(spec_patch_level(per_patch, "1"), 1);
+        // A bare `%patch` applies patch 0.
+        assert_eq!(spec_patch_level("%prep\n%patch -p0\n", "0"), 0);
+    }
+
+    #[test]
+    fn stale_patch_prefix_judges_a_git_style_name_by_its_release_directory() {
+        let diff = "--- a/foo-1.0/src/x.c\n+++ b/foo-1.0/src/x.c\n";
+        assert_eq!(
+            stale_patch_prefix(diff, "foo-2.0", "2.0").as_deref(),
+            Some("foo-1.0")
+        );
+        // The right directory, under the git prefix, fits.
+        let fine = "--- a/foo-2.0/src/x.c\n+++ b/foo-2.0/src/x.c\n";
+        assert_eq!(stale_patch_prefix(fine, "foo-2.0", "2.0"), None);
     }
 
     #[test]
@@ -17502,6 +17827,7 @@ mod hygiene_tests {
                 notes_path: ctx.ws.notes(),
                 snapshot: None,
                 kept: &[],
+                staged_out: None,
             },
             &cond,
             &lookup,
@@ -18108,7 +18434,7 @@ mod ladder_tests {
     }
 
     #[test]
-    fn a_ladder_that_resolves_in_round_two_stages_the_file_and_keeps_it() {
+    fn a_staged_file_is_kept_through_the_ladder_and_blocked_is_not_a_resolution() {
         let lookups = std::cell::Cell::new(0);
         let case = run_case(
             "open-webui-thing",
@@ -18118,34 +18444,49 @@ mod ladder_tests {
             vec![
                 // Round 1 changes nothing.
                 scripted_outcome(crate::agent::Action::NoChange, "nothing to do"),
-                // Round 2 asks the pipeline for the file, answering blocked.
+                // Round 2 asks the pipeline for the file, answering blocked: the
+                // file is staged and kept, but the round did not resolve anything.
                 stages(
                     blocked("I cannot copy it"),
                     "source/package-lock.json",
                     "package-lock.json",
                 ),
+                // Round 3 changes nothing either.
+                scripted_outcome(crate::agent::Action::NoChange, "still nothing"),
             ],
             &lookups,
             None,
         );
-        assert_eq!(case.result.unwrap(), TurnEffect::Edited);
-        assert_eq!(case.contexts.len(), 2);
-        // Round 2 was told what round 1 came to.
+        // Every rung failed: the ladder is spent, not resolved.
+        assert!(
+            matches!(
+                case.result,
+                Err(PipelineResult::Failed {
+                    kind: FailureKind::Exhausted,
+                    ..
+                })
+            ),
+            "{:?}",
+            case.result
+        );
+        assert_eq!(case.contexts.len(), 3);
+        // Round 2 was told what round 1 came to, and round 3 what round 2 came to.
         assert!(
             case.contexts[1].contains("ROUND 2 of 3")
                 && case.contexts[1].contains("answered no_change"),
             "{}",
             case.contexts[1]
         );
-        // The staged file stays: a blocked answer with staging is not rolled back.
+        assert!(case.contexts[2].contains("ROUND 3 of 3"), "{}", case.contexts[2]);
+        // The staged file stays through the later rollbacks: round 3 had it.
         assert_eq!(
             std::fs::read(case.checkout.join("package-lock.json")).unwrap(),
             b"{\"lock\":3}"
         );
         assert!(case.notes.contains("staged files"), "{}", case.notes);
-        // A resolved ladder leaves no memo.
+        // A spent ladder of a package's own spec leaves its memo.
         let state = PkgState::load(&Workspace::open(&case.state_root, "open-webui-thing").unwrap());
-        assert_eq!(state.ladder_spec_hash, None);
+        assert_eq!(state.ladder_spec_hash, Some(case.config_key));
     }
 
     #[test]

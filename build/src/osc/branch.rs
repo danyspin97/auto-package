@@ -124,13 +124,25 @@ pub fn branch_api_path(
     comment: &str,
     follow_devel: bool,
 ) -> String {
+    branch_api_path_as(source, pkg, pkg, target_project, comment, follow_devel)
+}
+
+/// [`branch_api_path`] with the branch named `target_pkg` instead of `pkg`.
+pub fn branch_api_path_as(
+    source: &str,
+    pkg: &str,
+    target_pkg: &str,
+    target_project: &str,
+    comment: &str,
+    follow_devel: bool,
+) -> String {
     let ignore = if follow_devel { "" } else { "&ignoredevel=1" };
     format!(
         "/source/{source}/{}?cmd=branch&target_project={}&target_package={}\
          {ignore}&comment={}",
         enc(pkg),
         enc(target_project),
-        enc(pkg),
+        enc(target_pkg),
         enc(comment)
     )
 }
@@ -183,7 +195,7 @@ fn classify_branch_failure(stderr: &str) -> BranchFailure {
     }
 }
 
-/// Branch `source/pkg` into `target_project`.
+/// Branch `source/pkg` into `target_project`, under the same name.
 pub fn branch_package(
     source: &str,
     pkg: &str,
@@ -191,12 +203,28 @@ pub fn branch_package(
     follow_devel: bool,
     emit: Emit<'_>,
 ) -> Result<BranchResult, Error> {
+    branch_package_as(source, pkg, pkg, target_project, follow_devel, emit)
+}
+
+/// Branch `source/pkg` into `target_project` as `target_pkg`. OBS names are
+/// case-sensitive, so a caller whose name for the package differs from the
+/// source's spelling branches it under its own.
+pub fn branch_package_as(
+    source: &str,
+    pkg: &str,
+    target_pkg: &str,
+    target_project: &str,
+    follow_devel: bool,
+    emit: Emit<'_>,
+) -> Result<BranchResult, Error> {
     check_obs_name("project", source)?;
     check_obs_name("package", pkg)?;
+    check_obs_name("package", target_pkg)?;
     check_obs_name("project", target_project)?;
-    let path = branch_api_path(
+    let path = branch_api_path_as(
         source,
         pkg,
+        target_pkg,
         target_project,
         &format!("auto-package: branch for a version update of {pkg}"),
         follow_devel,
@@ -206,7 +234,7 @@ pub fn branch_package(
         return Ok(BranchResult::Branched(parse_branch_response(
             &out.stdout,
             source,
-            pkg,
+            target_pkg,
             target_project,
         )));
     }
@@ -862,6 +890,26 @@ mod tests {
             "/source/Base:System/libsigc%2B%2B?cmd=branch\
              &target_project=home%3Au%3Abranches%3ABase%3ASystem\
              &target_package=libsigc%2B%2B&ignoredevel=1&comment=a%20b"
+        );
+    }
+
+    #[test]
+    fn branch_path_can_name_the_branch_differently_from_the_source() {
+        let path = branch_api_path_as(
+            "Base",
+            "python-APScheduler",
+            "python-apscheduler",
+            "home:u",
+            "c",
+            false,
+        );
+        assert!(
+            path.starts_with("/source/Base/python-APScheduler?cmd=branch&target_project=home%3Au&"),
+            "{path}"
+        );
+        assert!(
+            path.contains("&target_package=python-apscheduler&ignoredevel=1&"),
+            "{path}"
         );
     }
 
