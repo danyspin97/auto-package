@@ -178,8 +178,12 @@ fn rpm_reported_failure(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> 
 
     // Quote from inside the failing section, not from around the rpm error —
     // the two can be far apart, and the section is where the cause is.
+    // A span that starts after the `Bad exit status` line (the script's
+    // `Executing` line came later) has no body before the error: fall back to
+    // the window before it rather than slicing an inverted range.
     let body = span_for_script(spans, script)
         .map(|s| (s.start, s.end.min(idx + 1)))
+        .filter(|(start, end)| start < end)
         .unwrap_or((idx.saturating_sub(40), idx + 1));
 
     Some(quote(lines, body, phase, mapper, BY_RPM_REPORT))
@@ -543,6 +547,23 @@ mod tests {
         assert_eq!(f.elided, 3, "three chatter lines should have gone");
         assert!(f.excerpt.contains("genuinely odd"));
         assert!(!f.excerpt.contains("byte-compiling"));
+    }
+
+    /// The `Bad exit status` line names a script whose `Executing` line comes
+    /// after it: the section span starts past the error, and must not be
+    /// sliced as an inverted range.
+    #[test]
+    fn a_section_that_starts_after_the_bad_exit_line_does_not_panic() {
+        let lines = &[
+            "error: Bad exit status from /var/tmp/rpm-tmp.Z (%check)",
+            "something printed after the error",
+            "Executing(%check): /usr/bin/bash -e /var/tmp/rpm-tmp.Z",
+            "+ cd glances-4.3.0",
+            "/var/tmp/rpm-tmp.Z: line 3: CHOOSE:: command not found",
+        ];
+        let f = run(lines);
+        assert!(f.excerpt.contains("Bad exit status"));
+        assert_eq!(f.located_by, BY_RPM_REPORT);
     }
 
     #[test]

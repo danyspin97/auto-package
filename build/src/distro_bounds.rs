@@ -57,11 +57,14 @@ pub(crate) fn parse_specifier(text: &str) -> Option<VersionSpecifiers> {
 /// Which way `version` misses `bound`, or `None` when it meets it.
 fn violation(bound: &VersionSpecifiers, version: &Version) -> Option<Kind> {
     let failed = bound.iter().find(|s| !s.contains(version))?;
+    // `~=X` is two-sided (`>=X` and `==X.*`): a version below `X` is too old,
+    // one at or above the next prefix bump is too new.
     Some(match failed.operator() {
-        Operator::GreaterThan | Operator::GreaterThanEqual | Operator::TildeEqual => {
-            Kind::DistroTooOld
-        }
-        Operator::Equal | Operator::EqualStar | Operator::ExactEqual
+        Operator::GreaterThan | Operator::GreaterThanEqual => Kind::DistroTooOld,
+        Operator::TildeEqual
+        | Operator::Equal
+        | Operator::EqualStar
+        | Operator::ExactEqual
             if version < failed.version() =>
         {
             Kind::DistroTooOld
@@ -479,6 +482,21 @@ mod tests {
         assert!(meets("1.2.7", "==1.2.*"));
         assert!(!meets("1.3.0", "==1.2.*"));
         assert!(meets("1.3.0", "!=1.2.*"));
+    }
+
+    #[test]
+    fn a_compatible_release_misses_in_either_direction() {
+        // `~=0.1.0` is `>=0.1.0, ==0.1.*`: below 0.1.0 is too old, above 0.1.x
+        // is too new.
+        let c = parse_specifier("~=0.1.0").unwrap();
+        assert_eq!(violation(&c, &v("0.0.9")), Some(Kind::DistroTooOld));
+        assert_eq!(violation(&c, &v("0.2.0")), Some(Kind::DistroTooNew));
+        assert_eq!(violation(&c, &v("0.1.5")), None);
+        // `~=1.4` is `>=1.4, ==1.*`.
+        let c = parse_specifier("~=1.4").unwrap();
+        assert_eq!(violation(&c, &v("1.3")), Some(Kind::DistroTooOld));
+        assert_eq!(violation(&c, &v("2.0")), Some(Kind::DistroTooNew));
+        assert_eq!(violation(&c, &v("1.9")), None);
     }
 
     #[test]
