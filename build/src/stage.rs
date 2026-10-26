@@ -139,7 +139,10 @@ fn read_source(src: &Path, base: &Path) -> Result<Vec<u8>, String> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        // O_NONBLOCK: a FIFO swapped in after the check must not block the
+        // open; it is then refused by the is_file check below. Regular files
+        // ignore the flag for reads.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(src)
         .map_err(|e| {
             format!(
@@ -367,6 +370,24 @@ mod tests {
         std::os::unix::fs::symlink(f.t.path().join("secret"), &file).unwrap();
         let err = read_source(&file, &base).unwrap_err();
         assert!(err.contains("cannot open"), "{err}");
+    }
+
+    #[test]
+    fn a_fifo_swapped_in_after_the_check_is_refused_without_blocking() {
+        let f = fx();
+        let base = std::fs::canonicalize(&f.own).unwrap();
+        let file = base.join("pipe");
+        let c = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_source(&file, &base));
+        });
+        let err = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the open must not block on a FIFO")
+            .unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
     }
 
     #[test]

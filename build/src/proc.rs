@@ -442,14 +442,18 @@ pub fn capture_with_timeout_env(
     // One shared deadline: a second full wait would let a slow descendant
     // turn a stream that was unknown at 5s into a known one at 10s.
     let deadline = Instant::now() + Duration::from_secs(5);
+    // Returns the stream when it was read to EOF, and whether a read failed.
+    // A failed read is not the same as a reader that never answered (a
+    // descendant holding the pipe): the former is always an error.
     let collect = |rx: std::sync::mpsc::Receiver<(Vec<u8>, bool)>| match rx
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
     {
-        Ok((buf, false)) => Some(buf),
-        _ => None,
+        Ok((buf, false)) => (Some(buf), false),
+        Ok((_, true)) => (None, true),
+        _ => (None, false),
     };
-    let stdout = collect(out_rx);
-    let stderr = collect(err_rx);
+    let (stdout, stdout_failed) = collect(out_rx);
+    let (stderr, stderr_failed) = collect(err_rx);
     let elapsed = start.elapsed();
     let len = |o: &Option<Vec<u8>>| o.as_ref().map_or(0, |b| b.len() as u64);
 
@@ -466,6 +470,12 @@ pub fn capture_with_timeout_env(
         program: program.to_string(),
         stream,
     };
+    if stdout_failed {
+        return Err(lost("stdout"));
+    }
+    if stderr_failed {
+        return Err(lost("stderr"));
+    }
     let (stdout, stderr) = match (stdout.as_ref(), stderr.as_ref()) {
         (Some(o), Some(e)) => (o, e),
         // A clean exit with one stream read to EOF: the other pipe is held by
