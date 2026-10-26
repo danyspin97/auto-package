@@ -139,13 +139,17 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
 
 /// Whether the archive file name `archive` names `version` as a whole version:
 /// it starts the name or follows a `-`/`_` (a `v` may precede it, as in
-/// `v1.0.zip`), and it is followed by the end, an archive or wheel extension,
-/// or a `-py`/`-cp` tag, not by more of a version. `1.0` is in `a-1.0.tar.gz`,
-/// not in `a-1.0.1.tar.gz` or `a-11.0.tar.gz`, and `foo-1.0-docs.tar.gz` names
-/// another archive. The NVIDIA main archives (`…-13.8.0.4-archive.tar.xz`,
-/// `…-9.27.0.42_cuda13-archive.tar.xz`) are also accepted.
+/// `v1.0.zip`), and it is followed by the end or an archive extension, not by
+/// more of a version. A wheel's name also takes a `-<tag>` after the version
+/// (`foo-1.0-py3-none-any.whl`); any other name's `-suffix` names another
+/// archive (`foo-1.0-cpp.tar.gz`, `foo-1.0-python.tar.gz`). `1.0` is in
+/// `a-1.0.tar.gz`, not in `a-1.0.1.tar.gz` or `a-11.0.tar.gz`, and
+/// `foo-1.0-docs.tar.gz` names another archive. The NVIDIA main archives
+/// (`…-13.8.0.4-archive.tar.xz`, `…-9.27.0.42_cuda13-archive.tar.xz`) are also
+/// accepted.
 fn names_version(archive: &str, version: &str) -> bool {
     let bare = version.replace('~', "");
+    let is_wheel = archive.ends_with(".whl");
     [version, bare.as_str()].iter().any(|v| {
         !v.is_empty()
             && archive.match_indices(*v).any(|(at, _)| {
@@ -155,11 +159,10 @@ fn names_version(archive: &str, version: &str) -> bool {
                 let rest = &archive[at + v.len()..];
                 starts_here
                     && (rest.is_empty()
-                        || [
-                            ".tar", ".zip", ".whl", ".tgz", "-py", "-cp", "_", "-archive",
-                        ]
-                        .iter()
-                        .any(|ext| rest.starts_with(ext)))
+                        || [".tar", ".zip", ".tgz", "_", "-archive"]
+                            .iter()
+                            .any(|ext| rest.starts_with(ext))
+                        || (is_wheel && (rest.starts_with('-') || rest == ".whl")))
             })
     })
 }
@@ -338,6 +341,18 @@ mod tests {
         // Another archive's suffix is not this version's main archive.
         assert!(!names_version("foo-1.0-docs.tar.gz", "1.0"));
         assert!(!names_version("foo-1.0.post1.tar.gz", "1.0"));
+    }
+
+    #[test]
+    fn names_version_takes_a_wheel_tag_but_no_other_suffix_on_an_archive() {
+        assert!(names_version("foo-1.0-py3-none-any.whl", "1.0"));
+        assert!(names_version("foo-1.0-pp310-pypy310_pp73-linux_x86_64.whl", "1.0"));
+        // A companion archive whose name carries a suffix is not the main one.
+        assert!(!names_version("foo-1.0-cpp.tar.gz", "1.0"));
+        assert!(!names_version("foo-1.0-python.tar.gz", "1.0"));
+        assert!(!names_version("foo-1.0-py3.tar.gz", "1.0"));
+        assert!(!names_version("foo-1.0-cp311.zip", "1.0"));
+        assert!(!names_version("foo-1.0-py3-none-any.whl.bak", "1.0"));
     }
 
     #[test]
