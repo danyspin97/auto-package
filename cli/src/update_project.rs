@@ -565,7 +565,12 @@ fn cmd_update_project(
         }
         if !a.dry_run {
             match branch_item(branch, &mut item, a.follow_devel, ctx) {
-                Ok(()) => {}
+                Ok(()) => {
+                    // Branching may have changed the origin, so the item is
+                    // also recorded under its new key: a later discovery of the
+                    // same package from that project is then not processed twice.
+                    visited.insert(visit_key(&item));
+                }
                 Err(why) => {
                     ctx.warn(format!("{}: {why}", item.pkg));
                     report.results.push(ItemResult {
@@ -664,7 +669,16 @@ fn cmd_update_project(
     }
 
     if let Some(sweep) = sweep.take() {
-        let plan = sweep.finish().map_err(|e| eyre!("{e}"))?;
+        let plan = match sweep.finish() {
+            Ok(plan) => plan,
+            Err(e) => {
+                // Packages already branched and prepared are still built before the error is returned.
+                if !a.dry_run {
+                    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                }
+                return Err(eyre!("{e}"));
+            }
+        };
         if plan.total() == 0 {
             ctx.say(format!("no matching packages in {}", a.source));
             return Ok(());
@@ -675,7 +689,16 @@ fn cmd_update_project(
         }
     }
     if let Some(audit) = audit.take() {
-        let end = audit.finish().map_err(|e| eyre!("{e}"))?;
+        let end = match audit.finish() {
+            Ok(end) => end,
+            Err(e) => {
+                // Packages already branched and prepared are still built before the error is returned.
+                if !a.dry_run {
+                    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                }
+                return Err(eyre!("{e}"));
+            }
+        };
         if end.packages == 0 {
             ctx.say(format!("no matching packages in {}", a.source));
             return Ok(());
@@ -927,7 +950,13 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
     // Kept so that a failure after the write leaves the reused checkout as it was.
     let changes = format!("{}.changes", item.pkg);
     let changes_path = dir.join(&changes);
-    let changes_before = std::fs::read(&changes_path).ok();
+    // A file that is absent is removed again on restore; any other read error
+    // stops before the spec is edited, rather than being taken for "absent".
+    let changes_before = match std::fs::read(&changes_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("could not read {}: {e}", changes_path.display())),
+    };
     ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
     let committed = (|| -> Result<(), String> {
         osc::add_changes_entry(
@@ -1117,6 +1146,16 @@ fn visit_key(item: &Item) -> String {
     format!("{}/{}", item.origin, osc::fuzzy_key(&item.pkg))
 }
 
+/// Whether `package` is absent from the branch project's listing taken before
+/// the branch call, so that call is what created it. A listing that could not
+/// be read proves nothing, so the package is not treated as created.
+fn created_by_branch(before: &Result<Arc<HashSet<String>>, String>, package: &str) -> bool {
+    match before {
+        Ok(names) => !names.contains(package),
+        Err(_) => false,
+    }
+}
+
 /// Branch `item` into the branch project, or note that it is already there.
 /// The item's origin becomes the project OBS says it was branched from.
 fn branch_item(
@@ -1136,6 +1175,9 @@ fn branch_item(
             item.pkg, item.origin
         ));
     }
+    // What the branch project held before this call, so a package the call
+    // created can be told apart from one that was already there.
+    let packages_before = osc::try_list_project_packages(branch, emit);
     let result = osc::branch_package(&item.origin, &item.pkg, branch, follow_devel, emit)
         .map_err(|e| e.to_string());
     // The project's package listing is cached; it has changed now.
@@ -1144,8 +1186,14 @@ fn branch_item(
         BranchResult::Branched(b) => {
             if b.target_package != item.pkg {
                 // The branch just created a package nothing will build or
-                // submit; remove it rather than leave it in the project.
-                let cleanup = if b.target_project == branch {
+                // submit; remove it rather than leave it in the project. A
+                // package that was there before this call is not ours to delete.
+                let cleanup = if !created_by_branch(&packages_before, &b.target_package) {
+                    format!(
+                        "; left {}/{} in place: it was there before this branch, or could not be checked",
+                        b.target_project, b.target_package
+                    )
+                } else if b.target_project == branch {
                     match osc::delete_package(&b.target_project, &b.target_package, emit) {
                         Ok(()) => format!("; removed {}/{}", b.target_project, b.target_package),
                         Err(e) => format!(
@@ -1536,5 +1584,15 @@ mod tests {
             args(&["--nvidia", "redist"]).nvidia,
             Some(crate::NvidiaMode::Redist)
         );
+    }
+
+    #[test]
+    fn branch_call_owns_only_packages_missing_before_it() {
+        let before: Result<Arc<HashSet<String>>, String> =
+            Ok(Arc::new(["foo".to_string()].into_iter().collect()));
+        assert!(created_by_branch(&before, "bar"));
+        assert!(!created_by_branch(&before, "foo"));
+        let unknown: Result<Arc<HashSet<String>>, String> = Err("no listing".to_string());
+        assert!(!created_by_branch(&unknown, "bar"));
     }
 }

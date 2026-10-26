@@ -1258,6 +1258,8 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                         .clone()
                                         .or_else(|| retry_of.clone())
                                         .unwrap_or_default();
+                                    // Watches whether the build selected anything to start.
+                                    let watch = Arc::new(StartWatch::new(reporter.clone()));
                                     let r = match &raw {
                                         None => Err(color_eyre::eyre::eyre!(
                                             "no name was recorded for this package to retry it with"
@@ -1293,7 +1295,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                                             source_urls.clone(),
                                                             python_flavors.clone(),
                                                             run_dir,
-                                                            reporter.clone(),
+                                                            watch.clone(),
                                                             base_reporter.clone(),
                                                             tui_ctrl.clone(),
                                                             None,
@@ -1321,14 +1323,28 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                     // A retry that failed to start never reports its
                                     // own row, which would leave the row marked as
                                     // retrying for good. Report it failed here.
-                                    if let (Err(e), Some(row)) = (&r, retry_of) {
-                                        reporter.report(&Event::PackageFinished {
-                                            pkg: row,
-                                            version: String::new(),
-                                            outcome: PackageOutcome::Failed {
-                                                reason: format!("retry did not start: {e:#}"),
-                                            },
-                                        });
+                                    // A retry that succeeded without starting anything
+                                    // (the package was already built) settles its row
+                                    // as already built, instead of leaving it marked
+                                    // as retrying.
+                                    match (&r, retry_of) {
+                                        (Err(e), Some(row)) => {
+                                            reporter.report(&Event::PackageFinished {
+                                                pkg: row,
+                                                version: String::new(),
+                                                outcome: PackageOutcome::Failed {
+                                                    reason: format!("retry did not start: {e:#}"),
+                                                },
+                                            });
+                                        }
+                                        (Ok(()), Some(row)) if !watch.started() => {
+                                            reporter.report(&Event::PackageFinished {
+                                                pkg: row,
+                                                version: String::new(),
+                                                outcome: PackageOutcome::AlreadyBuilt,
+                                            });
+                                        }
+                                        _ => {}
                                     }
                                     // Only now, with its last event reported, does the
                                     // TUI stop counting this request as work.
@@ -2282,6 +2298,36 @@ fn unstarted_targets(
         .collect()
 }
 
+/// Forwards every event to `inner` and remembers whether a package was
+/// selected to start, so a retry that returns `Ok` without starting anything
+/// can be told apart from one that built something.
+struct StartWatch {
+    inner: Arc<dyn Reporter + Send + Sync>,
+    started: std::sync::atomic::AtomicBool,
+}
+
+impl StartWatch {
+    fn new(inner: Arc<dyn Reporter + Send + Sync>) -> Self {
+        Self {
+            inner,
+            started: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn started(&self) -> bool {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Reporter for StartWatch {
+    fn report(&self, event: &Event) {
+        if matches!(event, Event::TargetSelected { .. }) {
+            self.started.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.report(event);
+    }
+}
+
 /// Wait for every package still running, so none is left running unobserved
 /// when the build stops on an error. Their results are not used.
 fn drain_in_flight(
@@ -2729,7 +2775,16 @@ fn cmd_build(
                 let finished_version = dep_version.clone();
                 let handle = std::thread::spawn(move || {
                     let _permit = Permit::acquire(&sem2);
-                    let result = run_package(&dep_config, &dep_pkg_run, r.as_ref());
+                    // A panic is a failure of this row, reported like any other
+                    // outcome, so the row settles and the run sees it finish.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_package(&dep_config, &dep_pkg_run, r.as_ref())
+                    }))
+                    .unwrap_or_else(|p| PipelineResult::Failed {
+                        rpm_name: finished_name.clone(),
+                        reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
+                        kind: FailureKind::Other,
+                    });
                     r.report(&Event::PackageFinished {
                         pkg: finished_name,
                         version: finished_version,
@@ -3760,6 +3815,8 @@ fn cmd_build(
         // an error rather than a silent `Ok`.
         if explicit_target.is_some() {
             if let Some((rpm_name, reason)) = batch_failures.first() {
+                // Packages the batch left running are joined before returning.
+                drain_in_flight(&rx, &mut in_flight);
                 return Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"));
             }
             // A `--target` run returning `MissingDeps` previously fell through
@@ -3779,6 +3836,7 @@ fn cmd_build(
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
+                drain_in_flight(&rx, &mut in_flight);
                 return Err(color_eyre::eyre::eyre!(
                     "{name} needs {} but every one has already been attempted \
                      without success; cannot build. Why each one is out of reach:\n{}",
