@@ -1053,18 +1053,55 @@ fn same_version(a: &str, b: &str) -> bool {
     canon(a) == canon(b)
 }
 
+/// Whether the archive name `file` carries `version` as a whole token, for a
+/// name [`archive_name_version`] cannot split (`v1.0.tar.gz`, `foo.tar.gz`).
+/// The version must start the stem or follow a `-`/`_` (a `v` may come
+/// before it, as in `v1.0`), and must end the stem or precede a `-`/`_`, so
+/// `1.0` is not in `v1.0.5.tar.gz` or `x1.0.tar.gz`.
+fn file_names_version(file: &str, version: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    let Some(ext) = GZIP_EXTS
+        .iter()
+        .chain(OTHER_ARCHIVE_EXTS)
+        .find(|e| lower.ends_with(**e))
+    else {
+        return false;
+    };
+    let stem = &lower[..lower.len() - ext.len()];
+    let want = version.trim_start_matches(['v', 'V']).to_ascii_lowercase();
+    !want.is_empty()
+        && stem.match_indices(want.as_str()).any(|(at, _)| {
+            let before = &stem[..at];
+            let before = before.strip_suffix('v').unwrap_or(before);
+            let after = &stem[at + want.len()..];
+            (before.is_empty() || before.ends_with(['-', '_']))
+                && (after.is_empty() || after.starts_with(['-', '_']))
+        })
+}
+
 fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<String> {
     if kind == SourceKind::DirectArchive {
         // A fixed URL cannot serve another version: packaging 3.1.4 as 3.2.0
-        // would be silently wrong. Only a name without a version is trusted.
-        if let Some((_, v)) = archive_name_version(last_segment(url))
-            && !same_version(&v, version)
-        {
-            ap_core::diag!(
-                "  {url} is version {v}, not the requested {version}; \
-                 a direct archive URL cannot provide another version"
-            );
-            return Vec::new();
+        // would be silently wrong. The version in the name must be the one
+        // requested; a name with no parsable version must still name it.
+        let file = last_segment(url);
+        match archive_name_version(file) {
+            Some((_, v)) if !same_version(&v, version) => {
+                ap_core::diag!(
+                    "  {url} is version {v}, not the requested {version}; \
+                     a direct archive URL cannot provide another version"
+                );
+                return Vec::new();
+            }
+            Some(_) => {}
+            None if !file_names_version(file, version) => {
+                ap_core::diag!(
+                    "  {url} names no version that matches the requested {version}; \
+                     a direct archive URL cannot be trusted to provide it"
+                );
+                return Vec::new();
+            }
+            None => {}
         }
         return vec![url.to_string()];
     }
@@ -1484,10 +1521,14 @@ mod tests {
         let kind = super::SourceKind::DirectArchive;
         assert!(super::archive_urls_non_forge(url, kind, "3.2.0").is_empty());
         assert_eq!(super::archive_urls_non_forge(url, kind, "3.1.4"), vec![url]);
+        // A name with no parsable version is trusted only if it names the
+        // requested one.
         let bare = "https://example.org/dl/latest.tar.gz";
+        assert!(super::archive_urls_non_forge(bare, kind, "3.2.0").is_empty());
+        let named = "https://example.org/dl/latest-3.2.0.tar.gz";
         assert_eq!(
-            super::archive_urls_non_forge(bare, kind, "3.2.0"),
-            vec![bare]
+            super::archive_urls_non_forge(named, kind, "3.2.0"),
+            vec![named]
         );
     }
 
@@ -2181,6 +2222,34 @@ mod tests {
         let u = "https://example.org/pub/foo-3.1.4.tar.gz";
         assert_eq!(latest_release(u).unwrap(), "3.1.4");
         assert_eq!(archive_urls(u, "3.1.4"), [u]);
+    }
+
+    #[test]
+    fn direct_archive_without_a_parsable_version_must_name_the_requested_one() {
+        let v1 = "https://github.com/o/r/archive/v1.0.tar.gz";
+        // A `v1.0` name cannot serve 2.0, and no URL is returned for it.
+        assert!(archive_urls(v1, "2.0").is_empty());
+        // The same name serves 1.0, with or without the leading `v`.
+        assert_eq!(archive_urls(v1, "1.0"), [v1]);
+        assert_eq!(archive_urls(v1, "v1.0"), [v1]);
+        // A name with a parsable version is still checked the same way.
+        let foo = "https://github.com/o/r/archive/foo-1.0.tar.gz";
+        assert_eq!(archive_urls(foo, "1.0"), [foo]);
+        assert!(archive_urls(foo, "2.0").is_empty());
+        // An unversioned name does not name 2.0 either.
+        let bare = "https://github.com/o/r/archive/source.tar.gz";
+        assert!(archive_urls(bare, "2.0").is_empty());
+    }
+
+    #[test]
+    fn file_names_version_needs_whole_version_tokens() {
+        assert!(file_names_version("v1.0.tar.gz", "1.0"));
+        assert!(file_names_version("v1.0.zip", "1.0"));
+        assert!(file_names_version("release-1.0.tar.gz", "1.0"));
+        assert!(!file_names_version("v1.0.tar.gz", "2.0"));
+        assert!(!file_names_version("v1.0.5.tar.gz", "1.0"));
+        assert!(!file_names_version("x1.0.tar.gz", "1.0"));
+        assert!(!file_names_version("v1.0", "1.0"), "no archive extension");
     }
 
     /// Live forge tag lookup: public, unauthenticated GETs of api.github.com and

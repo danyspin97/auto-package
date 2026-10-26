@@ -43,10 +43,28 @@ impl ForgeUrl {
     }
 }
 
-/// Known Git-forge host suffixes. A match extends to subdomains too, so a
+/// Forges whose host names are fixed. A host matches when it equals an entry or
+/// is a dot-delimited subdomain of one (`sub.gitlab.com`), never when it merely
+/// starts with or contains one (`gitlab.com.attacker.example`).
+pub const FIXED_FORGE_HOSTS: &[&str] = &[
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "codeberg.org",
+    "sr.ht",
+    "git.sr.ht",
+    "salsa.debian.org",
+];
+
+/// Known Git-forge host suffixes, for recognising the forge a URL already in a
+/// spec or a checkout points at. A match extends to subdomains too, so a
 /// self-hosted `gitlab.gnome.org` or `git.example.com` with a `github.com`
 /// mirror reads correctly. GitHub Enterprise lives on bespoke hostnames and
 /// is not auto-detected — pass its URL through explicitly if it comes up.
+///
+/// This is recognition, not trust. Any `gitlab.<x>` name matches the prefix
+/// entry, so a URL an agent names must be checked with
+/// [`is_fixed_forge_host`] (plus the user's own allowlist) instead.
 pub const KNOWN_HOSTS: &[&str] = &[
     "github.com",
     "gitlab.com",
@@ -58,7 +76,17 @@ pub const KNOWN_HOSTS: &[&str] = &[
     "git.sr.ht",
 ];
 
-/// Does `host` look like one of the known forges?
+/// Whether `host` is one of [`FIXED_FORGE_HOSTS`] or a subdomain of one. This
+/// is the trust test: self-hosted `gitlab.<x>` names do not pass it.
+pub fn is_fixed_forge_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    FIXED_FORGE_HOSTS
+        .iter()
+        .any(|k| host == *k || host.strip_suffix(k).is_some_and(|h| h.ends_with('.')))
+}
+
+/// Does `host` look like one of the known forges? Recognition only: see
+/// [`KNOWN_HOSTS`]. Use [`is_fixed_forge_host`] for a trust decision.
 pub fn is_known_host(host: &str) -> bool {
     KNOWN_HOSTS.iter().any(|k| {
         if let Some(prefix) = k.strip_suffix('.') {
@@ -320,6 +348,31 @@ mod tests {
         assert!(is_known_host("www.github.com"));
         assert!(!is_known_host("github.com.evil.net"));
         assert!(!is_known_host("notgitlab.com"));
+    }
+
+    #[test]
+    fn fixed_forge_hosts_are_trusted_by_domain_only() {
+        for host in ["github.com", "gitlab.com", "sub.gitlab.com", "GitLab.com"] {
+            assert!(is_fixed_forge_host(host), "{host}");
+        }
+        for host in [
+            "gitlab.com.attacker.example",
+            "evil-gitlab.com",
+            "notgitlab.com",
+            "gitlab.example.org",
+            "gitlab.gnome.org",
+            "gitlab.",
+            "",
+        ] {
+            assert!(!is_fixed_forge_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn self_hosted_gitlab_is_recognised_but_not_trusted() {
+        // Recognition (spec URLs) keeps the prefix rule; trust does not.
+        assert!(is_known_host("gitlab.example.org"));
+        assert!(!is_fixed_forge_host("gitlab.example.org"));
     }
 
     #[test]

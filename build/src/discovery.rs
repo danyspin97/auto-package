@@ -365,13 +365,33 @@ pub struct Finding {
     pub reason: Option<String>,
 }
 
-/// The first JSON object in `text`, as a [`Finding`]. Models wrap the object
-/// in prose or a code fence often enough that the object is located, not
-/// assumed to be the whole reply.
+/// The answer in `text`, as a [`Finding`]. Models wrap the object in prose or a
+/// code fence, and the prose may hold braces of its own (`I checked
+/// {savannah}.`), so each `{` is tried as the start of a JSON object. Only
+/// top-level objects that carry a `url` key count, and the last one wins:
+/// agents put the answer at the end of the reply.
 pub fn parse_finding(text: &str) -> Option<Finding> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    serde_json::from_str(text.get(start..=end)?).ok()
+    let mut found = None;
+    let mut from = 0;
+    while let Some(off) = text[from..].find('{') {
+        let start = from + off;
+        let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
+        match stream.next() {
+            Some(Ok(value)) => {
+                // Continue after this object, so braces inside it are not
+                // taken as candidates of their own.
+                from = start + stream.byte_offset();
+                if value.get("url").is_some()
+                    && let Ok(finding) = serde_json::from_value::<Finding>(value)
+                {
+                    found = Some(finding);
+                }
+            }
+            // Not JSON from this brace: the next one may be.
+            _ => from = start + 1,
+        }
+    }
+    found
 }
 
 /// Whether a URL answers at all (HEAD, then GET for servers that refuse HEAD).
@@ -400,12 +420,14 @@ const TRUSTED_SOURCE_HOSTS: &[&str] = &[
     "download.gnome.org",
 ];
 
-/// Whether sources may be fetched from `host`: a known forge, a trusted index or
-/// release host, or a host listed in `AUTO_PACKAGE_SOURCE_HOSTS` (comma
-/// separated, for a private mirror).
+/// Whether sources may be fetched from `host`: a fixed forge host, a trusted
+/// index or release host, or a host listed in `AUTO_PACKAGE_SOURCE_HOSTS`
+/// (comma separated, for a private mirror or a self-hosted forge such as
+/// `gitlab.gnome.org`). Self-hosted `gitlab.<x>` names are not trusted by
+/// themselves, since any host can be spelled that way.
 fn host_allowed(host: &str) -> bool {
     let host = host.to_ascii_lowercase();
-    if ap_ecosystem::forge::is_known_host(&host) {
+    if ap_ecosystem::forge::is_fixed_forge_host(&host) {
         return true;
     }
     let extra = std::env::var("AUTO_PACKAGE_SOURCE_HOSTS").unwrap_or_default();
@@ -729,12 +751,25 @@ mod tests {
     #[test]
     fn source_hosts_are_matched_by_domain() {
         assert!(host_allowed("github.com"));
-        assert!(host_allowed("gitlab.gnome.org"));
         assert!(host_allowed("pypi.org"));
         assert!(host_allowed("test.pypi.org"));
         assert!(!host_allowed("example.com"));
         assert!(!host_allowed("pypi.org.example.com"));
         assert!(!host_allowed("notpypi.org"));
+    }
+
+    #[test]
+    fn agent_urls_on_prefix_lookalike_hosts_are_not_trusted() {
+        // `gitlab.` followed by anything must not pass as GitLab.
+        assert!(host_allowed("gitlab.com"));
+        assert!(host_allowed("sub.gitlab.com"));
+        assert!(!host_allowed("gitlab.com.attacker.example"));
+        assert!(!host_allowed("gitlab.example.org"));
+        assert!(!host_allowed("evil-gitlab.com"));
+        let err = validate_found_url("https://gitlab.com.attacker.example/x/y").unwrap_err();
+        assert!(err.contains("not a known forge"), "{err}");
+        let err = validate_found_url("https://gitlab.example.org/x/y").unwrap_err();
+        assert!(err.contains("AUTO_PACKAGE_SOURCE_HOSTS"), "{err}");
     }
 
     #[test]
@@ -866,6 +901,31 @@ Source3:        %name.keyring
         assert_eq!(parse_finding("{\"url\": null}").unwrap().url, None);
         assert!(parse_finding("no json here").is_none());
         assert!(parse_finding("{not json}").is_none());
+    }
+
+    #[test]
+    fn finding_skips_braces_in_prose_and_takes_the_last_answer() {
+        let f = parse_finding(
+            "I checked {savannah}. {\"url\": \"https://download.savannah.gnu.org/releases/foo/\", \"reason\": \"listing\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            f.url.as_deref(),
+            Some("https://download.savannah.gnu.org/releases/foo/")
+        );
+        // Two answers: the one at the end wins.
+        let f = parse_finding(
+            "Maybe {\"url\": \"https://a.example/x\", \"reason\": \"first\"} or {\"url\": \"https://ftp.gnu.org/gnu/hello/\", \"reason\": \"final\"}",
+        )
+        .unwrap();
+        assert_eq!(f.url.as_deref(), Some("https://ftp.gnu.org/gnu/hello/"));
+        // Braces inside a string value do not end or split the object.
+        let f = parse_finding("{\"url\": \"https://github.com/o/r\", \"reason\": \"a {b} c\"}")
+            .unwrap();
+        assert_eq!(f.reason.as_deref(), Some("a {b} c"));
+        // A JSON object without a url key is not an answer.
+        assert!(parse_finding("{\"reason\": \"nothing\"}").is_none());
+        assert!(parse_finding("I checked {savannah}.").is_none());
     }
 
     #[test]

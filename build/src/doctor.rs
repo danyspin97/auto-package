@@ -134,22 +134,30 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
     out
 }
 
-/// Whether the archive file name `archive` names `version`: the version is
-/// followed by a separator or the extension, not by more of a version
-/// (`1.0` is in `a-1.0.tar.gz` and `a-1.0_cuda13-archive.tar.xz`, not in
-/// `a-1.0.1.tar.gz`).
+/// Whether the archive file name `archive` names `version` as a whole version:
+/// it starts the name or follows a `-`/`_` (a `v` may precede it, as in
+/// `v1.0.zip`), and it is followed by the end, an archive or wheel extension,
+/// or a `-py`/`-cp` tag, not by more of a version. `1.0` is in `a-1.0.tar.gz`,
+/// not in `a-1.0.1.tar.gz` or `a-11.0.tar.gz`, and `foo-1.0-docs.tar.gz` names
+/// another archive. The NVIDIA main archives (`…-13.8.0.4-archive.tar.xz`,
+/// `…-9.27.0.42_cuda13-archive.tar.xz`) are also accepted.
 fn names_version(archive: &str, version: &str) -> bool {
     let bare = version.replace('~', "");
     [version, bare.as_str()].iter().any(|v| {
-        archive.match_indices(*v).any(|(at, _)| {
-            let rest = &archive[at + v.len()..];
-            let mut chars = rest.chars();
-            match chars.next() {
-                None => true,
-                Some('.') => !chars.next().is_some_and(|c| c.is_ascii_digit()),
-                Some(c) => !c.is_ascii_alphanumeric(),
-            }
-        })
+        !v.is_empty()
+            && archive.match_indices(*v).any(|(at, _)| {
+                let before = &archive[..at];
+                let before = before.strip_suffix(['v', 'V']).unwrap_or(before);
+                let starts_here = before.is_empty() || before.ends_with(['-', '_']);
+                let rest = &archive[at + v.len()..];
+                starts_here
+                    && (rest.is_empty()
+                        || [
+                            ".tar", ".zip", ".whl", ".tgz", "-py", "-cp", "_", "-archive",
+                        ]
+                        .iter()
+                        .any(|ext| rest.starts_with(ext)))
+            })
     })
 }
 
@@ -283,6 +291,20 @@ mod tests {
                 .join("\n")
                 .contains("python-a: the spec says")
         );
+    }
+
+    #[test]
+    fn names_version_needs_a_separator_before_and_an_archive_after() {
+        assert!(names_version("foo-1.0.tar.gz", "1.0"));
+        assert!(names_version("foo_1.0.tgz", "1.0"));
+        assert!(names_version("foo-1.0-py3-none-any.whl", "1.0"));
+        assert!(names_version("foo-1.0-cp311-cp311-linux_x86_64.whl", "1.0"));
+        // A digit before the match means it is part of another version.
+        assert!(!names_version("a-11.0.tar.gz", "1.0"));
+        assert!(!names_version("a-21.0.tar.gz", "1.0"));
+        // Another archive's suffix is not this version's main archive.
+        assert!(!names_version("foo-1.0-docs.tar.gz", "1.0"));
+        assert!(!names_version("foo-1.0.post1.tar.gz", "1.0"));
     }
 
     #[test]
