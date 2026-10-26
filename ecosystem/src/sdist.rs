@@ -1493,7 +1493,12 @@ fn inspect_from_entries(
         if file_name == Some("pyproject.toml".as_ref())
             && let Some(src) = &entry.contents
         {
-            let dir = components[1..components.len() - 1]
+            // A manifest at the archive root (a single component) has no
+            // directory above it: it gets the empty directory, as a
+            // two-component entry does, instead of an out-of-range slice.
+            let dir = components
+                .get(1..components.len().saturating_sub(1))
+                .unwrap_or_default()
                 .iter()
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
@@ -2249,6 +2254,23 @@ mod tests {
             ar.append_data(&mut header, name, *body).unwrap();
         }
         ar.into_inner().unwrap().finish().unwrap();
+    }
+
+    /// A bare `pyproject.toml` at the archive root has no directory above it.
+    /// It used to panic on the `components[1..len - 1]` slice.
+    #[test]
+    fn a_root_level_pyproject_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("bare.tar.gz");
+        write_tar(
+            &tarball,
+            &[(
+                "pyproject.toml",
+                b"[project]\nname = \"bare\"\n".as_slice(),
+            )],
+        );
+        // Must return rather than panic; the outcome itself is not asserted.
+        let _ = inspect(&tarball);
     }
 
     /// NVIDIA's archives are `.tar.xz`: the member list comes from the stream,
