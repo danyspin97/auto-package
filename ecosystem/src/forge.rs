@@ -88,6 +88,8 @@ pub fn is_fixed_forge_host(host: &str) -> bool {
 /// Does `host` look like one of the known forges? Recognition only: see
 /// [`KNOWN_HOSTS`]. Use [`is_fixed_forge_host`] for a trust decision.
 pub fn is_known_host(host: &str) -> bool {
+    // Host names are case-insensitive (`GitHub.com` is `github.com`).
+    let host = host.to_ascii_lowercase();
     KNOWN_HOSTS.iter().any(|k| {
         if let Some(prefix) = k.strip_suffix('.') {
             // Prefix rule (`gitlab.`): any `gitlab.<something>` host.
@@ -131,6 +133,7 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
     //   https://host/path
     //   ssh://git@host/path
     //   git@host:owner/path.git  (scp-style, no scheme at all)
+    //   github.com/owner/repo    (bare, known forge hosts only)
     let hostpath = if let Some((_, rest)) = trimmed.split_once("://") {
         // Drop user@ prefix if present (ssh://git@host/...), but only when
         // the '@' sits in the authority — a later '@' (a `pkg@1.2.0` tag in
@@ -143,6 +146,12 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
     } else if let Some((_user, rest)) = trimmed.split_once('@') {
         // scp-style: user@host:path  → host/path
         rest.replacen(':', "/", 1)
+    } else if let Some((host, _)) = trimmed.split_once('/')
+        && is_known_host(host)
+    {
+        // A bare `github.com/owner/repo` names a known forge, read as https.
+        // Any other scheme-less string (a local path) is not a URL.
+        trimmed.to_string()
     } else {
         return None;
     };
@@ -152,7 +161,8 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
     let hostpath = hostpath.split(['?', '#']).next().unwrap_or_default();
     let hostpath = hostpath.trim_end_matches('/');
     let mut parts = hostpath.splitn(2, '/');
-    let host = parts.next()?.to_string();
+    // Host names are case-insensitive; the project path keeps its case.
+    let host = parts.next()?.to_ascii_lowercase();
     let path = parts.next()?;
     if host.is_empty() || path.is_empty() {
         return None;
@@ -405,6 +415,46 @@ mod tests {
         assert!(parse("not-a-url").is_none());
         assert!(parse("https://github.com/just-an-owner").is_none());
         assert!(parse("https://github.com/").is_none());
+    }
+
+    #[test]
+    fn host_is_lowercased_and_the_project_path_keeps_its_case() {
+        let f = parse("GitHub.com/owner/Repo").unwrap();
+        assert_eq!(f.host, "github.com");
+        assert_eq!(f.project_path, "owner/Repo");
+        assert_eq!(f.repo_name, "Repo");
+        let f = parse("https://GitHub.com/owner/Repo").unwrap();
+        assert_eq!(f.host, "github.com");
+        assert_eq!(f.canonical_https(), "https://github.com/owner/Repo");
+        // Case does not stop the GitLab subgroup rule from applying.
+        let f = parse("git@GitLab.COM:Org/Team/Project.git").unwrap();
+        assert_eq!(f.host, "gitlab.com");
+        assert_eq!(f.project_path, "Org/Team/Project");
+    }
+
+    #[test]
+    fn bare_known_host_is_read_as_a_forge_url_but_local_paths_are_not() {
+        let f = parse("GitHub.com/owner/Repo").unwrap();
+        assert_eq!(f.host, "github.com");
+        assert_eq!(f.project_path, "owner/Repo");
+        assert_eq!(f.repo_name, "Repo");
+        assert_eq!(
+            parse("gitlab.gnome.org/GNOME/glib").unwrap().host,
+            "gitlab.gnome.org"
+        );
+        // Unknown hosts and local paths without a scheme are still refused.
+        assert!(parse("example.com/owner/repo").is_none());
+        assert!(parse("some.dir/sub/path").is_none());
+        assert!(parse("owner/repo").is_none());
+    }
+
+    #[test]
+    fn known_host_check_ignores_case() {
+        assert!(is_known_host("GitHub.com"));
+        assert!(is_known_host("WWW.GitHub.COM"));
+        assert!(is_known_host("GitLab.Gnome.org"));
+        assert!(!is_known_host("GitHub.com.Evil.net"));
+        assert!(is_fixed_forge_host("GitHub.com"));
     }
 
     #[test]

@@ -115,12 +115,14 @@ fn cache_dir() -> std::path::PathBuf {
 /// those stale files.
 ///
 /// `python` is the version string of the interpreter whose pip produced the
-/// closure (see [`resolve`]), not necessarily the host's.
+/// closure (see [`resolve`]), not necessarily the host's. `prefix` is that
+/// interpreter's prefix when it is known (see [`interpreter_prefix_of`]).
 fn cache_path(
     dir: &std::path::Path,
     name: &str,
     version: Option<&str>,
     python: &str,
+    prefix: Option<&std::path::Path>,
     mode: ResolveMode,
 ) -> std::path::PathBuf {
     let vars: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
@@ -131,6 +133,7 @@ fn cache_path(
         &host_platform(),
         mode,
         &vars,
+        prefix,
     ))
 }
 
@@ -158,6 +161,22 @@ pub(crate) fn cache_key(
     platform: &str,
     mode: ResolveMode,
     vars: &BTreeMap<OsString, OsString>,
+    prefix: Option<&std::path::Path>,
+) -> String {
+    let configs = config_candidates(vars, prefix);
+    cache_key_with_configs(name, version, python, platform, mode, vars, &configs)
+}
+
+/// [`cache_key`] over an explicit list of config candidates (see
+/// [`config_candidates`]). Split out so tests can inject the system paths.
+fn cache_key_with_configs(
+    name: &str,
+    version: Option<&str>,
+    python: &str,
+    platform: &str,
+    mode: ResolveMode,
+    vars: &BTreeMap<OsString, OsString>,
+    configs: &[Option<std::path::PathBuf>],
 ) -> String {
     let norm_name = normalize_name(name);
     let mut hasher = Sha256::new();
@@ -182,7 +201,7 @@ pub(crate) fn cache_key(
             .map(|v| sha256(v.as_encoded_bytes()));
         hash_field(&mut hasher, value.as_deref());
     }
-    for config in config_digests(vars) {
+    for config in config_digests(configs) {
         hash_field(&mut hasher, config.as_deref());
     }
     let digest = hex::encode(hasher.finalize());
@@ -217,28 +236,94 @@ const RESOLUTION_ENV: &[&str] = &[
     "no_proxy",
 ];
 
-/// Digests of the pip config files pip can read, in a fixed order:
-/// `PIP_CONFIG_FILE`, `$XDG_CONFIG_HOME/pip/pip.conf`, `~/.config/pip/pip.conf`
-/// and `~/.pip/pip.conf`. These are the candidates `pip_sandbox` binds. A
-/// candidate that is unset, relative or not a regular file is `None`.
-fn config_digests(vars: &BTreeMap<OsString, OsString>) -> Vec<Option<Vec<u8>>> {
+/// The config files pip may read, as paths, in the fixed order their digests
+/// are hashed. A slot that does not apply (unset, relative) is `None`, so the
+/// position of every file stays the same whatever else is set:
+///
+/// 1. `PIP_CONFIG_FILE`, when absolute;
+/// 2. `$XDG_CONFIG_HOME/pip/pip.conf`, when absolute;
+/// 3. `~/.config/pip/pip.conf` and 4. `~/.pip/pip.conf`;
+/// 5. `/etc/pip.conf`, 6. `/etc/xdg/pip/pip.conf`, and the
+///    `/usr/local/etc/xdg` and `/usr/etc/xdg` copies that `pip config debug`
+///    lists for a distribution-built pip;
+/// 7. `pip/pip.conf` under each absolute `$XDG_CONFIG_DIRS` entry (`/etc/xdg`
+///    when the variable is unset or empty);
+/// 8. `<prefix>/pip.conf`, pip's site file, when the interpreter's prefix is
+///    known.
+///
+/// The sandbox binds only some of these (`ETC_ENTRIES`, the user's config
+/// files); hashing the rest is harmless, a file that changes just changes the
+/// key. A file that is missing or not a regular file hashes as `None`.
+fn config_candidates(
+    vars: &BTreeMap<OsString, OsString>,
+    prefix: Option<&std::path::Path>,
+) -> Vec<Option<std::path::PathBuf>> {
+    use std::path::PathBuf;
     let path = |key: &str| {
         vars.get(OsStr::new(key))
             .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
     };
     let home = path("HOME").unwrap_or_else(|| "/nonexistent".into());
-    let xdg = path("XDG_CONFIG_HOME").filter(|p| p.is_absolute());
-    let candidates = [
+    let xdg_home = path("XDG_CONFIG_HOME").filter(|p| p.is_absolute());
+    let xdg_dirs: Vec<PathBuf> = match path("XDG_CONFIG_DIRS") {
+        Some(dirs) => dirs
+            .to_string_lossy()
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        None => vec![PathBuf::from("/etc/xdg")],
+    };
+    let mut out = vec![
         path("PIP_CONFIG_FILE").filter(|p| p.is_absolute()),
-        xdg.map(|x| x.join("pip/pip.conf")),
+        xdg_home.map(|x| x.join("pip/pip.conf")),
         Some(home.join(".config/pip/pip.conf")),
         Some(home.join(".pip/pip.conf")),
+        Some("/etc/pip.conf".into()),
+        Some("/etc/xdg/pip/pip.conf".into()),
+        Some("/usr/local/etc/xdg/pip/pip.conf".into()),
+        Some("/usr/etc/xdg/pip/pip.conf".into()),
     ];
+    out.extend(
+        xdg_dirs
+            .into_iter()
+            .map(|dir| dir.is_absolute().then(|| dir.join("pip/pip.conf"))),
+    );
+    out.push(prefix.map(|p| p.join("pip.conf")));
+    out
+}
+
+/// The interpreter prefix (`sys.prefix`, approximately) of `program`, found on
+/// `path` without running anything: the parent of the `bin` directory it sits
+/// in, or its own directory otherwise. This is a best-effort guess; a user
+/// install (`~/.local/bin/pip`) really has the system prefix, and a symlinked
+/// interpreter is taken where it is found. Either way the result only decides
+/// which `pip.conf` is hashed into the key.
+fn interpreter_prefix_of(program: &str, path: &OsStr) -> Option<std::path::PathBuf> {
+    let file = if program.contains('/') {
+        std::path::PathBuf::from(program)
+    } else {
+        std::env::split_paths(path)
+            .filter(|d| d.is_absolute())
+            .map(|d| d.join(program))
+            .find(|p| p.is_file())?
+    };
+    let dir = file.parent()?;
+    if dir.file_name() == Some(OsStr::new("bin")) {
+        dir.parent().map(|p| p.to_path_buf())
+    } else {
+        Some(dir.to_path_buf())
+    }
+}
+
+/// Digests of the config files in `candidates` (see [`config_candidates`]), in
+/// order. A candidate that is absent or not a regular file is `None`.
+fn config_digests(candidates: &[Option<std::path::PathBuf>]) -> Vec<Option<Vec<u8>>> {
     candidates
-        .into_iter()
+        .iter()
         .map(|candidate| {
-            let file = candidate.filter(|p| p.is_file())?;
+            let file = candidate.as_ref().filter(|p| p.is_file())?;
             std::fs::read(file).ok().map(|bytes| sha256(&bytes))
         })
         .collect()
@@ -326,6 +411,45 @@ fn probe_python(program: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The interpreter the default `pip` on `PATH` belongs to, as `Python 3.N`, from
+/// `pip --version`. Probed once per process. Falls back to the host's
+/// `python3` when the probe cannot run or its output cannot be parsed.
+fn default_python() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE
+        .get_or_init(|| probe_default_pip().unwrap_or_else(host_python))
+        .clone()
+}
+
+/// Upper bound on the `pip --version` probe. It runs on the host, unsandboxed
+/// like the other interpreter probes, but pip is not to be left to hang.
+const PIP_VERSION_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn probe_default_pip() -> Option<String> {
+    let mut cmd = Command::new("pip");
+    cmd.arg("--version");
+    let out = run_with_timeout(cmd, PIP_VERSION_TIMEOUT).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_pip_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `Python 3.N` interpreter named by `pip --version` output, e.g.
+/// `pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)`. `None`
+/// when there is no `(python 3.N)` part.
+fn parse_pip_version(out: &str) -> Option<String> {
+    let rest = out.split("(python ").nth(1)?;
+    let version: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = version.split('.');
+    let (major, minor) = (parts.next()?, parts.next()?);
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (numeric(major) && numeric(minor)).then(|| format!("Python {major}.{minor}"))
+}
+
 /// Host platform tag, from `sysconfig.get_platform()` (e.g.
 /// `linux-x86_64`). Falls back to `std::env::consts::OS-ARCH` when the Python
 /// probe can't run — enough to keep an x86_64 cache from being reused on
@@ -355,9 +479,10 @@ fn load_cached_resolve(
     name: &str,
     version: Option<&str>,
     python: &str,
+    prefix: Option<&std::path::Path>,
     mode: ResolveMode,
 ) -> Option<Vec<Node>> {
-    let path = cache_path(dir, name, version, python, mode);
+    let path = cache_path(dir, name, version, python, prefix, mode);
 
     // Check if cache file exists
     let metadata = std::fs::metadata(&path).ok()?;
@@ -403,10 +528,11 @@ fn save_cached_resolve(
     name: &str,
     version: Option<&str>,
     python: &str,
+    prefix: Option<&std::path::Path>,
     mode: ResolveMode,
     nodes: &[Node],
 ) {
-    let path = cache_path(dir, name, version, python, mode);
+    let path = cache_path(dir, name, version, python, prefix, mode);
 
     // Create cache directory if it doesn't exist
     if let Some(parent) = path.parent() {
@@ -851,12 +977,24 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
     // is read.
     let mode = resolve_mode();
     let dir = cache_dir();
-    let host = host_python();
+    // The default pip runs whatever `pip` is on PATH, which may not belong to
+    // the host's `python3`: the key names the interpreter it reports.
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let default_py = default_python();
+    let default_prefix = interpreter_prefix_of("pip", &path_var);
 
-    // Try to load from cache first. Only entries recorded under the host
-    // interpreter are read: an entry produced by an alternate interpreter is
-    // stored under that interpreter's key, so it is never served to the host.
-    if let Some(cached) = load_cached_resolve(&dir, name, version, &host, mode) {
+    // Try to load from cache first. Only entries recorded under the default
+    // pip's interpreter are read: an entry produced by an alternate interpreter
+    // is stored under that interpreter's key, so it is never served to the
+    // default pip.
+    if let Some(cached) = load_cached_resolve(
+        &dir,
+        name,
+        version,
+        &default_py,
+        default_prefix.as_deref(),
+        mode,
+    ) {
         return Ok(cached);
     }
 
@@ -880,11 +1018,11 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
         &alternates,
         |py| run_pip_report(&[py, "-m", "pip"], name, &spec, mode),
     )?;
-    // The interpreter whose pip produced `stdout`: the host's, or the alternate
-    // that was used. The cache entry is keyed by it.
-    let produced_by = match &alternate {
-        Some(py) => probe_python(py),
-        None => host.clone(),
+    // The interpreter whose pip produced `stdout`: the default pip's, or the
+    // alternate that was used. The cache entry is keyed by it.
+    let (produced_by, produced_prefix) = match &alternate {
+        Some(py) => (probe_python(py), interpreter_prefix_of(py, &path_var)),
+        None => (default_py, default_prefix),
     };
     if let Some(py) = alternate {
         ap_core::diag!("  default pip was not usable for {name}; resolved with {py}");
@@ -916,7 +1054,15 @@ pub fn resolve(name: &str, version: Option<&str>) -> Result<Vec<Node>, Error> {
     // Save to cache for future use. A result whose interpreter version cannot
     // be probed is not cached: there is no key that would describe it.
     if !produced_by.is_empty() {
-        save_cached_resolve(&dir, name, version, &produced_by, mode, &nodes);
+        save_cached_resolve(
+            &dir,
+            name,
+            version,
+            &produced_by,
+            produced_prefix.as_deref(),
+            mode,
+            &nodes,
+        );
     }
 
     Ok(nodes)
@@ -1188,6 +1334,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert!(key.starts_with("httpx-0.28.1-"), "{key}");
         assert!(key.ends_with(".json"), "{key}");
@@ -1207,6 +1354,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         let b = cache_key(
             "httpx",
@@ -1215,6 +1363,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert_ne!(a, b, "interpreter must change the cache key");
     }
@@ -1228,6 +1377,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         let b = cache_key(
             "httpx",
@@ -1236,6 +1386,7 @@ mod tests {
             "linux-aarch64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert_ne!(a, b, "platform must change the cache key");
     }
@@ -1249,6 +1400,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         let b = cache_key(
             "Httpx",
@@ -1257,6 +1409,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert_eq!(a, b);
     }
@@ -1272,6 +1425,7 @@ mod tests {
             "l",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         let b = cache_key(
             "markupsafe",
@@ -1280,6 +1434,7 @@ mod tests {
             "l",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert_eq!(a, b);
     }
@@ -1293,6 +1448,7 @@ mod tests {
             "l",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         let pinned = cache_key(
             "httpx",
@@ -1301,6 +1457,7 @@ mod tests {
             "l",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert_ne!(latest, pinned);
         assert!(latest.contains("httpx-latest-"), "{latest}");
@@ -1315,6 +1472,7 @@ mod tests {
             "l",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert!(!key.contains('/'), "{key}");
         assert!(!key.contains(".."), "{key}");
@@ -1325,6 +1483,7 @@ mod tests {
             "l",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         let b = cache_key(
             "foo-bar-baz",
@@ -1333,6 +1492,7 @@ mod tests {
             "l",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert_eq!(a, b);
         assert!(a.starts_with("foo-bar-baz-1.0-"), "{a}");
@@ -1356,6 +1516,7 @@ mod tests {
                 "linux-x86_64",
                 ResolveMode::Sandboxed,
                 &env_of(&[("PIP_INDEX_URL", idx)]),
+                None,
             )
         };
         let a = key("https://mirror-a.invalid/simple");
@@ -1374,6 +1535,7 @@ mod tests {
                 "linux-x86_64",
                 ResolveMode::Sandboxed,
                 vars,
+                None,
             )
         };
         let unset = key(&BTreeMap::new());
@@ -1393,6 +1555,7 @@ mod tests {
                 "linux-x86_64",
                 ResolveMode::Sandboxed,
                 &BTreeMap::new(),
+                None,
             )
         };
         assert_eq!(key(), key());
@@ -1407,6 +1570,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &env_of(&[("PIP_INDEX_URL", "https://user:hunter2@idx.invalid/simple")]),
+            None,
         );
         assert!(!key.contains("hunter2"), "{key}");
         assert!(!key.contains("idx.invalid"), "{key}");
@@ -1426,6 +1590,7 @@ mod tests {
                 "linux-x86_64",
                 ResolveMode::Sandboxed,
                 &env_of(&[("PIP_CONFIG_FILE", conf_path)]),
+                None,
             )
         };
         let a = key("[global]\nindex-url = https://a.invalid/simple\n");
@@ -1449,11 +1614,184 @@ mod tests {
                 "linux-x86_64",
                 ResolveMode::Sandboxed,
                 &env_of(&[("HOME", home_str)]),
+                None,
             )
         };
         let a = key("[global]\nextra-index-url = https://a.invalid/simple\n");
         let b = key("[global]\nextra-index-url = https://b.invalid/simple\n");
         assert_ne!(a, b, "~/.config/pip/pip.conf must change the cache key");
+    }
+
+    #[test]
+    fn system_config_content_changes_the_cache_key() {
+        // `/etc/pip.conf` itself cannot be written by a test, so the same
+        // digest path is exercised with an injected candidate list.
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("etc-pip.conf");
+        let key = |body: &str| {
+            std::fs::write(&conf, body).unwrap();
+            cache_key_with_configs(
+                "httpx",
+                None,
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                &BTreeMap::new(),
+                &[Some(conf.clone())],
+            )
+        };
+        let a = key("[global]\nindex-url = https://a.invalid/simple\n");
+        let b = key("[global]\nindex-url = https://b.invalid/simple\n");
+        assert_ne!(a, b, "a system config's content must change the cache key");
+        assert_eq!(a, key("[global]\nindex-url = https://a.invalid/simple\n"));
+    }
+
+    #[test]
+    fn missing_config_files_give_a_stable_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such.conf");
+        let key = |configs: &[Option<std::path::PathBuf>]| {
+            cache_key_with_configs(
+                "httpx",
+                None,
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                &BTreeMap::new(),
+                configs,
+            )
+        };
+        let absent = key(&[None, Some(missing.clone()), None]);
+        assert_eq!(absent, key(&[None, Some(missing.clone()), None]));
+        // A directory is not a config file either.
+        assert_eq!(absent, key(&[None, Some(dir.path().to_path_buf()), None]));
+        // Once the file exists, the key changes.
+        std::fs::write(&missing, "[global]\n").unwrap();
+        assert_ne!(absent, key(&[None, Some(missing.clone()), None]));
+    }
+
+    #[test]
+    fn config_candidates_are_in_a_fixed_order() {
+        let vars: BTreeMap<OsString, OsString> = [
+            ("HOME", "/h"),
+            ("XDG_CONFIG_HOME", "/x"),
+            ("PIP_CONFIG_FILE", "/p.conf"),
+            ("XDG_CONFIG_DIRS", "/a:rel:/b"),
+        ]
+        .iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .collect();
+        let got = config_candidates(&vars, Some(std::path::Path::new("/venv")));
+        let p = |s: &str| Some(std::path::PathBuf::from(s));
+        assert_eq!(
+            got,
+            vec![
+                p("/p.conf"),
+                p("/x/pip/pip.conf"),
+                p("/h/.config/pip/pip.conf"),
+                p("/h/.pip/pip.conf"),
+                p("/etc/pip.conf"),
+                p("/etc/xdg/pip/pip.conf"),
+                p("/usr/local/etc/xdg/pip/pip.conf"),
+                p("/usr/etc/xdg/pip/pip.conf"),
+                p("/a/pip/pip.conf"),
+                None, // relative XDG_CONFIG_DIRS entries are ignored
+                p("/b/pip/pip.conf"),
+                p("/venv/pip.conf"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unset_xdg_config_dirs_default_to_etc_xdg() {
+        let got = config_candidates(&BTreeMap::new(), None);
+        assert_eq!(
+            got[8],
+            Some(std::path::PathBuf::from("/etc/xdg/pip/pip.conf"))
+        );
+        assert_eq!(
+            got.last(),
+            Some(&None),
+            "no prefix, so no <prefix>/pip.conf"
+        );
+        assert_eq!(got.len(), 10, "{got:?}");
+    }
+
+    #[test]
+    fn the_interpreter_prefix_pip_conf_changes_the_cache_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path();
+        let key = |body: Option<&str>| {
+            if let Some(body) = body {
+                std::fs::write(venv.join("pip.conf"), body).unwrap();
+            }
+            cache_key(
+                "httpx",
+                None,
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                &BTreeMap::new(),
+                Some(venv),
+            )
+        };
+        let without = key(None);
+        let with = key(Some("[global]\nindex-url = https://a.invalid/simple\n"));
+        assert_ne!(without, with, "<prefix>/pip.conf must change the cache key");
+    }
+
+    #[test]
+    fn interpreter_prefix_is_found_on_path_without_running_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("pip"), "").unwrap();
+        let path = bin.clone().into_os_string();
+        assert_eq!(
+            interpreter_prefix_of("pip", &path),
+            Some(dir.path().join("venv"))
+        );
+        assert_eq!(interpreter_prefix_of("missing-pip", &path), None);
+        assert_eq!(
+            interpreter_prefix_of("/opt/py/bin/python3", OsStr::new("")),
+            Some(std::path::PathBuf::from("/opt/py"))
+        );
+        assert_eq!(
+            interpreter_prefix_of("/opt/tool/pip", OsStr::new("")),
+            Some(std::path::PathBuf::from("/opt/tool"))
+        );
+    }
+
+    #[test]
+    fn pip_version_names_the_interpreter_it_runs_under() {
+        for (out, want) in [
+            (
+                "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)\n",
+                "Python 3.12",
+            ),
+            (
+                "pip 23.3.1 from /home/u/.local/lib/python3.11/site-packages/pip (python 3.11)\n",
+                "Python 3.11",
+            ),
+            (
+                "pip 26.2.1 from /usr/lib/python3.13/site-packages/pip (python 3.13)\n",
+                "Python 3.13",
+            ),
+            (
+                "pip 25.1 from /opt/py/lib/python3.10/site-packages/pip (python 3.10.12)\n",
+                "Python 3.10",
+            ),
+        ] {
+            assert_eq!(parse_pip_version(out).as_deref(), Some(want), "{out}");
+        }
+    }
+
+    #[test]
+    fn pip_version_without_a_python_version_is_not_parsed() {
+        assert_eq!(parse_pip_version(""), None);
+        assert_eq!(parse_pip_version("pip 24.0 from /usr/lib/pip\n"), None);
+        assert_eq!(parse_pip_version("pip 24.0 from /x (python 3)\n"), None);
+        assert_eq!(parse_pip_version("pip 24.0 from /x (python x.y)\n"), None);
     }
 
     #[test]
@@ -1509,6 +1847,7 @@ mod tests {
             "linux-x86_64",
             ResolveMode::Sandboxed,
             &BTreeMap::new(),
+            None,
         );
         assert_ne!(old, new);
     }
@@ -1526,6 +1865,7 @@ mod tests {
                 "linux-x86_64",
                 mode,
                 &BTreeMap::new(),
+                None,
             )
         };
         let sandboxed = key(ResolveMode::Sandboxed);
@@ -1557,15 +1897,30 @@ mod tests {
             "httpx",
             Some("0.28.1"),
             "Python 3.12.7",
+            None,
             mode,
             &nodes,
         );
         assert_eq!(
-            load_cached_resolve(dir.path(), "httpx", Some("0.28.1"), "Python 3.12.7", mode),
+            load_cached_resolve(
+                dir.path(),
+                "httpx",
+                Some("0.28.1"),
+                "Python 3.12.7",
+                None,
+                mode
+            ),
             Some(nodes)
         );
         assert_eq!(
-            load_cached_resolve(dir.path(), "httpx", Some("0.28.1"), "Python 3.13.1", mode),
+            load_cached_resolve(
+                dir.path(),
+                "httpx",
+                Some("0.28.1"),
+                "Python 3.13.1",
+                None,
+                mode
+            ),
             None
         );
     }
