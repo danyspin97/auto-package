@@ -342,13 +342,31 @@ fn under_sensitive_home_dir(path: &Path, home: &Path) -> bool {
     })
 }
 
+/// Whether `prefix` looks like a Python installation tree: an interpreter in
+/// `bin/` and a standard library under `lib/python3*`, as a standalone build
+/// (such as one managed by uv) has. An app's config directory with a `bin/`
+/// directory but no Python library does not.
+fn looks_like_interpreter_install(prefix: &Path) -> bool {
+    let has_interpreter =
+        prefix.join("bin/python3").is_file() || prefix.join("bin/python").is_file();
+    let has_stdlib = std::fs::read_dir(prefix.join("lib"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.file_name().as_bytes().starts_with(b"python3") && e.path().is_dir());
+    has_interpreter && has_stdlib
+}
+
 fn check_prefix(program: &str, prefix: &Path, home: &Path) -> Result<(), SandboxError> {
     let reason = sensitive_reason(prefix, home).or_else(|| {
         // Under the configuration or cache directories only a virtualenv
-        // (which has a `pyvenv.cfg`) is a prefix of its own; anything else
-        // there may be a tool's data, config or keyring.
-        (under_sensitive_home_dir(prefix, home) && !prefix.join("pyvenv.cfg").is_file())
-            .then_some("it is inside a configuration or cache directory and is not a virtualenv")
+        // (which has a `pyvenv.cfg`) or an interpreter installation is a
+        // prefix of its own; anything else there may be a tool's data, config
+        // or keyring.
+        (under_sensitive_home_dir(prefix, home)
+            && !prefix.join("pyvenv.cfg").is_file()
+            && !looks_like_interpreter_install(prefix))
+        .then_some("it is inside a configuration or cache directory and is not a virtualenv or Python installation")
     });
     match reason {
         None => Ok(()),
@@ -788,6 +806,42 @@ mod tests {
         }
         assert!(check_prefix("tool", &h.join("venv"), h).is_ok());
         assert!(check_prefix("tool", Path::new("/opt/python"), h).is_ok());
+    }
+
+    #[test]
+    fn a_standalone_interpreter_tree_under_local_is_accepted() {
+        let f = fixture();
+        let h = &f.home;
+        // A uv-managed build: no pyvenv.cfg, an interpreter and a stdlib.
+        let uv = h.join(".local/share/uv/python/cpython-3.12");
+        fs::create_dir_all(uv.join("bin")).unwrap();
+        fs::write(uv.join("bin/python3"), "").unwrap();
+        fs::create_dir_all(uv.join("lib/python3.12")).unwrap();
+        assert!(check_prefix("pip", &uv, h).is_ok());
+        // The home-level directories stay refused even with an interpreter.
+        let local = h.join(".local");
+        fs::create_dir_all(local.join("bin")).unwrap();
+        fs::write(local.join("bin/python3"), "").unwrap();
+        fs::create_dir_all(local.join("lib/python3.12")).unwrap();
+        assert!(check_prefix("pip", &local, h).is_err());
+    }
+
+    #[test]
+    fn a_config_dir_with_a_bin_but_no_python_library_is_refused() {
+        let f = fixture();
+        let h = &f.home;
+        // Like ~/.config/gh: a bin/ directory, but no lib/python3* tree.
+        let gh = h.join(".config/gh");
+        fs::create_dir_all(gh.join("bin")).unwrap();
+        fs::write(gh.join("bin/gh"), "").unwrap();
+        assert!(check_prefix("pip", &gh, h).is_err());
+        // An interpreter alone, without a stdlib directory, is not enough.
+        fs::write(gh.join("bin/python3"), "").unwrap();
+        assert!(check_prefix("pip", &gh, h).is_err());
+        // A stdlib alone, without an interpreter, is not enough either.
+        let cache = h.join(".cache/tool");
+        fs::create_dir_all(cache.join("lib/python3.12")).unwrap();
+        assert!(check_prefix("pip", &cache, h).is_err());
     }
 
     #[test]
