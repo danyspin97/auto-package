@@ -2086,7 +2086,7 @@ fn inspect_from_entries(
         _ => match fallback_depth {
             None | Some(0) => None,
             Some(depth) => {
-                let mut dirs: Vec<String> = files
+                let dirs: Vec<String> = files
                     .iter()
                     .filter_map(|f| {
                         let rest = f.split_once('/').map(|(_, r)| r)?;
@@ -2103,12 +2103,7 @@ fn inspect_from_entries(
                         ok.then_some(dir)
                     })
                     .collect();
-                // Same tie-break as the manifest choice above.
-                dirs.sort_by_key(|d| {
-                    let norm = d.to_lowercase().replace(['-', '.'], "_");
-                    (normalized != Some(norm.as_str()), d.clone())
-                });
-                dirs.into_iter().next()
+                choose_fallback_dir(dirs, normalized.as_deref())
             }
         },
     };
@@ -2135,6 +2130,78 @@ fn inspect_from_entries(
         files,
         console_scripts,
     })
+}
+
+/// Directory names that hold a language binding, in the order they are
+/// preferred when no directory is named after the project.
+const BINDING_DIR_NAMES: &[&str] = &["python", "py", "pkg", "package", "src", "lib"];
+
+/// Directory names that hold examples, docs, tests and tooling rather than the
+/// product. They are chosen only when nothing else is a candidate.
+const NON_PRODUCT_DIR_NAMES: &[&str] = &[
+    "examples",
+    "example",
+    "docs",
+    "doc",
+    "tests",
+    "test",
+    "benchmarks",
+    "bench",
+    "scripts",
+    "tools",
+    "contrib",
+    "samples",
+];
+
+/// Choose the project directory among `dirs`, the directories holding a
+/// packaging manifest at the fallback depth, when no packaging pyproject.toml
+/// names one. In order:
+///
+/// 1. a directory named after the normalized project name;
+/// 2. among the product directories (not in [`NON_PRODUCT_DIR_NAMES`]), the
+///    first of [`BINDING_DIR_NAMES`] in that order;
+/// 3. the only candidate, when there is exactly one;
+/// 4. the only product directory, when there is exactly one.
+///
+/// Anything else is a guess between several directories, and `None` is
+/// returned instead.
+fn choose_fallback_dir(mut dirs: Vec<String>, normalized: Option<&str>) -> Option<String> {
+    dirs.sort();
+    dirs.dedup();
+    let leaf = |d: &str| {
+        d.rsplit('/')
+            .next()
+            .unwrap_or(d)
+            .to_lowercase()
+            .replace(['-', '.'], "_")
+    };
+    if let Some(want) = normalized
+        && let Some(d) = dirs.iter().find(|d| leaf(d) == want)
+    {
+        return Some(d.clone());
+    }
+    if dirs.len() == 1 {
+        return dirs.pop();
+    }
+    let product: Vec<&String> = dirs
+        .iter()
+        .filter(|d| !NON_PRODUCT_DIR_NAMES.contains(&leaf(d).as_str()))
+        .collect();
+    for pref in BINDING_DIR_NAMES {
+        if let Some(d) = product.iter().find(|d| leaf(d) == *pref) {
+            return Some((*d).clone());
+        }
+    }
+    match product.as_slice() {
+        [only] => Some((*only).clone()),
+        _ => {
+            tracing::warn!(
+                "several candidate project directories ({}); not choosing one",
+                dirs.join(", ")
+            );
+            None
+        }
+    }
 }
 
 impl BuildSystem {
@@ -2904,6 +2971,94 @@ mod tests {
         assert_eq!(info.project_dir, None);
         // One project at the root is not a monorepo, whatever sits below it.
         assert!(info.subprojects.is_empty());
+    }
+
+    /// Without a packaging pyproject.toml, `examples/setup.py` must not win the
+    /// alphabetical tie against the real binding in `python/setup.py`.
+    #[test]
+    fn a_binding_directory_beats_examples_in_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                ("pkg-1.0/examples/setup.py", b"x".as_slice()),
+                ("pkg-1.0/python/setup.py", b"x".as_slice()),
+            ],
+        );
+        let info = inspect_preferring(&tarball, Some("pkg")).unwrap();
+        assert_eq!(info.project_dir.as_deref(), Some("python"));
+        let info = inspect(&tarball).unwrap();
+        assert_eq!(info.project_dir.as_deref(), Some("python"));
+    }
+
+    /// Several candidates and none of them product-like: no guess is made.
+    #[test]
+    fn the_fallback_refuses_to_guess_between_several_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                ("pkg-1.0/core/setup.py", b"x".as_slice()),
+                ("pkg-1.0/util/setup.py", b"x".as_slice()),
+                ("pkg-1.0/examples/setup.py", b"x".as_slice()),
+            ],
+        );
+        let info = inspect_preferring(&tarball, Some("pkg")).unwrap();
+        assert_eq!(info.project_dir, None);
+        assert!(info.python_packaging);
+    }
+
+    #[test]
+    fn fallback_prefers_the_named_directory_then_bindings_then_the_only_product() {
+        let s = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        // A directory named after the project wins over a binding directory.
+        assert_eq!(
+            choose_fallback_dir(s(&["python", "my-pkg"]), Some("my_pkg")).as_deref(),
+            Some("my-pkg")
+        );
+        // Binding names in their preference order: `python` before `src`.
+        assert_eq!(
+            choose_fallback_dir(s(&["src", "lib", "python"]), Some("pkg")).as_deref(),
+            Some("python")
+        );
+        assert_eq!(
+            choose_fallback_dir(s(&["src", "lib"]), None).as_deref(),
+            Some("src")
+        );
+        // A lone candidate is taken, even a non-product one.
+        assert_eq!(
+            choose_fallback_dir(s(&["examples"]), Some("pkg")).as_deref(),
+            Some("examples")
+        );
+        assert_eq!(
+            choose_fallback_dir(s(&["core"]), None).as_deref(),
+            Some("core")
+        );
+        // Non-product directories do not compete with the one product directory.
+        assert_eq!(
+            choose_fallback_dir(s(&["examples", "docs", "core"]), Some("pkg")).as_deref(),
+            Some("core")
+        );
+        // Duplicates (a directory with both setup.py and Cargo.toml) are one candidate.
+        assert_eq!(
+            choose_fallback_dir(s(&["core", "core"]), None).as_deref(),
+            Some("core")
+        );
+        // A binding directory below a non-product one is still a binding.
+        assert_eq!(
+            choose_fallback_dir(s(&["bindings/python", "examples/demo"]), None).as_deref(),
+            Some("bindings/python")
+        );
+    }
+
+    #[test]
+    fn fallback_refuses_when_only_non_product_or_several_product_directories_remain() {
+        let s = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        assert_eq!(choose_fallback_dir(s(&["examples", "docs"]), None), None);
+        assert_eq!(choose_fallback_dir(s(&["core", "util"]), Some("pkg")), None);
+        assert_eq!(choose_fallback_dir(Vec::new(), Some("pkg")), None);
     }
 
     /// A GitHub source tarball starts with a `pax_global_header` entry at the

@@ -22,7 +22,12 @@
 //! file or directory, never a parent:
 //!
 //! - the interpreter prefix, when pip or its Python live outside the system
-//!   directories (a venv, `/opt/python`);
+//!   directories (a venv, `/opt/python`). Of that prefix only its `bin`,
+//!   `lib`, `lib64`, `include` and `share/python*` directories and its
+//!   `pyvenv.cfg` are bound, never the rest of it (`~/tools` next to
+//!   `~/tools/bin` keeps its own files out of the sandbox). A prefix with a
+//!   credential-like file at its top level, such as `.netrc` or `id_ed25519`,
+//!   is refused;
 //! - pip's own config (`PIP_CONFIG_FILE`, `~/.config/pip/pip.conf`,
 //!   `~/.pip/pip.conf`), since private indexes are configured there. Index
 //!   URLs in those files, and in `PIP_INDEX_URL` and `PIP_EXTRA_INDEX_URL`,
@@ -73,6 +78,25 @@ const CREDENTIAL_HOME_DIRS: &[&str] = &[
     ".password-store",
     ".mozilla",
     ".thunderbird",
+];
+
+/// The directories of a non-system interpreter prefix that are bound, at
+/// their own path. `share/python*` is added by `prefix_mounts`.
+const PREFIX_DIRS: &[&str] = &["bin", "lib", "lib64", "include"];
+
+/// Names at the top level of an interpreter prefix that mark it as holding
+/// credentials. Such a prefix is refused: a prefix is not bound whole, but its
+/// interpreter directories are, and a credential beside them would be left
+/// exposed to the build. Matched by `is_credential_entry`.
+const CREDENTIAL_ENTRY_NAMES: &[&str] = &[
+    ".netrc",
+    ".pypirc",
+    ".env",
+    ".git-credentials",
+    ".config",
+    ".ssh",
+    ".gnupg",
+    ".aws",
 ];
 
 /// Variables set explicitly inside the sandbox, so the host's values are not
@@ -243,21 +267,46 @@ fn bind_interpreter(
         check_prefix(program, &prefix, &host.home)?;
         prefixes.insert(prefix);
     }
-    // A prefix inside another needs no mount of its own.
-    let top: Vec<PathBuf> = prefixes
-        .iter()
-        .filter(|p| !prefixes.iter().any(|q| q != *p && p.starts_with(q)))
-        .cloned()
-        .collect();
+    // Every prefix is outside the system directories (see `interpreter_prefix`),
+    // so only its interpreter parts are bound, never the prefix itself: a
+    // prefix such as `~/tools` holds whatever else the user keeps there.
     let mut bin_dirs = Vec::new();
-    for prefix in &top {
-        a.ro_bind(prefix, prefix);
+    for prefix in &prefixes {
+        for mount in prefix_mounts(prefix) {
+            a.ro_bind(&mount, &mount);
+        }
         let bin = prefix.join("bin");
         if bin.is_dir() {
             bin_dirs.push(bin);
         }
     }
     Ok((exe, bin_dirs))
+}
+
+/// The parts of a prefix outside the system directories that the sandbox gets,
+/// each to be bound read-only at its own path: the interpreter's directories
+/// (`bin`, `lib`, `lib64`, `include`, `share/python*`) and `pyvenv.cfg`, as
+/// far as they exist. Nothing else at the top level of the prefix is bound.
+fn prefix_mounts(prefix: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = PREFIX_DIRS
+        .iter()
+        .map(|d| prefix.join(d))
+        .filter(|p| p.is_dir())
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(prefix.join("share")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.as_bytes().starts_with(b"python") && entry.path().is_dir() {
+                out.push(entry.path());
+            }
+        }
+    }
+    let cfg = prefix.join("pyvenv.cfg");
+    if cfg.is_file() {
+        out.push(cfg);
+    }
+    out.sort();
+    out
 }
 
 /// Find `program` the way a shell would: as given when it has a slash,
@@ -374,17 +423,47 @@ fn looks_like_interpreter_install(prefix: &Path) -> bool {
     has_interpreter && has_stdlib
 }
 
+/// Whether `name`, an entry at the top level of a prefix, looks like a
+/// credential: a netrc, a PyPI or git credential file, an SSH key, a PEM file,
+/// a `credentials` file, or one of the credential directories.
+fn is_credential_entry(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    CREDENTIAL_ENTRY_NAMES.contains(&name)
+        || CREDENTIAL_HOME_DIRS.contains(&name)
+        || name.starts_with(".env.")
+        || name.starts_with("id_")
+        || name.starts_with("credentials")
+        || name.ends_with(".pem")
+}
+
+/// Whether the top level of `prefix` holds an entry that `is_credential_entry`
+/// accepts. Only the top level is looked at.
+fn has_credential_entry(prefix: &Path) -> bool {
+    std::fs::read_dir(prefix)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| is_credential_entry(&e.file_name()))
+}
+
 fn check_prefix(program: &str, prefix: &Path, home: &Path) -> Result<(), SandboxError> {
-    let reason = sensitive_reason(prefix, home).or_else(|| {
-        // Under the configuration or cache directories only a virtualenv
-        // (which has a `pyvenv.cfg`) or an interpreter installation is a
-        // prefix of its own; anything else there may be a tool's data, config
-        // or keyring.
-        (under_sensitive_home_dir(prefix, home)
-            && !prefix.join("pyvenv.cfg").is_file()
-            && !looks_like_interpreter_install(prefix))
-        .then_some("it is inside a configuration or cache directory and is not a virtualenv or Python installation")
-    });
+    let reason = sensitive_reason(prefix, home)
+        .or_else(|| {
+            // Under the configuration or cache directories only a virtualenv
+            // (which has a `pyvenv.cfg`) or an interpreter installation is a
+            // prefix of its own; anything else there may be a tool's data, config
+            // or keyring.
+            (under_sensitive_home_dir(prefix, home)
+                && !prefix.join("pyvenv.cfg").is_file()
+                && !looks_like_interpreter_install(prefix))
+            .then_some("it is inside a configuration or cache directory and is not a virtualenv or Python installation")
+        })
+        .or_else(|| {
+            has_credential_entry(prefix)
+                .then_some("it holds a credential file or directory at its top level")
+        });
     match reason {
         None => Ok(()),
         Some(why) => Err(SandboxError::UnsafePrefix {
@@ -688,11 +767,14 @@ mod tests {
         for (flag, src, dst) in binds(&args) {
             assert!(flag.starts_with("--ro-bind"), "writable bind: {flag} {src}");
             assert!(
-                dst == venv || !dst.starts_with(&home),
+                dst.starts_with(&format!("{venv}/")) || dst == venv || !dst.starts_with(&home),
                 "{dst} is under the real home: {args:?}"
             );
             if src.starts_with(&home) {
-                assert_eq!(src, venv, "unexpected host path bound: {src}");
+                assert!(
+                    src.starts_with(&format!("{venv}/bin")),
+                    "unexpected host path bound: {src}"
+                );
             }
         }
         // The sandbox home is an empty tmpfs.
@@ -720,7 +802,7 @@ mod tests {
             assert!(flag.starts_with("--ro-bind"), "{flag} {src}");
             let known = ["/usr", "/bin", "/lib", "/lib64", "/sbin"].contains(&src.as_str())
                 || ETC_ENTRIES.contains(&src.as_str())
-                || src == venv;
+                || src.starts_with(&format!("{venv}/"));
             assert!(known, "unexpected bind {src} -> {dst}");
         }
         for never in ["/", "/etc", "/home", "/var", "/run", "/root", "/opt"] {
@@ -1093,7 +1175,126 @@ mod tests {
         host.path = bin.clone().into_os_string();
         let args = strs(&bwrap_args(&["python3", "-m", "pip"], &host).unwrap());
         let venv = f.home.join("venv").to_string_lossy().into_owned();
-        assert!(binds(&args).contains(&("--ro-bind".into(), venv.clone(), venv)));
+        // The venv's interpreter directory is bound, the venv itself is not.
+        let bin = format!("{venv}/bin");
+        let b = binds(&args);
+        assert!(b.contains(&("--ro-bind".into(), bin.clone(), bin)));
+        assert!(!b.iter().any(|(_, s, _)| s == &venv));
+    }
+
+    /// `~/tools` with `bin/pip` and a `.netrc` at its top level: the prefix
+    /// holds a credential, so it is refused, whatever the name.
+    #[test]
+    fn a_prefix_with_a_credential_at_its_top_level_is_refused() {
+        let mut f = fixture();
+        let tools = f.home.join("tools");
+        fs::create_dir_all(tools.join("bin")).unwrap();
+        fs::write(tools.join("bin/pip"), "#!/usr/bin/python3\n").unwrap();
+        f.host.path = tools.join("bin").into_os_string();
+        let files = [
+            ".netrc",
+            ".pypirc",
+            ".env",
+            ".env.prod",
+            ".git-credentials",
+            "id_ed25519",
+            "deploy.pem",
+            "credentials",
+            "credentials.json",
+        ];
+        for name in files {
+            fs::write(tools.join(name), "secret").unwrap();
+            let err = bwrap_args(&["pip"], &f.host).unwrap_err();
+            assert!(
+                matches!(err, SandboxError::UnsafePrefix { .. })
+                    && err.to_string().contains("top level"),
+                "{name}: {err}"
+            );
+            fs::remove_file(tools.join(name)).unwrap();
+        }
+        for dir in [".ssh", ".aws"] {
+            fs::create_dir_all(tools.join(dir)).unwrap();
+            let err = bwrap_args(&["pip"], &f.host).unwrap_err();
+            assert!(
+                matches!(err, SandboxError::UnsafePrefix { .. }),
+                "{dir}: {err}"
+            );
+            fs::remove_dir(tools.join(dir)).unwrap();
+        }
+        // Once the credential is gone the prefix is accepted again.
+        assert!(bwrap_args(&["pip"], &f.host).is_ok());
+    }
+
+    /// A prefix in the home directory is not bound whole: only its
+    /// interpreter directories are, and the user's own files stay out.
+    #[test]
+    fn a_prefix_in_the_home_binds_only_its_interpreter_parts() {
+        let mut f = fixture();
+        let tools = f.home.join("tools");
+        for d in [
+            "bin",
+            "lib/python3.12/site-packages",
+            "include/python3.12",
+            "share/python3.12",
+            "share/doc/tool",
+            "etc",
+        ] {
+            fs::create_dir_all(tools.join(d)).unwrap();
+        }
+        fs::write(tools.join("bin/pip"), "#!/usr/bin/python3\n").unwrap();
+        fs::write(tools.join("notes.txt"), "mine").unwrap();
+        f.host.path = tools.join("bin").into_os_string();
+
+        let args = strs(&bwrap_args(&["pip"], &f.host).unwrap());
+        let tools_s = tools.to_string_lossy().into_owned();
+        let mut ours: Vec<String> = binds(&args)
+            .into_iter()
+            .filter(|(_, s, _)| s.starts_with(&tools_s))
+            .map(|(flag, s, d)| {
+                assert_eq!(flag, "--ro-bind");
+                assert_eq!(s, d);
+                s
+            })
+            .collect();
+        ours.sort();
+        let expect: Vec<String> = ["bin", "include", "lib", "share/python3.12"]
+            .iter()
+            .map(|d| format!("{tools_s}/{d}"))
+            .collect();
+        assert_eq!(ours, expect);
+        assert!(!args
+            .iter()
+            .any(|a| a.ends_with("notes.txt") || a.ends_with("share/doc/tool")));
+    }
+
+    /// A venv with its `pyvenv.cfg` binds `bin`, `lib` and the config file, and
+    /// not the venv directory itself.
+    #[test]
+    fn a_venv_with_a_pyvenv_cfg_still_works() {
+        let f = fixture();
+        let venv = f.home.join("venv");
+        fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        fs::create_dir_all(venv.join("lib/python3.12/site-packages")).unwrap();
+        let args = build(&f);
+        let b = binds(&args);
+        let v = venv.to_string_lossy().into_owned();
+        for d in [
+            format!("{v}/bin"),
+            format!("{v}/lib"),
+            format!("{v}/pyvenv.cfg"),
+        ] {
+            assert!(
+                b.contains(&("--ro-bind".into(), d.clone(), d.clone())),
+                "{d} not bound: {b:?}"
+            );
+        }
+        assert!(!b.iter().any(|(_, s, _)| s == &v));
+        let path = setenvs(&args)
+            .into_iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v)
+            .unwrap();
+        assert!(path.starts_with(&format!("{v}/bin:")), "{path}");
     }
 
     #[test]
