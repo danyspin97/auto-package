@@ -11,7 +11,7 @@
 //! forwards a `(pkg, event)` pair into the render thread's channel.
 
 use std::collections::{HashMap, VecDeque};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
@@ -63,12 +63,19 @@ pub struct TuiController {
     tx: SyncSender<Msg>,
     /// Events dropped because the render thread's queue was full.
     dropped: std::sync::Arc<AtomicUsize>,
-    /// Package names the user typed into the TUI's `n` prompt. Handed out
+    /// Package requests from the TUI's `n` prompt and `r` key. Handed out
     /// once, via [`TuiController::take_add_requests`]; disconnects when the
     /// render thread exits, which is how the consumer learns the user quit.
     /// Only a run that accepts requests has `n` and `r` keys (see
     /// [`TuiController::new`]); for any other run nothing is ever sent.
-    add_rx: std::sync::Arc<std::sync::Mutex<Option<Receiver<String>>>>,
+    add_rx: std::sync::Arc<std::sync::Mutex<Option<Receiver<AddRequest>>>>,
+    /// The name each row was requested under, keyed by the row's RPM name.
+    /// Filled by the build (see [`TuiController::note_origin`]) and read when
+    /// a row is retried, since the RPM name is not what a build takes.
+    origins: std::sync::Arc<Mutex<HashMap<String, String>>>,
+    /// The error that ended the render loop early, if it did (see
+    /// [`TuiController::failure`]).
+    failure: std::sync::Arc<Mutex<Option<String>>>,
     /// Builds the run still owes: the root build until
     /// [`TuiController::work_finished`] is called for it, and each add request
     /// or retry from the time the TUI sends it until its build returns. The
@@ -114,13 +121,62 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// The terminal the render thread draws on, and the guard that restores it.
+struct Screen {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    _restore: TerminalGuard,
+}
+
+impl Screen {
+    /// Takes over the terminal, or fails having changed nothing that needs
+    /// undoing. Stdout must be a terminal: raw mode can succeed on
+    /// `/dev/tty` even when stdout is redirected, and then the TUI would
+    /// draw into a file. The guard is armed only once raw mode is on, so a
+    /// failure before that writes no escape sequences.
+    fn open() -> io::Result<Self> {
+        if !io::stdout().is_terminal() {
+            return Err(io::Error::other("stdout is not a terminal"));
+        }
+        enable_raw_mode()?;
+        let restore = TerminalGuard::new();
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+        // Without this, the alternate screen keeps whatever happened to be in its
+        // buffer when we switched to it (shell scrollback on terminals that mirror
+        // the primary buffer, previous-run leftovers on terminals that preserve
+        // the alt buffer across invocations). Ratatui's `draw` only sends diffs
+        // against its own previous buffer — not the terminal's — so cells we
+        // render as default (space + default style) silently keep that leftover
+        // content showing through. One hard clear up front wipes the slate.
+        terminal.clear()?;
+        Ok(Self {
+            terminal,
+            _restore: restore,
+        })
+    }
+}
+
+/// A request for a new root build, sent to the run by the TUI.
+pub enum AddRequest {
+    /// A package name or repository URL typed into the `n` prompt.
+    New(String),
+    /// A retry of the row with this key (its RPM name), sent under the name
+    /// the row was requested with (see [`TuiController::origin_of`]).
+    Retry(String),
+}
+
 struct Msg {
     pkg: Option<String>,
     event: Event,
 }
 
 impl TuiController {
-    /// Spawn the render thread and return a handle to feed it events.
+    /// Take over the terminal, spawn the render thread, and return a handle to
+    /// feed it events.
+    ///
+    /// Fails, with the terminal left as it was, when the TUI cannot be shown
+    /// (stdout is not a terminal, or raw mode or the alternate screen is
+    /// refused). The caller then runs without it, as a plain run.
     ///
     /// `memory` is only used for a Ctrl-C keypress inside the TUI — see
     /// `crate::handle_interrupt` for why the TUI cannot just rely on the
@@ -140,21 +196,87 @@ impl TuiController {
         let thread_work = work.clone();
         let settled = std::sync::Arc::new(AtomicBool::new(false));
         let thread_settled = settled.clone();
+        let failure = std::sync::Arc::new(Mutex::new(None));
+        let thread_failure = failure.clone();
         let add_tx = accepts_requests.then_some(add_tx);
+        // The render thread reports whether it could take the terminal over
+        // before it does anything else, so a failure comes back here, with
+        // nothing printed yet.
+        let (ready_tx, ready_rx) = sync_channel::<io::Result<()>>(1);
         let render = std::thread::spawn(move || {
-            if let Err(e) = run(rx, add_tx, thread_work, memory, scope, thread_settled) {
+            let screen = match Screen::open() {
+                Ok(screen) => screen,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            let _ = ready_tx.send(Ok(()));
+            if let Err(e) = run(
+                screen,
+                rx,
+                add_tx,
+                thread_work,
+                memory,
+                scope,
+                thread_settled,
+            ) {
                 eprintln!("TUI error: {e}");
+                *thread_failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
             }
         });
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let _ = render.join();
+                return Err(e);
+            }
+            Err(_) => {
+                let _ = render.join();
+                return Err(io::Error::other("the TUI thread ended before it started"));
+            }
+        }
         Ok(Self {
             tx,
             dropped: std::sync::Arc::new(AtomicUsize::new(0)),
             add_rx: std::sync::Arc::new(std::sync::Mutex::new(Some(add_rx))),
+            origins: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            failure,
             work,
             settled,
             idle: std::sync::Arc::new((Mutex::new(()), Condvar::new())),
             render: std::sync::Arc::new(Mutex::new(Some(render))),
         })
+    }
+
+    /// The error that ended the render loop before the run closed, if it did.
+    /// `None` when the TUI closed on its own terms, whether or not the run
+    /// settled. Read it after [`TuiController::wait_closed`].
+    pub fn failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Record the name `row` (an RPM name) was requested under, so a retry
+    /// can resend that name. The first name recorded for a row is kept.
+    pub fn note_origin(&self, row: &str, request: &str) {
+        self.origins
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(row.to_string())
+            .or_insert_with(|| request.to_string());
+    }
+
+    /// The name `row` was requested under, if one was recorded. Rows a
+    /// build did not start from a request (dependencies, for one) have none.
+    pub fn origin_of(&self, row: &str) -> Option<String> {
+        self.origins
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(row)
+            .cloned()
     }
 
     /// Whether the TUI closed with every package built (see [`run_is_done`]).
@@ -204,7 +326,7 @@ impl TuiController {
 
     /// Take the receiver for package names entered at runtime (`n` key).
     /// `None` after the first call. `recv` fails once the TUI has exited.
-    pub fn take_add_requests(&self) -> Option<Receiver<String>> {
+    pub fn take_add_requests(&self) -> Option<Receiver<AddRequest>> {
         self.add_rx.lock().ok()?.take()
     }
 
@@ -1129,43 +1251,22 @@ impl TuiState {
     }
 }
 
+/// Runs the event loop on an open `screen`. The screen's guard restores the
+/// terminal on every way out of this function — clean exit, a render or input
+/// error, or a panic unwinding through here. (Ctrl-C is the one exit path that
+/// does NOT come back through here at all — `crate::handle_interrupt` does its
+/// own equivalent teardown and then ends the process on the spot.)
 fn run(
+    mut screen: Screen,
     rx: Receiver<Msg>,
-    add_tx: Option<Sender<String>>,
+    add_tx: Option<Sender<AddRequest>>,
     work: std::sync::Arc<AtomicUsize>,
     memory: std::sync::Arc<MemorySink>,
     scope: RunScope,
     settled: std::sync::Arc<AtomicBool>,
 ) -> io::Result<()> {
-    // Installed before the fallible calls: `enable_raw_mode` succeeding and
-    // `EnterAlternateScreen` then failing must still restore the terminal.
-    // (Teardown is idempotent, so a guard after a failed first call is fine.)
-    let _terminal_guard = TerminalGuard::new();
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-
-    // However the event loop ends — clean exit, a render/input error, or a
-    // panic unwinding through here — raw mode and the alternate screen must
-    // be torn down. Left engaged, every line printed afterwards (including
-    // the error itself) lands inside the broken terminal state instead of
-    // the user's normal screen. The guard restores both on ANY exit path
-    // from this function. (Ctrl-C is the one exit path that does NOT come
-    // back through here at all — `crate::handle_interrupt` does its own
-    // equivalent teardown and then ends the process on the spot.)
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    // Without this, the alternate screen keeps whatever happened to be in its
-    // buffer when we switched to it (shell scrollback on terminals that mirror
-    // the primary buffer, previous-run leftovers on terminals that preserve
-    // the alt buffer across invocations). Ratatui's `draw` only sends diffs
-    // against its own previous buffer — not the terminal's — so cells we
-    // render as default (space + default style) silently keep that leftover
-    // content showing through. One hard clear up front wipes the slate.
-    terminal.clear()?;
-
     let result = event_loop(
-        &mut terminal,
+        &mut screen.terminal,
         rx,
         add_tx.as_ref(),
         &work,
@@ -1173,7 +1274,7 @@ fn run(
         scope,
         &settled,
     );
-    let _ = terminal.show_cursor();
+    let _ = screen.terminal.show_cursor();
     result
 }
 
@@ -1243,9 +1344,9 @@ fn over_hint(over: bool, settled: bool, accepts_requests: bool) -> Option<&'stat
 /// Hand `name` to the run as a new root build. It is counted as outstanding
 /// work before it is sent, so the run cannot look finished in the gap between
 /// the request leaving and its build starting. `false` if the run is gone.
-fn request_build(add_tx: &Sender<String>, work: &AtomicUsize, name: &str) -> bool {
+fn request_build(add_tx: &Sender<AddRequest>, work: &AtomicUsize, req: AddRequest) -> bool {
     work.fetch_add(1, Ordering::SeqCst);
-    let sent = add_tx.send(name.to_string()).is_ok();
+    let sent = add_tx.send(req).is_ok();
     if !sent {
         work.fetch_sub(1, Ordering::SeqCst);
     }
@@ -1255,7 +1356,7 @@ fn request_build(add_tx: &Sender<String>, work: &AtomicUsize, name: &str) -> boo
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     rx: Receiver<Msg>,
-    add_tx: Option<&Sender<String>>,
+    add_tx: Option<&Sender<AddRequest>>,
     work: &AtomicUsize,
     memory: &MemorySink,
     scope: RunScope,
@@ -1356,7 +1457,9 @@ fn event_loop(
                     PromptAction::Cancel => input = None,
                     PromptAction::Submit(name) => {
                         input = None;
-                        if add_tx.is_some_and(|tx| request_build(tx, work, &name)) {
+                        if add_tx.is_some_and(|tx| {
+                            request_build(tx, work, AddRequest::New(name.clone()))
+                        }) {
                             state.add_global_log(
                                 LogLevel::Info,
                                 format!("Queued {name} as a new root package"),
@@ -1480,10 +1583,9 @@ fn event_loop(
                 // Retry a package that failed with "No space left on
                 // device" (`PkgStatus::NoSpace`) once the user has freed
                 // some — re-sent through the same channel as the `n` add
-                // prompt, since from the build loop's side a retry and a
-                // freshly typed package name are the same request. Any
-                // other status is a no-op: there is nothing a disk cleanup
-                // would fix for a real spec defect.
+                // prompt, as a retry of this row. Any other status is a
+                // no-op: there is nothing a disk cleanup would fix for a
+                // real spec defect.
                 KeyCode::Char('r') => {
                     if let Some(add_tx) = add_tx
                         && let Some(name) = selected.as_ref()
@@ -1492,7 +1594,7 @@ fn event_loop(
                             .get(name.as_str())
                             .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested)
                     {
-                        if request_build(add_tx, work, name) {
+                        if request_build(add_tx, work, AddRequest::Retry(name.clone())) {
                             if let Some(p) = state.packages.get_mut(name.as_str()) {
                                 p.retry_requested = true;
                             }
@@ -3903,12 +4005,16 @@ mod run_end_tests {
     #[test]
     fn a_request_is_work_until_sent_and_is_released_if_the_run_is_gone() {
         let work = AtomicUsize::new(0);
-        let (add_tx, add_rx) = channel::<String>();
-        assert!(request_build(&add_tx, &work, "foo"));
+        let (add_tx, add_rx) = channel::<AddRequest>();
+        assert!(request_build(&add_tx, &work, AddRequest::New("foo".into())));
         assert_eq!(work.load(Ordering::SeqCst), 1);
-        assert_eq!(add_rx.recv().unwrap(), "foo");
+        assert!(matches!(add_rx.recv().unwrap(), AddRequest::New(n) if n == "foo"));
         drop(add_rx);
-        assert!(!request_build(&add_tx, &work, "bar"));
+        assert!(!request_build(
+            &add_tx,
+            &work,
+            AddRequest::Retry("bar".into())
+        ));
         assert_eq!(work.load(Ordering::SeqCst), 1);
     }
 }

@@ -314,19 +314,19 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     let run_dir = RunDir::allocate(&work_dir)?;
     let memory = Arc::new(MemorySink::new());
     // Declared before `tui_ctrl` so it drops last (see `Commands::Build`).
-    let _terminal_restore = a.tui.then(tui::TerminalGuard::new);
-    let tui_ctrl = if a.tui {
-        Some(tui::TuiController::new(
-            memory.clone(),
-            tui::RunScope {
-                project: branch_project.clone(),
-                targets: a.only.clone(),
-            },
-            false,
-        )?)
-    } else {
-        None
-    };
+    let mut _terminal_restore = a.tui.then(tui::TerminalGuard::new);
+    let tui_ctrl = crate::start_tui(
+        a.tui,
+        memory.clone(),
+        tui::RunScope {
+            project: branch_project.clone(),
+            targets: a.only.clone(),
+        },
+        false,
+    );
+    if tui_ctrl.is_none() {
+        _terminal_restore = None;
+    }
     ap_core::sink::set_quiet(tui_ctrl.is_some());
 
     let mut sinks: Vec<Box<dyn Reporter>> = Vec::new();
@@ -405,7 +405,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     match &ctx.tui_ctrl {
         Some(t) => {
             t.wait_closed();
-            crate::tui_run_exit(t.all_settled(), result, failures)
+            crate::tui_run_exit(t.all_settled(), t.failure(), result, failures)
         }
         None => {
             result?;

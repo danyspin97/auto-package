@@ -618,14 +618,27 @@ fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) -> color
 /// Any other run stays open until the user quits, and exits with the first
 /// error it has: the run's own, then the failed packages', or else the run
 /// ended before every package was built.
+///
+/// `tui_failure` is set when the render loop died before the run closed. No
+/// one was watching the run then, so it is judged by what its builds returned,
+/// as a plain run would be, instead of as an unsettled TUI run.
 fn tui_run_exit(
     settled: bool,
+    tui_failure: Option<String>,
     run: color_eyre::Result<()>,
     failures: Vec<String>,
 ) -> color_eyre::Result<()> {
     if settled {
         for line in settled_warnings(&run, &failures) {
             eprintln!("{line}");
+        }
+        return Ok(());
+    }
+    if let Some(e) = tui_failure {
+        eprintln!("warning: the TUI stopped before the run ended ({e})");
+        run?;
+        if !failures.is_empty() {
+            return Err(color_eyre::eyre::eyre!(failures.join("; ")));
         }
         return Ok(());
     }
@@ -647,6 +660,27 @@ fn settled_warnings(run: &color_eyre::Result<()>, failures: &[String]) -> Vec<St
         .into_iter()
         .chain(failures.iter().map(|f| format!("warning: {f}")))
         .collect()
+}
+
+/// The TUI for a run that asked for it, or `None` when it cannot be shown
+/// here (no terminal to take over). Then a warning says so, and the run goes
+/// on as a plain one, with text output and no `--tui`.
+fn start_tui(
+    enable: bool,
+    memory: Arc<MemorySink>,
+    scope: tui::RunScope,
+    accepts_requests: bool,
+) -> Option<tui::TuiController> {
+    if !enable {
+        return None;
+    }
+    match tui::TuiController::new(memory, scope, accepts_requests) {
+        Ok(tui) => Some(tui),
+        Err(e) => {
+            eprintln!("warning: cannot show the TUI ({e}); printing plain output instead");
+            None
+        }
+    }
 }
 
 /// Name of the per-project lock file, kept inside the project directory.
@@ -1112,7 +1146,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // in the user's shell. This main-thread guard runs on every
             // exit path (normal return, `?` early return, panic unwinding)
             // and the extra teardown is idempotent.
-            let _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
+            let mut _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
 
             // The TUI takes over the terminal, so text output is dropped in
             // favor of it; jsonl/memory logging are unaffected either way.
@@ -1120,18 +1154,18 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // through resolution/search code that don't go through a
             // `Reporter` at all — left unguarded they'd print straight over
             // the TUI's alternate screen.
-            let tui_ctrl = if enable_tui {
-                Some(tui::TuiController::new(
-                    memory.clone(),
-                    tui::RunScope {
-                        project: project.clone(),
-                        targets: vec![target.clone().unwrap_or_else(|| name.clone())],
-                    },
-                    true,
-                )?)
-            } else {
-                None
-            };
+            let tui_ctrl = start_tui(
+                enable_tui,
+                memory.clone(),
+                tui::RunScope {
+                    project: project.clone(),
+                    targets: vec![target.clone().unwrap_or_else(|| name.clone())],
+                },
+                true,
+            );
+            if tui_ctrl.is_none() {
+                _terminal_restore = None;
+            }
             ap_core::sink::set_quiet(tui_ctrl.is_some());
 
             let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
@@ -1207,68 +1241,99 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 std::thread::scope(|scope| {
                     if let Some(add_rx) = add_rx {
                         scope.spawn(move || {
-                            for raw in add_rx {
-                                scope.spawn({
-                                    let raw = raw.clone();
-                                    move || {
-                                        let (extra, extra_repo) = if looks_like_url(&raw) {
-                                            (repo_package_name(&raw), Some(raw.clone()))
-                                        } else {
-                                            (raw.clone(), None)
-                                        };
-                                        let r = validate_package_name(&extra)
-                                            .map_err(|e| color_eyre::eyre::eyre!(e))
-                                            .and_then(|()| {
-                                                catch_panic(|| {
-                                                    cmd_build(
-                                                        &extra,
-                                                        None,
-                                                        project,
-                                                        work_dir,
-                                                        state_root,
-                                                        rpms_dir,
-                                                        distro,
-                                                        arch,
-                                                        max_attempts,
-                                                        budget_usd,
-                                                        None,
-                                                        false, // force: reuse anything already built
-                                                        false, // regen
-                                                        no_agent,
-                                                        sem.clone(),
-                                                        false, // sweep
-                                                        extra_repo,
-                                                        source_urls.clone(),
-                                                        python_flavors.clone(),
-                                                        run_dir,
-                                                        reporter.clone(),
-                                                        base_reporter.clone(),
-                                                        tui_ctrl.clone(),
-                                                        None,
-                                                    )
+                            for req in add_rx {
+                                scope.spawn(move || {
+                                    // A retry is sent under the name its row was
+                                    // requested with. The row's own key is an RPM name,
+                                    // which a build cannot take back (`python-foo` is
+                                    // `foo` on PyPI).
+                                    let (raw, retry_of) = match req {
+                                        tui::AddRequest::New(name) => (Some(name), None),
+                                        tui::AddRequest::Retry(row) => (
+                                            tui_ctrl.as_ref().and_then(|t| t.origin_of(&row)),
+                                            Some(row),
+                                        ),
+                                    };
+                                    let label = raw
+                                        .clone()
+                                        .or_else(|| retry_of.clone())
+                                        .unwrap_or_default();
+                                    let r = match &raw {
+                                        None => Err(color_eyre::eyre::eyre!(
+                                            "no name was recorded for this package to retry it with"
+                                        )),
+                                        Some(raw) => {
+                                            let (extra, extra_repo) = if looks_like_url(raw) {
+                                                (repo_package_name(raw), Some(raw.clone()))
+                                            } else {
+                                                (raw.clone(), None)
+                                            };
+                                            validate_package_name(&extra)
+                                                .map_err(|e| color_eyre::eyre::eyre!(e))
+                                                .and_then(|()| {
+                                                    catch_panic(|| {
+                                                        cmd_build(
+                                                            &extra,
+                                                            None,
+                                                            project,
+                                                            work_dir,
+                                                            state_root,
+                                                            rpms_dir,
+                                                            distro,
+                                                            arch,
+                                                            max_attempts,
+                                                            budget_usd,
+                                                            None,
+                                                            false, // force: reuse anything already built
+                                                            false, // regen
+                                                            no_agent,
+                                                            sem.clone(),
+                                                            false, // sweep
+                                                            extra_repo,
+                                                            source_urls.clone(),
+                                                            python_flavors.clone(),
+                                                            run_dir,
+                                                            reporter.clone(),
+                                                            base_reporter.clone(),
+                                                            tui_ctrl.clone(),
+                                                            None,
+                                                        )
+                                                    })
                                                 })
-                                            });
-                                        reporter.report(&match r {
-                                            Ok(()) => Event::Progress {
-                                                step: None,
-                                                message: format!("{raw}: build finished"),
-                                            },
-                                            Err(e) => {
-                                                added_failures
-                                                    .lock()
-                                                    .unwrap_or_else(|p| p.into_inner())
-                                                    .push(format!("{raw}: {e:#}"));
-                                                Event::Warning {
-                                                    step: None,
-                                                    message: format!("{raw}: {e}"),
-                                                }
-                                            }
-                                        });
-                                        // Only now, with its last event reported, does the
-                                        // TUI stop counting this request as work.
-                                        if let Some(t) = tui_ctrl {
-                                            t.work_finished();
                                         }
+                                    };
+                                    reporter.report(&match &r {
+                                        Ok(()) => Event::Progress {
+                                            step: None,
+                                            message: format!("{label}: build finished"),
+                                        },
+                                        Err(e) => {
+                                            added_failures
+                                                .lock()
+                                                .unwrap_or_else(|p| p.into_inner())
+                                                .push(format!("{label}: {e:#}"));
+                                            Event::Warning {
+                                                step: None,
+                                                message: format!("{label}: {e}"),
+                                            }
+                                        }
+                                    });
+                                    // A retry that failed to start never reports its
+                                    // own row, which would leave the row marked as
+                                    // retrying for good. Report it failed here.
+                                    if let (Err(e), Some(row)) = (&r, retry_of) {
+                                        reporter.report(&Event::PackageFinished {
+                                            pkg: row,
+                                            version: String::new(),
+                                            outcome: PackageOutcome::Failed {
+                                                reason: format!("retry did not start: {e:#}"),
+                                            },
+                                        });
+                                    }
+                                    // Only now, with its last event reported, does the
+                                    // TUI stop counting this request as work.
+                                    if let Some(t) = tui_ctrl {
+                                        t.work_finished();
                                     }
                                 });
                             }
@@ -1361,12 +1426,11 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
 
             // Only the TUI takes add requests, so without it there are no
             // added failures to report.
-            if tui_ctrl.is_some() {
-                tui_run_exit(
-                    tui_ctrl.as_ref().is_some_and(|t| t.all_settled()),
-                    result,
-                    added_failures,
-                )?;
+            if let Some(t) = &tui_ctrl {
+                // A settled run closes itself after a grace period, so its
+                // verdict is only final once the TUI has closed.
+                t.wait_closed();
+                tui_run_exit(t.all_settled(), t.failure(), result, added_failures)?;
             } else {
                 result?;
             }
@@ -1468,19 +1532,19 @@ fn update_in_place(
     // exit kills it before its own terminal teardown runs, leaving
     // raw mode and the alternate screen stuck on). Declared BEFORE
     // `tui_ctrl` so it drops LAST.
-    let _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
-    let tui_ctrl = if enable_tui {
-        Some(tui::TuiController::new(
-            memory.clone(),
-            tui::RunScope {
-                project: project.clone(),
-                targets: only.to_vec(),
-            },
-            false,
-        )?)
-    } else {
-        None
-    };
+    let mut _terminal_restore = enable_tui.then(tui::TerminalGuard::new);
+    let tui_ctrl = start_tui(
+        enable_tui,
+        memory.clone(),
+        tui::RunScope {
+            project: project.clone(),
+            targets: only.to_vec(),
+        },
+        false,
+    );
+    if tui_ctrl.is_none() {
+        _terminal_restore = None;
+    }
     ap_core::sink::set_quiet(tui_ctrl.is_some());
 
     let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
@@ -1578,7 +1642,7 @@ fn update_in_place(
     match &tui_ctrl {
         Some(t) => {
             t.wait_closed();
-            tui_run_exit(t.all_settled(), result, Vec::new())?;
+            tui_run_exit(t.all_settled(), t.failure(), result, Vec::new())?;
         }
         None => result?,
     }
@@ -2286,6 +2350,9 @@ fn cmd_build(
             None => tagged,
         }
     };
+    // The name this build was requested under, before discovery below may
+    // turn it into a repository. A TUI retry resends it (see `tui_ctrl`).
+    let request_name = source_repo.clone().unwrap_or_else(|| name.to_string());
     // Resolve the version if it was not pinned. A repository has no package
     // index behind it, so "latest" comes from the forge's own release list.
     let pinned_version = version.map(str::to_string);
@@ -2412,6 +2479,9 @@ fn cmd_build(
         Some(own) if source_repo.is_some() => own.to_string(),
         _ => rpm_name,
     };
+    if let Some(t) = &tui_ctrl {
+        t.note_origin(&rpm_name, &request_name);
+    }
     let name = name.as_str();
     // The binary names a Python dependency may be published under, for the
     // search `update` does before building one (read once: it runs
@@ -3387,6 +3457,9 @@ fn cmd_build(
             }
 
             for (t, rpm_name) in &fresh {
+                if let Some(tc) = &tui_ctrl {
+                    tc.note_origin(rpm_name, &t.name);
+                }
                 reporter.report(&Event::TargetSelected {
                     pkg: rpm_name.clone(),
                     version: t.version.clone(),
@@ -3433,12 +3506,17 @@ fn cmd_build(
                     });
                     // Reported as soon as this package is done, not when the
                     // scheduler gets to its result, so a slower sibling never
-                    // holds back the row of one that already finished.
-                    r.report(&Event::PackageFinished {
-                        pkg: rpm_name.clone(),
-                        version: version.clone(),
-                        outcome: package_outcome(&result),
-                    });
+                    // holds back the row of one that already finished. The
+                    // report is itself caught: a panic in a reporter must not
+                    // skip the send below, or the scheduler waits on a result
+                    // that never comes (it keeps its own sender alive).
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        r.report(&Event::PackageFinished {
+                            pkg: rpm_name.clone(),
+                            version: version.clone(),
+                            outcome: package_outcome(&result),
+                        });
+                    }));
                     let _ = tx.send((rpm_name, version, result));
                 });
             }
@@ -4041,10 +4119,29 @@ mod tests {
     fn a_settled_tui_run_exits_zero_even_after_failures() {
         let failed = || Err(color_eyre::eyre::eyre!("boom"));
         let lines = || vec!["a: boom".to_string(), "b: boom".to_string()];
-        assert!(super::tui_run_exit(true, failed(), Vec::new()).is_ok());
-        assert!(super::tui_run_exit(true, Ok(()), lines()).is_ok());
-        assert!(super::tui_run_exit(true, failed(), lines()).is_ok());
-        assert!(super::tui_run_exit(true, Ok(()), Vec::new()).is_ok());
+        assert!(super::tui_run_exit(true, None, failed(), Vec::new()).is_ok());
+        assert!(super::tui_run_exit(true, None, Ok(()), lines()).is_ok());
+        assert!(super::tui_run_exit(true, None, failed(), lines()).is_ok());
+        assert!(super::tui_run_exit(true, None, Ok(()), Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn a_tui_that_died_mid_run_is_judged_by_its_builds() {
+        let dead = || Some("render failed".to_string());
+        // Every build succeeded: the run is a success, not an unsettled TUI run.
+        assert!(super::tui_run_exit(false, dead(), Ok(()), Vec::new()).is_ok());
+        // The root or an added package failed: that is the exit.
+        let err =
+            super::tui_run_exit(false, dead(), Ok(()), vec!["a: first".to_string()]).unwrap_err();
+        assert_eq!(format!("{err}"), "a: first");
+        let err = super::tui_run_exit(
+            false,
+            dead(),
+            Err(color_eyre::eyre::eyre!("root failed")),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(format!("{err}"), "root failed");
     }
 
     #[test]
@@ -4065,6 +4162,7 @@ mod tests {
     fn an_unsettled_tui_run_exits_with_its_own_error_first() {
         let err = super::tui_run_exit(
             false,
+            None,
             Err(color_eyre::eyre::eyre!("root failed")),
             vec!["added failed".to_string()],
         )
@@ -4073,6 +4171,7 @@ mod tests {
 
         let err = super::tui_run_exit(
             false,
+            None,
             Ok(()),
             vec!["a: first".to_string(), "b: second".to_string()],
         )
@@ -4082,7 +4181,7 @@ mod tests {
 
     #[test]
     fn an_unsettled_tui_run_without_errors_says_it_ended_early() {
-        let err = super::tui_run_exit(false, Ok(()), Vec::new()).unwrap_err();
+        let err = super::tui_run_exit(false, None, Ok(()), Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "the run ended before every package was built"
