@@ -22,7 +22,8 @@
 //! Cross-flavor resolution (python311 vs python313) requires the actual
 //! interpreter binaries to be installed and a separate run per flavor.
 
-use std::ffi::OsString;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -107,10 +108,11 @@ fn cache_dir() -> std::path::PathBuf {
 /// Get the cache file path for a specific package resolution.
 ///
 /// Delegates to [`cache_key`], which also folds in the host interpreter,
-/// platform and resolve mode so a cache populated under one Python/arch or
-/// one mode (sdists allowed or not) is not reused under another. The old
-/// narrow key (`<name>-<version>.json`) is simply never matched; the existing
-/// TTL prunes those stale files.
+/// platform, resolve mode and the environment pip inherits, so a cache
+/// populated under one Python/arch, one mode (sdists allowed or not) or one
+/// index is not reused under another. The old narrow key
+/// (`<name>-<version>.json`) is simply never matched; the existing TTL prunes
+/// those stale files.
 ///
 /// `python` is the version string of the interpreter whose pip produced the
 /// closure (see [`resolve`]), not necessarily the host's.
@@ -121,12 +123,14 @@ fn cache_path(
     python: &str,
     mode: ResolveMode,
 ) -> std::path::PathBuf {
+    let vars: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     dir.join(cache_key(
         name,
         version,
         python,
         &host_platform(),
         mode,
+        &vars,
     ))
 }
 
@@ -142,12 +146,18 @@ fn cache_path(
 /// The resolve mode goes in too: a wheels-only closure lacks sdist-only
 /// releases and dependencies, and a closure resolved with sdists may contain
 /// releases a wheels-only run must reject, so the modes never share an entry.
+///
+/// `vars` is the environment pip would inherit. Its index, config, CA and
+/// proxy variables (see [`RESOLUTION_ENV`]) and the config files pip reads
+/// change which closure comes back, so they are folded in too. Only digests
+/// go into the hash: no URL, credential or path is stored or printed.
 pub(crate) fn cache_key(
     name: &str,
     version: Option<&str>,
     python: &str,
     platform: &str,
     mode: ResolveMode,
+    vars: &BTreeMap<OsString, OsString>,
 ) -> String {
     let norm_name = normalize_name(name);
     let mut hasher = Sha256::new();
@@ -162,6 +172,19 @@ pub(crate) fn cache_key(
     hasher.update(norm_name.as_bytes());
     hasher.update([0u8]);
     hasher.update(version.unwrap_or("").as_bytes());
+    // Fixed order (the constant's, then the config slots), so the same inputs
+    // always hash the same. An unset variable and an empty one differ.
+    for var in RESOLUTION_ENV {
+        hasher.update(var.as_bytes());
+        hasher.update([0u8]);
+        let value = vars
+            .get(OsStr::new(var))
+            .map(|v| sha256(v.as_encoded_bytes()));
+        hash_field(&mut hasher, value.as_deref());
+    }
+    for config in config_digests(vars) {
+        hash_field(&mut hasher, config.as_deref());
+    }
     let digest = hex::encode(hasher.finalize());
     let short = &digest[..12];
     let base = match version {
@@ -169,6 +192,75 @@ pub(crate) fn cache_key(
         None => format!("{}-latest", filename_safe(&norm_name)),
     };
     format!("{base}-{short}.json")
+}
+
+/// Environment variables pip inherits that can change what it resolves: the
+/// index, extra indexes, trusted hosts and config file, and the CA and proxy
+/// settings that decide which server answers. Every name here must also be in
+/// [`PIP_ENV_ALLOWLIST`], or pip never sees it.
+const RESOLUTION_ENV: &[&str] = &[
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_TRUSTED_HOST",
+    "PIP_CONFIG_FILE",
+    "PIP_CERT",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+/// Digests of the pip config files pip can read, in a fixed order:
+/// `PIP_CONFIG_FILE`, `$XDG_CONFIG_HOME/pip/pip.conf`, `~/.config/pip/pip.conf`
+/// and `~/.pip/pip.conf`. These are the candidates `pip_sandbox` binds. A
+/// candidate that is unset, relative or not a regular file is `None`.
+fn config_digests(vars: &BTreeMap<OsString, OsString>) -> Vec<Option<Vec<u8>>> {
+    let path = |key: &str| {
+        vars.get(OsStr::new(key))
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let home = path("HOME").unwrap_or_else(|| "/nonexistent".into());
+    let xdg = path("XDG_CONFIG_HOME").filter(|p| p.is_absolute());
+    let candidates = [
+        path("PIP_CONFIG_FILE").filter(|p| p.is_absolute()),
+        xdg.map(|x| x.join("pip/pip.conf")),
+        Some(home.join(".config/pip/pip.conf")),
+        Some(home.join(".pip/pip.conf")),
+    ];
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let file = candidate.filter(|p| p.is_file())?;
+            std::fs::read(file).ok().map(|bytes| sha256(&bytes))
+        })
+        .collect()
+}
+
+/// SHA-256 of `bytes`, as raw digest bytes.
+fn sha256(bytes: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().to_vec()
+}
+
+/// Feed one optional digest into `hasher`, tagged so `None` and `Some` never
+/// produce the same bytes. Digests are fixed-length, so no framing is needed.
+fn hash_field(hasher: &mut Sha256, field: Option<&[u8]>) {
+    match field {
+        Some(bytes) => {
+            hasher.update([1u8]);
+            hasher.update(bytes);
+        }
+        None => hasher.update([0u8]),
+    }
 }
 
 /// PEP 503 normalisation: runs of `-`, `_`, `.` become one `-`, lowercased.
@@ -1095,6 +1187,7 @@ mod tests {
             "Python 3.13.1",
             "linux-x86_64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         assert!(key.starts_with("httpx-0.28.1-"), "{key}");
         assert!(key.ends_with(".json"), "{key}");
@@ -1113,6 +1206,7 @@ mod tests {
             "Python 3.13.1",
             "linux-x86_64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         let b = cache_key(
             "httpx",
@@ -1120,6 +1214,7 @@ mod tests {
             "Python 3.14.0",
             "linux-x86_64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         assert_ne!(a, b, "interpreter must change the cache key");
     }
@@ -1132,6 +1227,7 @@ mod tests {
             "Python 3.13.1",
             "linux-x86_64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         let b = cache_key(
             "httpx",
@@ -1139,6 +1235,7 @@ mod tests {
             "Python 3.13.1",
             "linux-aarch64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         assert_ne!(a, b, "platform must change the cache key");
     }
@@ -1151,6 +1248,7 @@ mod tests {
             "Python 3.13.1",
             "linux-x86_64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         let b = cache_key(
             "Httpx",
@@ -1158,6 +1256,7 @@ mod tests {
             "Python 3.13.1",
             "linux-x86_64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         assert_eq!(a, b);
     }
@@ -1172,6 +1271,7 @@ mod tests {
             "p",
             "l",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         let b = cache_key(
             "markupsafe",
@@ -1179,14 +1279,29 @@ mod tests {
             "p",
             "l",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         assert_eq!(a, b);
     }
 
     #[test]
     fn cache_key_distinguishes_latest_from_pinned() {
-        let latest = cache_key("httpx", None, "p", "l", ResolveMode::Sandboxed);
-        let pinned = cache_key("httpx", Some("0.28.1"), "p", "l", ResolveMode::Sandboxed);
+        let latest = cache_key(
+            "httpx",
+            None,
+            "p",
+            "l",
+            ResolveMode::Sandboxed,
+            &BTreeMap::new(),
+        );
+        let pinned = cache_key(
+            "httpx",
+            Some("0.28.1"),
+            "p",
+            "l",
+            ResolveMode::Sandboxed,
+            &BTreeMap::new(),
+        );
         assert_ne!(latest, pinned);
         assert!(latest.contains("httpx-latest-"), "{latest}");
     }
@@ -1199,13 +1314,146 @@ mod tests {
             "p",
             "l",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         assert!(!key.contains('/'), "{key}");
         assert!(!key.contains(".."), "{key}");
-        let a = cache_key("Foo_Bar.baz", Some("1.0"), "p", "l", ResolveMode::Sandboxed);
-        let b = cache_key("foo-bar-baz", Some("1.0"), "p", "l", ResolveMode::Sandboxed);
+        let a = cache_key(
+            "Foo_Bar.baz",
+            Some("1.0"),
+            "p",
+            "l",
+            ResolveMode::Sandboxed,
+            &BTreeMap::new(),
+        );
+        let b = cache_key(
+            "foo-bar-baz",
+            Some("1.0"),
+            "p",
+            "l",
+            ResolveMode::Sandboxed,
+            &BTreeMap::new(),
+        );
         assert_eq!(a, b);
         assert!(a.starts_with("foo-bar-baz-1.0-"), "{a}");
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> BTreeMap<OsString, OsString> {
+        pairs
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect()
+    }
+
+    #[test]
+    fn cache_key_changes_when_the_index_url_changes() {
+        // Resolving against mirror A and then mirror B must not share an entry.
+        let key = |idx: &str| {
+            cache_key(
+                "httpx",
+                None,
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                &env_of(&[("PIP_INDEX_URL", idx)]),
+            )
+        };
+        let a = key("https://mirror-a.invalid/simple");
+        let b = key("https://mirror-b.invalid/simple");
+        assert_ne!(a, b, "PIP_INDEX_URL must change the cache key");
+        assert_eq!(a, key("https://mirror-a.invalid/simple"));
+    }
+
+    #[test]
+    fn every_resolution_variable_changes_the_cache_key() {
+        let key = |vars: &BTreeMap<OsString, OsString>| {
+            cache_key(
+                "httpx",
+                Some("0.28.1"),
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                vars,
+            )
+        };
+        let unset = key(&BTreeMap::new());
+        for var in RESOLUTION_ENV {
+            let set = key(&env_of(&[(*var, "https://example.invalid/x")]));
+            assert_ne!(unset, set, "{var} must change the cache key");
+        }
+    }
+
+    #[test]
+    fn unset_resolution_variables_give_a_stable_key() {
+        let key = || {
+            cache_key(
+                "httpx",
+                None,
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                &BTreeMap::new(),
+            )
+        };
+        assert_eq!(key(), key());
+    }
+
+    #[test]
+    fn index_credentials_are_hashed_not_printed() {
+        let key = cache_key(
+            "httpx",
+            None,
+            "Python 3.13.1",
+            "linux-x86_64",
+            ResolveMode::Sandboxed,
+            &env_of(&[("PIP_INDEX_URL", "https://user:hunter2@idx.invalid/simple")]),
+        );
+        assert!(!key.contains("hunter2"), "{key}");
+        assert!(!key.contains("idx.invalid"), "{key}");
+    }
+
+    #[test]
+    fn the_content_of_the_pip_config_file_changes_the_cache_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("private-pip.conf");
+        let conf_path = conf.to_str().unwrap();
+        let key = |body: &str| {
+            std::fs::write(&conf, body).unwrap();
+            cache_key(
+                "httpx",
+                None,
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                &env_of(&[("PIP_CONFIG_FILE", conf_path)]),
+            )
+        };
+        let a = key("[global]\nindex-url = https://a.invalid/simple\n");
+        let b = key("[global]\nindex-url = https://b.invalid/simple\n");
+        assert_ne!(a, b, "config content must change the cache key");
+        assert_eq!(a, key("[global]\nindex-url = https://a.invalid/simple\n"));
+    }
+
+    #[test]
+    fn the_user_pip_conf_under_home_changes_the_cache_key() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_str().unwrap();
+        let conf_dir = home.path().join(".config/pip");
+        std::fs::create_dir_all(&conf_dir).unwrap();
+        let key = |body: &str| {
+            std::fs::write(conf_dir.join("pip.conf"), body).unwrap();
+            cache_key(
+                "httpx",
+                None,
+                "Python 3.13.1",
+                "linux-x86_64",
+                ResolveMode::Sandboxed,
+                &env_of(&[("HOME", home_str)]),
+            )
+        };
+        let a = key("[global]\nextra-index-url = https://a.invalid/simple\n");
+        let b = key("[global]\nextra-index-url = https://b.invalid/simple\n");
+        assert_ne!(a, b, "~/.config/pip/pip.conf must change the cache key");
     }
 
     #[test]
@@ -1260,6 +1508,7 @@ mod tests {
             "Python 3.13.1",
             "linux-x86_64",
             ResolveMode::Sandboxed,
+            &BTreeMap::new(),
         );
         assert_ne!(old, new);
     }
@@ -1276,6 +1525,7 @@ mod tests {
                 "Python 3.13.1",
                 "linux-x86_64",
                 mode,
+                &BTreeMap::new(),
             )
         };
         let sandboxed = key(ResolveMode::Sandboxed);
