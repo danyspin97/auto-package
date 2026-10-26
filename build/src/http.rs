@@ -200,7 +200,10 @@ fn download_once(url: &str, dest: &Path) -> Result<Download, Attempt> {
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(std::fs::Permissions::from_mode(0o644))
-            .map_err(local)?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&part);
+                local(e)
+            })?;
     }
     let mut body = resp.into_body();
     let reader = body.with_config().limit(MAX_DOWNLOAD).reader();
