@@ -2185,16 +2185,28 @@ impl BranchError {
     }
 }
 
-/// What a failed project lookup while branching means. A transient failure
-/// (network, timeout, OBS 5xx) fails the stage. Any other refusal (403, 404,
-/// forbidden, not found) means that project does not carry the package: a
-/// warning, and the lookup counts as empty.
-fn absent_unless_transient<T: Default>(
+/// Whether `name` is a plain package name, safe to write into a BuildRequires
+/// line: it starts with a letter or digit and holds only letters, digits and
+/// `._+-` after that.
+fn is_provider_stem(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+}
+
+/// What a failed project lookup while branching means. Only a clear "no such
+/// project" (a 404, or a 403 on a path project we do not own) means that
+/// project does not carry the package: a warning, and the lookup counts as
+/// empty. Everything else fails the stage, transient or not: a 401, a failed
+/// launch of `osc`, a timeout, an unrecognised error. Packaging from scratch
+/// behind an unanswered lookup would replace a package the distro ships.
+fn lookup_failure<T: Default>(
     reason: String,
     transient: bool,
+    path_project: bool,
     emit: Emit<'_>,
 ) -> Result<T, BranchError> {
-    if transient {
+    if transient || !osc::lookup_says_absent(&reason, path_project) {
         return Err(BranchError::Failed { reason, transient });
     }
     emit.reporter.report(&Event::Warning {
@@ -2213,7 +2225,7 @@ fn branch_from_linked(
         Ok(own) => own,
         Err(reason) => {
             let transient = osc::text_is_transient(&reason);
-            absent_unless_transient(reason, transient, emit)?
+            lookup_failure(reason, transient, false, emit)?
         }
     };
     let key = osc::fuzzy_key(rpm_name);
@@ -2222,14 +2234,14 @@ fn branch_from_linked(
     }
     let paths = match osc::get_project_repo_paths(&config.project, emit) {
         Ok(paths) => paths,
-        Err(e) => absent_unless_transient(e.to_string(), e.is_transient(), emit)?,
+        Err(e) => lookup_failure(e.to_string(), e.is_transient(), false, emit)?,
     };
     for (path_project, _repo) in paths {
         let listing = match osc::try_list_project_packages(&path_project, emit) {
             Ok(listing) => listing,
             Err(reason) => {
                 let transient = osc::text_is_transient(&reason);
-                absent_unless_transient(reason, transient, emit)?
+                lookup_failure(reason, transient, true, emit)?
             }
         };
         let Some(shipped) = listing.iter().find(|p| osc::fuzzy_key(p) == key) else {
@@ -5171,7 +5183,18 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                             validate_step.finish(StepOutcome::Failed);
                             Ok(Flow::Retry)
                         }
-                        Err(PipelineResult::Failed { reason, .. }) => {
+                        // Only a turn that could not run or gave no usable fix is
+                        // a warning. Budget exhaustion, cancellation and the apply
+                        // gate's refusals still fail the package below.
+                        Err(PipelineResult::Failed { reason, kind, .. })
+                            if matches!(
+                                kind,
+                                FailureKind::AgentUnavailable
+                                    | FailureKind::RateLimited
+                                    | FailureKind::Busy
+                                    | FailureKind::Transient
+                            ) =>
+                        {
                             // Style is not worth failing a package that builds:
                             // the failure is a warning and the package proceeds.
                             ap_core::diag!(
@@ -5748,6 +5771,17 @@ fn unresolvable_deps_round(
             let mut bare = c.providers.iter().map(|p| osc::strip_rpm_prefix(p));
             let Some(first) = bare.next() else { continue };
             if first.is_empty() || !bare.all(|b| b == first) {
+                continue;
+            }
+            // The name goes into a BuildRequires line verbatim: OBS text is not
+            // trusted to hold only a package name.
+            if !is_provider_stem(first) {
+                reporter.report(&Event::Warning {
+                    step: Some(build_step.id),
+                    message: format!(
+                        "not adding a BuildRequires for the OBS provider {first:?}: not a package name"
+                    ),
+                });
                 continue;
             }
             let req = format!("%{{python_module {first}}}");
@@ -17197,7 +17231,7 @@ mod hygiene_tests {
     }
 
     #[test]
-    fn a_project_lookup_failure_fails_the_branch_only_when_transient() {
+    fn a_project_lookup_failure_is_absent_only_when_the_project_says_so() {
         #[derive(Default)]
         struct Warnings(std::sync::Mutex<usize>);
         impl Reporter for Warnings {
@@ -17208,32 +17242,69 @@ mod hygiene_tests {
             }
         }
         let rec = Warnings::default();
-        // A 404 or 403 means the project does not carry the package.
-        let absent: Result<Vec<String>, BranchError> = absent_unless_transient(
-            "osc ls exited 1: HTTP Error 404: Not Found".to_string(),
-            osc::text_is_transient("osc ls exited 1: HTTP Error 404: Not Found"),
+        let lookup = |reason: &str, path_project: bool| -> Result<Vec<String>, BranchError> {
+            lookup_failure(
+                reason.to_string(),
+                osc::text_is_transient(reason),
+                path_project,
+                Emit::run(&rec),
+            )
+        };
+        let is_failed = |r: &Result<Vec<String>, BranchError>, transient: bool| {
+            matches!(r, Err(BranchError::Failed { transient: t, .. }) if *t == transient)
+        };
+
+        // A 404 means the project does not carry the package, for our own project too.
+        let r = lookup("osc ls exited 1: HTTP Error 404: Not Found", false);
+        assert!(matches!(r, Ok(ref v) if v.is_empty()));
+        assert_eq!(*rec.0.lock().unwrap(), 1);
+        // A 403 means so only for a path project; our own 403 is a failure.
+        let r = lookup("osc ls exited 1: HTTP Error 403: Forbidden", true);
+        assert!(matches!(r, Ok(ref v) if v.is_empty()));
+        assert_eq!(*rec.0.lock().unwrap(), 2);
+        let r = lookup("osc ls exited 1: HTTP Error 403: Forbidden", false);
+        assert!(is_failed(&r, false));
+        assert_eq!(*rec.0.lock().unwrap(), 2);
+        // An unknown project is absent too.
+        assert!(matches!(lookup("unknown project foo", false), Ok(ref v) if v.is_empty()));
+
+        // A 401, an "unauthorized" text, an unrecognised error: all failures.
+        for reason in [
+            "osc ls exited 1: HTTP Error 401: Unauthorized",
+            "osc ls exited 1: unauthorized: check your credentials",
+            "osc ls exited 1: something nobody has seen before",
+        ] {
+            assert!(is_failed(&lookup(reason, true), false), "{reason}");
+            assert!(is_failed(&lookup(reason, false), false), "{reason}");
+        }
+        // A failed launch of osc is a failure, not an absent project.
+        let spawn = osc::Error::Launch(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        ));
+        let r: Result<Vec<String>, BranchError> = lookup_failure(
+            spawn.to_string(),
+            spawn.is_transient(),
+            true,
             Emit::run(&rec),
         );
-        assert!(matches!(absent, Ok(ref v) if v.is_empty()));
-        assert_eq!(*rec.0.lock().unwrap(), 1);
-        assert!(!osc::text_is_transient("HTTP Error 403: Forbidden"));
-        // A 503 or a timeout fails the stage.
+        assert!(is_failed(&r, false));
+        // A 503 or a timeout fails the stage as transient.
         for reason in [
             "osc ls exited 1: HTTP Error 503: Service Unavailable",
             "timed out",
         ] {
-            let failed: Result<Vec<String>, BranchError> = absent_unless_transient(
-                reason.to_string(),
-                osc::text_is_transient(reason),
-                Emit::run(&rec),
-            );
-            assert!(matches!(
-                failed,
-                Err(BranchError::Failed {
-                    transient: true,
-                    ..
-                })
-            ));
+            assert!(is_failed(&lookup(reason, true), true), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_provider_name_must_be_a_plain_package_name() {
+        for ok in ["nvidia-nccl-cu13", "python313-foo", "a.b_c+d", "9lives"] {
+            assert!(is_provider_stem(ok), "{ok}");
+        }
+        for bad in ["", "-foo", ".foo", "foo bar", "foo}\nBuildRequires: x", "a%{x}", "foo/bar"] {
+            assert!(!is_provider_stem(bad), "{bad:?}");
         }
     }
 

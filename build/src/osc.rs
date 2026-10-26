@@ -147,6 +147,28 @@ pub fn text_is_transient(text: &str) -> bool {
         || http_status(text).is_some_and(|c| c == 408 || c >= 500)
 }
 
+/// Whether a failed project lookup answers that the project does not carry the
+/// package: a 404 (no such project), or a 403 when `path_project` is set (a
+/// project we only read from may refuse us). Anything else, a 401 or
+/// "unauthorized" included, a launch failure, a timeout or an unrecognised
+/// error, is a failure to look, not an answer.
+pub fn lookup_says_absent(text: &str, path_project: bool) -> bool {
+    if text_is_transient(text) {
+        return false;
+    }
+    match http_status(text) {
+        Some(404) => true,
+        Some(403) => path_project,
+        Some(_) => false,
+        None => {
+            let t = text.to_lowercase();
+            t.contains("unknown project")
+                || t.contains("project not found")
+                || t.contains("no such project")
+        }
+    }
+}
+
 /// Whether `word` is in `text` as a word of its own: `Error: timeout` has it,
 /// `test_timeout_is_set` (a test name in a failing log) does not.
 fn contains_word(text: &str, word: &str) -> bool {
