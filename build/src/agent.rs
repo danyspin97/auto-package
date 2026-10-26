@@ -4204,6 +4204,9 @@ fn turn_denied_tools(workspace: &std::path::Path, checkout: Option<&std::path::P
             denied.push(format!("{tool}({p}/.claude/**)"));
             denied.push(format!("{tool}({p}/.mcp.json)"));
             denied.push(format!("{tool}({p}/.claude.json)"));
+            // Project settings in any subdirectory (`settings.json` and
+            // `settings.local.json`), not only the root `.claude/`.
+            denied.push(format!("{tool}({p}/**/.claude/settings*.json)"));
         }
     }
     denied.extend(rpm_denied_tools());
@@ -4219,6 +4222,12 @@ fn turn_denied_tools(workspace: &std::path::Path, checkout: Option<&std::path::P
 /// metacharacters are denied: `ls -d /usr/local/cuda-*` and the quoted
 /// `zypper search 'python313-*<stem>*'` form stay allowed, and `*` is not
 /// denied for that reason.
+///
+/// The chaining and redirection characters (`> < ; & ( ) !`) are denied too:
+/// `ls <workspace> > ~/.bashrc` would write outside the turn's write set, and
+/// the engine's handling of redirection targets is not something to rely on.
+/// `|` is denied for every grant except `readelf`, because the prompt documents
+/// `readelf -d <lib> | grep NEEDED` (`grep` has no grant of its own).
 fn read_tool_denied_tools() -> Vec<String> {
     let prefixes = [
         "ls",
@@ -4230,11 +4239,19 @@ fn read_tool_denied_tools() -> Vec<String> {
     ];
     let patterns = [
         "*{*", "*}*", "*[*", "*]*", "*?*", "*`*", "*$*", "*..*", "*~*", "*\\*", "*\t*", "*\n*",
+        "*>*", "*<*", "*;*", "*&*", "*(*", "*)*", "*!*",
     ];
-    prefixes
+    let mut denied: Vec<String> = prefixes
         .iter()
         .flat_map(|p| patterns.iter().map(move |pat| format!("Bash({p} {pat})")))
-        .collect()
+        .collect();
+    denied.extend(
+        prefixes
+            .iter()
+            .filter(|p| **p != "readelf")
+            .map(|p| format!("Bash({p} *|*)")),
+    );
+    denied
 }
 
 /// Denies that win over the quilt grants in [`CHECKOUT_TOOLS`]. A grant's
@@ -6974,16 +6991,38 @@ mod tests {
             "zypper info",
         ] {
             for pat in [
-                "*{*", "*}*", "*[*", "*]*", "*?*", "*`*", "*$*", "*..*", "*~*",
+                "*{*", "*}*", "*[*", "*]*", "*?*", "*`*", "*$*", "*..*", "*~*", "*>*", "*<*",
+                "*;*", "*&*", "*(*", "*)*", "*!*",
             ] {
                 let rule = format!("Bash({prefix} {pat})");
                 assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
             }
+            // `|` is denied for every grant but readelf.
+            let pipe = format!("Bash({prefix} *|*)");
+            assert_eq!(
+                list.contains(&pipe.as_str()),
+                prefix != "readelf",
+                "pipe rule for {prefix}: {denied}"
+            );
         }
         // The grants stay as they were.
         let tools = turn_allowed_tools(Task::FixAfterBuild, ws, None);
         assert!(tools.contains("Bash(ls *)"));
         assert!(tools.contains("Bash(osc cat *)"));
+    }
+
+    #[test]
+    fn settings_files_in_any_directory_are_denied_for_edit_and_write() {
+        let ws = std::path::Path::new("/srv/ws");
+        let co = std::path::Path::new("/srv/ws/checkout");
+        let denied = turn_denied_tools(ws, Some(co));
+        let list: Vec<&str> = denied.split(',').collect();
+        for tool in ["Edit", "Write"] {
+            for root in ["//srv/ws", "//srv/ws/checkout"] {
+                let rule = format!("{tool}({root}/**/.claude/settings*.json)");
+                assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+            }
+        }
     }
 
     #[test]
@@ -7006,6 +7045,8 @@ mod tests {
             "ls -d /usr/local/cuda-*",
             "ls /srv/ws/checkout/src",
             "readelf -d /usr/lib64/libfoo.so",
+            "readelf -d /usr/lib64/libfoo.so | grep NEEDED",
+            "readelf -d /usr/lib64/libfoo.so | grep -E 'RPATH|RUNPATH'",
             "osc status",
             "osc cat openSUSE:Factory python-foo python-foo.spec",
             "zypper search -s --match-exact python313-foo",
