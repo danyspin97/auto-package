@@ -1459,12 +1459,23 @@ fn post_process(
                 // A newline in a TOML string would open new spec lines, and a
                 // `%` or `{` would expand: only a plain PEP 508 requirement
                 // goes in, and a bad one is dropped without failing the spec.
-                // A marker is not written (a BuildRequires cannot carry one).
-                let Some(req) = ap_ecosystem::sdist::build_requirement_part(req) else {
-                    tracing::warn!(
-                        "dropping build requirement {req:?}: not a plain PEP 508 requirement"
-                    );
-                    continue;
+                // A marker is not written (a BuildRequires cannot carry one);
+                // one false for the build target (Linux, CPython) is not written
+                // at all.
+                let req = match ap_ecosystem::sdist::build_requirement_part(req) {
+                    Some(ap_ecosystem::sdist::BuildRequirement::Keep(req)) => req,
+                    Some(ap_ecosystem::sdist::BuildRequirement::NotForTarget) => {
+                        tracing::info!(
+                            "not writing build requirement {req:?}: its marker is false for the build target"
+                        );
+                        continue;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "dropping build requirement {req:?}: not a plain PEP 508 requirement"
+                        );
+                        continue;
+                    }
                 };
                 // `setuptools>=42` as it appears in pyproject.toml is exactly
                 // the form the conventions document as wrong; OBS needs
@@ -5801,7 +5812,10 @@ BuildRequires:  %{python_module pip}
             assert!(!spec.contains("%{lua:os"), "{bad}: {spec}");
             assert!(!spec.contains(";touch"), "{bad}: {spec}");
             assert!(!spec.contains("$(x)"), "{bad}: {spec}");
-            assert!(!spec.contains("rm -rf %{buildroot}%{$sitedir}/nvidia/a"), "{bad}");
+            assert!(
+                !spec.contains("rm -rf %{buildroot}%{$sitedir}/nvidia/a"),
+                "{bad}"
+            );
             // The safe directory is still cleaned up.
             assert!(spec.contains("/nvidia/cu13/include"), "{bad}: {spec}");
         }
@@ -8217,11 +8231,37 @@ mod relax_bound_tests {
     }
 }
 
+/// Whether `requirement` is a package a spec can name: `%{python_module ...}`
+/// around it is allowed, and so is a version constraint after the name. The
+/// name must match `^[A-Za-z0-9][A-Za-z0-9._+-]*$`; the constraint may hold only
+/// letters, digits, spaces and `. _ + - < > = ! ~ , *`, so no macro, shell
+/// or spec character reaches the line.
+fn is_plain_build_requirement(requirement: &str) -> bool {
+    let inner = requirement
+        .strip_prefix("%{python_module ")
+        .and_then(|r| r.strip_suffix('}'))
+        .unwrap_or(requirement)
+        .trim();
+    let name_end = inner
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')))
+        .unwrap_or(inner.len());
+    let (name, constraint) = inner.split_at(name_end);
+    name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && constraint
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " ._+-<>=!~,*".contains(c))
+}
+
 /// `spec` with `BuildRequires:  <requirement>` added after the last
-/// `BuildRequires:` line, or `None` when it is already there. Used to settle a
-/// provider the solver cannot choose between.
+/// `BuildRequires:` line, or `None` when it is already there, or the name is
+/// not plain (a warning is logged). Used to settle a provider the solver cannot
+/// choose between.
 pub fn add_build_requires(spec: &str, requirement: &str) -> Option<String> {
     let wanted = requirement.trim();
+    if !is_plain_build_requirement(wanted) {
+        tracing::warn!("not adding BuildRequires {wanted:?}: not a plain package name");
+        return None;
+    }
     let has = spec.lines().any(|l| {
         l.trim_start()
             .strip_prefix("BuildRequires:")
@@ -8319,6 +8359,43 @@ mod runtime_dependency_tests {
 #[cfg(test)]
 mod add_build_requires_tests {
     use super::add_build_requires;
+
+    /// A provider name that carries a macro or shell expansion is refused: the
+    /// spec is left as it was, and no line is written.
+    #[test]
+    fn a_name_with_macro_or_shell_syntax_is_not_written() {
+        let spec = "Name: x\nBuildRequires:  a\n";
+        for bad in [
+            "x%(echo INJECTED)",
+            "%{python_module x%(echo INJECTED)}",
+            "%{python_module x}\nRequires: pwned",
+            "-x",
+            "",
+            "%{python_module }",
+            "x; rm",
+            "x`id`",
+        ] {
+            assert_eq!(add_build_requires(spec, bad), None, "{bad:?}");
+        }
+    }
+
+    /// Plain names, with or without the macro and a version constraint, are
+    /// written.
+    #[test]
+    fn a_plain_name_or_constraint_is_written() {
+        let spec = "Name: x\nBuildRequires:  a\n";
+        for good in [
+            "numpy",
+            "Cython",
+            "python_dateutil",
+            "pkg.name+x-1",
+            "%{python_module numpy}",
+            "%{python_module setuptools >= 42, < 80}",
+        ] {
+            let out = add_build_requires(spec, good).unwrap_or_else(|| panic!("{good:?}"));
+            assert!(out.contains("BuildRequires:  "), "{out}");
+        }
+    }
 
     #[test]
     fn the_line_goes_after_the_last_build_requires_once() {
@@ -9023,8 +9100,14 @@ mod license_url_injection_tests {
                 console_scripts: Vec::new(),
             },
         );
-        assert!(out.contains("BuildRequires:  %{python_module numpy >= 2}\n"), "{out}");
-        assert!(out.contains("BuildRequires:  %{python_module tomli}\n"), "{out}");
+        assert!(
+            out.contains("BuildRequires:  %{python_module numpy >= 2}\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("BuildRequires:  %{python_module tomli}\n"),
+            "{out}"
+        );
         assert!(!out.contains("python_version"), "{out}");
         assert!(!out.contains("lua"), "{out}");
         assert!(!out.contains("%pre"), "{out}");

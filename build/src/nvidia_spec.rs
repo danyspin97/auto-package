@@ -101,12 +101,18 @@ fn spec_text(text: &str) -> String {
 }
 
 /// `text` as an RPM `Version:`: only letters, digits and `. _ + ~`, the
-/// characters a version may carry. Anything else is removed, so a newline or a
-/// `%` cannot open a spec line or a macro; an empty result becomes `0`.
+/// characters a version may carry. A `-` (a release suffix such as
+/// `13.4.92-1`) becomes `.`, so the parts stay apart. Anything else is removed,
+/// so a newline or a `%` cannot open a spec line or a macro; an empty result
+/// becomes `0`.
 fn version_text(text: &str) -> String {
     let v: String = text
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '~'))
+        .filter_map(|c| match c {
+            '-' => Some('.'),
+            c if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '~') => Some(c),
+            _ => None,
+        })
         .collect();
     if v.is_empty() { "0".to_string() } else { v }
 }
@@ -1067,7 +1073,10 @@ bin/__nvcc_device_query
         let spec = redist_component_spec(&i);
         // Tags live in the preamble; the description body is free text.
         let preamble = spec.split("%description").next().unwrap_or_default();
-        assert!(!preamble.lines().any(|l| l.starts_with("Requires: pwned")), "{spec}");
+        assert!(
+            !preamble.lines().any(|l| l.starts_with("Requires: pwned")),
+            "{spec}"
+        );
         assert!(!spec.contains("%{lua"), "{spec}");
         assert_eq!(
             spec.lines().filter(|l| l.starts_with("Version:")).count(),
@@ -1078,6 +1087,21 @@ bin/__nvcc_device_query
         // A clean version is written as it is.
         let clean = redist_component_spec(&cudart());
         assert!(clean.contains("Version:        13.4.92\n"), "{clean}");
+    }
+
+    /// A release suffix keeps its digits apart: `13.4.92-1` is `13.4.92.1`,
+    /// not `13.4.921`. The other characters are still removed.
+    #[test]
+    fn version_text_turns_a_dash_into_a_dot() {
+        assert_eq!(version_text("13.4.92-1"), "13.4.92.1");
+        assert_eq!(version_text("13.4.92~rc1-2"), "13.4.92~rc1.2");
+        assert_eq!(
+            version_text("13.4.92\nRequires: x%{lua:y}"),
+            "13.4.92Requiresxluay"
+        );
+        assert_eq!(version_text("%{x}"), "x");
+        assert_eq!(version_text("-"), ".");
+        assert_eq!(version_text("%%"), "0");
     }
 
     #[test]

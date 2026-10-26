@@ -758,13 +758,23 @@ pub fn is_safe_build_requirement(req: &str) -> bool {
     })
 }
 
+/// What a `[build-system] requires` entry means for a spec.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BuildRequirement<'a> {
+    /// The requirement part, to be written as a `BuildRequires`. A marker that
+    /// is undecided for the build target, or cannot be parsed, is kept with it.
+    Keep(&'a str),
+    /// The environment marker is false for the build target (Linux, CPython,
+    /// x86_64 or aarch64), so the requirement is not installed.
+    NotForTarget,
+}
+
 /// What a `[build-system] requires` entry contributes to a spec: its requirement
-/// part, with any PEP 508 environment marker (`; python_version < "3.11"`)
-/// removed. A `BuildRequires` cannot carry a marker, so the requirement is kept
-/// unconditionally: at worst an extra build dependency is installed. `None`
+/// part, and whether its PEP 508 environment marker (`; sys_platform == "win32"`)
+/// rules it out for the build target (see [`marker_excludes_target`]). `None`
 /// when the requirement part is not plain, or the marker holds a character a
 /// spec or shell could expand (see [`is_safe_marker`]).
-pub fn build_requirement_part(entry: &str) -> Option<&str> {
+pub fn build_requirement_part(entry: &str) -> Option<BuildRequirement<'_>> {
     let (req, marker) = match entry.split_once(';') {
         Some((req, marker)) => (req, Some(marker)),
         None => (entry, None),
@@ -773,7 +783,144 @@ pub fn build_requirement_part(entry: &str) -> Option<&str> {
         return None;
     }
     let req = req.trim();
-    is_safe_build_requirement(req).then_some(req)
+    if !is_safe_build_requirement(req) {
+        return None;
+    }
+    if marker.is_some_and(marker_excludes_target) {
+        return Some(BuildRequirement::NotForTarget);
+    }
+    Some(BuildRequirement::Keep(req))
+}
+
+/// A token of a PEP 508 marker.
+#[derive(Debug, PartialEq)]
+enum MarkerTok<'a> {
+    /// A marker variable, or `and`, `or`, `in`, `not`.
+    Word(&'a str),
+    /// A quoted value, without its quotes.
+    Str(&'a str),
+    /// A run of comparison characters (`==`, `!=`, `<=`, ...).
+    Op(&'a str),
+}
+
+/// Splits a marker into tokens; `None` on anything else (parentheses, a lone
+/// quote, a stray character).
+fn tokenize_marker(marker: &str) -> Option<Vec<MarkerTok<'_>>> {
+    let is_op = |c: char| "=!<>~".contains(c);
+    let is_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.');
+    let mut out = Vec::new();
+    let mut rest = marker;
+    loop {
+        rest = rest.trim_start();
+        let Some(c) = rest.chars().next() else {
+            return Some(out);
+        };
+        if c == '\'' || c == '"' {
+            let inner = &rest[1..];
+            let end = inner.find(c)?;
+            out.push(MarkerTok::Str(&inner[..end]));
+            rest = &inner[end + 1..];
+        } else if is_op(c) {
+            let end = rest.find(|ch: char| !is_op(ch)).unwrap_or(rest.len());
+            out.push(MarkerTok::Op(&rest[..end]));
+            rest = &rest[end..];
+        } else if is_word(c) {
+            let end = rest.find(|ch: char| !is_word(ch)).unwrap_or(rest.len());
+            out.push(MarkerTok::Word(&rest[..end]));
+            rest = &rest[end..];
+        } else {
+            return None;
+        }
+    }
+}
+
+/// The value a marker variable has for the build target (Linux, CPython on
+/// x86_64 or aarch64), for the variables that do not depend on the machine or
+/// the Python version. `None` for every other variable: undecided.
+fn target_marker_value(var: &str) -> Option<&'static str> {
+    match var {
+        "sys_platform" | "sys.platform" => Some("linux"),
+        "os_name" | "os.name" => Some("posix"),
+        "platform_system" => Some("Linux"),
+        "implementation_name" => Some("cpython"),
+        "platform_python_implementation" | "platform.python_implementation" => Some("CPython"),
+        _ => None,
+    }
+}
+
+/// The verdict of one `<operand> <op> <operand>` clause at the start of
+/// `toks`, and how many tokens it used. `None` in the verdict is undecided; the
+/// whole result is `None` when the clause is not of that form.
+fn marker_clause_verdict(toks: &[MarkerTok<'_>]) -> Option<(Option<bool>, usize)> {
+    let (lhs, op, rhs, used) = match toks {
+        [a, MarkerTok::Word("not"), MarkerTok::Word("in"), b, ..] => (a, "not in", b, 4),
+        [a, MarkerTok::Word("in"), b, ..] => (a, "in", b, 3),
+        [a, MarkerTok::Op(op), b, ..] => (a, *op, b, 3),
+        _ => return None,
+    };
+    let (var, value, var_left) = match (lhs, rhs) {
+        (MarkerTok::Word(v), MarkerTok::Str(s)) => (*v, *s, true),
+        (MarkerTok::Str(s), MarkerTok::Word(v)) => (*v, *s, false),
+        _ => return None,
+    };
+    let Some(target) = target_marker_value(var) else {
+        return Some((None, used));
+    };
+    let verdict = match op {
+        "==" | "===" => Some(value == target),
+        "!=" => Some(value != target),
+        // `'x' in var` asks whether x is inside var; `var in 'x'` whether var is
+        // inside the quoted list.
+        "in" | "not in" => {
+            let found = if var_left {
+                value.contains(target)
+            } else {
+                target.contains(value)
+            };
+            Some(found == (op == "in"))
+        }
+        _ => None,
+    };
+    Some((verdict, used))
+}
+
+/// Whether a marker is false for the build target. A pure `and` chain is
+/// excluded when any decided clause is false; a pure `or` chain only when every
+/// clause is decided false. A marker that is not such a chain, or has a clause
+/// it cannot read, is not excluded (the requirement is kept).
+fn marker_excludes_target(marker: &str) -> bool {
+    let Some(toks) = tokenize_marker(marker) else {
+        return false;
+    };
+    if toks.is_empty() {
+        return false;
+    }
+    let mut verdicts: Vec<Option<bool>> = Vec::new();
+    let mut connector: Option<&str> = None;
+    let mut rest = &toks[..];
+    loop {
+        let Some((verdict, used)) = marker_clause_verdict(rest) else {
+            return false;
+        };
+        verdicts.push(verdict);
+        rest = &rest[used..];
+        match rest {
+            [] => break,
+            [MarkerTok::Word(c), tail @ ..] if *c == "and" || *c == "or" => {
+                if connector.is_some_and(|k| k != *c) {
+                    return false;
+                }
+                connector = Some(*c);
+                rest = tail;
+            }
+            _ => return false,
+        }
+    }
+    if connector == Some("or") {
+        verdicts.iter().all(|v| *v == Some(false))
+    } else {
+        verdicts.iter().any(|v| *v == Some(false))
+    }
 }
 
 /// Whether a PEP 508 marker is made only of what a marker needs: letters
@@ -786,8 +933,20 @@ fn is_safe_marker(marker: &str) -> bool {
             c.is_ascii_alphanumeric()
                 || matches!(
                     c,
-                    ' ' | '.' | '_' | '-' | '+' | '*' | '!' | '=' | '<' | '>' | '~' | '(' | ')'
-                        | '\'' | '"'
+                    ' ' | '.'
+                        | '_'
+                        | '-'
+                        | '+'
+                        | '*'
+                        | '!'
+                        | '='
+                        | '<'
+                        | '>'
+                        | '~'
+                        | '('
+                        | ')'
+                        | '\''
+                        | '"'
                 )
         })
 }
@@ -1805,35 +1964,64 @@ fn inspect_from_entries(
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
-    let project_depth = python_depth.or(cargo.as_ref().map(|((d, _), _)| *d));
-
     // Name the subdirectory the packaging lives in. A chosen pyproject.toml
-    // decides it: its directory is the one the build reads the metadata from.
-    // Only without one is a setup.py/setup.cfg/Cargo.toml at the depth used.
-    let project_dir = match (&pyproject, project_depth) {
-        (Some((depth, dir, _)), _) => (*depth > 0).then(|| dir.clone()),
-        (None, None | Some(0)) => None,
-        (None, Some(depth)) => {
-            let mut dirs: Vec<String> = files
-                .iter()
-                .filter_map(|f| {
-                    let rest = f.split_once('/').map(|(_, r)| r)?;
-                    let parts: Vec<&str> = rest.split('/').collect();
-                    (parts.len() == depth + 1
-                        && matches!(
-                            *parts.last()?,
-                            "pyproject.toml" | "setup.py" | "setup.cfg" | "Cargo.toml"
-                        ))
-                    .then(|| parts[..depth].join("/"))
-                })
-                .collect();
-            // Same tie-break as the manifest choice above.
-            dirs.sort_by_key(|d| {
-                let norm = d.to_lowercase().replace(['-', '.'], "_");
-                (normalized != Some(norm.as_str()), d.clone())
-            });
-            dirs.into_iter().next()
-        }
+    // decides it when it is a packaging one (a `[build-system]` or `[project]`
+    // table): its directory is the one the build reads the metadata from. A
+    // tool-only pyproject.toml (pytest config in `tests/`) does not count: only
+    // without a packaging pyproject is a setup.py/setup.cfg/Cargo.toml at the
+    // depth used, and a pyproject.toml only where it is a packaging one.
+    let is_packaging = |src: &str| {
+        src.parse::<toml::Table>()
+            .is_ok_and(|t| t.contains_key("build-system") || t.contains_key("project"))
+    };
+    let packaging_dirs: Vec<&str> = py_manifests
+        .iter()
+        .filter(|(_, _, src)| is_packaging(src))
+        .map(|(_, dir, _)| dir.as_str())
+        .collect();
+    let packaging_depth = py_manifests
+        .iter()
+        .filter(|(_, _, src)| is_packaging(src))
+        .map(|(d, _, _)| *d)
+        .min();
+    let fallback_depth = [
+        packaging_depth,
+        setup_py_depth,
+        cargo.as_ref().map(|((d, _), _)| *d),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let project_dir = match &pyproject {
+        Some((depth, dir, src)) if is_packaging(src) => (*depth > 0).then(|| dir.clone()),
+        _ => match fallback_depth {
+            None | Some(0) => None,
+            Some(depth) => {
+                let mut dirs: Vec<String> = files
+                    .iter()
+                    .filter_map(|f| {
+                        let rest = f.split_once('/').map(|(_, r)| r)?;
+                        let parts: Vec<&str> = rest.split('/').collect();
+                        if parts.len() != depth + 1 {
+                            return None;
+                        }
+                        let dir = parts[..depth].join("/");
+                        let ok = match *parts.last()? {
+                            "pyproject.toml" => packaging_dirs.contains(&dir.as_str()),
+                            "setup.py" | "setup.cfg" | "Cargo.toml" => true,
+                            _ => false,
+                        };
+                        ok.then_some(dir)
+                    })
+                    .collect();
+                // Same tie-break as the manifest choice above.
+                dirs.sort_by_key(|d| {
+                    let norm = d.to_lowercase().replace(['-', '.'], "_");
+                    (normalized != Some(norm.as_str()), d.clone())
+                });
+                dirs.into_iter().next()
+            }
+        },
     };
 
     Ok(SdistInfo {
@@ -1876,13 +2064,20 @@ impl BuildSystem {
 impl From<RawBuildSystem> for BuildSystem {
     fn from(raw: RawBuildSystem) -> Self {
         // An entry a spec cannot carry verbatim is dropped, not the whole list.
-        // A marker is dropped and the requirement kept (see `build_requirement_part`).
+        // A marker false for the build target drops its requirement; any other
+        // marker is dropped and the requirement kept (see `build_requirement_part`).
         let requires = raw
             .requires
             .into_iter()
-            .filter_map(|r| {
-                let part = build_requirement_part(&r).map(str::to_string);
-                if part.is_none() {
+            .filter_map(|r| match build_requirement_part(&r) {
+                Some(BuildRequirement::Keep(part)) => Some(part.to_string()),
+                Some(BuildRequirement::NotForTarget) => {
+                    tracing::info!(
+                        "not installing build-system requirement {r:?}: its marker is false for the build target"
+                    );
+                    None
+                }
+                None => {
                     if r.split(';').next().is_some_and(|req| req.contains('@')) {
                         tracing::warn!(
                             "ignoring build-system requirement {r:?}: a direct reference (`@ url`) cannot be written in a spec"
@@ -1892,8 +2087,8 @@ impl From<RawBuildSystem> for BuildSystem {
                             "ignoring build-system requirement {r:?}: not a plain PEP 508 requirement"
                         );
                     }
+                    None
                 }
-                part
             })
             .collect();
         Self {
@@ -2574,6 +2769,30 @@ mod tests {
         assert_eq!(info.project_dir.as_deref(), Some("cuda_core"));
     }
 
+    /// A pyproject.toml that is only tool config (no `[build-system]` or
+    /// `[project]`) does not name the project directory: the root setup.py does.
+    #[test]
+    fn tool_only_pyproject_does_not_name_the_project_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = dir.path().join("src.tar.gz");
+        write_tar(
+            &tarball,
+            &[
+                (
+                    "thing-1.0/setup.py",
+                    b"from setuptools import setup\n".as_slice(),
+                ),
+                (
+                    "thing-1.0/tests/pyproject.toml",
+                    b"[tool.pytest.ini_options]\naddopts = \"-q\"\n".as_slice(),
+                ),
+            ],
+        );
+        let info = inspect(&tarball).unwrap();
+        assert_eq!(info.project_dir, None);
+        assert!(info.python_packaging);
+    }
+
     #[test]
     fn a_manifest_at_the_root_beats_a_matching_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
@@ -3120,8 +3339,8 @@ build-backend = "flit_core.buildapi"
         }
         for bad in [
             "", ".", "..", "a/b", "a\\b", "a b", "a\nb", "a\u{7}b", "a%b", "a;b", "a$b", "a\"b",
-            "a'b", "a`b", "a(b)", "a{b}", "a|b", "a&b", "a<b>", "a*b", "a?b", "a!b", "a#b",
-            "-x", "--option", "~root", "~",
+            "a'b", "a`b", "a(b)", "a{b}", "a|b", "a&b", "a<b>", "a*b", "a?b", "a!b", "a#b", "-x",
+            "--option", "~root", "~",
         ] {
             assert!(!is_safe_top_level_dir(bad), "{bad:?}");
         }
@@ -3155,11 +3374,104 @@ build-backend = "flit_core.buildapi"
             ("tomli; a # b", None),
             ("tomli; a{b}", None),
             ("setuptools\n%pre; python_version < '3'", None),
-            ("pkg @ https://example.org/x.tar.gz; python_version < '3'", None),
+            (
+                "pkg @ https://example.org/x.tar.gz; python_version < '3'",
+                None,
+            ),
             ("pkg @ https://example.org/x.tar.gz", None),
         ] {
-            assert_eq!(build_requirement_part(entry), want, "{entry:?}");
+            assert_eq!(
+                build_requirement_part(entry),
+                want.map(BuildRequirement::Keep),
+                "{entry:?}"
+            );
         }
+    }
+
+    /// A marker false for the build target (Linux, CPython) drops the
+    /// requirement; one that is undecided for it, mixed, or unreadable keeps it.
+    #[test]
+    fn build_requirement_part_drops_what_the_build_target_excludes() {
+        use BuildRequirement::{Keep, NotForTarget};
+        for (entry, want) in [
+            ("colorama; sys_platform == \"win32\"", NotForTarget),
+            ("pywin32; os_name == 'nt'", NotForTarget),
+            ("tomli; python_version < \"3.11\"", Keep("tomli")),
+            ("foo; sys_platform == 'linux'", Keep("foo")),
+            (
+                "foo; sys_platform == 'win32' or sys_platform == 'darwin'",
+                NotForTarget,
+            ),
+            (
+                "foo; python_version < '3.8' and sys_platform == 'win32'",
+                NotForTarget,
+            ),
+            (
+                "foo; sys_platform == 'win32' or python_version < '3.8'",
+                Keep("foo"),
+            ),
+            ("foo; 'win32' == sys_platform", NotForTarget),
+            ("foo; sys_platform != 'linux'", NotForTarget),
+            (
+                "foo; platform_system == 'Linux' and implementation_name == 'pypy'",
+                NotForTarget,
+            ),
+            (
+                "foo; platform_python_implementation == 'PyPy'",
+                NotForTarget,
+            ),
+            ("foo; sys_platform in 'win32 darwin'", NotForTarget),
+            ("foo; sys_platform not in 'linux darwin'", NotForTarget),
+            ("foo; sys_platform not in 'win32 darwin'", Keep("foo")),
+            ("foo; 'win' in sys_platform", NotForTarget),
+            ("foo; 'lin' in sys_platform", Keep("foo")),
+            (
+                "foo; sys_platform == 'win32' and platform_machine == 'x86_64'",
+                NotForTarget,
+            ),
+            ("foo; platform_machine == 'arm64'", Keep("foo")),
+            ("foo; extra == 'test'", Keep("foo")),
+            ("foo; sys_platform < 'win32'", Keep("foo")),
+            (
+                "foo; sys_platform == 'win32' or sys_platform == 'linux' and python_version < '3'",
+                Keep("foo"),
+            ),
+            ("foo; (sys_platform == 'win32')", Keep("foo")),
+            ("foo; not sys_platform == 'win32'", Keep("foo")),
+            ("foo; sys_platform == 'win32", Keep("foo")),
+            ("foo; sys_platform == 'win32' and", Keep("foo")),
+            ("foo; sys_platform == 'win32' == 'linux'", Keep("foo")),
+        ] {
+            assert_eq!(build_requirement_part(entry), Some(want), "{entry:?}");
+        }
+    }
+
+    /// Through `[build-system] requires`: the excluded requirement is not
+    /// kept, the others are, in order.
+    #[test]
+    fn build_system_drops_requirements_the_build_target_excludes() {
+        let doc: PyprojectToml = toml::from_str(
+            "[build-system]\n\
+             requires = [\"setuptools\", \"colorama; sys_platform == 'win32'\", \"tomli; python_version < '3.11'\"]\n\
+             build-backend = \"setuptools.build_meta\"\n",
+        )
+        .unwrap();
+        let build = BuildSystem::from(doc.build_system.unwrap());
+        assert_eq!(build.requires, vec!["setuptools", "tomli"]);
+    }
+
+    /// The marker is parsed only after the charset check: an unsafe marker is
+    /// refused even when the clause around it would be decided.
+    #[test]
+    fn unsafe_marker_is_refused_not_decided() {
+        assert_eq!(
+            build_requirement_part("foo; sys_platform == 'win32'%{x}"),
+            None
+        );
+        assert_eq!(
+            build_requirement_part("foo; sys_platform == 'win32'; x"),
+            None
+        );
     }
 
     /// Through the `[build-system]` parse: a marker is dropped, the
@@ -3470,10 +3782,7 @@ requires = ["numpy>=2; python_version>='3.9'", 'tomli; python_version < "3.11"',
     fn wheel_layout_collapses_children_even_when_a_sibling_sorts_between() {
         let dir = tempfile::tempdir().unwrap();
         let w = dir.path().join("between.whl");
-        write_wheel(
-            &w,
-            &["pkg/b/x.h", "pkg/b-x/y.h", "pkg/b/c/z.h"],
-        );
+        write_wheel(&w, &["pkg/b/x.h", "pkg/b-x/y.h", "pkg/b/c/z.h"]);
         let l = wheel_layout(&w).unwrap();
         assert_eq!(
             l.header_dirs,
