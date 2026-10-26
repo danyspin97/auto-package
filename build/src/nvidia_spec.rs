@@ -145,12 +145,23 @@ fn major_minor(release: &str) -> (String, String) {
 }
 
 /// The archive's top directory: the first path component every member shares.
+/// A leading `./` is ignored, and the archive root itself (`./`) is no member.
+/// Members that disagree on the first component have no top directory.
 fn top_dir(files: &[String]) -> Option<String> {
-    files
-        .iter()
-        .find_map(|f| member_path(f).split('/').next().filter(|s| !s.is_empty()))
-        .filter(|t| is_plain_name(t))
-        .map(str::to_string)
+    let mut top: Option<&str> = None;
+    for f in files {
+        let path = member_path(f);
+        if path.is_empty() {
+            continue;
+        }
+        let first = path.split('/').next().unwrap_or_default();
+        match top {
+            None => top = Some(first),
+            Some(t) if t != first => return None,
+            Some(_) => {}
+        }
+    }
+    top.filter(|t| is_plain_name(t)).map(str::to_string)
 }
 
 /// The archive ships `lib/`; NVIDIA's own tree (what nvcc, cmake's FindCUDA and
@@ -258,8 +269,11 @@ fn analyse(files: &[String]) -> Option<Layout> {
         // the shell would split or expand. Deeper directories are named in the
         // `%install` shell lines too (the `sed` over each `.pc` directory), so
         // every component of every member is held to the same rule.
+        // Such a member is left out, not the whole archive: the rest still
+        // makes a package, and the member is never copied.
         if !rel.split('/').all(is_plain_name) {
-            return None;
+            tracing::warn!("not installing archive member {f:?}: its name is not a plain path");
+            continue;
         }
         if !rel.contains('/') && !is_dir && is_license_name(rel) {
             licenses.push(rel.to_string());
@@ -300,6 +314,19 @@ fn analyse(files: &[String]) -> Option<Layout> {
             .map(|(src, (dest, dir))| (src, dest, dir))
             .collect(),
     })
+}
+
+/// Whether an archive with these members makes a package with something in
+/// it. An archive with no single top directory, or whose members are all
+/// licenses or were all refused, would build an empty package.
+pub fn check_layout(files: &[String]) -> Result<(), String> {
+    match analyse(files) {
+        None => Err("its members have no single top directory with a usable name".into()),
+        Some(layout) if layout.members.is_empty() => {
+            Err("it has no file to install (only licenses, or every member was refused)".into())
+        }
+        Some(_) => Ok(()),
+    }
 }
 
 fn has_shared_libs(layout: &Layout) -> bool {
@@ -1043,12 +1070,14 @@ bin/__nvcc_device_query
             "{spec}"
         );
         assert!(spec.contains("EULA %%{_bindir} licensed archive"), "{spec}");
-        // A member name the shell would act on makes the archive unusable.
+        // A member name the shell would act on is left out; the rest stays.
         let files: Vec<String> = ["top/lib/libx.so.1", "top/--help/y", "top/LICENSE"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(analyse(&files).is_none());
+        let layout = analyse(&files).unwrap();
+        assert!(layout.members.iter().all(|m| !m.dest.contains("--help")));
+        assert_eq!(layout.members.len(), 1);
         let files: Vec<String> = ["to p/lib/libx.so.1"]
             .iter()
             .map(|s| s.to_string())
@@ -1069,7 +1098,8 @@ bin/__nvcc_device_query
         let mut i = cudart();
         i.cuda_release = "13.4%{lua:os.execute(\"id\")}\nRequires: x".into();
         i.archive_filename = "a%{lua:x}.tar.xz".into();
-        i.files = vec!["top/lib/a b$(x)/y.so".into()];
+        // Two top directories: no layout, so the fallback names the setup directory.
+        i.files = vec!["top/lib/a b$(x)/y.so".into(), "other/lib/y.so".into()];
         let spec = redist_component_spec(&i);
         // Every `%` left is half of a `%%`: no bare macro survives.
         assert!(!spec.replace("%%", "").contains("%{lua"), "{spec}");
@@ -1123,7 +1153,7 @@ bin/__nvcc_device_query
     fn fallback_setup_directory_must_be_plain() {
         let mut i = cudart();
         i.archive_filename = "x y.tar.xz".into();
-        i.files = vec!["top/lib/a b$(x)/y.so".into()];
+        i.files = vec!["top/lib/a b$(x)/y.so".into(), "other/lib/y.so".into()];
         let spec = redist_component_spec(&i);
         assert!(spec.contains("%setup -q -n archive\n"), "{spec}");
         assert!(!spec.contains("x y"), "{spec}");
@@ -1141,10 +1171,10 @@ bin/__nvcc_device_query
     }
 
     #[test]
-    fn parent_references_in_members_refuse_the_archive() {
+    fn parent_references_in_members_are_not_installed() {
         for odd in ["cuda/../../evil", "top/lib/../x.so", "top/./lib/x.so", "top/lib/./x.so"] {
             let files = vec![odd.to_string()];
-            assert!(analyse(&files).is_none(), "{odd}");
+            assert!(check_layout(&files).is_err(), "{odd}");
         }
         // The `..` must not reach the spec either: no `cp -a ..` line.
         let mut i = cudart();
@@ -1152,6 +1182,55 @@ bin/__nvcc_device_query
         let spec = redist_component_spec(&i);
         assert!(!spec.contains("cp -a .."), "{spec}");
         assert!(!spec.contains("cp -a ."), "{spec}");
+    }
+
+    fn owned(files: &[&str]) -> Vec<String> {
+        files.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_archive_whose_only_library_is_refused_is_not_a_package() {
+        // The reviewer's case: the one library has a name the shell would
+        // not take, so nothing is left to install (the license is no package).
+        let files = owned(&["top/", "top/lib/", "top/lib/libfoo@1.so.1", "top/LICENSE"]);
+        let layout = analyse(&files).unwrap();
+        assert!(layout.members.is_empty());
+        assert_eq!(layout.licenses, vec!["LICENSE".to_string()]);
+        let err = check_layout(&files).unwrap_err();
+        assert!(err.contains("no file to install"), "{err}");
+        // The archive with a plain library next to it is a package, and the
+        // refused one is absent from both the members and the spec.
+        let mut i = cudart();
+        i.files = owned(&[
+            "top/",
+            "top/lib/",
+            "top/lib/libfoo@1.so.1",
+            "top/lib/libok.so.1",
+            "top/LICENSE",
+        ]);
+        assert!(check_layout(&i.files).is_ok());
+        let spec = redist_component_spec(&i);
+        assert!(spec.contains("libok.so.1"), "{spec}");
+        assert!(!spec.contains("libfoo@"), "{spec}");
+    }
+
+    #[test]
+    fn archive_members_must_agree_on_one_top_directory() {
+        assert_eq!(
+            top_dir(&owned(&["top/", "top/lib/x.so.1"])).as_deref(),
+            Some("top")
+        );
+        // A leading `./` is no component, and the archive root is no member.
+        assert_eq!(
+            top_dir(&owned(&["./", "./top/lib/x.so.1", "top/LICENSE"])).as_deref(),
+            Some("top")
+        );
+        // Two top directories: no top directory at all.
+        assert_eq!(top_dir(&owned(&["top/lib/x.so.1", "other/LICENSE"])), None);
+        assert!(analyse(&owned(&["top/lib/x.so.1", "other/LICENSE"])).is_none());
+        // Only the first member used to count: a later one disagreeing refuses.
+        assert_eq!(top_dir(&owned(&["top/lib/x.so.1", "./other/x.so"])), None);
+        assert_eq!(top_dir(&owned(&["/abs/lib/x.so.1", "/abs/LICENSE"])), None);
     }
 
     #[test]
@@ -1180,7 +1259,7 @@ bin/__nvcc_device_query
     #[test]
     fn deeper_member_directories_must_be_plain_too() {
         // The `.pc` sed line names every directory of a member, so an odd name
-        // deeper than the first component refuses the archive as well.
+        // deeper than the first component keeps the member out of the package.
         for odd in [
             "top/lib/a b$(x)/libx.so.1",
             "top/lib/$(x)/y.pc",
@@ -1188,7 +1267,7 @@ bin/__nvcc_device_query
             "top/lib/-x/y.pc",
         ] {
             let files = vec![odd.to_string()];
-            assert!(analyse(&files).is_none(), "{odd}");
+            assert!(check_layout(&files).is_err(), "{odd}");
         }
         let files = vec![
             "top/lib/pkgconfig/x.pc".to_string(),

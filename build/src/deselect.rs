@@ -123,12 +123,28 @@ fn safe_ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// The counts of a pytest summary line (`=== 3 failed, 5 passed in 1.2s ===`),
+/// without the ` in <seconds>s` tail. A line that only mentions a failure
+/// (`FAILED t.py::t - request failed in retry loop`) is not one: a summary
+/// starts with a count and ends with a duration.
+fn summary_head(t: &str) -> Option<&str> {
+    if !t.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let (head, tail) = t.rsplit_once(" in ")?;
+    let secs = tail.split_whitespace().next()?.strip_suffix('s')?;
+    secs.parse::<f64>().ok()?;
+    Some(head)
+}
+
 fn pytest_failures(lines: &[String]) -> Result<Vec<FailingTest>, String> {
     // A suite in which nothing passed fails for a reason common to all of it.
     for l in lines {
         let t = l.trim_matches(|c: char| c == '=' || c.is_whitespace());
-        if t.contains(" failed") && t.contains(" in ") {
-            let head = t.rsplit_once(" in ").map_or(t, |(h, _)| h);
+        let Some(head) = summary_head(t) else {
+            continue;
+        };
+        if head.contains(" failed") {
             let passed = head
                 .split(", ")
                 .find_map(|part| part.strip_suffix(" passed"))
@@ -911,6 +927,29 @@ mod tests {
         );
         let broken = "ERROR tests/test_a.py - SyntaxError: bad\n== 1 error in 0.1s ==\n";
         assert!(drop_failing_tests(SPEC, broken, &none).is_err());
+    }
+
+    #[test]
+    fn a_failure_message_with_failed_and_in_is_not_the_summary() {
+        // The message of a test that did pass the suite, and says `failed ... in`.
+        let log = "[  30s] =========== short test summary info ============\n\
+                   [  30s] FAILED tests/t.py::test_a - request failed in retry loop\n\
+                   [  30s] ===== 1 failed, 4 passed in 1.2s =====\n";
+        let found = failing_tests(log).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "tests/t.py::test_a");
+        // The summary still decides: nothing passed means the suite is not dropped.
+        let none_passed = log.replace("4 passed", "0 passed");
+        assert!(
+            failing_tests(&none_passed)
+                .unwrap_err()
+                .contains("no test passed")
+        );
+        assert_eq!(summary_head("request failed in retry loop"), None);
+        assert_eq!(
+            summary_head("3 failed, 5 passed in 1.2s"),
+            Some("3 failed, 5 passed")
+        );
     }
 
     #[test]

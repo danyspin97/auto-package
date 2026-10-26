@@ -157,9 +157,13 @@ impl PathMapper {
         // Preferred: we know what the tarball unpacks to.
         if let Some(root) = &self.sdist_root {
             let marker = format!("/{root}/");
-            if let Some(rest) = after_marker(path, &marker) {
+            // The first place the root name occurs below BUILD: the root sits
+            // right under the `-build` wrapper, and a subdirectory of the same
+            // name inside it is source too, not the path to cut at.
+            let tail = &path[path.rfind("/BUILD/")?..];
+            if let Some(at) = tail.find(&marker) {
                 self.matched.store(true, Ordering::Relaxed);
-                return Some(rest.to_string());
+                return Some(tail[at + marker.len()..].to_string());
             }
             // Path is under /BUILD/ but not under the sdist root — a generated
             // wheel, a scratch dir. Not our source.
@@ -282,6 +286,25 @@ mod tests {
     fn rpm_scratch_is_other() {
         assert_eq!(
             mapper().classify("/var/tmp/rpm-tmp.Asoqjo"),
+            PathClass::Other
+        );
+    }
+
+    #[test]
+    fn a_root_name_recurring_below_the_root_cuts_at_the_first_one() {
+        // `glances-4.3.0/` is the sdist root, and a subdirectory of the same
+        // name sits inside it: the source path is below the root, not below
+        // the subdirectory.
+        let nested = "/home/abuild/rpmbuild/BUILD/python-glances-4.3.0-build/glances-4.3.0/glances-4.3.0/main.py";
+        assert_eq!(
+            mapper().classify(nested),
+            PathClass::BuildTree {
+                relative: "glances-4.3.0/main.py".into()
+            }
+        );
+        // Without a root name below BUILD, nothing matches.
+        assert_eq!(
+            mapper().classify("/home/abuild/rpmbuild/BUILD/other/x.py"),
             PathClass::Other
         );
     }

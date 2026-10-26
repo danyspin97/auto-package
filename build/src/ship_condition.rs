@@ -25,12 +25,16 @@ pub struct FilesCondition {
 }
 
 impl FilesCondition {
-    /// The forbidden fragments, `devel` when none were given.
+    /// The forbidden fragments: those given, else `devel`. The default does not
+    /// apply when the package asked for is itself named with `devel` (a
+    /// `python-develop` request is not a request for the `-devel` split).
     fn forbidden(&self) -> Vec<String> {
-        if self.not_in.is_empty() {
-            vec!["devel".to_string()]
-        } else {
-            self.not_in.iter().map(|s| s.to_lowercase()).collect()
+        if !self.not_in.is_empty() {
+            return self.not_in.iter().map(|s| s.to_lowercase()).collect();
+        }
+        match &self.package {
+            Some(p) if p.to_lowercase().contains("devel") => Vec::new(),
+            _ => vec!["devel".to_string()],
         }
     }
 
@@ -49,10 +53,17 @@ impl FilesCondition {
             Some(p) => format!("package {p}"),
             None => "a package that is not excluded below".to_string(),
         };
+        let forbidden = self.forbidden();
+        if forbidden.is_empty() {
+            return format!(
+                "`{}` must be shipped by {target}",
+                self.path.trim_matches('/')
+            );
+        }
         format!(
             "`{}` must be shipped by {target}, and not by a package whose name contains {}",
             self.path.trim_matches('/'),
-            self.forbidden()
+            forbidden
                 .iter()
                 .map(|f| format!("`{f}`"))
                 .collect::<Vec<_>>()
@@ -375,6 +386,44 @@ mod tests {
         )];
         assert!(matches!(
             check(&c, &look, "python-torch"),
+            Verdict::Violated(_)
+        ));
+    }
+
+    #[test]
+    fn a_requested_package_named_with_devel_is_not_forbidden_by_default() {
+        // `python-develop` is asked for: its own `python313-develop` ships it.
+        let pkgs = [rpm(
+            "python313-develop",
+            &[&format!("{SP}/develop/__init__.py")],
+        )];
+        let c = cond("develop", Some("python-develop"));
+        assert_eq!(check(&c, &pkgs, "python-develop"), Verdict::Satisfied);
+        assert!(
+            !c.describe().contains("whose name contains"),
+            "{}",
+            c.describe()
+        );
+        // An explicit `not_in` is honoured as given, whatever the package.
+        let explicit = FilesCondition {
+            path: "develop".into(),
+            package: Some("python-develop".into()),
+            not_in: vec!["devel".into()],
+        };
+        assert!(matches!(
+            check(&explicit, &pkgs, "python-develop"),
+            Verdict::Violated(w) if w.contains("python313-develop")
+        ));
+        // The default still forbids the -devel split of a package that is not named so.
+        let split = [
+            rpm("python313-torch", &[&format!("{SP}/torch/__init__.py")]),
+            rpm("python313-torch-devel", &[&format!("{SP}/torch/x.h")]),
+        ];
+        let t = cond("torch/x.h", Some("python-torch-devel"));
+        assert_eq!(check(&t, &split, "python-torch"), Verdict::Satisfied);
+        let t = cond("torch/x.h", None);
+        assert!(matches!(
+            check(&t, &split, "python-torch"),
             Verdict::Violated(_)
         ));
     }

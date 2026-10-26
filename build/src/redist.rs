@@ -377,6 +377,9 @@ pub fn generate(
     fetch_verified(source, &url, &dest, &archive.sha256)?;
     let files = ap_ecosystem::sdist::list_archive_members(&dest)
         .map_err(|e| format!("listing {filename}: {e}"))?;
+    // An empty package must not be reported as built.
+    crate::nvidia_spec::check_layout(&files)
+        .map_err(|why| format!("{filename} cannot be packaged: {why}"))?;
 
     let input = RedistSpecInput {
         component_key: key.to_string(),
@@ -785,6 +788,65 @@ pub(crate) mod tests {
         assert!(g.rpmlintrc.contains("filelist-forbidden-fhs23"));
         // No Python in it.
         assert!(!g.spec.contains("%pyproject") && !g.spec.contains("python_expand"));
+    }
+
+    /// A tar.xz with exactly these members (`(name, is_dir)`).
+    fn archive_of(members: &[(&str, bool)]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        {
+            let mut ar = tar::Builder::new(&mut raw);
+            for (name, is_dir) in members {
+                let mut h = tar::Header::new_gnu();
+                if *is_dir {
+                    h.set_entry_type(tar::EntryType::Directory);
+                    h.set_size(0);
+                    h.set_mode(0o755);
+                    h.set_cksum();
+                    ar.append_data(&mut h, name, std::io::empty()).unwrap();
+                } else {
+                    h.set_size(2);
+                    h.set_mode(0o644);
+                    h.set_cksum();
+                    ar.append_data(&mut h, name, &b"hi"[..]).unwrap();
+                }
+            }
+            ar.finish().unwrap();
+        }
+        let mut out = Vec::new();
+        let mut w = lzma_rust2::XzWriter::new(&mut out, lzma_rust2::XzOptions::default()).unwrap();
+        std::io::Write::write_all(&mut w, &raw).unwrap();
+        w.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn an_archive_with_nothing_to_install_is_not_reported_as_built() {
+        let _on = TestMode::set(true);
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = Fake::new("top");
+        fake.archive = archive_of(&[
+            ("top/", true),
+            ("top/lib/", true),
+            ("top/lib/libfoo@1.so.1", false),
+            ("top/LICENSE", false),
+        ]);
+        fake.advertised = hex_sha(&fake.archive);
+        let err = generate(&fake, "cuda-cudart", "13.4.92", "x86_64", dir.path()).unwrap_err();
+        assert!(err.contains("cannot be packaged"), "{err}");
+        // With a plain library beside the refused one, the package is built
+        // and the refused member is not in it.
+        fake.archive = archive_of(&[
+            ("top/", true),
+            ("top/lib/", true),
+            ("top/lib/libfoo@1.so.1", false),
+            ("top/lib/libok.so.1", false),
+            ("top/LICENSE", false),
+        ]);
+        fake.advertised = hex_sha(&fake.archive);
+        let fresh = tempfile::tempdir().unwrap();
+        let g = generate(&fake, "cuda-cudart", "13.4.92", "x86_64", fresh.path()).unwrap();
+        assert!(g.spec.contains("libok.so.1"), "{}", g.spec);
+        assert!(!g.spec.contains("libfoo@"), "{}", g.spec);
     }
 
     #[test]

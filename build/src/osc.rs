@@ -142,9 +142,35 @@ pub fn text_is_transient(text: &str) -> bool {
         "unexpected eof",
         "tls handshake",
     ];
-    MARKS.iter().any(|m| t.contains(m))
-        || contains_word(&t, "timeout")
-        || http_status(text).is_some_and(|c| c == 408 || c >= 500)
+    if MARKS.iter().any(|m| t.contains(m)) {
+        return true;
+    }
+    match http_status(text) {
+        // An explicit status is the answer: a 404 for a project called
+        // `timeout` is not a timeout, and a 504 is one whatever it says.
+        Some(code) => code == 408 || code >= 500,
+        None => has_timeout_word(error_body(text)),
+    }
+}
+
+/// The part of an `osc ... failed (exit N):` message that the server or the
+/// tool wrote, without the command line that names the project or package.
+/// Text without that header is returned whole.
+fn error_body(text: &str) -> &str {
+    match text.find(" failed (exit ") {
+        Some(at) => text[at..].split_once(':').map_or("", |(_, rest)| rest),
+        None => text,
+    }
+}
+
+/// Whether `timeout` is a word of its own in `text`: `Error: Timeout` has it,
+/// `home:alice:timeout`, `python-timeout-decorator` and `--timeouts` do not.
+fn has_timeout_word(text: &str) -> bool {
+    text.split_whitespace().any(|tok| {
+        tok.trim_start_matches(['(', '[', '"', '\''])
+            .trim_end_matches([':', ',', '.', ';', ')', ']', '"', '\''])
+            .eq_ignore_ascii_case("timeout")
+    })
 }
 
 /// Whether a failed project lookup answers that the project does not carry the
@@ -167,16 +193,6 @@ pub fn lookup_says_absent(text: &str, path_project: bool) -> bool {
                 || t.contains("no such project")
         }
     }
-}
-
-/// Whether `word` is in `text` as a word of its own: `Error: timeout` has it,
-/// `test_timeout_is_set` (a test name in a failing log) does not.
-fn contains_word(text: &str, word: &str) -> bool {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    text.match_indices(word).any(|(at, _)| {
-        !text[..at].chars().next_back().is_some_and(is_word)
-            && !text[at + word.len()..].chars().next().is_some_and(is_word)
-    })
 }
 
 /// Marker in the message of a build whose RPMs could not be fetched after OBS
@@ -402,13 +418,34 @@ fn segment_package_names(segment: &str) -> Vec<String> {
         };
     }
     let mut names = Vec::new();
+    // The word after a bare comparison operator (`>=`, `<`, ...) is its
+    // version, not a package: `1.2` in `(foo >= 1.2 and bar)`.
+    let mut after_operator = false;
     for w in words {
-        let w = clean_unresolvable_name(w.trim_matches(['(', ')']));
-        let operator_or_version =
-            w.starts_with(['<', '>', '=', '!']) || w.starts_with(|c: char| c.is_ascii_digit());
-        // A version bound belongs to the previous name.
-        if !w.is_empty() && !is_keyword(w) && !operator_or_version {
-            names.push(w.to_string());
+        let w = w.trim_matches(['(', ')']);
+        // A comparison may stand alone (`>=`) or be glued to a name (`foo>=1.2`).
+        let (name, comparison) = match w.find(['<', '>', '=', '!']) {
+            Some(at) => (&w[..at], Some(&w[at..])),
+            None => (w, None),
+        };
+        if let Some(cmp) = comparison {
+            // A bare operator leaves its version to the next word; a glued
+            // `>=1.2` carries it, and the next word is a package again.
+            after_operator = cmp.trim_start_matches(['<', '>', '=', '!']).is_empty();
+        } else if std::mem::take(&mut after_operator) || is_keyword(w) {
+            continue;
+        }
+        // A digit may start a package name (`3proxy`, `python314-foo`): only
+        // what is not a name at all, such as a stray `)` or `(`, is dropped.
+        let name = clean_unresolvable_name(name);
+        let looks_like_name = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+            // `1.2.3` is a version, which no package is called.
+            && !name.chars().all(|c| c.is_ascii_digit() || c == '.');
+        if looks_like_name {
+            names.push(name.to_string());
         }
     }
     names
@@ -3838,11 +3875,14 @@ fn bare_lua_marker(text: &str) -> bool {
 
 /// The first code-running macro form in `text`, if any.
 fn code_macro_marker(text: &str) -> Option<&'static str> {
+    // `%%` is a literal percent sign, so `%%(` and `%%{lua:` are text. Each
+    // pair goes first, left to right: `%%%(` still leaves a real `%(`.
+    let text = text.replace("%%", "");
     CODE_MACRO_MARKERS
         .iter()
         .copied()
         .find(|m| text.contains(m))
-        .or_else(|| bare_lua_marker(text).then_some("%lua"))
+        .or_else(|| bare_lua_marker(&text).then_some("%lua"))
 }
 
 /// Directives that make `rpmspec` read another file from the host while
@@ -6186,7 +6226,7 @@ pub fn current_unresolvable(
             return (names, extract_unresolvable_detail(&details));
         }
     }
-    let log_text = fs::read_to_string(log_path).unwrap_or_default();
+    let log_text = read_log_lossy(log_path).unwrap_or_default();
     let mut names = extract_unresolvable(&log_text);
     let mut detail = extract_unresolvable_detail(&log_text);
     if names.is_empty() {
@@ -6799,7 +6839,34 @@ const BROKEN_RETRIGGER_PAUSE: Duration = Duration::from_secs(30);
 
 /// Whether a `broken` verdict is backed by evidence: a non-empty build log.
 fn broken_is_confirmed(log_path: &Path) -> bool {
-    fs::read_to_string(log_path).is_ok_and(|t| !t.trim().is_empty())
+    read_log_lossy(log_path).is_ok_and(|t| !t.trim().is_empty())
+}
+
+/// A build log as text, lossily: a log with one invalid UTF-8 byte is still
+/// the evidence it was, and must not read as an empty or missing file.
+fn read_log_lossy(path: &Path) -> std::io::Result<String> {
+    fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The text of a build log that is the evidence for a failure. One that
+/// cannot be read, or is empty (a failed `osc buildlog` leaves an empty file
+/// behind), is an environment problem, reported as an I/O error.
+fn usable_build_log(log_path: &Path) -> Result<String, Error> {
+    read_log_lossy(log_path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| {
+            if text.trim().is_empty() {
+                Err("the file is empty".to_string())
+            } else {
+                Ok(text)
+            }
+        })
+        .map_err(|why| {
+            Error::Io(std::io::Error::other(format!(
+                "no usable build log at {}: {why}",
+                log_path.display()
+            )))
+        })
 }
 
 /// Ask OBS to rebuild `pkg_name` (`osc rebuild`), which re-evaluates a source
@@ -7442,21 +7509,7 @@ fn obs_build_once(
             // cannot be read, or is empty (a failed `osc buildlog` leaves an
             // empty file behind), is an environment problem: classifying it
             // would send the package to the fix agent as a BuildFailed.
-            let log_text = fs::read_to_string(log_path)
-                .map_err(|e| e.to_string())
-                .and_then(|text| {
-                    if text.trim().is_empty() {
-                        Err("the file is empty".to_string())
-                    } else {
-                        Ok(text)
-                    }
-                })
-                .map_err(|why| {
-                    Error::Io(std::io::Error::other(format!(
-                        "no usable build log at {}: {why}",
-                        log_path.display()
-                    )))
-                })?;
+            let log_text = usable_build_log(log_path)?;
             match classify_build_failure(&log_text) {
                 FailureKind::NoRepositories => Error::NotActionable(
                     "OBS project has no build repositories — configure them in OBS first"
@@ -7967,6 +8020,19 @@ mod rpmspec_sandbox_tests {
         assert_eq!(code_macro_marker("%{lua:x}"), Some("%{lua:"));
         assert_eq!(code_macro_marker("%global x %{lua: print(1)}"), Some("%{lua:"));
         assert_eq!(unsandboxed_marker("Summary: %lua"), Some("%lua"));
+    }
+
+    #[test]
+    fn escaped_percent_is_text_and_a_real_macro_stays_refused() {
+        // `%%` is a literal `%`: these are text, not code.
+        assert_eq!(code_macro_marker("Summary: %%(id -u)"), None);
+        assert_eq!(code_macro_marker("%%{lua:x}"), None);
+        assert_eq!(code_macro_marker("Summary: %%lua"), None);
+        assert_eq!(code_macro_marker("%%%%(id)"), None);
+        // An odd `%` before the macro is a real one.
+        assert_eq!(code_macro_marker("%%%(id -u)"), Some("%("));
+        assert_eq!(code_macro_marker("%%%{lua:x}"), Some("%{lua:"));
+        assert_eq!(code_macro_marker("%%%lua x"), Some("%lua"));
     }
 
     #[test]
@@ -8845,5 +8911,95 @@ mod transient_error_tests {
             "FAILED tests/test_net.py::test_timeout_is_set"
         ));
         assert!(!text_is_transient("unknown option --timeouts"));
+    }
+
+    #[test]
+    fn a_project_named_timeout_is_not_a_transient_failure() {
+        // The header names the project; a 404 is the answer, not a timeout.
+        let text = "osc meta prj home:alice:timeout failed (exit 1):\nHTTP Error 404: Not Found";
+        assert!(!text_is_transient(text));
+        assert!(lookup_says_absent(text, false));
+        let pkg = "osc meta pkg home:alice:python-timeout-decorator foo failed (exit 1):\nHTTP Error 404: Not Found";
+        assert!(!text_is_transient(pkg));
+        assert!(lookup_says_absent(pkg, false));
+        // Without a status the header is still not read as a timeout word.
+        assert!(!text_is_transient("osc meta prj timeout failed (exit 1):"));
+        // A 403 on a project we only read from is absent, as before.
+        let forbidden =
+            "osc meta prj home:alice:timeout failed (exit 1):\nHTTP Error 403: Forbidden";
+        assert!(lookup_says_absent(forbidden, true));
+        assert!(!lookup_says_absent(forbidden, false));
+    }
+
+    #[test]
+    fn a_gateway_timeout_or_a_timed_out_operation_is_transient() {
+        assert!(text_is_transient("HTTP Error 504: Gateway Timeout"));
+        assert!(!lookup_says_absent(
+            "HTTP Error 504: Gateway Timeout",
+            false
+        ));
+        assert!(text_is_transient("Operation timed out"));
+        assert!(!lookup_says_absent("Operation timed out", false));
+        // A bare timeout word in the error body still counts.
+        assert!(text_is_transient(
+            "osc meta prj home:alice:foo failed (exit 1):\nError: Timeout"
+        ));
+    }
+
+    #[test]
+    fn a_build_log_with_a_latin1_byte_is_still_a_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.txt");
+        // `é` in Latin-1 is 0xE9 alone: not UTF-8, but a log all the same.
+        fs::write(&path, b"caf\xE9 error: build failed\n").unwrap();
+        assert!(broken_is_confirmed(&path));
+        let text = usable_build_log(&path).unwrap();
+        assert!(text.contains("error: build failed"), "{text}");
+        assert!(text.starts_with("caf"), "{text}");
+        // An empty or missing file is still an environment problem.
+        let empty = dir.path().join("empty.txt");
+        fs::write(&empty, b"").unwrap();
+        assert!(matches!(usable_build_log(&empty), Err(Error::Io(_))));
+        assert!(matches!(
+            usable_build_log(&dir.path().join("missing.txt")),
+            Err(Error::Io(_))
+        ));
+        assert!(!broken_is_confirmed(&empty));
+    }
+
+    #[test]
+    fn a_rich_dependency_keeps_names_that_start_with_a_digit() {
+        assert_eq!(
+            segment_package_names("(3proxy or python314-foo)"),
+            vec!["3proxy".to_string(), "python314-foo".to_string()]
+        );
+        // The version after a comparison is no package, a name after `and` is.
+        assert_eq!(
+            segment_package_names("(foo >= 1.2 and bar)"),
+            vec!["foo".to_string(), "bar".to_string()]
+        );
+        assert_eq!(
+            segment_package_names("(python313-tomli >= 2.0.0 if python313-base < 3.11)"),
+            vec!["python313-tomli".to_string(), "python313-base".to_string()]
+        );
+        // A glued `>=1.2` carries its version: the next word is a package.
+        assert_eq!(
+            segment_package_names("(foo>=1.2 or 2fa-tools)"),
+            vec!["foo".to_string(), "2fa-tools".to_string()]
+        );
+        // A bare version without an operator is no name either.
+        assert_eq!(
+            segment_package_names("(foo 1.2.3 or bar)"),
+            vec!["foo".to_string(), "bar".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_rich_dependency_names_reach_the_extraction() {
+        let log = "nothing provides (3proxy or python314-foo)\n";
+        assert_eq!(
+            extract_unresolvable(log),
+            vec!["3proxy".to_string(), "python314-foo".to_string()]
+        );
     }
 }
