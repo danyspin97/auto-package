@@ -1578,6 +1578,9 @@ pub(crate) fn sync_blocked_waiters(
             continue;
         };
         let (outcome, reason) = now.clone();
+        // Set only when the closure actually writes: a run may have started
+        // since the states were read, and then nothing changed.
+        let mut written = false;
         match PkgState::update(&ws, |st| {
             // A run may have started since the states were read.
             if matches!(st.last_outcome.as_deref(), Some("running" | "success")) {
@@ -1585,9 +1588,10 @@ pub(crate) fn sync_blocked_waiters(
             }
             st.last_outcome = outcome;
             st.last_failure_reason = reason;
+            written = true;
         }) {
             Ok(_) => {
-                if was.0 != now.0 {
+                if written && was.0 != now.0 {
                     out.push((n, new));
                 }
             }
@@ -3522,6 +3526,22 @@ fn review_stage(
             {
                 return Err(missing);
             }
+        } else if let Err((e, kind)) = turn {
+            // A patch turn that failed on the agent's side is a declined
+            // request too, as a patch turn that edited nothing is (see
+            // `patch_turn_failed`). Only `Other` counts: AgentUnavailable,
+            // RateLimited and Busy say nothing about the package.
+            if let Some(problem) = patching
+                && matches!(kind, FailureKind::Other)
+            {
+                let h = hash_spec(problem);
+                update_state(ws, reporter, |state| {
+                    if !state.declined_patches.contains(&h) {
+                        state.declined_patches.push(h);
+                    }
+                });
+            }
+            return Err(ctx.failed_as(kind, format!("the agent turn failed: {e}")));
         }
     }
     Ok(())
@@ -3707,6 +3727,8 @@ fn prefix_stage(
             {
                 return Err(missing);
             }
+        } else if let Err((e, kind)) = turn {
+            return Err(ctx.failed_as(kind, format!("the agent turn failed: {e}")));
         }
     }
     Ok(())
@@ -6610,7 +6632,13 @@ fn sibling_facts(config: &PipelineConfig, dirs: &[PathBuf]) -> Option<String> {
         }
         text.push('\n');
         if text.len() > TOTAL_CAP {
-            text.truncate(TOTAL_CAP);
+            // Cut back to a character boundary: the spec and RPM listings can
+            // hold multi-byte text, and a mid-character cut would panic.
+            let mut cut = TOTAL_CAP;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
             text.push_str("\n(truncated)\n");
             break;
         }
@@ -9963,7 +9991,7 @@ pub(crate) fn sha256_file(path: &Path) -> std::io::Result<String> {
 /// a digest of what was used.
 fn record_archive_digest(spec_path: &Path, url: &str, digest: &str) {
     let noted = std::fs::read_to_string(spec_path).and_then(|spec| {
-        std::fs::write(
+        ap_core::fsx::write_atomic(
             spec_path,
             crate::spec_tidy::with_archive_note(&spec, url, digest),
         )
@@ -10831,10 +10859,16 @@ fn generate_multi_flavor_wheel_spec(
     if flavors.len() < 2 {
         return None;
     }
-    let abis: Vec<String> = flavors
-        .iter()
-        .filter_map(|f| crate::flavors::abi_tag_for_flavor(f))
-        .collect();
+    // Each flavor paired with its ABI tag. A flavor without one has no wheel to
+    // pick, so the per-flavor layout does not apply.
+    let mut flavor_abis: Vec<(String, String)> = Vec::with_capacity(flavors.len());
+    for flavor in &flavors {
+        let Some(abi) = crate::flavors::abi_tag_for_flavor(flavor) else {
+            return None;
+        };
+        flavor_abis.push((flavor.clone(), abi));
+    }
+    let abis: Vec<String> = flavor_abis.iter().map(|(_, abi)| abi.clone()).collect();
     let picked = match ap_ecosystem::pypi::pick_wheels_per_flavor(json, &config.arch, &abis) {
         Ok(picked) => picked,
         Err(e) => {
@@ -10852,16 +10886,26 @@ fn generate_multi_flavor_wheel_spec(
         flavors.join(", ")
     );
     Some((|| {
+        if picked.len() != flavor_abis.len() {
+            return Err(GenSpecError::Other(format!(
+                "picked {} wheel(s) for {} flavor(s)",
+                picked.len(),
+                flavor_abis.len()
+            )));
+        }
         let mut wheels: Vec<(String, String)> = Vec::new();
         let mut first_path = None;
-        for (flavor, (_, wheel)) in flavors.iter().zip(&picked) {
+        for ((flavor, _), (_, wheel)) in flavor_abis.iter().zip(&picked) {
             let path = wheel
                 .fetch(checkout_dir)
                 .map_err(|e| GenSpecError::Other(format!("wheel download failed: {e}")))?;
             first_path.get_or_insert(path);
             wheels.push((flavor.clone(), wheel.filename.clone()));
         }
-        let release = ap_ecosystem::pypi::parse_release_with_tarball(json, &wheels[0].1)
+        let Some((_, first_wheel)) = wheels.first().cloned() else {
+            return Err(GenSpecError::Other("no wheel was picked for any flavor".into()));
+        };
+        let release = ap_ecosystem::pypi::parse_release_with_tarball(json, &first_wheel)
             .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
         let root_is_purelib = first_path
             .as_deref()
@@ -10896,7 +10940,7 @@ fn generate_multi_flavor_wheel_spec(
         write_wheel_rpmlintrc(
             checkout_dir,
             &config.pkg_name,
-            &wheels[0].1,
+            &first_wheel,
             layout.as_ref(),
         );
         let first_wheel = picked.into_iter().next().map(|(_, w)| w).ok_or_else(|| {
