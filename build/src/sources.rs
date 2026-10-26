@@ -1082,20 +1082,50 @@ fn file_names_version(file: &str, version: &str) -> bool {
         })
 }
 
-/// Whether `after` is a wheel's tag part after a version, `-py3-none-any`
-/// (or with a leading numeric build tag, `-1-py3-none-any`): dash-separated,
-/// non-empty components. A `-word` suffix such as `-docs` is not one.
+/// Whether `after` is a wheel's tag part after a version, `-<python>-<abi>-<platform>`
+/// as in `-py3-none-any`, optionally preceded by a digits-only build tag
+/// (`-1-py3-none-any`). The python tag is `py`, `cp`, `pp`, `ip` or `jy` with a
+/// version number (`py3`, `cp311`), or several of them joined by dots
+/// (`py2.py3`). Any other dash-separated words (`-docs-html-pdf`) are not one.
 fn wheel_tags_follow(after: &str) -> bool {
     let Some(rest) = after.strip_prefix('-') else {
         return false;
     };
     let parts: Vec<&str> = rest.split('-').collect();
-    let tags = match parts.as_slice() {
-        [build, tags @ ..] if build.chars().all(|c| c.is_ascii_digit()) && tags.len() == 3 => tags,
-        [_, _, _] => &parts[..],
+    let tags: &[&str] = match parts.as_slice() {
+        [build, tags @ ..]
+            if tags.len() == 3
+                && !build.is_empty()
+                && build.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            tags
+        }
+        [_, _, _] => &parts,
         _ => return false,
     };
-    tags.iter().all(|t| !t.is_empty())
+    let [python, abi, platform] = tags else {
+        return false;
+    };
+    is_wheel_python_tag(python) && is_wheel_word(abi) && is_wheel_word(platform)
+}
+
+/// `py3`, `cp311`, `pp310`, or dot-joined compounds such as `py2.py3`.
+fn is_wheel_python_tag(tag: &str) -> bool {
+    tag.split('.').all(|part| {
+        ["py", "cp", "pp", "ip", "jy"].iter().any(|prefix| {
+            part.strip_prefix(prefix)
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        })
+    })
+}
+
+/// An ABI or platform tag: letters, digits, `_` and `.` (`none`, `abi3`,
+/// `manylinux_2_17_x86_64.manylinux2014_x86_64`).
+fn is_wheel_word(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
 fn archive_urls_non_forge(url: &str, kind: SourceKind, version: &str) -> Vec<String> {
@@ -1201,6 +1231,13 @@ fn is_gitlab_host(host: &str) -> bool {
     host.to_ascii_lowercase()
         .split('.')
         .any(|label| label.starts_with("gitlab"))
+}
+
+/// Whether the URL `base` is on a GitLab host (see [`is_gitlab_host`]), which
+/// decides the archive layout. The API lookup and the archive layout must agree
+/// on this, or a self-hosted GitLab gets GitHub-style URLs.
+fn url_is_gitlab(base: &str) -> bool {
+    crate::http::host_of(base).is_some_and(|h| is_gitlab_host(&h))
 }
 
 /// The release endpoint and the tag-list fallback for a forge project, in the
@@ -1377,8 +1414,7 @@ pub fn archive_urls(repo_url: &str, version: &str) -> Vec<String> {
         .as_ref()
         .map(|f| f.repo_name.as_str())
         .unwrap_or_else(|| base.rsplit('/').next().unwrap_or("source"));
-    let is_gitlab =
-        crate::http::host_of(base).is_some_and(|h| h == "gitlab.com" || h.starts_with("gitlab."));
+    let is_gitlab = url_is_gitlab(base);
 
     let mut tags = Vec::new();
 
@@ -1457,8 +1493,7 @@ pub fn tag_archive_url(repo_url: &str, version: &str) -> Option<String> {
     let tags = get_repo_tags(repo_url).ok()?;
     let tag = find_matching_tag(&tags, version, &parsed.repo_name)?;
     let base = parsed.canonical_https();
-    let is_gitlab =
-        crate::http::host_of(&base).is_some_and(|h| h == "gitlab.com" || h.starts_with("gitlab."));
+    let is_gitlab = url_is_gitlab(&base);
     Some(tag_archive_url_for(
         &base,
         &parsed.repo_name,
@@ -2287,6 +2322,58 @@ mod tests {
         let bare = "https://github.com/o/r/archive/source.tar.gz";
         assert!(archive_urls(bare, "2.0").is_empty());
         assert!(!file_names_version("v1.0-docs.tar.gz", "1.0"));
+    }
+
+    #[test]
+    fn a_wheel_tag_suffix_must_have_the_wheel_tag_shape() {
+        // A name that is not a version plus wheel tags is another file.
+        assert!(!file_names_version("v1.0-docs-html-pdf.tar.gz", "1.0"));
+        assert!(!file_names_version("v1.0-docs.tar.gz", "1.0"));
+        assert!(!file_names_version("v1.0-docs-html-pdf.whl", "1.0"));
+        assert!(
+            !file_names_version("v1.0-x-y-z.whl", "1.0"),
+            "python tag is not one"
+        );
+        // The wheel tags of a real wheel: python, ABI and platform.
+        assert!(file_names_version("1.0-py3-none-any.whl", "1.0"));
+        assert!(file_names_version("1.0-1-py3-none-any.whl", "1.0"));
+        assert!(file_names_version("1.0-py2.py3-none-any.whl", "1.0"));
+        assert!(file_names_version(
+            "1.0-cp311-abi3-manylinux_2_17_x86_64.whl",
+            "1.0"
+        ));
+        assert!(
+            !file_names_version("1.0-py3-none.whl", "1.0"),
+            "two tags, not three"
+        );
+        assert!(
+            !file_names_version("1.0-x1-py3-none-any.whl", "1.0"),
+            "build tag is digits"
+        );
+    }
+
+    #[test]
+    fn a_self_hosted_gitlab_gets_the_gitlab_archive_layout() {
+        for gitlab in [
+            "https://gitlab.com/g/r",
+            "https://git.gitlab.corp.example/team/libfoo",
+            "https://gitlab-internal.corp.example/team/libfoo",
+        ] {
+            assert!(url_is_gitlab(gitlab), "{gitlab}");
+        }
+        for other in ["https://github.com/o/r", "https://evil-gitlab.example/x/y"] {
+            assert!(!url_is_gitlab(other), "{other}");
+        }
+        let base = "https://git.gitlab.corp.example/team/libfoo";
+        assert_eq!(
+            tag_archive_url_for(base, "libfoo", url_is_gitlab(base), "v1.0"),
+            "https://git.gitlab.corp.example/team/libfoo/-/archive/v1.0/libfoo-v1.0.tar.gz"
+        );
+        let base = "https://gitlab-internal.corp.example/team/libfoo";
+        assert_eq!(
+            tag_archive_url_for(base, "libfoo", url_is_gitlab(base), "v1.0"),
+            "https://gitlab-internal.corp.example/team/libfoo/-/archive/v1.0/libfoo-v1.0.tar.gz"
+        );
     }
 
     /// Live forge tag lookup: public, unauthenticated GETs of api.github.com and

@@ -311,12 +311,17 @@ pub fn drop_unneeded_wheel_build_requires(spec: &str) -> String {
         return spec.to_string();
     }
     let keep = |l: &str| {
-        !l.starts_with("BuildRequires:")
-            || !l.contains("%{python_module ")
-            || l.contains("%{python_module pip}")
+        !l.starts_with("BuildRequires:") || python_module_name(l).is_none_or(|name| name == "pip")
     };
     let lines: Vec<&str> = spec.lines().filter(|l| keep(l)).collect();
     join(&lines, spec.ends_with('\n'))
+}
+
+/// The module a `%{python_module <name> [<constraint>]}` macro names in `line`
+/// (`pip` in `%{python_module pip >= 19}`), or `None` when the line has none.
+fn python_module_name(line: &str) -> Option<&str> {
+    let (_, after) = line.split_once("%{python_module ")?;
+    after.split('}').next()?.split_whitespace().next()
 }
 
 /// The two-line note of the archive a spec was generated from, as comments
@@ -482,6 +487,23 @@ mod tests {
         );
         let imports = spec.replace("test -e %{buildroot}/x", "$python -c 'import x'");
         assert_eq!(drop_unneeded_wheel_build_requires(&imports), imports);
+    }
+
+    #[test]
+    fn a_pip_requirement_with_a_version_constraint_is_kept() {
+        let spec = "BuildRequires:  %{python_module pip >= 19}\n\
+                    BuildRequires:  %{python_module  setuptools  }\n\
+                    BuildRequires:  %{python_module wheel}\n\
+                    %install\n%pyproject_install %{SOURCE0}\n";
+        assert_eq!(
+            drop_unneeded_wheel_build_requires(spec),
+            "BuildRequires:  %{python_module pip >= 19}\n%install\n%pyproject_install %{SOURCE0}\n"
+        );
+        assert_eq!(
+            python_module_name("BuildRequires: %{python_module pip}"),
+            Some("pip")
+        );
+        assert_eq!(python_module_name("BuildRequires: fdupes"), None);
     }
 
     #[test]

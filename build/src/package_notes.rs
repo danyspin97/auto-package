@@ -361,8 +361,25 @@ fn check_size(notes: &str) -> Result<(), String> {
 /// already in the notes is refused. Conservative on purpose; a refused update
 /// is retried once and otherwise leaves the previous notes in place.
 const SUSPICIOUS: &[&str] = &[
-    "http://", "https://", "ftp://", "curl ", "wget ", "rm -rf", "rm -fr", "sudo ", "osc ", "| sh",
-    "| bash", "bash -c", "sh -c", "eval ", "chmod ", "base64 ",
+    "http://",
+    "https://",
+    "ftp://",
+    "ssh://",
+    "git@",
+    "git clone ",
+    "curl ",
+    "wget ",
+    "rm -rf",
+    "rm -fr",
+    "sudo ",
+    "osc ",
+    "| sh",
+    "| bash",
+    "bash -c",
+    "sh -c",
+    "eval ",
+    "chmod ",
+    "base64 ",
 ];
 
 /// Whether `pat` occurs at byte `i` of `hay` as a whole token: a pattern that
@@ -649,6 +666,27 @@ mod tests {
                 .contains("`curl x`")
         );
         assert!(check_injection("", "- do eval $x\n").is_err());
+    }
+
+    #[test]
+    fn injection_check_refuses_new_ssh_and_git_sources() {
+        assert!(check_injection("", "- fetch ssh://git.example/x\n").is_err());
+        assert!(check_injection("", "- use git+ssh://git.example/x\n").is_err());
+        assert!(check_injection("", "- git clone git@git.example:x/y.git\n").is_err());
+        assert!(check_injection("", "- git@git.example:x/y.git\n").is_err());
+        assert!(check_injection("", "- run git clone x\n").is_err());
+        // Whole tokens only: a word that ends in `git` or `ssh` is not one.
+        for ok in [
+            "- libgit clone is slow\n",
+            "- pygit@ prose\n",
+            "- rssh://x is a word\n",
+        ] {
+            assert!(check_injection("", ok).is_ok(), "{ok}");
+        }
+        // A span the old notes carry can be restated; a new one is refused.
+        let old = "- fetch ssh://git.example/x\n";
+        assert!(check_injection(old, "- fetch ssh://git.example/x\n- prose\n").is_ok());
+        assert!(check_injection(old, "- fetch ssh://evil.example/x\n").is_err());
     }
 
     #[test]

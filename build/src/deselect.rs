@@ -349,12 +349,34 @@ fn evidence_comment(line: &str) -> String {
     format!("# evidence: {}", flat.replace('%', "%%").trim())
 }
 
+/// The pytest ids of `failing` that `t` is a strict prefix of. pytest's
+/// `--deselect=<id>` drops every test whose node id starts with `<id>`, so
+/// these would be dropped along with `t`. Non-pytest tests yield none.
+fn pytest_prefix_extensions<'a>(t: &FailingTest, failing: &'a [FailingTest]) -> Vec<&'a str> {
+    if t.runner != Runner::Pytest {
+        return Vec::new();
+    }
+    failing
+        .iter()
+        .filter(|o| {
+            o.runner == Runner::Pytest && o.id.len() > t.id.len() && o.id.starts_with(&t.id)
+        })
+        .map(|o| o.id.as_str())
+        .collect()
+}
+
 fn apply_pytest(spec: &str, tests: &[&FailingTest]) -> Result<String, String> {
     let lines: Vec<&str> = spec.lines().collect();
     let (start, end) =
         section_body(&lines, "%check").ok_or("the spec has no %check section to edit")?;
     let at = addopts_insertion_point(&lines, start, end)?;
     let mut add: Vec<String> = tests.iter().map(|t| evidence_comment(&t.line)).collect();
+    add.push(
+        "# auto-package: --deselect matches node ids by prefix, so each id also deselects the \
+         tests whose ids start with it; the failing tests of this log that extend one are not \
+         dropped with it"
+            .to_string(),
+    );
     add.push(format!(
         "export PYTEST_ADDOPTS=\"${{PYTEST_ADDOPTS:-}} {}\"",
         tests
@@ -784,12 +806,26 @@ pub fn drop_failing_tests(
     let failing = failing_tests(log)?;
     let already = already_dropped(spec);
     let (fresh, repeated): (Vec<FailingTest>, Vec<FailingTest>) =
-        failing.into_iter().partition(|t| {
+        failing.iter().cloned().partition(|t| {
             !already
                 .iter()
                 .any(|a| *a == t.id || t.id.starts_with(&format!("{a}[")))
         });
+    // `--deselect` matches a node id by prefix: a failing test whose id another
+    // failing test of this log extends would also deselect that test, unrecorded.
+    let (fresh, prefixed): (Vec<FailingTest>, Vec<FailingTest>) = fresh
+        .into_iter()
+        .partition(|t| pytest_prefix_extensions(t, &failing).is_empty());
     if fresh.is_empty() {
+        if let Some(t) = prefixed.first() {
+            let by = pytest_prefix_extensions(t, &failing).join(", ");
+            return Err(format!(
+                "{} failing test(s) cannot be dropped exactly: pytest --deselect matches node ids \
+                 by prefix, so deselecting {} would also deselect {by}, unrecorded",
+                prefixed.len(),
+                t.id
+            ));
+        }
         return Err(format!(
             "{} failing test(s) are already dropped here and still run: the drop does not take \
              effect, so another route is needed",
@@ -809,7 +845,7 @@ pub fn drop_failing_tests(
             s
         }
     };
-    let omitted = fresh.len() - chosen.len();
+    let omitted = fresh.len() + prefixed.len() - chosen.len();
     Ok(Dropped {
         spec: spec_out,
         tests: chosen.into_iter().cloned().collect(),
@@ -867,6 +903,49 @@ mod tests {
         // Dropping the same tests again is refused: the drop is not taking effect.
         let again = drop_failing_tests(&got.spec, &log, &none).unwrap_err();
         assert!(again.contains("already dropped"), "{again}");
+    }
+
+    #[test]
+    fn a_pytest_id_that_prefixes_another_failing_id_is_not_dropped() {
+        // `--deselect=tests/io.py::test_read` would also deselect `test_read_large`.
+        let log = pytest_log(
+            &["tests/io.py::test_read", "tests/io.py::test_read_large"],
+            40,
+        );
+        let got = drop_failing_tests(SPEC, &log, &none).unwrap();
+        assert_eq!(
+            got.tests.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["tests/io.py::test_read_large"]
+        );
+        assert_eq!(got.omitted, 1);
+        let spec = &got.spec;
+        assert!(
+            spec.contains("--deselect=tests/io.py::test_read_large"),
+            "{spec}"
+        );
+        assert!(
+            !spec.contains("--deselect=tests/io.py::test_read "),
+            "{spec}"
+        );
+        assert!(
+            !spec.contains("--deselect=tests/io.py::test_read\""),
+            "{spec}"
+        );
+        assert!(
+            spec.contains("--deselect matches node ids by prefix"),
+            "{spec}"
+        );
+
+        // Once the longer id is dropped, the shorter one still cannot be dropped exactly.
+        let longer = drop_failing_tests(SPEC, &log, &none).unwrap();
+        let refused = drop_failing_tests(&longer.spec, &log, &none).unwrap_err();
+        assert!(refused.contains("cannot be dropped exactly"), "{refused}");
+
+        // A lone failing id with no extension in the log is dropped as before.
+        let alone =
+            drop_failing_tests(SPEC, &pytest_log(&["tests/io.py::test_read"], 40), &none).unwrap();
+        assert_eq!(alone.tests.len(), 1);
+        assert_eq!(alone.omitted, 0);
     }
 
     #[test]
