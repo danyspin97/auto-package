@@ -67,15 +67,17 @@ impl Obs for LiveObs {
 /// repository of the source (so the branch builds against what the source
 /// publishes).
 pub fn synthetic_branch_meta(branch: &str, source: &str, source_info: &ProjectInfo) -> String {
-    let mut xml = format!("<project name=\"{branch}\">\n");
+    let esc = crate::osc::xml_escape;
+    let mut xml = format!("<project name=\"{}\">\n", esc(branch));
     for repo in &source_info.repositories {
-        xml.push_str(&format!("  <repository name=\"{}\">\n", repo.name));
+        xml.push_str(&format!("  <repository name=\"{}\">\n", esc(&repo.name)));
         xml.push_str(&format!(
-            "    <path project=\"{source}\" repository=\"{}\"/>\n",
-            repo.name
+            "    <path project=\"{}\" repository=\"{}\"/>\n",
+            esc(source),
+            esc(&repo.name)
         ));
         for arch in &repo.arches {
-            xml.push_str(&format!("    <arch>{arch}</arch>\n"));
+            xml.push_str(&format!("    <arch>{}</arch>\n", esc(arch)));
         }
         xml.push_str("  </repository>\n");
     }
@@ -218,6 +220,14 @@ fn judge(
                     };
                 }
             };
+            // A name the search cannot carry is never looked up, so nothing is
+            // known about it: unchecked, not "published nowhere".
+            if !osc::is_searchable_binary_name(name) {
+                return DepVerdict {
+                    name: name.clone(),
+                    state: DepState::Unchecked,
+                };
+            }
             let published = hits.get(name).map(Vec::as_slice).unwrap_or_default();
             if published.is_empty() {
                 return DepVerdict {
@@ -464,7 +474,8 @@ impl DepResolver {
         Ok((meta, info))
     }
 
-    /// Fetch and cache the binaries of every name not asked about yet.
+    /// Fetch and cache the binaries of every name not asked about yet. A name
+    /// that cannot be searched is not fetched and not cached: it stays unknown.
     fn prefetch(&self, names: &[&str]) -> Result<(), String> {
         let _turn = self
             .binaries_fetch
@@ -476,7 +487,9 @@ impl DepResolver {
             names
                 .iter()
                 .copied()
-                .filter(|n| !cache.contains_key(*n) && seen.insert(*n))
+                .filter(|n| {
+                    osc::is_searchable_binary_name(n) && !cache.contains_key(*n) && seen.insert(*n)
+                })
                 .collect()
         };
         let chunks: Vec<&[&str]> = todo.chunks(SEARCH_CHUNK).collect();
@@ -1073,6 +1086,49 @@ mod tests {
             [("S".to_string(), "r1".to_string())]
         );
         assert_eq!(got.repositories[1].arches, ["x86_64"]);
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_searched_is_unchecked_and_never_cached_as_unpublished() {
+        let (r, fake) = resolver();
+        let v = r.check(&[pkg("a'b"), pkg("cmake"), pkg("x\"y")]).unwrap();
+        assert_eq!(state(&v, "a'b"), &DepState::Unchecked);
+        assert_eq!(state(&v, "x\"y"), &DepState::Unchecked);
+        assert!(matches!(state(&v, "cmake"), DepState::Reachable { .. }));
+        // Only the searchable name was looked up, and only it is cached.
+        assert_eq!(*fake.searches.lock().unwrap(), 1);
+        let cache = r.binaries.lock().unwrap();
+        assert!(cache.contains_key("cmake"));
+        assert!(!cache.contains_key("a'b"));
+        assert!(!cache.contains_key("x\"y"));
+        drop(cache);
+        // Such a name is left for the build, not offered a path.
+        assert_eq!(r.cover_dependency(&["a'b".into()]).unwrap(), None);
+    }
+
+    #[test]
+    fn the_synthetic_meta_escapes_names_and_stays_well_formed() {
+        let info = ProjectInfo {
+            kind: None,
+            locked: false,
+            repositories: vec![osc::RepoDef {
+                name: "r\"<x".into(),
+                paths: vec![],
+                arches: vec!["x86_64".into()],
+            }],
+        };
+        let xml = synthetic_branch_meta("B\"<", "S&<", &info);
+        assert!(xml.contains("<project name=\"B&quot;&lt;\">"), "{xml}");
+        assert!(xml.contains("<repository name=\"r&quot;&lt;x\">"), "{xml}");
+        assert!(
+            xml.contains("<path project=\"S&amp;&lt;\" repository=\"r&quot;&lt;x\"/>"),
+            "{xml}"
+        );
+        // The raw name does not open an element of its own.
+        let got = osc::parse_project_info(&xml);
+        assert_eq!(got.repositories.len(), 1);
+        assert_eq!(got.repositories[0].name, "r&quot;&lt;x");
+        assert_eq!(got.repositories[0].arches, ["x86_64"]);
     }
 
     #[test]

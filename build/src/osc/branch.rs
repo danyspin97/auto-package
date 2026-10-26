@@ -584,13 +584,20 @@ pub struct PublishedBinary {
     pub version: Option<String>,
 }
 
+/// Whether `name` can be put in a published-binary search at all. A name with
+/// a quote or a backslash cannot be written into the query, so it is never
+/// searched, and an answer about it is unknown rather than "nothing publishes
+/// it".
+pub fn is_searchable_binary_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['\'', '"', '\\'])
+}
+
 /// The search request for published binaries named any of `names`, across
-/// every project. Names with a quote in them cannot be put in the query and
-/// are left out.
+/// every project. Names [`is_searchable_binary_name`] rejects are left out.
 pub fn published_binary_search_path(names: &[&str]) -> String {
     let terms: Vec<String> = names
         .iter()
-        .filter(|n| !n.is_empty() && !n.contains(['\'', '"', '\\']))
+        .filter(|n| is_searchable_binary_name(n))
         .map(|n| format!("@name='{n}'"))
         .collect();
     format!(
@@ -622,10 +629,7 @@ pub fn search_published_binaries(
     names: &[&str],
     emit: Emit<'_>,
 ) -> Result<Vec<PublishedBinary>, Error> {
-    if names
-        .iter()
-        .all(|n| n.is_empty() || n.contains(['\'', '"', '\\']))
-    {
+    if names.iter().all(|n| !is_searchable_binary_name(n)) {
         return Ok(Vec::new());
     }
     let xml = api_get(&published_binary_search_path(names), emit)?;
@@ -1073,6 +1077,20 @@ mod tests {
         assert_eq!(
             published_binary_search_path(&["foo", "foo-devel", "a'b"]),
             "/search/published/binary/id?match=%40name%3D%27foo%27%20or%20%40name%3D%27foo-devel%27"
+        );
+    }
+
+    #[test]
+    fn names_with_quotes_or_backslashes_are_not_searchable() {
+        assert!(is_searchable_binary_name("libfoo-devel"));
+        assert!(is_searchable_binary_name("gtk+-3.0"));
+        for bad in ["", "a'b", "a\"b", "a\\b"] {
+            assert!(!is_searchable_binary_name(bad), "{bad:?}");
+        }
+        assert!(
+            search_published_binaries(&["a'b"], Emit::quiet())
+                .unwrap()
+                .is_empty()
         );
     }
 
