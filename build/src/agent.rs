@@ -4208,7 +4208,33 @@ fn turn_denied_tools(workspace: &std::path::Path, checkout: Option<&std::path::P
     }
     denied.extend(rpm_denied_tools());
     denied.extend(quilt_denied_tools());
+    denied.extend(read_tool_denied_tools());
     denied.join(",")
+}
+
+/// Denies for the read-only Bash grants that take a path or a name and print
+/// the result back to the model (`ls`, `osc cat`, `readelf`, `zypper`). Their
+/// trailing `*` also matches brace or glob expansion, backticks, `$(`, `..`
+/// and `~`, which can name files outside what the turn should see. Only these
+/// metacharacters are denied: `ls -d /usr/local/cuda-*` and the quoted
+/// `zypper search 'python313-*<stem>*'` form stay allowed, and `*` is not
+/// denied for that reason.
+fn read_tool_denied_tools() -> Vec<String> {
+    let prefixes = [
+        "ls",
+        "osc cat",
+        "readelf",
+        "zypper search",
+        "zypper what-provides",
+        "zypper info",
+    ];
+    let patterns = [
+        "*{*", "*}*", "*[*", "*]*", "*?*", "*`*", "*$*", "*..*", "*~*", "*\\*", "*\t*", "*\n*",
+    ];
+    prefixes
+        .iter()
+        .flat_map(|p| patterns.iter().map(move |pat| format!("Bash({p} {pat})")))
+        .collect()
 }
 
 /// Denies that win over the quilt grants in [`CHECKOUT_TOOLS`]. A grant's
@@ -4217,13 +4243,23 @@ fn turn_denied_tools(workspace: &std::path::Path, checkout: Option<&std::path::P
 /// `quilt refresh` would write that file's content into a patch the pipeline
 /// commits. The path rules need a space before the `/` or `~`, so a relative
 /// `quilt add foo/bar.c` is not denied. The metacharacter rules block chaining,
-/// substitution and redirection inside a granted quilt command. Each rule is
-/// written for both the bare and the `cd source && ` forms, since the grant
-/// matches them as separate prefixes.
+/// substitution and redirection inside a granted quilt command. Brace expansion
+/// (`quilt add {,/abs/file}`) turns one word into several, and the grant's `*`
+/// matches the result, so `{`/`}` are denied, as are glob characters that can
+/// reach outside the checkout (`[`, `]`, `?`). Quoted absolute paths
+/// (`"/abs"`, `'/abs'`, `--opt=/abs`) and a quote-pair prefix that hides the
+/// leading `/` (`""/abs`) are denied too. Each rule is written for both the
+/// bare and the `cd source && ` forms, since the grant matches them as separate
+/// prefixes.
 fn quilt_denied_tools() -> Vec<String> {
     let prefixes = ["quilt", "cd source && quilt"];
     let patterns = [
         "* /*",
+        "* \"/*",
+        "* '/*",
+        "*=/*",
+        "* \"\"*",
+        "* ''*",
         "*..*",
         "*~*",
         "*$*",
@@ -4234,6 +4270,15 @@ fn quilt_denied_tools() -> Vec<String> {
         "*`*",
         "*>*",
         "*<*",
+        "*{*",
+        "*}*",
+        "*[*",
+        "*]*",
+        "*?*",
+        "*!*",
+        "*\\*",
+        "*\t*",
+        "*\n*",
     ];
     prefixes
         .iter()
@@ -4259,7 +4304,11 @@ fn rpm_denied_tools() -> Vec<String> {
         "-*E*",
         "-*D*",
     ];
-    let metachars = [";", "&", "|", "`", "$(", "%(", ">", "<"];
+    // `{`/`}` are brace expansion, `[`/`]`/`?` globs and `..` a parent path:
+    // each turns the granted directory prefix into a path outside it.
+    let metachars = [
+        ";", "&", "|", "`", "$(", "%(", ">", "<", "{", "}", "[", "]", "?", "..", "\t", "\n",
+    ];
     options
         .iter()
         .map(|o| format!("Bash(rpm * {o})"))
@@ -6832,6 +6881,145 @@ mod tests {
         assert!(!denied.contains("Bash(rpm -qlp"), "{denied}");
         let granted = rpm_inspection_tools(Some(std::path::Path::new("/srv/nonexistent/rpms")));
         assert!(granted.contains("Bash(rpm -qlp /srv/nonexistent/rpms/*)"));
+    }
+
+    /// Matches a permission pattern (only `*` is special) against a whole command.
+    fn glob_matches(pattern: &str, text: &str) -> bool {
+        let p: Vec<char> = pattern.chars().collect();
+        let t: Vec<char> = text.chars().collect();
+        let (mut pi, mut ti) = (0, 0);
+        let (mut star, mut mark) = (None, 0);
+        while ti < t.len() {
+            if pi < p.len() && p[pi] == '*' {
+                star = Some(pi);
+                mark = ti;
+                pi += 1;
+            } else if pi < p.len() && p[pi] == t[ti] {
+                pi += 1;
+                ti += 1;
+            } else if let Some(s) = star {
+                pi = s + 1;
+                mark += 1;
+                ti = mark;
+            } else {
+                return false;
+            }
+        }
+        while pi < p.len() && p[pi] == '*' {
+            pi += 1;
+        }
+        pi == p.len()
+    }
+
+    /// The inner patterns of the `Bash(...)` deny rules in `denied`.
+    fn bash_deny_patterns(denied: &str) -> Vec<&str> {
+        denied
+            .split(',')
+            .filter_map(|r| r.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')))
+            .collect()
+    }
+
+    #[test]
+    fn quilt_and_rpm_denies_cover_brace_glob_quote_and_tab_forms() {
+        let ws = std::path::Path::new("/srv/ws");
+        let denied = turn_denied_tools(ws, Some(std::path::Path::new("/srv/ws/checkout")));
+        let list: Vec<&str> = denied.split(',').collect();
+        for prefix in ["quilt", "cd source && quilt"] {
+            for rule in [
+                "* \"/*", "* '/*", "*=/*", "*{*", "*}*", "*[*", "*]*", "*?*", "*!*", "*\\*",
+                "*\t*", "*\n*",
+            ] {
+                let rule = format!("Bash({prefix} {rule})");
+                assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+            }
+        }
+        for rule in [
+            "Bash(rpm *{*)",
+            "Bash(rpm *}*)",
+            "Bash(rpm *\t*)",
+            "Bash(rpm *..*)",
+        ] {
+            assert!(list.contains(&rule), "missing {rule}: {denied}");
+        }
+        // The reviewer's bypass: brace expansion turns one word into an
+        // absolute path that `quilt add *` would otherwise grant.
+        for command in [
+            "quilt add {,/abs/outside/file}",
+            "cd source && quilt add {,/abs/outside/file}",
+            "quilt add \"/etc/shadow\"",
+            "quilt add '/etc/shadow'",
+            "quilt add ''/etc/shadow",
+            "quilt add --patch=/etc/shadow",
+        ] {
+            assert!(
+                bash_deny_patterns(&denied)
+                    .iter()
+                    .any(|p| glob_matches(p, command)),
+                "no deny rule matches {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_tool_grants_are_denied_expansion_forms() {
+        let ws = std::path::Path::new("/srv/ws");
+        let denied = turn_denied_tools(ws, None);
+        let list: Vec<&str> = denied.split(',').collect();
+        for prefix in [
+            "ls",
+            "osc cat",
+            "readelf",
+            "zypper search",
+            "zypper what-provides",
+            "zypper info",
+        ] {
+            for pat in [
+                "*{*", "*}*", "*[*", "*]*", "*?*", "*`*", "*$*", "*..*", "*~*",
+            ] {
+                let rule = format!("Bash({prefix} {pat})");
+                assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+            }
+        }
+        // The grants stay as they were.
+        let tools = turn_allowed_tools(Task::FixAfterBuild, ws, None);
+        assert!(tools.contains("Bash(ls *)"));
+        assert!(tools.contains("Bash(osc cat *)"));
+    }
+
+    #[test]
+    fn documented_quilt_rpm_and_read_commands_match_no_deny_rule() {
+        // Every command example the prompt text gives for these tools. A deny
+        // that matches one of them would break the documented workflow.
+        let ws = std::path::Path::new("/srv/ws");
+        let denied = turn_denied_tools(ws, Some(std::path::Path::new("/srv/ws/checkout")));
+        let patterns = bash_deny_patterns(&denied);
+        assert!(patterns.len() > 50, "{denied}");
+        for command in [
+            "quilt new 0001-short-description.patch",
+            "quilt add path/to/file.py",
+            "quilt refresh",
+            "cd source && quilt new 0001-short-description.patch",
+            "cd source && quilt add path/to/file.py",
+            "cd source && quilt refresh",
+            "rpm -qlp /srv/ws/rpms/python-foo-1.0-1.1.noarch.rpm",
+            "ls",
+            "ls -d /usr/local/cuda-*",
+            "ls /srv/ws/checkout/src",
+            "readelf -d /usr/lib64/libfoo.so",
+            "osc status",
+            "osc cat openSUSE:Factory python-foo python-foo.spec",
+            "zypper search -s --match-exact python313-foo",
+            "zypper search -s 'foo*'",
+            "zypper search 'python313-*foo*'",
+            "zypper search --provides --match-exact \"/usr/include/foo.h\"",
+            "zypper what-provides /usr/bin/foo",
+            "zypper what-provides 'libfoo.so*'",
+            "zypper info python313-foo",
+        ] {
+            if let Some(p) = patterns.iter().find(|p| glob_matches(p, command)) {
+                panic!("documented command {command:?} is denied by {p:?}");
+            }
+        }
     }
 
     #[test]
