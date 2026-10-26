@@ -8817,6 +8817,15 @@ impl PkgState {
         }
     }
 
+    /// Count a patch turn on top of `unsaved` failures this process could not
+    /// save earlier; the new total.
+    fn record_condition_failure_after(&mut self, key: u64, unsaved: u32) -> u32 {
+        for _ in 0..unsaved {
+            self.record_condition_failure(key);
+        }
+        self.record_condition_failure(key)
+    }
+
     fn record_condition_satisfied(&mut self, key: u64) {
         if !self.satisfied_conditions.contains(&key) {
             self.satisfied_conditions.push(key);
@@ -8980,10 +8989,24 @@ fn patch_condition_gate(
     static UNSAVED_FAILURES: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<u64, u32>>,
     > = std::sync::LazyLock::new(Default::default);
+    // Failures counted in memory by earlier turns that could not be saved are
+    // added to the stored count, so the total is never short.
+    let unsaved = UNSAVED_FAILURES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .copied()
+        .unwrap_or(0);
     let failures = match PkgState::update(&ctx.ws, |s| {
-        s.record_condition_failure(key);
+        s.record_condition_failure_after(key, unsaved);
     }) {
-        Ok(state) => state.condition_failures_of(key),
+        Ok(state) => {
+            UNSAVED_FAILURES
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&key);
+            state.condition_failures_of(key)
+        }
         Err(e) => {
             ctx.reporter.report(&Event::Warning {
                 step: None,
@@ -16546,6 +16569,17 @@ mod hygiene_tests {
                 .contains(&condition_key(&utils_condition()))
         );
         assert_eq!(spec, FIXED_SPEC);
+    }
+
+    #[test]
+    fn failures_counted_while_unsaved_join_the_stored_count() {
+        let key = condition_key(&utils_condition());
+        let mut state = PkgState::default();
+        // Nothing unsaved: the first failure is 1.
+        assert_eq!(state.record_condition_failure_after(key, 0), 1);
+        // Two unsaved failures on top of the one stored: 1 + 2 + 1.
+        assert_eq!(state.record_condition_failure_after(key, 2), 4);
+        assert_eq!(state.condition_failures_of(key), 4);
     }
 
     #[test]
