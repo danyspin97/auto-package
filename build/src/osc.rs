@@ -147,11 +147,24 @@ pub fn text_is_transient(text: &str) -> bool {
     }
     match http_status(text) {
         // An explicit status is the answer: a 404 for a project called
-        // `timeout` is not a timeout, and a 504 is one whatever it says.
-        Some(code) => code == 408 || code >= 500,
-        None => has_timeout_word(error_body(text)),
+        // `timeout` is not a timeout, and a 504 is one whatever it says. A 429
+        // is OBS asking us to slow down, which passes.
+        Some(code) => code == 408 || code == 429 || code >= 500,
+        // Without a status, a timeout word counts unless the text says plainly
+        // that the project or package is not there.
+        None => {
+            !NOT_FOUND_PHRASES.iter().any(|p| t.contains(p)) && has_timeout_word(error_body(text))
+        }
     }
 }
+
+/// Phrases that say plainly that a project or package does not exist.
+const NOT_FOUND_PHRASES: &[&str] = &[
+    "unknown project",
+    "project not found",
+    "no such project",
+    "not found",
+];
 
 /// The part of an `osc ... failed (exit N):` message that the server or the
 /// tool wrote, without the command line that names the project or package.
@@ -163,14 +176,19 @@ fn error_body(text: &str) -> &str {
     }
 }
 
-/// Whether `timeout` is a word of its own in `text`: `Error: Timeout` has it,
-/// `home:alice:timeout`, `python-timeout-decorator` and `--timeouts` do not.
+/// Whether `timeout` is a word of its own in `text`: `Error: Timeout` and
+/// `connection timeout:` have it. A quoted word (`'timeout'`, a project's name)
+/// does not, nor does a name with a separator (`home:alice:timeout`,
+/// `python-timeout-decorator`, `pkg.timeout`) or `--timeouts`.
 fn has_timeout_word(text: &str) -> bool {
-    text.split_whitespace().any(|tok| {
-        tok.trim_start_matches(['(', '[', '"', '\''])
-            .trim_end_matches([':', ',', '.', ';', ')', ']', '"', '\''])
-            .eq_ignore_ascii_case("timeout")
-    })
+    text.split_whitespace()
+        .filter(|tok| !tok.contains(['\'', '"']))
+        .any(|tok| {
+            let word = tok
+                .trim_start_matches(['(', '['])
+                .trim_end_matches([':', ',', '.', ';', ')', ']', '!', '?']);
+            !word.contains([':', '-', '.', '/']) && word.eq_ignore_ascii_case("timeout")
+        })
 }
 
 /// Whether a failed project lookup answers that the project does not carry the
@@ -192,6 +210,50 @@ pub fn lookup_says_absent(text: &str, path_project: bool) -> bool {
                 || t.contains("project not found")
                 || t.contains("no such project")
         }
+    }
+}
+
+#[cfg(test)]
+mod transient_text_tests {
+    use super::*;
+
+    #[test]
+    fn a_project_named_timeout_is_absent_not_a_timeout() {
+        assert!(lookup_says_absent("unknown project 'timeout'", false));
+        assert!(!text_is_transient("unknown project 'timeout'"));
+    }
+
+    #[test]
+    fn a_package_named_timeout_is_not_transient() {
+        assert!(!text_is_transient("package 'timeout' not found"));
+    }
+
+    #[test]
+    fn a_timeout_word_without_status_is_transient() {
+        assert!(text_is_transient("Operation timed out"));
+        assert!(text_is_transient("connection timeout"));
+        assert!(text_is_transient("Error: Timeout"));
+        assert!(text_is_transient("request timeout: retry later"));
+    }
+
+    #[test]
+    fn a_timeout_inside_a_name_is_not_a_timeout() {
+        assert!(!text_is_transient("cannot read home:alice:timeout"));
+        assert!(!text_is_transient("no module python-timeout-decorator"));
+        assert!(!text_is_transient("unknown option --timeouts"));
+    }
+
+    #[test]
+    fn a_plain_not_found_phrase_wins_over_a_timeout_word() {
+        assert!(!text_is_transient("timeout: project not found"));
+    }
+
+    #[test]
+    fn a_429_is_transient_in_either_wording() {
+        assert!(text_is_transient("rate limited (429)"));
+        assert!(text_is_transient("HTTP Error 429: Too Many Requests"));
+        assert!(text_is_transient("429 Client Error: Too Many Requests"));
+        assert!(!lookup_says_absent("HTTP Error 429: Too Many Requests", true));
     }
 }
 
@@ -1286,7 +1348,11 @@ pub fn strip_devel_wrapping(name: &str) -> &str {
     else {
         return name;
     };
-    stripped.strip_prefix("lib").unwrap_or(stripped)
+    // `lib-devel` names nothing once `lib` is dropped: keep the name as written.
+    match stripped.strip_prefix("lib").unwrap_or(stripped) {
+        "" => name,
+        upstream => upstream,
+    }
 }
 
 #[cfg(test)]
@@ -1296,6 +1362,17 @@ mod strip_devel_wrapping_tests {
     #[test]
     fn strips_lib_prefix_and_devel_suffix() {
         assert_eq!(strip_devel_wrapping("libtrantor-devel"), "trantor");
+    }
+
+    #[test]
+    fn a_name_that_is_only_lib_and_devel_is_kept_whole() {
+        assert_eq!(strip_devel_wrapping("lib-devel"), "lib-devel");
+        assert_eq!(strip_devel_wrapping("-devel"), "-devel");
+    }
+
+    #[test]
+    fn python_devel_strips_to_python() {
+        assert_eq!(strip_devel_wrapping("python3-devel"), "python3");
     }
 
     #[test]
@@ -2332,6 +2409,16 @@ pub fn try_list_project_packages(
     Ok(pkgs)
 }
 
+/// Drop every cached published-binary search. A search is keyed by the expression
+/// over the projects `project` builds against, and a project built or published
+/// into can be one of those, so the answers are not keyed well enough to drop
+/// only the ones that changed. Losing them costs one re-search each.
+fn forget_published_binaries() {
+    *PUBLISHED_BINARIES_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Drop `project`'s cached package listing so the next [`try_list_project_packages`]
 /// call re-fetches it. Call this right after successfully building/committing
 /// a package into `project` — see [`try_list_project_packages`]'s doc comment for
@@ -2340,6 +2427,7 @@ pub fn try_list_project_packages(
 pub fn invalidate_project_packages_cache(project: &str) {
     // The sources changed, so the shared build results of the project may too.
     RESULTS_CACHE.invalidate(project);
+    forget_published_binaries();
     // Bump first: a fetch in flight must see the change even if it reaches
     // `insert_if_current` before the removal below.
     *PROJECT_PACKAGES_GENERATION
@@ -2378,6 +2466,24 @@ mod project_packages_cache_tests {
         invalidate_project_packages_cache(project);
 
         assert!(!cache.lock().unwrap().contains_key(project));
+    }
+
+    /// A published-binary answer cached before a build into the project would
+    /// keep saying "nothing published" for the rest of the run, so invalidation
+    /// must drop it.
+    #[test]
+    fn invalidate_drops_cached_published_binary_answers() {
+        let key = "ap-test-published-binaries-key".to_string();
+        PUBLISHED_BINARIES_CACHE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(key.clone(), Vec::new());
+
+        invalidate_project_packages_cache("ap-test-published-binaries-project");
+
+        let cache = PUBLISHED_BINARIES_CACHE.lock().unwrap();
+        assert!(cache.as_ref().is_none_or(|c| !c.contains_key(&key)));
     }
 
     /// A worker that read the listing before an invalidation must not put its
@@ -2435,6 +2541,55 @@ pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Ve
             .filter(|l| !l.is_empty())
             .collect(),
     )
+}
+
+/// The spec file of OBS package `pkg` given its file listing: the one `*.spec`
+/// it holds. A package with several, or none, falls back to `<pkg>.spec`.
+fn spec_file_name(files: &[String], pkg: &str) -> String {
+    let specs: Vec<&String> = files.iter().filter(|f| f.ends_with(".spec")).collect();
+    match specs.as_slice() {
+        [only] => only.to_string(),
+        _ => format!("{pkg}.spec"),
+    }
+}
+
+/// The spec file of OBS package `pkg` in `project`, found from its listing (see
+/// [`spec_file_name`]). `<pkg>.spec` when the listing cannot be read.
+fn package_spec_name(project: &str, pkg: &str, emit: Emit<'_>) -> String {
+    match list_package_files(project, pkg, emit) {
+        Some(files) => spec_file_name(&files, pkg),
+        None => format!("{pkg}.spec"),
+    }
+}
+
+#[cfg(test)]
+mod spec_file_name_tests {
+    use super::*;
+
+    fn files(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_single_spec_is_the_spec_whatever_the_package_is_called() {
+        let listing = files(&["_service", "pytorch.spec", "pytorch-2.4.tar.gz"]);
+        assert_eq!(spec_file_name(&listing, "pytorch+2.4"), "pytorch.spec");
+    }
+
+    #[test]
+    fn several_specs_fall_back_to_the_package_name() {
+        let listing = files(&["a.spec", "b.spec"]);
+        assert_eq!(spec_file_name(&listing, "pkg"), "pkg.spec");
+        let listing = files(&["pkg.spec", "other.spec"]);
+        assert_eq!(spec_file_name(&listing, "pkg"), "pkg.spec");
+    }
+
+    #[test]
+    fn no_spec_falls_back_to_the_package_name() {
+        let listing = files(&["_service", "README"]);
+        assert_eq!(spec_file_name(&listing, "pkg"), "pkg.spec");
+        assert_eq!(spec_file_name(&[], "pkg"), "pkg.spec");
+    }
 }
 
 /// Fetch a single file's contents from an OBS package without checking out.
@@ -2818,6 +2973,14 @@ pub fn checkout(
     check_obs_name("package", pkg_name)?;
     let checkout_dir = into_dir.join(project).join(pkg_name);
 
+    // The decision below (discard an unfinished checkout, re-use or check out)
+    // and the osc run it leads to hold this directory's lock, so a concurrent
+    // call for the same package waits instead of renaming a checkout that is
+    // still being written. Other packages are not held up. The process-wide
+    // lock further down is taken inside this one, never the other way round.
+    let dir_lock = checkout_dir_lock(&checkout_dir);
+    let _dir_guard = dir_lock.lock().unwrap_or_else(|e| e.into_inner());
+
     // Moved-aside copies of an unfinished checkout are kept for a week, then
     // they go: each can hold a large partial download.
     prune_unfinished_asides(&checkout_dir, None, Some(UNFINISHED_ASIDE_MAX_AGE));
@@ -2877,6 +3040,19 @@ pub fn checkout(
     }
 
     Ok(checkout_dir)
+}
+
+/// The lock for one checkout directory, created on first use and kept for the
+/// life of the process (one per package checked out).
+fn checkout_dir_lock(checkout_dir: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(checkout_dir.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 /// Remove `checkout_dir` when it is a checkout that was never completed: osc
@@ -3273,6 +3449,33 @@ mod unfinished_checkout_tests {
             fs::write(dir.join("_service"), "").unwrap();
         }
         base
+    }
+
+    /// The same checkout directory always gets the same lock, and another
+    /// package's directory gets its own, so it is not held up.
+    #[test]
+    fn checkout_locks_are_per_directory() {
+        let a = Path::new("/ap-test-checkout-lock/proj/a");
+        let b = Path::new("/ap-test-checkout-lock/proj/b");
+        assert!(Arc::ptr_eq(
+            &checkout_dir_lock(a),
+            &checkout_dir_lock(a)
+        ));
+        let held = checkout_dir_lock(a);
+        let _guard = held.lock().unwrap();
+        assert!(!Arc::ptr_eq(&held, &checkout_dir_lock(b)));
+        let other = checkout_dir_lock(b);
+        assert!(other.try_lock().is_ok());
+    }
+
+    /// Calls one after another take the lock in turn: a finished call leaves
+    /// the directory free for the next one.
+    #[test]
+    fn a_directory_lock_is_free_after_its_holder_leaves() {
+        let dir = Path::new("/ap-test-checkout-lock/proj/c");
+        drop(checkout_dir_lock(dir).lock().unwrap());
+        let lock = checkout_dir_lock(dir);
+        assert!(lock.try_lock().is_ok());
     }
 
     fn sibling_names(base: &Path) -> Vec<String> {
@@ -6437,11 +6640,12 @@ pub fn empty_package_warning(
     repo: &str,
     arch: &str,
 ) -> Option<String> {
+    let spec_name = package_spec_name(project, pkg_name, Emit::quiet());
     let spec = osc_api(&format!(
-        "/source/{}/{}/{}.spec",
+        "/source/{}/{}/{}",
         enc(project),
         enc(pkg_name),
-        enc(pkg_name)
+        enc(&spec_name)
     ))?;
     let reason = unfinished_spec_reason(&spec)?;
     let sizes = osc_api(&format!(
@@ -7522,7 +7726,7 @@ fn obs_build_once(
                     Error::UnresolvableDeps { names, detail }
                 }
                 FailureKind::BuildFailed => Error::BuildFailed {
-                    spec: format!("{pkg_name}.spec"),
+                    spec: package_spec_name(project, pkg_name, emit),
                     code: 1,
                     log: log_path.to_owned(),
                 },
