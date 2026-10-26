@@ -37,6 +37,9 @@ const AGENT_ENV_ALLOW: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
     "NODE_PATH",
     "REQUESTS_CA_BUNDLE",
+    // The Vertex region: a setting, not a credential, and the settings `env`
+    // block usually carries it next to CLAUDE_CODE_USE_VERTEX.
+    "CLOUD_ML_REGION",
 ];
 
 /// Name prefixes (upper-case) the subprocess may inherit.
@@ -168,18 +171,37 @@ fn parse_pass_list(raw: &str) -> Vec<String> {
 /// Anthropic OAuth and reports "not logged in". The entries are added here
 /// instead, under the variables of this process, which take precedence.
 pub(crate) fn agent_env() -> BTreeMap<String, String> {
-    let mut env = user_settings_env();
-    env.extend(scrub_env_for_agent_passing(
+    merge_agent_env(
+        user_settings_env(),
         std::env::vars().collect(),
-        &[],
         &agent_env_pass_list(),
-    ));
+    )
+}
+
+/// Both sources go through the same policy: [`AGENT_ENV_ALLOW`] and its
+/// prefixes, the publishing denylist, the credential-shape checks with
+/// [`CREDENTIAL_EXCEPTIONS`], and the `pass` list. So a settings entry such as
+/// `GITHUB_TOKEN` or `NODE_OPTIONS` is dropped as it would be from the process
+/// environment. What the agent legitimately reads from settings survives:
+/// `ANTHROPIC_*` / `CLAUDE_*` (base URL, model, Vertex or Bedrock switches,
+/// `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`
+/// through the exceptions), `CLOUD_ML_REGION` and the proxy and CA variables.
+/// Cloud names such as `AWS_REGION` need the same `AUTO_PACKAGE_AGENT_ENV_PASS`
+/// opt-in as in the process environment. Process variables take precedence.
+fn merge_agent_env(
+    settings: BTreeMap<String, String>,
+    process: Vec<(String, String)>,
+    pass: &[String],
+) -> BTreeMap<String, String> {
+    let mut env = scrub_env_for_agent_passing(settings.into_iter().collect(), &[], pass);
+    env.extend(scrub_env_for_agent_passing(process, &[], pass));
     env
 }
 
 /// The `env` block of the user's claude `settings.json`
 /// (`$CLAUDE_CONFIG_DIR` or `~/.claude`), or nothing if absent or unreadable.
-/// `OSC*` names are dropped: the agent does not publish.
+/// `OSC*` names are dropped here, and the values are scrubbed by
+/// [`merge_agent_env`] like any other variable.
 fn user_settings_env() -> BTreeMap<String, String> {
     let dir = match std::env::var_os("CLAUDE_CONFIG_DIR") {
         Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
@@ -354,6 +376,47 @@ const AGENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 const AGENT_WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 /// Most stdout/stderr text kept from one turn for post-mortem files.
 const MAX_AGENT_STREAM_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Longest stdout line kept in memory. A line past it is cut, and the rest of
+/// it is read and dropped up to the newline, so one newline-less line cannot
+/// grow the buffer without bound. Far above any real stream-json event.
+const MAX_AGENT_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Read one line into `line`, keeping at most `cap` bytes of it. The bytes past
+/// the cap are consumed and discarded up to and including the newline, so the
+/// next call starts on the following line. Returns the number of bytes consumed
+/// (0 at end of input) and whether the line was cut.
+fn read_capped_line<R: std::io::BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<(usize, bool)> {
+    line.clear();
+    let mut consumed = 0usize;
+    let mut cut = false;
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            break;
+        }
+        let (done, used) = match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => (true, i + 1),
+            None => (false, buf.len()),
+        };
+        let room = cap - line.len();
+        let keep = used.min(room);
+        line.extend_from_slice(&buf[..keep]);
+        if keep < used {
+            cut = true;
+        }
+        consumed += used;
+        reader.consume(used);
+        if done {
+            break;
+        }
+    }
+    Ok((consumed, cut))
+}
 /// Most bytes kept of one tool call's input.
 const MAX_TOOL_INPUT_BYTES: usize = 256 * 1024;
 
@@ -4144,7 +4207,38 @@ fn turn_denied_tools(workspace: &std::path::Path, checkout: Option<&std::path::P
         }
     }
     denied.extend(rpm_denied_tools());
+    denied.extend(quilt_denied_tools());
     denied.join(",")
+}
+
+/// Denies that win over the quilt grants in [`CHECKOUT_TOOLS`]. A grant's
+/// trailing `*` matches any text, so `quilt add /abs/secret` or
+/// `quilt add ../../x` would otherwise be allowed, and a following
+/// `quilt refresh` would write that file's content into a patch the pipeline
+/// commits. The path rules need a space before the `/` or `~`, so a relative
+/// `quilt add foo/bar.c` is not denied. The metacharacter rules block chaining,
+/// substitution and redirection inside a granted quilt command. Each rule is
+/// written for both the bare and the `cd source && ` forms, since the grant
+/// matches them as separate prefixes.
+fn quilt_denied_tools() -> Vec<String> {
+    let prefixes = ["quilt", "cd source && quilt"];
+    let patterns = [
+        "* /*",
+        "*..*",
+        "*~*",
+        "*$*",
+        "*quiltrc*",
+        "*;*",
+        "*&*",
+        "*|*",
+        "*`*",
+        "*>*",
+        "*<*",
+    ];
+    prefixes
+        .iter()
+        .flat_map(|p| patterns.iter().map(move |pat| format!("Bash({p} {pat})")))
+        .collect()
 }
 
 /// Denies that win over the `Bash(rpm -qlp <rpms dir>/*)` grant. Its trailing
@@ -4488,7 +4582,6 @@ fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // inspect — the parsed path above silently drops anything it can't read.
     let mut stdout_raw = String::new();
     {
-        use std::io::BufRead;
         let mut reader = std::io::BufReader::new(child_stdout);
         let mut raw_line: Vec<u8> = Vec::new();
         let mut read_errors = 0u32;
@@ -4496,10 +4589,14 @@ fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         // cannot spin the loop.
         const MAX_CONSECUTIVE_READ_ERRORS: u32 = 16;
         loop {
-            raw_line.clear();
-            match reader.read_until(b'\n', &mut raw_line) {
-                Ok(0) => break,
-                Ok(_) => read_errors = 0,
+            match read_capped_line(&mut reader, &mut raw_line, MAX_AGENT_LINE_BYTES) {
+                Ok((0, _)) => break,
+                Ok((_, cut)) => {
+                    read_errors = 0;
+                    if cut {
+                        stdout_raw.push_str("[line truncated]\n");
+                    }
+                }
                 // Keep draining after a read error. Stopping here left the CLI
                 // blocked on a full pipe until the watchdog killed it, and lost
                 // the turn's result. The error is recorded so a truncated
@@ -6489,6 +6586,97 @@ mod tests {
     }
 
     #[test]
+    fn capped_line_reader_bounds_a_huge_line_and_keeps_normal_lines() {
+        let mut input = Vec::new();
+        input.extend_from_slice(b"short\n");
+        input.extend_from_slice(&vec![b'x'; 100_000]);
+        input.extend_from_slice(b"\nafter\n");
+        // A small buffer forces the line to span many fill_buf calls.
+        let mut reader = std::io::BufReader::with_capacity(64, std::io::Cursor::new(input));
+        let mut line = Vec::new();
+        let (n, cut) = read_capped_line(&mut reader, &mut line, 1000).unwrap();
+        assert_eq!((n, cut, line.as_slice()), (6, false, &b"short\n"[..]));
+        let (n, cut) = read_capped_line(&mut reader, &mut line, 1000).unwrap();
+        assert!(cut && n == 100_001, "consumed {n}, cut {cut}");
+        assert_eq!(line.len(), 1000);
+        let (n, cut) = read_capped_line(&mut reader, &mut line, 1000).unwrap();
+        assert_eq!((n, cut, line.as_slice()), (6, false, &b"after\n"[..]));
+        let (n, _) = read_capped_line(&mut reader, &mut line, 1000).unwrap();
+        assert_eq!(n, 0, "end of input");
+    }
+
+    #[test]
+    fn settings_env_is_scrubbed_like_process_env_but_keeps_claude_config() {
+        let settings: BTreeMap<String, String> = [
+            ("ANTHROPIC_API_KEY", "sk-ant-x"),
+            ("ANTHROPIC_BASE_URL", "https://gw.example.com/v1"),
+            ("ANTHROPIC_MODEL", "claude-x"),
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
+            ("CLOUD_ML_REGION", "europe-west4"),
+            ("HTTPS_PROXY", "http://user:pw@proxy:3128"),
+            ("GITHUB_TOKEN", "ghp_x"),
+            ("MY_SERVICE_TOKEN", "t"),
+            ("NODE_OPTIONS", "--require /tmp/evil.js"),
+            ("AWS_PROFILE", "prod"),
+            ("OSC_PASS", "hunter2"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let process = vec![("ANTHROPIC_MODEL".to_string(), "claude-process".to_string())];
+        let env = merge_agent_env(settings, process, &[]);
+        assert_eq!(
+            env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-ant-x")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://gw.example.com/v1")
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_USE_VERTEX").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            env.get("CLOUD_ML_REGION").map(String::as_str),
+            Some("europe-west4")
+        );
+        assert!(env.contains_key("HTTPS_PROXY"), "proxy must survive");
+        // Process variables win over settings.
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL").map(String::as_str),
+            Some("claude-process")
+        );
+        for dropped in [
+            "GITHUB_TOKEN",
+            "MY_SERVICE_TOKEN",
+            "NODE_OPTIONS",
+            "AWS_PROFILE",
+            "OSC_PASS",
+        ] {
+            assert!(
+                !env.contains_key(dropped),
+                "{dropped} must not reach the agent"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_env_cloud_names_need_the_pass_list() {
+        let settings: BTreeMap<String, String> =
+            [("AWS_REGION".to_string(), "us-east-1".to_string())]
+                .into_iter()
+                .collect();
+        let dropped = merge_agent_env(settings.clone(), Vec::new(), &[]);
+        assert!(!dropped.contains_key("AWS_REGION"));
+        let kept = merge_agent_env(settings, Vec::new(), &["AWS_REGION".to_string()]);
+        assert_eq!(
+            kept.get("AWS_REGION").map(String::as_str),
+            Some("us-east-1")
+        );
+    }
+
+    #[test]
     fn turn_tools_have_no_rpmspec_and_no_bare_quilt_and_deny_settings_writes() {
         let ws = std::path::Path::new("/srv/ws");
         let co = Some(std::path::Path::new("/srv/ws/checkout"));
@@ -6501,6 +6689,43 @@ mod tests {
         let denied = turn_denied_tools(ws, co);
         assert!(denied.contains("Write(//srv/ws/.claude/**)"));
         assert!(denied.contains("Edit(//srv/ws/checkout/.mcp.json)"));
+    }
+
+    #[test]
+    fn quilt_grant_is_denied_absolute_parent_and_chaining_forms() {
+        let ws = std::path::Path::new("/srv/ws");
+        let denied = turn_denied_tools(ws, None);
+        let list: Vec<&str> = denied.split(',').collect();
+        for prefix in ["quilt", "cd source && quilt"] {
+            for rule in [
+                "* /*",
+                "*..*",
+                "*~*",
+                "*$*",
+                "*quiltrc*",
+                "*;*",
+                "*&*",
+                "*|*",
+                "*`*",
+                "*>*",
+                "*<*",
+            ] {
+                let rule = format!("Bash({prefix} {rule})");
+                assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+            }
+        }
+        // A relative path is not denied: the path rules need a space before
+        // the `/`, and no rule is a bare `quilt */*`.
+        assert!(!list.contains(&"Bash(quilt */*)"), "{denied}");
+        assert!(!denied.contains("Bash(quilt *)"), "{denied}");
+        // The grants themselves are still present for the checkout turns.
+        let tools = turn_allowed_tools(
+            Task::FixAfterBuild,
+            ws,
+            Some(std::path::Path::new("/srv/ws/checkout")),
+        );
+        assert!(tools.contains("Bash(quilt add *)"));
+        assert!(tools.contains("Bash(cd source && quilt add *)"));
     }
 
     #[test]
