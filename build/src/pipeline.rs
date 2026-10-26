@@ -2177,15 +2177,6 @@ enum BranchError {
 }
 
 impl BranchError {
-    /// A failure of a listing, which reports only its text: a listing that
-    /// could not be read is a network or OBS failure.
-    fn listing(reason: String) -> Self {
-        Self::Failed {
-            reason,
-            transient: true,
-        }
-    }
-
     fn osc(e: &osc::Error) -> Self {
         Self::Failed {
             reason: e.to_string(),
@@ -2194,22 +2185,53 @@ impl BranchError {
     }
 }
 
+/// What a failed project lookup while branching means. A transient failure
+/// (network, timeout, OBS 5xx) fails the stage. Any other refusal (403, 404,
+/// forbidden, not found) means that project does not carry the package: a
+/// warning, and the lookup counts as empty.
+fn absent_unless_transient<T: Default>(
+    reason: String,
+    transient: bool,
+    emit: Emit<'_>,
+) -> Result<T, BranchError> {
+    if transient {
+        return Err(BranchError::Failed { reason, transient });
+    }
+    emit.reporter.report(&Event::Warning {
+        step: emit.step,
+        message: format!("{reason}; treating that project as not carrying the package"),
+    });
+    Ok(T::default())
+}
+
 fn branch_from_linked(
     config: &PipelineConfig,
     rpm_name: &str,
     emit: Emit<'_>,
 ) -> Result<Option<String>, BranchError> {
-    let own =
-        osc::try_list_project_packages(&config.project, emit).map_err(BranchError::listing)?;
+    let own = match osc::try_list_project_packages(&config.project, emit) {
+        Ok(own) => own,
+        Err(reason) => {
+            let transient = osc::text_is_transient(&reason);
+            absent_unless_transient(reason, transient, emit)?
+        }
+    };
     let key = osc::fuzzy_key(rpm_name);
     if own.iter().any(|p| osc::fuzzy_key(p) == key) {
         return Ok(None);
     }
-    for (path_project, _repo) in
-        osc::get_project_repo_paths(&config.project, emit).map_err(|e| BranchError::osc(&e))?
-    {
-        let listing =
-            osc::try_list_project_packages(&path_project, emit).map_err(BranchError::listing)?;
+    let paths = match osc::get_project_repo_paths(&config.project, emit) {
+        Ok(paths) => paths,
+        Err(e) => absent_unless_transient(e.to_string(), e.is_transient(), emit)?,
+    };
+    for (path_project, _repo) in paths {
+        let listing = match osc::try_list_project_packages(&path_project, emit) {
+            Ok(listing) => listing,
+            Err(reason) => {
+                let transient = osc::text_is_transient(&reason);
+                absent_unless_transient(reason, transient, emit)?
+            }
+        };
         let Some(shipped) = listing.iter().find(|p| osc::fuzzy_key(p) == key) else {
             continue;
         };
@@ -9141,6 +9163,12 @@ fn condition_holds_now(
     ) == Verdict::Satisfied
 }
 
+/// The failure count when the state could not be saved: the stored count (0
+/// when it cannot be read either) plus the failures this process holds unsaved.
+fn count_when_unsaved(stored: std::io::Result<u32>, unsaved: u32) -> u32 {
+    stored.unwrap_or(0) + unsaved
+}
+
 /// After a patch turn on a package with a condition: true of the spec now, the
 /// request is met. Not true, the failure is counted: the first one fails the
 /// patch (a dependent asks again), the second switches the package to its
@@ -9199,10 +9227,26 @@ fn patch_condition_gate(
                     ctx.rpm_name
                 ),
             });
-            let mut counts = UNSAVED_FAILURES.lock().unwrap_or_else(|p| p.into_inner());
-            let n = counts.entry(slot).or_insert(0);
-            *n += 1;
-            *n
+            let unsaved_now = {
+                let mut counts = UNSAVED_FAILURES.lock().unwrap_or_else(|p| p.into_inner());
+                let n = counts.entry(slot).or_insert(0);
+                *n += 1;
+                *n
+            };
+            // The stored count is still the total: this failure is only the
+            // one not saved yet.
+            let stored = PkgState::try_load(&ctx.ws)
+                .map(|s| s.condition_failures_of(key))
+                .inspect_err(|e| {
+                    ctx.reporter.report(&Event::Warning {
+                        step: None,
+                        message: format!(
+                            "{}: cannot read the condition failure count: {e}; counting from 0",
+                            ctx.rpm_name
+                        ),
+                    });
+                });
+            count_when_unsaved(stored, unsaved_now)
         }
     };
     append_notes(
@@ -17139,6 +17183,58 @@ mod hygiene_tests {
         // Two unsaved failures on top of the one stored: 1 + 2 + 1.
         assert_eq!(state.record_condition_failure_after(key, 2), 4);
         assert_eq!(state.condition_failures_of(key), 4);
+    }
+
+    #[test]
+    fn an_unsaved_failure_count_adds_to_the_stored_one() {
+        // Stored 1, this failure unsaved: 2, so the cap is reached.
+        assert_eq!(count_when_unsaved(Ok(1), 1), 2);
+        // Stored count unreadable: the unsaved failures alone.
+        assert_eq!(
+            count_when_unsaved(Err(std::io::Error::other("locked")), 1),
+            1
+        );
+    }
+
+    #[test]
+    fn a_project_lookup_failure_fails_the_branch_only_when_transient() {
+        #[derive(Default)]
+        struct Warnings(std::sync::Mutex<usize>);
+        impl Reporter for Warnings {
+            fn report(&self, event: &Event) {
+                if matches!(event, Event::Warning { .. }) {
+                    *self.0.lock().unwrap() += 1;
+                }
+            }
+        }
+        let rec = Warnings::default();
+        // A 404 or 403 means the project does not carry the package.
+        let absent: Result<Vec<String>, BranchError> = absent_unless_transient(
+            "osc ls exited 1: HTTP Error 404: Not Found".to_string(),
+            osc::text_is_transient("osc ls exited 1: HTTP Error 404: Not Found"),
+            Emit::run(&rec),
+        );
+        assert!(matches!(absent, Ok(ref v) if v.is_empty()));
+        assert_eq!(*rec.0.lock().unwrap(), 1);
+        assert!(!osc::text_is_transient("HTTP Error 403: Forbidden"));
+        // A 503 or a timeout fails the stage.
+        for reason in [
+            "osc ls exited 1: HTTP Error 503: Service Unavailable",
+            "timed out",
+        ] {
+            let failed: Result<Vec<String>, BranchError> = absent_unless_transient(
+                reason.to_string(),
+                osc::text_is_transient(reason),
+                Emit::run(&rec),
+            );
+            assert!(matches!(
+                failed,
+                Err(BranchError::Failed {
+                    transient: true,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
