@@ -4143,7 +4143,34 @@ fn turn_denied_tools(workspace: &std::path::Path, checkout: Option<&std::path::P
             denied.push(format!("{tool}({p}/.claude.json)"));
         }
     }
+    denied.extend(rpm_denied_tools());
     denied.join(",")
+}
+
+/// Denies that win over the `Bash(rpm -qlp <rpms dir>/*)` grant. Its trailing
+/// `*` matches any text, spaces included, so `rpm -qlp x.rpm --eval '%(...)'`
+/// matches it: rpm takes `--eval`/`-E` and `--define`/`-D` after the file name,
+/// expands `%(...)` by running a shell, and `--macros`, `--rcfile` and `--pipe`
+/// load or run more. Each rule needs a space before the option, so a file name
+/// containing the letters does not match. The metacharacter rules block
+/// chaining or substitution inside the granted command; the engine also checks
+/// each part of a compound command on its own.
+fn rpm_denied_tools() -> Vec<String> {
+    let options = [
+        "--eval*",
+        "--define*",
+        "--macros*",
+        "--rcfile*",
+        "--pipe*",
+        "-*E*",
+        "-*D*",
+    ];
+    let metachars = [";", "&", "|", "`", "$(", "%(", ">", "<"];
+    options
+        .iter()
+        .map(|o| format!("Bash(rpm * {o})"))
+        .chain(metachars.iter().map(|m| format!("Bash(rpm *{m}*)")))
+        .collect()
 }
 
 /// Run one agent turn. The agent has tool access to the workspace and edits
@@ -6549,6 +6576,37 @@ mod tests {
         let tools = rpm_inspection_tools(Some(std::path::Path::new("/srv/nonexistent/rpms")));
         assert_eq!(tools, ",Bash(rpm -qlp /srv/nonexistent/rpms/*)");
         assert!(!tools.contains("rpm *") && !tools.contains("rpm -q *"));
+    }
+
+    #[test]
+    fn rpm_grant_is_denied_expansion_and_chaining_forms() {
+        let ws = std::path::Path::new("/srv/ws");
+        let denied = turn_denied_tools(ws, None);
+        let list: Vec<&str> = denied.split(',').collect();
+        // The grant's trailing `*` also matches these; the deny must win.
+        for rule in [
+            "Bash(rpm * --eval*)",
+            "Bash(rpm * --define*)",
+            "Bash(rpm * --macros*)",
+            "Bash(rpm * --rcfile*)",
+            "Bash(rpm * --pipe*)",
+            "Bash(rpm * -*E*)",
+            "Bash(rpm * -*D*)",
+            "Bash(rpm *;*)",
+            "Bash(rpm *&*)",
+            "Bash(rpm *|*)",
+            "Bash(rpm *`*)",
+            "Bash(rpm *$(*)",
+            "Bash(rpm *%(*)",
+            "Bash(rpm *>*)",
+            "Bash(rpm *<*)",
+        ] {
+            assert!(list.contains(&rule), "missing {rule}: {denied}");
+        }
+        // The grant itself is not denied, and a bare rpm never is granted.
+        assert!(!denied.contains("Bash(rpm -qlp"), "{denied}");
+        let granted = rpm_inspection_tools(Some(std::path::Path::new("/srv/nonexistent/rpms")));
+        assert!(granted.contains("Bash(rpm -qlp /srv/nonexistent/rpms/*)"));
     }
 
     #[test]
