@@ -2253,12 +2253,15 @@ fn branch_from_linked(
         let Some(shipped) = listing.iter().find(|p| osc::fuzzy_key(p) == key) else {
             continue;
         };
-        if shipped != rpm_name {
+        // The lookup is fuzzy and the names are lowercased here, so a name
+        // that differs only in case (PyYAML vs pyyaml) is the same package. The
+        // listed spelling is the one the path project ships and is branched.
+        if !shipped.eq_ignore_ascii_case(rpm_name) {
             return Err(BranchError::Renamed(format!(
                 "{path_project} ships it as {shipped}, not {rpm_name}"
             )));
         }
-        let result = osc::branch_package(&path_project, rpm_name, &config.project, false, emit)
+        let result = osc::branch_package(&path_project, shipped, &config.project, false, emit)
             .map_err(|e| BranchError::osc(&e));
         osc::invalidate_project_packages_cache(&config.project);
         return result.map(|_| Some(path_project));
@@ -4828,11 +4831,25 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
     }
 
     // A patch for another release's tree is dropped, with a note in `.changes`,
-    // before anything is asked of the agent about it.
+    // before anything is asked of the agent about it. A name prefix that looks
+    // like another release is only a candidate: `-p1` strips it, so the patch
+    // is dropped only when its dry run fails to apply.
     if !st.sdist_top_level.is_empty()
         && let Ok(current) = std::fs::read_to_string(spec_path)
     {
-        let stale = stale_patches(&current, checkout_dir, &st.sdist_top_level, &config.version);
+        let candidates =
+            stale_patches(&current, checkout_dir, &st.sdist_top_level, &config.version);
+        let failing: Vec<String> = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            try_patches(spec_path, &current)
+                .map(|check| check.failed.into_iter().map(|(n, _)| n).collect())
+                .unwrap_or_default()
+        };
+        let stale: Vec<(String, String)> = candidates
+            .into_iter()
+            .filter(|(n, _)| failing.contains(n))
+            .collect();
         if !stale.is_empty() {
             let names: Vec<String> = stale.iter().map(|(n, _)| n.clone()).collect();
             write_or_warn(spec_path, without_patches(&current, &names));
@@ -4841,7 +4858,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                 reporter.report(&Event::Warning {
                     step: Some(validate_step.id),
                     message: format!(
-                        "{rpm_name}: dropped {name}: it patches {prefix}, not the {} sources",
+                        "{rpm_name}: dropped {name}: it patches {prefix} and does not apply to the {} sources",
                         config.version
                     ),
                 });
@@ -5189,9 +5206,11 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                             validate_step.finish(StepOutcome::Failed);
                             Ok(Flow::Retry)
                         }
-                        // Only a turn that could not run or gave no usable fix is
-                        // a warning. Budget exhaustion, cancellation and the apply
-                        // gate's refusals still fail the package below.
+                        // Only a turn that could not run, gave no usable fix, or
+                        // was blocked on every rung of the ladder is a warning.
+                        // Budget exhaustion, cancellation and the apply gate's
+                        // refusals still fail the package below. Every problem
+                        // here is style, so an exhausted ladder is style too.
                         Err(PipelineResult::Failed { reason, kind, .. })
                             if matches!(
                                 kind,
@@ -5199,8 +5218,17 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                                     | FailureKind::RateLimited
                                     | FailureKind::Busy
                                     | FailureKind::Transient
+                                    | FailureKind::Exhausted
                             ) =>
                         {
+                            // The ladder memo would refuse a later rebuild of
+                            // this spec as spent; a style-only failure must not.
+                            if kind == FailureKind::Exhausted {
+                                update_state(ws, reporter, |state| {
+                                    state.ladder_spec_hash = None;
+                                    state.ladder_reason = None;
+                                });
+                            }
                             // Style is not worth failing a package that builds:
                             // the failure is a warning and the package proceeds.
                             ap_core::diag!(
@@ -7277,7 +7305,9 @@ fn resolve_blocked_with(
                                 }
                             ),
                             ws.notes(),
-                            &[],
+                            // Files staged by earlier rounds are not in the
+                            // snapshot: a rollback here must keep them.
+                            &kept_staged,
                         );
                     if let Err(e) = &written {
                         append_notes(
@@ -8391,6 +8421,38 @@ fn reject_patch_escape(
     true
 }
 
+/// The gate for a turn whose arm answers `NoChange` (the npm-vendor deferral and
+/// the refused wheel switch): a spec the turn edited goes through the full
+/// acceptance gate, an unchanged spec only through the patch-escape check. A
+/// rejection restores the snapshot keeping `keep`. Returns true when the turn's
+/// spec edit was accepted.
+fn gate_turn_edit_without_accept(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_entry: &str,
+    notes_path: PathBuf,
+    keep: &[String],
+) -> bool {
+    let spec_edited = std::fs::read_to_string(spec_path).ok().as_deref() != Some(before);
+    if spec_edited {
+        accept_or_restore_with_snapshot(
+            spec_path,
+            before,
+            snapshot,
+            step,
+            reporter,
+            notes_entry,
+            notes_path,
+            keep,
+        )
+    } else {
+        !reject_patch_escape(spec_path, before, snapshot, step, reporter, notes_path, keep)
+    }
+}
+
 /// The acceptance gate for an agent edit. A full-checkout snapshot taken
 /// BEFORE the agent turn ran is optional: on reject (rpmspec --parse fails on
 /// the agent's new spec), the spec AND every other top-level checkout file the
@@ -8639,10 +8701,10 @@ fn apply_turn_outcome_with(
             );
             // The turn may also have edited the spec or a patch before it
             // answered. Those edits go through the same gate as any other
-            // edit (the spec and patches are checked, and rolled back on
-            // rejection) before anything else runs on them. The full-checkout
-            // snapshot is not used here: restoring it would delete the staged
-            // files, which are not in it.
+            // edit before anything else runs on them. The snapshot is passed
+            // so that the patch-escape check judges the patches this turn
+            // changed (a published patch rewritten by the turn is not skipped),
+            // and a rollback keeps the staged files and anything kept earlier.
             // An unchanged spec has nothing for the spec gate to judge, so it
             // is not run. The patch-escape check still runs: a turn may have
             // written a patch whatever the spec says.
@@ -8652,7 +8714,7 @@ fn apply_turn_outcome_with(
             if reject_patch_escape(
                 spec_path,
                 before,
-                None,
+                snapshot,
                 step,
                 reporter,
                 notes_path.clone(),
@@ -8667,7 +8729,7 @@ fn apply_turn_outcome_with(
                 let changed = accept_or_restore_with_snapshot(
                     spec_path,
                     before,
-                    None,
+                    snapshot,
                     step,
                     reporter,
                     &format!(
@@ -8789,18 +8851,21 @@ fn apply_turn_outcome_with(
             // there once; a second `use_upstream_wheel` is honoured.
             if npm_vendor_route_pending(why, checkout_dir, &notes_path, &config.version) {
                 // This arm returns without the acceptance gate, so the turn's
-                // own patch edits are checked here, before the pipeline adds
-                // its files. An escape is rolled back and the turn is a no-op.
-                if reject_patch_escape(
+                // own edits are gated here, before the pipeline adds its files.
+                // A rejection is rolled back (keeping the staged files) and the
+                // turn is a no-op.
+                let accepted = gate_turn_edit_without_accept(
                     spec_path,
                     before,
                     snapshot,
                     step,
                     reporter,
+                    "\n## npm vendoring deferral — edits kept\n",
                     notes_path.clone(),
-                    &staged,
-                ) {
-                    return Ok(TurnEffect::NoChange);
+                    &keep,
+                );
+                if !accepted && let Some(msg) = repeated_spec_rejection(spec_path) {
+                    return Err(format!("{label}: {msg}"));
                 }
                 // The pipeline does the file work of the route itself: the
                 // lock file into the checkout and the `node_modules` service
@@ -8875,7 +8940,7 @@ fn apply_turn_outcome_with(
                             wheel.filename, wheel.sha256,
                         ),
                         notes_path,
-                        &staged,
+                        &keep,
                     );
                     Ok(if changed {
                         TurnEffect::SwitchedToWheel
@@ -8890,16 +8955,17 @@ fn apply_turn_outcome_with(
                 // redirect through the notes it reads next turn and carry on.
                 Err(e) if e.contains("no usable upstream wheel either") => {
                     // The arm returns NoChange without the acceptance gate, so
-                    // the turn's patch edits are checked here. Either way the
-                    // arm answers NoChange; an escape is rolled back first.
-                    reject_patch_escape(
+                    // the turn's edits are gated here. Either way the arm
+                    // answers NoChange; a rejected edit is rolled back first.
+                    gate_turn_edit_without_accept(
                         spec_path,
                         before,
                         snapshot,
                         step,
                         reporter,
+                        "\n## use_upstream_wheel refused — edits kept\n",
                         notes_path.clone(),
-                        &staged,
+                        &keep,
                     );
                     append_notes(
                         notes_path,
@@ -9775,7 +9841,7 @@ fn stale_patches(
             continue;
         };
         let tag = tag.trim();
-        if !(tag.len() > 5
+        if !(tag.len() >= 5
             && tag
                 .get(..5)
                 .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
@@ -9904,7 +9970,7 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
             let tag = tag.trim();
             // `get` rather than slicing: spec text can hold multi-byte
             // characters, and a mid-character cut would panic.
-            (tag.len() > 5
+            (tag.len() >= 5
                 && tag
                     .get(..5)
                     .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
@@ -10211,7 +10277,7 @@ fn patch_escape_offender(
             continue;
         };
         let tag = tag.trim();
-        if !(tag.len() > 5
+        if !(tag.len() >= 5
             && tag
                 .get(..5)
                 .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
@@ -10286,7 +10352,9 @@ fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
                 return None;
             }
             (n.ends_with(".tar.gz")
+                || n.ends_with(".tgz")
                 || n.ends_with(".tar.bz2")
+                || n.ends_with(".tar.xz")
                 || n.ends_with(".tar.zst")
                 || n.ends_with(".zip")
                 || n.ends_with(".whl"))
@@ -10309,7 +10377,10 @@ fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
 /// Whether the archive file name `name` carries `version` as a whole version:
 /// `1.2` is in `pkg-1.2.tar.gz` and `pkg-1.2-py3.whl`, but not in `pkg-1.2.1.tar.gz`,
 /// `pkg-13.3.1.tar.gz` (for `3.1`) or `pkg-11.2.tar.gz`. The version must follow
-/// the `-` or `_` that ends the project name (or start the name).
+/// the `-` or `_` that ends the project name (or start the name). What follows
+/// the version is the end of the name, an archive extension, or a wheel tag
+/// (`-py3-none-any.whl`, `-cp311-...`): a suffix such as `-docs` or `-data`
+/// names another archive, not this version's main one.
 fn names_version(name: &str, version: &str) -> bool {
     !version.is_empty()
         && name.match_indices(version).any(|(i, _)| {
@@ -10320,11 +10391,11 @@ fn names_version(name: &str, version: &str) -> bool {
             let rest = &name[i + version.len()..];
             starts_here
                 && (rest.is_empty()
-                    || rest.starts_with('-')
-                    || rest.starts_with('_')
                     || [".tar", ".zip", ".whl", ".tgz"]
                         .iter()
-                        .any(|ext| rest.starts_with(ext)))
+                        .any(|ext| rest.starts_with(ext))
+                    || rest.starts_with("-py")
+                    || rest.starts_with("-cp"))
         })
 }
 
@@ -10344,7 +10415,7 @@ fn superseded_tarball(
         .filter_map(|e| {
             let path = e.ok()?.path();
             let name = path.file_name()?.to_string_lossy().into_owned();
-            let archive = [".tar.gz", ".tar.bz2", ".tar.zst", ".zip", ".whl"]
+            let archive = [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip", ".whl"]
                 .iter()
                 .any(|ext| name.ends_with(ext));
             (archive
@@ -10367,7 +10438,7 @@ fn find_sdist_top_level(checkout_dir: &Path, pkg_name: &str, version: &str) -> S
         if fname.ends_with(".whl") {
             return String::new();
         }
-        for ext in &[".tar.gz", ".tar.bz2", ".tar.zst", ".zip"] {
+        for ext in &[".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip"] {
             if let Some(stem) = fname.strip_suffix(ext) {
                 return stem.to_string();
             }
@@ -10501,7 +10572,9 @@ fn carry_forward_repo_spec(
     // Only a source whose address changes with the version is fetched again;
     // the others (a keyring, a rpmlintrc) stay as they are.
     let old_sources = crate::spec::expanded_sources(&old);
-    let mut main: Option<PathBuf> = None;
+    // Every source fetched again, in spec order: the first one that is an
+    // archive gives the top directory (a changed `.asc` signature does not).
+    let mut fetched: Vec<PathBuf> = Vec::new();
     // Old files replaced by this run, removed after the spec is written.
     let mut superseded: Vec<String> = Vec::new();
     for (i, source) in sources.iter().enumerate() {
@@ -10511,9 +10584,7 @@ fn carry_forward_repo_spec(
         let dest = checkout_dir.join(&source.file);
         crate::sources::fetch_archive_to(&source.url, &dest)
             .map_err(|e| format!("downloading {}: {e}", source.url))?;
-        if main.is_none() {
-            main = Some(dest);
-        }
+        fetched.push(dest);
         // The old file this slot had is removed only when no source of the new
         // spec is named that: sources can be reordered or shifted, and the
         // file at this index may be one a later new source just needs.
@@ -10523,10 +10594,14 @@ fn carry_forward_repo_spec(
             superseded.push(old_file.clone());
         }
     }
-    let main = main.ok_or("no source of the spec changes with the version")?;
-    let top = ap_ecosystem::sdist::inspect(&main)
-        .ok()
-        .and_then(|info| info.top_level_dir);
+    if fetched.is_empty() {
+        return Err("no source of the spec changes with the version".to_string());
+    }
+    let top = fetched.iter().find_map(|path| {
+        ap_ecosystem::sdist::inspect(path)
+            .ok()
+            .and_then(|info| info.top_level_dir)
+    });
     let bumped = match &top {
         Some(top) => crate::spec::fix_autosetup_dir(&bumped, top).unwrap_or(bumped),
         None => bumped,
@@ -12032,6 +12107,16 @@ fn generate_multi_flavor_wheel_spec(
         );
         let spec_text =
             with_wheel_spec_notes(config, &spec_text, &release, layout.as_ref(), no_sdist);
+        // As for the single-wheel spec: a wheel without a licence text, switched
+        // to from a sdist that has one, ships the sdist's as Source1.
+        let spec_text = match layout
+            .as_ref()
+            .filter(|_| !no_sdist)
+            .and_then(|l| crate::spec::copy_sdist_license(checkout_dir, &config.version, l))
+        {
+            Some(file) => crate::spec::with_license_source(&spec_text, &file),
+            None => spec_text,
+        };
         ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
@@ -12434,7 +12519,13 @@ fn patch_targets(diff: &str) -> Vec<String> {
         .filter_map(|l| l.strip_prefix("--- ").or_else(|| l.strip_prefix("+++ ")))
         .map(|name| name.split('\t').next().unwrap_or("").trim())
         .filter(|name| *name != "/dev/null")
-        .filter_map(|name| name.split_once('/').map(|(_, rest)| rest.to_string()))
+        // `patch -p1` drops the first directory component. A name with no
+        // directory part has none to drop, so the name is its own target
+        // (`--- setup.py.orig` / `+++ setup.py` patches `setup.py`).
+        .map(|name| match name.split_once('/') {
+            Some((_, rest)) => rest.to_string(),
+            None => name.to_string(),
+        })
         .filter(|rest| !rest.is_empty())
         .collect()
 }
@@ -13982,6 +14073,41 @@ mod tests {
     fn patch_targets_are_the_diff_names_minus_the_first_component() {
         let diff = "--- a/src/x.c\t2026-01-01\n+++ b/src/x.c\n--- /dev/null\n+++ b/new.h\n";
         assert_eq!(patch_targets(diff), vec!["src/x.c", "src/x.c", "new.h"]);
+        // A name with no directory part is its own target under -p1.
+        let bare = "--- setup.py.orig\n+++ setup.py\n";
+        assert_eq!(patch_targets(bare), vec!["setup.py.orig", "setup.py"]);
+    }
+
+    #[test]
+    fn names_version_ends_the_version_at_an_archive_or_a_wheel_tag() {
+        assert!(names_version("foo-1.2.tar.gz", "1.2"));
+        assert!(names_version("foo-1.2.tgz", "1.2"));
+        assert!(names_version("foo-1.2.tar.xz", "1.2"));
+        assert!(names_version("foo-1.2-py3-none-any.whl", "1.2"));
+        assert!(names_version("foo-1.2-cp311-cp311-linux_x86_64.whl", "1.2"));
+        // A suffix that names another archive is not this version's main one.
+        assert!(!names_version("foo-1.2-docs.tar.gz", "1.2"));
+        assert!(!names_version("foo-1.2-data.tar.gz", "1.2"));
+        assert!(!names_version("foo-1.2.post1.tar.gz", "1.2"));
+    }
+
+    #[test]
+    fn find_tarball_prefers_the_main_archive_over_a_docs_one() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["foo-1.2-docs.tar.gz", "foo-1.2.tar.gz"] {
+            std::fs::write(dir.path().join(f), b"").unwrap();
+        }
+        assert_eq!(
+            find_tarball(dir.path(), "1.2").unwrap().file_name().unwrap(),
+            "foo-1.2.tar.gz"
+        );
+        // A .tgz and a .tar.xz are archives too.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("foo-1.2.tgz"), b"").unwrap();
+        assert!(find_tarball(other.path(), "1.2").is_some());
+        let xz = tempfile::tempdir().unwrap();
+        std::fs::write(xz.path().join("foo-1.2.tar.xz"), b"").unwrap();
+        assert!(find_tarball(xz.path(), "1.2").is_some());
     }
 
     #[test]
