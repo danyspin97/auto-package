@@ -1104,7 +1104,7 @@ pub fn select_target(
                     .join(real)
                     .join(format!("{real}.spec"));
                 return if status_is_resolvable(build_statuses.get(real))
-                    && !spec_has_published_defects(&spec)
+                    && !spec_has_published_defects(&spec, &config.rpms_dir)
                     && !wheel_policy_pending(&config.source_urls, &n.name, &spec)
                 {
                     Resolution::Built
@@ -2321,7 +2321,7 @@ fn preflight<'a>(
         .join(&rpm_name)
         .join(format!("{rpm_name}.spec"));
     let unfinished = spec_has_placeholders(&local_spec)
-        || spec_has_published_defects(&local_spec)
+        || spec_has_published_defects(&local_spec, &config.rpms_dir)
         || wheel_policy_pending(&config.source_urls, &config.pkg_name, &local_spec);
     if !config.force && prior.is_built(&config.version) && !unfinished {
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
@@ -2429,14 +2429,21 @@ fn checkout_stage(
         // Fetch this package's current OBS build status once; reused below both
         // to grab the build log on failure and to skip the rest of the
         // pipeline when it already succeeded and nothing would change.
-        obs_status = osc::get_build_status(
+        let status = osc::get_build_status(
             &config.project,
             rpm_name,
             &config.distro,
             &config.arch,
             emit,
-        )
-        .ok();
+        );
+        // Without the status the build is handled as if OBS had not answered;
+        // say so rather than discard the error.
+        warn_if_err(
+            reporter,
+            &format!("{rpm_name}: reading the OBS build status"),
+            status.as_ref().map(|_| ()),
+        );
+        obs_status = status.ok();
 
         // Fetch the previous build log if OBS reports a failed or
         // unresolvable build. Non-fatal — PreFix uses ws.build_log() if
@@ -2475,7 +2482,7 @@ fn checkout_stage(
         && !has_local_changes
         && !spec_version_differs(spec_path, &config.version)
         && !spec_has_placeholders(spec_path)
-        && !spec_has_published_defects(spec_path)
+        && !spec_has_published_defects(spec_path, &config.rpms_dir)
         && !wheel_policy_pending(&config.source_urls, &config.pkg_name, spec_path)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
         && PkgState::load(ws).policy_current()
@@ -2758,7 +2765,15 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
         // in the checkout dir (or fall back to a reasonable guess).
         let top = find_sdist_top_level(checkout_dir, &config.pkg_name, &config.version);
         step_attempts.skip(reporter, StepKind::GenerateSpec, SkipReason::SpecExists);
-        let spec_text = std::fs::read_to_string(spec_path).unwrap_or_default();
+        // A spec that cannot be read says nothing about Rust or maturin: the
+        // read error is a transient failure, not a reason to build without
+        // the Rust or maturin setup.
+        let spec_text = match std::fs::read_to_string(spec_path) {
+            Ok(text) => text,
+            Err(e) => {
+                return Err(ctx.failed_text(true, format!("reading the spec: {e}")));
+            }
+        };
         let is_maturin = spec_text.contains("maturin");
         let is_rust = spec_text.contains("cargo_build");
         (top, is_maturin, false, is_rust)
@@ -3694,16 +3709,17 @@ fn prefix_stage(
             &mut st.step_attempts,
         );
 
+        // The log's hash is recorded only once the turn is applied. A turn that
+        // returns MissingDeps (or fails) has not fixed anything, so the same log
+        // must get its PreFix again after the deps are built; the stale check
+        // would otherwise skip it, since the restored spec is newer than the log.
         if let Ok((prefix_step, outcome)) = turn {
-            if build_log_nonempty {
-                let h = hash_spec(&log_text);
-                update_state(ws, reporter, |state| state.prefix_log_hash = Some(h));
-            }
             if let Some(missing) = missing_deps_from_turn(ctx, prefix_step.id, &outcome) {
                 // Not applied, so not validated or journaled: undo the turn's
                 // edits (see `fix_after_build`).
                 checkout_snapshot.restore(reporter, Some(&prefix_step));
                 restore_spec(spec_path, &clean, Some(&prefix_step), reporter);
+                update_state(ws, reporter, |state| state.prefix_log_hash = None);
                 return Err(missing);
             }
             // Everything the turn called missing is already built here, so
@@ -3727,28 +3743,37 @@ fn prefix_stage(
                 &mut st.sdist_top_level,
                 &mut st.from_repo_archive,
             ) {
-                Ok(effect) => effect,
-                Err(reason) => resolve_blocked(
-                    ctx,
-                    st,
-                    LadderSite {
-                        build_log: Some(&prefix_log),
-                        task: crate::agent::Task::FixAfterBuild,
-                        event_task: ap_core::event::Task::FixAfterBuild {
-                            attempt: attempts as u32 + 1,
-                            max_attempts: config.max_attempts as u32,
+                Ok(effect) => {
+                    if build_log_nonempty {
+                        let h = hash_spec(&log_text);
+                        update_state(ws, reporter, |state| state.prefix_log_hash = Some(h));
+                    }
+                    effect
+                }
+                Err(reason) => {
+                    update_state(ws, reporter, |state| state.prefix_log_hash = None);
+                    resolve_blocked(
+                        ctx,
+                        st,
+                        LadderSite {
+                            build_log: Some(&prefix_log),
+                            task: crate::agent::Task::FixAfterBuild,
+                            event_task: ap_core::event::Task::FixAfterBuild {
+                                attempt: attempts as u32 + 1,
+                                max_attempts: config.max_attempts as u32,
+                            },
+                            attempt: attempts + 1,
+                            hint: Some(&extract),
+                            context: None,
+                            apply_label: "PreFix — restart from previous log",
+                            before: &clean,
+                            snapshot: &checkout_snapshot,
+                            step: &prefix_step,
                         },
-                        attempt: attempts + 1,
-                        hint: Some(&extract),
-                        context: None,
-                        apply_label: "PreFix — restart from previous log",
-                        before: &clean,
-                        snapshot: &checkout_snapshot,
-                        step: &prefix_step,
-                    },
-                    &outcome,
-                    reason,
-                )?,
+                        &outcome,
+                        reason,
+                    )?
+                }
             };
             if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
                 st.attempts += 1;
@@ -3768,6 +3793,7 @@ fn prefix_stage(
                 &clean,
                 "PreFix",
             );
+            update_state(ws, reporter, |state| state.prefix_log_hash = None);
             return Err(ctx.failed_as(kind, format!("the agent turn failed: {e}")));
         }
     }
@@ -4041,9 +4067,25 @@ fn linked_bound_conflicts(
     }
     let config = ctx.config;
     let emit = Emit::new(ctx.reporter, step);
-    let requires: Vec<String> = fetch_pypi_json(&config.pkg_name, &config.version)
-        .ok()
-        .flatten()
+    // A failure here skips the bound check for this package: say so, so the
+    // skipped check is visible rather than a silent "no conflicts".
+    let skipped = |why: String| {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(step),
+            message: format!(
+                "{}: the bound check against linked projects is skipped: {why}",
+                config.pkg_name
+            ),
+        });
+    };
+    let requires_json = match fetch_pypi_json(&config.pkg_name, &config.version) {
+        Ok(json) => json,
+        Err(e) => {
+            skipped(format!("could not read the PyPI metadata ({e})"));
+            None
+        }
+    };
+    let requires: Vec<String> = requires_json
         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .and_then(|v| {
             v["info"]["requires_dist"].as_array().map(|a| {
@@ -4056,15 +4098,24 @@ fn linked_bound_conflicts(
     if requires.is_empty() {
         return Vec::new();
     }
-    let Ok(paths) = osc::get_project_repo_paths(&config.project, emit) else {
-        return Vec::new();
+    let paths = match osc::get_project_repo_paths(&config.project, emit) {
+        Ok(paths) => paths,
+        Err(e) => {
+            skipped(format!("could not list the linked projects ({e})"));
+            return Vec::new();
+        }
     };
     let mut linked = Vec::new();
     for (path_project, _repo) in paths {
-        let Ok(l) = osc::try_list_project_packages(&path_project, emit) else {
-            return Vec::new();
-        };
-        linked.push((path_project, l));
+        match osc::try_list_project_packages(&path_project, emit) {
+            Ok(l) => linked.push((path_project, l)),
+            Err(e) => {
+                skipped(format!(
+                    "could not list the packages of {path_project} ({e})"
+                ));
+                return Vec::new();
+            }
+        }
     }
     let none = Default::default();
     let no_statuses = std::collections::HashMap::new();
@@ -4097,7 +4148,7 @@ fn linked_bound_conflicts(
 /// left in its Requires. A package built before these were repaired stays
 /// green in OBS while its dependents are unresolvable, so `preflight` also
 /// asks this whether an already built package still needs a new revision.
-fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path) -> String {
+fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path, rpms_dir: &Path) -> String {
     let mut fixed = crate::spec::parenthesize_conditional_dependencies(spec);
     if crate::spec::may_link_driver_library(&fixed) {
         fixed = crate::spec::with_driver_requires_exclude(&fixed);
@@ -4113,8 +4164,7 @@ fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path) -> String 
         && let Some(wheel) = local_wheel_source(&fixed, checkout_dir)
         && let Some(layout) = ap_ecosystem::sdist::wheel_layout(&wheel)
     {
-        let siblings =
-            crate::spec::sibling_wheels(Path::new("/nonexistent"), checkout_dir.parent(), &name);
+        let siblings = crate::spec::sibling_wheels(rpms_dir, checkout_dir.parent(), &name);
         fixed = crate::spec::with_sibling_tree_in_sitelib(&fixed, &layout, &siblings);
     }
     if !fixed.contains("[0-9a-f]{8}")
@@ -4127,10 +4177,10 @@ fn spec_with_published_defects_fixed(spec: &str, checkout_dir: &Path) -> String 
 }
 
 /// Whether the spec checked out at `spec_path` carries such a defect.
-fn spec_has_published_defects(spec_path: &Path) -> bool {
+fn spec_has_published_defects(spec_path: &Path, rpms_dir: &Path) -> bool {
     std::fs::read_to_string(spec_path).is_ok_and(|text| {
         let dir = spec_path.parent().unwrap_or(Path::new("."));
-        spec_with_published_defects_fixed(&text, dir) != text
+        spec_with_published_defects_fixed(&text, dir, rpms_dir) != text
     })
 }
 
@@ -4638,7 +4688,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
         let mut fixed = fixed;
-        fixed = spec_with_published_defects_fixed(&fixed, checkout_dir);
+        fixed = spec_with_published_defects_fixed(&fixed, checkout_dir, &config.rpms_dir);
         fixed = crate::spec::relax_dependencies(&fixed, &PkgState::load(ws).relaxed_dependencies);
         if fixed != current {
             write_or_warn(spec_path, &fixed);
@@ -5237,6 +5287,13 @@ fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<(), 
     }
     if let Some(why) = osc::unfinished_spec_reason(&spec) {
         return Err(format!("the spec is an unfinished skeleton ({why})"));
+    }
+    // Last line of the patch-escape gate: whatever path kept the agent's
+    // edits, a patch that escapes the tree is never committed.
+    if let Some(problem) = patch_escape_problem(&ctx.spec_path, &spec) {
+        return Err(format!(
+            "a patch escapes the source tree, so it is not committed: {problem}"
+        ));
     }
     let expanded = osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step))
         .map_err(|e| format!("the spec does not parse, so it is not committed: {e}"))?;
@@ -8022,6 +8079,47 @@ fn repeated_spec_rejection(spec_path: &Path) -> Option<String> {
         })
 }
 
+/// The patch-escape check on its own, for a turn whose result the rest of the
+/// acceptance gate does not judge (an unchanged spec, the npm-vendor and the
+/// refused-wheel arms). On an escape the spec goes back to `before`, the
+/// snapshot (when there is one) is restored keeping `keep`, and the rejection
+/// is noted. Returns true when the edit was rolled back.
+fn reject_patch_escape(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_path: PathBuf,
+    keep: &[String],
+) -> bool {
+    let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
+    let Some(problem) = patch_escape_problem(spec_path, &after) else {
+        return false;
+    };
+    note_spec_rejection(spec_path, &problem);
+    reporter.report(&Event::SpecRejected {
+        step: step.id,
+        reason: ap_core::event::SpecRejection::RpmspecParseFailed {
+            stderr: problem.clone(),
+        },
+        restored_from: spec_path.to_path_buf(),
+    });
+    restore_spec(spec_path, before, Some(step), reporter);
+    if let Some(snap) = snapshot {
+        snap.restore_keeping(reporter, Some(step), keep);
+    }
+    append_notes(
+        notes_path,
+        &format!(
+            "\n## Edit rejected — a patch escapes the source tree\n{problem}\n\
+             The edit was rolled back. Patch headers must name paths relative to the \
+             source tree, with no leading `/`, `~`, or `..` component.\n"
+        ),
+    );
+    true
+}
+
 /// The acceptance gate for an agent edit. A full-checkout snapshot taken
 /// BEFORE the agent turn ran is optional: on reject (rpmspec --parse fails on
 /// the agent's new spec), the spec AND every other top-level checkout file the
@@ -8095,27 +8193,15 @@ fn accept_or_restore_with_snapshot(
     // A patch header naming an absolute path or a `..` component would let the
     // patch carry files from outside the checkout into the commit. Checked for
     // every turn outcome, before anything else reads the patch.
-    if let Some(problem) = patch_escape_problem(spec_path, &after) {
-        note_spec_rejection(spec_path, &problem);
-        reporter.report(&Event::SpecRejected {
-            step: step.id,
-            reason: ap_core::event::SpecRejection::RpmspecParseFailed {
-                stderr: problem.clone(),
-            },
-            restored_from: spec_path.to_path_buf(),
-        });
-        restore_spec(spec_path, before, Some(step), reporter);
-        if let Some(snap) = snapshot {
-            snap.restore_keeping(reporter, Some(step), keep);
-        }
-        append_notes(
-            notes_path,
-            &format!(
-                "\n## Edit rejected — a patch escapes the source tree\n{problem}\n\
-                 The edit was rolled back. Patch headers must name paths relative to the \
-                 source tree, with no leading `/`, `~`, or `..` component.\n"
-            ),
-        );
+    if reject_patch_escape(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+    ) {
         return false;
     }
 
@@ -8279,10 +8365,17 @@ fn apply_turn_outcome_with(
             // rejection) before anything else runs on them. The full-checkout
             // snapshot is not used here: restoring it would delete the staged
             // files, which are not in it.
-            // An unchanged spec has nothing for the gate to judge: it is not
-            // run, and a rejection is not counted against the package.
+            // An unchanged spec has nothing for the spec gate to judge, so it
+            // is not run. The patch-escape check still runs: a turn may have
+            // written a patch whatever the spec says.
             let spec_edited = std::fs::read_to_string(spec_path).ok().as_deref() != Some(before);
-            if spec_edited {
+            if !spec_edited {
+                if reject_patch_escape(spec_path, before, None, step, reporter, notes_path, &staged)
+                    && let Some(msg) = repeated_spec_rejection(spec_path)
+                {
+                    return Err(format!("{label}: {msg}"));
+                }
+            } else {
                 let changed = accept_or_restore_with_snapshot(
                     spec_path,
                     before,
@@ -8407,6 +8500,20 @@ fn apply_turn_outcome_with(
             // fixable with the `node_modules` OBS service. Send the agent
             // there once; a second `use_upstream_wheel` is honoured.
             if npm_vendor_route_pending(why, checkout_dir, &notes_path, &config.version) {
+                // This arm returns without the acceptance gate, so the turn's
+                // own patch edits are checked here, before the pipeline adds
+                // its files. An escape is rolled back and the turn is a no-op.
+                if reject_patch_escape(
+                    spec_path,
+                    before,
+                    snapshot,
+                    step,
+                    reporter,
+                    notes_path.clone(),
+                    &staged,
+                ) {
+                    return Ok(TurnEffect::NoChange);
+                }
                 // The pipeline does the file work of the route itself: the
                 // lock file into the checkout and the `node_modules` service
                 // entry. The turn only has to wire the spec to them.
@@ -8494,6 +8601,18 @@ fn apply_turn_outcome_with(
                 // the agent had correctly diagnosed it; hand the agent the
                 // redirect through the notes it reads next turn and carry on.
                 Err(e) if e.contains("no usable upstream wheel either") => {
+                    // The arm returns NoChange without the acceptance gate, so
+                    // the turn's patch edits are checked here. Either way the
+                    // arm answers NoChange; an escape is rolled back first.
+                    reject_patch_escape(
+                        spec_path,
+                        before,
+                        snapshot,
+                        step,
+                        reporter,
+                        notes_path.clone(),
+                        &staged,
+                    );
                     append_notes(
                         notes_path,
                         &format!(
@@ -9677,6 +9796,49 @@ fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
     found.into_iter().next()
 }
 
+/// Whether the archive file name `name` carries `version` as a whole version:
+/// `1.2` is in `pkg-1.2.tar.gz` and `pkg-1.2-py3.whl`, but not in `pkg-1.2.1.tar.gz`.
+fn names_version(name: &str, version: &str) -> bool {
+    !version.is_empty()
+        && name.match_indices(version).any(|(i, _)| {
+            let starts_here = name[..i]
+                .chars()
+                .last()
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
+            let rest = &name[i + version.len()..];
+            starts_here
+                && (rest.is_empty()
+                    || rest.starts_with('-')
+                    || rest.starts_with('_')
+                    || [".tar", ".zip", ".whl", ".tgz"]
+                        .iter()
+                        .any(|ext| rest.starts_with(ext)))
+        })
+}
+
+/// The source archive of `old_version` in `dir` that a new version replaces.
+/// `keep` (the new tarball) is never returned, and a longer version that
+/// merely starts with `old_version` (`1.2.1` for `1.2`) does not match.
+fn superseded_tarball(dir: &Path, old_version: &str, keep: &Path) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let archive = [".tar.gz", ".tar.bz2", ".tar.zst", ".zip", ".whl"]
+                .iter()
+                .any(|ext| name.ends_with(ext));
+            (archive
+                && path != keep
+                && !matches!(name.as_str(), "vendor.tar.zst" | "registry.tar.zst")
+                && names_version(&name, old_version))
+            .then_some(path)
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
 fn find_sdist_top_level(checkout_dir: &Path, pkg_name: &str, version: &str) -> String {
     if let Some(tb) = find_tarball(checkout_dir, version) {
         let fname = tb.file_name().unwrap_or_default().to_string_lossy();
@@ -9759,16 +9921,10 @@ fn carry_forward_spec(
         return Err("the sdist holds several projects".to_string());
     }
 
-    // The old source goes: the spec names the new one.
-    if let Some(stale) = find_tarball(checkout_dir, &old_version)
-        && stale != tarball
-        && stale
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().contains(&old_version))
-        && let Err(e) = std::fs::remove_file(&stale)
-    {
-        ap_core::diag!("  could not remove the old source {}: {e}", stale.display());
-    }
+    // The old source goes once the new spec is written: the spec names the new
+    // one. Until then the old file is kept, so a failed write leaves the
+    // checkout as it was.
+    let stale = superseded_tarball(checkout_dir, &old_version, &tarball);
 
     let top = info
         .top_level_dir
@@ -9776,6 +9932,11 @@ fn carry_forward_spec(
         .unwrap_or_else(|| format!("{}-{}", config.pkg_name.to_lowercase(), config.version));
     let bumped = crate::spec::fix_autosetup_dir(&bumped, &top).unwrap_or(bumped);
     ap_core::fsx::write_atomic(spec_path, &bumped).map_err(|e| format!("writing the spec: {e}"))?;
+    if let Some(stale) = stale
+        && let Err(e) = std::fs::remove_file(&stale)
+    {
+        ap_core::diag!("  could not remove the old source {}: {e}", stale.display());
+    }
     write_or_warn(step.file("spec.generated"), &bumped);
     Ok(GenSpecResult {
         sdist_top_level: top,
@@ -9816,6 +9977,8 @@ fn carry_forward_repo_spec(
     // the others (a keyring, a rpmlintrc) stay as they are.
     let old_sources = crate::spec::expanded_sources(&old);
     let mut main: Option<PathBuf> = None;
+    // Old files replaced by this run, removed after the spec is written.
+    let mut superseded: Vec<String> = Vec::new();
     for (i, source) in sources.iter().enumerate() {
         if old_sources.get(i).is_some_and(|o| o.url == source.url) {
             continue;
@@ -9832,7 +9995,7 @@ fn carry_forward_repo_spec(
         if let Some(old_file) = old_sources.get(i).map(|o| &o.file)
             && is_superseded_source_file(old_file, &sources)
         {
-            let _ = std::fs::remove_file(checkout_dir.join(old_file));
+            superseded.push(old_file.clone());
         }
     }
     let main = main.ok_or("no source of the spec changes with the version")?;
@@ -9844,6 +10007,11 @@ fn carry_forward_repo_spec(
         None => bumped,
     };
     ap_core::fsx::write_atomic(spec_path, &bumped).map_err(|e| format!("writing the spec: {e}"))?;
+    // The superseded files go only now that every fetch and the spec write
+    // have succeeded: a failure above must leave the old sources in place.
+    for old_file in &superseded {
+        let _ = std::fs::remove_file(checkout_dir.join(old_file));
+    }
     write_or_warn(step.file("spec.generated"), &bumped);
     Ok(GenSpecResult {
         sdist_top_level: top
@@ -10080,10 +10248,15 @@ fn generate_spec(
                 }
                 Err(e) => return Err(e),
             };
+            let digest = sha256_file(&tarball)
+                .map_err(|e| GenSpecError::Other(format!("hashing {}: {e}", tarball.display())))?;
             let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
                 .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
 
-            return generate_repo_python_spec(config, &tarball, &info, &json, spec_path, step);
+            let result =
+                generate_repo_python_spec(config, &tarball, &info, &json, spec_path, step)?;
+            record_archive_digest(spec_path, &url, &digest);
+            return Ok(result);
         }
         Err(e) => return Err(GenSpecError::Other(format!("PyPI parse failed: {e}"))),
     };
@@ -10896,6 +11069,7 @@ fn try_wheel_fallback_with(
                 checkout_dir,
                 spec_path,
                 step,
+                false,
             ) {
                 Some(Ok((_, first))) => Ok(first),
                 Some(Err(GenSpecError::Other(m) | GenSpecError::NoReleaseArchive(m))) => {
@@ -11215,7 +11389,14 @@ fn wheel_or_wheel_only(
             generate_wheel_binary_spec(config, &wheel, json, checkout_dir, spec_path, step, true)
         }
         Err(_) => {
-            match generate_multi_flavor_wheel_spec(config, json, checkout_dir, spec_path, step) {
+            match generate_multi_flavor_wheel_spec(
+                config,
+                json,
+                checkout_dir,
+                spec_path,
+                step,
+                true,
+            ) {
                 Some(result) => result.map(|(r, _)| r),
                 None => Err(GenSpecError::WheelOnly {
                     pkg_name: config.pkg_name.clone(),
@@ -11238,6 +11419,7 @@ fn generate_multi_flavor_wheel_spec(
     checkout_dir: &Path,
     spec_path: &Path,
     step: &StepDir,
+    no_sdist: bool,
 ) -> Option<Result<(GenSpecResult, ap_ecosystem::pypi::WheelFile), GenSpecError>> {
     let flavors = match config.python_flavors.try_effective() {
         Ok(flavors) => flavors,
@@ -11321,6 +11503,8 @@ fn generate_multi_flavor_wheel_spec(
             release.requires_python.as_deref(),
             &flavors,
         );
+        let spec_text =
+            with_wheel_spec_notes(config, &spec_text, &release, layout.as_ref(), no_sdist);
         ap_core::fsx::write_atomic(spec_path, &spec_text)
             .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
         write_or_warn(step.file("spec.generated"), &spec_text);
@@ -11366,6 +11550,46 @@ fn write_wheel_rpmlintrc(
                 let _ = std::fs::remove_file(stale);
             }
         }
+    }
+}
+
+/// The notes a repackaged-wheel spec carries whichever generator wrote it (one
+/// wheel, or one per flavor): the no-sdist note for a true no-sdist release, and
+/// for a prebuilt vendor library a note that it is not a Python package, with a
+/// warning when its licence is not open source.
+fn with_wheel_spec_notes(
+    config: &PipelineConfig,
+    spec_text: &str,
+    release: &ap_ecosystem::pypi::Release,
+    layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+    no_sdist: bool,
+) -> String {
+    // The note about a missing sdist is only true of a release with none.
+    let spec_text = if no_sdist {
+        crate::spec::with_no_sdist_note(spec_text)
+    } else {
+        spec_text.to_string()
+    };
+    // A wheel that is only a vendor's shared library is a C library carried
+    // through PyPI, not a Python package. It is repackaged only because a
+    // Python package loads it from site-packages; say so in the description,
+    // and flag a licence that is not open source.
+    let library_only = layout.is_some_and(|l| l.is_library_only());
+    if library_only {
+        let proprietary = crate::spec::license_is_proprietary(&release.license);
+        ap_core::diag!(
+            "warning: {} {} is a prebuilt vendor library, not a Python package{}",
+            config.pkg_name,
+            config.version,
+            if proprietary {
+                "; its licence is not open source, so this redistributes proprietary binaries"
+            } else {
+                ""
+            }
+        );
+        crate::spec::note_prebuilt_library(&spec_text, proprietary)
+    } else {
+        spec_text
     }
 }
 
@@ -11426,33 +11650,7 @@ fn generate_wheel_binary_spec(
         release.requires_python.as_deref(),
         &flavors,
     );
-    // The note about a missing sdist is only true of a release with none.
-    let spec_text = if no_sdist {
-        crate::spec::with_no_sdist_note(&spec_text)
-    } else {
-        spec_text
-    };
-    // A wheel that is only a vendor's shared library is a C library carried
-    // through PyPI, not a Python package. It is repackaged only because a
-    // Python package loads it from site-packages; say so in the description,
-    // and flag a licence that is not open source.
-    let library_only = layout.as_ref().is_some_and(|l| l.is_library_only());
-    let spec_text = if library_only {
-        let proprietary = crate::spec::license_is_proprietary(&release.license);
-        ap_core::diag!(
-            "warning: {} {} is a prebuilt vendor library, not a Python package{}",
-            config.pkg_name,
-            config.version,
-            if proprietary {
-                "; its licence is not open source, so this redistributes proprietary binaries"
-            } else {
-                ""
-            }
-        );
-        crate::spec::note_prebuilt_library(&spec_text, proprietary)
-    } else {
-        spec_text
-    };
+    let spec_text = with_wheel_spec_notes(config, &spec_text, &release, layout.as_ref(), no_sdist);
     // A wheel without a licence text, switched to from a sdist that has one: the
     // sdist's is shipped as Source1 and owned as %license.
     let spec_text = match layout
@@ -12135,7 +12333,19 @@ fn write_gzip_tarball(extract_dir: &Path, temp_tarball: &Path) -> Result<(), Str
 /// Not a complete Cargo workspace resolver — doesn't handle `**` recursive
 /// globs or Cargo's `exclude = [...]` filter — but every workspace shape
 /// the running packaging corpus hits uses single-segment `*` patterns.
+///
+/// A member with a `*` in a non-final segment (`crates/*/bindings`) spans
+/// several directories, which this does not expand, so it is kept as it is
+/// (`true`) rather than judged missing and removed from the manifest.
 fn member_resolves(base_dir: &Path, member: &str) -> bool {
+    if member
+        .split('/')
+        .rev()
+        .skip(1)
+        .any(|segment| segment.contains('*'))
+    {
+        return true;
+    }
     let (parent_rel, pattern) = match member.rsplit_once('/') {
         Some((p, n)) => (p, n),
         None => ("", member),
@@ -12711,11 +12921,23 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
 }
 
 /// Verify that a repository URL exists by making a HEAD request.
+///
+/// `false` only when the host definitively says the repository is not there
+/// (404 or 410). A probe that cannot tell (a rate limit, a 5xx, a timeout) is
+/// retried by the request wrapper; if it still cannot tell, the repository is
+/// kept as unverified rather than counted as missing. A transient failure must
+/// not drop a real repository, which would let a wheel-only release be
+/// repackaged from its binary wheel. Whether an unverified candidate is used
+/// is still decided by the vouching rules.
 fn verify_repo_exists(url: &str) -> bool {
-    crate::http::head(url)
-        .call()
-        .map(|r| r.status() == 200)
-        .unwrap_or(false)
+    match ap_ecosystem::net::call_with_retries(|| crate::http::head(url)) {
+        Ok(_) => true,
+        Err(ureq::Error::StatusCode(404 | 410)) => false,
+        Err(e) => {
+            ap_core::diag!("  warning: could not check {url} ({e}); keeping it as unverified");
+            true
+        }
+    }
 }
 
 /// [`verify_repo_exists`] for several URLs, each probe on its own thread.
@@ -13413,6 +13635,25 @@ mod tests {
         assert_eq!(name("2.0").as_deref(), Some("foo-2.0.tar.gz"));
         assert_eq!(name("1.0").as_deref(), Some("a-1.0.tar.gz"));
         assert_eq!(name("9").as_deref(), Some("a-1.0.tar.gz"));
+    }
+
+    #[test]
+    fn superseded_tarball_is_the_old_version_never_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["pkg-1.2.tar.gz", "pkg-1.2.1.tar.gz"] {
+            std::fs::write(dir.path().join(f), b"").unwrap();
+        }
+        let new = dir.path().join("pkg-1.2.1.tar.gz");
+        // The old 1.2 tarball is found even though 1.2.1 also contains "1.2".
+        assert_eq!(
+            superseded_tarball(dir.path(), "1.2", &new),
+            Some(dir.path().join("pkg-1.2.tar.gz"))
+        );
+        // Nothing is superseded when the only match is the new tarball.
+        assert_eq!(superseded_tarball(dir.path(), "1.2.1", &new), None);
+        assert!(names_version("pkg-1.2-py3-none-any.whl", "1.2"));
+        assert!(!names_version("pkg-1.2.1.tar.gz", "1.2"));
+        assert!(!names_version("pkg-11.2.tar.gz", "1.2"));
     }
 
     #[test]
@@ -14285,6 +14526,8 @@ Patch0:         0001-fix.patch
         );
         assert!(!member_resolves(tmp.path(), "nonexistent/*"));
         assert!(!member_resolves(tmp.path(), "nope"));
+        // A glob in a non-final segment is kept, not judged missing.
+        assert!(member_resolves(tmp.path(), "crates/*/bindings"));
     }
 
     #[test]
@@ -14953,17 +15196,23 @@ mod published_defect_tests {
         let text =
             "Name: python-flashinfer-python\nBuildRequires: cuda-nvcc\n%python_subpackages\n";
         std::fs::write(&spec, text).unwrap();
-        assert!(spec_has_published_defects(&spec));
-        let fixed = spec_with_published_defects_fixed(text, dir.path());
+        assert!(spec_has_published_defects(&spec, Path::new("/nonexistent")));
+        let fixed = spec_with_published_defects_fixed(text, dir.path(), Path::new("/nonexistent"));
         assert!(
             fixed.contains("%global __requires_exclude ^(libcuda"),
             "{fixed}"
         );
         std::fs::write(&spec, &fixed).unwrap();
-        assert!(!spec_has_published_defects(&spec));
+        assert!(!spec_has_published_defects(
+            &spec,
+            Path::new("/nonexistent")
+        ));
         // A noarch package cannot link the driver.
         std::fs::write(&spec, "Name: x\nBuildArch: noarch\nRequires: cuda\n").unwrap();
-        assert!(!spec_has_published_defects(&spec));
+        assert!(!spec_has_published_defects(
+            &spec,
+            Path::new("/nonexistent")
+        ));
     }
 
     #[test]
@@ -14975,15 +15224,21 @@ mod published_defect_tests {
             "Requires:  python-tomli >= 2 if python-base < 3.11\n",
         )
         .unwrap();
-        assert!(spec_has_published_defects(&spec));
+        assert!(spec_has_published_defects(&spec, Path::new("/nonexistent")));
         std::fs::write(
             &spec,
             "Requires:  (python-tomli >= 2 if python-base < 3.11)\n",
         )
         .unwrap();
-        assert!(!spec_has_published_defects(&spec));
+        assert!(!spec_has_published_defects(
+            &spec,
+            Path::new("/nonexistent")
+        ));
         // No spec checked out: nothing to repair.
-        assert!(!spec_has_published_defects(&dir.path().join("absent.spec")));
+        assert!(!spec_has_published_defects(
+            &dir.path().join("absent.spec"),
+            Path::new("/nonexistent")
+        ));
     }
 }
 
