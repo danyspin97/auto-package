@@ -2168,7 +2168,21 @@ fn parse_has_repository(xml: &str) -> bool {
 /// callers that write it back out escape it again.
 fn extract_xml_attr(tag: &str, attr: &str) -> Option<String> {
     let needle = format!("{attr}=\"");
-    let start = tag.find(&needle)? + needle.len();
+    // A match only counts as the attribute when a whitespace (or the start of
+    // the text) precedes it: `name="` must not match inside `filename="` or
+    // `baseproject="` for `project`.
+    let mut from = 0;
+    let start = loop {
+        let at = from + tag[from..].find(&needle)?;
+        let bounded = tag[..at]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        if bounded {
+            break at + needle.len();
+        }
+        from = at + needle.len();
+    };
     let rest = &tag[start..];
     let end = rest.find('"')?;
     Some(xml_unescape(&rest[..end]))
@@ -2369,8 +2383,14 @@ pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Ve
 /// Returns `None` when the package doesn't exist, the file isn't in it, or
 /// `osc cat` otherwise fails — the update sweep uses that `None` to skip the
 /// package instead of blowing up the whole run on a stray missing spec.
+/// A file name passed to `osc` as a positional argument. A leading `-` would
+/// be read as an option, and a `/` would leave the package directory.
+fn is_safe_file_arg(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('-') && !name.contains('/') && !name.contains('\0')
+}
+
 pub fn cat_file(project: &str, pkg: &str, filename: &str, emit: Emit<'_>) -> Option<String> {
-    if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) {
+    if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) || !is_safe_file_arg(filename) {
         return None;
     }
     let out = osc_query(
@@ -2800,10 +2820,29 @@ pub fn checkout(
 /// leaves `.osc/_in_update` while it downloads and removes it at the end, and
 /// `.osc/_files` lists nothing until the download has been recorded. A working
 /// copy that tracks files was completed once and keeps its local changes.
+///
+/// Files in an unfinished checkout that nothing tracks may be local work (a
+/// new package's spec or `.changes` never committed), so such a checkout is
+/// moved aside to `<name>.unfinished-<millis>` next to it instead of deleted.
 fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
     if !checkout_dir.join(".osc").join("_in_update").exists()
         || !tracked_files(checkout_dir).is_empty()
     {
+        return;
+    }
+    if has_entries_besides_osc(checkout_dir) {
+        let aside = unfinished_aside_path(checkout_dir);
+        match fs::rename(checkout_dir, &aside) {
+            Ok(()) => emit.reporter.report(&Event::Warning {
+                step: emit.step,
+                message: format!(
+                    "{} is an unfinished checkout with untracked files; moved to {} and checking it out again",
+                    checkout_dir.display(),
+                    aside.display()
+                ),
+            }),
+            Err(e) => ap_core::diag!("  could not move {} aside: {e}", checkout_dir.display()),
+        }
         return;
     }
     match fs::remove_dir_all(checkout_dir) {
@@ -2816,6 +2855,36 @@ fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
         }),
         Err(e) => ap_core::diag!("  could not remove {}: {e}", checkout_dir.display()),
     }
+}
+
+/// Whether `checkout_dir` holds anything but its `.osc` metadata directory.
+fn has_entries_besides_osc(checkout_dir: &Path) -> bool {
+    fs::read_dir(checkout_dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name() != std::ffi::OsStr::new(".osc"))
+    })
+}
+
+/// A free sibling path `<checkout_dir>.unfinished-<millis>` (suffixed with a
+/// counter if that name is taken).
+fn unfinished_aside_path(checkout_dir: &Path) -> PathBuf {
+    let name = checkout_dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let parent = checkout_dir.parent().unwrap_or(Path::new("."));
+    let mut candidate = parent.join(format!("{name}.unfinished-{millis}"));
+    let mut n = 1;
+    while candidate.exists() {
+        candidate = parent.join(format!("{name}.unfinished-{millis}-{n}"));
+        n += 1;
+    }
+    candidate
 }
 
 /// Run `osc up` from `checkout_dir` to update the working copy.
@@ -3077,22 +3146,50 @@ mod osc_error_text_tests {
 mod unfinished_checkout_tests {
     use super::*;
 
-    fn checkout_with(files_xml: &str, in_update: bool) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join(".osc")).unwrap();
-        fs::write(dir.path().join(".osc/_files"), files_xml).unwrap();
+    /// A checkout at `<base>/pkg`. The base is its own temp dir so that any
+    /// moved-aside sibling stays inside it.
+    fn checkout_with(files_xml: &str, in_update: bool, local_file: bool) -> tempfile::TempDir {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("pkg");
+        fs::create_dir_all(dir.join(".osc")).unwrap();
+        fs::write(dir.join(".osc/_files"), files_xml).unwrap();
         if in_update {
-            fs::create_dir(dir.path().join(".osc/_in_update")).unwrap();
+            fs::create_dir(dir.join(".osc/_in_update")).unwrap();
         }
-        fs::write(dir.path().join("_service"), "").unwrap();
-        dir
+        if local_file {
+            fs::write(dir.join("_service"), "").unwrap();
+        }
+        base
+    }
+
+    fn sibling_names(base: &Path) -> Vec<String> {
+        fs::read_dir(base)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("pkg.unfinished-"))
+            .collect()
     }
 
     #[test]
-    fn a_checkout_that_tracks_nothing_and_was_mid_update_is_discarded() {
-        let dir = checkout_with("<directory />", true);
-        discard_unfinished_checkout(dir.path(), Emit::quiet());
-        assert!(!dir.path().exists());
+    fn an_empty_unfinished_checkout_is_removed() {
+        let base = checkout_with("<directory />", true, false);
+        let dir = base.path().join("pkg");
+        discard_unfinished_checkout(&dir, Emit::quiet());
+        assert!(!dir.exists());
+        assert!(sibling_names(base.path()).is_empty());
+    }
+
+    #[test]
+    fn an_unfinished_checkout_with_untracked_files_is_moved_aside_not_deleted() {
+        let base = checkout_with("<directory />", true, true);
+        let dir = base.path().join("pkg");
+        discard_unfinished_checkout(&dir, Emit::quiet());
+        assert!(!dir.exists());
+        let aside = sibling_names(base.path());
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        let kept = base.path().join(&aside[0]);
+        assert!(kept.join("_service").exists());
     }
 
     #[test]
@@ -3100,13 +3197,83 @@ mod unfinished_checkout_tests {
         let tracking = checkout_with(
             r#"<directory name="p"><entry name="p.spec" md5="a" size="1"/></directory>"#,
             true,
+            true,
         );
-        discard_unfinished_checkout(tracking.path(), Emit::quiet());
-        assert!(tracking.path().join("_service").exists());
+        let dir = tracking.path().join("pkg");
+        discard_unfinished_checkout(&dir, Emit::quiet());
+        assert!(dir.join("_service").exists());
 
-        let finished = checkout_with("<directory />", false);
-        discard_unfinished_checkout(finished.path(), Emit::quiet());
-        assert!(finished.path().join("_service").exists());
+        let finished = checkout_with("<directory />", false, true);
+        let dir = finished.path().join("pkg");
+        discard_unfinished_checkout(&dir, Emit::quiet());
+        assert!(dir.join("_service").exists());
+    }
+}
+
+#[cfg(test)]
+mod sandbox_spec_dir_tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_spec_is_bound_from_the_current_directory() {
+        let cwd = Path::new("/work");
+        assert_eq!(
+            sandbox_spec_dir(Path::new("pkg/foo.spec"), cwd),
+            PathBuf::from("/work/pkg")
+        );
+        assert_eq!(sandbox_spec_dir(Path::new("foo.spec"), cwd), PathBuf::from("/work"));
+    }
+
+    #[test]
+    fn an_absolute_spec_is_bound_from_its_own_parent() {
+        assert_eq!(
+            sandbox_spec_dir(Path::new("/a/b/foo.spec"), Path::new("/work")),
+            PathBuf::from("/a/b")
+        );
+    }
+}
+
+#[cfg(test)]
+mod xml_attr_and_status_tests {
+    use super::*;
+
+    #[test]
+    fn an_attribute_name_is_not_matched_inside_a_longer_name() {
+        let tag = r#"<binary filename="foo-1.0.rpm" name="foo">"#;
+        assert_eq!(extract_xml_attr(tag, "name").as_deref(), Some("foo"));
+        assert_eq!(
+            extract_xml_attr(tag, "filename").as_deref(),
+            Some("foo-1.0.rpm")
+        );
+        let tag = r#"<package baseproject="Base" project="Mine">"#;
+        assert_eq!(extract_xml_attr(tag, "project").as_deref(), Some("Mine"));
+        assert_eq!(extract_xml_attr(r#"name="x""#, "name").as_deref(), Some("x"));
+        assert_eq!(extract_xml_attr(r#"<a filename="x">"#, "name"), None);
+    }
+
+    #[test]
+    fn an_attribute_value_is_unescaped() {
+        assert_eq!(
+            extract_xml_attr(r#"<a name="a&amp;b">"#, "name").as_deref(),
+            Some("a&b")
+        );
+    }
+
+    #[test]
+    fn a_trailing_unpublished_marker_is_stripped_with_or_without_the_space() {
+        assert_eq!(strip_result_suffixes("succeeded (unpublished)"), "succeeded");
+        assert_eq!(strip_result_suffixes("succeeded(unpublished)"), "succeeded");
+        assert_eq!(strip_result_suffixes("succeeded*"), "succeeded");
+        assert_eq!(strip_result_suffixes("succeeded * (unpublished)"), "succeeded");
+        assert_eq!(strip_result_suffixes("failed"), "failed");
+        assert!(matches!(
+            status_from_osc_text("succeeded (unpublished)"),
+            BuildStatus::Succeeded
+        ));
+        assert!(matches!(
+            status_from_osc_text("succeeded"),
+            BuildStatus::Succeeded
+        ));
     }
 }
 
@@ -3623,6 +3790,20 @@ fn sandbox_prefix(spec_dir: Option<&str>) -> Vec<String> {
     args
 }
 
+/// The directory bubblewrap binds for a spec: its absolute parent. A relative
+/// spec path is taken from `cwd`, so the parent is never the empty path (which
+/// `canonicalize` rejects and bwrap refuses as `--ro-bind "" ""`).
+fn sandbox_spec_dir(spec_path: &Path, cwd: &Path) -> PathBuf {
+    let absolute = if spec_path.is_absolute() {
+        spec_path.to_path_buf()
+    } else {
+        cwd.join(spec_path)
+    };
+    absolute
+        .parent()
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
+}
+
 /// Run `rpmspec --parse` on a spec file and check for syntax errors.
 ///
 /// Judges on exit status only (warnings in stderr are not treated as failures).
@@ -3647,8 +3828,9 @@ pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> 
 
     let spec = spec_path.to_string_lossy().into_owned();
     let out = if rpmspec_sandbox_works() {
-        let dir = spec_path.parent().unwrap_or(Path::new("/"));
-        let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let dir = sandbox_spec_dir(spec_path, &cwd);
+        let dir = fs::canonicalize(&dir).unwrap_or(dir);
         let file = dir.join(spec_path.file_name().unwrap_or_default());
         let mut args = sandbox_prefix(Some(&dir.to_string_lossy()));
         let file = file.to_string_lossy().into_owned();
@@ -4021,6 +4203,7 @@ pub fn restore_named_sources(checkout_dir: &Path, emit: Emit<'_>) -> Vec<String>
     let mut restored = Vec::new();
     for name in tracked_files(checkout_dir) {
         if checkout_dir.join(&name).exists()
+            || !is_safe_file_arg(&name)
             || !sources.iter().any(|p| matches_source_name(p, &name))
         {
             continue;
@@ -4047,7 +4230,7 @@ pub fn remove_tracked_strays(
     let tracked = tracked_files(checkout_dir);
     let mut removed = Vec::new();
     for name in skipped {
-        if !tracked.contains(name) {
+        if !tracked.contains(name) || !is_safe_file_arg(name) {
             continue;
         }
         match proc::capture("osc", &["rm", "--force", name.as_str()], checkout_dir, emit) {
@@ -4081,6 +4264,11 @@ pub fn commit(
 ) -> Result<(), Error> {
     if files.is_empty() {
         return Err(Error::NothingToPublish(checkout_dir.to_path_buf()));
+    }
+    if let Some(bad) = files.iter().find(|f| !is_safe_file_arg(f)) {
+        return Err(Error::NotActionable(format!(
+            "refusing to commit file {bad:?}: not a plain file name"
+        )));
     }
 
     // A `write_atomic` temp file left by a killed run must not linger in the
@@ -5174,6 +5362,23 @@ fn parse_single_build_status(stdout: &str, pkg_name: &str, repo: &str, arch: &st
     BuildStatus::Unknown("no results".to_string())
 }
 
+/// The bare status word of a result head: the trailing `*` and `(unpublished)`
+/// markers removed, with whitespace before each one removed too, so that
+/// `succeeded (unpublished)` gives `succeeded`.
+fn strip_result_suffixes(head: &str) -> &str {
+    let mut word = head;
+    loop {
+        let next = word
+            .trim_end_matches('*')
+            .trim_end_matches("(unpublished)")
+            .trim_end();
+        if next.len() == word.len() {
+            return word;
+        }
+        word = next;
+    }
+}
+
 /// The status part of one `osc results` line (see [`parse_single_build_status`]).
 fn status_from_osc_text(text: &str) -> BuildStatus {
     // OBS marks a result as possibly older than the sources on the server:
@@ -5191,7 +5396,7 @@ fn status_from_osc_text(text: &str) -> BuildStatus {
         None => (text, None),
     };
     let starred = head.ends_with('*');
-    let word = head.trim_end_matches('*').trim_end_matches("(unpublished)");
+    let word = strip_result_suffixes(head);
     if starred {
         return BuildStatus::Unknown(format!("stale: {word}"));
     }
