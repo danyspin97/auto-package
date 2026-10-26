@@ -1743,15 +1743,16 @@ struct RawProject {
 }
 
 /// Whether an archive's top-level directory name can be written verbatim into
-/// a spec (`%autosetup -n <name>`) and a shell command. Only the characters
-/// that appear in real source-tree names are allowed: no whitespace, newline,
-/// `%` (RPM macro), `/` or other shell or spec metacharacters.
-fn is_safe_top_level_dir(name: &str) -> bool {
+/// a spec (`%autosetup -n <name>`) and a shell command. Letters and digits in
+/// any script are allowed (e.g. `Pyöpt-1.0`), plus `. _ - + ~`: no whitespace,
+/// control character, newline, `%` (RPM macro), `/` or other shell or spec
+/// metacharacters. Shared with `ap-build` so both sides accept the same names.
+pub fn is_safe_top_level_dir(name: &str) -> bool {
     name.len() <= 255
         && !matches!(name, "" | "." | "..")
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~'))
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~'))
 }
 
 /// Whether an upstream-declared project name is safe to build a package, a
@@ -2891,11 +2892,13 @@ build-backend = "flit_core.buildapi"
             "sqlite3-3",
             "a_b+c~1",
             "v1.2",
+            "Pyöpt-1.0",
         ] {
             assert!(is_safe_top_level_dir(good), "{good}");
         }
         for bad in [
-            "", ".", "..", "a/b", "a b", "a\nb", "a%b", "a;b", "a$b", "a\"b",
+            "", ".", "..", "a/b", "a\\b", "a b", "a\nb", "a\u{7}b", "a%b", "a;b", "a$b", "a\"b",
+            "a'b", "a`b", "a(b)", "a{b}", "a|b", "a&b", "a<b>", "a*b", "a?b", "a!b", "a#b",
         ] {
             assert!(!is_safe_top_level_dir(bad), "{bad:?}");
         }
