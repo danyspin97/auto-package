@@ -1008,7 +1008,6 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             let _project_lock = ProjectLock::acquire(&project_dir)?;
             // `--nvidia`: the flag, else what this work directory used before.
             let nvidia_choice = nvidia.or(nvidia_redist.then_some(NvidiaMode::Redist));
-            let nvidia_mode = apply_nvidia_mode(&project_dir, nvidia_choice, cleanup)?;
             if cleanup && !created_now {
                 let marker = project_dir.join(OWNERSHIP_MARKER);
                 if !marker.exists() {
@@ -1023,11 +1022,16 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                         project_dir.display(),
                     ));
                 }
-                // Empty the directory rather than removing it: it holds our lock
-                // file, and the marker is rewritten below.
+                // Empty the directory rather than removing it. The lock file and
+                // the marker are kept: the marker is what lets a later --cleanup
+                // run proceed if one of these removes fails part-way. It is
+                // rewritten below once everything else has gone.
                 for entry in std::fs::read_dir(&project_dir)? {
                     let path = entry?.path();
-                    if path.file_name().is_some_and(|n| n == PROJECT_LOCK_NAME) {
+                    if path
+                        .file_name()
+                        .is_some_and(|n| n == PROJECT_LOCK_NAME || n == OWNERSHIP_MARKER)
+                    {
                         continue;
                     }
                     if path.is_dir() && !path.is_symlink() {
@@ -1038,6 +1042,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 }
                 created_now = true;
             }
+            // Runs after the --cleanup refusal above, so a refused run does not
+            // change the process-wide NVIDIA mode or print its warnings.
+            let nvidia_mode = apply_nvidia_mode(&project_dir, nvidia_choice, cleanup)?;
             if created_now {
                 // Non-fatal: without the marker, --cleanup just refuses later.
                 if let Err(e) = ap_core::fsx::write_atomic(&project_dir.join(OWNERSHIP_MARKER), b"")
