@@ -219,8 +219,10 @@ fn analyse(files: &[String]) -> Option<Layout> {
         }
         let first = rel.split('/').next().unwrap();
         // Copied by `cp -a <first>` in `%install`: never an option or a name
-        // the shell would split or expand.
-        if !is_plain_name(first) {
+        // the shell would split or expand. Deeper directories are named in the
+        // `%install` shell lines too (the `sed` over each `.pc` directory), so
+        // every component of every member is held to the same rule.
+        if !rel.split('/').all(is_plain_name) {
             return None;
         }
         if !rel.contains('/') && !is_dir && is_license_name(rel) {
@@ -298,7 +300,8 @@ fn dir_owners(members: &[Member]) -> BTreeMap<String, Role> {
 }
 
 /// A `%files` line for a path: `%` doubled, glob characters escaped, a path
-/// with whitespace quoted. Archive members never contain either in practice.
+/// with whitespace or a double quote quoted, the quote itself escaped inside.
+/// Archive members never contain either in practice; `analyse` refuses them.
 fn files_entry(path: &str) -> String {
     let mut out = String::new();
     for c in path.chars() {
@@ -308,10 +311,11 @@ fn files_entry(path: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
+            '"' => out.push_str("\\\""),
             c => out.push(c),
         }
     }
-    if out.contains(char::is_whitespace) {
+    if path.contains('"') || out.contains(char::is_whitespace) {
         format!("\"{out}\"")
     } else {
         out
@@ -1013,6 +1017,39 @@ bin/__nvcc_device_query
         let spec = redist_component_spec(&empty);
         assert!(spec.contains("%files\n"), "{spec}");
         assert!(!redist_rpmlintrc(&empty).is_empty());
+    }
+
+    #[test]
+    fn deeper_member_directories_must_be_plain_too() {
+        // The `.pc` sed line names every directory of a member, so an odd name
+        // deeper than the first component refuses the archive as well.
+        for odd in [
+            "top/lib/a b$(x)/libx.so.1",
+            "top/lib/$(x)/y.pc",
+            "top/lib/a\"b/y.pc",
+            "top/lib/-x/y.pc",
+        ] {
+            let files = vec![odd.to_string()];
+            assert!(analyse(&files).is_none(), "{odd}");
+        }
+        let files = vec![
+            "top/lib/pkgconfig/x.pc".to_string(),
+            "top/lib/libx.so.1".to_string(),
+        ];
+        assert!(analyse(&files).is_some());
+        // Through the spec, the odd directory name never reaches the output.
+        let mut i = cudart();
+        i.files = vec!["top/lib/a b$(x)/y.pc".into(), "top/LICENSE".into()];
+        let spec = redist_component_spec(&i);
+        assert!(!spec.contains("$(x)"), "{spec}");
+    }
+
+    #[test]
+    fn files_entry_quotes_and_escapes_what_rpm_would_split_or_expand() {
+        assert_eq!(files_entry("a\"b"), "\"a\\\"b\"");
+        assert_eq!(files_entry("a b"), "\"a b\"");
+        assert_eq!(files_entry("100%"), "100%%");
+        assert_eq!(files_entry("lib/x.so"), "lib/x.so");
     }
 
     #[test]

@@ -1110,31 +1110,7 @@ pub fn latest_release(repo_url: &str) -> Result<String, String> {
         kind => return latest_release_non_forge(repo_url, kind),
     }
     let (host, project_path, repo_name) = owner_repo(repo_url)?;
-
-    // Each forge family gets its release endpoint and its tag-list fallback.
-    // `project_path` carries the full path below the host, so a nested GitLab
-    // group (`group/subgroup/project`) is formatted correctly for the API.
-    let endpoints: [String; 2] = if host.contains("github.com") {
-        // GitHub has no subgroups, so project_path is always `owner/repo`.
-        [
-            format!("https://api.github.com/repos/{project_path}/releases/latest"),
-            format!("https://api.github.com/repos/{project_path}/tags?per_page=1"),
-        ]
-    } else if host.contains("gitlab") {
-        // GitLab identifies projects by the URL-encoded full path.
-        let encoded = project_path.replace('/', "%2F");
-        [
-            format!("https://{host}/api/v4/projects/{encoded}/releases?per_page=1"),
-            format!("https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=1"),
-        ]
-    } else {
-        // Gitea and Forgejo, which is what most self-hosted forges are.
-        // Neither supports subgroups, so project_path is `owner/repo`.
-        [
-            format!("https://{host}/api/v1/repos/{project_path}/releases/latest"),
-            format!("https://{host}/api/v1/repos/{project_path}/tags?limit=1"),
-        ]
-    };
+    let endpoints = release_endpoints(&host, &project_path);
 
     let mut last_err = None;
     for url in &endpoints {
@@ -1152,6 +1128,47 @@ pub fn latest_release(repo_url: &str) -> Result<String, String> {
          Last attempt: {}",
         last_err.unwrap_or_else(|| "no endpoint answered".into())
     ))
+}
+
+/// `github.com` or one of its subdomains, matched on the parsed host: a
+/// lookalike such as `mygithub.com` is not a GitHub host.
+fn is_github_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "github.com" || host.ends_with(".github.com")
+}
+
+/// A GitLab host: a known forge (see [`ap_ecosystem::forge::is_known_host`])
+/// with a `gitlab` label, such as `gitlab.com` or `gitlab.gnome.org`.
+fn is_gitlab_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    ap_ecosystem::forge::is_known_host(&host) && host.split('.').any(|label| label == "gitlab")
+}
+
+/// The release endpoint and the tag-list fallback for a forge project, in the
+/// order they are asked. `project_path` carries the full path below the host,
+/// so a nested GitLab group (`group/subgroup/project`) is formatted correctly.
+fn release_endpoints(host: &str, project_path: &str) -> [String; 2] {
+    if is_github_host(host) {
+        // GitHub has no subgroups, so project_path is always `owner/repo`.
+        [
+            format!("https://api.github.com/repos/{project_path}/releases/latest"),
+            format!("https://api.github.com/repos/{project_path}/tags?per_page=1"),
+        ]
+    } else if is_gitlab_host(host) {
+        // GitLab identifies projects by the URL-encoded full path.
+        let encoded = project_path.replace('/', "%2F");
+        [
+            format!("https://{host}/api/v4/projects/{encoded}/releases?per_page=1"),
+            format!("https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=1"),
+        ]
+    } else {
+        // Gitea and Forgejo, which is what most self-hosted forges are.
+        // Neither supports subgroups, so project_path is `owner/repo`.
+        [
+            format!("https://{host}/api/v1/repos/{project_path}/releases/latest"),
+            format!("https://{host}/api/v1/repos/{project_path}/tags?limit=1"),
+        ]
+    }
 }
 
 /// The version inside a release tag: `v1.2.3` → `1.2.3`, `thing-v1.2.3` →
@@ -1889,6 +1906,44 @@ mod tests {
         info.project_name = Some("llama-cpp-scripts".to_string());
         assert!(!is_python_hijack(&info, "llama_cpp_scripts"));
         assert!(!is_python_hijack(&info, "Llama-CPP-Scripts"));
+    }
+
+    #[test]
+    fn release_endpoints_match_the_parsed_host_not_a_substring() {
+        // A lookalike host is a Gitea-style forge, never the GitHub API.
+        let e = release_endpoints("mygithub.com", "o/r");
+        assert!(e[0].starts_with("https://mygithub.com/api/v1/"), "{e:?}");
+        assert!(!e.iter().any(|u| u.contains("api.github.com")), "{e:?}");
+        // Likewise a host that merely contains "gitlab" without the label.
+        let e = release_endpoints("notgitlab.com", "o/r");
+        assert!(e[0].starts_with("https://notgitlab.com/api/v1/"), "{e:?}");
+        assert!(!e.iter().any(|u| u.contains("/api/v4/")), "{e:?}");
+        let e = release_endpoints("evil-gitlab.example", "o/r");
+        assert!(
+            e[0].starts_with("https://evil-gitlab.example/api/v1/"),
+            "{e:?}"
+        );
+        // The real hosts keep their APIs.
+        assert_eq!(
+            release_endpoints("github.com", "o/r")[0],
+            "https://api.github.com/repos/o/r/releases/latest"
+        );
+        assert_eq!(
+            release_endpoints("www.github.com", "o/r")[1],
+            "https://api.github.com/repos/o/r/tags?per_page=1"
+        );
+        assert_eq!(
+            release_endpoints("gitlab.gnome.org", "GNOME/glib")[0],
+            "https://gitlab.gnome.org/api/v4/projects/GNOME%2Fglib/releases?per_page=1"
+        );
+        assert_eq!(
+            release_endpoints("gitlab.com", "g/sub/proj")[1],
+            "https://gitlab.com/api/v4/projects/g%2Fsub%2Fproj/repository/tags?per_page=1"
+        );
+        assert_eq!(
+            release_endpoints("codeberg.org", "o/r")[0],
+            "https://codeberg.org/api/v1/repos/o/r/releases/latest"
+        );
     }
 
     #[test]
