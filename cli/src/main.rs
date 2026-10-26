@@ -1224,11 +1224,14 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // Roots added in the TUI run on their own threads; their failures
             // are collected here so they reach the outcome and exit code. Each
             // is keyed by the name it was requested under, so a retry that
-            // builds the package clears the failure it follows.
-            let added_failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+            // builds the package clears the failure it follows, and a later
+            // build of that package as a dependency clears it too (see
+            // `withdraw_settled`).
+            let added_failures: Mutex<Vec<AddFailure>> = Mutex::new(Vec::new());
             let result = {
                 let sem = &sem;
                 let added_failures = &added_failures;
+                let memory = &memory;
                 let (project, work_dir, state_root, rpms_dir) =
                     (&project, &work_dir, &state_root, &rpms_dir);
                 let (distro, arch, run_dir) = (&distro, &arch, &run_dir);
@@ -1256,6 +1259,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                         .unwrap_or_default();
                                     // Watches whether the build selected anything to start.
                                     let watch = Arc::new(StartWatch::new(reporter.clone()));
+                                    // The package's own outcome is reported to the
+                                    // base reporter, so it is read from the run's
+                                    // record: events from before this retry are not its.
+                                    let finished_before = memory.finished().len();
                                     let r = match &raw {
                                         None => Err(color_eyre::eyre::eyre!(
                                             "no name was recorded for this package to retry it with"
@@ -1307,7 +1314,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                             added_failures
                                                 .lock()
                                                 .unwrap_or_else(|p| p.into_inner())
-                                                .retain(|(l, _)| *l != label);
+                                                .retain(|f| f.label != label);
                                             Event::Progress {
                                                 step: None,
                                                 message: format!("{label}: build finished"),
@@ -1317,30 +1324,44 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                             added_failures
                                                 .lock()
                                                 .unwrap_or_else(|p| p.into_inner())
-                                                .push((label.clone(), format!("{label}: {e:#}")));
+                                                .push(AddFailure {
+                                                    label: label.clone(),
+                                                    message: format!("{label}: {e:#}"),
+                                                    after: memory.finished().len(),
+                                                });
                                             Event::Warning {
                                                 step: None,
                                                 message: format!("{label}: {e}"),
                                             }
                                         }
                                     });
-                                    // A retry that failed to start never reports its
-                                    // own row, which would leave the row marked as
-                                    // retrying for good. Report it failed here.
+                                    // A retry that fails without its own row having
+                                    // finished would leave the row marked as retrying
+                                    // for good (its own worker reports it, but a retry
+                                    // may only have started a dependency). Report it
+                                    // failed here. A row the retry did finish keeps
+                                    // its own outcome.
                                     // A retry that succeeded without starting anything
                                     // (the package was already built) settles its row
                                     // as already built, instead of leaving it marked
                                     // as retrying.
                                     match (&r, retry_of) {
-                                        // Only a retry that never started needs a row
-                                        // settled here; a started build reports its own.
-                                        (Err(e), Some(row)) if !watch.started() => {
+                                        (Err(e), Some(row))
+                                            if !finished_since(
+                                                &memory.finished(),
+                                                finished_before,
+                                                &row,
+                                            ) =>
+                                        {
+                                            let reason = if watch.started() {
+                                                format!("retry failed: {e:#}")
+                                            } else {
+                                                format!("retry did not start: {e:#}")
+                                            };
                                             reporter.report(&Event::PackageFinished {
                                                 pkg: row,
                                                 version: String::new(),
-                                                outcome: PackageOutcome::Failed {
-                                                    reason: format!("retry did not start: {e:#}"),
-                                                },
+                                                outcome: PackageOutcome::Failed { reason },
                                             });
                                         }
                                         (Ok(()), Some(row)) if !watch.started() => {
@@ -1414,11 +1435,11 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                         // and the TUI needs RunFinished to close.
                         t.wait_until_idle();
                     }
-                    let failed = first.is_err()
-                        || !added_failures
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .is_empty();
+                    let failed = first.is_err() || {
+                        let mut failures = added_failures.lock().unwrap_or_else(|p| p.into_inner());
+                        withdraw_settled(&mut failures, memory, tui_ctrl);
+                        !failures.is_empty()
+                    };
                     // Sum usage from all AgentReply events recorded during the run.
                     reporter.report(&Event::RunFinished {
                         outcome: if failed {
@@ -1433,12 +1454,13 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 })
             };
 
-            let added_failures: Vec<String> = added_failures
+            // Every add request has returned by now (the scope joined them), so
+            // this is the run's final word on which failures still stand.
+            let mut failures = added_failures
                 .into_inner()
-                .unwrap_or_else(|p| p.into_inner())
-                .into_iter()
-                .map(|(_, message)| message)
-                .collect();
+                .unwrap_or_else(|p| p.into_inner());
+            withdraw_settled(&mut failures, &memory, &tui_ctrl);
+            let added_failures: Vec<String> = failures.into_iter().map(|f| f.message).collect();
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
             *summary = Some(print_run_summary(
@@ -2349,6 +2371,75 @@ fn drain_in_flight(
             Err(_) => break,
         }
     }
+}
+
+/// A failed add request (the `n` key or a retry), kept until a later build of
+/// its package settles it.
+struct AddFailure {
+    /// The name the request was made under (see `AddRequest`).
+    label: String,
+    message: String,
+    /// How many `PackageFinished` events the run had reported when it failed.
+    after: usize,
+}
+
+/// Whether `row` reported `PackageFinished` among `finished[from..]`. `finished`
+/// is the run's record of `PackageFinished` events, in order.
+fn finished_since(finished: &[Event], from: usize, row: &str) -> bool {
+    finished
+        .iter()
+        .skip(from)
+        .any(|e| matches!(e, Event::PackageFinished { pkg, .. } if pkg == row))
+}
+
+/// Drops the failures that a later build settled. A failure goes when a row it
+/// was requested as (the request name, or the row's own RPM name) has its last
+/// `PackageFinished` at or after the failure, and that outcome is built. `ends`
+/// is the run's `PackageFinished` events in order, as (row, built).
+fn withdraw_settled_failures(
+    failures: &mut Vec<AddFailure>,
+    ends: &[(String, bool)],
+    origin_of: impl Fn(&str) -> Option<String>,
+) {
+    let mut last: std::collections::HashMap<&str, (usize, bool)> = Default::default();
+    for (at, (row, built)) in ends.iter().enumerate() {
+        last.insert(row.as_str(), (at, *built));
+    }
+    failures.retain(|f| {
+        !last.iter().any(|(row, (at, built))| {
+            *built
+                && *at >= f.after
+                && (*row == f.label.as_str() || origin_of(row).as_deref() == Some(f.label.as_str()))
+        })
+    });
+}
+
+/// The `PackageFinished` events in order, as (row, ended built).
+fn row_ends(finished: &[Event]) -> Vec<(String, bool)> {
+    finished
+        .iter()
+        .filter_map(|e| match e {
+            Event::PackageFinished { pkg, outcome, .. } => Some((
+                pkg.clone(),
+                matches!(
+                    outcome,
+                    PackageOutcome::Built | PackageOutcome::AlreadyBuilt
+                ),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`withdraw_settled_failures`] over the events the run has reported so far.
+fn withdraw_settled(
+    failures: &mut Vec<AddFailure>,
+    memory: &MemorySink,
+    tui: &Option<tui::TuiController>,
+) {
+    withdraw_settled_failures(failures, &row_ends(&memory.finished()), |row| {
+        tui.as_ref().and_then(|t| t.origin_of(row))
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3533,7 +3624,8 @@ fn cmd_build(
             }
 
             // One thread per package; OBS builds run concurrently.
-            for (target_info, rpm_name) in fresh {
+            let mut unspawned = fresh.into_iter();
+            while let Some((target_info, rpm_name)) = unspawned.next() {
                 let pkg_config = PipelineConfig {
                     pkg_name: target_info.name.clone(),
                     rpm_name: rpm_name.clone(),
@@ -3545,13 +3637,35 @@ fn cmd_build(
                 };
                 let pkg_run = run_dir.pkg(&rpm_name);
                 if let Err(e) = pkg_run.ensure() {
+                    // Every row this round selected must settle: the failing one
+                    // and the fresh ones never spawned, or the TUI keeps them
+                    // queued for good. Rows already spawned report themselves.
+                    let reason = format!(
+                        "cannot create the package run directory {}: {e}",
+                        pkg_run.path.display()
+                    );
+                    reporter.report(&Event::PackageFinished {
+                        pkg: rpm_name.clone(),
+                        version: target_info.version.clone(),
+                        outcome: PackageOutcome::Failed {
+                            reason: reason.clone(),
+                        },
+                    });
+                    for (rest, rest_rpm) in unspawned {
+                        reporter.report(&Event::PackageFinished {
+                            pkg: rest_rpm,
+                            version: rest.version.clone(),
+                            outcome: PackageOutcome::Failed {
+                                reason: format!(
+                                    "not started because {rpm_name} has no run directory: {e}"
+                                ),
+                            },
+                        });
+                    }
                     // Join the workers already spawned so none is left running
                     // unobserved once we return.
                     drain_in_flight(&rx, &mut in_flight);
-                    return Err(color_eyre::eyre::eyre!(
-                        "cannot create the package run directory {}: {e}",
-                        pkg_run.path.display()
-                    ));
+                    return Err(color_eyre::eyre::eyre!(reason));
                 }
                 let r = pkg_reporter(&rpm_name);
                 let sem2 = sem.clone();
@@ -4794,5 +4908,98 @@ mod built_locally_tests {
         )
         .unwrap();
         assert_eq!(built_locally(dir.path(), "python-cuda-bindings"), None);
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    fn fin(pkg: &str, outcome: PackageOutcome) -> Event {
+        Event::PackageFinished {
+            pkg: pkg.to_string(),
+            version: "1.0".to_string(),
+            outcome,
+        }
+    }
+
+    fn failed(label: &str, after: usize) -> AddFailure {
+        AddFailure {
+            label: label.to_string(),
+            message: format!("{label}: boom"),
+            after,
+        }
+    }
+
+    fn origin(row: &str) -> Option<String> {
+        // `python-foo` was requested as `foo`.
+        (row == "python-foo").then(|| "foo".to_string())
+    }
+
+    fn labels(failures: &[AddFailure]) -> Vec<&str> {
+        failures.iter().map(|f| f.label.as_str()).collect()
+    }
+
+    #[test]
+    fn finished_since_only_looks_past_the_mark() {
+        let events = vec![
+            fin("python-a", PackageOutcome::Built),
+            fin("python-b", PackageOutcome::Failed { reason: "x".into() }),
+        ];
+        assert!(finished_since(&events, 0, "python-a"));
+        assert!(!finished_since(&events, 1, "python-a"));
+        assert!(finished_since(&events, 1, "python-b"));
+        assert!(!finished_since(&events, 2, "python-b"));
+        assert!(!finished_since(&events, 0, "python-c"));
+    }
+
+    #[test]
+    fn failure_is_withdrawn_when_its_package_is_later_built_as_a_dependency() {
+        // The request `foo` fails, then `python-foo` builds as a dependency.
+        let events = vec![
+            fin("python-foo", PackageOutcome::Failed { reason: "x".into() }),
+            fin("python-foo", PackageOutcome::Built),
+        ];
+        let mut failures = vec![failed("foo", 1)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn failure_is_withdrawn_by_the_rpm_name_too() {
+        let events = vec![fin("python-foo", PackageOutcome::AlreadyBuilt)];
+        let mut failures = vec![failed("python-foo", 0)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn failure_after_the_build_stands() {
+        // Built first, then the request failed: the later failure is not settled.
+        let events = vec![fin("python-foo", PackageOutcome::Built)];
+        let mut failures = vec![failed("foo", 1)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        assert_eq!(labels(&failures), vec!["foo"]);
+    }
+
+    #[test]
+    fn failure_stands_when_the_package_did_not_end_built() {
+        let events = vec![
+            fin("python-foo", PackageOutcome::Built),
+            fin("python-foo", PackageOutcome::Failed { reason: "x".into() }),
+        ];
+        let mut failures = vec![failed("foo", 0)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        assert_eq!(labels(&failures), vec!["foo"]);
+    }
+
+    #[test]
+    fn failure_of_another_package_stands() {
+        // `python-bar` has no recorded request name here, and `bar` is not its
+        // RPM name, so neither failure is settled by it.
+        let events = vec![fin("python-bar", PackageOutcome::Built)];
+        let mut failures = vec![failed("foo", 0), failed("bar", 0)];
+        withdraw_settled_failures(&mut failures, &row_ends(&events), origin);
+        assert_eq!(labels(&failures), vec!["foo", "bar"]);
     }
 }
