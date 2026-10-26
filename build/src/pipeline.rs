@@ -1055,10 +1055,14 @@ pub fn select_target(
     // unresolvable and get queued as duplicates. Index both listings by a
     // separator-blind `fuzzy_key` instead, and use the *real* listed name
     // (not the guess) for the build-status lookup once a match is found.
-    let own_fuzzy: std::collections::HashMap<String, &String> = own_packages
-        .iter()
-        .map(|p| (osc::fuzzy_key(p), p))
-        .collect();
+    // Several listed spellings can share a key (`python-APScheduler` and
+    // `python-apscheduler` are both real OBS packages): all are kept, and the
+    // choice among them is `preferred_own_spelling`, not the iteration order.
+    let mut own_fuzzy: std::collections::HashMap<String, Vec<&String>> =
+        std::collections::HashMap::new();
+    for p in own_packages.iter() {
+        own_fuzzy.entry(osc::fuzzy_key(p)).or_default().push(p);
+    }
     let linked_fuzzy: std::collections::HashSet<String> =
         linked_packages.iter().map(|p| osc::fuzzy_key(p)).collect();
 
@@ -1110,7 +1114,10 @@ pub fn select_target(
             if is_settled(&rpm) {
                 return Resolution::Built;
             }
-            if let Some(&real) = own_fuzzy.get(&key) {
+            if let Some(real) = own_fuzzy
+                .get(&key)
+                .and_then(|spellings| preferred_own_spelling(&rpm, spellings))
+            {
                 // A package OBS built that its dependents cannot install (see
                 // `spec_with_published_defects_fixed`) is not resolved: it is
                 // selected again, repaired and rebuilt.
@@ -2269,6 +2276,33 @@ fn own_name<'a>(rpm_name: &str, own: &'a std::collections::HashSet<String>) -> O
     variant.map_or(OwnName::Absent, OwnName::Variant)
 }
 
+/// The listed own spelling of `rpm_name` among `spellings`, which all share its
+/// fuzzy key: the one equal to the lowercase `rpm_name` when listed, else the
+/// lexicographically smallest. The same rule as [`own_name`], and independent
+/// of the order the listing came in.
+fn preferred_own_spelling<'a>(rpm_name: &str, spellings: &[&'a String]) -> Option<&'a String> {
+    let lower = rpm_name.to_lowercase();
+    spellings
+        .iter()
+        .copied()
+        .find(|s| s.as_str() == lower)
+        .or_else(|| spellings.iter().copied().min())
+}
+
+/// The spelling a linked project lists `rpm_name`'s package under, up to case
+/// and separators: the exact spelling when listed, else the smallest variant,
+/// so the choice does not depend on the order of the listing.
+fn linked_spelling<'a>(
+    rpm_name: &str,
+    listing: &'a std::collections::HashSet<String>,
+) -> Option<&'a str> {
+    match own_name(rpm_name, listing) {
+        OwnName::Exact => listing.get(rpm_name).map(String::as_str),
+        OwnName::Variant(v) => Some(v),
+        OwnName::Absent => None,
+    }
+}
+
 /// The OBS package name `rpm_name` is built and checked out under, given the
 /// listing of the own project. The project's own spelling wins: a listed
 /// case variant is the package. Otherwise the name is `rpm_name`, which is
@@ -2318,15 +2352,16 @@ fn branch_from_linked(
                 lookup_failure(reason, transient, true, emit)?
             }
         };
-        let Some(shipped) = listing.iter().find(|p| osc::fuzzy_key(p) == key) else {
+        let Some(shipped) = linked_spelling(rpm_name, &listing) else {
             continue;
         };
-        // The lookup is fuzzy, so a name that differs only in case (PyYAML vs
-        // pyyaml) is the same package: the distro's spelling is the source of
-        // the branch, and the branch is named `rpm_name`. The own project then
+        // The lookup is fuzzy, so a name that differs only in case or separators
+        // (PyYAML vs pyyaml, pydantic-core vs pydantic_core, ruamel.yaml vs
+        // ruamel-yaml) is the same package: the distro's spelling is the source
+        // of the branch, and the branch is named `rpm_name`. The own project then
         // lists `rpm_name`, which is the OBS name `resolve_obs_name` gives it.
-        // Only a genuinely different name is refused.
-        if !shipped.eq_ignore_ascii_case(rpm_name) {
+        // Only a spelling that is not the same package up to that is refused.
+        if osc::fuzzy_key(shipped) != key {
             return Err(BranchError::Renamed(format!(
                 "{path_project} ships it as {shipped}, not {rpm_name}"
             )));
@@ -3446,6 +3481,7 @@ fn switch_for_missing_submodules(
                 snapshot: None,
                 kept: &[],
                 staged_out: None,
+                rejected_out: None,
             },
             &outcome,
             *reporter,
@@ -3673,6 +3709,7 @@ fn review_stage(
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
                     staged_out: Some(&mut staged),
+                    rejected_out: None,
                 },
                 &outcome,
                 reporter,
@@ -3765,6 +3802,7 @@ fn review_stage(
                         snapshot: None,
                         kept: &[],
                         staged_out: None,
+                        rejected_out: None,
                     },
                     cond,
                     &fetch_release_json,
@@ -3974,6 +4012,7 @@ fn prefix_stage(
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
                     staged_out: Some(&mut staged),
+                    rejected_out: None,
                 },
                 &outcome,
                 reporter,
@@ -4883,6 +4922,7 @@ fn fix_after_validation(
                     snapshot: Some(&checkout_snapshot),
                     kept: &[],
                     staged_out: Some(&mut staged),
+                    rejected_out: None,
                 },
                 &outcome,
                 *reporter,
@@ -6665,6 +6705,7 @@ fn fix_after_build(
             snapshot: Some(&checkout_snapshot),
             kept: &[],
             staged_out: Some(&mut staged),
+            rejected_out: None,
         },
         &outcome,
         reporter,
@@ -7262,6 +7303,13 @@ fn ladder_key(config: &PipelineConfig, spec: &str) -> u64 {
     hash_spec(&all)
 }
 
+/// Whether an exhausted ladder is remembered (its spec and reason written as the
+/// memo `spent_ladder_refusal` reads). A patch-driven ladder is not, and neither
+/// is one the budget stopped, since its rungs never ran.
+fn should_remember_ladder(patch_task: bool, budget_stopped: bool) -> bool {
+    !patch_task && !budget_stopped
+}
+
 /// The failure for a spec whose resolution ladder was already spent: the same
 /// ladder would end the same way, at the price of several turns, while the spec
 /// and the specs it depends on are unchanged. `--force` and a package that is
@@ -7413,6 +7461,13 @@ fn resolve_blocked_with(
     // to the pre-ladder one, so such edits survive later rounds.
     let mut base_spec: String = site.before.to_string();
     let mut base_snapshot: Option<CheckoutSnapshot> = None;
+    // Set when a round was not run because the run's budget was spent: the
+    // ladder then says so, and writes no memo (see the end of this function).
+    let mut budget_stopped = false;
+    // The round that deferred to the npm vendoring route (its agent turn
+    // answered `use_upstream_wheel` and the route was staged). The mechanical
+    // wheel rung waits for the turn after it: see `wheel_rung_round`.
+    let mut npm_deferred_round: Option<usize> = None;
     let result = run_ladder(&first, LADDER_ROUNDS, |round, history| {
         let latest = history.last().map(String::as_str).unwrap_or("");
         // Mechanical: a fix the reason puts in a sibling goes to that package
@@ -7553,7 +7608,7 @@ fn resolve_blocked_with(
             }
         }
         // Mechanical: the upstream wheel, when the project publishes one.
-        if round == 2 && is_python {
+        if round == wheel_rung_round(npm_deferred_round) && is_python {
             let wheel = pipeline_wheel_outcome(&format!(
                 "the resolver found no way to build from source after a blocked turn: {}",
                 brief(latest)
@@ -7572,6 +7627,7 @@ fn resolve_blocked_with(
                     snapshot: Some(base_snapshot.as_ref().unwrap_or(site.snapshot)),
                     kept: &kept_staged,
                     staged_out: None,
+                    rejected_out: None,
                 },
                 &wheel,
                 *reporter,
@@ -7583,6 +7639,7 @@ fn resolve_blocked_with(
             }
         }
         if st.spent_usd >= config.budget_usd {
+            budget_stopped = true;
             return Rung::Blocked(format!(
                 "round {round} not run: budget exhausted (${:.2} spent of ${:.2})",
                 st.spent_usd, config.budget_usd
@@ -7622,6 +7679,8 @@ fn resolve_blocked_with(
         // to `kept_staged`); the rounds before this one are kept as they were.
         let kept_before = kept_staged.clone();
         let label = format!("{} — resolve round {round}", site.apply_label);
+        let npm_marked_before = notes_record_npm_deferral(&ws.notes());
+        let mut rejected: Option<String> = None;
         match apply_turn_and_reset(
             ApplyTurnCtx {
                 config,
@@ -7636,6 +7695,7 @@ fn resolve_blocked_with(
                 snapshot: Some(base_snapshot.as_ref().unwrap_or(site.snapshot)),
                 kept: &kept_before,
                 staged_out: Some(&mut kept_staged),
+                rejected_out: Some(&mut rejected),
             },
             &out,
             *reporter,
@@ -7643,14 +7703,22 @@ fn resolve_blocked_with(
             &mut st.from_repo_archive,
         ) {
             Ok(TurnEffect::NoChange) => {
+                if !npm_marked_before && notes_record_npm_deferral(&ws.notes()) {
+                    npm_deferred_round = Some(round);
+                }
                 // Whatever the round left on disk (a kept npm vendoring route,
                 // the files it staged) is the base for the rounds after it.
                 base_spec = std::fs::read_to_string(spec_path).unwrap_or_default();
                 base_snapshot = Some(CheckoutSnapshot::take(checkout_dir));
-                Rung::Blocked(format!(
-                    "round {round} answered no_change: {}",
-                    brief(&out.reasoning)
-                ))
+                // An edit the gate rejected came back as no change: its reason
+                // is the round's answer, not the agent's reasoning.
+                Rung::Blocked(match rejected {
+                    Some(why) => format!("round {round} edit rejected: {}", brief(&why)),
+                    None => format!(
+                        "round {round} answered no_change: {}",
+                        brief(&out.reasoning)
+                    ),
+                })
             }
             Ok(effect) => Rung::Resolved(effect),
             Err(r) => match &out.action {
@@ -7684,9 +7752,18 @@ fn resolve_blocked_with(
             append_notes(
                 ws.notes(),
                 &format!(
-                    "\n## {} — resolution ladder spent\n{LADDER_FAILED_PREFIX}every rung \
-                     failed:\n{}\n",
+                    "\n## {} — resolution ladder {}\n{LADDER_FAILED_PREFIX}{}:\n{}\n",
                     site.apply_label,
+                    if budget_stopped {
+                        "stopped on the budget"
+                    } else {
+                        "spent"
+                    },
+                    if budget_stopped {
+                        "the run's budget was spent before every rung ran"
+                    } else {
+                        "every rung failed"
+                    },
                     history
                         .iter()
                         .enumerate()
@@ -7699,17 +7776,34 @@ fn resolve_blocked_with(
             // writes no memo: the spec it failed on is the dependency's, and
             // an ordinary run of that package must not find it spent.
             // `spent_ladder_refusal` likewise skips the check for a patch run.
-            if site.task != crate::agent::Task::PatchDependency {
-                let key = ladder_key(config, site.before);
+            // A ladder the budget stopped did not try its rungs, so nothing is
+            // remembered: a rerun with more budget must run them.
+            if should_remember_ladder(
+                site.task == crate::agent::Task::PatchDependency,
+                budget_stopped,
+            ) {
+                // Keyed on the spec on disk now, which is what
+                // `spent_ladder_refusal` reads: a round that kept spec edits (a
+                // deferred npm route) moved the base on from `site.before`.
+                let spec_now = std::fs::read_to_string(spec_path).unwrap_or_default();
+                let key = ladder_key(config, &spec_now);
                 let memo = text.clone();
                 update_state(ws, *reporter, |state| {
                     state.ladder_spec_hash = Some(key);
                     state.ladder_reason = Some(memo);
                 });
             }
+            let why = if budget_stopped {
+                format!(
+                    "stopped on the budget (${:.2} spent of ${:.2}) before every rung ran: {text}",
+                    st.spent_usd, config.budget_usd
+                )
+            } else {
+                text
+            };
             Err(ctx.failed_as(
                 FailureKind::Exhausted,
-                format!("{LADDER_FAILED_PREFIX}{rpm_name}: {text}"),
+                format!("{LADDER_FAILED_PREFIX}{rpm_name}: {why}"),
             ))
         }
     }
@@ -8401,6 +8495,14 @@ fn is_agent_editable(name: &str) -> bool {
             .any(|ext| name.ends_with(ext))
 }
 
+/// Whether a rollback leaves the top-level file `name` as it is: it was staged
+/// by a turn (named in `keep`). A spec is never kept, whatever `keep` says: a
+/// rejected spec is always restored.
+fn is_kept_file(name: &std::ffi::OsStr, keep: &[String]) -> bool {
+    name.to_str()
+        .is_some_and(|n| !n.ends_with(".spec") && keep.iter().any(|k| k == n))
+}
+
 impl CheckoutSnapshot {
     fn take(checkout_dir: &Path) -> Self {
         let mut files = std::collections::HashMap::new();
@@ -8459,11 +8561,16 @@ impl CheckoutSnapshot {
     }
 
     /// Like [`Self::restore`], but top-level files named in `keep` are left as they
-    /// are: the files a turn asked to be staged, which are not in the snapshot.
+    /// are: the files a turn asked to be staged, whether they are new (not in the
+    /// snapshot) or overwrite a snapshotted file (see [`is_kept_file`]).
     fn restore_keeping(&self, reporter: &dyn Reporter, step: Option<&StepDir>, keep: &[String]) {
         let step_id = step.map(|s| s.id);
-        // 1) Put back every snapshotted file the agent changed or deleted.
+        // 1) Put back every snapshotted file the agent changed or deleted, except
+        //    the staged ones, whose staged content stays.
         for (name, entry) in &self.files {
+            if is_kept_file(name, keep) {
+                continue;
+            }
             let path = self.checkout_dir.join(name);
             let Some(bytes) = &entry.content else {
                 // Not kept (an archive or an oversized file): all that can be
@@ -8512,7 +8619,7 @@ impl CheckoutSnapshot {
                     continue;
                 }
                 let name = entry.file_name();
-                if !self.files.contains_key(&name) && !keep.iter().any(|k| name == k.as_str()) {
+                if !self.files.contains_key(&name) && !is_kept_file(&name, keep) {
                     let path = entry.path();
                     if let Err(e) = std::fs::remove_file(&path) {
                         reporter.report(&Event::Warning {
@@ -8586,12 +8693,12 @@ fn reject_patch_escape(
     reporter: &dyn Reporter,
     notes_path: PathBuf,
     keep: &[String],
-) -> bool {
+) -> Option<String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
     let baseline = patch_baseline(snapshot, spec_path);
     let Some((offender, problem)) = patch_escape_offender(spec_path, &after, &baseline, None)
     else {
-        return false;
+        return None;
     };
     note_spec_rejection(spec_path, &problem);
     reporter.report(&Event::SpecRejected {
@@ -8643,7 +8750,7 @@ fn reject_patch_escape(
              source tree, with no leading `/`, `~`, or `..` component.\n"
         ),
     );
-    true
+    Some(problem)
 }
 
 /// The gate for a turn whose arm answers `NoChange` (the npm-vendor deferral and
@@ -8674,7 +8781,10 @@ fn gate_turn_edit_without_accept(
             keep,
         )
     } else {
-        !reject_patch_escape(spec_path, before, snapshot, step, reporter, notes_path, keep)
+        reject_patch_escape(
+            spec_path, before, snapshot, step, reporter, notes_path, keep,
+        )
+        .is_none()
     }
 }
 
@@ -8699,6 +8809,32 @@ fn accept_or_restore_with_snapshot(
     notes_path: PathBuf,
     keep: &[String],
 ) -> bool {
+    accept_or_restore_reasoned(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_entry,
+        notes_path,
+        keep,
+    )
+    .is_ok()
+}
+
+/// [`accept_or_restore_with_snapshot`] with the reason of a rejection: `Err` is
+/// the gate's own words (the rpmspec or patch complaint), already in the notes
+/// and rolled back.
+fn accept_or_restore_reasoned(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_entry: &str,
+    notes_path: PathBuf,
+    keep: &[String],
+) -> Result<(), String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
 
     if let Some((line_no, text)) = crate::spec::first_macro_in_comment(&after) {
@@ -8735,7 +8871,7 @@ fn accept_or_restore_with_snapshot(
                 snap.restore_keeping(reporter, Some(step), keep);
             }
             append_notes(notes_path, &rollback_note(&e.to_string()));
-            return false;
+            return Err(e.to_string());
         }
         Err(e) => {
             skipped_check_note(
@@ -8751,7 +8887,7 @@ fn accept_or_restore_with_snapshot(
     // A patch header naming an absolute path or a `..` component would let the
     // patch carry files from outside the checkout into the commit. Checked for
     // every turn outcome, before anything else reads the patch.
-    if reject_patch_escape(
+    if let Some(problem) = reject_patch_escape(
         spec_path,
         before,
         snapshot,
@@ -8760,7 +8896,7 @@ fn accept_or_restore_with_snapshot(
         notes_path.clone(),
         keep,
     ) {
-        return false;
+        return Err(problem);
     }
 
     // `rpmspec --parse` cannot see a patch that does not apply; that would only
@@ -8792,7 +8928,7 @@ fn accept_or_restore_with_snapshot(
                  The edit was rolled back.\n"
             ),
         );
-        return false;
+        return Err(problem);
     }
 
     clear_spec_rejections(spec_path);
@@ -8808,7 +8944,7 @@ fn accept_or_restore_with_snapshot(
         artifact: diff_path,
     });
     append_notes(notes_path, notes_entry);
-    true
+    Ok(())
 }
 
 /// The journal entry for a turn whose edit was rejected before any build and
@@ -8857,6 +8993,10 @@ struct ApplyTurnCtx<'a> {
     /// are appended (a refused request is not one of them). The resolution
     /// ladder keeps them for its later rounds; every other caller passes `None`.
     staged_out: Option<&'a mut Vec<String>>,
+    /// Where the reason of a rejected edit goes (the gate's own words), so the
+    /// ladder's history can say why a round changed nothing. `None` when nothing
+    /// reads it.
+    rejected_out: Option<&'a mut Option<String>>,
 }
 
 /// Apply one agent turn's outcome the same way at every call site that runs
@@ -8901,6 +9041,7 @@ fn apply_turn_outcome_with(
         snapshot,
         kept,
         mut staged_out,
+        mut rejected_out,
     } = ctx;
     // Files the turn asked the pipeline to copy into the checkout: its shell
     // cannot write there. Done first, and kept even by a `blocked` or
@@ -8945,7 +9086,8 @@ fn apply_turn_outcome_with(
             reporter,
             notes_path.clone(),
             &keep,
-        );
+        )
+        .is_some();
         if escaped && let Some(msg) = repeated_spec_rejection(spec_path) {
             return Err(format!("{label}: {msg}"));
         }
@@ -8988,7 +9130,7 @@ fn apply_turn_outcome_with(
             Ok(TurnEffect::NoChange)
         }
         crate::agent::Action::Edited => {
-            let changed = accept_or_restore_with_snapshot(
+            let changed = match accept_or_restore_reasoned(
                 spec_path,
                 before,
                 snapshot,
@@ -9002,7 +9144,15 @@ fn apply_turn_outcome_with(
                 ),
                 notes_path.clone(),
                 &keep,
-            );
+            ) {
+                Ok(()) => true,
+                Err(why) => {
+                    if let Some(slot) = rejected_out.as_mut() {
+                        **slot = Some(why);
+                    }
+                    false
+                }
+            };
             if !changed && !staged.is_empty() {
                 append_notes(
                     notes_path.clone(),
@@ -10038,6 +10188,15 @@ fn spec_version_differs(spec_path: &Path, version: &str) -> bool {
     header.version != version
 }
 
+/// A version as a release directory names it: digits and dots, then any
+/// pre-release, post, dev, or local suffix (`1.2rc1`, `2.4.0a0`, `1.2+git2024`).
+static RELEASE_DIR_VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"^[0-9]+(\.[0-9]+)*([a-z]+[0-9]*|rc[0-9]+|\+[A-Za-z0-9_.]+|\.post[0-9]+|\.dev[0-9]+)*$",
+    )
+    .expect("a valid version pattern")
+});
+
 /// The tree prefix a patch was made for when it names another release: the first
 /// path component of its diff names is `<name>-<version>` with a version other
 /// than `version`, and not the directory `top_level` the sources unpack to.
@@ -10057,12 +10216,12 @@ fn stale_patch_prefix(diff: &str, top_level: &str, version: &str) -> Option<Stri
             n.split_once('/').map(|(first, _)| first)
         })
         .find(|first| {
-            let Some((_, ver)) = first.rsplit_once('-') else {
+            let Some((name, ver)) = first.rsplit_once('-') else {
                 return false;
             };
             *first != top_level
-                && ver.starts_with(|c: char| c.is_ascii_digit())
-                && ver.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && !name.is_empty()
+                && RELEASE_DIR_VERSION.is_match(ver)
                 && ver != version
         })
         .map(str::to_string)
@@ -10206,10 +10365,20 @@ struct PatchCheck {
 /// `%autosetup`/`%autopatch` line, else 1, the default of both macros. Only the
 /// macro lines are read, so a `-p1` anywhere else in the spec is not a level.
 fn spec_patch_level(spec: &str, number: &str) -> u32 {
+    // rpm takes both `-p0` and the spaced `-p 0` (`%autosetup -p 0` is level 0).
     let level_of = |line: &str| -> Option<u32> {
-        line.split_whitespace()
-            .skip(1)
-            .find_map(|tok| tok.strip_prefix("-p")?.parse::<u32>().ok())
+        let mut toks = line.split_whitespace().skip(1);
+        while let Some(tok) = toks.next() {
+            let level = if tok == "-p" {
+                toks.next().and_then(|t| t.parse::<u32>().ok())
+            } else {
+                tok.strip_prefix("-p").and_then(|t| t.parse::<u32>().ok())
+            };
+            if level.is_some() {
+                return level;
+            }
+        }
+        None
     };
     let mut general = None;
     for line in spec.lines() {
@@ -11696,8 +11865,26 @@ fn package_notes_for_prompt(text: &str) -> String {
     // requirements` keeps that section's rank. Text before the first heading is
     // kept with the highest priority.
     let mut sections: Vec<(u8, String)> = Vec::new();
+    // Inside a fenced code block a `#` line is code (a shell comment, say), not
+    // a heading: the fence's marker (``` or ~~~) is open until the same marker.
+    let mut fence: Option<&str> = None;
     for line in text.lines() {
-        let heading = line.starts_with('#');
+        let trimmed = line.trim_start();
+        let heading = fence.is_none() && line.starts_with('#');
+        match fence {
+            None => {
+                if trimmed.starts_with("```") {
+                    fence = Some("```");
+                } else if trimmed.starts_with("~~~") {
+                    fence = Some("~~~");
+                }
+            }
+            Some(marker) => {
+                if trimmed.starts_with(marker) {
+                    fence = None;
+                }
+            }
+        }
         if heading || sections.is_empty() {
             let rank = if heading { notes_section_rank(line) } else { 0 };
             sections.push((rank, String::new()));
@@ -12239,6 +12426,21 @@ fn stage_npm_vendor_route(checkout_dir: &Path, version: &str) -> Result<Vec<Stri
         None => return Err("the existing _service is not a <services> document".to_string()),
     }
     Ok(done)
+}
+
+/// Whether the notes record an npm vendoring deferral (the marker
+/// `npm_vendor_route_pending` reads).
+fn notes_record_npm_deferral(notes_path: &Path) -> bool {
+    std::fs::read_to_string(notes_path).is_ok_and(|n| n.contains(NPM_VENDOR_NOTE_MARKER))
+}
+
+/// The ladder round the mechanical wheel rung runs in: round 2, or two rounds
+/// after a round that deferred to the npm vendoring route. The round in between
+/// is an agent turn, so the npm route gets the turn it asked for before the
+/// wheel switch is applied (the marker already in the notes would otherwise
+/// turn the wheel switch through, with no npm attempt).
+fn wheel_rung_round(npm_deferred_round: Option<usize>) -> usize {
+    npm_deferred_round.map_or(2, |r| r + 2)
 }
 
 /// True when a `use_upstream_wheel` should first be turned into an npm
@@ -14523,6 +14725,69 @@ mod tests {
     }
 
     #[test]
+    fn preferred_own_spelling_is_the_same_whatever_the_listing_order() {
+        let a = "python-APScheduler".to_string();
+        let b = "python-apscheduler".to_string();
+        // The lowercase rpm name wins when listed, in either order.
+        assert_eq!(
+            preferred_own_spelling("python-apscheduler", &[&a, &b]).map(String::as_str),
+            Some("python-apscheduler")
+        );
+        assert_eq!(
+            preferred_own_spelling("python-apscheduler", &[&b, &a]).map(String::as_str),
+            Some("python-apscheduler")
+        );
+        // Without the lowercase spelling, the smallest one, in either order.
+        let only_upper = "python-APScheduler".to_string();
+        let other = "python-APSCHEDULER".to_string();
+        assert_eq!(
+            preferred_own_spelling("python-apscheduler", &[&only_upper, &other])
+                .map(String::as_str),
+            Some("python-APSCHEDULER")
+        );
+        assert_eq!(
+            preferred_own_spelling("python-apscheduler", &[&other, &only_upper])
+                .map(String::as_str),
+            Some("python-APSCHEDULER")
+        );
+        assert_eq!(preferred_own_spelling("python-apscheduler", &[]), None);
+    }
+
+    #[test]
+    fn a_linked_spelling_that_differs_in_separators_is_the_same_package() {
+        let listing: std::collections::HashSet<String> =
+            ["python-pydantic-core", "ruamel-yaml", "python-other"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        // Found up to separators, and the classification says it is the same package.
+        let shipped = linked_spelling("python-pydantic_core", &listing).unwrap();
+        assert_eq!(shipped, "python-pydantic-core");
+        assert_eq!(
+            osc::fuzzy_key(shipped),
+            osc::fuzzy_key("python-pydantic_core")
+        );
+        let shipped = linked_spelling("ruamel.yaml", &listing).unwrap();
+        assert_eq!(shipped, "ruamel-yaml");
+        assert_eq!(osc::fuzzy_key(shipped), osc::fuzzy_key("ruamel.yaml"));
+        // A genuinely different name is not found at all.
+        assert_eq!(linked_spelling("python-yaml", &listing), None);
+        // An exact spelling wins over a variant, whatever the listing order.
+        let both: std::collections::HashSet<String> = ["python-APScheduler", "python-apscheduler"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            linked_spelling("python-apscheduler", &both),
+            Some("python-apscheduler")
+        );
+        assert_eq!(
+            linked_spelling("python-APSCHEDULER", &both),
+            Some("python-APScheduler")
+        );
+    }
+
+    #[test]
     fn a_dependency_key_ignores_the_python_prefix_case_and_separators() {
         for name in [
             "python-APScheduler",
@@ -14702,6 +14967,18 @@ mod tests {
     }
 
     #[test]
+    fn spec_patch_level_reads_the_spaced_dash_p_as_rpm_does() {
+        // rpm takes `-p 0` as well as `-p0`.
+        assert_eq!(spec_patch_level("%prep\n%autosetup -p 0\n", "0"), 0);
+        assert_eq!(spec_patch_level("%prep\n%autosetup -p0\n", "0"), 0);
+        assert_eq!(spec_patch_level("%prep\n%patch -P 1 -p 0\n", "1"), 0);
+        assert_eq!(spec_patch_level("%prep\n%patch0 -p 1\n", "0"), 1);
+        // `-p` after other options.
+        assert_eq!(spec_patch_level("%prep\n%autosetup -N -p 0\n", "0"), 0);
+        assert_eq!(spec_patch_level("%prep\n%patch -p 0 -P 1\n", "1"), 0);
+    }
+
+    #[test]
     fn a_companion_archive_is_not_the_main_one_unless_it_is_a_wheel() {
         assert!(!names_version("foo-1.2-cpp.tar.gz", "1.2"));
         assert!(!names_version("foo-1.2-python.tar.gz", "1.2"));
@@ -14732,6 +15009,35 @@ mod tests {
             find_tarball(wheels.path(), "1.2").unwrap().file_name().unwrap(),
             "foo-1.2-py3-none-any.whl"
         );
+    }
+
+    #[test]
+    fn stale_patch_prefix_reads_prerelease_and_local_release_directories() {
+        let judged = |first: &str| {
+            let diff = format!("--- a/{first}/x.py\n+++ b/{first}/x.py\n");
+            stale_patch_prefix(&diff, "python-torch-2.14", "2.14")
+        };
+        // Pre-release, pre-release number, and local versions are other releases.
+        assert_eq!(judged("foo-1.2rc1").as_deref(), Some("foo-1.2rc1"));
+        assert_eq!(
+            judged("python-torch-2.4.0a0").as_deref(),
+            Some("python-torch-2.4.0a0")
+        );
+        assert_eq!(
+            judged("foo-1.2+git2024").as_deref(),
+            Some("foo-1.2+git2024")
+        );
+        assert_eq!(judged("foo-2.13.post1").as_deref(), Some("foo-2.13.post1"));
+        // The current version, the top-level directory, and a plain `src/` are not stale.
+        assert_eq!(judged("python-torch-2.14"), None);
+        assert_eq!(
+            judged("python-torch-2.14rc1").as_deref(),
+            Some("python-torch-2.14rc1")
+        );
+        assert_eq!(judged("src"), None);
+        // A directory whose tail is not a version is not a release.
+        assert_eq!(judged("foo-bar"), None);
+        assert_eq!(judged("foo-1.2-extra"), None);
     }
 
     #[test]
@@ -16424,6 +16730,29 @@ mod prompt_notes_tests {
         let cut = package_notes_for_prompt(&text);
         // The bold line is body text of the kept section, not a rank-2 section.
         assert!(cut.contains("**gcc**: needed for the C extension"));
+        assert!(!cut.contains("## Failure history"));
+    }
+
+    #[test]
+    fn a_hash_line_inside_a_fence_is_not_a_section_start() {
+        let filler = "- a fact about the build\n".repeat(1000);
+        // The fenced `# export CFLAGS` is code inside `## Workarounds`: it must
+        // stay with that section, which is kept.
+        let text = format!(
+            "## Build requirements\n- gcc\n## Workarounds\n```sh\n# export CFLAGS=-O2\n```\n\
+             - the flags above\n## Failure history\n{filler}"
+        );
+        assert!(text.len() > MAX_PROMPT_NOTES_BYTES);
+        let cut = package_notes_for_prompt(&text);
+        assert!(cut.contains("## Workarounds\n```sh\n# export CFLAGS=-O2\n```"));
+        assert!(cut.contains("- the flags above"));
+        assert!(!cut.contains("## Failure history"));
+        // A tilde fence closes only on a tilde, so a ``` inside it does not end it.
+        let tilde =
+            format!("## Workarounds\n~~~\n```\n# inner\n~~~\n- kept\n## Failure history\n{filler}");
+        let cut = package_notes_for_prompt(&tilde);
+        assert!(cut.contains("# inner"));
+        assert!(cut.contains("- kept"));
         assert!(!cut.contains("## Failure history"));
     }
 }
@@ -18174,6 +18503,7 @@ mod hygiene_tests {
                 snapshot: None,
                 kept: &[],
                 staged_out: None,
+                rejected_out: None,
             },
             &cond,
             &lookup,
@@ -18409,6 +18739,79 @@ mod ladder_tests {
         assert_eq!(got, Ok("done"));
         // Each round sees every earlier reason, the first turn's included.
         assert_eq!(seen, [(1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn restore_keeping_leaves_a_staged_file_that_overwrote_a_snapshotted_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("foo.spec"), "Name: foo\nVersion: 1.0\n").unwrap();
+        std::fs::write(dir.join("fix.patch"), "--- orig\n+++ new\n").unwrap();
+        std::fs::write(dir.join("other.patch"), "old other\n").unwrap();
+        let snap = CheckoutSnapshot::take(dir);
+        // The turn's staged files: fix.patch overwritten by stage_files, and
+        // a spec that was staged too.
+        std::fs::write(dir.join("fix.patch"), "staged content\n").unwrap();
+        std::fs::write(dir.join("other.patch"), "agent edit\n").unwrap();
+        std::fs::write(dir.join("foo.spec"), "staged spec\n").unwrap();
+        std::fs::write(dir.join("new.patch"), "staged new\n").unwrap();
+        let keep = vec![
+            "fix.patch".to_string(),
+            "foo.spec".to_string(),
+            "new.patch".to_string(),
+        ];
+        struct Null;
+        impl Reporter for Null {
+            fn report(&self, _: &Event) {}
+        }
+        snap.restore_keeping(&Null, None, &keep);
+        // The staged content of a kept file survives the rollback.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("fix.patch")).unwrap(),
+            "staged content\n"
+        );
+        assert!(dir.join("new.patch").exists());
+        // A spec is never kept: a rejected spec is restored even when named.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("foo.spec")).unwrap(),
+            "Name: foo\nVersion: 1.0\n"
+        );
+        // A snapshotted file that is not kept is still rolled back.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("other.patch")).unwrap(),
+            "old other\n"
+        );
+    }
+
+    #[test]
+    fn the_wheel_rung_waits_a_turn_after_an_npm_deferral() {
+        // Round 2 is the wheel rung, as before, when nothing was deferred.
+        assert_eq!(wheel_rung_round(None), 2);
+        // A deferral in round 1 leaves round 2 to the agent turn; the wheel rung
+        // runs in round 3.
+        assert_eq!(wheel_rung_round(Some(1)), 3);
+        // A deferral in round 2 leaves no round for the wheel rung.
+        assert_eq!(wheel_rung_round(Some(2)), 4);
+    }
+
+    #[test]
+    fn a_ladder_stopped_on_the_budget_is_not_remembered() {
+        // Only a ladder that ran its rungs is a memo; a patch run never is.
+        assert!(should_remember_ladder(false, false));
+        assert!(!should_remember_ladder(false, true));
+        assert!(!should_remember_ladder(true, false));
+        assert!(!should_remember_ladder(true, true));
+        // A round skipped for the budget is a blocked reason the ladder ends on.
+        let mut skipped = false;
+        let got: Result<(), LadderEnd<()>> = run_ladder("t0", 3, |round, _| {
+            if round >= 2 {
+                skipped = true;
+                return Rung::Blocked(format!("round {round} not run: budget exhausted"));
+            }
+            Rung::Blocked(format!("round {round} answered no_change"))
+        });
+        assert!(matches!(got, Err(LadderEnd::Exhausted(ref h)) if h.len() == 4));
+        assert!(skipped);
     }
 
     #[test]
