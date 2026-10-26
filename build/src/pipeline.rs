@@ -3672,6 +3672,10 @@ fn prefix_stage(
                 update_state(ws, reporter, |state| state.prefix_log_hash = Some(h));
             }
             if let Some(missing) = missing_deps_from_turn(ctx, prefix_step.id, &outcome) {
+                // Not applied, so not validated or journaled: undo the turn's
+                // edits (see `fix_after_build`).
+                checkout_snapshot.restore(reporter, &prefix_step);
+                restore_spec(spec_path, &clean, &prefix_step, reporter);
                 return Err(missing);
             }
             // Everything the turn called missing is already built here, so
@@ -5722,11 +5726,15 @@ fn unresolvable_deps_round(
         .into_iter()
         .partition(|d| crate::depclass::is_driver_soname(d));
     let mut driver_fixed = false;
+    // The spec as it was BEFORE this edit: the guard in `run_stages` rejects a
+    // retry whose spec still hashes to this, so it must be the pre-edit hash.
+    let mut driver_before: Option<String> = None;
     if !driver_deps.is_empty()
         && let Ok(current) = std::fs::read_to_string(spec_path)
     {
         let fixed = crate::spec::with_driver_requires_exclude(&current);
         if fixed != current {
+            driver_before = sha256_file(spec_path).ok();
             write_or_warn(spec_path, &fixed);
             driver_fixed = true;
             ctx.reporter.report(&Event::Warning {
@@ -5740,7 +5748,7 @@ fn unresolvable_deps_round(
         }
     }
     if driver_fixed {
-        st.relaxed_from_spec = sha256_file(spec_path).ok();
+        st.relaxed_from_spec = driver_before;
     }
 
     if unresolvable_deps.is_empty() {
@@ -6897,10 +6905,17 @@ fn resolve_blocked_with(
             let failed_section = site.hint.and_then(|h| h.failed_section.as_deref());
             match dropped_tests_edit(failed_section, &log, &spec_now, &source_has) {
                 Ok(dropped) => {
+                    // Written like any other edit: snapshot first, then the
+                    // same acceptance gate (rpmspec, patches, rollback on reject).
+                    let drop_snapshot = CheckoutSnapshot::take(checkout_dir);
                     write_or_warn(spec_path, &dropped.spec);
                     let names: Vec<&str> = dropped.tests.iter().map(|t| t.id.as_str()).collect();
-                    append_notes(
-                        ws.notes(),
+                    let accepted = accept_or_restore_with_snapshot(
+                        spec_path,
+                        &spec_now,
+                        Some(&drop_snapshot),
+                        site.step,
+                        *reporter,
                         &format!(
                             "\n## {} - resolve round {round} - failing tests skipped\n{}\n{}",
                             site.apply_label,
@@ -6919,25 +6934,29 @@ fn resolve_blocked_with(
                                 String::new()
                             }
                         ),
+                        ws.notes(),
                     );
-                    warn_if_err(
-                        *reporter,
-                        "adding the .changes entry for the skipped tests",
-                        osc::add_changes_entry(
-                            checkout_dir,
-                            &dropped_tests_message(&dropped),
-                            Emit::new(*reporter, site.step.id),
-                        ),
-                    );
-                    reporter.report(&Event::Warning {
-                        step: Some(site.step.id),
-                        message: format!(
-                            "{rpm_name}: only %check tests fail; skipped {} with the log as \
-                             evidence instead of asking again",
-                            names.join(", ")
-                        ),
-                    });
-                    return Rung::Resolved(TurnEffect::Edited);
+                    if accepted {
+                        warn_if_err(
+                            *reporter,
+                            "adding the .changes entry for the skipped tests",
+                            osc::add_changes_entry(
+                                checkout_dir,
+                                &dropped_tests_message(&dropped),
+                                Emit::new(*reporter, site.step.id),
+                            ),
+                        );
+                        reporter.report(&Event::Warning {
+                            step: Some(site.step.id),
+                            message: format!(
+                                "{rpm_name}: only %check tests fail; skipped {} with the log as \
+                                 evidence instead of asking again",
+                                names.join(", ")
+                            ),
+                        });
+                        return Rung::Resolved(TurnEffect::Edited);
+                    }
+                    // Rejected and rolled back: fall through to the next rung.
                 }
                 Err(why) => append_notes(
                     ws.notes(),
@@ -7242,9 +7261,14 @@ fn agent_turn(
                           retrying once in a fresh session"
                     .to_string(),
             });
+            // The retry keeps the same context as the first try, fact blocks
+            // (licence guard, sibling checkouts) included.
             let _ = nudge.set(format!(
                 "{}{STRUCTURED_OUTPUT_NUDGE}",
-                ctx.context.map(|c| format!("{c}\n\n")).unwrap_or_default()
+                base_context
+                    .as_deref()
+                    .map(|c| format!("{c}\n\n"))
+                    .unwrap_or_default()
             ));
             fresh_session.set(true);
             result = crate::agent::turn(make_req(*spent_usd));
@@ -7826,25 +7850,6 @@ impl CheckoutSnapshot {
     }
 }
 
-fn accept_or_restore(
-    spec_path: &Path,
-    before: &str,
-    step: &StepDir,
-    reporter: &dyn Reporter,
-    notes_entry: &str,
-    notes_path: PathBuf,
-) -> bool {
-    accept_or_restore_with_snapshot(
-        spec_path,
-        before,
-        None,
-        step,
-        reporter,
-        notes_entry,
-        notes_path,
-    )
-}
-
 /// How many times the same validation error rejected an edit of one spec, in
 /// this process. A fourth identical turn would be re-prompting for the same
 /// failure (python-torch: eleven rejections of one inherited patch, $2.64).
@@ -7889,16 +7894,12 @@ fn repeated_spec_rejection(spec_path: &Path) -> Option<String> {
         })
 }
 
-/// `accept_or_restore` extended with a full-checkout snapshot taken BEFORE
-/// the agent turn ran. On reject (rpmspec --parse fails on the agent's
-/// new spec), both the spec AND every other top-level checkout file the
-/// agent may have edited are rolled back from the snapshot.
-///
-/// The two-function split exists because `accept_or_restore` is also
-/// called from the automatic retry path inside `generate_from_repo` where
-/// there is no "before this turn" snapshot to take — a `None` snapshot
-/// there means "spec-only restore", preserving pre-fix behavior for that
-/// one caller.
+/// The acceptance gate for an agent edit. A full-checkout snapshot taken
+/// BEFORE the agent turn ran is optional: on reject (rpmspec --parse fails on
+/// the agent's new spec), the spec AND every other top-level checkout file the
+/// agent may have edited are rolled back from it. A `None` snapshot means
+/// "spec-only restore", for edits that must keep files written outside the
+/// snapshot (the staged files of a turn).
 ///
 /// Oct 6 review (reproducing Sep): the pre-fix function restored only the
 /// spec text, so a `.changes`/patch/`_service` edit the agent made in the
@@ -8104,6 +8105,30 @@ fn apply_turn_outcome_with(
                     brief(&outcome.reasoning)
                 ),
             );
+            // The turn may also have edited the spec or a patch before it
+            // answered. Those edits go through the same gate as any other
+            // edit (the spec and patches are checked, and rolled back on
+            // rejection) before anything else runs on them. The full-checkout
+            // snapshot is not used here: restoring it would delete the staged
+            // files, which are not in it.
+            let changed = accept_or_restore_with_snapshot(
+                spec_path,
+                before,
+                None,
+                step,
+                reporter,
+                &format!(
+                    "\n## Attempt {attempt} — {label} — edits kept with the staged files\n\
+                     Reasoning: {}\n",
+                    brief(&outcome.reasoning)
+                ),
+                notes_path,
+            );
+            if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
+                return Err(format!("{label}: {msg}"));
+            }
+            // The staged files are changes in their own right, kept whatever
+            // the gate decided about the spec.
             Ok(TurnEffect::Edited)
         }
         crate::agent::Action::Blocked { why } => {
@@ -8254,9 +8279,12 @@ fn apply_turn_outcome_with(
                             ),
                         });
                     }
-                    let changed = accept_or_restore(
+                    // The snapshot is taken before the turn, so on rejection the
+                    // wheel and rpmlintrc written above (not in it) are removed.
+                    let changed = accept_or_restore_with_snapshot(
                         spec_path,
                         before,
+                        snapshot,
                         step,
                         reporter,
                         &format!(
@@ -11074,10 +11102,16 @@ fn generate_wheel_binary_spec(
     let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
     // A wheel whose Requires-Python is capped below a built flavor needs pip told
     // so in both sections that run it, without waiting for a review turn.
+    // An unreadable flavor setup is an error, not an empty list that would
+    // leave the pip ignore out of the spec without a word.
+    let flavors = config
+        .python_flavors
+        .try_effective()
+        .map_err(GenSpecError::Other)?;
     let spec_text = crate::spec::with_pip_ignore_requires_python(
         &spec_text,
         release.requires_python.as_deref(),
-        &config.python_flavors.effective(),
+        &flavors,
     );
     // The note about a missing sdist is only true of a release with none.
     let spec_text = if no_sdist {
@@ -11649,8 +11683,8 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
 
     // Preserve the pristine downloaded archive before replacing it, so the
     // original SHA256-verified bytes are still auditable after the fact.
-    // Non-fatal — a save failure logs a warning rather than aborting a
-    // successful workspace fix.
+    // Fatal: the repack below renames over the original, so a missing backup
+    // would leave the modification with no way back to the bytes it replaced.
     let orig_backup = tarball.with_file_name(format!(
         "{}.orig",
         tarball
@@ -11659,10 +11693,10 @@ fn fix_cargo_workspace_in_tarball(tarball: &std::path::Path, pkg_name: &str) -> 
             .unwrap_or_default()
     ));
     if let Err(e) = std::fs::copy(tarball, &orig_backup) {
-        ap_core::diag!(
-            "  warning: could not back up original tarball to {}: {e}",
+        return Err(format!(
+            "could not back up original tarball to {}: {e}",
             orig_backup.display()
-        );
+        ));
     }
 
     // Audit record of what members were stripped and from which
@@ -16233,7 +16267,10 @@ mod ladder_tests {
             std::fs::create_dir_all(work.join("proj").join(s)).unwrap();
         }
         let spec_path = checkout.join(format!("{rpm_name}.spec"));
-        let before = format!("Name: {rpm_name}\nVersion: 1.0\n\n%check\n%pytest\n");
+        // A spec rpmspec accepts: the acceptance gate now checks the edit.
+        let before = format!(
+            "Name: {rpm_name}\nVersion: 1.0\nRelease: 0\nSummary: test\nLicense: MIT\n\n%check\n%pytest\n"
+        );
         std::fs::write(&spec_path, &before).unwrap();
         let run = ap_core::run::RunDir::allocate(&work).unwrap();
         let pkg_run = run.pkg(rpm_name);
