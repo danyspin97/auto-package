@@ -41,7 +41,7 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The home directory inside the sandbox.
 pub const SANDBOX_HOME: &str = "/home/sandbox";
@@ -495,7 +495,7 @@ fn bind_ca(
         Some(c) => raw.split(|b| *b == c).collect(),
         None => vec![raw],
     };
-    let mut usable: Vec<&[u8]> = Vec::new();
+    let mut usable: Vec<Vec<u8>> = Vec::new();
     for entry in entries {
         if entry.is_empty() {
             continue;
@@ -515,26 +515,68 @@ fn bind_ca(
             );
             continue;
         }
-        if is_under_any(&path, SYSTEM_DIRS) || is_under_any(&path, ETC_ENTRIES) {
-            // Already present in the sandbox at this path.
-            usable.push(entry);
+        // `..` is resolved before anything is decided: `/usr/../home/u/.ssh/key`
+        // is not under `/usr`. A path that climbs above `/` is not exposed.
+        let Some(normal) = normalize_lexically(&path) else {
+            tracing::warn!(
+                "{var} entry {} climbs above the root; not exposing it to the sandbox",
+                path.display()
+            );
             continue;
-        }
-        if let Some(why) = sensitive_file(&path, &host.home) {
+        };
+        let Ok(resolved) = path.canonicalize() else {
+            tracing::warn!(
+                "{var} entry {} cannot be resolved; not exposing it to the sandbox",
+                path.display()
+            );
+            continue;
+        };
+        // Both the path as named and what it resolves to through symlinks and
+        // `..` must be free of credentials. `sensitive_file` also resolves the
+        // normalized path, which is what gets bound.
+        if let Some(why) =
+            sensitive_reason(&resolved, &host.home).or_else(|| sensitive_file(&normal, &host.home))
+        {
             return Err(SandboxError::UnsafePath {
                 var: var.to_string(),
                 path,
                 why,
             });
         }
-        a.ro_bind(&path, &path);
-        usable.push(entry);
+        if is_under_any(&normal, SYSTEM_DIRS) || is_under_any(&normal, ETC_ENTRIES) {
+            // Already present in the sandbox at this path.
+            usable.push(normal.as_os_str().as_bytes().to_vec());
+            continue;
+        }
+        a.ro_bind(&normal, &normal);
+        usable.push(normal.as_os_str().as_bytes().to_vec());
     }
     if usable.is_empty() {
         return Ok(None);
     }
     let joined: Vec<u8> = usable.join(&b':');
     Ok(Some(OsStr::from_bytes(&joined).to_owned()))
+}
+
+/// `path` with its `.` and `..` components resolved without touching the
+/// filesystem: `/usr/../home/u` is `/home/u`. `None` when `path` is not
+/// absolute or a `..` would climb above `/`.
+fn normalize_lexically(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => out.push("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(name) => out.push(name),
+            Component::Prefix(_) => return None,
+        }
+    }
+    out.is_absolute().then_some(out)
 }
 
 #[cfg(test)]
@@ -844,6 +886,46 @@ mod tests {
         let args = build(&f);
         assert!(!setenvs(&args).iter().any(|(k, _)| k == "SSL_CERT_FILE"));
         assert!(!binds(&args).iter().any(|(_, s, _)| s.contains("nonexistent")));
+    }
+
+    /// `/usr/..` is `/`, so the key is not under `/usr`: the check must see
+    /// the normalized path, not the prefix it was written with.
+    #[test]
+    fn a_ca_path_climbing_out_of_usr_to_credentials_is_refused() {
+        let mut f = fixture();
+        let key = f.home.join(".ssh/id_ed25519");
+        let through = format!("/usr/..{}", key.display());
+        f.host.vars.push(("SSL_CERT_FILE".into(), through.into()));
+        let err = bwrap_args(&["pip"], &f.host).unwrap_err();
+        assert!(matches!(err, SandboxError::UnsafePath { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_ca_path_under_etc_ssl_is_still_accepted() {
+        let path = "/etc/ssl/certs/ca-bundle.crt";
+        if !Path::new(path).exists() {
+            eprintln!("{path} is absent on this host; nothing to check");
+            return;
+        }
+        let mut f = fixture();
+        f.host.vars.push(("SSL_CERT_FILE".into(), path.into()));
+        let args = build(&f);
+        assert!(setenvs(&args).contains(&("SSL_CERT_FILE".into(), path.into())));
+        assert!(!binds(&args).iter().any(|(_, s, _)| s.contains(".ssh")));
+    }
+
+    #[test]
+    fn normalize_lexically_resolves_dot_dot_and_refuses_climbing_above_root() {
+        assert_eq!(
+            normalize_lexically(Path::new("/usr/../home/x/./y")),
+            Some(PathBuf::from("/home/x/y"))
+        );
+        assert_eq!(normalize_lexically(Path::new("/usr/../../x")), None);
+        assert_eq!(
+            normalize_lexically(Path::new("/")),
+            Some(PathBuf::from("/"))
+        );
+        assert_eq!(normalize_lexically(Path::new("rel/x")), None);
     }
 
     #[test]

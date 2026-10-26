@@ -12,6 +12,7 @@
 //! returns everything callers need. Individual helper functions have been
 //! replaced by this to avoid opening and iterating the archive multiple times.
 
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -744,18 +745,51 @@ pub fn is_safe_build_requirement(req: &str) -> bool {
     if rest.is_empty() {
         return true;
     }
+    // The version clauses, bare or in one pair of parentheses (`foo (>=1, <2)`).
+    let clauses = match rest.strip_prefix('(') {
+        Some(inner) => match inner.strip_suffix(')') {
+            Some(clauses) => clauses,
+            None => return false,
+        },
+        None => rest,
+    };
+    clauses
+        .split(',')
+        .all(|clause| split_version_clause(clause).is_some())
+}
+
+/// The operator and the version of one PEP 440 version clause (`>= 42`), both
+/// trimmed, when the clause is one a spec can carry: a version of letters,
+/// digits and `. * + ! _ -`, starting with a letter or digit.
+fn split_version_clause(clause: &str) -> Option<(&str, &str)> {
     const OPS: [&str; 8] = ["===", "~=", "==", "!=", "<=", ">=", "<", ">"];
-    rest.split(',').all(|clause| {
-        let clause = clause.trim();
-        let Some(op) = OPS.iter().find(|op| clause.starts_with(**op)) else {
-            return false;
-        };
-        let version = clause[op.len()..].trim();
-        starts_alnum(version)
-            && version.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '.' | '*' | '+' | '!' | '_' | '-')
-            })
-    })
+    let clause = clause.trim();
+    let op = OPS.iter().find(|op| clause.starts_with(**op))?;
+    let version = clause[op.len()..].trim();
+    let ok = version.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '*' | '+' | '!' | '_' | '-'));
+    ok.then_some((*op, version))
+}
+
+/// The requirement a spec writes for a requirement that passed
+/// [`is_safe_build_requirement`]. A parenthesized version list is written
+/// without its parentheses, as `%{python_module}` needs (`foo (>=1, <2)` is
+/// `foo >= 1, < 2`); anything else is written as it is.
+fn spec_requirement(req: &str) -> Cow<'_, str> {
+    let Some(open) = req.find('(') else {
+        return Cow::Borrowed(req);
+    };
+    let head = req[..open].trim_end();
+    let inner = &req[open + 1..];
+    let inner = inner.strip_suffix(')').unwrap_or(inner);
+    let clauses: Vec<String> = inner
+        .split(',')
+        .filter_map(split_version_clause)
+        .map(|(op, version)| format!("{op} {version}"))
+        .collect();
+    Cow::Owned(format!("{head} {}", clauses.join(", ")))
 }
 
 /// What a `[build-system] requires` entry means for a spec.
@@ -763,7 +797,8 @@ pub fn is_safe_build_requirement(req: &str) -> bool {
 pub enum BuildRequirement<'a> {
     /// The requirement part, to be written as a `BuildRequires`. A marker that
     /// is undecided for the build target, or cannot be parsed, is kept with it.
-    Keep(&'a str),
+    /// Borrowed unless the parentheses of a version list had to be removed.
+    Keep(Cow<'a, str>),
     /// The environment marker is false for the build target (Linux, CPython,
     /// x86_64 or aarch64), so the requirement is not installed.
     NotForTarget,
@@ -789,7 +824,7 @@ pub fn build_requirement_part(entry: &str) -> Option<BuildRequirement<'_>> {
     if marker.is_some_and(marker_excludes_target) {
         return Some(BuildRequirement::NotForTarget);
     }
-    Some(BuildRequirement::Keep(req))
+    Some(BuildRequirement::Keep(spec_requirement(req)))
 }
 
 /// A token of a PEP 508 marker.
@@ -801,10 +836,14 @@ enum MarkerTok<'a> {
     Str(&'a str),
     /// A run of comparison characters (`==`, `!=`, `<=`, ...).
     Op(&'a str),
+    /// `(`.
+    Open,
+    /// `)`.
+    Close,
 }
 
-/// Splits a marker into tokens; `None` on anything else (parentheses, a lone
-/// quote, a stray character).
+/// Splits a marker into tokens; `None` on anything else (a lone quote, a stray
+/// character).
 fn tokenize_marker(marker: &str) -> Option<Vec<MarkerTok<'_>>> {
     let is_op = |c: char| "=!<>~".contains(c);
     let is_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.');
@@ -828,6 +867,13 @@ fn tokenize_marker(marker: &str) -> Option<Vec<MarkerTok<'_>>> {
             let end = rest.find(|ch: char| !is_word(ch)).unwrap_or(rest.len());
             out.push(MarkerTok::Word(&rest[..end]));
             rest = &rest[end..];
+        } else if c == '(' || c == ')' {
+            out.push(if c == '(' {
+                MarkerTok::Open
+            } else {
+                MarkerTok::Close
+            });
+            rest = &rest[1..];
         } else {
             return None;
         }
@@ -884,42 +930,85 @@ fn marker_clause_verdict(toks: &[MarkerTok<'_>]) -> Option<(Option<bool>, usize)
     Some((verdict, used))
 }
 
-/// Whether a marker is false for the build target. A pure `and` chain is
-/// excluded when any decided clause is false; a pure `or` chain only when every
-/// clause is decided false. A marker that is not such a chain, or has a clause
-/// it cannot read, is not excluded (the requirement is kept).
+/// The truth of a marker for the build target: `Some(true)` or `Some(false)`,
+/// or `None` when a clause the target cannot decide makes it unknown.
+type Verdict = Option<bool>;
+
+/// Kleene `and`: false if either side is false, true if both are true.
+fn verdict_and(a: Verdict, b: Verdict) -> Verdict {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+
+/// Kleene `or`: true if either side is true, false if both are false.
+fn verdict_or(a: Verdict, b: Verdict) -> Verdict {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// `or_expr := and_expr ('or' and_expr)*`: the verdict and the tokens used.
+/// `None` when the tokens do not parse.
+fn marker_or(toks: &[MarkerTok<'_>]) -> Option<(Verdict, usize)> {
+    let (mut acc, mut used) = marker_and(toks)?;
+    while toks.get(used) == Some(&MarkerTok::Word("or")) {
+        let (v, n) = marker_and(&toks[used + 1..])?;
+        acc = verdict_or(acc, v);
+        used += 1 + n;
+    }
+    Some((acc, used))
+}
+
+/// `and_expr := not_expr ('and' not_expr)*`.
+fn marker_and(toks: &[MarkerTok<'_>]) -> Option<(Verdict, usize)> {
+    let (mut acc, mut used) = marker_not(toks)?;
+    while toks.get(used) == Some(&MarkerTok::Word("and")) {
+        let (v, n) = marker_not(&toks[used + 1..])?;
+        acc = verdict_and(acc, v);
+        used += 1 + n;
+    }
+    Some((acc, used))
+}
+
+/// `not_expr := 'not' not_expr | atom`. `not` of an unknown verdict is unknown.
+fn marker_not(toks: &[MarkerTok<'_>]) -> Option<(Verdict, usize)> {
+    if toks.first() == Some(&MarkerTok::Word("not")) {
+        let (v, n) = marker_not(&toks[1..])?;
+        return Some((v.map(|b| !b), n + 1));
+    }
+    marker_atom(toks)
+}
+
+/// `atom := '(' or_expr ')' | clause`.
+fn marker_atom(toks: &[MarkerTok<'_>]) -> Option<(Verdict, usize)> {
+    match toks.first()? {
+        MarkerTok::Open => {
+            let (v, n) = marker_or(&toks[1..])?;
+            (toks.get(n + 1) == Some(&MarkerTok::Close)).then_some((v, n + 2))
+        }
+        MarkerTok::Close | MarkerTok::Word("and" | "or" | "in") => None,
+        _ => marker_clause_verdict(toks),
+    }
+}
+
+/// Whether a marker is false for the build target (Linux, CPython), evaluated
+/// with three-valued logic: a clause the target cannot decide (`python_version`,
+/// `extra`, ...) is unknown. `not` binds tighter than `and`, which binds tighter
+/// than `or`, and parentheses group. Only a marker that is definitely false is
+/// excluded; a true or unknown one, and one that does not parse (unbalanced
+/// parentheses included), is kept.
 fn marker_excludes_target(marker: &str) -> bool {
     let Some(toks) = tokenize_marker(marker) else {
         return false;
     };
-    if toks.is_empty() {
-        return false;
-    }
-    let mut verdicts: Vec<Option<bool>> = Vec::new();
-    let mut connector: Option<&str> = None;
-    let mut rest = &toks[..];
-    loop {
-        let Some((verdict, used)) = marker_clause_verdict(rest) else {
-            return false;
-        };
-        verdicts.push(verdict);
-        rest = &rest[used..];
-        match rest {
-            [] => break,
-            [MarkerTok::Word(c), tail @ ..] if *c == "and" || *c == "or" => {
-                if connector.is_some_and(|k| k != *c) {
-                    return false;
-                }
-                connector = Some(*c);
-                rest = tail;
-            }
-            _ => return false,
-        }
-    }
-    if connector == Some("or") {
-        verdicts.iter().all(|v| *v == Some(false))
-    } else {
-        verdicts.iter().any(|v| *v == Some(false))
+    match marker_or(&toks) {
+        Some((verdict, used)) if used == toks.len() => verdict == Some(false),
+        _ => false,
     }
 }
 
@@ -3382,7 +3471,7 @@ build-backend = "flit_core.buildapi"
         ] {
             assert_eq!(
                 build_requirement_part(entry),
-                want.map(BuildRequirement::Keep),
+                want.map(|w| BuildRequirement::Keep(w.into())),
                 "{entry:?}"
             );
         }
@@ -3396,8 +3485,8 @@ build-backend = "flit_core.buildapi"
         for (entry, want) in [
             ("colorama; sys_platform == \"win32\"", NotForTarget),
             ("pywin32; os_name == 'nt'", NotForTarget),
-            ("tomli; python_version < \"3.11\"", Keep("tomli")),
-            ("foo; sys_platform == 'linux'", Keep("foo")),
+            ("tomli; python_version < \"3.11\"", Keep("tomli".into())),
+            ("foo; sys_platform == 'linux'", Keep("foo".into())),
             (
                 "foo; sys_platform == 'win32' or sys_platform == 'darwin'",
                 NotForTarget,
@@ -3408,7 +3497,7 @@ build-backend = "flit_core.buildapi"
             ),
             (
                 "foo; sys_platform == 'win32' or python_version < '3.8'",
-                Keep("foo"),
+                Keep("foo".into()),
             ),
             ("foo; 'win32' == sys_platform", NotForTarget),
             ("foo; sys_platform != 'linux'", NotForTarget),
@@ -3422,28 +3511,87 @@ build-backend = "flit_core.buildapi"
             ),
             ("foo; sys_platform in 'win32 darwin'", NotForTarget),
             ("foo; sys_platform not in 'linux darwin'", NotForTarget),
-            ("foo; sys_platform not in 'win32 darwin'", Keep("foo")),
+            (
+                "foo; sys_platform not in 'win32 darwin'",
+                Keep("foo".into()),
+            ),
             ("foo; 'win' in sys_platform", NotForTarget),
-            ("foo; 'lin' in sys_platform", Keep("foo")),
+            ("foo; 'lin' in sys_platform", Keep("foo".into())),
             (
                 "foo; sys_platform == 'win32' and platform_machine == 'x86_64'",
                 NotForTarget,
             ),
-            ("foo; platform_machine == 'arm64'", Keep("foo")),
-            ("foo; extra == 'test'", Keep("foo")),
-            ("foo; sys_platform < 'win32'", Keep("foo")),
+            ("foo; platform_machine == 'arm64'", Keep("foo".into())),
+            ("foo; extra == 'test'", Keep("foo".into())),
+            ("foo; sys_platform < 'win32'", Keep("foo".into())),
             (
                 "foo; sys_platform == 'win32' or sys_platform == 'linux' and python_version < '3'",
-                Keep("foo"),
+                Keep("foo".into()),
             ),
-            ("foo; (sys_platform == 'win32')", Keep("foo")),
-            ("foo; not sys_platform == 'win32'", Keep("foo")),
-            ("foo; sys_platform == 'win32", Keep("foo")),
-            ("foo; sys_platform == 'win32' and", Keep("foo")),
-            ("foo; sys_platform == 'win32' == 'linux'", Keep("foo")),
+            ("foo; (sys_platform == 'win32')", NotForTarget),
+            ("foo; not sys_platform == 'win32'", Keep("foo".into())),
+            ("foo; sys_platform == 'win32", Keep("foo".into())),
+            ("foo; sys_platform == 'win32' and", Keep("foo".into())),
+            (
+                "foo; sys_platform == 'win32' == 'linux'",
+                Keep("foo".into()),
+            ),
+            (
+                "foo; (sys_platform == 'win32' or sys_platform == 'darwin') and python_version >= '3.8'",
+                NotForTarget,
+            ),
+            (
+                "foo; (python_version < '3.8' or sys_platform == 'linux')",
+                Keep("foo".into()),
+            ),
+            ("foo; not (sys_platform == 'win32')", Keep("foo".into())),
+            ("foo; (sys_platform == 'win32'", Keep("foo".into())),
+            ("foo; sys_platform == 'win32')", Keep("foo".into())),
+            ("foo; ((sys_platform == 'win32'))", NotForTarget),
+            (
+                "foo; not (sys_platform == 'win32') and python_version < '3'",
+                Keep("foo".into()),
+            ),
+            (
+                "foo; not (sys_platform == 'win32') or sys_platform == 'win32'",
+                Keep("foo".into()),
+            ),
+            (
+                "foo; not (sys_platform == 'linux') or sys_platform == 'darwin'",
+                NotForTarget,
+            ),
+            (
+                "foo; (sys_platform == 'win32' or python_version < '3.8') and sys_platform == 'linux'",
+                Keep("foo".into()),
+            ),
+            ("foo; ()", Keep("foo".into())),
+            (
+                "foo; sys_platform == 'win32' and python_version < '3' or sys_platform == 'darwin'",
+                NotForTarget,
+            ),
         ] {
             assert_eq!(build_requirement_part(entry), Some(want), "{entry:?}");
         }
+    }
+
+    /// A parenthesized version list is accepted and written without its
+    /// parentheses, in the `name op version` form a spec macro takes.
+    #[test]
+    fn build_requirement_part_writes_a_parenthesized_version_list_without_parens() {
+        for (entry, want) in [
+            ("setuptools (>=42)", "setuptools >= 42"),
+            ("foo (>=1.0, <2)", "foo >= 1.0, < 2"),
+            ("pkg[extra] (>=1.0)", "pkg[extra] >= 1.0"),
+            ("foo(>=1)", "foo >= 1"),
+            ("setuptools>=42", "setuptools>=42"),
+        ] {
+            let Some(BuildRequirement::Keep(part)) = build_requirement_part(entry) else {
+                panic!("{entry:?} should be kept");
+            };
+            assert_eq!(part, want, "{entry:?}");
+            assert!(!part.contains('('), "{entry:?}");
+        }
+        assert_eq!(build_requirement_part("foo (>=1; $(x))"), None);
     }
 
     /// Through `[build-system] requires`: the excluded requirement is not
@@ -4157,6 +4305,10 @@ requires = ["numpy>=2; python_version>='3.9'", 'tomli; python_version < "3.11"',
             "pkg[extra1,extra2]>=1.0",
             "Foo.Bar-baz_qux",
             "pkg!=1.0",
+            "setuptools (>=42)",
+            "foo (>=1.0, <2)",
+            "pkg[extra] (>=1.0)",
+            "foo(>=1)",
         ] {
             assert!(is_safe_build_requirement(good), "{good:?}");
         }
@@ -4179,7 +4331,12 @@ requires = ["numpy>=2; python_version>='3.9'", 'tomli; python_version < "3.11"',
             "a#b",
             "a\tb",
             "pkg ; python_version < '3'",
-            "pkg (>=1.0)",
+            "pkg (>=1.0",
+            "pkg (>=1.0))",
+            "pkg ()",
+            "pkg (>=1; $(x))",
+            "pkg (>=1.0) (<2)",
+            "pkg (>=1.0 $(x))",
             "pkg @ https://example.org/x.tar.gz",
             "pkg[extra",
             "pkg[]",
