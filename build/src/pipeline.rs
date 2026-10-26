@@ -340,6 +340,14 @@ pub struct PkgState {
     /// Patch turns that did not make a condition true, by the condition's hash.
     #[serde(default)]
     pub condition_failures: Vec<(u64, u32)>,
+    /// The OBS package name this package is built and checked out under, when
+    /// it differs from the workspace's `rpm_name` only by case (a package the
+    /// project already lists as `python-APScheduler`). Resolved from the
+    /// project's listing at the start of each run and recorded here; `None`
+    /// in a state.json written before the field existed, which means
+    /// `rpm_name` itself.
+    #[serde(default)]
+    pub obs_name: Option<String>,
 }
 
 impl PkgState {
@@ -451,8 +459,8 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
 /// `success`. Only for a package whose checkout holds the version the state
 /// last worked on and has no local changes, so an OBS success of an older
 /// source is not taken for this one. `statuses` is keyed by lower-case package
-/// name. Returns `(name, what was done)` for each package looked at that could
-/// not be fixed or was.
+/// name. `download` gets the package's OBS name. Returns `(name, what was done)`
+/// for each package looked at that could not be fixed or was.
 pub fn reconcile_with_obs(
     state_root: &Path,
     checkout_root: &Path,
@@ -484,8 +492,11 @@ pub fn reconcile_with_obs(
         {
             continue;
         }
-        let checkout = checkout_root.join(&name);
-        let spec_version = std::fs::read_to_string(checkout.join(format!("{name}.spec")))
+        // The checkout and the OBS download are named by the OBS name the state
+        // records; a state written before that field is the name itself.
+        let obs = state.obs_name.clone().unwrap_or_else(|| name.clone());
+        let checkout = checkout_root.join(&obs);
+        let spec_version = std::fs::read_to_string(checkout.join(format!("{obs}.spec")))
             .ok()
             .and_then(|t| crate::spec::parse_header(&t).map(|h| h.version));
         if spec_version.is_none()
@@ -494,11 +505,11 @@ pub fn reconcile_with_obs(
         {
             continue;
         }
-        match download(&name) {
+        match download(&obs) {
             Ok(n) if n > 0 => {
                 let version = spec_version.unwrap_or_default();
                 // The rpmlint log of what was fetched, as a normal download does.
-                let lint = record_rpmlint_logs(rpms_dir, &name, &version, &ws);
+                let lint = record_rpmlint_logs(rpms_dir, &obs, &version, &ws);
                 let saved = PkgState::update(&ws, |st| {
                     st.policy_version = POLICY_VERSION;
                     st.last_built_version = Some(version);
@@ -2103,7 +2114,12 @@ struct RunCtx<'a> {
     pkg_run: &'a PkgRunDir,
     reporter: &'a dyn Reporter,
     ws: Workspace,
+    /// The workspace, state and run key: the lowercase name.
     rpm_name: String,
+    /// The name OBS knows the package by (see [`resolve_obs_name`]). Every
+    /// OBS call about this package, and the checkout directory and spec file
+    /// derived from it, use this; the state, logs and display use `rpm_name`.
+    obs_name: String,
     checkout_dir: PathBuf,
     spec_path: PathBuf,
 }
@@ -2143,6 +2159,7 @@ impl RunCtx<'_> {
             ws: &self.ws,
             pkg_run: self.pkg_run,
             reporter: self.reporter,
+            obs_name: &self.obs_name,
         }
     }
 }
@@ -2167,15 +2184,11 @@ struct RunState {
     relaxed_from_spec: Option<String>,
 }
 
-/// The linked project that ships `rpm_name`, when the own project does not
-/// have it yet: the package is branched from there so the existing recipe is
-/// the starting point. `Ok(None)` when nothing needs branching (the project has
-/// it, no linked project ships it, or the shipped name differs in spelling, in
-/// which case a branch would land under the wrong name).
 /// Why [`branch_from_linked`] did not branch the package.
 enum BranchError {
-    /// The distro ships the package under another name: nothing is branched,
-    /// and the package is packaged under its own name as before.
+    /// The distro ships the package under a genuinely different name (not
+    /// merely another case): nothing is branched, and the package is packaged
+    /// under its own name as before.
     Renamed(String),
     /// A listing or the branch call failed. A package the distro ships must not
     /// be packaged from scratch behind that failure, so the stage fails.
@@ -2250,6 +2263,26 @@ fn own_name<'a>(rpm_name: &str, own: &'a std::collections::HashSet<String>) -> O
     variant.map_or(OwnName::Absent, OwnName::Variant)
 }
 
+/// The OBS package name `rpm_name` is built and checked out under, given the
+/// listing of the own project. The project's own spelling wins: a listed
+/// case variant is the package. Otherwise the name is `rpm_name`, which is
+/// also the name a branch from a linked project is made under (see
+/// [`branch_from_linked`]), so a linked project's spelling never changes the
+/// answer and is not an input here.
+fn resolve_obs_name(rpm_name: &str, own: &std::collections::HashSet<String>) -> String {
+    match own_name(rpm_name, own) {
+        OwnName::Variant(listed) => listed.to_string(),
+        OwnName::Exact | OwnName::Absent => rpm_name.to_string(),
+    }
+}
+
+/// Branch `rpm_name` from the linked project that ships it, when the own project
+/// does not have it yet: the package is branched from there so the existing
+/// recipe is the starting point, and the branch is made under `rpm_name`.
+/// `Ok(None)` when nothing needs branching: the own project has it (under
+/// either spelling, see [`resolve_obs_name`]), or no linked project ships it.
+/// A linked project that ships it under another name entirely is `Renamed`,
+/// and nothing is branched.
 fn branch_from_linked(
     config: &PipelineConfig,
     rpm_name: &str,
@@ -2264,16 +2297,7 @@ fn branch_from_linked(
     };
     let key = osc::fuzzy_key(rpm_name);
     match own_name(rpm_name, &own) {
-        OwnName::Exact => return Ok(None),
-        // OBS keeps the two spellings apart, and the checkout uses
-        // `rpm_name`: the warning says why the distro copy is not branched
-        // here (the checkout then refuses to create the second name).
-        OwnName::Variant(existing) => {
-            return Err(BranchError::Renamed(format!(
-                "{} already has {existing}, not {rpm_name}",
-                config.project
-            )));
-        }
+        OwnName::Exact | OwnName::Variant(_) => return Ok(None),
         OwnName::Absent => {}
     }
     let paths = match osc::get_project_repo_paths(&config.project, emit) {
@@ -2291,12 +2315,11 @@ fn branch_from_linked(
         let Some(shipped) = listing.iter().find(|p| osc::fuzzy_key(p) == key) else {
             continue;
         };
-        // The lookup is fuzzy and the names are lowercased here, so a name
-        // that differs only in case (PyYAML vs pyyaml) is the same package. The
-        // distro's spelling is the source of the branch; the branch itself is
-        // named `rpm_name`, the spelling the checkout and the rest of the
-        // pipeline use. OBS names are case-sensitive, so branching under the
-        // listed spelling would leave a package the checkout then refuses.
+        // The lookup is fuzzy, so a name that differs only in case (PyYAML vs
+        // pyyaml) is the same package: the distro's spelling is the source of
+        // the branch, and the branch is named `rpm_name`. The own project then
+        // lists `rpm_name`, which is the OBS name `resolve_obs_name` gives it.
+        // Only a genuinely different name is refused.
         if !shipped.eq_ignore_ascii_case(rpm_name) {
             return Err(BranchError::Renamed(format!(
                 "{path_project} ships it as {shipped}, not {rpm_name}"
@@ -2445,13 +2468,32 @@ fn preflight<'a>(
     };
 
     let prior = PkgState::load(&ws);
+    // The OBS name comes from the project's own listing every run, so a
+    // listing that changed is followed, and the state records what was
+    // resolved. A listing that cannot be read is not a failure here: the
+    // checkout stage lists the project again and reports it in its own step,
+    // and until then the recorded name stands in (only local paths use it).
+    let obs_name = match osc::try_list_project_packages(&config.project, Emit::run(reporter)) {
+        Ok(own) => {
+            let obs_name = resolve_obs_name(&rpm_name, &own);
+            if prior.obs_name.as_deref() != Some(obs_name.as_str()) {
+                update_state(&ws, reporter, |st| st.obs_name = Some(obs_name.clone()));
+            }
+            obs_name
+        }
+        Err(_) => prior.obs_name.clone().unwrap_or_else(|| rpm_name.clone()),
+    };
+    if let Err(reason) = validate_path_component("OBS package name", &obs_name) {
+        return Err(PipelineResult::Failed {
+            rpm_name,
+            reason,
+            kind: FailureKind::Other,
+        });
+    }
+    let (checkout_dir, spec_path) = checkout_paths(&config.work_dir, &config.project, &obs_name);
     // A package whose checked-out spec is an unfinished skeleton is not done,
     // whatever an earlier build of it reported.
-    let local_spec = config
-        .work_dir
-        .join(&config.project)
-        .join(&rpm_name)
-        .join(format!("{rpm_name}.spec"));
+    let local_spec = spec_path.clone();
     let unfinished = spec_has_placeholders(&local_spec)
         || spec_has_published_defects(&local_spec, &config.rpms_dir)
         || wheel_policy_pending(&config.source_urls, &config.pkg_name, &local_spec);
@@ -2465,18 +2507,25 @@ fn preflight<'a>(
         });
     }
 
-    let checkout_dir = config.work_dir.join(&config.project).join(&rpm_name);
-    let spec_name = format!("{rpm_name}.spec");
-    let spec_path = checkout_dir.join(&spec_name);
     Ok(RunCtx {
         config,
         pkg_run,
         reporter,
         ws,
         rpm_name,
+        obs_name,
         checkout_dir,
         spec_path,
     })
+}
+
+/// Where the checkout of OBS package `obs_name` lives under `work_dir`, and its
+/// spec file: `<work_dir>/<project>/<obs_name>/` and `<obs_name>.spec` inside it.
+/// The checkout is named by the OBS name, which is case-sensitive.
+fn checkout_paths(work_dir: &Path, project: &str, obs_name: &str) -> (PathBuf, PathBuf) {
+    let checkout_dir = work_dir.join(project).join(obs_name);
+    let spec_path = checkout_dir.join(format!("{obs_name}.spec"));
+    (checkout_dir, spec_path)
 }
 
 /// Step: Checkout, then the OBS-already-built fast path. Returns the package's
@@ -2491,6 +2540,7 @@ fn checkout_stage(
         reporter,
         ws,
         rpm_name,
+        obs_name,
         checkout_dir,
         spec_path,
     } = ctx;
@@ -2542,9 +2592,9 @@ fn checkout_stage(
                 return Err(ctx.failed_text(transient, message));
             }
         }
-        let result = osc::ensure_package(&config.project, rpm_name, &config.work_dir, emit)
+        let result = osc::ensure_package(&config.project, obs_name, &config.work_dir, emit)
             .and_then(|()| {
-                osc::checkout(&config.project, rpm_name, &config.work_dir, emit).map(|_| ())
+                osc::checkout(&config.project, obs_name, &config.work_dir, emit).map(|_| ())
             });
 
         if let Err(e) = result {
@@ -2576,7 +2626,7 @@ fn checkout_stage(
         // pipeline when it already succeeded and nothing would change.
         let status = osc::get_build_status(
             &config.project,
-            rpm_name,
+            obs_name,
             &config.distro,
             &config.arch,
             emit,
@@ -2606,7 +2656,7 @@ fn checkout_stage(
                 "fetching the failed build log",
                 osc::fetch_buildlog(
                     &config.project,
-                    rpm_name,
+                    obs_name,
                     &config.distro,
                     &config.arch,
                     &log_path,
@@ -2631,7 +2681,7 @@ fn checkout_stage(
         && !wheel_policy_pending(&config.source_urls, &config.pkg_name, spec_path)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
         && PkgState::load(ws).policy_current()
-        && reconcile_rpms(config, ws, reporter)
+        && reconcile_rpms(config, obs_name, ws, reporter)
     {
         update_state(ws, reporter, |state| {
             state.policy_version = POLICY_VERSION;
@@ -2659,11 +2709,16 @@ fn state_needs_rpm_reconcile(prior: &PkgState) -> bool {
 /// For a package OBS reports as succeeded: when local state disagrees (a
 /// stale failure), download the RPMs first. Returns whether the package can
 /// be recorded as built; `false` falls through to the normal pipeline.
-fn reconcile_rpms(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Reporter) -> bool {
-    reconcile_rpms_with(config, ws, reporter, || {
+fn reconcile_rpms(
+    config: &PipelineConfig,
+    obs_name: &str,
+    ws: &Workspace,
+    reporter: &dyn Reporter,
+) -> bool {
+    reconcile_rpms_with(config, obs_name, ws, reporter, || {
         osc::download_built_rpms(
             &config.project,
-            &config.rpm_name,
+            obs_name,
             &config.distro,
             &config.arch,
             &config.rpms_dir,
@@ -2675,6 +2730,7 @@ fn reconcile_rpms(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Report
 /// [`reconcile_rpms`] with the download injected.
 fn reconcile_rpms_with(
     config: &PipelineConfig,
+    obs_name: &str,
     ws: &Workspace,
     reporter: &dyn Reporter,
     download: impl FnOnce() -> Result<usize, osc::Error>,
@@ -2684,7 +2740,7 @@ fn reconcile_rpms_with(
     }
     match download() {
         Ok(n) if n > 0 => {
-            record_rpmlint(config, ws, reporter);
+            record_rpmlint(config, obs_name, ws, reporter);
             true
         }
         Ok(_) => {
@@ -2713,6 +2769,7 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
         reporter,
         ws,
         rpm_name,
+        obs_name,
         checkout_dir,
         spec_path,
     } = ctx;
@@ -2788,7 +2845,7 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
                         "creating the initial .changes entry",
                         osc::create_initial_changes(
                             checkout_dir,
-                            rpm_name,
+                            obs_name,
                             Emit::new(reporter, step.id),
                         ),
                     );
@@ -3423,6 +3480,7 @@ fn review_stage(
         reporter,
         ws,
         rpm_name,
+        obs_name,
         checkout_dir,
         spec_path,
         ..
@@ -3455,7 +3513,7 @@ fn review_stage(
     // A request whose condition already holds of this package needs no turn.
     if patching.is_some()
         && let Some(cond) = config.patch_condition.as_ref().filter(|c| c.is_valid())
-        && condition_holds_now(config, rpm_name, cond)
+        && condition_holds_now(config, rpm_name, obs_name, cond)
     {
         let key = condition_key(cond);
         update_state(ws, reporter, |s| s.record_condition_satisfied(key));
@@ -4080,8 +4138,13 @@ fn missing_deps_from_turn(
                     .unwrap_or_default();
                 let state = PkgState::load(&w);
                 let over = patch_request_over(&state, p, &|c| {
-                    condition_holds_now(ctx.config, &real, c)
-                        || condition_holds_now(ctx.config, &osc::rpm_name(&p.name), c)
+                    condition_holds_now(ctx.config, &real, &real, c)
+                        || condition_holds_now(
+                            ctx.config,
+                            &osc::rpm_name(&p.name),
+                            &osc::rpm_name(&p.name),
+                            c,
+                        )
                 });
                 if over && let Some(cond) = &p.condition {
                     let key = condition_key(cond);
@@ -4837,6 +4900,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         reporter,
         ws,
         rpm_name,
+        obs_name: _,
         checkout_dir,
         spec_path,
     } = ctx;
@@ -5684,6 +5748,7 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
         pkg_run,
         reporter,
         rpm_name,
+        obs_name,
         ..
     } = ctx;
     let reporter = *reporter;
@@ -5699,7 +5764,7 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
 
     let build_result = osc::obs_build(
         &config.project,
-        rpm_name,
+        obs_name,
         &config.distro,
         &config.arch,
         &build_log,
@@ -5739,8 +5804,13 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
 /// `state/<pkg>/rpmlint.log`, one dated section per run of rpmlint, and warn
 /// about its errors. The log OBS publishes is overwritten with every build, so
 /// this file is the only record of earlier ones.
-fn record_rpmlint(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Reporter) {
-    for message in record_rpmlint_logs(&config.rpms_dir, &config.rpm_name, &config.version, ws) {
+fn record_rpmlint(
+    config: &PipelineConfig,
+    obs_name: &str,
+    ws: &Workspace,
+    reporter: &dyn Reporter,
+) {
+    for message in record_rpmlint_logs(&config.rpms_dir, obs_name, &config.version, ws) {
         reporter.report(&Event::Warning {
             step: None,
             message,
@@ -5750,15 +5820,16 @@ fn record_rpmlint(config: &PipelineConfig, ws: &Workspace, reporter: &dyn Report
 
 /// [`record_rpmlint`] without a reporter: returns the warnings instead. Also
 /// used by [`reconcile_with_obs`], so RPMs fetched there are recorded the same
-/// way as those of a normal download.
+/// way as those of a normal download. `obs_name` is the name the RPMs were
+/// downloaded under: the stashed rpmlint logs are keyed by it.
 fn record_rpmlint_logs(
     rpms_dir: &Path,
-    rpm_name: &str,
+    obs_name: &str,
     version: &str,
     ws: &Workspace,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
-    let logs = osc::take_rpmlint_logs(rpms_dir, rpm_name);
+    let logs = osc::take_rpmlint_logs(rpms_dir, obs_name);
     if logs.is_empty() {
         return warnings;
     }
@@ -5803,11 +5874,12 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
         reporter,
         ws,
         rpm_name,
+        obs_name,
         ..
     } = ctx;
     let reporter = *reporter;
     let build_step = build_step.finish(StepOutcome::Ok);
-    record_rpmlint(config, ws, reporter);
+    record_rpmlint(config, obs_name, ws, reporter);
     st.step_attempts
         .skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
     update_state(ws, reporter, |state| {
@@ -6346,6 +6418,7 @@ fn fix_after_build(
         reporter,
         ws,
         rpm_name,
+        obs_name,
         checkout_dir,
         spec_path,
     } = ctx;
@@ -6384,7 +6457,7 @@ fn fix_after_build(
         let emit = Emit::new(reporter, build_step.id);
         let started = osc::rebuild(
             &config.project,
-            &ctx.rpm_name,
+            obs_name,
             &config.distro,
             &config.arch,
             emit,
@@ -6612,6 +6685,8 @@ struct TurnEnv<'a> {
     ws: &'a Workspace,
     pkg_run: &'a PkgRunDir,
     reporter: &'a dyn Reporter,
+    /// The package's OBS name, for reading its checkout's spec.
+    obs_name: &'a str,
 }
 
 /// What one agent turn needs beyond [`PipelineConfig`].
@@ -7605,6 +7680,7 @@ fn agent_turn(
         ws,
         pkg_run,
         reporter,
+        obs_name,
     } = env;
     let step = StepGuard::begin(
         pkg_run,
@@ -7635,12 +7711,12 @@ fn agent_turn(
     // so torchcodec's turns could only answer `blocked`.
     let licence_facts = ctx
         .checkout_dir
-        .and_then(|dir| licence_guard_facts(config, &ws.build_log(), dir));
+        .and_then(|dir| licence_guard_facts(config, obs_name, &ws.build_log(), dir));
     // The packages this one depends on, and the ones a blocker names: their
     // checkouts are readable in the turn and their file lists are inlined.
     let spec_text = ctx
         .checkout_dir
-        .map(|d| d.join(format!("{}.spec", config.rpm_name)))
+        .map(|d| d.join(format!("{obs_name}.spec")))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
     let sibling_dirs = sibling_checkouts(config, &spec_text, ctx.context.unwrap_or(""));
@@ -9349,17 +9425,16 @@ fn package_files_from_rpms_with(
 
 /// Whether a condition on `rpm_name` is true now: of the recipe in its project
 /// checkout (the patch may be made and not built yet), or of its built RPMs.
+/// `checkout_name` is the OBS name the checkout is made under (see
+/// [`checkout_paths`]); the RPMs and the condition's own name are `rpm_name`.
 fn condition_holds_now(
     config: &PipelineConfig,
     rpm_name: &str,
+    checkout_name: &str,
     cond: &crate::ship_condition::FilesCondition,
 ) -> bool {
     use crate::ship_condition::{Verdict, check, spec_packages};
-    let spec_path = config
-        .work_dir
-        .join(&config.project)
-        .join(rpm_name)
-        .join(format!("{rpm_name}.spec"));
+    let (_, spec_path) = checkout_paths(&config.work_dir, &config.project, checkout_name);
     if let Ok(spec) = std::fs::read_to_string(&spec_path)
         && check(cond, &spec_packages(&spec), rpm_name) == Verdict::Satisfied
     {
@@ -9586,12 +9661,13 @@ fn recipe_licence_lines(spec: &str) -> Vec<String> {
 /// guard or no recipe could be read. Cached per recipe for the process.
 fn licence_guard_facts(
     config: &PipelineConfig,
+    obs_name: &str,
     build_log: &Path,
     checkout_dir: &Path,
 ) -> Option<String> {
     let guard = |text: &str| text.contains("LICENSE_VIOLATION");
     let log = std::fs::read_to_string(build_log).unwrap_or_default();
-    let spec = std::fs::read_to_string(checkout_dir.join(format!("{}.spec", config.rpm_name)))
+    let spec = std::fs::read_to_string(checkout_dir.join(format!("{obs_name}.spec")))
         .unwrap_or_default();
     if !guard(&log) && !guard(&spec) {
         return None;
@@ -14332,6 +14408,52 @@ mod tests {
     }
 
     #[test]
+    fn the_obs_name_is_the_listed_spelling_of_a_case_variant_and_rpm_name_otherwise() {
+        let own: std::collections::HashSet<String> = ["python-APScheduler", "python-pyyaml"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // The own project lists a case variant: that listed spelling is the OBS name.
+        assert_eq!(
+            resolve_obs_name("python-apscheduler", &own),
+            "python-APScheduler"
+        );
+        // The own project lists it exactly as the pipeline names it.
+        assert_eq!(resolve_obs_name("python-pyyaml", &own), "python-pyyaml");
+        // Not listed yet: rpm_name. A linked project's spelling does not enter
+        // here, because the branch from it is made under rpm_name.
+        assert_eq!(resolve_obs_name("python-croniter", &own), "python-croniter");
+    }
+
+    #[test]
+    fn the_checkout_and_its_spec_follow_the_obs_name_in_mixed_case() {
+        let (dir, spec) = checkout_paths(Path::new("/work"), "proj", "python-APScheduler");
+        assert_eq!(dir, PathBuf::from("/work/proj/python-APScheduler"));
+        assert_eq!(
+            spec,
+            PathBuf::from("/work/proj/python-APScheduler/python-APScheduler.spec")
+        );
+        let (lower, lower_spec) = checkout_paths(Path::new("/work"), "proj", "python-apscheduler");
+        assert_eq!(lower, PathBuf::from("/work/proj/python-apscheduler"));
+        assert_eq!(
+            lower_spec,
+            PathBuf::from("/work/proj/python-apscheduler/python-apscheduler.spec")
+        );
+    }
+
+    #[test]
+    fn a_state_json_without_obs_name_loads_and_the_field_round_trips() {
+        let old = r#"{"policy_version":0,"last_built_version":"3.11.0","last_outcome":"success"}"#;
+        let mut st: PkgState = serde_json::from_str(old).unwrap();
+        assert_eq!(st.obs_name, None);
+        assert_eq!(st.last_built_version.as_deref(), Some("3.11.0"));
+        st.obs_name = Some("python-APScheduler".to_string());
+        let text = serde_json::to_string(&st).unwrap();
+        let back: PkgState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.obs_name.as_deref(), Some("python-APScheduler"));
+    }
+
+    #[test]
     fn a_release_archive_is_saved_under_the_suffix_of_its_own_kind() {
         assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.gz"), Some(".tar.gz"));
         assert_eq!(archive_save_suffix("https://x/foo-1.0.tgz"), Some(".tar.gz"));
@@ -17459,19 +17581,19 @@ mod hygiene_tests {
         let ws = Workspace::open(root.path(), "python-x").unwrap();
         let cfg = config("x", root.path());
         let quiet = Warnings(Default::default());
-        assert!(reconcile_rpms_with(&cfg, &ws, &quiet, || Ok(2)));
+        assert!(reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || Ok(2)));
         assert!(quiet.0.lock().unwrap().is_empty());
         // Nothing landed: the package is rebuilt, with a warning saying why.
-        assert!(!reconcile_rpms_with(&cfg, &ws, &quiet, || Ok(0)));
+        assert!(!reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || Ok(0)));
         assert!(quiet.0.lock().unwrap()[0].contains("no RPMs were downloaded"));
         // A failing download is the same.
-        assert!(!reconcile_rpms_with(&cfg, &ws, &quiet, || {
+        assert!(!reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || {
             Err(osc::Error::NotActionable("502".into()))
         }));
         assert!(quiet.0.lock().unwrap()[1].contains("fetching its RPMs failed"));
         // A recorded success needs no download at all.
         write_state(root.path(), "python-x", "success", None);
-        assert!(reconcile_rpms_with(&cfg, &ws, &quiet, || panic!(
+        assert!(reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || panic!(
             "not called"
         )));
     }
@@ -17586,6 +17708,7 @@ mod hygiene_tests {
             reporter: &warnings,
             ws,
             rpm_name: "python-foo".into(),
+            obs_name: "python-foo".into(),
             checkout_dir: checkout.clone(),
             spec_path: spec_path.clone(),
         };
@@ -17732,16 +17855,16 @@ mod hygiene_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cond = utils_condition();
         std::fs::write(dir.join("python-foo.spec"), SPLIT_SPEC).unwrap();
-        assert!(!condition_holds_now(&config, "python-foo", &cond));
+        assert!(!condition_holds_now(&config, "python-foo", "python-foo", &cond));
         std::fs::write(
             dir.join("python-foo.spec"),
             FIXED_SPEC.replace("foo/include", "foo/utils"),
         )
         .unwrap();
         // Still devel: not true.
-        assert!(!condition_holds_now(&config, "python-foo", &cond));
+        assert!(!condition_holds_now(&config, "python-foo", "python-foo", &cond));
         std::fs::write(dir.join("python-foo.spec"), FIXED_SPEC).unwrap();
-        assert!(condition_holds_now(&config, "python-foo", &cond));
+        assert!(condition_holds_now(&config, "python-foo", "python-foo", &cond));
     }
 
     /// A package `python-foo` whose spec is `spec`, with the wheel the switch
@@ -17792,6 +17915,7 @@ mod hygiene_tests {
             reporter: &ap_core::sink::NULL_REPORTER,
             ws,
             rpm_name: "python-foo".into(),
+            obs_name: "python-foo".into(),
             checkout_dir: checkout.clone(),
             spec_path: spec_path.clone(),
         };
@@ -18011,6 +18135,7 @@ mod hygiene_tests {
             reporter: &warnings,
             ws,
             rpm_name: "python-foo".into(),
+            obs_name: "python-foo".into(),
             checkout_dir: checkout,
             spec_path: spec_path.clone(),
         };
@@ -18339,6 +18464,7 @@ mod ladder_tests {
             reporter: &ap_core::sink::NULL_REPORTER,
             ws,
             rpm_name: rpm_name.into(),
+            obs_name: rpm_name.into(),
             checkout_dir: checkout.clone(),
             spec_path: spec_path.clone(),
         };
@@ -18566,6 +18692,7 @@ mod ladder_tests {
             reporter: &ap_core::sink::NULL_REPORTER,
             ws: Workspace::open(state_root, "python-foo").unwrap(),
             rpm_name: "python-foo".into(),
+            obs_name: "python-foo".into(),
             checkout_dir: PathBuf::new(),
             spec_path: PathBuf::new(),
         }
