@@ -721,8 +721,8 @@ pub(crate) fn write_nvidia_mode(
     explicit: bool,
 ) -> color_eyre::Result<()> {
     if mode != NvidiaMode::Wheel || explicit || project_dir.join(NVIDIA_MODE_FILE).exists() {
-        std::fs::write(
-            project_dir.join(NVIDIA_MODE_FILE),
+        ap_core::fsx::write_atomic(
+            &project_dir.join(NVIDIA_MODE_FILE),
             format!("{}\n", mode.as_str()),
         )?;
     }
