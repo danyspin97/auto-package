@@ -326,8 +326,31 @@ fn sensitive_reason(path: &Path, home: &Path) -> Option<&'static str> {
     None
 }
 
+/// Whether `path` is at or under one of `SENSITIVE_HOME_DIRS` in the home
+/// directory (`~/.local`, `~/.config`, `~/.cache`, at any depth).
+fn under_sensitive_home_dir(path: &Path, home: &Path) -> bool {
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    [home, real_home.as_path()].into_iter().any(|h| {
+        path.strip_prefix(h)
+            .ok()
+            .and_then(|rel| rel.components().next())
+            .is_some_and(|first| {
+                SENSITIVE_HOME_DIRS
+                    .iter()
+                    .any(|d| first.as_os_str() == *d)
+            })
+    })
+}
+
 fn check_prefix(program: &str, prefix: &Path, home: &Path) -> Result<(), SandboxError> {
-    match sensitive_reason(prefix, home) {
+    let reason = sensitive_reason(prefix, home).or_else(|| {
+        // Under the configuration or cache directories only a virtualenv
+        // (which has a `pyvenv.cfg`) is a prefix of its own; anything else
+        // there may be a tool's data, config or keyring.
+        (under_sensitive_home_dir(prefix, home) && !prefix.join("pyvenv.cfg").is_file())
+            .then_some("it is inside a configuration or cache directory and is not a virtualenv")
+    });
+    match reason {
         None => Ok(()),
         Some(why) => Err(SandboxError::UnsafePrefix {
             program: program.to_string(),
@@ -335,6 +358,15 @@ fn check_prefix(program: &str, prefix: &Path, home: &Path) -> Result<(), Sandbox
             why,
         }),
     }
+}
+
+/// Why the file `path` must not be bound into the sandbox, checked as named
+/// and as resolved through symlinks.
+fn sensitive_file(path: &Path, home: &Path) -> Option<&'static str> {
+    sensitive_reason(path, home).or_else(|| {
+        let real = path.canonicalize().ok()?;
+        sensitive_reason(&real, home)
+    })
 }
 
 /// Bind the user's pip config files, each at the place pip looks for it in
@@ -370,6 +402,10 @@ fn bind_pip_config(a: &mut Args, host: &Host) {
     let mut seen_dst = BTreeSet::new();
     for (src, dst) in candidates {
         if src.is_file() && seen_dst.insert(dst) {
+            if let Some(why) = sensitive_file(&src, &host.home) {
+                tracing::warn!("skipping pip config {}: {why}", src.display());
+                continue;
+            }
             a.ro_bind(&src, Path::new(dst));
         }
     }
@@ -392,6 +428,10 @@ fn pip_config_env(a: &mut Args, host: &Host) -> Option<OsString> {
     if !src.is_absolute() || !src.is_file() {
         return None;
     }
+    if let Some(why) = sensitive_file(&src, &host.home) {
+        tracing::warn!("skipping PIP_CONFIG_FILE {}: {why}", src.display());
+        return None;
+    }
     a.ro_bind(&src, Path::new(SANDBOX_PIP_CONFIG_FILE));
     Some(SANDBOX_PIP_CONFIG_FILE.into())
 }
@@ -406,11 +446,7 @@ fn bind_ca(a: &mut Args, var: &str, value: &OsString, host: &Host) -> Result<(),
     if is_under_any(&path, SYSTEM_DIRS) || is_under_any(&path, ETC_ENTRIES) {
         return Ok(());
     }
-    let reason = sensitive_reason(&path, &host.home).or_else(|| {
-        let real = path.canonicalize().ok()?;
-        sensitive_reason(&real, &host.home)
-    });
-    if let Some(why) = reason {
+    if let Some(why) = sensitive_file(&path, &host.home) {
         return Err(SandboxError::UnsafePath {
             var: var.to_string(),
             path,
@@ -725,6 +761,57 @@ mod tests {
         assert!(sensitive_reason(&f.home.join("venv"), &f.home).is_none());
         assert!(sensitive_reason(&f.home.join(".local/share/pipx/venvs/x"), &f.home).is_none());
         assert!(sensitive_reason(Path::new("/opt/python"), &f.home).is_none());
+    }
+
+    #[test]
+    fn prefixes_under_config_cache_or_local_are_refused_unless_a_venv() {
+        let f = fixture();
+        let h = &f.home;
+        // The home-level directories themselves are refused even as venvs.
+        for dir in [".local", ".config", ".cache"] {
+            let p = h.join(dir);
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+            assert!(check_prefix("tool", &p, h).is_err(), "{dir} accepted");
+        }
+        for dir in [
+            ".local/share",
+            ".local/share/pipx/venvs/x",
+            ".config/myapp",
+            ".cache/tool",
+        ] {
+            let p = h.join(dir);
+            assert!(check_prefix("tool", &p, h).is_err(), "{dir} accepted");
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+            assert!(check_prefix("tool", &p, h).is_ok(), "venv {dir} refused");
+        }
+        assert!(check_prefix("tool", &h.join("venv"), h).is_ok());
+        assert!(check_prefix("tool", Path::new("/opt/python"), h).is_ok());
+    }
+
+    #[test]
+    fn a_pip_config_file_naming_credentials_is_not_bound() {
+        let mut f = fixture();
+        let key = f.home.join(".ssh/id_ed25519");
+        f.host
+            .vars
+            .push(("PIP_CONFIG_FILE".into(), key.clone().into()));
+        let args = build(&f);
+        assert!(!binds(&args).iter().any(|(_, s, _)| s == &key.to_string_lossy()));
+        assert!(!setenvs(&args).iter().any(|(k, _)| k == "PIP_CONFIG_FILE"));
+    }
+
+    #[test]
+    fn a_pip_config_file_under_the_config_dir_is_bound_but_the_dir_itself_is_not() {
+        let mut f = fixture();
+        let conf = f.home.join(".config/pip/pip.conf");
+        fs::write(&conf, "[global]\n").unwrap();
+        f.host.vars.push(("PIP_CONFIG_FILE".into(), conf.clone().into()));
+        let b = binds(&build(&f));
+        assert!(b.iter().any(|(_, s, _)| s == &conf.to_string_lossy()));
+        assert!(sensitive_file(&f.home.join(".config/pip/pip.conf"), &f.home).is_none());
+        assert!(sensitive_file(&f.home.join(".config"), &f.home).is_some());
     }
 
     #[test]
