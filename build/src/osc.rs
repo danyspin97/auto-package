@@ -2759,6 +2759,10 @@ pub fn checkout(
     check_obs_name("package", pkg_name)?;
     let checkout_dir = into_dir.join(project).join(pkg_name);
 
+    // Moved-aside copies of an unfinished checkout are kept for a week, then
+    // they go: each can hold a large partial download.
+    prune_unfinished_asides(&checkout_dir, None, Some(UNFINISHED_ASIDE_MAX_AGE));
+
     // A checkout osc never finished (killed, or out of disk space mid-download)
     // tracks nothing, and `osc up` on it cannot recover: it trips over the files
     // the half-run already wrote. It is checked out again instead.
@@ -2824,6 +2828,10 @@ pub fn checkout(
 /// Files in an unfinished checkout that nothing tracks may be local work (a
 /// new package's spec or `.changes` never committed), so such a checkout is
 /// moved aside to `<name>.unfinished-<millis>` next to it instead of deleted.
+///
+/// Only the newest moved-aside copy of a package is kept, and its `.osc`
+/// metadata is dropped: the copy is no longer a checkout, so nothing scanning
+/// for package directories (by `.osc`) picks it up.
 fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
     if !checkout_dir.join(".osc").join("_in_update").exists()
         || !tracked_files(checkout_dir).is_empty()
@@ -2833,14 +2841,21 @@ fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
     if has_entries_besides_osc(checkout_dir) {
         let aside = unfinished_aside_path(checkout_dir);
         match fs::rename(checkout_dir, &aside) {
-            Ok(()) => emit.reporter.report(&Event::Warning {
-                step: emit.step,
-                message: format!(
-                    "{} is an unfinished checkout with untracked files; moved to {} and checking it out again",
-                    checkout_dir.display(),
-                    aside.display()
-                ),
-            }),
+            Ok(()) => {
+                let osc_dir = aside.join(".osc");
+                if let Err(e) = fs::remove_dir_all(&osc_dir) {
+                    ap_core::diag!("  could not remove {}: {e}", osc_dir.display());
+                }
+                prune_unfinished_asides(checkout_dir, Some(&aside), None);
+                emit.reporter.report(&Event::Warning {
+                    step: emit.step,
+                    message: format!(
+                        "{} is an unfinished checkout with untracked files; moved to {} and checking it out again",
+                        checkout_dir.display(),
+                        aside.display()
+                    ),
+                });
+            }
             Err(e) => ap_core::diag!("  could not move {} aside: {e}", checkout_dir.display()),
         }
         return;
@@ -2864,6 +2879,45 @@ fn has_entries_besides_osc(checkout_dir: &Path) -> bool {
             .flatten()
             .any(|e| e.file_name() != std::ffi::OsStr::new(".osc"))
     })
+}
+
+/// How long a moved-aside unfinished checkout is kept.
+const UNFINISHED_ASIDE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Delete the moved-aside copies of `checkout_dir` (`<name>.unfinished-*`
+/// siblings), except `keep`. With `max_age`, only copies last modified longer
+/// ago than that are deleted.
+fn prune_unfinished_asides(checkout_dir: &Path, keep: Option<&Path>, max_age: Option<Duration>) {
+    let (Some(parent), Some(name)) = (checkout_dir.parent(), checkout_dir.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.unfinished-", name.to_string_lossy());
+    let Ok(rd) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !entry.file_name().to_string_lossy().starts_with(&prefix)
+            || keep.is_some_and(|k| k == path)
+            || !entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            continue;
+        }
+        if let Some(max_age) = max_age {
+            let old_enough = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+                .is_some_and(|age| age > max_age);
+            if !old_enough {
+                continue;
+            }
+        }
+        if let Err(e) = fs::remove_dir_all(&path) {
+            ap_core::diag!("  could not remove {}: {e}", path.display());
+        }
+    }
 }
 
 /// A free sibling path `<checkout_dir>.unfinished-<millis>` (suffixed with a
@@ -3207,6 +3261,58 @@ mod unfinished_checkout_tests {
         let dir = finished.path().join("pkg");
         discard_unfinished_checkout(&dir, Emit::quiet());
         assert!(dir.join("_service").exists());
+    }
+
+    #[test]
+    fn the_moved_aside_copy_is_not_a_checkout_any_more() {
+        let base = checkout_with("<directory />", true, true);
+        let dir = base.path().join("pkg");
+        discard_unfinished_checkout(&dir, Emit::quiet());
+        let aside = base.path().join(&sibling_names(base.path())[0]);
+        assert!(aside.join("_service").exists());
+        assert!(!aside.join(".osc").exists());
+    }
+
+    #[test]
+    fn only_the_newest_moved_aside_copy_of_a_package_is_kept() {
+        let base = checkout_with("<directory />", true, true);
+        // Older copies of this package, and a different package whose name
+        // only starts the same way; neither of those may be touched.
+        for old in ["pkg.unfinished-1", "pkg.unfinished-2-1"] {
+            fs::create_dir_all(base.path().join(old)).unwrap();
+        }
+        fs::create_dir_all(base.path().join("pkg-other.unfinished-1")).unwrap();
+        let dir = base.path().join("pkg");
+        discard_unfinished_checkout(&dir, Emit::quiet());
+
+        let aside = sibling_names(base.path());
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert!(base.path().join(&aside[0]).join("_service").exists());
+        assert!(base.path().join("pkg-other.unfinished-1").exists());
+    }
+
+    #[test]
+    fn moved_aside_copies_older_than_a_week_are_pruned_at_checkout_time() {
+        let base = tempfile::tempdir().unwrap();
+        let old = base.path().join("pkg.unfinished-1");
+        let recent = base.path().join("pkg.unfinished-2");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&recent).unwrap();
+        let eight_days_ago =
+            std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        fs::File::open(&old)
+            .unwrap()
+            .set_modified(eight_days_ago)
+            .unwrap();
+
+        prune_unfinished_asides(
+            &base.path().join("pkg"),
+            None,
+            Some(UNFINISHED_ASIDE_MAX_AGE),
+        );
+
+        assert!(!old.exists());
+        assert!(recent.exists());
     }
 }
 

@@ -1137,11 +1137,14 @@ fn is_github_host(host: &str) -> bool {
     host == "github.com" || host.ends_with(".github.com")
 }
 
-/// A GitLab host: a known forge (see [`ap_ecosystem::forge::is_known_host`])
-/// with a `gitlab` label, such as `gitlab.com` or `gitlab.gnome.org`.
+/// A GitLab host: some dot-separated label is `gitlab` or starts with it, such
+/// as `gitlab.com`, `gitlab.gnome.org`, `gitlab-internal.corp.example` or
+/// `git.gitlab.corp.example`. A label that merely ends with it
+/// (`evil-gitlab.example`) is not.
 fn is_gitlab_host(host: &str) -> bool {
-    let host = host.to_ascii_lowercase();
-    ap_ecosystem::forge::is_known_host(&host) && host.split('.').any(|label| label == "gitlab")
+    host.to_ascii_lowercase()
+        .split('.')
+        .any(|label| label.starts_with("gitlab"))
 }
 
 /// The release endpoint and the tag-list fallback for a forge project, in the
@@ -1203,6 +1206,20 @@ pub fn version_from_tag(tag: &str, repo: &str) -> String {
     v.to_string()
 }
 
+/// The tag-listing endpoint of a forge project, chosen the same way as
+/// [`release_endpoints`].
+fn tag_list_url(host: &str, project_path: &str) -> String {
+    if is_github_host(host) {
+        format!("https://api.github.com/repos/{project_path}/tags?per_page=100")
+    } else if is_gitlab_host(host) {
+        let encoded = project_path.replace('/', "%2F");
+        format!("https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=100")
+    } else {
+        // Gitea/Forgejo
+        format!("https://{host}/api/v1/repos/{project_path}/tags?limit=100")
+    }
+}
+
 /// Get all tags from a repository via the forge API.
 fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
     if source_kind(repo_url) != SourceKind::Forge {
@@ -1210,17 +1227,7 @@ fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
     }
     let (host, project_path, _repo_name) = owner_repo(repo_url)?;
 
-    let api_url = if host.contains("github.com") {
-        format!("https://api.github.com/repos/{project_path}/tags?per_page=100")
-    } else if host.contains("gitlab") {
-        let encoded = project_path.replace('/', "%2F");
-        format!("https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=100")
-    } else {
-        // Gitea/Forgejo
-        format!("https://{host}/api/v1/repos/{project_path}/tags?limit=100")
-    };
-
-    let json = get_json(&api_url)?;
+    let json = get_json(&tag_list_url(&host, &project_path))?;
 
     let tags = match json.as_array() {
         Some(arr) => arr
@@ -1922,6 +1929,30 @@ mod tests {
         assert!(
             e[0].starts_with("https://evil-gitlab.example/api/v1/"),
             "{e:?}"
+        );
+        // Self-hosted GitLab names: a label that is or starts with "gitlab".
+        for host in [
+            "gitlab.example.org",
+            "gitlab-internal.corp.example",
+            "git.gitlab.corp.example",
+        ] {
+            let e = release_endpoints(host, "g/p");
+            assert_eq!(
+                e[0],
+                format!("https://{host}/api/v4/projects/g%2Fp/releases?per_page=1"),
+            );
+            assert_eq!(
+                e[1],
+                format!("https://{host}/api/v4/projects/g%2Fp/repository/tags?per_page=1"),
+            );
+        }
+        // The tag listing takes the same routes.
+        assert!(
+            tag_list_url("mygithub.com", "o/r").starts_with("https://mygithub.com/api/v1/"),
+        );
+        assert!(
+            tag_list_url("git.gitlab.corp.example", "o/r")
+                .starts_with("https://git.gitlab.corp.example/api/v4/"),
         );
         // The real hosts keep their APIs.
         assert_eq!(
