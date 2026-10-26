@@ -2186,14 +2186,20 @@ pub fn dedupe_build_requires(spec: &str) -> String {
 pub fn normalize_files_paths(spec: &str, pypi_name: &str) -> String {
     let normalized = normalized_module_name(pypi_name);
     let mut out = String::with_capacity(spec.len());
+    let mut in_files = false;
 
     for line in spec.lines() {
+        if let Some(keyword) = section_keyword(line) {
+            in_files = keyword == "%files";
+        }
         // py2pack writes these entries with a trailing `/`; splitting at the
         // last `/` of the untrimmed line made the "prefix" the whole path
         // and doubled the directory (`x.dist-info/x.dist-info/`) in every
         // generated spec.
         let trimmed = line.trim().trim_end_matches('/');
-        let rewritten = if trimmed.contains(".dist-info") {
+        let rewritten = if !in_files || section_keyword(line).is_some() {
+            line.to_string()
+        } else if trimmed.contains(".dist-info") {
             // Split at the `/` ending the dist-info component so a trailing
             // file (`.dist-info/LICENSE`) survives the rewrite.
             let idx = trimmed.find(".dist-info").unwrap();
@@ -2223,6 +2229,40 @@ pub fn normalize_files_paths(spec: &str, pypi_name: &str) -> String {
         out.pop();
     }
     out
+}
+
+/// The section a spec line opens (`%package`, `%files -n foo`, `%install`, …),
+/// or `None` for any other line. A macro use such as `%python_expand` or
+/// `%prefix` is not a section.
+fn section_keyword(line: &str) -> Option<&str> {
+    let word = line.trim_start().split_whitespace().next()?;
+    let is_section = match word {
+        "%package"
+        | "%description"
+        | "%prep"
+        | "%build"
+        | "%install"
+        | "%check"
+        | "%files"
+        | "%changelog"
+        | "%clean"
+        | "%conf"
+        | "%generate_buildrequires"
+        | "%verifyscript"
+        | "%pre"
+        | "%post"
+        | "%preun"
+        | "%postun"
+        | "%pretrans"
+        | "%posttrans" => true,
+        _ => {
+            let suffix = word
+                .strip_prefix("%trigger")
+                .or_else(|| word.strip_prefix("%filetrigger"));
+            suffix.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic()))
+        }
+    };
+    is_section.then_some(word)
 }
 
 /// [`wheel_binary_skeleton`] for a release whose wheels are each locked to one
@@ -2289,6 +2329,22 @@ pub fn wheel_multi_flavor_skeleton_shared(
         .replacen("%pyproject_install %{SOURCE0}\n", &installs, 1)
 }
 
+/// Whether the values a skeleton writes unescaped into its header (`Name:`,
+/// `Version:`, `Source:`/`Source0:`) are plain. They come from the command line
+/// and from PyPI's JSON, which this code does not check, and a value with a
+/// space, `%` or newline would rewrite the rest of the spec. A plain name is
+/// [`is_plain_dependency_name`]; a version is PEP 440's characters; a wheel
+/// filename is the same plain set.
+fn skeleton_header_values_are_plain(pkg_name: &str, version: &str, wheel: Option<&str>) -> bool {
+    let plain_text = |s: &str| {
+        s.len() <= 255
+            && s.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '!'))
+    };
+    is_plain_dependency_name(pkg_name) && plain_text(version) && wheel.is_none_or(plain_text)
+}
+
 /// Generate a minimal skeleton spec for a monorepo package.
 ///
 /// py2pack only understands single-project PyPI packages; for a monorepo with
@@ -2302,6 +2358,9 @@ pub fn monorepo_skeleton(
     subprojects: &[ap_ecosystem::sdist::Subproject],
     release: Option<&ap_ecosystem::pypi::Release>,
 ) -> String {
+    if !skeleton_header_values_are_plain(pkg_name, version, None) {
+        return String::new();
+    }
     let name = pkg_name.to_lowercase();
     let summary = rpm_text(
         release
@@ -3012,6 +3071,9 @@ pub fn wheel_binary_skeleton_shared(
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
     siblings: &[SiblingWheel],
 ) -> String {
+    if !skeleton_header_values_are_plain(pkg_name, version, Some(wheel_filename)) {
+        return String::new();
+    }
     let foreign: Vec<String> = siblings
         .iter()
         .flat_map(|s| s.files.iter().cloned())
@@ -5069,21 +5131,40 @@ pub fn note_prebuilt_library(spec: &str, proprietary: bool) -> String {
         "This package redistributes the upstream prebuilt binary library, unpacked from \
          its wheel; it is not built from source."
     };
+    let lines: Vec<&str> = spec.lines().collect();
+    let insert_after = description_paragraph_end(&lines);
     let mut out = Vec::new();
-    let mut after_description = false;
-    let mut done = false;
-    for line in spec.lines() {
+    for (idx, line) in lines.iter().enumerate() {
         out.push(line.to_string());
-        if !done && after_description {
+        if Some(idx) == insert_after {
             out.push(String::new());
             out.push(note.to_string());
-            done = true;
-        }
-        if line.trim_end() == "%description" {
-            after_description = true;
         }
     }
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// Index of the last line of the first paragraph of the `%description` body: the
+/// line before the blank line or the next section header that ends it. With no
+/// text under the header, the header itself. `None` without a `%description`.
+fn description_paragraph_end(lines: &[&str]) -> Option<usize> {
+    let header = lines.iter().position(|l| l.trim_end() == "%description")?;
+    let mut end = header;
+    for (idx, line) in lines.iter().enumerate().skip(header + 1) {
+        let t = line.trim();
+        if t.is_empty() {
+            if end > header {
+                break;
+            }
+            continue;
+        }
+        // `%{...}` is a macro in the text, not a section header.
+        if t.starts_with('%') && !t.starts_with("%{") {
+            break;
+        }
+        end = idx;
+    }
+    Some(end)
 }
 
 #[cfg(test)]
@@ -5101,6 +5182,22 @@ mod prebuilt_library_tests {
         );
         assert_eq!(out.matches("redistributes").count(), 1);
         assert!(out.contains("%prep"));
+    }
+
+    #[test]
+    fn the_note_goes_after_the_whole_description_paragraph() {
+        let spec = "%description\nNCCL runtime, the\nwrapped second line,\nand a third.\n\n%prep\n";
+        let out = note_prebuilt_library(spec, false);
+        assert!(
+            out.starts_with(
+                "%description\nNCCL runtime, the\nwrapped second line,\nand a third.\n\nThis package redistributes"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("unpacked from its wheel; it is not built from source.\n\n%prep\n"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -6697,13 +6794,14 @@ BuildRequires:  %{python_module pip}
     #[test]
     fn trailing_slashes_do_not_double_the_dist_info_directory() {
         let spec = "\
+%files
 %{python_sitelib}/accelerate/
 %{python_sitelib}/accelerate-%{version}.dist-info/
 ";
         let out = normalize_files_paths(spec, "accelerate");
         assert_eq!(
             out,
-            "%{python_sitelib}/accelerate/\n%{python_sitelib}/accelerate-%{version}.dist-info/\n"
+            "%files\n%{python_sitelib}/accelerate/\n%{python_sitelib}/accelerate-%{version}.dist-info/\n"
         );
         // Idempotent: a second pass changes nothing.
         assert_eq!(normalize_files_paths(&out, "accelerate"), out);
@@ -6738,6 +6836,101 @@ BuildRequires:  %{python_module pip}
         let spec = "%files %{python_files}\n%{python_sitearch}/MarkupSafe\n";
         let out = normalize_files_paths(spec, "MarkupSafe");
         assert!(out.contains("%{python_sitearch}/markupsafe/"), "{out}");
+    }
+
+    #[test]
+    fn only_files_sections_are_rewritten() {
+        let spec = "\
+%install
+  echo removing foo-bar.dist-info
+%files
+%{python_sitelib}/foo-bar-%{version}.dist-info/
+%package doc
+%description doc
+%{python_sitelib}/foo-bar-%{version}.dist-info/
+%files doc
+%{python_sitelib}/foo-bar-%{version}.dist-info/
+";
+        let out = normalize_files_paths(spec, "foo-bar");
+        assert!(
+            out.contains("%install\n  echo removing foo-bar.dist-info\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("%files\n%{python_sitelib}/foo_bar-%{version}.dist-info/\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("%description doc\n%{python_sitelib}/foo-bar-%{version}.dist-info/\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("%files doc\n%{python_sitelib}/foo_bar-%{version}.dist-info/\n"),
+            "{out}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod skeleton_header_guard_tests {
+    use super::*;
+
+    fn release() -> Release {
+        Release {
+            name: "x".into(),
+            version: "1".into(),
+            summary: Some("A tool".into()),
+            homepage: None,
+            license: License::Spdx("MIT".into()),
+            requires_python: None,
+            requires_dist: Vec::new(),
+            yanked: false,
+            sdist: ap_ecosystem::pypi::Sdist {
+                filename: String::new(),
+                url: String::new(),
+                sha256: String::new(),
+                size: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn a_plain_version_and_wheel_name_still_make_a_skeleton() {
+        let wheel = "x-1.0.post1+local-py3-none-any.whl";
+        let spec =
+            wheel_binary_skeleton("x", "1.0.post1+local", wheel, &release(), Some(true), None);
+        assert!(
+            spec.contains(&format!("Source0:        {wheel}\n")),
+            "{spec}"
+        );
+        assert!(spec.contains("Version:        1.0.post1+local\n"), "{spec}");
+    }
+
+    #[test]
+    fn a_version_that_would_rewrite_the_spec_is_refused() {
+        let wheel = "x-1-py3-none-any.whl";
+        for bad in ["1.0\nRequires: evil", "1.0 %{evil}", "1.0\"; rm -rf /"] {
+            let spec = wheel_binary_skeleton("x", bad, wheel, &release(), Some(true), None);
+            assert!(spec.is_empty(), "{bad:?} produced {spec}");
+            let mono = monorepo_skeleton("x", bad, &[], Some(&release()));
+            assert!(mono.is_empty(), "{bad:?} produced {mono}");
+        }
+    }
+
+    #[test]
+    fn a_wheel_filename_or_name_that_would_rewrite_the_spec_is_refused() {
+        let r = release();
+        let spec = wheel_binary_skeleton("x", "1", "x 1.whl\n%{evil}", &r, Some(true), None);
+        assert!(spec.is_empty(), "{spec}");
+        let spec = wheel_binary_skeleton(
+            "x\n%{evil}",
+            "1",
+            "x-1-py3-none-any.whl",
+            &r,
+            Some(true),
+            None,
+        );
+        assert!(spec.is_empty(), "{spec}");
     }
 }
 
@@ -6827,12 +7020,12 @@ mod review_fix_tests {
     #[test]
     fn dist_info_rewrite_keeps_the_trailing_file() {
         let out = normalize_files_paths(
-            "%license %{python_sitelib}/foo-%{version}.dist-info/LICENSE\n",
+            "%files\n%license %{python_sitelib}/foo-%{version}.dist-info/LICENSE\n",
             "foo",
         );
         assert_eq!(
             out,
-            "%license %{python_sitelib}/foo-%{version}.dist-info/LICENSE\n"
+            "%files\n%license %{python_sitelib}/foo-%{version}.dist-info/LICENSE\n"
         );
     }
 
@@ -7125,17 +7318,30 @@ pub fn set_version(spec: &str, version: &str) -> Option<String> {
         .lines()
         .map(|line| {
             let t = line.trim_start();
-            let hit = !replaced
-                && prefixes.iter().any(|p| {
+            let matched = if replaced {
+                None
+            } else {
+                prefixes.iter().find(|p| {
                     t.strip_prefix(p.as_str())
                         .is_some_and(|rest| rest.starts_with([' ', '\t']) || rest.is_empty())
                 })
-                && line.contains(old_value.as_str());
-            if hit {
-                replaced = true;
-                line.replacen(old_value.as_str(), version, 1)
-            } else {
-                line.to_string()
+            };
+            match matched {
+                Some(prefix) if old_value.trim().is_empty() => {
+                    // No value to replace: the version goes where the value
+                    // would start, after the tag's own padding (or one space).
+                    replaced = true;
+                    let indent = &line[..line.len() - t.len()];
+                    let rest = &t[prefix.len()..];
+                    let padding = &rest[..rest.len() - rest.trim_start().len()];
+                    let padding = if padding.is_empty() { " " } else { padding };
+                    format!("{indent}{prefix}{padding}{version}")
+                }
+                Some(_) if line.contains(old_value.as_str()) => {
+                    replaced = true;
+                    line.replacen(old_value.as_str(), version, 1)
+                }
+                _ => line.to_string(),
             }
         })
         .collect();
@@ -7167,6 +7373,22 @@ mod set_version_tests {
     #[test]
     fn a_computed_version_is_refused() {
         assert!(set_version("Name: x\nVersion: %(echo 1)\n", "2").is_none());
+    }
+
+    #[test]
+    fn an_empty_version_gets_the_new_one_after_the_tag() {
+        // Without a value, the version must not be inserted at column 0.
+        let out = set_version("Name: x\nVersion:\nRelease: 0\n", "2.0").unwrap();
+        assert_eq!(out, "Name: x\nVersion: 2.0\nRelease: 0\n");
+    }
+
+    #[test]
+    fn a_whitespace_only_version_keeps_the_tag_padding() {
+        let out = set_version("Name: x\nVersion:    \nRelease: 0\n", "2.0").unwrap();
+        assert_eq!(out, "Name: x\nVersion:    2.0\nRelease: 0\n");
+        // The normal case is untouched by the empty-value branch.
+        let out = set_version("Name: x\nVersion:    1.0\n", "2.0").unwrap();
+        assert_eq!(out, "Name: x\nVersion:    2.0\n");
     }
 }
 
@@ -8028,9 +8250,40 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
     };
     let wanted = crate::osc::fuzzy_key(dependency);
     let mut out: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = Default::default();
+    // One dedupe set per conditional branch: the same text in the `%if` and the
+    // `%else` branch is two different requirements, not a duplicate.
+    let mut seen_stack: Vec<std::collections::HashSet<String>> = vec![Default::default()];
+    const OPEN_CONDITIONALS: &[&str] = &["%if", "%ifarch", "%ifnarch", "%ifos", "%ifnos"];
+    const BRANCH_CONDITIONALS: &[&str] = &[
+        "%elif",
+        "%elifarch",
+        "%elifnarch",
+        "%elifos",
+        "%elifnos",
+        "%else",
+    ];
     for line in spec.lines() {
         let t = line.trim_start();
+        let keyword = t.split_whitespace().next().unwrap_or_default();
+        if OPEN_CONDITIONALS.contains(&keyword) {
+            seen_stack.push(Default::default());
+            out.push(line.to_string());
+            continue;
+        }
+        if BRANCH_CONDITIONALS.contains(&keyword) {
+            if let Some(top) = seen_stack.last_mut() {
+                top.clear();
+            }
+            out.push(line.to_string());
+            continue;
+        }
+        if keyword == "%endif" {
+            if seen_stack.len() > 1 {
+                seen_stack.pop();
+            }
+            out.push(line.to_string());
+            continue;
+        }
         let is_dep_line = ["BuildRequires", "Requires", "Recommends", "Suggests"]
             .iter()
             .any(|tag| {
@@ -8107,7 +8360,11 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
             },
             items.join(", ")
         );
-        // A line that reads the same as one already kept is not repeated.
+        // A line that reads the same as one already kept in this branch is not
+        // repeated.
+        let seen = seen_stack
+            .last_mut()
+            .expect("the base scope is never popped");
         if rebuilt != line && !seen.insert(rebuilt.trim().to_string()) {
             continue;
         }
@@ -8131,6 +8388,24 @@ pub fn relax_dependencies(spec: &str, relaxed: &[(String, String)]) -> String {
 #[cfg(test)]
 mod relax_bound_tests {
     use super::{relax_dependencies, relax_dependency_bounds};
+
+    #[test]
+    fn the_else_branch_keeps_its_requires_when_the_if_branch_has_the_same_text() {
+        let spec =
+            "%if %{with foo}\nRequires: python-foo\n%else\nRequires: python-foo >= 2\n%endif\n";
+        let out = relax_dependency_bounds(spec, "foo", "1.5");
+        assert_eq!(
+            out,
+            "%if %{with foo}\nRequires: python-foo\n%else\nRequires: python-foo\n%endif\n"
+        );
+    }
+
+    #[test]
+    fn a_repeat_within_one_branch_is_still_merged() {
+        let spec = "%if 1\nRequires: python-foo >= 2\nRequires: python-foo >= 3\n%endif\n";
+        let out = relax_dependency_bounds(spec, "foo", "1.5");
+        assert_eq!(out, "%if 1\nRequires: python-foo\n%endif\n");
+    }
 
     #[test]
     fn a_bound_the_shipped_version_misses_is_dropped_the_name_kept() {
