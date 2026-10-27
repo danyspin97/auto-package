@@ -1988,6 +1988,15 @@ fn update_config_for_outdated(
             ));
         }
     };
+    if let Some(req) = required
+        && ap_build::update::is_newer(req, &newest)
+    {
+        return Err(format!(
+            "upstream's newest release of {real} is {newest}, below the {req} the dependent \
+             asks for: no release can meet that bound, so drop it from the spec (or patch the \
+             dependent) instead of requesting {real} again"
+        ));
+    }
     if current.as_deref() == Some(newest.as_str()) {
         return Err(format!(
             "{real} is already at the newest release ({newest}); a newer one than upstream \
