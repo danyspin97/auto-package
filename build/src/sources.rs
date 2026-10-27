@@ -963,6 +963,36 @@ pub(crate) fn is_prerelease(version: &str) -> bool {
         .any(|m| v.contains(m))
 }
 
+/// The release a version split off an archive name stands for: a trailing
+/// source marker is not part of it (`4.3.8.src` is 4.3.8, `3.9.5-src` 3.9.5),
+/// and `None` for an archive that is a build for one platform or flavor
+/// rather than the release (`1.10-win32-dll-openssl`).
+pub(crate) fn release_version(version: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        ".src", "-src", "_src", ".source", "-source", "_source", ".orig",
+    ];
+    let lower = version.to_ascii_lowercase();
+    let mut end = version.len();
+    for m in MARKERS {
+        if lower.ends_with(m) {
+            end = version.len() - m.len();
+            break;
+        }
+    }
+    let v = &version[..end];
+    // A word that is neither a pre-release tag nor a release suffix names a
+    // platform or a flavor (win32, dll, openssl, linux, bin).
+    let flavored = v.split(['.', '-', '_']).any(|t| {
+        let letters = t.chars().filter(char::is_ascii_alphabetic).count();
+        letters >= 3
+            && !is_prerelease(t)
+            && !["stable", "final", "release", "patch", "post", "p"]
+                .contains(&t.to_ascii_lowercase().as_str())
+    });
+    (!v.is_empty() && v.starts_with(|c: char| c.is_ascii_digit()) && !flavored)
+        .then(|| v.to_string())
+}
+
 /// The gzip tarballs in an index for the project `hint` (the index URL's own
 /// directory name), as `(file, version)`, newest first with pre-releases
 /// last. If nothing in the index carries the hinted name, every tarball is
@@ -974,6 +1004,7 @@ pub fn index_archives(links: &[String], hint: &str) -> Vec<(String, String)> {
         .iter()
         .filter(|f| is_gzip_archive(f))
         .filter_map(|f| archive_name_version(f).map(|(n, v)| (f.clone(), n, v)))
+        .filter_map(|(f, n, v)| release_version(&v).map(|v| (f, n, v)))
         .collect();
     let named: Vec<_> = all
         .iter()

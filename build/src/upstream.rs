@@ -59,7 +59,7 @@ fn newest_for(links: &[String], name: &str) -> Option<String> {
         .filter(|f| is_any_archive(f))
         .filter_map(archive_name_version)
         .filter(|(n, _)| norm(n) == norm(name))
-        .map(|(_, v)| v)
+        .filter_map(|(_, v)| crate::sources::release_version(&v))
         .collect();
     let stable: Vec<String> = versions
         .iter()
@@ -186,6 +186,29 @@ fn newest_on_repology(body: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_source_marker_or_a_platform_build_is_not_the_release() {
+        let l: Vec<String> = [
+            "collectl-4.3.8.src.tar.gz",
+            "collectl-4.3.7.src.tar.gz",
+            "libircclient-1.10.tar.gz",
+            "libircclient-1.10-win32-dll-openssl.tar.gz",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(newest_for(&l, "collectl").as_deref(), Some("4.3.8"));
+        assert_eq!(newest_for(&l, "libircclient").as_deref(), Some("1.10"));
+        assert_eq!(
+            crate::sources::release_version("3.9.5-src").as_deref(),
+            Some("3.9.5")
+        );
+        assert_eq!(
+            crate::sources::release_version("2.1.13-stable").as_deref(),
+            Some("2.1.13-stable")
+        );
+    }
     use super::*;
 
     fn links(files: &[&str]) -> Vec<String> {
