@@ -31,13 +31,62 @@ pub fn latest_in_index(source: &str) -> Result<String, String> {
         .map(|rest| format!("https://{rest}"));
     let source = upgraded.as_deref().unwrap_or(source);
     let file = last_segment(source);
-    let (name, _) = archive_name_version(file)
+    let (name, packaged) = archive_name_version(file)
         .ok_or_else(|| format!("cannot read a project name from the file name in {source}"))?;
+    // A release directory per version (`.../mariadb-13.0.2/source/mariadb-13.0.2.tar.gz`)
+    // lists only its own release: the newer ones are siblings of that directory.
+    if let Some((base, prefix)) = versioned_directory(source, &packaged) {
+        let links = fetch_index(&index_dir(&base))?;
+        if let Some(newest) = newest_release_directory(&links, &prefix) {
+            return Ok(newest);
+        }
+    }
     let links = match sourceforge_project(source) {
         Some(project) => sourceforge_files(&project)?,
         None => fetch_index(&index_dir(parent_dir(source)))?,
     };
     newest_for(&links, &name).ok_or_else(|| format!("no release of {name} listed for {source}"))
+}
+
+/// When the URL has a path segment that is the project's prefix plus the
+/// packaged version (`mariadb-13.0.2`), the directory above it and that prefix
+/// (`mariadb-`).
+fn versioned_directory(source: &str, version: &str) -> Option<(String, String)> {
+    let path = source.split(['?', '#']).next().unwrap_or(source);
+    let (scheme, rest) = path.split_once("://")?;
+    let segments: Vec<&str> = rest.split('/').collect();
+    // Host first, file last: only the directories between count.
+    for i in 1..segments.len().saturating_sub(1) {
+        if let Some(prefix) = segments[i].strip_suffix(version)
+            && !prefix.is_empty()
+            && prefix.ends_with(['-', '_'])
+        {
+            return Some((
+                format!("{scheme}://{}", segments[..i].join("/")),
+                prefix.to_string(),
+            ));
+        }
+    }
+    None
+}
+
+/// The highest version among the directories `<prefix><version>/` of a
+/// listing; pre-releases only when there is nothing else.
+fn newest_release_directory(links: &[String], prefix: &str) -> Option<String> {
+    let mut versions: Vec<String> = links
+        .iter()
+        .filter_map(|l| l.trim_end_matches('/').strip_prefix(prefix))
+        .filter_map(crate::sources::release_version)
+        .collect();
+    let stable: Vec<String> = versions
+        .iter()
+        .filter(|v| !is_prerelease(v))
+        .cloned()
+        .collect();
+    if !stable.is_empty() {
+        versions = stable;
+    }
+    versions.into_iter().max_by(|a, b| version_cmp(a, b))
 }
 
 /// The directory a file URL sits in: `https://h/pub/foo-1.tar.gz` is
@@ -186,6 +235,38 @@ fn newest_on_repology(body: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_directory_per_release_is_searched_beside_itself() {
+        assert_eq!(
+            versioned_directory(
+                "https://archive.mariadb.org/mariadb-13.0.2/source/mariadb-13.0.2.tar.gz",
+                "13.0.2"
+            ),
+            Some((
+                "https://archive.mariadb.org".to_string(),
+                "mariadb-".to_string()
+            ))
+        );
+        assert_eq!(
+            versioned_directory("https://h/pub/foo-1.2.tar.gz", "1.2"),
+            None
+        );
+        let links: Vec<String> = [
+            "mariadb-13.0.2/",
+            "mariadb-13.1.0/",
+            "mariadb-13.1/",
+            "mariadb-13.2.0/",
+            "foo/",
+            "mariadb-14.0.0-rc1/",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            newest_release_directory(&links, "mariadb-").as_deref(),
+            Some("13.2.0")
+        );
+    }
 
     #[test]
     fn a_source_marker_or_a_platform_build_is_not_the_release() {
