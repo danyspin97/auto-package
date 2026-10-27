@@ -11576,6 +11576,20 @@ fn carry_forward_repo_spec(
         if checkout_dir.join("_service").is_file() {
             return carry_forward_service_spec(config, repo, checkout_dir, spec_path, step, bumped);
         }
+        if bumped
+            .lines()
+            .find(|l| {
+                l.strip_prefix("Source").is_some_and(|r| {
+                    r.trim_start_matches(|c: char| c.is_ascii_digit())
+                        .starts_with(':')
+                })
+            })
+            .is_some_and(|l| l.contains("://"))
+        {
+            return Err(
+                "the first Source: has an address with a macro that cannot be expanded".into(),
+            );
+        }
         let url = crate::sources::tag_archive_url(repo, &config.version).ok_or_else(|| {
             format!(
                 "{repo} lists no tag for {}, so there is no archive to fetch",
@@ -11661,34 +11675,58 @@ fn carry_forward_service_spec(
     let service_path = checkout_dir.join("_service");
     let service =
         std::fs::read_to_string(&service_path).map_err(|e| format!("reading _service: {e}"))?;
-    if !service.contains("tar_scm") && !service.contains("obs_scm") {
+    // `obs_scm` makes an `.obscpio`, which nothing below handles: only `tar_scm`.
+    if !service.contains("tar_scm") {
         return Err("the _service is not a tar_scm one, so the source cannot be moved".into());
     }
     let tag = crate::sources::tag_for_version(repo, &config.version)
         .ok_or_else(|| format!("{repo} lists no tag for {}", config.version))?;
     let moved = with_service_revision(&service, &tag)
         .ok_or("the _service has no revision to move to the new tag")?;
+    let old_spec =
+        std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
+    let old_version = crate::spec::parse_header(&old_spec).map(|h| h.version);
     let before: std::collections::HashSet<String> = tarballs_in(checkout_dir);
-    ap_core::fsx::write_atomic(&service_path, &moved)
-        .map_err(|e| format!("writing _service: {e}"))?;
-    ap_core::fsx::write_atomic(spec_path, &bumped).map_err(|e| format!("writing the spec: {e}"))?;
-    run_service_with_retries(checkout_dir, Emit::quiet())
-        .map_err(|e| format!("running the _service: {e}"))?;
-    // The service writes `Version:` from the tarball (`set_version`) when it is
-    // enabled; the version asked for is what the spec must say.
-    let after = std::fs::read_to_string(spec_path).unwrap_or(bumped.clone());
-    let keep = crate::spec::set_version(&after, &config.version).unwrap_or(after);
-    ap_core::fsx::write_atomic(spec_path, &keep).map_err(|e| format!("writing the spec: {e}"))?;
-    let made = find_tarball(checkout_dir, &config.version)
-        .ok_or("the _service made no tarball for the new version")?;
-    // Tarballs of earlier releases that the new spec no longer names.
-    for old in before {
-        let named = crate::spec::expanded_sources(&keep)
-            .iter()
-            .any(|s| s.file == old)
-            || made.file_name().is_some_and(|n| n.to_string_lossy() == old);
-        if !named && old.contains(&config.pkg_name) {
-            let _ = std::fs::remove_file(checkout_dir.join(&old));
+    // Both files go back as they were when anything below fails: a half-moved
+    // checkout would be taken for a finished one by the next run.
+    let restore = || {
+        let _ = std::fs::write(&service_path, &service);
+        let _ = std::fs::write(spec_path, &old_spec);
+    };
+    let result = (|| -> Result<(String, PathBuf), String> {
+        ap_core::fsx::write_atomic(&service_path, &moved)
+            .map_err(|e| format!("writing _service: {e}"))?;
+        ap_core::fsx::write_atomic(spec_path, &bumped)
+            .map_err(|e| format!("writing the spec: {e}"))?;
+        run_service_with_retries(checkout_dir, Emit::quiet())
+            .map_err(|e| format!("running the _service: {e}"))?;
+        // The service writes `Version:` from the tarball (`set_version`) when it
+        // is enabled; the version asked for is what the spec must say.
+        let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| bumped.clone());
+        let keep = crate::spec::set_version(&after, &config.version).unwrap_or(after);
+        ap_core::fsx::write_atomic(spec_path, &keep)
+            .map_err(|e| format!("writing the spec: {e}"))?;
+        let made = find_tarball(checkout_dir, &config.version)
+            .ok_or("the _service made no tarball for the new version")?;
+        Ok((keep, made))
+    })();
+    let (keep, made) = match result {
+        Ok(done) => done,
+        Err(e) => {
+            restore();
+            return Err(e);
+        }
+    };
+    // The tarball of the release being replaced goes; an archive that does not
+    // carry the old version in its name (a vendor bundle) is left alone.
+    if let Some(old_version) = old_version.filter(|v| *v != config.version) {
+        for old in before {
+            if old.contains(&old_version)
+                && !old.contains(&config.version)
+                && made.file_name().is_none_or(|n| n.to_string_lossy() != old)
+            {
+                let _ = std::fs::remove_file(checkout_dir.join(&old));
+            }
         }
     }
     let top = ap_ecosystem::sdist::inspect(&made)
@@ -11723,7 +11761,8 @@ fn tarballs_in(dir: &Path) -> std::collections::HashSet<String> {
 /// `None` when it has none.
 fn with_service_revision(service: &str, tag: &str) -> Option<String> {
     let open = "<param name=\"revision\">";
-    let start = service.find(open)? + open.len();
+    let scm = service.find("name=\"tar_scm\"")?;
+    let start = scm + service[scm..].find(open)? + open.len();
     let end = start + service[start..].find("</param>")?;
     Some(format!(
         "{}{}{}",
