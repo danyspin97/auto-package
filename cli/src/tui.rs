@@ -2216,6 +2216,8 @@ const MIN_HEIGHT: u16 = 6;
 const FULL_CHROME_MIN_HEIGHT: u16 = 20;
 /// Width from which two panes sit side by side; narrower ones are stacked.
 const SIDE_BY_SIDE_MIN_WIDTH: u16 = 60;
+/// Rows of detail area below which stacked panes are shown one at a time.
+const STACKED_PANES_MIN_HEIGHT: u16 = 10;
 
 fn too_small(area: Rect) -> bool {
     area.width < MIN_WIDTH || area.height < MIN_HEIGHT
@@ -2223,7 +2225,18 @@ fn too_small(area: Rect) -> bool {
 
 /// The one line drawn instead of the UI when the terminal is too small.
 fn render_too_small(f: &mut Frame, area: Rect) {
-    let line = truncate_with_ellipsis("terminal too small", area.width as usize);
+    let width = area.width as usize;
+    // The size and the minimum when they fit; the bare notice, which the
+    // narrowest terminals get cut to the width, otherwise.
+    let detailed = format!(
+        "terminal too small ({}x{}, need {MIN_WIDTH}x{MIN_HEIGHT})",
+        area.width, area.height
+    );
+    let line = if detailed.chars().count() <= width {
+        detailed
+    } else {
+        truncate_with_ellipsis("terminal too small", width)
+    };
     let row = Rect {
         height: area.height.min(1),
         ..area
@@ -2240,14 +2253,15 @@ fn table_wanted(rows: usize) -> u16 {
     u16::try_from(rows)
         .unwrap_or(u16::MAX)
         .saturating_add(3)
-        .clamp(5, 12)
+        .clamp(4, 12)
 }
 
 /// Heights of the summary, package table, detail pane and footer, top to
 /// bottom, for a terminal `height` rows tall. The summary and footer shrink
 /// to a single bare line when the terminal is short. The table takes what it
-/// wants up to half of the body, and the detail pane keeps the rest, so
-/// neither is squeezed out by the other.
+/// wants up to half of the body — a third on a short one, where the logs are
+/// the point, but never less than its header and one row — and the detail
+/// pane keeps the rest, so neither is squeezed out by the other.
 fn stacked_heights(height: u16, table_wanted: u16) -> [u16; 4] {
     let chrome = if height >= FULL_CHROME_MIN_HEIGHT {
         3
@@ -2255,7 +2269,12 @@ fn stacked_heights(height: u16, table_wanted: u16) -> [u16; 4] {
         1
     };
     let body = height.saturating_sub(2 * chrome);
-    let table = table_wanted.min(body / 2);
+    let cap = if body >= 24 {
+        body / 2
+    } else {
+        (body / 3).max(4.min(body / 2))
+    };
+    let table = table_wanted.min(cap);
     [chrome, table, body - table, chrome]
 }
 
@@ -2599,7 +2618,16 @@ fn render_detail(
         }
         None => area,
     };
-    let [log_area, act_area] = two_panes(body, 65);
+    let [mut log_area, mut act_area] = two_panes(body, 65);
+    // Two stacked panes each too short to read: show only the one in focus
+    // (Tab switches), the log when the table has it.
+    if body.width < SIDE_BY_SIDE_MIN_WIDTH && body.height < STACKED_PANES_MIN_HEIGHT {
+        if browse.focus == Focus::Activity {
+            (log_area, act_area) = (Rect::default(), body);
+        } else {
+            (log_area, act_area) = (body, Rect::default());
+        }
+    }
 
     let Some(pkg) = pkg else {
         f.render_widget(
@@ -3631,6 +3659,31 @@ mod filter_esc_tests {
 mod render_smoke_tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    fn screen(t: &Terminal<TestBackend>) -> String {
+        (0..t.backend().buffer().area.height)
+            .map(|y| row_text(t, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_short_terminal_keeps_a_package_row_and_one_readable_pane() {
+        let state = state_with_history();
+        let narrow = screen(&render_at(&state, 24, 10));
+        assert!(narrow.contains("foo"), "{narrow}");
+        assert!(narrow.contains("Event Log") && !narrow.contains("Agent Activity"));
+        assert!(narrow.contains("log line"), "{narrow}");
+        let wide = screen(&render_at(&state, 80, 10));
+        assert!(wide.contains("foo") && wide.contains("log line"), "{wide}");
+        assert!(wide.contains("Agent Activity"));
+    }
+
+    #[test]
+    fn the_too_small_notice_gives_the_size() {
+        let terminal = render_at(&state_with_history(), 40, 5);
+        assert!(row_text(&terminal, 0).contains("(40x5, need 20x6)"));
+    }
 
     fn state_with_history() -> TuiState {
         let scope = RunScope {
