@@ -4370,7 +4370,71 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
             stderr,
         });
     }
+    collapse_generated_changes(checkout_dir);
     Ok(())
+}
+
+/// A `tar_scm` service with `changesgenerate` writes one entry listing every
+/// upstream commit since the last release (a hundred bullets for a package
+/// that was a few releases behind). That entry is cut down to `- Update to
+/// <version>`, which is all a packaging changelog needs to say.
+fn collapse_generated_changes(checkout_dir: &Path) {
+    let Ok(rd) = fs::read_dir(checkout_dir) else {
+        return;
+    };
+    for file in rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "changes"))
+    {
+        let Some(name) = file.file_name() else {
+            continue;
+        };
+        let pristine = fs::read_to_string(checkout_dir.join(".osc").join("sources").join(name))
+            .unwrap_or_default();
+        if let Ok(working) = fs::read_to_string(&file)
+            && let Some(collapsed) = collapsed_generated_entry(&working, &pristine)
+        {
+            let _ = fs::write(&file, collapsed);
+        }
+    }
+}
+
+fn collapsed_generated_entry(working: &str, pristine: &str) -> Option<String> {
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let lines: Vec<&str> = working.lines().collect();
+    let first = lines.iter().position(|l| is_separator(l.trim()))?;
+    let end = lines[first + 1..]
+        .iter()
+        .position(|l| is_separator(l.trim()))
+        .map_or(lines.len(), |i| first + 1 + i);
+    let entry = lines[first..end].join("\n");
+    if pristine.contains(entry.trim_end()) {
+        return None;
+    }
+    let body_from = (first + 2).min(end);
+    let head = lines[body_from..end]
+        .iter()
+        .find(|l| l.trim_start().starts_with("- Update to version "))?;
+    let version = head
+        .trim_start()
+        .trim_start_matches("- Update to version ")
+        .trim_end_matches(':')
+        .trim();
+    let sub_bullets = lines[body_from..end]
+        .iter()
+        .filter(|l| l.starts_with("  * ") || l.starts_with("  - "))
+        .count();
+    if version.is_empty() || sub_bullets < 5 {
+        return None;
+    }
+    let mut out: Vec<String> = lines[..body_from].iter().map(|l| l.to_string()).collect();
+    out.push(format!("- Update to {version}"));
+    out.push(String::new());
+    out.extend(lines[end..].iter().map(|l| l.to_string()));
+    let mut text = out.join("\n");
+    text.push('\n');
+    Some(text)
 }
 
 /// Macro forms that run a program or read a file while `rpmspec` expands them.
