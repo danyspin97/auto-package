@@ -181,6 +181,9 @@ pub enum Task {
     /// Patching a distro package branched into the project because another
     /// package needs a change to it.
     PatchDependency,
+    /// One cheap look at a spec that has just built, to drop leftovers of the
+    /// failed attempts that no longer serve a purpose.
+    PostBuildReview,
 }
 
 impl std::fmt::Display for Task {
@@ -195,6 +198,7 @@ impl std::fmt::Display for Task {
             }
             Task::TranslateUnresolvableDeps => write!(f, "translate deps"),
             Task::PatchDependency => write!(f, "patch dependency"),
+            Task::PostBuildReview => write!(f, "post-build review"),
         }
     }
 }

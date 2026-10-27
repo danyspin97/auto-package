@@ -2195,6 +2195,17 @@ struct RunState {
     /// bound was relaxed: the retry is only worth a build when the spec
     /// then differs from this.
     relaxed_from_spec: Option<String>,
+    /// The post-build review ran (or was ruled out) for this run.
+    post_review_done: bool,
+    /// Set while the build of a post-build-review edit is pending: what to put
+    /// back when that build does not succeed.
+    post_review_revert: Option<PostReviewRevert>,
+}
+
+/// The state a post-build review's edit is rolled back to.
+struct PostReviewRevert {
+    spec: String,
+    snapshot: CheckoutSnapshot,
 }
 
 /// Why [`branch_from_linked`] did not branch the package.
@@ -2433,6 +2444,8 @@ fn run_stages(
         last_log_digest: None,
         identical_logs: 0,
         relaxed_from_spec: None,
+        post_review_done: false,
+        post_review_revert: None,
     };
 
     let obs_status = checkout_stage(&ctx, &mut st)?;
@@ -5860,8 +5873,23 @@ fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResu
         Emit::new(reporter, build_step.id),
     );
 
+    // A build of a post-build review's edit that did not succeed: the spec that
+    // built before is what the package ends with.
+    if let Err(e) = &build_result
+        && let Some(revert) = st.post_review_revert.take()
+    {
+        return revert_post_review(ctx, st, build_step, revert, &e.to_string());
+    }
+    st.post_review_revert = None;
+
     match build_result {
-        Ok(()) => Ok(RoundEnd::Finished(build_succeeded(ctx, st, build_step))),
+        Ok(()) => {
+            if let Some(end) = post_build_review(ctx, st, &build_log) {
+                build_step.finish(StepOutcome::Ok);
+                return Ok(end);
+            }
+            Ok(RoundEnd::Finished(build_succeeded(ctx, st, build_step)))
+        }
         Err(osc::Error::UnresolvableDeps {
             names: deps,
             detail,
@@ -5970,16 +5998,7 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
     record_rpmlint(config, obs_name, ws, reporter);
     st.step_attempts
         .skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
-    update_state(ws, reporter, |state| {
-        state.policy_version = POLICY_VERSION;
-        state.last_built_version = Some(config.version.clone());
-        state.last_outcome = Some("success".to_string());
-        state.last_failure_reason = None;
-        // A ladder spent on an earlier spec no longer holds back this build,
-        // and a later rebuild of the same spec must not be refused for it.
-        state.ladder_spec_hash = None;
-        state.ladder_reason = None;
-    });
+    record_built_state(ctx);
     warn_if_err(
         reporter,
         "updating the latest-build link",
@@ -5994,6 +6013,225 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
     PipelineResult::Built {
         rpm_name: rpm_name.clone(),
     }
+}
+
+/// Record in the package's state that its current spec built.
+fn record_built_state(ctx: &RunCtx) {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        ..
+    } = ctx;
+    update_state(ws, *reporter, |state| {
+        state.policy_version = POLICY_VERSION;
+        state.last_built_version = Some(config.version.clone());
+        state.last_outcome = Some("success".to_string());
+        state.last_failure_reason = None;
+        // A ladder spent on an earlier spec no longer holds back this build,
+        // and a later rebuild of the same spec must not be refused for it.
+        state.ladder_spec_hash = None;
+        state.ladder_reason = None;
+    });
+}
+
+/// The least model budget worth a post-build review turn.
+const POST_REVIEW_MIN_BUDGET_USD: f64 = 0.5;
+/// Most diff lines and warning lines the post-build review is given.
+const POST_REVIEW_DIFF_LINES: usize = 200;
+const POST_REVIEW_WARNING_LINES: usize = 60;
+
+/// The lines of a successful build log worth a second look: compiler and
+/// rpmlint warnings, capped, so the agent never reads the log itself.
+fn build_warnings_extract(log: &str) -> String {
+    const MARKERS: [&str; 6] = [
+        " W: ",
+        " E: ",
+        "warning:",
+        "Installed (but unpackaged)",
+        "Deprecat",
+        "rpmlint",
+    ];
+    log.lines()
+        .filter(|l| MARKERS.iter().any(|m| l.contains(m)))
+        .take(POST_REVIEW_WARNING_LINES)
+        .map(|l| l.chars().take(300).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One cheap clean-up turn on a spec that has just built, when the agent
+/// changed it on the way (a fix attempt or the pre-build review). `Some` is
+/// the round to run next: the turn edited the spec, so it is built again, and
+/// [`revert_post_review`] puts the built spec back if that build fails. `None`
+/// ends the package as built: there was nothing to review, nothing to improve,
+/// or the turn could not be used. Runs at most once per run.
+fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Option<RoundEnd> {
+    let RunCtx {
+        config,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    if std::mem::replace(&mut st.post_review_done, true)
+        || config.no_agent
+        || config.budget_usd - st.spent_usd < POST_REVIEW_MIN_BUDGET_USD
+    {
+        return None;
+    }
+    let good = strip_and_rewrite(spec_path);
+    let generated = std::fs::read_to_string(ws.dir().join("spec.generated")).unwrap_or_default();
+    let diff = unified_diff(&generated, &good);
+    // Nothing the agent changed: the spec is the generated one and was vetted.
+    if good.trim().is_empty() || diff.trim().is_empty() {
+        return None;
+    }
+    let diff: String = diff
+        .lines()
+        .take(POST_REVIEW_DIFF_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let warnings = std::fs::read_to_string(build_log)
+        .map(|l| build_warnings_extract(&l))
+        .unwrap_or_default();
+    let notes = std::fs::read_to_string(ws.notes()).unwrap_or_default();
+    let journal: String = notes
+        .chars()
+        .rev()
+        .take(4096)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let context = format!(
+        "Changes the earlier turns made to the generated spec (`-` removed, `+` added):\n{}\n\
+         Warnings of the build (a capped extract; the log itself is not needed):\n{}\n\
+         End of the attempt journal:\n{}",
+        crate::agent::fenced_data(&diff),
+        crate::agent::fenced_data(if warnings.is_empty() {
+            "(none)"
+        } else {
+            &warnings
+        }),
+        crate::agent::fenced_data(&journal),
+    );
+
+    let snapshot = CheckoutSnapshot::take(checkout_dir);
+    let turn = agent_turn(
+        TurnCtx {
+            label: "post-build-review",
+            task: crate::agent::Task::PostBuildReview,
+            event_task: ap_core::event::Task::PostBuildReview,
+            // The cheapest tier: a wrong edit costs a rebuild, then a revert.
+            attempt: 1,
+            hint: None,
+            unresolvable_deps: &[],
+            unresolvable_detail: &[],
+            checkout_dir: Some(checkout_dir),
+            from_repo_archive: st.from_repo_archive,
+            resume: false,
+            context: Some(&context),
+        },
+        ctx.turn_env(),
+        &mut st.spent_usd,
+        &mut st.session_id,
+        &mut st.step_attempts,
+    );
+    let (agent_step, outcome) = match turn {
+        Ok(v) => v,
+        Err((e, _)) => {
+            discard_failed_turn(
+                ws.notes(),
+                reporter,
+                &snapshot,
+                spec_path,
+                &good,
+                "PostBuildReview",
+            );
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!("{rpm_name}: post-build review skipped: {e}"),
+            });
+            return None;
+        }
+    };
+    let mut staged: Vec<String> = Vec::new();
+    let effect = apply_turn_and_reset(
+        ApplyTurnCtx {
+            config,
+            checkout_dir,
+            spec_path,
+            step: &agent_step,
+            before: &good,
+            rpm_name,
+            label: "PostBuildReview",
+            attempt: st.attempts,
+            notes_path: ws.notes(),
+            snapshot: Some(&snapshot),
+            kept: &[],
+            staged_out: Some(&mut staged),
+            rejected_out: None,
+        },
+        &outcome,
+        reporter,
+        &mut st.sdist_top_level,
+        &mut st.from_repo_archive,
+    );
+    match effect {
+        Ok(TurnEffect::Edited) => {
+            st.post_review_revert = Some(PostReviewRevert {
+                spec: good,
+                snapshot,
+            });
+            Some(RoundEnd::Retry)
+        }
+        // No change, a refused edit (already rolled back by the gate), or an
+        // effect the review has no business with: the built spec stands.
+        Ok(_) | Err(_) => {
+            snapshot.restore(reporter, Some(&agent_step));
+            restore_spec(spec_path, &good, Some(&agent_step), reporter);
+            None
+        }
+    }
+}
+
+/// The build after a post-build review's edit failed: put back the spec (and
+/// checkout files) that built, publish it again, and end the package as built.
+/// The RPMs of that build are still in the RPM directory.
+fn revert_post_review(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    build_step: StepGuard<'_>,
+    revert: PostReviewRevert,
+    why: &str,
+) -> Result<RoundEnd, PipelineResult> {
+    let reporter = ctx.reporter;
+    let build_step = build_step.finish(StepOutcome::Failed);
+    reporter.report(&Event::Warning {
+        step: Some(build_step.id),
+        message: format!(
+            "{}: the build after the post-build review failed ({}); reverting to the spec \
+             that built",
+            ctx.rpm_name,
+            brief(why)
+        ),
+    });
+    revert.snapshot.restore(reporter, Some(&build_step));
+    restore_spec(&ctx.spec_path, &revert.spec, Some(&build_step), reporter);
+    append_notes(
+        ctx.ws.notes(),
+        "\n## Post-build review reverted\nThe build after the review's edit failed; the spec that built was restored.\n",
+    );
+    commit_step(ctx, st)?;
+    record_built_state(ctx);
+    osc::invalidate_project_packages_cache(&ctx.config.project);
+    Ok(RoundEnd::Finished(PipelineResult::Built {
+        rpm_name: ctx.rpm_name.clone(),
+    }))
 }
 
 /// OBS reported unresolvable dependencies for the build.
@@ -17591,6 +17829,18 @@ mod hygiene_tests {
     use super::*;
 
     #[test]
+    fn the_post_build_warnings_extract_is_capped_and_skips_progress_lines() {
+        let mut log = String::from("[ 12s] compiling foo.c\n");
+        for i in 0..200 {
+            log.push_str(&format!("[ 99s] foo.c:{i}: warning: unused variable\n"));
+        }
+        let out = build_warnings_extract(&log);
+        assert_eq!(out.lines().count(), POST_REVIEW_WARNING_LINES);
+        assert!(!out.contains("compiling foo.c"));
+        assert_eq!(build_warnings_extract("all quiet\n"), "");
+    }
+
+    #[test]
     fn a_service_that_rewrites_version_is_undone() {
         let before = "Name: pcp\nVersion:        7.2.2\nRelease: 0\n";
         let after = "Name: pcp\nVersion:        5.2.5\nRelease: 0\n";
@@ -18335,6 +18585,8 @@ mod hygiene_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
+        post_review_done: false,
+        post_review_revert: None,
         };
 
         let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &lookup)
@@ -18542,6 +18794,8 @@ mod hygiene_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
+        post_review_done: false,
+        post_review_revert: None,
         };
         let step = StepDir {
             path: root.path().join("step"),
@@ -18763,6 +19017,8 @@ mod hygiene_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
+        post_review_done: false,
+        post_review_revert: None,
         };
         let offline = |_: &PipelineConfig| Err("PyPI fetch failed: offline".to_string());
         let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &offline)
@@ -19165,6 +19421,8 @@ mod ladder_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
+        post_review_done: false,
+        post_review_revert: None,
         };
         let snapshot = CheckoutSnapshot::take(&checkout);
         let step = StepDir {

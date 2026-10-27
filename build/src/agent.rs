@@ -3576,6 +3576,8 @@ pub enum Task {
     /// Patch a distro package that was branched into the project because a
     /// dependent package needs a change to it (convention 62).
     PatchDependency,
+    /// Look once more at a spec that built, after fix attempts changed it.
+    PostBuildReview,
 }
 
 /// Input to one agent turn.
@@ -5233,6 +5235,25 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              `%license`): the problem is the one given under \"Context\" below, so do not look for \
              the file or try to run rpmspec yourself."
         }
+        Task::PostBuildReview => {
+            "The package just BUILT. This is an optional clean-up pass over the spec, not a \
+             fix: the build is green and must stay green. Any edit costs a full rebuild, and \
+             a rebuild that fails throws your edit away, so edit only for a clear, safe win.\n\
+             \n\
+             The Context below holds the diff of the spec against the generated one (what \
+             the earlier turns changed) and the warnings of the build. Look for: debug \
+             leftovers added to diagnose a failure (`config.log` dumps, `ls`/`cat`/`set -x` \
+             lines, `|| true` that hides errors); a workaround of a failed attempt that the \
+             journal shows was a wrong guess and that the build does not need; a deselected \
+             or skipped test without a comment naming the reason; a BuildRequires or Requires \
+             that nothing uses; `%files` entries that are too broad or listed twice; real \
+             rpmlint warnings that a spec change fixes.\n\
+             \n\
+             Do NOT remove anything that fixed a build failure unless the log proves it \
+             unnecessary, do not reformat, reorder or rewrite working lines, do not touch \
+             Version, sources or patches, and do not read the whole build log. If nothing \
+             clearly improves the package, return `no_change` without investigating further."
+        }
         Task::PatchDependency => {
             "This package is a distro package that was branched into the project \
              because another package needs a change to it (convention 62). The \
@@ -5333,6 +5354,11 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     let budget_line = match req.task {
         Task::Review => format!(
             "Pre-build review. ${remaining:.2} of model budget left for this package.",
+            remaining = (req.budget_usd - req.spent_usd).max(0.0),
+        ),
+        Task::PostBuildReview => format!(
+            "Post-build review. ${remaining:.2} of model budget left for this package; \
+             keep this turn short.",
             remaining = (req.budget_usd - req.spent_usd).max(0.0),
         ),
         Task::PatchDependency => format!(
@@ -5951,6 +5977,18 @@ mod tests {
 
     /// The priorities frame every convention, so they must come first, and
     /// must name both halves of the goal: time, and building AND working.
+    #[test]
+    fn the_post_build_review_prompt_is_a_cautious_cleanup() {
+        let ws = std::path::Path::new("/tmp/ws");
+        let mut req = request(ws, &[]);
+        req.task = Task::PostBuildReview;
+        req.attempt = 1;
+        let prompt = build_turn_prompt(&req);
+        assert!(prompt.contains("just BUILT"));
+        assert!(prompt.contains("no_change"));
+        assert!(prompt.contains("Post-build review."));
+    }
+
     #[test]
     fn static_system_prompt_opens_with_the_priorities() {
         let combined = static_system_prompt();

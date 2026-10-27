@@ -1305,6 +1305,7 @@ impl TuiState {
                     }
                     Task::TranslateUnresolvableDeps => "Looking up dependency names".to_string(),
                     Task::PatchDependency => "Patching a dependency".to_string(),
+                    Task::PostBuildReview => "Reviewing the built spec".to_string(),
                 };
                 state.add_agent_activity(ActivityKind::Task, task_str.clone());
                 state.add_log(LogLevel::Info, format!("Agent: {task_str}"));
