@@ -5613,6 +5613,12 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
             message: format!("removing '{name}' from OBS: the package does not use it"),
         });
     }
+    for name in osc::discard_untracked_archives(&ctx.checkout_dir, &plan.skipped) {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: format!("deleted '{name}' from the checkout: the package does not use it"),
+        });
+    }
     let mut files = plan.files.clone();
     files.extend(removed);
     if let Err(e) = osc::commit(

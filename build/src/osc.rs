@@ -4770,6 +4770,38 @@ pub fn remove_tracked_strays(
     removed
 }
 
+/// Archives in the checkout that [`publish_plan`] left out and OBS does not
+/// track (an sdist fetched for a version that was then given up, the previous
+/// release's tarball), deleted from the checkout so they do not pile up there
+/// or show as added. Returns the names deleted.
+pub fn discard_untracked_archives(checkout_dir: &Path, skipped: &[String]) -> Vec<String> {
+    const ARCHIVES: &[&str] = &[
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar", ".tgz", ".tbz", ".txz", ".zip",
+        ".crate", ".whl",
+    ];
+    let tracked = tracked_files(checkout_dir);
+    let mut gone = Vec::new();
+    for name in skipped {
+        if tracked.contains(name)
+            || !is_safe_file_arg(name)
+            || !ARCHIVES.iter().any(|s| name.ends_with(s))
+        {
+            continue;
+        }
+        // Scheduled for addition by an earlier `osc add`: unschedule it first.
+        let _ = proc::capture(
+            "osc",
+            &["revert", name.as_str()],
+            checkout_dir,
+            Emit::quiet(),
+        );
+        if fs::remove_file(checkout_dir.join(name)).is_ok() {
+            gone.push(name.clone());
+        }
+    }
+    gone
+}
+
 /// Commit the package to OBS, triggering a remote build.
 ///
 /// Only `files` are staged and committed. `osc addremove` and `osc ci` both
