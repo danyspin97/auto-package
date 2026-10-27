@@ -9446,7 +9446,11 @@ fn apply_turn_outcome_with(
                     "adding the .changes entry for the agent's edit",
                     osc::add_changes_entry(
                         checkout_dir,
-                        &changes_message(&outcome.reasoning),
+                        &without_own_version(
+                            &changes_message(&outcome.reasoning),
+                            &config.pkg_name,
+                            &config.version,
+                        ),
                         Emit::new(reporter, step.id),
                     ),
                 );
@@ -10323,6 +10327,35 @@ fn changes_message(reasoning: &str) -> String {
         line = "Update the packaging".to_string();
     }
     line
+}
+
+/// `line` without a trailing "in/for/of <package> <version>" naming the release
+/// this run packages: the `- Update to <version>` entry just below says which
+/// release that is. Another package's version, or one mid-sentence, stays.
+fn without_own_version(line: &str, package: &str, version: &str) -> String {
+    let Some(head) = line.strip_suffix(version) else {
+        return line.to_string();
+    };
+    if !head.ends_with(' ') {
+        return line.to_string();
+    }
+    let mut words: Vec<&str> = head.split_whitespace().collect();
+    if words
+        .last()
+        .is_some_and(|w| w.eq_ignore_ascii_case(package))
+    {
+        words.pop();
+    }
+    if words
+        .last()
+        .is_some_and(|w| ["in", "for", "of", "with", "from", "on", "against"].contains(w))
+    {
+        words.pop();
+    }
+    if words.is_empty() {
+        return line.to_string();
+    }
+    words.join(" ")
 }
 
 /// Count added/removed lines in a diff produced by [`unified_diff`].
@@ -14651,6 +14684,31 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_packages_own_version_is_left_to_the_update_entry() {
+        assert_eq!(
+            without_own_version(
+                "Raise the cmake minimum to 3.16 to match cmake_minimum_required in Catch2 3.16.1",
+                "Catch2",
+                "3.16.1"
+            ),
+            "Raise the cmake minimum to 3.16 to match cmake_minimum_required"
+        );
+        assert_eq!(
+            without_own_version(
+                "Add the CPS directory for CRCpp 1.2.3.0",
+                "CRCpp",
+                "1.2.3.0"
+            ),
+            "Add the CPS directory"
+        );
+        // Another version, or the version mid-sentence, is kept.
+        let keep = "Raise the cmake minimum to 3.16";
+        assert_eq!(without_own_version(keep, "Catch2", "3.16.1"), keep);
+        let mid = "Build 3.16.1 with ninja";
+        assert_eq!(without_own_version(mid, "Catch2", "3.16.1"), mid);
+    }
 
     #[test]
     fn changes_message_is_the_first_sentence_on_one_line() {

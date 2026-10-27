@@ -576,7 +576,10 @@ one; the pipeline runs `rpmspec --parse` on it once you finish.
 - "why": required when action is "blocked" or "use_upstream_wheel" — for the
 latter, name the exact missing compiler/SDK and quote the build.log line proving it
 (convention 28 Exception 4)
-- "reasoning": one sentence summarising what you did
+- "reasoning": one sentence summarising what you did. It becomes the package's
+  `.changes` bullet, which sits right under `- Update to <version>`: do not name
+  the package or the release being packaged in it (a version the change itself
+  is about, such as a cmake minimum, is fine)
 - "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.
   REQUIRED format (each entry must name a specific file or pattern):
   ["Read source/pyproject.toml lines 1-50",
