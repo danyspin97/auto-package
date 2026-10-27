@@ -861,7 +861,8 @@ fn main() -> color_eyre::Result<()> {
 pub(crate) fn choose_distro(requested: Option<&str>, project: &str, arch: &str) -> String {
     let (chosen, others) = ap_build::osc::choose_repository(project, requested, arch);
     if !others.is_empty() {
-        eprintln!(
+        // Called per package during an `update`, so while the TUI owns the screen.
+        ap_core::diag!(
             "note: {project} builds for {chosen} and {}; using {chosen} (--distro picks another)",
             others.join(", ")
         );
