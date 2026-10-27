@@ -1946,27 +1946,60 @@ fn update_config_for_outdated(
         })
         .cloned()
         .unwrap_or(rpm);
-    // The release the constraint names, when PyPI has it: the packages of one
-    // release family are pinned to each other, and the newest of one may not
-    // match the rest. Otherwise the newest release.
-    let named = required.filter(|v| {
-        ap_build::pipeline::fetch_pypi_json(dep, v)
-            .ok()
-            .flatten()
-            .is_some()
-    });
-    let newest = match named {
-        Some(v) => v.to_string(),
-        None => pypi_latest_version(dep, reporter)
-            .ok_or_else(|| "it has no PyPI release to update to".to_string())?,
+    let header = ap_build::update::spec_for_package(project, &real, emit)
+        .and_then(|text| ap_build::spec::parse_header(&text));
+    let current = header.as_ref().map(|h| h.version.clone());
+    // Where the recipe says its upstream is decides where "newest" comes from:
+    // a package that does not come from PyPI is not looked up there, whatever
+    // an unrelated PyPI project of the same name has to offer.
+    let upstream = header
+        .as_ref()
+        .map(ap_build::update::declared_upstream)
+        .unwrap_or(ap_build::update::DeclaredUpstream::Unknown);
+    let (newest, source_repo) = match upstream {
+        ap_build::update::DeclaredUpstream::Git(url) => {
+            let v = ap_build::sources::latest_release(&url)
+                .map_err(|e| format!("the latest release of {url} is unknown: {e}"))?;
+            (v, Some(url))
+        }
+        _ if config.rpm_name.starts_with("python-")
+            || upstream == ap_build::update::DeclaredUpstream::Pypi =>
+        {
+            // The release the constraint names, when PyPI has it: the packages
+            // of one release family are pinned to each other, and the newest of
+            // one may not match the rest. Otherwise the newest release.
+            let named = required.filter(|v| {
+                ap_build::pipeline::fetch_pypi_json(dep, v)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            });
+            let v = match named {
+                Some(v) => v.to_string(),
+                None => pypi_latest_version(dep, reporter)
+                    .ok_or_else(|| "it has no PyPI release to update to".to_string())?,
+            };
+            (v, None)
+        }
+        _ => {
+            return Err(format!(
+                "{real} does not name a PyPI or git upstream, so there is no way to tell \
+                 its newest release"
+            ));
+        }
     };
-    let current = ap_build::update::spec_for_package(project, &real, emit)
-        .and_then(|text| ap_build::spec::parse_header(&text))
-        .map(|h| h.version);
     if current.as_deref() == Some(newest.as_str()) {
         return Err(format!(
-            "{real} is already at the newest release ({newest}); a newer one than PyPI has \
-             cannot be built"
+            "{real} is already at the newest release ({newest}); a newer one than upstream \
+             has cannot be built"
+        ));
+    }
+    // Never "update" to something older than the recipe already has.
+    if let Some(cur) = current.as_deref()
+        && !ap_build::update::is_newer(&newest, cur)
+    {
+        return Err(format!(
+            "upstream's newest release of {real} ({newest}) is not newer than {cur}"
         ));
     }
     ap_core::diag!(
@@ -1977,7 +2010,7 @@ fn update_config_for_outdated(
         pkg_name: dep.to_string(),
         rpm_name: real.to_lowercase(),
         version: newest,
-        source_repo: None,
+        source_repo,
         subprojects: Vec::new(),
         force: true,
         regen: false,

@@ -241,6 +241,39 @@ fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
     out
 }
 
+/// Where a spec's own `Source:` says its upstream is, without the guesses
+/// [`ecosystems`] makes: a PyPI URL or wheel name, or a git forge. A package
+/// that names neither is not looked up on PyPI by name, since a PyPI project
+/// can share the name of an unrelated C library (PyPI's `aws-c-http` is a
+/// placeholder at 0.0.1).
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeclaredUpstream {
+    Pypi,
+    Git(String),
+    Unknown,
+}
+
+pub fn declared_upstream(header: &spec::Header) -> DeclaredUpstream {
+    let source = header.source.as_deref().unwrap_or_default();
+    if pypi::pypi_name_from_source_url(source).is_some()
+        || pypi::pypi_name_and_version_from_wheel_filename(source).is_some()
+    {
+        return DeclaredUpstream::Pypi;
+    }
+    let expanded = header.expanded_source.as_deref().unwrap_or_default();
+    for line in [expanded, header.url.as_deref().unwrap_or_default(), source] {
+        if let Some(url) = git_repo_url(line) {
+            return DeclaredUpstream::Git(url);
+        }
+    }
+    DeclaredUpstream::Unknown
+}
+
+/// Whether `latest` is strictly newer than `packaged`.
+pub fn is_newer(latest: &str, packaged: &str) -> bool {
+    compare_versions(latest, packaged) == pypi::VersionCompare::Newer
+}
+
 /// Return a canonical `https://<host>/<project_path>` for a git-forge URL
 /// found inside a `Source:` line, or `None` if the line doesn't point at a
 /// recognised git host.
@@ -879,6 +912,27 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
                 new_version: "13.2.0.0".into(),
             }
         );
+    }
+
+    #[test]
+    fn declared_upstream_ignores_a_pypi_project_that_only_shares_the_name() {
+        let spec = "Name: aws-c-http\nVersion: 1.1.1\nURL: https://github.com/awslabs/aws-c-http\n\
+                    Source0: https://github.com/awslabs/%{name}/archive/v%{version}.tar.gz\n";
+        let header = spec::parse_header(spec).unwrap();
+        assert_eq!(
+            declared_upstream(&header),
+            DeclaredUpstream::Git("https://github.com/awslabs/aws-c-http".into())
+        );
+        let bare = spec::parse_header("Name: foo\nVersion: 1\nSource0: foo-%{version}.tar.gz\n")
+            .unwrap();
+        assert_eq!(declared_upstream(&bare), DeclaredUpstream::Unknown);
+    }
+
+    #[test]
+    fn is_newer_refuses_a_downgrade() {
+        assert!(is_newer("1.1.1", "0.11.0"));
+        assert!(!is_newer("0.0.1", "1.1.1"));
+        assert!(!is_newer("1.1.1", "1.1.1"));
     }
 
     #[test]
