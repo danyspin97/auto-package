@@ -2997,6 +2997,15 @@ fn merge_pending_changes_file(checkout_dir: &Path) {
         .file_name()
         .and_then(|n| fs::read_to_string(checkout_dir.join(".osc/sources").join(n)).ok())
         .unwrap_or_default();
+    // No copy of what OBS holds although OBS tracks the file: every entry would
+    // look new and the history would be merged into one.
+    if committed.is_empty()
+        && file
+            .file_name()
+            .is_some_and(|n| tracked_files(checkout_dir).contains(&n.to_string_lossy().to_string()))
+    {
+        return;
+    }
     if let Some(merged) = merge_pending_changes(&current, &committed) {
         let _ = fs::write(file, merged);
     }
