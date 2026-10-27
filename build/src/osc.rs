@@ -2978,12 +2978,40 @@ fn without_unpublished_update_entry(
 /// Longest line of a `.changes` entry the style checks accept.
 const CHANGES_WIDTH: usize = 67;
 
+/// A long `- Did this and did that` bullet as two bullets, when what follows
+/// the ` and ` starts with a verb of its own (a second change, not the second
+/// half of one object: "Drop a and b" stays whole).
+fn split_bullet(line: &str) -> Option<[String; 2]> {
+    const VERBS: &[&str] = &[
+        "add", "drop", "remove", "fix", "use", "switch", "enable", "disable", "install", "move",
+        "replace", "require", "build", "ship", "split", "rename", "update", "set", "pass", "patch",
+        "keep", "stop", "skip", "make", "list", "own", "package", "provide",
+    ];
+    let lead = line.len() - line.trim_start().len();
+    let rest = &line[lead..];
+    let text = rest.strip_prefix("- ")?;
+    let (first, second) = text.split_once(" and ")?;
+    let (verb, _) = second.split_once(' ')?;
+    if !VERBS.contains(&verb.to_ascii_lowercase().as_str()) || first.split_whitespace().count() < 2
+    {
+        return None;
+    }
+    let mut cap = second.chars();
+    let second: String = cap.next()?.to_uppercase().chain(cap).collect();
+    let first = first.trim_end_matches(',');
+    let pad = &line[..lead];
+    Some([format!("{pad}- {first}"), format!("{pad}- {second}")])
+}
+
 /// `line` broken at word boundaries into lines of at most [`CHANGES_WIDTH`]
 /// characters, each continuation indented to sit under the text of a bullet
 /// (`- text`, `  * text`) or under the line it continues.
 fn wrap_changes_line(line: &str) -> Vec<String> {
     if line.chars().count() <= CHANGES_WIDTH {
         return vec![line.to_string()];
+    }
+    if let Some(parts) = split_bullet(line) {
+        return parts.iter().flat_map(|p| wrap_changes_line(p)).collect();
     }
     let lead = line.len() - line.trim_start().len();
     let rest = &line[lead..];
@@ -9529,7 +9557,11 @@ mod transient_broken_tests {
         );
         let pristine = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Old\n");
         let out = wrapped_newest_entry(&working, &pristine).unwrap();
-        assert!(out.contains("- Drop the obsolete fix-cmake.patch and add the CPS share directory\n  to the devel package for CRCpp 1.2.3.0\n"), "{out}");
+        assert!(out.contains("- Drop the obsolete fix-cmake.patch\n- Add the CPS share directory to the devel package for CRCpp\n  1.2.3.0\n"), "{out}");
+        // No second verb: wrapped under the bullet instead.
+        let one = "- Drop the obsolete fix-cmake.patch and the CPS share directory from the devel package of CRCpp";
+        assert_eq!(wrap_changes_line(one).len(), 2);
+        assert!(wrap_changes_line(one)[1].starts_with("  "));
         assert!(out.lines().all(|l| l.chars().count() <= 67));
         // A published entry is left alone.
         assert!(wrapped_newest_entry(&working, &working).is_none());
