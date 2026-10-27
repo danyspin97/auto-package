@@ -5643,7 +5643,7 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     files.extend(removed);
     if let Err(e) = osc::commit(
         &ctx.checkout_dir,
-        "Automated packaging",
+        &commit_message(&ctx.checkout_dir),
         &files,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
@@ -5651,6 +5651,73 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     }
     commit_step.finish(StepOutcome::Ok);
     Ok(())
+}
+
+/// The `osc ci` message: "Automated packaging", and when the newest `.changes`
+/// entry is not on OBS yet, a one-line summary of what it says.
+fn commit_message(checkout_dir: &Path) -> String {
+    const BASE: &str = "Automated packaging";
+    let Some(file) = std::fs::read_dir(checkout_dir).ok().and_then(|rd| {
+        let mut files: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "changes"))
+            .collect();
+        files.sort();
+        files.into_iter().next()
+    }) else {
+        return BASE.to_string();
+    };
+    let working = std::fs::read_to_string(&file).unwrap_or_default();
+    let pristine = file
+        .file_name()
+        .and_then(|n| {
+            std::fs::read_to_string(checkout_dir.join(".osc").join("sources").join(n)).ok()
+        })
+        .unwrap_or_default();
+    match changes_summary(&working, &pristine) {
+        Some(summary) => format!("{BASE}: {summary}"),
+        None => BASE.to_string(),
+    }
+}
+
+/// The bullets of the newest entry of `working` joined on one line and cut at
+/// 100 characters, or `None` when that entry is empty or already in `pristine`.
+fn changes_summary(working: &str, pristine: &str) -> Option<String> {
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let lines: Vec<&str> = working.lines().collect();
+    let first = lines.iter().position(|l| is_separator(l.trim()))?;
+    let end = lines[first + 1..]
+        .iter()
+        .position(|l| is_separator(l.trim()))
+        .map_or(lines.len(), |i| first + 1 + i);
+    if pristine.contains(lines[first..end].join("\n").trim_end()) {
+        return None;
+    }
+    let mut bullets: Vec<String> = Vec::new();
+    for l in &lines[(first + 2).min(end)..end] {
+        if let Some(b) = l.strip_prefix("- ") {
+            bullets.push(b.trim().to_string());
+        } else if l.starts_with("  ")
+            && !l.trim().is_empty()
+            && let Some(last) = bullets.last_mut()
+        {
+            last.push(' ');
+            last.push_str(l.trim());
+        }
+    }
+    let joined = bullets.join("; ");
+    if joined.is_empty() {
+        return None;
+    }
+    let mut out: String = joined.chars().take(100).collect();
+    if joined.chars().count() > 100 {
+        out = out
+            .rsplit_once(' ')
+            .map_or(out.clone(), |(h, _)| h.to_string());
+        out = out.trim_end_matches([',', ';', ':', ' ']).to_string();
+    }
+    Some(out)
 }
 
 /// Whether the unpacked source has a Python package (an `__init__.py`) within a
@@ -14901,6 +14968,26 @@ mod tests {
             "<services><service name=\"tar_scm\"><param name=\"revision\">v1.3.7</param><param name=\"url\">u</param></service></services>"
         );
         assert!(with_service_revision("<services/>", "v1").is_none());
+    }
+
+    #[test]
+    fn the_commit_message_summarises_the_new_changelog_entry() {
+        let sep = "-".repeat(67);
+        let old = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Old\n");
+        let new = format!(
+            "{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 2.0\n- Drop the obsolete fix.patch\n  and more\n\n"
+        );
+        assert_eq!(
+            changes_summary(&format!("{new}{old}"), &old).unwrap(),
+            "Update to 2.0; Drop the obsolete fix.patch and more"
+        );
+        let both = format!("{new}{old}");
+        assert!(changes_summary(&both, &both).is_none());
+        let long = format!(
+            "{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n- {}\n",
+            "word ".repeat(40)
+        );
+        assert!(changes_summary(&long, "").unwrap().chars().count() <= 100);
     }
 
     #[test]
