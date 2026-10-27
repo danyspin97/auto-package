@@ -132,12 +132,21 @@ pub enum SkipReason {
         packaged: String,
         latest: String,
     },
+    /// Upstream's newest release has a `-` in it (`25.12.19-2026-02-06-03fffb2`,
+    /// `1.3.12-pre3`), which an RPM `Version:` cannot hold.
+    NotAnRpmVersion {
+        latest: String,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SkipReason::SpecFetchFailed => write!(f, "osc cat failed for the spec"),
+            SkipReason::NotAnRpmVersion { latest } => write!(
+                f,
+                "upstream's newest release ({latest}) is not a valid RPM Version"
+            ),
             SkipReason::SpecHeaderMissing => write!(f, "spec has no Name:/Version:"),
             SkipReason::NoSourceLine => write!(f, "spec has no Source: line"),
             SkipReason::NotRecognized { source } => {
@@ -399,6 +408,14 @@ where
     };
 
     let latest = version_part(&latest);
+    // A release suffix that only says "this is the release" is not part of it.
+    let latest = ["-stable", "-release", "-final", "-src", "-source"]
+        .iter()
+        .find_map(|s| latest.strip_suffix(s))
+        .map_or(latest.clone(), str::to_string);
+    if latest.contains('-') && !header.version.contains('-') {
+        return skipped(rpm_name, SkipReason::NotAnRpmVersion { latest });
+    }
     if is_snapshot_version(&header.version) {
         return skipped(
             rpm_name,
@@ -927,6 +944,26 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
                 old_version: "13.1.1.3".into(),
                 new_version: "13.2.0.0".into(),
             }
+        );
+    }
+
+    #[test]
+    fn a_version_an_rpm_cannot_hold_is_skipped_and_a_release_suffix_is_dropped() {
+        let spec = "Name: foo\nVersion: 1.0\nURL: https://github.com/o/foo\n\
+                    Source0: https://github.com/o/foo/archive/v%{version}.tar.gz\n";
+        let fetch = |_: &str| Some(spec.to_string());
+        let c = classify("foo", &fetch, &only_repo("v25.12.19-2026-02-06-03fffb2"));
+        assert_eq!(
+            c.decision,
+            Decision::Skipped(SkipReason::NotAnRpmVersion {
+                latest: "25.12.19-2026-02-06-03fffb2".into()
+            })
+        );
+        let c = classify("foo", &fetch, &only_repo("2.1.13-stable"));
+        assert!(
+            matches!(c.decision, Decision::Update { ref new_version, .. } if new_version == "2.1.13"),
+            "{:?}",
+            c.decision
         );
     }
 
