@@ -460,6 +460,13 @@ const PRIORITIES: &str = r#"
    line points to. Fix every problem you can see in one turn rather than one
    per turn, and do not re-verify what the build log or an earlier turn has
    already shown.
+   Tokens are money: every file you read is billed again on every later step of
+   this turn. Never read a whole log or a whole large file. For `build.log`,
+   Grep for the error (`error:`, `FAILED`, `No such file`, `Bad exit status`) or
+   Read the last 40-80 lines, then Read only a small window (about 30-50 lines)
+   around what you found. Grep the spec and the source for the exact symbol
+   instead of reading them end to end, and do not re-read a range you have
+   already seen. Stop investigating as soon as the evidence supports a fix.
    Coverage is not the goal: a test that fails for a reason outside this package
    (a defective dependency, a missing fixture, no network, no device) is
    deselected with a comment naming the reason, never kept at the price of

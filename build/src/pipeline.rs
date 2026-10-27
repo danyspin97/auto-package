@@ -5174,7 +5174,11 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             // checkout is as the agent left it.
             let generated = write_download_service(&expanded, &missing, checkout_dir);
             if !missing.is_empty() && checkout_dir.join("_service").is_file() {
-                match osc::run_service(checkout_dir, Emit::new(reporter, validate_step.id)) {
+                match run_service_keeping_version(
+                    checkout_dir,
+                    spec_path,
+                    Emit::new(reporter, validate_step.id),
+                ) {
                     Ok(()) => missing = missing_source_files(&expanded, checkout_dir),
                     Err(e) => {
                         service_error = Some(if generated {
@@ -7937,8 +7941,16 @@ fn agent_turn(
         unresolvable_detail: ctx.unresolvable_detail,
         failed_deps: &config.failed_deps,
         unbuildable_deps: &config.unbuildable_deps,
+        // A session is only resumed on the model that wrote it: another model
+        // has no prompt cache for that history, so it would re-bill all of it
+        // at the uncached rate (an Opus turn resuming a Sonnet session cost
+        // $1.63 for 2k output tokens).
         session_id: if ctx.resume && !fresh_session.get() {
-            session_id.as_deref()
+            session_id.as_deref().and_then(|s| {
+                let (model, id) = s.split_once('|')?;
+                (model == crate::agent::model_for_attempt(ctx.attempt, model_rotation.get()))
+                    .then_some(id)
+            })
         } else {
             None
         },
@@ -8058,7 +8070,12 @@ fn agent_turn(
         }
     };
 
-    *session_id = outcome.session_id.clone();
+    *session_id = outcome.session_id.as_ref().map(|id| {
+        format!(
+            "{}|{id}",
+            crate::agent::model_for_attempt(ctx.attempt, model_rotation.get())
+        )
+    });
     *spent_usd += outcome.usage.cost_usd();
 
     // If the claude CLI's final `result` event carried a structured
@@ -9377,7 +9394,8 @@ fn apply_turn_outcome_with(
     if matches!(
         &effect,
         Ok(TurnEffect::Edited | TurnEffect::SwitchedToWheel)
-    ) && let Err(e) = osc::run_service(checkout_dir, Emit::new(reporter, step.id))
+    ) && let Err(e) =
+        run_service_keeping_version(checkout_dir, spec_path, Emit::new(reporter, step.id))
     {
         reporter.report(&Event::Warning {
             step: Some(step.id),
@@ -9386,6 +9404,42 @@ fn apply_turn_outcome_with(
     }
 
     effect
+}
+
+/// `osc service ra` runs EVERY service of the checkout, `mode="disabled"` ones
+/// included. An existing package's `_service` is the one OBS holds: a
+/// `tar_scm` pinned to the old revision plus `set_version` rewrites `Version:`
+/// back to the old release (pcp: 7.2.2 -> 5.2.5, so four builds compiled the
+/// old tarball). The version is the pipeline's decision, so put it back.
+fn run_service_keeping_version(
+    checkout_dir: &Path,
+    spec_path: &Path,
+    emit: Emit<'_>,
+) -> Result<(), osc::Error> {
+    let before = std::fs::read_to_string(spec_path).unwrap_or_default();
+    let result = osc::run_service(checkout_dir, emit);
+    if let Ok(after) = std::fs::read_to_string(spec_path)
+        && let Some(fixed) = keep_version_line(&before, &after)
+    {
+        ap_core::diag!("warning: osc service changed `Version:`; restoring the pipeline's version");
+        write_or_warn(spec_path, &fixed);
+    }
+    result
+}
+
+/// `after` with its `Version:` line replaced by the one in `before`, when the
+/// two differ; `None` when there is nothing to put back.
+fn keep_version_line(before: &str, after: &str) -> Option<String> {
+    let version_line = |text: &str| {
+        text.lines()
+            .find(|l| l.trim_start().to_ascii_lowercase().starts_with("version:"))
+            .map(str::to_string)
+    };
+    let (old, new) = (version_line(before)?, version_line(after)?);
+    if old == new {
+        return None;
+    }
+    Some(after.replacen(&new, &old, 1))
 }
 
 /// [`crate::stage::stage_files`] with the trees of this package's run.
@@ -17535,6 +17589,14 @@ mod settled_tests {
 #[cfg(test)]
 mod hygiene_tests {
     use super::*;
+
+    #[test]
+    fn a_service_that_rewrites_version_is_undone() {
+        let before = "Name: pcp\nVersion:        7.2.2\nRelease: 0\n";
+        let after = "Name: pcp\nVersion:        5.2.5\nRelease: 0\n";
+        assert_eq!(keep_version_line(before, after).as_deref(), Some(before));
+        assert_eq!(keep_version_line(before, before), None);
+    }
 
     #[test]
     fn empty_submodule_directories_are_found_in_a_source_tree() {
