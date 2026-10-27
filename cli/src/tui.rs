@@ -926,8 +926,8 @@ struct TuiState {
     /// Whether the run takes the `n` and `r` keys (see `TuiController::new`).
     accepts_requests: bool,
     run_start: Option<Instant>,
-    /// Toggled with `a` — show every package, including ones `visible_order`
-    /// would otherwise hide once they succeed.
+    /// Toggled with `a` — on by default, so a package that succeeded stays in
+    /// the list; off hides the ones `visible_order` would drop once they succeed.
     show_all: bool,
     /// Full pip-closure size from the most recent `ResolveFinished` — there
     /// is no live equivalent (see that event's handler), so this is kept as
@@ -951,7 +951,7 @@ impl TuiState {
             resolve_total: None,
             resolve_in_distro: None,
             run_start: None,
-            show_all: false,
+            show_all: true,
         }
     }
 
@@ -976,8 +976,8 @@ impl TuiState {
         self.last_global_log = Some(line);
     }
 
-    /// Packages still worth showing in the table: everything except ones that
-    /// built fine and need no further attention. Failed and missing-deps
+    /// Packages shown in the table: every one by default, or, with `show_all`
+    /// off, everything except ones that built fine and need no further attention. Failed and missing-deps
     /// packages stay visible since they may still need attention or get
     /// retried; the header's `n/N packages done` count still includes the
     /// hidden ones (it is derived from `packages`, not this list). Hiding
