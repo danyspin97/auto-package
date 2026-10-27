@@ -226,7 +226,7 @@ impl Sdist {
         };
         let dest = dest_dir.join(name);
 
-        if dest.exists() && sha256_of(&dest)? == self.sha256 {
+        if dest.is_file() && sha256_of(&dest).is_ok_and(|h| h == self.sha256) {
             return Ok(dest);
         }
 
