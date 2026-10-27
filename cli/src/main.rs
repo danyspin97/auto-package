@@ -1962,7 +1962,9 @@ fn update_config_for_outdated(
                 .map_err(|e| format!("the latest release of {url} is unknown: {e}"))?;
             (v, Some(url))
         }
-        _ if config.rpm_name.starts_with("python-")
+        // The dependency's own name decides, not the dependent's: a Python
+        // package can need a C library, which PyPI knows nothing about.
+        _ if real.to_ascii_lowercase().starts_with("python-")
             || upstream == ap_build::update::DeclaredUpstream::Pypi =>
         {
             // The release the constraint names, when PyPI has it: the packages
