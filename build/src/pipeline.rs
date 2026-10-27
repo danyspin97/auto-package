@@ -5653,10 +5653,10 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     Ok(())
 }
 
-/// The `osc ci` message: "Automated packaging", and when the newest `.changes`
+/// The `osc ci` message: "auto-package", and when the newest `.changes`
 /// entry is not on OBS yet, a one-line summary of what it says.
 fn commit_message(checkout_dir: &Path) -> String {
-    const BASE: &str = "Automated packaging";
+    const BASE: &str = "auto-package";
     let Some(file) = std::fs::read_dir(checkout_dir).ok().and_then(|rd| {
         let mut files: Vec<PathBuf> = rd
             .flatten()
