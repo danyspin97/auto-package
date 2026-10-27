@@ -753,10 +753,26 @@ pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> 
 
 /// Fetch the primary spec from an OBS package, picking the right filename
 /// out of whatever `osc ls` returns.
+///
+/// OBS answers slowly or not at all now and then (a sweep of hundreds of
+/// packages saw `osc ls`/`osc cat` time out), so a failed read is repeated a
+/// few times before the package is given up on. A package with no spec at all
+/// is not a failed read and is not retried.
 pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
-    let files = osc::list_package_files(project, pkg, emit)?;
-    let picked = pick_spec_filename(pkg, &files)?;
-    osc::cat_file(project, pkg, &picked, emit)
+    const ATTEMPTS: u32 = 3;
+    for attempt in 1..=ATTEMPTS {
+        if attempt > 1 {
+            std::thread::sleep(std::time::Duration::from_secs(5 * u64::from(attempt - 1)));
+        }
+        let Some(files) = osc::list_package_files(project, pkg, emit) else {
+            continue;
+        };
+        let picked = pick_spec_filename(pkg, &files)?;
+        if let Some(spec) = osc::cat_file(project, pkg, &picked, emit) {
+            return Some(spec);
+        }
+    }
+    None
 }
 
 /// Pure, testable half of [`spec_for_package`]'s filename picker.
