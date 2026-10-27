@@ -4954,13 +4954,18 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[Str
         // A prebuilt wheel used as the source, and the pristine copy of an
         // archive the pipeline rewrote (kept so its provenance is auditable).
         ".whl",
-        ".orig",
         // Detached signatures and keyrings that ship beside a source archive.
         ".sig",
         ".asc",
         ".keyring",
     ];
+    // `foo.tar.gz.orig`: the archive as upstream shipped it. A patch backup
+    // (`foo.spec.orig`) is not published.
+    let archive_original = name
+        .strip_suffix(".orig")
+        .is_some_and(|base| ARCHIVES.iter().any(|s| base.ends_with(s)));
     if FIXED.contains(&name)
+        || archive_original
         || SUFFIXES.iter().any(|s| name.ends_with(s))
         || sources.iter().any(|p| matches_source_name(p, name))
     {
