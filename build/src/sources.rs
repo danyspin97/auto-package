@@ -776,6 +776,23 @@ fn first_tag(v: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The repository name a forge answer (a release, or a tag list) says it comes
+/// from, read from its `tarball_url` (`.../repos/<owner>/<name>/tarball/<tag>`).
+/// A repository that was renamed or merged into another answers under the new
+/// name, so a mismatch with the name asked for means the releases are another
+/// project's.
+fn answered_repo_name(v: &serde_json::Value) -> Option<String> {
+    let obj = match v {
+        serde_json::Value::Array(items) => items.first()?,
+        other => other,
+    };
+    let url = obj.get("tarball_url")?.as_str()?;
+    let after = url.split("/repos/").nth(1)?;
+    let mut parts = after.split('/');
+    let _owner = parts.next()?;
+    parts.next().map(str::to_string)
+}
+
 // ── non-forge sources: release directories and direct tarballs ─────────────────
 //
 // Plenty of upstreams (GNU Savannah, ftp.gnu.org, self-hosted project sites)
@@ -1234,6 +1251,15 @@ pub fn latest_release(repo_url: &str) -> Result<String, String> {
         match get_json(url) {
             Ok(v) => match first_tag(&v) {
                 Some(tag) => {
+                    if let Some(answered) = answered_repo_name(&v)
+                        && !answered.eq_ignore_ascii_case(&repo_name)
+                    {
+                        return Err(format!(
+                            "{repo_url} now belongs to the repository {answered}, so its \
+                             releases are of another project; point the package at {answered} \
+                             to update it"
+                        ));
+                    }
                     let version = version_from_tag(&tag, &repo_name);
                     // A tag such as `start` or `latest` marks no release; the
                     // tag list may still have one.
@@ -1543,6 +1569,24 @@ pub fn tag_archive_url(repo_url: &str, version: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_repository_that_moved_to_another_name_is_recognised() {
+        let moved: serde_json::Value = serde_json::from_str(
+            r#"{"tag_name":"v3.16.1","tarball_url":"https://api.github.com/repos/catchorg/Catch2/tarball/v3.16.1"}"#,
+        )
+        .unwrap();
+        assert_eq!(answered_repo_name(&moved).as_deref(), Some("Catch2"));
+        let list: serde_json::Value = serde_json::from_str(
+            r#"[{"name":"v1","tarball_url":"https://api.github.com/repos/o/Same/tarball/v1"}]"#,
+        )
+        .unwrap();
+        assert_eq!(answered_repo_name(&list).as_deref(), Some("Same"));
+        assert_eq!(
+            answered_repo_name(&serde_json::json!({"tag_name": "v1"})),
+            None
+        );
+    }
+
     #[test]
     fn tag_archive_urls_follow_the_forge_layout() {
         assert_eq!(
