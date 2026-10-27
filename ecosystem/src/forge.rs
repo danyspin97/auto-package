@@ -143,7 +143,10 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
             Some(i) => rest[i + 1..].to_string(),
             None => rest.to_string(),
         }
-    } else if let Some((_user, rest)) = trimmed.split_once('@') {
+    } else if let Some((_user, rest)) = trimmed
+        .split_once('@')
+        .filter(|(user, _)| !user.contains('/'))
+    {
         // scp-style: user@host:path  → host/path
         rest.replacen(':', "/", 1)
     } else if let Some((host, _)) = trimmed.split_once('/')
