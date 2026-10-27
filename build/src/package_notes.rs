@@ -380,6 +380,11 @@ const SUSPICIOUS: &[&str] = &[
     "eval ",
     "chmod ",
     "base64 ",
+    "python -c",
+    "python3 -c",
+    "perl -e",
+    "ruby -e",
+    "nc ",
 ];
 
 /// Whether `pat` occurs at byte `i` of `hay` as a whole token: a pattern that
