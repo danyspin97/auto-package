@@ -10304,6 +10304,7 @@ fn changes_message(reasoning: &str) -> String {
         .trim_end_matches('.');
     // `.changes` is plain text, not a spec: a doubled `%%` is a spec escape.
     let first = first.replace("%%", "%");
+    let first = without_file_list(&first);
     // A changelog line is read at a glance: past 120 characters it is cut at a
     // clause boundary (or at a word when there is none), with no ellipsis.
     let mut line: String = if first.chars().count() > 120 {
@@ -10327,6 +10328,31 @@ fn changes_message(reasoning: &str) -> String {
         line = "Update the packaging".to_string();
     }
     line
+}
+
+/// `line` without a trailing parenthesis that lists files or paths
+/// (`... already contains (src/fa.c, fa.h, tests/fatest.c)`): a changelog says
+/// what changed, not where.
+fn without_file_list(line: &str) -> String {
+    let Some(head) = line.trim_end().strip_suffix(')') else {
+        return line.to_string();
+    };
+    let Some((before, inside)) = head.rsplit_once(" (") else {
+        return line.to_string();
+    };
+    let looks_like_files = |item: &str| {
+        let item = item.trim().trim_matches('`');
+        !item.is_empty()
+            && !item.contains(' ')
+            && (item.contains('/')
+                || item
+                    .rsplit_once('.')
+                    .is_some_and(|(_, e)| (1..=4).contains(&e.len())))
+    };
+    if before.trim().is_empty() || !inside.split(',').all(looks_like_files) {
+        return line.to_string();
+    }
+    before.trim_end().to_string()
 }
 
 /// `line` without a trailing "in/for/of <package> <version>" naming the release
@@ -14684,6 +14710,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_trailing_file_list_is_not_in_the_changelog() {
+        assert_eq!(
+            without_file_list(
+                "Drop the patch, which upstream already contains (src/fa.c, fa.h, tests/fatest.c)"
+            ),
+            "Drop the patch, which upstream already contains"
+        );
+        let keep = "Build with ninja (the default generator)";
+        assert_eq!(without_file_list(keep), keep);
+    }
 
     #[test]
     fn the_packages_own_version_is_left_to_the_update_entry() {
