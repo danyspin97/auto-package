@@ -2519,6 +2519,14 @@ pub fn invalidate_project_packages_cache(project: &str) {
 mod project_packages_cache_tests {
     use super::*;
 
+    /// The caches and their generation counters are process-wide, and every
+    /// test here bumps or reads them: run one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Regression test for the bug where a long run permanently froze every
     /// package's availability at whatever the cache first saw: builds z3
     /// -solver, pydantic-core, etc. later in the same run kept looking
@@ -2526,6 +2534,7 @@ mod project_packages_cache_tests {
     /// because nothing ever dropped the stale entry.
     #[test]
     fn invalidate_drops_the_cached_entry() {
+        let _serial = serial();
         let project = "ap-test-cache-invalidation-project";
         let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         cache.lock().unwrap().insert(
@@ -2544,6 +2553,7 @@ mod project_packages_cache_tests {
     /// must drop it.
     #[test]
     fn invalidate_drops_cached_published_binary_answers() {
+        let _serial = serial();
         let key = "ap-test-published-binaries-key".to_string();
         PUBLISHED_BINARIES_CACHE
             .lock()
@@ -2561,6 +2571,7 @@ mod project_packages_cache_tests {
     /// store its answer afterwards; one that started after is stored.
     #[test]
     fn published_answer_from_a_search_started_before_invalidation_is_dropped() {
+        let _serial = serial();
         let stale_key = "ap-test-published-generation-stale".to_string();
         let fresh_key = "ap-test-published-generation-fresh".to_string();
 
@@ -2588,6 +2599,7 @@ mod project_packages_cache_tests {
     /// stale set back afterwards.
     #[test]
     fn invalidation_between_fetch_and_insert_is_not_overwritten() {
+        let _serial = serial();
         let project = "ap-test-cache-stale-insert-project";
         let generation = project_generation(project);
         // ...fetch happens here, then another worker commits and invalidates...
@@ -2606,6 +2618,7 @@ mod project_packages_cache_tests {
     /// process has ever looked at.
     #[test]
     fn invalidate_does_not_touch_the_cache_before_anything_is_in_it() {
+        let _serial = serial();
         // Just needs to not panic when the cache is empty or lacks the key.
         invalidate_project_packages_cache("ap-test-project-never-cached");
     }
