@@ -1093,16 +1093,13 @@ mod tests {
             ))
             .unwrap()
         };
-        let empty_homepage = info(
-            r#"{"Homepage": "", "Source": "https://github.com/example/x"}"#,
-        );
+        let empty_homepage = info(r#"{"Homepage": "", "Source": "https://github.com/example/x"}"#);
         assert_eq!(
             homepage(&empty_homepage).as_deref(),
             Some("https://github.com/example/x")
         );
-        let blank_homepage = info(
-            r#"{"Homepage": "  \t ", "Source": "https://github.com/example/x"}"#,
-        );
+        let blank_homepage =
+            info(r#"{"Homepage": "  \t ", "Source": "https://github.com/example/x"}"#);
         assert_eq!(
             homepage(&blank_homepage).as_deref(),
             Some("https://github.com/example/x")
@@ -1446,16 +1443,20 @@ mod tests {
         assert!(r.yanked, "a yanked tarball file must taint the release");
         assert_eq!(r.sdist.filename, "markupsafe-3.0.3.tar.gz");
 
-        let live = parse_release_with_tarball(MARKUPSAFE, "markupsafe-3.0.3.tar.gz")
-            .expect("parses");
+        let live =
+            parse_release_with_tarball(MARKUPSAFE, "markupsafe-3.0.3.tar.gz").expect("parses");
         assert!(!live.yanked);
     }
 
     #[test]
     fn tarball_path_honours_the_release_level_yanked_flag() {
-        let json = MARKUPSAFE.replacen(r#""yanked": false
-      },"#, r#""yanked": true
-      },"#, 1);
+        let json = MARKUPSAFE.replacen(
+            r#""yanked": false
+      },"#,
+            r#""yanked": true
+      },"#,
+            1,
+        );
         let r = parse_release_with_tarball(&json, "markupsafe-3.0.3.tar.gz").expect("parses");
         assert!(r.yanked);
     }

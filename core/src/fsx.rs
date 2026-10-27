@@ -285,7 +285,12 @@ mod tests {
                 });
             }
         });
-        assert!(std::fs::read_link(link).unwrap().to_string_lossy().starts_with("run-"));
+        assert!(
+            std::fs::read_link(link)
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("run-")
+        );
         let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(leftovers, 1, "no temp link may be left behind");
     }

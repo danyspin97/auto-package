@@ -400,11 +400,7 @@ fn under_sensitive_home_dir(path: &Path, home: &Path) -> bool {
         path.strip_prefix(h)
             .ok()
             .and_then(|rel| rel.components().next())
-            .is_some_and(|first| {
-                SENSITIVE_HOME_DIRS
-                    .iter()
-                    .any(|d| first.as_os_str() == *d)
-            })
+            .is_some_and(|first| SENSITIVE_HOME_DIRS.iter().any(|d| first.as_os_str() == *d))
     })
 }
 
@@ -569,7 +565,11 @@ fn bind_ca(
     host: &Host,
 ) -> Result<Option<OsString>, SandboxError> {
     let raw = value.as_bytes();
-    let sep = if var == "SSL_CERT_DIR" { Some(b':') } else { None };
+    let sep = if var == "SSL_CERT_DIR" {
+        Some(b':')
+    } else {
+        None
+    };
     let entries: Vec<&[u8]> = match sep {
         Some(c) => raw.split(|b| *b == c).collect(),
         None => vec![raw],
@@ -947,9 +947,7 @@ mod tests {
         fs::create_dir_all(&good).unwrap();
         let good_s = good.to_string_lossy().into_owned();
         let value = format!("/nonexistent/one:{good_s}::/nonexistent/two");
-        f.host
-            .vars
-            .push(("SSL_CERT_DIR".into(), value.into()));
+        f.host.vars.push(("SSL_CERT_DIR".into(), value.into()));
         let args = build(&f);
         let b = binds(&args);
         assert!(b.contains(&("--ro-bind".into(), good_s.clone(), good_s.clone())));
@@ -967,7 +965,11 @@ mod tests {
             .push(("SSL_CERT_FILE".into(), "/nonexistent/ca.pem".into()));
         let args = build(&f);
         assert!(!setenvs(&args).iter().any(|(k, _)| k == "SSL_CERT_FILE"));
-        assert!(!binds(&args).iter().any(|(_, s, _)| s.contains("nonexistent")));
+        assert!(
+            !binds(&args)
+                .iter()
+                .any(|(_, s, _)| s.contains("nonexistent"))
+        );
     }
 
     /// `/usr/..` is `/`, so the key is not under `/usr`: the check must see
@@ -1140,7 +1142,11 @@ mod tests {
             .vars
             .push(("PIP_CONFIG_FILE".into(), key.clone().into()));
         let args = build(&f);
-        assert!(!binds(&args).iter().any(|(_, s, _)| s == &key.to_string_lossy()));
+        assert!(
+            !binds(&args)
+                .iter()
+                .any(|(_, s, _)| s == &key.to_string_lossy())
+        );
         assert!(!setenvs(&args).iter().any(|(k, _)| k == "PIP_CONFIG_FILE"));
     }
 
@@ -1149,7 +1155,9 @@ mod tests {
         let mut f = fixture();
         let conf = f.home.join(".config/pip/pip.conf");
         fs::write(&conf, "[global]\n").unwrap();
-        f.host.vars.push(("PIP_CONFIG_FILE".into(), conf.clone().into()));
+        f.host
+            .vars
+            .push(("PIP_CONFIG_FILE".into(), conf.clone().into()));
         let b = binds(&build(&f));
         assert!(b.iter().any(|(_, s, _)| s == &conf.to_string_lossy()));
         assert!(sensitive_file(&f.home.join(".config/pip/pip.conf"), &f.home).is_none());
@@ -1262,9 +1270,11 @@ mod tests {
             .map(|d| format!("{tools_s}/{d}"))
             .collect();
         assert_eq!(ours, expect);
-        assert!(!args
-            .iter()
-            .any(|a| a.ends_with("notes.txt") || a.ends_with("share/doc/tool")));
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.ends_with("notes.txt") || a.ends_with("share/doc/tool"))
+        );
     }
 
     /// A venv with its `pyvenv.cfg` binds `bin`, `lib` and the config file, and
