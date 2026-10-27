@@ -982,7 +982,9 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
             },
         };
         if let Err(e) = restored_spec.and(restored_changes) {
-            return Err(format!("{why}; could not restore the checkout of {branch}: {e}"));
+            return Err(format!(
+                "{why}; could not restore the checkout of {branch}: {e}"
+            ));
         }
         return Err(why);
     }

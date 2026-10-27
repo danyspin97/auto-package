@@ -336,7 +336,9 @@ pub fn with_archive_note(spec: &str, url: &str, sha256: &str) -> String {
     // stays one word. Any `%` is doubled: rpm expands macros even inside
     // comments (`%{lua:...}` runs at parse time), `%%` is a literal `%`.
     if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        tracing::warn!("not writing the source archive note: the URL has whitespace or control characters");
+        tracing::warn!(
+            "not writing the source archive note: the URL has whitespace or control characters"
+        );
         return spec.to_string();
     }
     let url = url.replace('%', "%%");
@@ -371,17 +373,32 @@ mod tests {
     #[test]
     fn archive_note_refuses_a_url_that_would_start_a_spec_line() {
         let spec = "Name: x\nSource0: a\n%changelog\n";
-        for url in ["https://u/a\n%pre\necho x", "https://u/a b", "https://u/a\rx", "https://u/\tx"] {
+        for url in [
+            "https://u/a\n%pre\necho x",
+            "https://u/a b",
+            "https://u/a\rx",
+            "https://u/\tx",
+        ] {
             assert_eq!(with_archive_note(spec, url, "abc"), spec, "{url:?}");
         }
     }
 
     #[test]
     fn archive_note_doubles_percent_so_rpm_does_not_expand_it() {
-        let out = with_archive_note("Name: x\nSource0: a\n%changelog\n", "https://u/a%2Fb", "abc");
-        assert!(out.contains("# Source archive: https://u/a%%2Fb\n"), "{out}");
+        let out = with_archive_note(
+            "Name: x\nSource0: a\n%changelog\n",
+            "https://u/a%2Fb",
+            "abc",
+        );
+        assert!(
+            out.contains("# Source archive: https://u/a%%2Fb\n"),
+            "{out}"
+        );
         let lua = with_archive_note("Name: x\nSource0: a\n", "https://u/%{lua:x}", "abc");
-        assert!(lua.contains("# Source archive: https://u/%%{lua:x}\n"), "{lua}");
+        assert!(
+            lua.contains("# Source archive: https://u/%%{lua:x}\n"),
+            "{lua}"
+        );
         // Every `%` left is half of a `%%`: no bare macro survives.
         assert!(!lua.replace("%%", "").contains("%{lua"), "{lua}");
         assert_eq!(lua.lines().filter(|l| l.starts_with('#')).count(), 2);

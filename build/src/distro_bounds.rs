@@ -61,10 +61,7 @@ fn violation(bound: &VersionSpecifiers, version: &Version) -> Option<Kind> {
     // one at or above the next prefix bump is too new.
     Some(match failed.operator() {
         Operator::GreaterThan | Operator::GreaterThanEqual => Kind::DistroTooOld,
-        Operator::TildeEqual
-        | Operator::Equal
-        | Operator::EqualStar
-        | Operator::ExactEqual
+        Operator::TildeEqual | Operator::Equal | Operator::EqualStar | Operator::ExactEqual
             if version < failed.version() =>
         {
             Kind::DistroTooOld

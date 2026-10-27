@@ -253,7 +253,10 @@ mod transient_text_tests {
         assert!(text_is_transient("rate limited (429)"));
         assert!(text_is_transient("HTTP Error 429: Too Many Requests"));
         assert!(text_is_transient("429 Client Error: Too Many Requests"));
-        assert!(!lookup_says_absent("HTTP Error 429: Too Many Requests", true));
+        assert!(!lookup_says_absent(
+            "HTTP Error 429: Too Many Requests",
+            true
+        ));
     }
 }
 
@@ -3631,10 +3634,7 @@ mod unfinished_checkout_tests {
     fn checkout_locks_are_per_directory() {
         let a = Path::new("/ap-test-checkout-lock/proj/a");
         let b = Path::new("/ap-test-checkout-lock/proj/b");
-        assert!(Arc::ptr_eq(
-            &checkout_dir_lock(a),
-            &checkout_dir_lock(a)
-        ));
+        assert!(Arc::ptr_eq(&checkout_dir_lock(a), &checkout_dir_lock(a)));
         let held = checkout_dir_lock(a);
         let _guard = held.lock().unwrap();
         assert!(!Arc::ptr_eq(&held, &checkout_dir_lock(b)));
@@ -3734,8 +3734,7 @@ mod unfinished_checkout_tests {
         let recent = base.path().join("pkg.unfinished-2");
         fs::create_dir_all(&old).unwrap();
         fs::create_dir_all(&recent).unwrap();
-        let eight_days_ago =
-            std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        let eight_days_ago = std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
         fs::File::open(&old)
             .unwrap()
             .set_modified(eight_days_ago)
@@ -3763,7 +3762,10 @@ mod sandbox_spec_dir_tests {
             sandbox_spec_dir(Path::new("pkg/foo.spec"), cwd),
             PathBuf::from("/work/pkg")
         );
-        assert_eq!(sandbox_spec_dir(Path::new("foo.spec"), cwd), PathBuf::from("/work"));
+        assert_eq!(
+            sandbox_spec_dir(Path::new("foo.spec"), cwd),
+            PathBuf::from("/work")
+        );
     }
 
     #[test]
@@ -3789,7 +3791,10 @@ mod xml_attr_and_status_tests {
         );
         let tag = r#"<package baseproject="Base" project="Mine">"#;
         assert_eq!(extract_xml_attr(tag, "project").as_deref(), Some("Mine"));
-        assert_eq!(extract_xml_attr(r#"name="x""#, "name").as_deref(), Some("x"));
+        assert_eq!(
+            extract_xml_attr(r#"name="x""#, "name").as_deref(),
+            Some("x")
+        );
         assert_eq!(extract_xml_attr(r#"<a filename="x">"#, "name"), None);
     }
 
@@ -3803,10 +3808,16 @@ mod xml_attr_and_status_tests {
 
     #[test]
     fn a_trailing_unpublished_marker_is_stripped_with_or_without_the_space() {
-        assert_eq!(strip_result_suffixes("succeeded (unpublished)"), "succeeded");
+        assert_eq!(
+            strip_result_suffixes("succeeded (unpublished)"),
+            "succeeded"
+        );
         assert_eq!(strip_result_suffixes("succeeded(unpublished)"), "succeeded");
         assert_eq!(strip_result_suffixes("succeeded*"), "succeeded");
-        assert_eq!(strip_result_suffixes("succeeded * (unpublished)"), "succeeded");
+        assert_eq!(
+            strip_result_suffixes("succeeded * (unpublished)"),
+            "succeeded"
+        );
         assert_eq!(strip_result_suffixes("failed"), "failed");
         assert!(matches!(
             status_from_osc_text("succeeded (unpublished)"),
@@ -5568,7 +5579,7 @@ fn get_build_status_xml(
                             enc(project),
                             enc(pkg_name)
                         ))
-                            .and_then(|x| obs_status::parse_source_info(&x))
+                        .and_then(|x| obs_status::parse_source_info(&x))
                     })
                     .clone(),
                 job: osc_api(&format!(
@@ -8131,7 +8142,10 @@ mod obs_name_tests {
 
     #[test]
     fn xml_unescape_decodes_predefined_entities_once() {
-        assert_eq!(xml_unescape("a&amp;b&lt;c&gt;&quot;d&apos;e"), "a&b<c>\"d'e");
+        assert_eq!(
+            xml_unescape("a&amp;b&lt;c&gt;&quot;d&apos;e"),
+            "a&b<c>\"d'e"
+        );
         // Decodes once: an escaped ampersand stays as the literal text `&lt;`.
         assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
     }
@@ -8161,7 +8175,10 @@ mod obs_name_tests {
     fn extract_xml_attr_unescapes_value() {
         let tag = r#"<path project="a&amp;b" repository="x&quot;y&lt;z"/"#;
         assert_eq!(extract_xml_attr(tag, "project").as_deref(), Some("a&b"));
-        assert_eq!(extract_xml_attr(tag, "repository").as_deref(), Some("x\"y<z"));
+        assert_eq!(
+            extract_xml_attr(tag, "repository").as_deref(),
+            Some("x\"y<z")
+        );
         assert_eq!(extract_xml_attr(tag, "missing"), None);
     }
 
@@ -8243,7 +8260,10 @@ mod count_rpms_tests {
             // Another package written during the download.
             ("python-other-1.0-1.1.noarch.rpm".to_string(), at(1_010)),
             // A sibling whose name extends this package: not its RPM.
-            ("python-events-extra-1.0-1.1.noarch.rpm".to_string(), at(1_010)),
+            (
+                "python-events-extra-1.0-1.1.noarch.rpm".to_string(),
+                at(1_010),
+            ),
             // Source RPM and other files.
             ("python-events-0.5-2.1.src.rpm".to_string(), at(1_010)),
             ("_buildenv".to_string(), at(1_010)),
@@ -8294,7 +8314,10 @@ mod count_rpms_tests {
         std::fs::write(tmp.path().join("pkg-1.0-1.1.src.rpm"), b"").unwrap();
         std::fs::write(tmp.path().join("other-1.0-1.1.noarch.rpm"), b"").unwrap();
         let before = SystemTime::now() - Duration::from_secs(3600);
-        assert_eq!(count_package_rpms_since_in_dir(tmp.path(), "pkg", before), 1);
+        assert_eq!(
+            count_package_rpms_since_in_dir(tmp.path(), "pkg", before),
+            1
+        );
         let after = SystemTime::now() + Duration::from_secs(3600);
         assert_eq!(count_package_rpms_since_in_dir(tmp.path(), "pkg", after), 0);
     }
@@ -8586,13 +8609,13 @@ mod rpmspec_sandbox_tests {
         assert_eq!(code_macro_marker("Summary: %lua{x}"), Some("%lua"));
         assert_eq!(code_macro_marker("Summary: %lua(x)"), Some("%lua"));
         // A later bare `%lua` after a `%luajit` is still found.
-        assert_eq!(
-            code_macro_marker("%luajit %lua x"),
-            Some("%lua")
-        );
+        assert_eq!(code_macro_marker("%luajit %lua x"), Some("%lua"));
         // The braced form stays refused.
         assert_eq!(code_macro_marker("%{lua:x}"), Some("%{lua:"));
-        assert_eq!(code_macro_marker("%global x %{lua: print(1)}"), Some("%{lua:"));
+        assert_eq!(
+            code_macro_marker("%global x %{lua: print(1)}"),
+            Some("%{lua:")
+        );
         assert_eq!(unsandboxed_marker("Summary: %lua"), Some("%lua"));
     }
 

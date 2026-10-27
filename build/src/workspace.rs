@@ -383,8 +383,7 @@ mod tests {
 
         // Rewrite with the same length but a later mtime.
         fs::write(&tarball, b"that").unwrap();
-        let later = fs::metadata(&tarball).unwrap().modified().unwrap()
-            + Duration::from_secs(60);
+        let later = fs::metadata(&tarball).unwrap().modified().unwrap() + Duration::from_secs(60);
         fs::File::options()
             .write(true)
             .open(&tarball)

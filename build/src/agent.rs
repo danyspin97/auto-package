@@ -479,7 +479,6 @@ const PRIORITIES: &str = r#"
    instead of reporting a hollow success.
 "#;
 
-
 /// Workflow/header/cleanup boilerplate that, like [`CONVENTIONS`], is
 /// identical on every turn regardless of package, task, or attempt — kept as
 /// a separate constant (rather than folded into `CONVENTIONS` itself) only
@@ -3202,7 +3201,10 @@ mod tests {
     fn conventions_are_numbered_consecutively_from_one() {
         for (i, (n, text)) in crate::conventions_table::CONVENTIONS.iter().enumerate() {
             assert_eq!(*n as usize, i + 1, "convention numbering is not 1..n");
-            assert!(text.starts_with(&format!("{n}. ")), "file {n}.md opens with another number");
+            assert!(
+                text.starts_with(&format!("{n}. ")),
+                "file {n}.md opens with another number"
+            );
         }
     }
 
@@ -3211,11 +3213,18 @@ mod tests {
         let lines: Vec<&str> = CONVENTIONS_INDEX.lines().collect();
         assert_eq!(lines.len(), crate::conventions_table::CONVENTIONS.len());
         for (i, l) in lines.iter().enumerate() {
-            assert!(l.starts_with(&format!("{}. ", i + 1)), "index line {} is {l:?}", i + 1);
+            assert!(
+                l.starts_with(&format!("{}. ", i + 1)),
+                "index line {} is {l:?}",
+                i + 1
+            );
             assert!(l.len() <= 200, "index line {} is too long", i + 1);
         }
         for n in INLINE_CONVENTIONS {
-            assert!(lines[n as usize - 1].contains("[inline]"), "convention {n} is not marked inline");
+            assert!(
+                lines[n as usize - 1].contains("[inline]"),
+                "convention {n} is not marked inline"
+            );
         }
     }
 
@@ -3234,7 +3243,9 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         materialise_conventions(ws.path()).unwrap();
         materialise_conventions(ws.path()).unwrap();
-        let n = std::fs::read_dir(ws.path().join(CONVENTIONS_DIR)).unwrap().count();
+        let n = std::fs::read_dir(ws.path().join(CONVENTIONS_DIR))
+            .unwrap()
+            .count();
         assert_eq!(n, crate::conventions_table::CONVENTIONS.len());
         let got = std::fs::read_to_string(ws.path().join("conventions/76.md")).unwrap();
         assert!(got.starts_with("76. "));
@@ -3244,7 +3255,9 @@ mod tests {
     fn the_turn_may_not_rewrite_the_convention_files() {
         let ws = std::path::Path::new("/tmp/ws");
         let denied = turn_denied_tools(ws, None);
-        assert!(denied.contains("Write(//tmp/ws/conventions/**)") || denied.contains("/conventions/**"));
+        assert!(
+            denied.contains("Write(//tmp/ws/conventions/**)") || denied.contains("/conventions/**")
+        );
     }
 
     fn request<'a>(
@@ -3545,7 +3558,10 @@ mod tests {
         assert_eq!(c.path, "torch/utils/benchmark/utils");
         assert_eq!(c.package.as_deref(), Some("python-torch"));
         assert!(resp.patch_dependencies[1].condition.is_none());
-        assert!(STATIC_WORKFLOW.contains("\"condition\"") && all_conventions().contains("\"condition\""));
+        assert!(
+            STATIC_WORKFLOW.contains("\"condition\"")
+                && all_conventions().contains("\"condition\"")
+        );
         assert!(TURN_RESPONSE_SCHEMA.contains("\"not_in\""));
     }
 

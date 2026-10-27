@@ -346,7 +346,10 @@ mod tests {
     #[test]
     fn names_version_takes_a_wheel_tag_but_no_other_suffix_on_an_archive() {
         assert!(names_version("foo-1.0-py3-none-any.whl", "1.0"));
-        assert!(names_version("foo-1.0-pp310-pypy310_pp73-linux_x86_64.whl", "1.0"));
+        assert!(names_version(
+            "foo-1.0-pp310-pypy310_pp73-linux_x86_64.whl",
+            "1.0"
+        ));
         // A companion archive whose name carries a suffix is not the main one.
         assert!(!names_version("foo-1.0-cpp.tar.gz", "1.0"));
         assert!(!names_version("foo-1.0-python.tar.gz", "1.0"));

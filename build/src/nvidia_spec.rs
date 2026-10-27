@@ -1172,7 +1172,12 @@ bin/__nvcc_device_query
 
     #[test]
     fn parent_references_in_members_are_not_installed() {
-        for odd in ["cuda/../../evil", "top/lib/../x.so", "top/./lib/x.so", "top/lib/./x.so"] {
+        for odd in [
+            "cuda/../../evil",
+            "top/lib/../x.so",
+            "top/./lib/x.so",
+            "top/lib/./x.so",
+        ] {
             let files = vec![odd.to_string()];
             assert!(check_layout(&files).is_err(), "{odd}");
         }

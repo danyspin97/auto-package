@@ -2399,7 +2399,8 @@ impl StartWatch {
 impl Reporter for StartWatch {
     fn report(&self, event: &Event) {
         if matches!(event, Event::TargetSelected { .. }) {
-            self.started.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         self.inner.report(event);
     }

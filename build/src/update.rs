@@ -939,8 +939,8 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
             declared_upstream(&header),
             DeclaredUpstream::Git("https://github.com/awslabs/aws-c-http".into())
         );
-        let bare = spec::parse_header("Name: foo\nVersion: 1\nSource0: foo-%{version}.tar.gz\n")
-            .unwrap();
+        let bare =
+            spec::parse_header("Name: foo\nVersion: 1\nSource0: foo-%{version}.tar.gz\n").unwrap();
         assert_eq!(declared_upstream(&bare), DeclaredUpstream::Unknown);
     }
 

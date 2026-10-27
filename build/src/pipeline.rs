@@ -3073,7 +3073,10 @@ fn osc_service_stage(
     // commit, not before spec generation — the spec is a template either way.
     // A maturin package writes its own `_service` below, which replaces this
     // one: running `tar_scm` first would only leave its output unreferenced.
-    if is_rust && !is_maturin && let Some(ref repo_url) = config.source_repo {
+    if is_rust
+        && !is_maturin
+        && let Some(ref repo_url) = config.source_repo
+    {
         let need_service = need_spec || !checkout_dir.join("_service").exists();
         if need_service {
             let step = begin_or_fail!(
@@ -10205,8 +10208,8 @@ fn licence_guard_facts(
 ) -> Option<String> {
     let guard = |text: &str| text.contains("LICENSE_VIOLATION");
     let log = std::fs::read_to_string(build_log).unwrap_or_default();
-    let spec = std::fs::read_to_string(checkout_dir.join(format!("{obs_name}.spec")))
-        .unwrap_or_default();
+    let spec =
+        std::fs::read_to_string(checkout_dir.join(format!("{obs_name}.spec"))).unwrap_or_default();
     if !guard(&log) && !guard(&spec) {
         return None;
     }
@@ -10796,7 +10799,9 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
             continue;
         }
         if *level != 1 {
-            notes.push(format!("{name} applies with -p{level}, so it was not checked"));
+            notes.push(format!(
+                "{name} applies with -p{level}, so it was not checked"
+            ));
             continue;
         }
         let patch_file = checkout.join(&name);
@@ -11216,9 +11221,11 @@ fn superseded_tarball(
         .filter_map(|e| {
             let path = e.ok()?.path();
             let name = path.file_name()?.to_string_lossy().into_owned();
-            let archive = [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip", ".whl"]
-                .iter()
-                .any(|ext| name.ends_with(ext));
+            let archive = [
+                ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip", ".whl",
+            ]
+            .iter()
+            .any(|ext| name.ends_with(ext));
             (archive
                 && path != keep
                 && !matches!(name.as_str(), "vendor.tar.zst" | "registry.tar.zst")
@@ -13405,7 +13412,10 @@ fn patch_targets(diff: &str) -> Vec<String> {
     let mut stripped_names: Vec<&str> = Vec::new();
     let mut bare_names: Vec<&str> = Vec::new();
     for line in diff.lines() {
-        if let Some(name) = line.strip_prefix("--- ").or_else(|| line.strip_prefix("+++ ")) {
+        if let Some(name) = line
+            .strip_prefix("--- ")
+            .or_else(|| line.strip_prefix("+++ "))
+        {
             stripped_names.push(name.split('\t').next().unwrap_or("").trim());
         } else if let Some(rest) = line.strip_prefix("diff --git ") {
             stripped_names.extend(rest.split_whitespace());
@@ -15095,8 +15105,14 @@ mod tests {
         ] {
             assert_eq!(dependency_key(name), "apscheduler", "{name}");
         }
-        assert_eq!(dependency_key("python-ruamel.yaml"), dependency_key("ruamel_yaml"));
-        assert_eq!(dependency_key("ffmpeg-8"), dependency_key("python-ffmpeg-8"));
+        assert_eq!(
+            dependency_key("python-ruamel.yaml"),
+            dependency_key("ruamel_yaml")
+        );
+        assert_eq!(
+            dependency_key("ffmpeg-8"),
+            dependency_key("python-ffmpeg-8")
+        );
         assert_ne!(dependency_key("ffmpeg-8"), dependency_key("ffmpeg"));
     }
 
@@ -15177,12 +15193,30 @@ mod tests {
 
     #[test]
     fn a_release_archive_is_saved_under_the_suffix_of_its_own_kind() {
-        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.gz"), Some(".tar.gz"));
-        assert_eq!(archive_save_suffix("https://x/foo-1.0.tgz"), Some(".tar.gz"));
-        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.xz"), Some(".tar.xz"));
-        assert_eq!(archive_save_suffix("https://x/foo-1.0.txz"), Some(".tar.xz"));
-        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.bz2"), Some(".tar.bz2"));
-        assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.zst"), Some(".tar.zst"));
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0.tar.gz"),
+            Some(".tar.gz")
+        );
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0.tgz"),
+            Some(".tar.gz")
+        );
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0.tar.xz"),
+            Some(".tar.xz")
+        );
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0.txz"),
+            Some(".tar.xz")
+        );
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0.tar.bz2"),
+            Some(".tar.bz2")
+        );
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0.tar.zst"),
+            Some(".tar.zst")
+        );
         assert_eq!(archive_save_suffix("https://x/foo-1.0.zip"), Some(".zip"));
         assert_eq!(
             archive_save_suffix("https://x/foo-1.0.tar.xz?download=1"),
@@ -15190,7 +15224,10 @@ mod tests {
         );
         // Not an archive the inspector reads: refused, not saved as .tar.gz.
         assert_eq!(archive_save_suffix("https://x/foo-1.0.tar.lz"), None);
-        assert_eq!(archive_save_suffix("https://x/foo-1.0-py3-none-any.whl"), None);
+        assert_eq!(
+            archive_save_suffix("https://x/foo-1.0-py3-none-any.whl"),
+            None
+        );
     }
 
     #[test]
@@ -15209,9 +15246,15 @@ mod tests {
     #[test]
     fn names_version_takes_any_wheel_tag_but_no_sdist_suffix() {
         // PyPy tags and build tags are wheel tags too.
-        assert!(names_version("foo-1.2-pp310-pypy310_pp73-linux_x86_64.whl", "1.2"));
+        assert!(names_version(
+            "foo-1.2-pp310-pypy310_pp73-linux_x86_64.whl",
+            "1.2"
+        ));
         assert!(names_version("foo-1.2-1-py3-none-any.whl", "1.2"));
-        assert!(names_version("foo-1.2-cp311-abi3-manylinux_2_17.whl", "1.2"));
+        assert!(names_version(
+            "foo-1.2-cp311-abi3-manylinux_2_17.whl",
+            "1.2"
+        ));
         // A suffix on an sdist still names another archive.
         assert!(!names_version("foo-1.2-docs.tar.gz", "1.2"));
         assert!(!names_version("foo-1.2-data.zip", "1.2"));
@@ -15253,15 +15296,27 @@ mod tests {
         // `%autosetup -N` does not apply the patch; the `%patch -P 1 -p0` line does.
         let spec = "%prep\n%autosetup -p1 -N\n%patch -P 1 -p0\n";
         assert_eq!(spec_patch_level(spec, "1"), 0);
-        assert_eq!(spec_patch_level("%prep\n%autosetup -p1 -N\n%patch1 -p0\n", "1"), 0);
-        assert_eq!(spec_patch_level("%prep\n%autosetup -N\n%patch -p0 -P 1\n", "1"), 0);
+        assert_eq!(
+            spec_patch_level("%prep\n%autosetup -p1 -N\n%patch1 -p0\n", "1"),
+            0
+        );
+        assert_eq!(
+            spec_patch_level("%prep\n%autosetup -N\n%patch -p0 -P 1\n", "1"),
+            0
+        );
         // A `%patch -P` line with no `-p` takes the macro level, as before.
-        assert_eq!(spec_patch_level("%prep\n%autosetup -p2\n%patch -P 1\n", "1"), 2);
+        assert_eq!(
+            spec_patch_level("%prep\n%autosetup -p2\n%patch -P 1\n", "1"),
+            2
+        );
         // The `%autosetup` default is 1, and an explicit `-p1` is the same.
         assert_eq!(spec_patch_level("%prep\n%autosetup -p1\n", "3"), 1);
         assert_eq!(spec_patch_level("%prep\n%autosetup\n", "3"), 1);
         // A `%patch` line for another number does not give this one's level.
-        assert_eq!(spec_patch_level("%prep\n%patch -P 2 -p0\n%autosetup -p1\n", "1"), 1);
+        assert_eq!(
+            spec_patch_level("%prep\n%patch -P 2 -p0\n%autosetup -p1\n", "1"),
+            1
+        );
     }
 
     #[test]
@@ -15293,18 +15348,28 @@ mod tests {
     #[test]
     fn find_tarball_prefers_the_exact_main_archive_over_a_companion() {
         let tmp = tempfile::tempdir().unwrap();
-        for name in ["foo-1.2-cpp.tar.gz", "foo-1.2-python.tar.gz", "foo-1.2.tar.gz"] {
+        for name in [
+            "foo-1.2-cpp.tar.gz",
+            "foo-1.2-python.tar.gz",
+            "foo-1.2.tar.gz",
+        ] {
             std::fs::write(tmp.path().join(name), b"x").unwrap();
         }
         assert_eq!(
-            find_tarball(tmp.path(), "1.2").unwrap().file_name().unwrap(),
+            find_tarball(tmp.path(), "1.2")
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "foo-1.2.tar.gz"
         );
         // A wheel of the version is still a match when no sdist is there.
         let wheels = tempfile::tempdir().unwrap();
         std::fs::write(wheels.path().join("foo-1.2-py3-none-any.whl"), b"x").unwrap();
         assert_eq!(
-            find_tarball(wheels.path(), "1.2").unwrap().file_name().unwrap(),
+            find_tarball(wheels.path(), "1.2")
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "foo-1.2-py3-none-any.whl"
         );
     }
@@ -15357,7 +15422,10 @@ mod tests {
             std::fs::write(dir.path().join(f), b"").unwrap();
         }
         assert_eq!(
-            find_tarball(dir.path(), "1.2").unwrap().file_name().unwrap(),
+            find_tarball(dir.path(), "1.2")
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "foo-1.2.tar.gz"
         );
         // A .tgz and a .tar.xz are archives too.
@@ -17509,7 +17577,11 @@ mod patch_turn_tests {
             &Action::NoChange
         ));
         // It edited, or this is not a patch turn.
-        assert!(!patch_turn_failed(true, TurnEffect::Edited, &Action::Edited));
+        assert!(!patch_turn_failed(
+            true,
+            TurnEffect::Edited,
+            &Action::Edited
+        ));
         assert!(!patch_turn_failed(false, TurnEffect::NoChange, &blocked));
         // Blocked is a failure to patch, on a spec reviewed earlier too.
         assert!(patch_turn_failed(true, TurnEffect::NoChange, &blocked));
@@ -18453,7 +18525,9 @@ mod hygiene_tests {
         assert!(reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || Ok(2)));
         assert!(quiet.0.lock().unwrap().is_empty());
         // Nothing landed: the package is rebuilt, with a warning saying why.
-        assert!(!reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || Ok(0)));
+        assert!(!reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || Ok(
+            0
+        )));
         assert!(quiet.0.lock().unwrap()[0].contains("no RPMs were downloaded"));
         // A failing download is the same.
         assert!(!reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || {
@@ -18462,9 +18536,13 @@ mod hygiene_tests {
         assert!(quiet.0.lock().unwrap()[1].contains("fetching its RPMs failed"));
         // A recorded success needs no download at all.
         write_state(root.path(), "python-x", "success", None);
-        assert!(reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || panic!(
-            "not called"
-        )));
+        assert!(reconcile_rpms_with(
+            &cfg,
+            "python-x",
+            &ws,
+            &quiet,
+            || panic!("not called")
+        ));
     }
 
     pub(super) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
@@ -18591,8 +18669,8 @@ mod hygiene_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
-        post_review_done: false,
-        post_review_revert: None,
+            post_review_done: false,
+            post_review_revert: None,
         };
 
         let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &lookup)
@@ -18726,16 +18804,31 @@ mod hygiene_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cond = utils_condition();
         std::fs::write(dir.join("python-foo.spec"), SPLIT_SPEC).unwrap();
-        assert!(!condition_holds_now(&config, "python-foo", "python-foo", &cond));
+        assert!(!condition_holds_now(
+            &config,
+            "python-foo",
+            "python-foo",
+            &cond
+        ));
         std::fs::write(
             dir.join("python-foo.spec"),
             FIXED_SPEC.replace("foo/include", "foo/utils"),
         )
         .unwrap();
         // Still devel: not true.
-        assert!(!condition_holds_now(&config, "python-foo", "python-foo", &cond));
+        assert!(!condition_holds_now(
+            &config,
+            "python-foo",
+            "python-foo",
+            &cond
+        ));
         std::fs::write(dir.join("python-foo.spec"), FIXED_SPEC).unwrap();
-        assert!(condition_holds_now(&config, "python-foo", "python-foo", &cond));
+        assert!(condition_holds_now(
+            &config,
+            "python-foo",
+            "python-foo",
+            &cond
+        ));
     }
 
     /// A package `python-foo` whose spec is `spec`, with the wheel the switch
@@ -18800,8 +18893,8 @@ mod hygiene_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
-        post_review_done: false,
-        post_review_revert: None,
+            post_review_done: false,
+            post_review_revert: None,
         };
         let step = StepDir {
             path: root.path().join("step"),
@@ -18889,9 +18982,7 @@ mod hygiene_tests {
                 Emit::run(&rec),
             )
         };
-        let is_failed = |r: &Result<Vec<String>, BranchError>, transient: bool| {
-            matches!(r, Err(BranchError::Failed { transient: t, .. }) if *t == transient)
-        };
+        let is_failed = |r: &Result<Vec<String>, BranchError>, transient: bool| matches!(r, Err(BranchError::Failed { transient: t, .. }) if *t == transient);
 
         // A 404 means the project does not carry the package, for our own project too.
         let r = lookup("osc ls exited 1: HTTP Error 404: Not Found", false);
@@ -18942,7 +19033,15 @@ mod hygiene_tests {
         for ok in ["nvidia-nccl-cu13", "python313-foo", "a.b_c+d", "9lives"] {
             assert!(is_provider_stem(ok), "{ok}");
         }
-        for bad in ["", "-foo", ".foo", "foo bar", "foo}\nBuildRequires: x", "a%{x}", "foo/bar"] {
+        for bad in [
+            "",
+            "-foo",
+            ".foo",
+            "foo bar",
+            "foo}\nBuildRequires: x",
+            "a%{x}",
+            "foo/bar",
+        ] {
             assert!(!is_provider_stem(bad), "{bad:?}");
         }
     }
@@ -19023,8 +19122,8 @@ mod hygiene_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
-        post_review_done: false,
-        post_review_revert: None,
+            post_review_done: false,
+            post_review_revert: None,
         };
         let offline = |_: &PipelineConfig| Err("PyPI fetch failed: offline".to_string());
         let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &offline)
@@ -19427,8 +19526,8 @@ mod ladder_tests {
             last_log_digest: None,
             identical_logs: 0,
             relaxed_from_spec: None,
-        post_review_done: false,
-        post_review_revert: None,
+            post_review_done: false,
+            post_review_revert: None,
         };
         let snapshot = CheckoutSnapshot::take(&checkout);
         let step = StepDir {
@@ -19555,7 +19654,11 @@ mod ladder_tests {
             "{}",
             case.contexts[1]
         );
-        assert!(case.contexts[2].contains("ROUND 3 of 3"), "{}", case.contexts[2]);
+        assert!(
+            case.contexts[2].contains("ROUND 3 of 3"),
+            "{}",
+            case.contexts[2]
+        );
         // The staged file stays through the later rollbacks: round 3 had it.
         assert_eq!(
             std::fs::read(case.checkout.join("package-lock.json")).unwrap(),
