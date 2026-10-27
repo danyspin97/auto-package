@@ -1,5 +1,5 @@
 // Generated from build/conventions/*.md: one entry per convention, in order.
-pub(crate) static CONVENTIONS: [(u32, &str); 83] = [
+pub(crate) static CONVENTIONS: [(u32, &str); 86] = [
     (1, include_str!("../conventions/1.md")),
     (2, include_str!("../conventions/2.md")),
     (3, include_str!("../conventions/3.md")),
@@ -83,4 +83,7 @@ pub(crate) static CONVENTIONS: [(u32, &str); 83] = [
     (81, include_str!("../conventions/81.md")),
     (82, include_str!("../conventions/82.md")),
     (83, include_str!("../conventions/83.md")),
+    (84, include_str!("../conventions/84.md")),
+    (85, include_str!("../conventions/85.md")),
+    (86, include_str!("../conventions/86.md")),
 ];

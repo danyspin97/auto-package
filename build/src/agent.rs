@@ -508,7 +508,7 @@ For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
 - Library linking errors → search for the library and add its -devel package
 - CUDA headers/libraries (`cuda.h`, `libcudart`, `nvcc`) → do NOT add
   `cuda-devel`/`cuda-runtime`: they cannot exist here. A package whose build
-  needs them is repackaged from its upstream wheel (convention 27, Exception 4)
+  needs them is repackaged from its upstream wheel (convention 28, Exception 4; convention 84)
 - A missing build-time EXECUTABLE (`command not found`, `No such file or
   directory: 'pg_config'`) → `zypper search --provides --match-exact
   /usr/bin/<tool>` and BuildRequire the package it names. Never guess: plain
@@ -633,7 +633,7 @@ it, then re-runs this package."#;
 
 /// The conventions whose full text stays in the system prompt: they apply to
 /// nearly every turn (a missing dependency is built, not worked around).
-const INLINE_CONVENTIONS: [u32; 5] = [27, 61, 62, 63, 64];
+const INLINE_CONVENTIONS: [u32; 6] = [27, 61, 62, 63, 64, 86];
 
 /// The index of every convention, one line each (`build/conventions/INDEX.md`).
 const CONVENTIONS_INDEX: &str = include_str!("../conventions/INDEX.md");
@@ -730,7 +730,7 @@ fn redist_cuda_prompt() -> Option<String> {
 
 This section REPLACES every statement above and below that openSUSE has no CUDA
 toolkit, that `cuda-devel`/`cuda-runtime` "cannot exist here", and the "CUDA at
-build time means: use the upstream wheel" special case (convention 27 CUDA special
+build time means: use the upstream wheel" special case (convention 84, the CUDA special
 case, step "0f", the dependency-failure hints). In this run the pipeline builds
 NVIDIA's redistributable components as RPMs in the same project, one package per
 component and a `-devel` package for its headers:
@@ -2544,7 +2544,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
                  `#include <cuda` / `<cub/` / `<nccl.h>` in compiled sources, and check the \
                  spec's BuildRequires for `cuda-devel`/`cuda-runtime`. If the BUILD needs \
                  CUDA, stop reviewing a source build: this package is repackaged from its \
-                 upstream wheel — return `use_upstream_wheel` now (convention 27 CUDA special \
+                 upstream wheel — return `use_upstream_wheel` now (convention 84 CUDA special \
                  case; convention 49 when the wheels are per-CPython). Run-time-only use \
                  (NVRTC/Triton JIT, `dlopen`) is not a build need.\n\
              \n\
@@ -3126,7 +3126,7 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              compiled in this environment at all: do not add or keep the \
              BuildRequires — check what wheels PyPI publishes for this version and \
              set action to `\"use_upstream_wheel\"` (or follow convention 49 for \
-             per-CPython wheels) per convention 27's CUDA special case.\n\n",
+             per-CPython wheels) per convention 84.\n\n",
             bullets(req.unbuildable_deps),
         )
     };

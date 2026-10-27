@@ -24,7 +24,7 @@
 24. Bundled headers in a non-devel package (devel-file-in-non-devel-package) — read when rpmlint reports that error
 25. rpmlint badness budget (threshold 999) — read when the build log says "Badness NNNN exceeds threshold"
 26. Source from a repository, not an sdist — read when the checkout is a git snapshot or the project sits in a subdirectory
-27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules and special cases
+27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
 28. The four exceptions to building a dependency — read before using any workaround or use_upstream_wheel
 29. Missing source code (no sdist, no repo URL) — read when no source tarball or repository URL can be found for the package
 30. Monorepos: package every sibling project — read when the prompt lists several "Other projects in this archive"
@@ -81,3 +81,6 @@
 81. Predict the %check environment before building — read when tests may need network, GPU, redis, models or repo files
 82. Four pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when the package has any of these
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
+84. CUDA at build time: nvcc, CUDA headers or libraries, dlopen of CUDA — read when the build or its sources mention CUDA, cuda.h, nvcc or libcudart
+85. Dynamic Requires for ctypes/dlopen wrappers, cffi pin, ExclusiveArch propagation, ninja — read when a package dlopens a system .so, uses cffi, requires an arch-limited package or lists ninja
+86. [inline] Carried-forward recipe: change only what the release forces; follow upstream SONAME; no fake stand-ins; quote version bounds; header-only is one noarch devel
