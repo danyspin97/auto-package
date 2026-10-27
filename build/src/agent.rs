@@ -580,8 +580,9 @@ latter, name the exact missing compiler/SDK and quote the build.log line proving
   `.changes` bullet, which sits right under `- Update to <version>`: do not name
   the package or the release being packaged in it (a version the change itself
   is about, such as a cmake minimum, is fine). Write it as a short imperative
-  line that says what changed and why, with no file names or paths and no
-  parenthetical detail: "Drop the CVE-2025-2588 patch, fixed upstream", not
+  line that says what changed and why, with no file names or paths, no
+  macros (`%{name}`, `%{version}`: write the names out) and no parenthetical
+  detail: "Drop the CVE-2025-2588 patch, fixed upstream", not
   "Drop the CVE-2025-2588 patch, which upstream 1.15.0 already contains
   (src/fa.c, fa.h, tests/fatest.c)"
 - "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.

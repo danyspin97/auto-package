@@ -9447,7 +9447,11 @@ fn apply_turn_outcome_with(
                     osc::add_changes_entry(
                         checkout_dir,
                         &without_own_version(
-                            &changes_message(&outcome.reasoning),
+                            &without_macros(
+                                &changes_message(&outcome.reasoning),
+                                &config.pkg_name,
+                                &config.version,
+                            ),
                             &config.pkg_name,
                             &config.version,
                         ),
@@ -10328,6 +10332,16 @@ fn changes_message(reasoning: &str) -> String {
         line = "Update the packaging".to_string();
     }
     line
+}
+
+/// `line` with the package's own macros written out. A `.changes` entry is
+/// plain text that rpm later reads as `%changelog`, where `%{name}` would be
+/// expanded or flagged, so `lib%{name}1_4` becomes `libaws-c-s31_4`.
+fn without_macros(line: &str, package: &str, version: &str) -> String {
+    line.replace("%{name}", package)
+        .replace("%name", package)
+        .replace("%{version}", version)
+        .replace("%version", version)
 }
 
 /// `line` without a trailing parenthesis that lists files or paths
@@ -14710,6 +14724,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_changelog_has_no_macros_for_the_packages_own_name_and_version() {
+        assert_eq!(
+            without_macros(
+                "Move the runtime library to lib%{name}1_4 (%{version})",
+                "aws-c-s3",
+                "1.4.1"
+            ),
+            "Move the runtime library to libaws-c-s31_4 (1.4.1)"
+        );
+    }
 
     #[test]
     fn a_trailing_file_list_is_not_in_the_changelog() {
