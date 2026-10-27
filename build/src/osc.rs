@@ -2865,6 +2865,68 @@ pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> 
     Ok(())
 }
 
+/// [`add_changes_entry`] for a change made while packaging `version`: when the
+/// newest entry is this release's own `- Update to <version>` entry, the bullet
+/// joins it instead of opening an entry of its own, so a package that took
+/// several rounds of fixes still reads as one update. Any other newest entry
+/// (an earlier release, a new package) gets a fresh entry as before.
+pub fn add_release_changes_entry(
+    checkout_dir: &Path,
+    version: &str,
+    message: &str,
+    emit: Emit<'_>,
+) -> Result<(), Error> {
+    if let Ok(rd) = fs::read_dir(checkout_dir) {
+        let mut files: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "changes"))
+            .collect();
+        files.sort();
+        if let Some(file) = files.first()
+            && let Ok(text) = fs::read_to_string(file)
+            && let Some(folded) = with_bullet_in_release_entry(&text, version, message)
+        {
+            return fs::write(file, folded).map_err(|e| {
+                Error::NotActionable(format!("cannot write {}: {e}", file.display()))
+            });
+        }
+    }
+    add_changes_entry(checkout_dir, message, emit)
+}
+
+/// `changes` with `- message` added to the newest entry, when that entry says
+/// `Update to <version>`. `None` otherwise; unchanged text when the entry
+/// already has the bullet.
+fn with_bullet_in_release_entry(changes: &str, version: &str, message: &str) -> Option<String> {
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let lines: Vec<&str> = changes.lines().collect();
+    let first = lines.iter().position(|l| is_separator(l.trim()))?;
+    let end = lines[first + 1..]
+        .iter()
+        .position(|l| is_separator(l.trim()))
+        .map_or(lines.len(), |i| first + 1 + i);
+    let entry = &lines[first + 1..end];
+    let bullet_text = |l: &&str| l.trim().trim_start_matches(['-', '*', ' ']).to_string();
+    let update = format!("Update to {version}");
+    if !entry.iter().map(bullet_text).any(|t| t == update) {
+        return None;
+    }
+    if entry.iter().map(bullet_text).any(|t| t == message) {
+        return Some(changes.to_string());
+    }
+    let last = lines[first + 1..end]
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(first, |i| first + 1 + i);
+    let mut out: Vec<String> = lines[..=last].iter().map(|l| l.to_string()).collect();
+    out.push(format!("- {message}"));
+    out.extend(lines[last + 1..].iter().map(|l| l.to_string()));
+    let mut text = out.join("\n");
+    text.push('\n');
+    Some(text)
+}
+
 fn is_changes_separator(l: &str) -> bool {
     let l = l.trim();
     l.len() >= 20 && l.bytes().all(|b| b == b'-')
@@ -9629,6 +9691,49 @@ mod transient_broken_tests {
         assert!(out.lines().all(|l| l.chars().count() <= 67));
         // A published entry is left alone.
         assert!(wrapped_newest_entry(&working, &working).is_none());
+    }
+
+    #[test]
+    fn a_fix_joins_the_release_entry_instead_of_opening_another() {
+        let sep = "-".repeat(67);
+        let old = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 1.0\n");
+        let new = format!("{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 2.0\n\n");
+        let working = format!("{new}{old}");
+        let out = with_bullet_in_release_entry(&working, "2.0", "Drop fix.patch").unwrap();
+        assert!(
+            out.contains("- Update to 2.0\n- Drop fix.patch\n\n"),
+            "{out}"
+        );
+        assert!(out.ends_with(&old));
+        // The same bullet twice is kept once.
+        assert_eq!(
+            with_bullet_in_release_entry(&out, "2.0", "Drop fix.patch").unwrap(),
+            out
+        );
+        // An earlier release's entry is never added to.
+        assert!(with_bullet_in_release_entry(&working, "1.0", "x").is_none());
+        assert!(with_bullet_in_release_entry(&old, "2.0", "x").is_none());
+    }
+
+    #[test]
+    fn a_generated_commit_list_collapses_to_the_update_line() {
+        let sep = "-".repeat(67);
+        let old = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 1.0\n");
+        let bullets: String = (0..8).map(|i| format!("  * change {i} (#{i})\n")).collect();
+        let new = format!(
+            "{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to version 1.3.7:\n{bullets}\n"
+        );
+        let out = collapsed_generated_entry(&format!("{new}{old}"), &old).unwrap();
+        assert!(out.contains("- Update to 1.3.7\n\n"), "{out}");
+        assert!(!out.contains("change 3"));
+        assert!(out.ends_with(&old));
+        // A short list, or one OBS holds, stays.
+        let short = format!(
+            "{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to version 1.3.7:\n  * one\n\n"
+        );
+        assert!(collapsed_generated_entry(&format!("{short}{old}"), &old).is_none());
+        let both = format!("{new}{old}");
+        assert!(collapsed_generated_entry(&both, &both).is_none());
     }
 
     #[test]

@@ -5091,8 +5091,9 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             warn_if_err(
                 reporter,
                 "adding the .changes entry for the dropped patches",
-                osc::add_changes_entry(
+                osc::add_release_changes_entry(
                     checkout_dir,
+                    &config.version,
                     &format!(
                         "Drop {}: made for another release, it does not apply to {}",
                         names.join(", "),
@@ -5133,8 +5134,9 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                     warn_if_err(
                         reporter,
                         "adding the .changes entry for the dropped patches",
-                        osc::add_changes_entry(
+                        osc::add_release_changes_entry(
                             checkout_dir,
+                            &config.version,
                             &format!(
                                 "Drop {}: it does not apply to {}",
                                 names.join(", "),
@@ -7835,8 +7837,9 @@ fn resolve_blocked_with(
                         warn_if_err(
                             *reporter,
                             "adding the .changes entry for the skipped tests",
-                            osc::add_changes_entry(
+                            osc::add_release_changes_entry(
                                 checkout_dir,
+                                &config.version,
                                 &dropped_tests_message(&dropped),
                                 Emit::new(*reporter, site.step.id),
                             ),
@@ -9444,11 +9447,19 @@ fn apply_turn_outcome_with(
                 warn_if_err(
                     reporter,
                     "adding the .changes entry for the agent's edit",
-                    osc::add_changes_entry(
+                    osc::add_release_changes_entry(
                         checkout_dir,
+                        &config.version,
                         &without_own_version(
                             &without_macros(
-                                &changes_message(&outcome.reasoning),
+                                &{
+                                    let m = changes_message(&outcome.reasoning);
+                                    if is_narration(&m) {
+                                        "Fix the packaging".to_string()
+                                    } else {
+                                        m
+                                    }
+                                },
                                 &config.pkg_name,
                                 &config.version,
                             ),
