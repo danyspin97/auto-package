@@ -2831,6 +2831,18 @@ pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> 
             .filter(|p| p.extension().is_some_and(|x| x == "changes"))
             .collect();
         files.sort();
+        // A version given up on (a wrong upstream, later corrected) left its
+        // entry at the top of the file; it was never published, so it goes.
+        if let Some(file) = files.first()
+            && let Some(name) = file.file_name()
+            && let (Ok(working), Ok(pristine)) = (
+                fs::read_to_string(file),
+                fs::read_to_string(checkout_dir.join(".osc").join("sources").join(name)),
+            )
+            && let Some(cleaned) = without_unpublished_update_entry(&working, &pristine, message)
+        {
+            let _ = fs::write(file, cleaned);
+        }
         if let Some(text) = files.first().and_then(|f| fs::read_to_string(f).ok())
             && newest_changes_entry_says(&text, message)
         {
@@ -2923,6 +2935,41 @@ fn merge_pending_changes_file(checkout_dir: &Path) {
     if let Some(merged) = merge_pending_changes(&current, &committed) {
         let _ = fs::write(file, merged);
     }
+}
+
+/// `working` without its newest entry, when that entry is not in `pristine`
+/// (what OBS holds) and records an `- Update to <other version>` that is not
+/// the `message` about to be recorded. `None` when there is nothing to drop.
+fn without_unpublished_update_entry(
+    working: &str,
+    pristine: &str,
+    message: &str,
+) -> Option<String> {
+    if !message.starts_with("Update to ") {
+        return None;
+    }
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let lines: Vec<&str> = working.lines().collect();
+    let first = lines.iter().position(|l| is_separator(l.trim()))?;
+    let next = lines[first + 1..]
+        .iter()
+        .position(|l| is_separator(l.trim()))
+        .map(|i| first + 1 + i)?;
+    let entry = lines[first..next].join("\n");
+    let says_other_update = lines[first..next].iter().any(|l| {
+        let t = l.trim().trim_start_matches(['-', '*', ' ']);
+        t.starts_with("Update to ") && t != message
+    });
+    if !says_other_update || pristine.contains(entry.trim_end()) {
+        return None;
+    }
+    let mut out = lines[..first].join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&lines[next..].join("\n"));
+    out.push('\n');
+    Some(out)
 }
 
 /// Whether the newest entry of a `.changes` file (the text between its first
@@ -9337,6 +9384,23 @@ mod transient_broken_tests {
         );
         assert!(matches!(r, Err(Error::OscFailed { code: 1, .. })));
         assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn an_unpublished_update_entry_for_another_version_is_dropped() {
+        let sep = "-".repeat(67);
+        let old = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 1.1.1\n");
+        let wrong =
+            format!("{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 0.0.1\n\n");
+        let working = format!("{wrong}{old}");
+        assert_eq!(
+            without_unpublished_update_entry(&working, &old, "Update to 1.1.1").unwrap(),
+            old
+        );
+        // Already published, the same version, or not an update: kept.
+        assert!(without_unpublished_update_entry(&working, &working, "Update to 1.1.1").is_none());
+        assert!(without_unpublished_update_entry(&working, &old, "Update to 0.0.1").is_none());
+        assert!(without_unpublished_update_entry(&working, &old, "Initial packaging").is_none());
     }
 
     #[test]
