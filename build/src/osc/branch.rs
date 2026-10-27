@@ -230,6 +230,11 @@ pub fn branch_package_as(
         follow_devel,
     );
     let out = api_call(Some("POST"), &path, None, emit)?;
+    if out.success() || classify_branch_failure(&out.stderr) == BranchFailure::AlreadyThere {
+        // Best effort: a branch that keeps OBS's default blocking only builds
+        // slower, and the build wait reports what it is blocked on.
+        let _ = block_locally(target_project, emit);
+    }
     if out.success() {
         return Ok(BranchResult::Branched(parse_branch_response(
             &out.stdout,
@@ -371,6 +376,47 @@ pub fn delete_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<(), Er
         code: out.code,
         stderr: out.stderr,
     })
+}
+
+/// `xml` with `block="local"` on every `<repository>` that sets no `block`,
+/// or `None` when there is nothing to change.
+///
+/// OBS blocks a repository by default until every package of the projects on
+/// its build paths has finished building. A branch has the paths of the
+/// project it came from, so while that project (Base:System) is mid-rebuild
+/// the branched package waits with it, for as long as the rebuild takes.
+/// `local` blocks only on the branch project's own packages.
+pub fn with_local_blocking(xml: &str) -> Option<String> {
+    let mut out = xml.to_string();
+    let mut changed = false;
+    // Back to front, so earlier offsets stay valid.
+    for (start, _) in repository_spans(xml).into_iter().rev() {
+        let open_end = out[start..].find('>').map_or(out.len(), |i| start + i);
+        if extract_xml_attr(&out[start..open_end], "block").is_some() {
+            continue;
+        }
+        let at = if out[..open_end].ends_with('/') {
+            open_end - 1
+        } else {
+            open_end
+        };
+        let trimmed = out[..at].trim_end().len();
+        out.insert_str(trimmed, " block=\"local\"");
+        changed = true;
+    }
+    changed.then_some(out)
+}
+
+/// Make the repositories of `project` block on its own packages only (see
+/// [`with_local_blocking`]).
+fn block_locally(project: &str, emit: Emit<'_>) -> Result<(), Error> {
+    let Some(xml) = get_project_meta(project, emit)? else {
+        return Ok(());
+    };
+    match with_local_blocking(&xml) {
+        Some(edited) => set_project_meta(project, &edited, emit),
+        None => Ok(()),
+    }
 }
 
 /// Read a branch response, falling back to what was asked for when a field
@@ -847,6 +893,17 @@ pub fn open_submit_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repositories_without_a_block_get_a_local_one() {
+        let xml = "<project>\n  <repository name=\"a\">\n    <arch>x86_64</arch>\n  </repository>\n  \
+                   <repository name=\"b\" block=\"all\"/>\n  <repository name=\"c\"/>\n</project>";
+        let edited = with_local_blocking(xml).unwrap();
+        assert!(edited.contains("<repository name=\"a\" block=\"local\">"));
+        assert!(edited.contains("<repository name=\"b\" block=\"all\"/>"));
+        assert!(edited.contains("<repository name=\"c\" block=\"local\"/>"));
+        assert_eq!(with_local_blocking(&edited), None);
+    }
 
     #[test]
     fn linkinfo_behind_only_when_base_differs_from_origin() {
