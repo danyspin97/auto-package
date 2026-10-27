@@ -2941,6 +2941,7 @@ fn cmd_build(
                     version: dep_config.version.clone(),
                     reason: SelectionReason::FirstUnbuiltDependency,
                     blocked_by: vec![],
+                    from_version: None,
                 });
                 // A failed request under the dependency's name is settled by this
                 // row (see `withdraw_settled_failures`). It is not a request, so
@@ -3553,6 +3554,7 @@ fn cmd_build(
                 version: version.clone(),
                 reason: SelectionReason::ExplicitOverride,
                 blocked_by: vec![],
+                from_version: branch.and_then(|b| b.from_version.clone()),
             });
             let r = pkg_reporter(&rpm_name);
             let result = run_package(&config, &pkg_run, r.as_ref());
@@ -3699,6 +3701,9 @@ fn cmd_build(
                     version: t.version.clone(),
                     reason: t.reason.clone(),
                     blocked_by: t.blocked_by.clone(),
+                    from_version: (*rpm_name == config.rpm_name)
+                        .then(|| branch.and_then(|b| b.from_version.clone()))
+                        .flatten(),
                 });
             }
 
@@ -4118,11 +4123,12 @@ fn cmd_update(
             rpm_name: Some(ap_build::update_project::branch_name(&c.rpm_name).to_string()),
             resolver: None,
             improve: None,
+            from_version: None,
         };
         let ap_build::update::Decision::Update {
             ecosystem,
+            old_version,
             new_version,
-            ..
         } = c.decision
         else {
             continue;
@@ -4157,6 +4163,10 @@ fn cmd_update(
         // asked for it. `sweep` stays off: an `update` of package X must
         // not opportunistically start rebuilding every other stuck
         // package in the project.
+        let existing = update_project::BranchBuild {
+            from_version: Some(old_version),
+            ..existing
+        };
         let r = cmd_build(
             &name,
             Some(&new_version),

@@ -764,6 +764,8 @@ struct StepInfo {
 
 struct PkgState {
     version: String,
+    /// For an update: the version the package was at before it.
+    from_version: Option<String>,
     status: PkgStatus,
     /// The last step seen, never cleared between steps; cleared only for a
     /// fresh attempt and for packages that finished without failing.
@@ -809,9 +811,20 @@ struct PkgState {
 }
 
 impl PkgState {
+    /// The version cell: `old → new` for an update, else the version.
+    fn version_label(&self) -> String {
+        match &self.from_version {
+            Some(from) if *from != self.version && !self.version.is_empty() => {
+                format!("{from} → {}", self.version)
+            }
+            _ => self.version.clone(),
+        }
+    }
+
     fn new(version: String) -> Self {
         Self {
             version,
+            from_version: None,
             status: PkgStatus::Queued,
             step: None,
             fail_reason: None,
@@ -1074,9 +1087,15 @@ impl TuiState {
                     ),
                 );
             }
-            Event::TargetSelected { pkg, version, .. } => {
+            Event::TargetSelected {
+                pkg,
+                version,
+                from_version,
+                ..
+            } => {
                 let state = self.pkg_mut(pkg);
                 state.version = version.clone();
+                state.from_version = from_version.clone();
                 state.status = PkgStatus::Queued;
                 state.started = Instant::now();
                 state.step = None;
@@ -2462,7 +2481,7 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
 const TABLE_COLUMNS: [(&str, Option<u16>); 7] = [
     ("Status", Some(11)),
     ("Package", None),
-    ("Version", Some(12)),
+    ("Version", Some(15)),
     ("Step", None),
     ("Tries", Some(7)),
     ("Time", Some(7)),
@@ -2470,7 +2489,7 @@ const TABLE_COLUMNS: [(&str, Option<u16>); 7] = [
 ];
 /// Column indices by importance, most important first. On a narrow terminal
 /// the last ones are dropped first.
-const TABLE_PRIORITY: [usize; 7] = [1, 0, 3, 5, 2, 4, 6];
+const TABLE_PRIORITY: [usize; 7] = [1, 0, 3, 2, 5, 4, 6];
 /// Least width a flexible column needs before it is worth showing.
 const FLEX_MIN_WIDTH: u16 = 12;
 
@@ -2532,7 +2551,7 @@ fn render_table(
                         Style::default().add_modifier(Modifier::BOLD)
                     },
                 ),
-                Cell::from(pkg.version.as_str()).style(Style::default().fg(Color::Gray)),
+                Cell::from(pkg.version_label()).style(Style::default().fg(Color::Gray)),
                 Cell::from(step),
                 Cell::from(tries),
                 Cell::from(format!("{elapsed}s")),
@@ -2820,7 +2839,7 @@ fn built_lines(state: &TuiState) -> Vec<String> {
         .iter()
         .filter_map(|n| state.packages.get(n.as_str()).map(|p| (n, p)))
         .filter(|(_, p)| matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt))
-        .map(|(n, p)| format!("{n} {}", p.version).trim_end().to_string())
+        .map(|(n, p)| format!("{n} {}", p.version_label()).trim_end().to_string())
         .collect()
 }
 
@@ -3286,6 +3305,7 @@ mod step_state_tests {
                 version: "1.0".to_string(),
                 reason: SelectionReason::RequestedRoot,
                 blocked_by: Vec::new(),
+                from_version: None,
             },
         });
         let pkg = &state.packages["foo"];
@@ -3301,6 +3321,7 @@ mod step_state_tests {
                 version: "1.0".to_string(),
                 reason: SelectionReason::RequestedRoot,
                 blocked_by: Vec::new(),
+                from_version: None,
             },
         }
     }
@@ -3849,8 +3870,8 @@ mod render_smoke_tests {
 
     #[test]
     fn the_table_keeps_the_most_important_columns_when_narrow() {
-        assert_eq!(visible_columns(80), vec![0, 1, 2, 3, 4, 5, 6]);
-        assert_eq!(visible_columns(60), vec![0, 1, 2, 3, 5]);
+        assert_eq!(visible_columns(90), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(visible_columns(60), vec![0, 1, 2, 3]);
         assert_eq!(visible_columns(40), vec![0, 1, 3]);
         // The package name is always there, even when nothing else fits.
         assert_eq!(visible_columns(5), vec![1]);
@@ -4132,6 +4153,7 @@ mod run_end_tests {
                 version: "1".to_string(),
                 reason: SelectionReason::RequestedRoot,
                 blocked_by: Vec::new(),
+                from_version: None,
             },
         });
         assert!(!run_is_done(&state, 0));

@@ -264,6 +264,9 @@ pub enum Event {
         version: String,
         reason: SelectionReason,
         blocked_by: Vec<String>,
+        /// For an update: the version the package was at before it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_version: Option<String>,
     },
     StepStarted {
         step: StepId,

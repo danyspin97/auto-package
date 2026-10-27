@@ -180,6 +180,8 @@ pub struct BranchBuild {
     /// `lint`: what the quality checks found, handed to the agent as
     /// the problem to fix in the existing recipe.
     pub improve: Option<String>,
+    /// `update`: the version the package is at, shown beside the new one.
+    pub from_version: Option<String>,
 }
 
 /// Everything a run produced, kept outside the `Result` so the summary is
@@ -1428,6 +1430,7 @@ fn build_item(
         rpm_name: Some(item.pkg.clone()),
         resolver: Some(resolver.clone()),
         improve: improve_problem(item),
+        from_version: Some(item.old_version.clone()),
     };
     let distro = crate::choose_distro(a.distro.as_deref(), branch, &a.arch);
     catch_panic(|| {
