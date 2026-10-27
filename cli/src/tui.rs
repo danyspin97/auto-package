@@ -1496,6 +1496,9 @@ fn request_build(add_tx: &Sender<AddRequest>, work: &AtomicUsize, req: AddReques
     sent
 }
 
+/// The longest a frame spends applying queued events before it draws.
+const DRAIN_BUDGET: Duration = Duration::from_millis(50);
+
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     rx: Receiver<Msg>,
@@ -1531,7 +1534,10 @@ fn event_loop(
     loop {
         // Drain everything currently queued so a burst of events (e.g. many
         // packages starting at once) renders as one frame, not one per event.
-        loop {
+        // Bounded by time, so producers that never pause can't starve the draw
+        // and input below — a resize would otherwise never be picked up.
+        let drain_until = Instant::now() + DRAIN_BUDGET;
+        while Instant::now() < drain_until {
             match rx.try_recv() {
                 Ok(msg) => state.apply(msg),
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
