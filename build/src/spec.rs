@@ -551,6 +551,29 @@ pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
     out
 }
 
+/// `spec` with the value of its first `Source`/`SourceN:` line replaced, the tag
+/// and its spacing kept. `None` when the spec has no source line.
+pub fn set_first_source(spec: &str, value: &str) -> Option<String> {
+    let mut done = false;
+    let lines: Vec<String> = spec
+        .lines()
+        .map(|line| {
+            if !done && let Some(rest) = line.strip_prefix("Source") {
+                let digits = rest.chars().take_while(char::is_ascii_digit).count();
+                if rest[digits..].starts_with(':') {
+                    let colon = "Source".len() + digits;
+                    let after = &line[colon + 1..];
+                    let pad = after.len() - after.trim_start().len();
+                    done = true;
+                    return format!("{}{}{value}", &line[..=colon], &after[..pad]);
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+    done.then(|| lines.join("\n") + if spec.ends_with('\n') { "\n" } else { "" })
+}
+
 /// What one `BuildRequires:` entry asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildRequire {
@@ -856,6 +879,16 @@ pub fn autosetup_expected_dir(spec: &str, name: &str, version: &str) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_first_source_value_is_replaced_in_place() {
+        let spec = "Name: x\nSource:         x-1.tar.gz\nSource1: y\n";
+        assert_eq!(
+            set_first_source(spec, "https://h/x-1.tar.gz#/x.tar.gz").unwrap(),
+            "Name: x\nSource:         https://h/x-1.tar.gz#/x.tar.gz\nSource1: y\n"
+        );
+        assert!(set_first_source("Name: x\n", "u").is_none());
+    }
+
     #[test]
     fn web_sources_are_listed_with_their_file_names() {
         let spec = "Name: dtc\nVersion: 1.8.1\n\

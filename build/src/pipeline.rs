@@ -11491,8 +11491,32 @@ fn carry_forward_repo_spec(
     step: &StepDir,
 ) -> Result<GenSpecResult, String> {
     let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
-    let bumped = crate::spec::set_version(&old, &config.version)
+    let mut bumped = crate::spec::set_version(&old, &config.version)
         .ok_or("its Version: is not a plain value")?;
+    if crate::spec::expanded_sources(&bumped).is_empty() {
+        // The source has no web address: a `_service` fetches it, or the
+        // tarball was committed by hand.
+        let repo = config
+            .source_repo
+            .as_deref()
+            .ok_or("the spec's sources have no web address to download from")?;
+        if checkout_dir.join("_service").is_file() {
+            return carry_forward_service_spec(config, repo, checkout_dir, spec_path, step, bumped);
+        }
+        let url = crate::sources::tag_archive_url(repo, &config.version).ok_or_else(|| {
+            format!(
+                "{repo} lists no tag for {}, so there is no archive to fetch",
+                config.version
+            )
+        })?;
+        // The address becomes part of the recipe, under the file name the spec
+        // already unpacks, so every later update has one to follow.
+        bumped = crate::spec::set_first_source(
+            &bumped,
+            &format!("{url}#/%{{name}}-%{{version}}.tar.gz"),
+        )
+        .ok_or("the spec has no Source: line")?;
+    }
     let sources = crate::spec::expanded_sources(&bumped);
     if sources.is_empty() {
         return Err("the spec's sources have no web address to download from".to_string());
@@ -11548,6 +11572,92 @@ fn carry_forward_repo_spec(
         is_rust: false,
         from_repo_archive: true,
     })
+}
+
+/// [`carry_forward_repo_spec`] for a package whose source a `tar_scm` service
+/// fetches: the service's `revision` moves to the new tag, `osc service ra`
+/// makes the tarball, and the old one goes. The spec keeps everything else.
+fn carry_forward_service_spec(
+    config: &PipelineConfig,
+    repo: &str,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    step: &StepDir,
+    bumped: String,
+) -> Result<GenSpecResult, String> {
+    let service_path = checkout_dir.join("_service");
+    let service =
+        std::fs::read_to_string(&service_path).map_err(|e| format!("reading _service: {e}"))?;
+    if !service.contains("tar_scm") && !service.contains("obs_scm") {
+        return Err("the _service is not a tar_scm one, so the source cannot be moved".into());
+    }
+    let tag = crate::sources::tag_for_version(repo, &config.version)
+        .ok_or_else(|| format!("{repo} lists no tag for {}", config.version))?;
+    let moved = with_service_revision(&service, &tag)
+        .ok_or("the _service has no revision to move to the new tag")?;
+    let before: std::collections::HashSet<String> = tarballs_in(checkout_dir);
+    ap_core::fsx::write_atomic(&service_path, &moved)
+        .map_err(|e| format!("writing _service: {e}"))?;
+    ap_core::fsx::write_atomic(spec_path, &bumped).map_err(|e| format!("writing the spec: {e}"))?;
+    run_service_with_retries(checkout_dir, Emit::quiet())
+        .map_err(|e| format!("running the _service: {e}"))?;
+    // The service writes `Version:` from the tarball (`set_version`) when it is
+    // enabled; the version asked for is what the spec must say.
+    let after = std::fs::read_to_string(spec_path).unwrap_or(bumped.clone());
+    let keep = crate::spec::set_version(&after, &config.version).unwrap_or(after);
+    ap_core::fsx::write_atomic(spec_path, &keep).map_err(|e| format!("writing the spec: {e}"))?;
+    let made = find_tarball(checkout_dir, &config.version)
+        .ok_or("the _service made no tarball for the new version")?;
+    // Tarballs of earlier releases that the new spec no longer names.
+    for old in before {
+        let named = crate::spec::expanded_sources(&keep)
+            .iter()
+            .any(|s| s.file == old)
+            || made.file_name().is_some_and(|n| n.to_string_lossy() == old);
+        if !named && old.contains(&config.pkg_name) {
+            let _ = std::fs::remove_file(checkout_dir.join(&old));
+        }
+    }
+    let top = ap_ecosystem::sdist::inspect(&made)
+        .ok()
+        .and_then(|info| info.top_level_dir)
+        .unwrap_or_else(|| format!("{}-{}", config.pkg_name.to_lowercase(), config.version));
+    write_or_warn(step.file("spec.generated"), &keep);
+    Ok(GenSpecResult {
+        sdist_top_level: top,
+        is_maturin: false,
+        is_rust: false,
+        from_repo_archive: true,
+    })
+}
+
+/// The tarballs (by file name) in `dir`.
+fn tarballs_in(dir: &Path) -> std::collections::HashSet<String> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| {
+            [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar"]
+                .iter()
+                .any(|s| n.ends_with(s))
+        })
+        .collect()
+}
+
+/// `service` with the `revision` parameter of its `tar_scm` set to `tag`;
+/// `None` when it has none.
+fn with_service_revision(service: &str, tag: &str) -> Option<String> {
+    let open = "<param name=\"revision\">";
+    let start = service.find(open)? + open.len();
+    let end = start + service[start..].find("</param>")?;
+    Some(format!(
+        "{}{}{}",
+        &service[..start],
+        crate::osc::xml_escape(tag),
+        &service[end..]
+    ))
 }
 
 /// The PyPI JSON of this package's version.
@@ -14781,6 +14891,16 @@ mod tests {
             ),
             "Move the runtime library to libaws-c-s31_4 (1.4.1)"
         );
+    }
+
+    #[test]
+    fn the_service_revision_moves_to_the_new_tag() {
+        let svc = "<services><service name=\"tar_scm\"><param name=\"revision\">v1.1.2</param><param name=\"url\">u</param></service></services>";
+        assert_eq!(
+            with_service_revision(svc, "v1.3.7").unwrap(),
+            "<services><service name=\"tar_scm\"><param name=\"revision\">v1.3.7</param><param name=\"url\">u</param></service></services>"
+        );
+        assert!(with_service_revision("<services/>", "v1").is_none());
     }
 
     #[test]

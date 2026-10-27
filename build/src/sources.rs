@@ -1553,6 +1553,13 @@ fn tag_archive_url_for(base: &str, repo: &str, is_gitlab: bool, tag: &str) -> St
 /// is that version. Unlike [`archive_urls`] there is no guess: a caller that
 /// writes the URL into a spec without downloading it first needs a tag that
 /// exists.
+/// The tag the forge API lists for `version`.
+pub fn tag_for_version(repo_url: &str, version: &str) -> Option<String> {
+    let parsed = ap_ecosystem::forge::parse(repo_url)?;
+    let tags = get_repo_tags(repo_url).ok()?;
+    find_matching_tag(&tags, version, &parsed.repo_name)
+}
+
 pub fn tag_archive_url(repo_url: &str, version: &str) -> Option<String> {
     let parsed = ap_ecosystem::forge::parse(repo_url)?;
     let tags = get_repo_tags(repo_url).ok()?;
