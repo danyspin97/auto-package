@@ -5594,6 +5594,7 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
             ),
         });
     }
+    osc::wrap_unpublished_changes(&ctx.checkout_dir);
     let plan = osc::publish_plan(&ctx.checkout_dir);
     for name in &plan.skipped {
         ctx.reporter.report(&Event::Warning {

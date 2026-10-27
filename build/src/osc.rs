@@ -2975,6 +2975,100 @@ fn without_unpublished_update_entry(
     Some(out)
 }
 
+/// Longest line of a `.changes` entry the style checks accept.
+const CHANGES_WIDTH: usize = 67;
+
+/// `line` broken at word boundaries into lines of at most [`CHANGES_WIDTH`]
+/// characters, each continuation indented to sit under the text of a bullet
+/// (`- text`, `  * text`) or under the line it continues.
+fn wrap_changes_line(line: &str) -> Vec<String> {
+    if line.chars().count() <= CHANGES_WIDTH {
+        return vec![line.to_string()];
+    }
+    let lead = line.len() - line.trim_start().len();
+    let rest = &line[lead..];
+    let bullet = ["- ", "* "]
+        .iter()
+        .find(|b| rest.starts_with(**b))
+        .map_or(0, |b| b.len());
+    let first_prefix = &line[..lead + bullet];
+    let indent = " ".repeat(lead + bullet);
+    let mut out = Vec::new();
+    let mut current = first_prefix.to_string();
+    let mut empty = true;
+    for word in rest[bullet..].split_whitespace() {
+        let add = if empty { 0 } else { 1 } + word.chars().count();
+        if !empty && current.chars().count() + add > CHANGES_WIDTH {
+            out.push(std::mem::replace(&mut current, indent.clone()));
+            empty = true;
+        }
+        if !empty {
+            current.push(' ');
+        }
+        current.push_str(word);
+        empty = false;
+    }
+    out.push(current);
+    out
+}
+
+/// `working` with the lines of its newest entry wrapped, or `None` when that
+/// entry is already short enough or is one OBS already holds (`pristine`):
+/// a published entry is never rewritten.
+fn wrapped_newest_entry(working: &str, pristine: &str) -> Option<String> {
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let lines: Vec<&str> = working.lines().collect();
+    let first = lines.iter().position(|l| is_separator(l.trim()))?;
+    let end = lines[first + 1..]
+        .iter()
+        .position(|l| is_separator(l.trim()))
+        .map_or(lines.len(), |i| first + 1 + i);
+    // The header line (date - author) is the one after the separator.
+    let body_from = (first + 2).min(end);
+    if !lines[body_from..end]
+        .iter()
+        .any(|l| l.chars().count() > CHANGES_WIDTH)
+    {
+        return None;
+    }
+    let entry = lines[first..end].join("\n");
+    if pristine.contains(entry.trim_end()) {
+        return None;
+    }
+    let mut out: Vec<String> = lines[..body_from].iter().map(|l| l.to_string()).collect();
+    for l in &lines[body_from..end] {
+        out.extend(wrap_changes_line(l));
+    }
+    out.extend(lines[end..].iter().map(|l| l.to_string()));
+    let mut text = out.join("\n");
+    text.push('\n');
+    Some(text)
+}
+
+/// Wrap the long lines of the `.changes` entry this run wrote (one OBS does
+/// not hold yet) so the package passes the changelog style checks.
+pub fn wrap_unpublished_changes(checkout_dir: &Path) {
+    let Ok(rd) = fs::read_dir(checkout_dir) else {
+        return;
+    };
+    for file in rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "changes"))
+    {
+        let Some(name) = file.file_name() else {
+            continue;
+        };
+        let pristine = fs::read_to_string(checkout_dir.join(".osc").join("sources").join(name))
+            .unwrap_or_default();
+        if let Ok(working) = fs::read_to_string(&file)
+            && let Some(wrapped) = wrapped_newest_entry(&working, &pristine)
+        {
+            let _ = fs::write(&file, wrapped);
+        }
+    }
+}
+
 /// Whether the newest entry of a `.changes` file (the text between its first
 /// two separator lines) has `message` as one of its lines, bullet or not.
 fn newest_changes_entry_says(changes: &str, message: &str) -> bool {
@@ -9424,6 +9518,21 @@ mod transient_broken_tests {
         assert!(without_unpublished_update_entry(&working, &working, "Update to 1.1.1").is_none());
         assert!(without_unpublished_update_entry(&working, &old, "Update to 0.0.1").is_none());
         assert!(without_unpublished_update_entry(&working, &old, "Initial packaging").is_none());
+    }
+
+    #[test]
+    fn a_long_changelog_line_is_wrapped_under_its_bullet() {
+        let sep = "-".repeat(67);
+        let long = "- Drop the obsolete fix-cmake.patch and add the CPS share directory to the devel package for CRCpp 1.2.3.0";
+        let working = format!(
+            "{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n{long}\n\n{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Old\n"
+        );
+        let pristine = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Old\n");
+        let out = wrapped_newest_entry(&working, &pristine).unwrap();
+        assert!(out.contains("- Drop the obsolete fix-cmake.patch and add the CPS share directory\n  to the devel package for CRCpp 1.2.3.0\n"), "{out}");
+        assert!(out.lines().all(|l| l.chars().count() <= 67));
+        // A published entry is left alone.
+        assert!(wrapped_newest_entry(&working, &working).is_none());
     }
 
     #[test]
