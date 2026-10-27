@@ -2,6 +2,7 @@
 //! and the validation gate.
 
 pub mod agent;
+mod conventions_table;
 pub mod depclass;
 pub mod depreach;
 pub mod deselect;

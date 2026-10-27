@@ -1,0 +1,83 @@
+1. BuildRequires constraint syntax inside %{python_module ...} — read when writing or fixing a BuildRequires with >=, <, ==
+2. Normalized vs display vs import names — read when a Requires/dist-info/%files name has odd casing, dashes or dots
+3. Arch-specific vs noarch, C libs and -devel names — read when deciding BuildArch, or an extension links a C/C++ library
+4. Maturin (Rust-in-Python) packages — read when build-backend is maturin or the source has Cargo.toml plus pyproject.toml
+5. License must be an SPDX expression — read when License is FIXME, not SPDX, or no LICENSE file exists in the sdist
+6. %pyproject_wheel / %pyproject_install for PEP 517 — read when writing %build or %install of a Python package
+7. %check with %pytest / %pytest_arch and its BuildRequires — read when adding or editing %check of a Python package
+8. Python flavors, %python_expand, %python_files, _multibuild — read when touching flavor macros, multibuild or python_subpackages
+9. Never limit parallelism (-j1) — read when tempted to add -j1 or a job cap to make, cmake or pytest
+10. %check failure: missing dependency vs cannot run here — read when %check fails (ImportError, fixture not found, collect error)
+11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
+12. pytest config pitfalls (exit 5, coverage gates, filterwarnings, newer pytest) — read when %check fails oddly on config
+13. Non-test failures: Source0 mismatch, offline %build errors — read when %prep/%build fails (no such file, name resolution)
+14. Tools available to you and how to use them — read when unsure which tool or command (Read, Grep, rpm -qlp, zypper) applies
+15. Missing third-party module in %check, circular deps (Step B) — read when %check says ModuleNotFoundError or a dep cycle
+16. Import name differs from package name — read when writing %files module dirs or an import check for an unfamiliar package
+17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
+18. Console scripts and python_alternative — read when the package declares scripts/entry points or %files lists /usr/bin
+19. Single % in RPM macros, never %% — read when a spec line shows %% or an rpmspec macro-parse error
+20. Only documented Python macros — read when about to use a python macro you have not seen in the spec or a skill
+21. One simple constraint per BuildRequires, not PEP 508 — read when copying a requirement with extras, markers or commas
+22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
+23. Stray top-level files in site-packages — read when %files or rpmlint shows tests/docs/setup files at site-packages root
+24. Bundled headers in a non-devel package (devel-file-in-non-devel-package) — read when rpmlint reports that error
+25. rpmlint badness budget (threshold 999) — read when the build log says "Badness NNNN exceeds threshold"
+26. Source from a repository, not an sdist — read when the checkout is a git snapshot or the project sits in a subdirectory
+27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules and special cases
+28. The four exceptions to building a dependency — read before using any workaround or use_upstream_wheel
+29. Missing source code (no sdist, no repo URL) — read when no source tarball or repository URL can be found for the package
+30. Monorepos: package every sibling project — read when the prompt lists several "Other projects in this archive"
+31. rpmlint compliance (summary, line length, manpage, rights) — read when rpmlint warns on Summary, description, binaries, perms
+32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
+33. Plain C/C++ packages (CMake/autotools, Skill plain-c-cpp-packaging) — read when the package has no Python and no Cargo
+34. Optional extras are Recommends, not BuildRequires — read when pyproject lists optional-dependencies you consider adding
+35. Systemd service files and system users — read when the package ships a daemon, a .service unit or needs /run dirs
+36. gettext .mo translations (%find_lang) — read when the package installs locale/ .mo files or rpmlint reports them
+37. -doc subpackage for Sphinx/generated docs — read when upstream ships docs as an artifact or the task asks for -doc
+38. Removed or renamed Python stdlib APIs — read when tests or code fail with AttributeError/ImportError on a stdlib name
+39. rpmlintrc for a genuine false positive — read when rpmlint flags something that is correct to ship
+40. The .changes file is written for you — read before editing a .changes file or writing the reasoning sentence
+41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
+42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
+43. setup.cfg pytest config needs [tool:pytest] — read when pytest ignores options set in setup.cfg
+44. Absent test files/fixtures and other non-bugs — read when %check fails on a missing conftest, testdata or fixture file
+45. Django test suites need DJANGO_SETTINGS_MODULE — read when %check says ImproperlyConfigured: settings are not configured
+46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
+47. Set %{optflags} before building a C extension — read when a distutils/setuptools Extension ignores distro flags
+48. Test-environment setup: %ctest env, UTF-8 locale, git, sandbox — read when %check fails with no missing package
+49. Per-CPython upstream wheels covering our flavors — read when the source cannot be built and wheels exist per cp3NN
+50. OOM / disk-full failures are sizing, not spec bugs — read when the build is killed or says "No space left on device"
+51. meson-python / scikit-build-core args via PIP_CONFIG_SETTINGS — read when build-backend is mesonpy or scikit_build_core
+52. PyPI renames and forks need Obsoletes/Provides — read when the package is a fork or rename of another PyPI project
+53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
+54. Metapackage subpackage of runtime deps — read when a feature only needs other packages installed, no files
+55. Two-pass pytest (xdist-safe in parallel, rest serial) — read when tests fail only under pytest-xdist -n auto
+56. Signed checksums file, GPG verify — read when the upstream signs a checksum list, not the tarball, or a .asc is involved
+57. Tests need the compiled extension in-tree (make inplace) — read when tests skip or fail because the .so is not in source/
+58. Vendored libraries need their LICENSE in %license — read when sources have _vendor/vendor/bundled dirs
+59. Exact == pin that openSUSE ships at another version — read when OBS says "nothing provides ... = X (got version Y)"
+60. "Pure Python" can ship compiled code, check before noarch — read when choosing BuildArch noarch for a wheel or sdist
+61. [inline] A missing dependency may already be built here — full text for rpm -qlp checks and import-name mismatches
+62. [inline] Dependency needs patching: patch_dependencies — full text for the two cases and the problem text to write
+63. [inline] No TODO placeholders left in a spec — full text for what each skeleton marker needs
+64. [inline] C/C++/CUDA libs are never python-<lib> — full text for NVIDIA nvidia-<lib>-cuNN wheel exceptions
+65. Runtime Requires are flavor-neutral python-<name> — read when writing any Requires line for a Python dependency
+66. Summary and %description must say something — read when writing Summary/%description or the generator left a stub
+67. %check needing GPU/driver/device is not run — read when tests need CUDA, a device, a display or network
+68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
+69. %license and the licence expression are exact — read when listing %license files or the licence is multi-licence
+70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
+71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
+72. rpmlintrc filters only for reported warnings — read when adding addFilter lines or "unused-rpmlintrc-filter" appears
+73. Unsatisfiable bounds, build sibling packages first — read when upstream pins its own sibling with == / >= newer than ours
+74. Write the changelog line (reasoning sentence) for a reader — read before writing the reasoning of any edit
+75. Keep upstream bounds, say when relaxed — read when about to drop or loosen a version bound in Requires/BuildRequires
+76. Files of one Python package come from one tree — read when several wheels fill one package, ModuleNotFoundError on a sibling part
+77. Reproducible Source: URLs with #/file fragment — read when adding or editing a Source: for a wheel or GitHub archive
+78. Upstream licence guards (e.g. I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION) — read when a build refuses over a licence variable
+79. ELF RPATH/RUNPATH checks before the first build — read when the package ships .so files or rpmlint reports rpath errors
+80. $python only inside %python_expand/%python_exec — read when %build/%install uses $python or "Unterminated {" appears
+81. Predict the %check environment before building — read when tests may need network, GPU, redis, models or repo files
+82. Four pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when the package has any of these
+83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
