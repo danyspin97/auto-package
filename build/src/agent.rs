@@ -576,18 +576,17 @@ one; the pipeline runs `rpmspec --parse` on it once you finish.
 - "why": required when action is "blocked" or "use_upstream_wheel" — for the
 latter, name the exact missing compiler/SDK and quote the build.log line proving it
 (convention 28 Exception 4)
-- "reasoning": one sentence summarising what you did. It becomes the package's
-  `.changes` bullet, which sits right under `- Update to <version>`: do not name
-  the package or the release being packaged in it (a version the change itself
-  is about, such as a cmake minimum, is fine). Write it as a short imperative
-  line that says what changed and why, with no file names or paths, no
-  macros (`%{name}`, `%{version}`: write the names out) and no parenthetical
-  detail, and it starts with a verb (Add, Drop, Fix, Use, Raise, ...): say
-  what you changed in the package, never what the build log showed or what you
-  reviewed (`The build still...`, `All tests failed...`). "Drop the CVE-2025-2588
-  patch, fixed upstream", not
-  "Drop the CVE-2025-2588 patch, which upstream 1.15.0 already contains
-  (src/fa.c, fa.h, tests/fatest.c)"
+- "reasoning": your notes: what you found and why, free-form. It goes to the run
+  log and the package notes, not to the changelog.
+- "changelog": required when action is "edited". The package's `.changes` bullet,
+  which sits right under `- Update to <version>`. ONE short imperative line (under
+  100 characters) that starts with a verb (Add, Drop, Fix, Use, Raise, ...) and
+  says what you changed in the package and why. No package name, no version being
+  packaged (a version the change itself is about, such as a cmake minimum, is
+  fine), no macros (`%{name}`, `%{version}`: write the names out), no file names or
+  paths, no parentheses, and never what the build log showed or what you reviewed.
+  "Drop the CVE-2025-2588 patch, fixed upstream", not "Drop the CVE-2025-2588 patch,
+  which upstream 1.15.0 already contains (src/fa.c, fa.h, tests/fatest.c)".
 - "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.
   REQUIRED format (each entry must name a specific file or pattern):
   ["Read source/pyproject.toml lines 1-50",
@@ -1120,6 +1119,8 @@ pub struct ToolCall {
 pub struct TurnOutcome {
     pub action: Action,
     pub reasoning: String,
+    /// The `.changes` bullet the turn asked for; empty when it gave none.
+    pub changelog: String,
     pub evidence: Vec<String>,
     pub unresolvable_packages: Vec<String>,
     /// Dependencies to branch and patch rather than build (convention 62).
@@ -1228,6 +1229,10 @@ const TURN_RESPONSE_SCHEMA: &str = r#"{
     "action": {"type": "string", "enum": ["edited", "no_change", "blocked", "use_upstream_wheel"]},
     "why": {"type": "string"},
     "reasoning": {"type": "string"},
+    "changelog": {
+      "type": "string",
+      "description": "The package's `.changes` bullet: ONE imperative line, under 100 characters, saying what you changed in the package and why. No package name, no version being packaged, no macros, no file names, no build-log narration. Required when action is edited."
+    },
     "evidence": {
       "type": "array",
       "items": {"type": "string"},
@@ -1301,6 +1306,8 @@ struct TurnResponse {
     #[serde(default)]
     evidence: Vec<String>,
     reasoning: String,
+    #[serde(default)]
+    changelog: String,
     confidence: Confidence,
     #[serde(default)]
     unresolvable_packages: Vec<String>,
@@ -1405,6 +1412,7 @@ fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
         why: String::new(),
         evidence,
         reasoning,
+        changelog: String::new(),
         confidence,
         unresolvable_packages,
         patch_dependencies: Vec::new(),
@@ -2349,6 +2357,7 @@ fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     Ok(TurnOutcome {
         action,
         reasoning: resp.reasoning,
+        changelog: resp.changelog,
         evidence: resp.evidence,
         unresolvable_packages: resp.unresolvable_packages,
         patch_dependencies: resp.patch_dependencies,

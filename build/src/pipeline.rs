@@ -3448,6 +3448,7 @@ fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
             why: why.to_string(),
         },
         reasoning: why.to_string(),
+        changelog: String::new(),
         evidence: Vec::new(),
         unresolvable_packages: Vec::new(),
         patch_dependencies: Vec::new(),
@@ -9534,7 +9535,12 @@ fn apply_turn_outcome_with(
                         &without_own_version(
                             &without_macros(
                                 &{
-                                    let m = changes_message(&outcome.reasoning);
+                                    let m =
+                                        changes_message(if outcome.changelog.trim().is_empty() {
+                                            &outcome.reasoning
+                                        } else {
+                                            &outcome.changelog
+                                        });
                                     if is_narration(&m) {
                                         "Fix the packaging".to_string()
                                     } else {
