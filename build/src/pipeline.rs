@@ -10334,6 +10334,27 @@ fn changes_message(reasoning: &str) -> String {
     line
 }
 
+/// Whether a bullet narrates the investigation (what the build log showed, what
+/// was reviewed) instead of saying what changed in the package.
+fn is_narration(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+    [
+        "the",
+        "all",
+        "this",
+        "it",
+        "pre-build",
+        "reviewed",
+        "review",
+        "restored",
+    ]
+    .contains(&first)
+        || lower.contains("build.log")
+        || lower.contains("build log")
+        || lower.contains("despite")
+}
+
 /// `line` with the package's own macros written out. A `.changes` entry is
 /// plain text that rpm later reads as `%changelog`, where `%{name}` would be
 /// expanded or flagged, so `lib%{name}1_4` becomes `libaws-c-s31_4`.
@@ -14735,6 +14756,17 @@ mod tests {
             ),
             "Move the runtime library to libaws-c-s31_4 (1.4.1)"
         );
+    }
+
+    #[test]
+    fn narration_is_not_a_changelog_bullet() {
+        assert!(is_narration(
+            "The build still installed aws-c-http-devel-0.11.0 despite the requirement"
+        ));
+        assert!(is_narration("All 9 tests failed with an option error"));
+        assert!(is_narration("Pre-build review of influxdb-cxx"));
+        assert!(!is_narration("Drop the obsolete fix-cmake.patch"));
+        assert!(!is_narration("Replace %make_jobs with %cmake_build"));
     }
 
     #[test]
