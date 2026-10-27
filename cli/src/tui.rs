@@ -1037,7 +1037,7 @@ impl TuiState {
                 self.add_global_log(
                     level,
                     format!(
-                        "Run finished: {outcome} in {:.1}s (${:.4})",
+                        "Run finished: {outcome} in {:.1}s (${:.2})",
                         elapsed.as_secs_f64(),
                         usage.cost_usd
                     ),
@@ -1326,7 +1326,7 @@ impl TuiState {
                 state.add_agent_activity(
                     ActivityKind::Reply,
                     format!(
-                        "{} (confidence: {}, ${:.4})\n{}",
+                        "{} (confidence: {}, ${:.2})\n{}",
                         response.action,
                         response.confidence.as_deref().unwrap_or("?"),
                         usage.cost_usd,
@@ -2424,17 +2424,17 @@ fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     let cost = state.total_cost_usd();
     let full = match (state.resolve_total, state.resolve_in_distro) {
         (Some(closure_total), Some(in_distro)) => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${cost:.4} "
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${cost:.2} "
         ),
         _ => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built) │ elapsed {elapsed}s │ cost ${cost:.4} "
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built) │ elapsed {elapsed}s │ cost ${cost:.2} "
         ),
     };
     // Narrower titles for narrower terminals, each dropping the least
     // essential parts first.
     let short =
-        format!(" {done}/{total} done, {pending} pending │ elapsed {elapsed}s │ ${cost:.4} ");
-    let shortest = format!(" {done}/{total} done │ ${cost:.4} ");
+        format!(" {done}/{total} done, {pending} pending │ elapsed {elapsed}s │ ${cost:.2} ");
+    let shortest = format!(" {done}/{total} done │ ${cost:.2} ");
     let title = header_line(
         &scope_labels(&state.scope),
         vec![full, short, shortest],
@@ -2535,7 +2535,7 @@ fn render_table(
                 Cell::from(step),
                 Cell::from(tries),
                 Cell::from(format!("{elapsed}s")),
-                Cell::from(format!("${:.4}", pkg.cost_usd)),
+                Cell::from(format!("${:.2}", pkg.cost_usd)),
             ];
             let kept = cells
                 .into_iter()
@@ -3969,10 +3969,10 @@ mod header_tests {
 
     fn counters() -> Vec<String> {
         vec![
-            " Auto-Package — 3/10 packages done, 7 pending (2 built) │ elapsed 12s │ cost $0.1234 "
+            " Auto-Package — 3/10 packages done, 7 pending (2 built) │ elapsed 12s │ cost $0.12 "
                 .to_string(),
-            " 3/10 done, 7 pending │ elapsed 12s │ $0.1234 ".to_string(),
-            " 3/10 done │ $0.1234 ".to_string(),
+            " 3/10 done, 7 pending │ elapsed 12s │ $0.12 ".to_string(),
+            " 3/10 done │ $0.12 ".to_string(),
         ]
     }
 
@@ -4023,13 +4023,13 @@ mod header_tests {
     #[test]
     fn a_narrow_header_drops_the_scope_before_the_counters_it_cannot_share_room_with() {
         let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 40);
-        assert_eq!(line, " 3/10 done │ $0.1234 ");
+        assert_eq!(line, " 3/10 done │ $0.12 ");
     }
 
     #[test]
     fn the_targets_are_dropped_before_the_project() {
         let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 60);
-        assert_eq!(line, "project: home:foo:bar │ 3/10 done │ $0.1234 ");
+        assert_eq!(line, "project: home:foo:bar │ 3/10 done │ $0.12 ");
     }
 
     #[test]
@@ -4048,8 +4048,8 @@ mod header_tests {
             project: "home:a-very-long-project-name:branches:openSUSE:Factory".to_string(),
             targets: vec!["pkg".to_string()],
         };
-        let line = header_line(&scope_labels(&long), counters(), 20);
-        assert!(line.width() <= 20, "{line:?}");
+        let line = header_line(&scope_labels(&long), counters(), 15);
+        assert!(line.width() <= 15, "{line:?}");
         assert!(line.ends_with("..."), "{line:?}");
     }
 }

@@ -3337,9 +3337,9 @@ fn resume_budget(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> 
         ctx.reporter.report(&Event::Progress {
             step: None,
             message: format!(
-                "{rpm_name}: resuming with ${spent_usd:.4} spent and {attempts} fix \
+                "{rpm_name}: resuming with ${spent_usd:.2} spent and {attempts} fix \
                  attempt(s) already used on this package in this CLI run (budget cap \
-                 ${:.4}, max {} attempts)",
+                 ${:.2}, max {} attempts)",
                 config.budget_usd, config.max_attempts
             ),
         });

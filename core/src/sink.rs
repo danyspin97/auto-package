@@ -331,7 +331,7 @@ impl HumanSink {
                 Some(format!(
                     "\n{outcome_colored} in {} · {}",
                     fmt_elapsed(*elapsed),
-                    format!("${:.4}", usage.cost_usd).if_supports_color(Stderr, |t| t.dimmed()),
+                    format!("${:.2}", usage.cost_usd).if_supports_color(Stderr, |t| t.dimmed()),
                 ))
             }
             Event::ResolveStarted { root } => Some(format!(
@@ -594,7 +594,7 @@ impl HumanSink {
                 let mut s = format!(
                     "  {} ({action_colored} · {confidence_colored} · {}): {reasoning}",
                     "reply".if_supports_color(Stderr, |t| t.cyan()),
-                    format!("${:.4}", usage.cost_usd).if_supports_color(Stderr, |t| t.dimmed()),
+                    format!("${:.2}", usage.cost_usd).if_supports_color(Stderr, |t| t.dimmed()),
                 );
                 if self.level >= LogLevel::Trace && !raw.is_empty() {
                     s.push('\n');

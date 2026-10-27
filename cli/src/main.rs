@@ -594,7 +594,7 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     }
     let usage = memory.usage();
     eprintln!(
-        "\nInterrupted — tokens: {} in / {} out — cost: ${:.4}",
+        "\nInterrupted — tokens: {} in / {} out — cost: ${:.2}",
         usage.input_tokens, usage.output_tokens, usage.cost_usd
     );
     // The shell convention for death by SIGINT; scripts can tell an
