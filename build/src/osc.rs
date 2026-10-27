@@ -4805,7 +4805,23 @@ fn matches_source_name(pattern: &str, name: &str) -> bool {
         parts.push(&rest[..at]);
         let after = &rest[at + 1..];
         rest = if let Some(body) = after.strip_prefix('{') {
-            body.split_once('}').map_or("", |(_, tail)| tail)
+            // The braces close at their own depth: `%{pypi_source %{name} 1.2}`.
+            let mut depth = 1usize;
+            let mut end = body.len();
+            for (i, c) in body.char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            &body[end..]
         } else {
             after.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
         };
