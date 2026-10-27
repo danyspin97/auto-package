@@ -2870,6 +2870,20 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
                     Ok(res)
                 }
                 Err(why) => {
+                    // A generated spec starts from scratch: it would drop what a
+                    // maintained C/C++ recipe has (noarch, its Source URL, a
+                    // multibuild, patches). That is only done when asked for
+                    // (`--regen`); Python packages keep the old fallback, as a
+                    // generated spec is what they are normally made from.
+                    if config.source_repo.is_some() && !config.rpm_name.starts_with("python-") {
+                        step.finish(StepOutcome::Failed);
+                        return Err(ctx.failed(format!(
+                            "could not carry the existing recipe forward to {} ({why}); a new \
+                             spec would replace the package's own recipe, so nothing was \
+                             changed (pass --regen to generate one anyway)",
+                            config.version
+                        )));
+                    }
                     reporter.report(&Event::Warning {
                         step: Some(step.id),
                         message: format!(
