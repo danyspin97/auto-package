@@ -10478,9 +10478,9 @@ fn without_file_list(line: &str) -> String {
         !item.is_empty()
             && !item.contains(' ')
             && (item.contains('/')
-                || item
-                    .rsplit_once('.')
-                    .is_some_and(|(_, e)| (1..=4).contains(&e.len())))
+                || item.rsplit_once('.').is_some_and(|(_, e)| {
+                    (1..=4).contains(&e.len()) && e.chars().any(|c| c.is_ascii_alphabetic())
+                }))
     };
     if before.trim().is_empty() || !inside.split(',').all(looks_like_files) {
         return line.to_string();
@@ -10499,19 +10499,24 @@ fn without_own_version(line: &str, package: &str, version: &str) -> String {
         return line.to_string();
     }
     let mut words: Vec<&str> = head.split_whitespace().collect();
+    let mut stripped = false;
     if words
         .last()
         .is_some_and(|w| w.eq_ignore_ascii_case(package))
     {
         words.pop();
+        stripped = true;
     }
-    if words
-        .last()
-        .is_some_and(|w| ["in", "for", "of", "with", "from", "on", "against"].contains(w))
+    if stripped
+        && words
+            .last()
+            .is_some_and(|w| ["in", "for", "of", "with", "from", "on", "against", "to"].contains(w))
     {
         words.pop();
     }
-    if words.is_empty() {
+    // Only a "<package> <version>" ending is the release's own name; a bare
+    // trailing number ("Raise the minimum to 1.2") may mean something else.
+    if !stripped || words.is_empty() {
         return line.to_string();
     }
     words.join(" ")
