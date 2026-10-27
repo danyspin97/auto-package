@@ -37,6 +37,26 @@ generalize perfectly to this package.
   package `lib<name>-<version-major>_<minor>` or keep the `.so` in the base
   package and put only headers/cmake/pkgconfig in `-devel`
   (`Requires: %{name} = %{version}`).
+- **Follow the SONAME upstream sets; never pin an old one.** When a new
+  release changes `SOVERSION` (or the major of `VERSION`), the runtime
+  subpackage is renamed to the new `lib<name><soversion>` and `%files` lists
+  that soname. Do NOT keep the old name by editing `SOVERSION` with `sed`
+  or a patch (`SOVERSION 0unstable`, `.so.1.0.0` hard-coded in a compat
+  CMake module): it hides an ABI change from every dependent. Glob the
+  version part with `%{_libdir}/lib<name>.so.%{soversion_dotted}*` rather
+  than `*.so.*` or one hard-coded number.
+- **A header-only library is one noarch `-devel` package.** No runtime
+  subpackage, no empty base package: `BuildArch: noarch`, `%files` for the
+  headers only. If the CMake config lands in `%{_libdir}`, install it to
+  `%{_datadir}` (`-DCMAKE_INSTALL_LIBDIR=share` or the project's own cmake
+  dir variable) so the package stays noarch.
+- **Keep the `Source:` URL when updating.** `Source0: <https url>#/%{name}-%{version}.tar.gz`
+  stays an address OBS can download, not a bare file name with a sha256
+  comment; and a `_service` (`tar_scm`, `set_version`) the package has stays
+  as it is, with only its `revision` moved to the new tag.
+- **Do not lean on a bundled copy when the distro has it.** If the old
+  recipe removed a bundled library (`rm -r 3rd_party/...`) and
+  `BuildRequires` the system one, keep doing that on an update.
 - **Install dirs named after a version the CMake script computes**
   (e.g. `include/oatpp-1.3.0/` while the tag is 1.3.1 — the project parses
   its own header, not the tag): list `%{buildroot}` after `%install` and use
