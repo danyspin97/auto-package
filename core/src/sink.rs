@@ -66,21 +66,47 @@ fn strip_controls(text: &str, keep_sgr: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if keep_sgr && c == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            let mut params = String::new();
-            while let Some(&p) = chars.peek() {
-                if !(p.is_ascii_digit() || p == ';') {
-                    break;
+        if c == '\u{1b}' {
+            match chars.peek() {
+                // CSI: parameters, intermediates, one final byte. Dropped whole,
+                // so `ESC [ 2 K` leaves nothing behind; only a plain SGR colour
+                // is kept, and only for the human sink.
+                Some('[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    while let Some(&p) = chars.peek() {
+                        if !('\u{20}'..='\u{3f}').contains(&p) {
+                            break;
+                        }
+                        params.push(p);
+                        chars.next();
+                    }
+                    if let Some(fin) = chars.next_if(|f| ('\u{40}'..='\u{7e}').contains(f))
+                        && keep_sgr
+                        && fin == 'm'
+                        && params.chars().all(|p| p.is_ascii_digit() || p == ';')
+                    {
+                        out.push_str("\u{1b}[");
+                        out.push_str(&params);
+                        out.push('m');
+                    }
                 }
-                params.push(p);
-                chars.next();
-            }
-            if chars.peek() == Some(&'m') {
-                chars.next();
-                out.push_str("\u{1b}[");
-                out.push_str(&params);
-                out.push('m');
+                // OSC (title, clipboard): up to BEL or ESC \.
+                Some(']') => {
+                    chars.next();
+                    while let Some(o) = chars.next() {
+                        if o == '\u{7}' {
+                            break;
+                        }
+                        if o == '\u{1b}' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {}
             }
             continue;
         }
@@ -1097,7 +1123,7 @@ mod printable_tests {
         let text = "ok\u{1b}]0;pwned\u{7}\n\tnext\u{1b}]52;c;ZGF0YQ==\u{1b}\\";
         let out = printable(text);
         assert!(!out.contains('\u{1b}') && !out.contains('\u{7}'), "{out:?}");
-        assert_eq!(out, "ok]0;pwned\n\tnext]52;c;ZGF0YQ==\\");
+        assert_eq!(out, "ok\n\tnext");
     }
 
     #[test]
@@ -1118,7 +1144,8 @@ mod printable_tests {
     fn human_output_keeps_its_own_colours_only() {
         let msg = "\u{1b}[31mred\u{1b}[0m \u{1b}[2J\u{1b}]0;x\u{7}";
         let out = strip_controls(msg, true);
-        assert_eq!(out, "\u{1b}[31mred\u{1b}[0m J]0;x");
+        assert_eq!(out, "\u{1b}[31mred\u{1b}[0m ");
+        assert_eq!(printable("\u{1b}[2Kdone"), "done");
     }
 }
 
