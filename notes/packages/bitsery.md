@@ -1,7 +1,7 @@
 # bitsery notes
 
 ## Test changes
-- The test CMake file hard-codes -Werror on the test targets. It is removed from the test flags so compiler warnings in the headers do not fail the test build.
+- The test CMake file hard-codes -Werror on the test targets. It is removed from the test flags so that GCC warnings from the headers (for example unused-but-set variables) do not fail the test build.
 - Checked against 5.2.5 on openSUSE_Factory, x86_64.
 
 ## Workarounds

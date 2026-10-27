@@ -1,3 +1,8 @@
 # crcpp
 
-Source0 is the GitHub release archive CRCpp-1.2.3.0.tar.gz, which unpacks to CRCpp-release-1.2.3.0; the spec's %autosetup -n value must match that directory. Checked against 1.2.3.0 on openSUSE_Factory, x86_64.
+## Workarounds
+
+- Source0 is the GitHub release archive. It unpacks to a directory named CRCpp-release-<version>, so the spec's %autosetup -n must use that name.
+- The devel package owns the CPS share directory (%{_datadir}/cps/), which holds the CPS package description files.
+
+Checked against 1.2.3.0 on openSUSE_Factory, x86_64.
