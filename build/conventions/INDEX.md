@@ -82,7 +82,7 @@
 82. Four pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when the package has any of these
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
 84. CUDA at build time: use the upstream wheel; NVIDIA output is not Factory/SLE material — read when the build or sources mention CUDA, cuda.h, nvcc or libcudart
-85. Dynamic Requires for ctypes/dlopen wrappers, cffi pin, ExclusiveArch propagation, ninja — read when a package dlopens a system .so, uses cffi, requires an arch-limited package or lists ninja
+85. dlopen Requires, cffi minimum, ExclusiveArch propagation, ninja — read when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
 86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
 87. Flaky tests: pytest-rerunfailures or a named deselect — read when the prompt lists flaky tests or a %check failure differs between two builds
 88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
