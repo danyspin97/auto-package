@@ -1395,9 +1395,10 @@ pub struct Options {
     pub arch: String,
     /// Where the checkouts that add the bug references go.
     pub checkout_dir: PathBuf,
-    /// The workspace state directory (`state/`), where a build recorded the
-    /// risk flags `--yes` must not submit past.
-    pub state_root: PathBuf,
+    /// The work directory the code streams' updates build in: each branch
+    /// project keeps its state under it (see [`branch_state_root`]), where a
+    /// build recorded the risk flags `--yes` must not submit past.
+    pub work_dir: PathBuf,
     /// Backport (the default of `update`), update or lint.
     pub mode: Mode,
     /// `--backport`: the fixes of a backport, as given.
@@ -1762,18 +1763,37 @@ fn commit_refs(
     }
 }
 
-/// The risk lines `--yes` must not submit past for `pkg`: what its recorded
-/// state says needs a review, or why that state cannot be read. A package with
-/// no recorded state was never built here, so it has none.
-fn yes_blockers(state_root: &std::path::Path, pkg: &str) -> Vec<String> {
-    match crate::risk_flags::try_of_package(state_root, pkg) {
-        Ok(flags) => flags
-            .iter()
-            .map(crate::risk_flags::RiskFlag::line)
-            .collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => vec![format!("its recorded state cannot be read: {e}")],
+/// The risk lines `--yes` must not submit past for `pkg`, read from the state
+/// of each `(branch, state root)` it was built in: what the recorded state says
+/// needs a review, or why that state cannot be read. A state that is missing
+/// is a blocker too: the build that would have recorded the risks is the one
+/// whose request is about to go.
+fn yes_blockers(roots: &[(String, PathBuf)], pkg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (branch, root) in roots {
+        match crate::risk_flags::try_of_package(root, pkg) {
+            Ok(flags) => out.extend(flags.iter().map(crate::risk_flags::RiskFlag::line)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => out.push(format!(
+                "no recorded state for {pkg} in {branch}: whether its change needs a review is not known"
+            )),
+            Err(e) => out.push(format!(
+                "its recorded state in {branch} cannot be read: {e}"
+            )),
+        }
     }
+    out
+}
+
+/// The workspace state directory of the update run that built `branch` in
+/// `work_dir` (`<work_dir>/<branch>-<arch>/state`, as `update` names it).
+pub fn branch_state_root(work_dir: &std::path::Path, branch: &str, arch: &str) -> PathBuf {
+    work_dir
+        .join(format!(
+            "{}-{}",
+            ap_core::run::sanitize_name(branch),
+            ap_core::run::sanitize_name(arch),
+        ))
+        .join("state")
 }
 
 /// Put back the OBS baselines of branches whose references were committed, for
@@ -2127,7 +2147,15 @@ pub fn run_with(
         // `--yes` approves without asking, so a package whose change needs a
         // review (or whose recorded state cannot be read) gets no request.
         let blockers = if opts.yes {
-            yes_blockers(&opts.state_root, pkg)
+            let roots: Vec<(String, PathBuf)> = ready
+                .iter()
+                .map(|r| {
+                    let branch = r.action.source_project.clone();
+                    let root = branch_state_root(&opts.work_dir, &branch, &opts.arch);
+                    (branch, root)
+                })
+                .collect();
+            yes_blockers(&roots, pkg)
         } else {
             Vec::new()
         };
@@ -2267,8 +2295,12 @@ mod tests {
         use crate::risk_flags::{RiskFlag, settle};
         use crate::workspace::Workspace;
         let root = tempfile::tempdir().unwrap();
-        // Never built here: nothing recorded, nothing to block on.
-        assert!(super::yes_blockers(root.path(), "python-new").is_empty());
+        let roots =
+            |pkg_root: &std::path::Path| vec![("home:u:Base".to_string(), pkg_root.to_path_buf())];
+        // Never built in this branch: the state is missing, which blocks too.
+        let missing = super::yes_blockers(&roots(&root.path().join("nothing")), "python-foo");
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(missing[0].contains("no recorded state"), "{missing:?}");
         let ws = Workspace::open(root.path(), "python-foo").unwrap();
         PkgState::update(&ws, |st| {
             settle(
@@ -2281,11 +2313,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            super::yes_blockers(root.path(), "python-foo"),
+            super::yes_blockers(&roots(root.path()), "python-foo"),
             vec!["RISK: new scriptlet: %post".to_string()]
         );
         std::fs::write(ws.dir().join("state.json"), "{ not json").unwrap();
-        let lines = super::yes_blockers(root.path(), "python-foo");
+        let lines = super::yes_blockers(&roots(root.path()), "python-foo");
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("cannot be read"), "{lines:?}");
     }

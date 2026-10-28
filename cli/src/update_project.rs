@@ -1397,7 +1397,7 @@ fn run_maintenance(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_
         distro: a.distro.clone(),
         arch: a.arch.clone(),
         checkout_dir: std::path::absolute(a.work_dir.join("maintenance"))?,
-        state_root: std::path::absolute(a.work_dir.join("state"))?,
+        work_dir: std::path::absolute(&a.work_dir)?,
         mode,
         backports: a.backport.clone(),
         backport_repo: a.backport_repo.clone(),
