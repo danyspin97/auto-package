@@ -1162,6 +1162,15 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("could not read {}: {e}", changes_path.display())),
     };
+    // What OBS holds is kept before the first write, so a failed commit can be
+    // undone on OBS as well as in the checkout.
+    let baseline = osc::begin_baseline(
+        &ctx.work_dir.join(osc::BASELINE_ROOT),
+        &dir,
+        branch,
+        &item.pkg,
+    )
+    .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
     let committed = (|| -> Result<(), String> {
         osc::add_changes_entry(
@@ -1174,6 +1183,7 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
         if changes_path.exists() {
             commit_files.push(changes.clone());
         }
+        osc::note_attempt(&baseline, &commit_files).map_err(|e| e.to_string())?;
         osc::commit(
             &dir,
             "Tidy the spec (auto-package lint)",
@@ -1182,6 +1192,16 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())
     })();
+    let committed = match committed {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(&baseline);
+            Ok(())
+        }
+        Err(why) => match osc::restore_baseline(&baseline, emit) {
+            Ok(()) => Err(why),
+            Err(e) => Err(format!("{why}; the OBS baseline was NOT restored: {e}")),
+        },
+    };
     if let Err(why) = committed {
         let restored_spec = ap_core::fsx::write_atomic(&spec_path, before.as_bytes());
         let restored_changes = match changes_before {

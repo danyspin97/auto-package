@@ -1716,6 +1716,8 @@ fn check_stream(
 }
 
 /// Commit the backport bullets and the references into the branch's `.changes`.
+/// Returns the baseline kept for the commit (see [`undo_refs`]), `None` when
+/// nothing was committed. A commit that fails is undone on OBS here.
 fn commit_refs(
     branch: &str,
     pkg: &str,
@@ -1723,17 +1725,25 @@ fn commit_refs(
     opts: &Options,
     refs: &[String],
     bullets: &[(String, String)],
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
     let emit = Emit::quiet();
     let dir = osc::checkout(branch, pkg, &opts.checkout_dir, emit).map_err(|e| e.to_string())?;
     let path = dir.join(name);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let Some(amended) = amend_changes(&text, refs, bullets) else {
-        return Ok(());
+        return Ok(None);
     };
+    let baseline = osc::begin_baseline(
+        &opts.checkout_dir.join(osc::BASELINE_ROOT),
+        &dir,
+        branch,
+        pkg,
+    )
+    .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     std::fs::write(&path, amended).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    osc::commit(
+    osc::note_attempt(&baseline, &[name.to_string()]).map_err(|e| e.to_string())?;
+    let committed = osc::commit(
         &dir,
         &format!(
             "Add the bug references {} (auto-package maintenance)",
@@ -1741,8 +1751,25 @@ fn commit_refs(
         ),
         &[name.to_string()],
         emit,
-    )
-    .map_err(|e| e.to_string())
+    );
+    match committed {
+        Ok(()) => Ok(Some(baseline)),
+        Err(e) => match osc::restore_baseline(&baseline, emit) {
+            Ok(()) => Err(e.to_string()),
+            Err(why) => Err(format!("{e}; the OBS baseline was NOT restored: {why}")),
+        },
+    }
+}
+
+/// Put back the OBS baselines of branches whose references were committed, for
+/// a maintenance request that could not be created: the references must not
+/// stay on the branches without their request. Returns what could not go back.
+fn undo_refs(bases: &[PathBuf]) -> Option<String> {
+    let failed: Vec<String> = bases
+        .iter()
+        .filter_map(|b| osc::restore_baseline(b, Emit::quiet()).err())
+        .collect();
+    (!failed.is_empty()).then(|| failed.join("; "))
 }
 
 /// The [`StreamCheck`] of a run: `--affected-by` when given, else none.
@@ -2095,19 +2122,22 @@ pub fn run_with(
         // A code stream whose changelog cannot be amended is left out; the
         // others still go.
         let mut sent: Vec<Ready> = Vec::new();
+        let mut bases: Vec<PathBuf> = Vec::new();
         for r in ready {
-            if let Some((name, _)) = &r.amended
-                && let Err(e) =
-                    commit_refs(&r.action.source_project, pkg, name, opts, &refs, &bullets)
-            {
-                reports[i].push(StreamReport {
-                    stream: r.action.release_project.clone(),
-                    outcome: StreamOutcome::Failed(format!(
-                        "could not add the changelog bullets and references in {}: {e}",
-                        r.action.source_project
-                    )),
-                });
-                continue;
+            if let Some((name, _)) = &r.amended {
+                match commit_refs(&r.action.source_project, pkg, name, opts, &refs, &bullets) {
+                    Ok(base) => bases.extend(base),
+                    Err(e) => {
+                        reports[i].push(StreamReport {
+                            stream: r.action.release_project.clone(),
+                            outcome: StreamOutcome::Failed(format!(
+                                "could not add the changelog bullets and references in {}: {e}",
+                                r.action.source_project
+                            )),
+                        });
+                        continue;
+                    }
+                }
             }
             sent.push(r);
         }
@@ -2120,6 +2150,9 @@ pub fn run_with(
         };
         match create_request(&req, emit) {
             Ok(id) => {
+                for base in &bases {
+                    let _ = std::fs::remove_dir_all(base);
+                }
                 (host.say)(&format!(
                     "created maintenance request {id} for {pkg} to {}",
                     req.target_project
@@ -2132,11 +2165,14 @@ pub fn run_with(
                 }
             }
             Err(e) => {
+                let not_restored = undo_refs(&bases).map_or(String::new(), |why| {
+                    format!("; the OBS baseline was NOT restored: {why}")
+                });
                 for r in &sent {
                     reports[i].push(StreamReport {
                         stream: r.action.release_project.clone(),
                         outcome: StreamOutcome::Failed(format!(
-                            "the maintenance request could not be created: {e}"
+                            "the maintenance request could not be created: {e}{not_restored}"
                         )),
                     });
                 }
@@ -2155,6 +2191,30 @@ pub fn run_with(
         Ok(())
     } else {
         Err(failures.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod undo_refs_tests {
+    use super::*;
+
+    #[test]
+    fn nothing_to_undo_is_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(undo_refs(&[]), None);
+        assert_eq!(undo_refs(&[dir.path().join("never-written")]), None);
+    }
+
+    #[test]
+    fn a_baseline_that_cannot_go_back_is_named() {
+        // An attempt was noted, but the checkout it was saved from is gone.
+        let dir = tempfile::tempdir().unwrap();
+        osc::note_attempt(dir.path(), &["foo.changes".to_string()]).unwrap();
+        let why = undo_refs(&[dir.path().to_path_buf()]).unwrap();
+        assert!(
+            why.contains("checkout the baseline was saved from"),
+            "{why}"
+        );
     }
 }
 
