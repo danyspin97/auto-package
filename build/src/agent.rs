@@ -579,12 +579,15 @@ latter, name the exact missing compiler/SDK and quote the build.log line proving
 - "reasoning": your notes: what you found and why, free-form. It goes to the run
   log and the package notes, not to the changelog.
 - "changelog": required when action is "edited". The package's `.changes` bullet,
-  which sits right under `- Update to <version>`. ONE short imperative line (under
-  100 characters) that starts with a verb (Add, Drop, Fix, Use, Raise, ...) and
-  says what you changed in the package and why. No package name, no version being
-  packaged (a version the change itself is about, such as a cmake minimum, is
-  fine), no macros (`%{name}`, `%{version}`: write the names out), no file names or
-  paths, no parentheses, and never what the build log showed or what you reviewed.
+  which sits right under `- Update to <version>`. One bullet per change, one line
+  each: a short imperative line (under 100 characters) that starts with a verb (Add,
+  Drop, Fix, Use, Raise, ...) and says what you changed in the package and why. A
+  patch you add, remove or refresh is named by its file name (`Add
+  pytest9-fixtures.patch to convert class fixtures to classmethods`). No package
+  name, no version being packaged (a version the change itself is about, such as a
+  cmake minimum, is fine), no macros (`%{name}`, `%{version}`: write the names out),
+  no other file names or paths, no parentheses, and never what the build log showed
+  or what you reviewed.
   "Drop the CVE-2025-2588 patch, fixed upstream", not "Drop the CVE-2025-2588 patch,
   which upstream 1.15.0 already contains (src/fa.c, fa.h, tests/fatest.c)".
 - "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.
@@ -1270,7 +1273,7 @@ const TURN_RESPONSE_SCHEMA: &str = r#"{
     "reasoning": {"type": "string"},
     "changelog": {
       "type": "string",
-      "description": "The package's `.changes` bullet: ONE imperative line, under 100 characters, saying what you changed in the package and why. No package name, no version being packaged, no macros, no file names, no build-log narration. Required when action is edited."
+      "description": "The package's `.changes` bullets: one bullet per change, one line each, every line an imperative sentence under 100 characters saying what you changed in the package and why. Name a patch you add, remove or refresh by its file name. No package name, no version being packaged, no macros, no other file names, no build-log narration. Required when action is edited."
     },
     "evidence": {
       "type": "array",
