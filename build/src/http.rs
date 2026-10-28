@@ -87,9 +87,27 @@ pub enum FetchFailure {
     RateLimited,
     /// The body is larger than [`MAX_DOWNLOAD`].
     TooLarge,
+    /// The disk cannot take the download (see [`ap_ecosystem::space`]).
+    NoSpace(ap_ecosystem::space::NotEnoughSpace),
     /// Connection, timeout, other HTTP status, or local I/O.
     Transport(String),
 }
+
+impl FetchFailure {
+    /// Whether the download failed because the disk is full.
+    pub fn is_disk_full(&self) -> bool {
+        matches!(self, FetchFailure::NoSpace(_))
+    }
+}
+
+/// What a download is expected to write: its `Content-Length` when the server
+/// sent one, else [`UNKNOWN_DOWNLOAD`], and never more than [`MAX_DOWNLOAD`].
+fn download_estimate(content_length: Option<u64>) -> u64 {
+    content_length.unwrap_or(UNKNOWN_DOWNLOAD).min(MAX_DOWNLOAD)
+}
+
+/// Reserved for a download whose size the server did not announce.
+const UNKNOWN_DOWNLOAD: u64 = 128 * 1024 * 1024;
 
 impl std::fmt::Display for FetchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -99,6 +117,7 @@ impl std::fmt::Display for FetchFailure {
             FetchFailure::TooLarge => {
                 write!(f, "larger than the {} MiB limit", MAX_DOWNLOAD >> 20)
             }
+            FetchFailure::NoSpace(e) => write!(f, "{e}"),
             FetchFailure::Transport(e) => write!(f, "{e}"),
         }
     }
@@ -188,6 +207,19 @@ fn download_once(url: &str, dest: &Path) -> Result<Download, Attempt> {
     let dir = dir.unwrap_or(Path::new("."));
     let local = |e: std::io::Error| FetchFailure::Transport(format!("{}: {e}", dir.display()));
     sweep_stale_parts(dir);
+    // The expected bytes are reserved against the free space of `dir` for as
+    // long as the download is being written.
+    let announced = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let _lease = ap_ecosystem::space::lease(
+        &format!("downloading {url}"),
+        dir,
+        download_estimate(announced),
+    )
+    .map_err(FetchFailure::NoSpace)?;
     let temp = tempfile::Builder::new()
         .prefix(".download-")
         .suffix(".part")
@@ -286,6 +318,27 @@ mod tests {
     fn only_a_failed_body_stream_is_retried_by_the_caller() {
         let early: Attempt = FetchFailure::Transport("connect".into()).into();
         assert!(!early.mid_body);
+    }
+
+    #[test]
+    fn download_estimates_use_the_announced_size_within_the_cap() {
+        assert_eq!(download_estimate(Some(5)), 5);
+        assert_eq!(download_estimate(None), UNKNOWN_DOWNLOAD);
+        assert_eq!(download_estimate(Some(u64::MAX)), MAX_DOWNLOAD);
+    }
+
+    #[test]
+    fn only_no_space_counts_as_a_full_disk() {
+        let full = FetchFailure::NoSpace(ap_ecosystem::space::NotEnoughSpace {
+            what: "x".into(),
+            needed: 2 << 20,
+            free: 0,
+            reserved: 0,
+            margin: 0,
+        });
+        assert!(full.is_disk_full());
+        assert!(full.to_string().contains("not enough free space"));
+        assert!(!FetchFailure::Transport("x".into()).is_disk_full());
     }
 
     #[test]
