@@ -303,7 +303,8 @@ struct SlotState {
 /// removes the map entry when nobody else is waiting on it.
 struct Slot {
     url: String,
-    state: Arc<SlotState>,
+    /// Taken in `drop`, so the handle is released before the map is checked.
+    state: Option<Arc<SlotState>>,
 }
 
 impl Slot {
@@ -324,19 +325,29 @@ impl Slot {
         drop(busy);
         Slot {
             url: url.to_string(),
-            state,
+            state: Some(state),
         }
     }
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        *self.state.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
-        self.state.freed.notify_one();
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        *state.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        state.freed.notify_one();
+        // Our handle is released before the check, so a waiter that still
+        // holds one keeps the entry, and the last one out removes it.
+        drop(state);
         let mut cache = archive_cache().lock().unwrap_or_else(|e| e.into_inner());
-        // The map's handle and ours: nobody else holds or awaits it. Waiters
-        // cloned theirs under this same lock, so the count cannot rise now.
-        if Arc::strong_count(&self.state) <= 2 {
+        // Only the map's handle is left: nobody holds or awaits this slot.
+        // Waiters clone theirs under this same lock.
+        if cache
+            .in_flight
+            .get(&self.url)
+            .is_some_and(|entry| Arc::strong_count(entry) <= 1)
+        {
             cache.in_flight.remove(&self.url);
         }
     }
