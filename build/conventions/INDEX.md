@@ -49,7 +49,7 @@
 49. Per-CPython upstream wheels covering our flavors — read when the source cannot be built and wheels exist per cp3NN
 50. OOM / disk-full failures are sizing, not spec bugs — read when the build is killed or says "No space left on device"
 51. meson-python / scikit-build-core args via PIP_CONFIG_SETTINGS — read when build-backend is mesonpy or scikit_build_core
-52. PyPI renames and forks need Obsoletes/Provides — read when the package is a fork or rename of another PyPI project
+52. Merged into convention 2 — read convention 2 when the package is a fork or rename of another PyPI project
 53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
 54. Metapackage subpackage of runtime deps — read when a feature only needs other packages installed, no files
 55. Two-pass pytest (xdist-safe in parallel, rest serial) — read when tests fail only under pytest-xdist -n auto
