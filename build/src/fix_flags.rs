@@ -149,10 +149,14 @@ pub fn from_spec_diff(baseline: Option<&str>, fin: &str) -> Vec<FixFlag> {
         }
     }
     let check = section_span(&fin, "%check");
+    let prep = section_span(&fin, "%prep");
     let mut items: Vec<String> = Vec::new();
     for &i in &added {
-        let in_check = check.is_some_and(|(s, e)| (s..e).contains(&i));
-        for item in skipped_in(fin[i], in_check, &removed) {
+        let place = Place {
+            check: check.is_some_and(|(s, e)| (s..e).contains(&i)),
+            prep: prep.is_some_and(|(s, e)| (s..e).contains(&i)),
+        };
+        for item in skipped_in(fin[i], place, &removed) {
             if !items.contains(&item) {
                 items.push(item);
             }
@@ -194,21 +198,65 @@ fn section_span(lines: &[&str], name: &str) -> Option<(usize, usize)> {
     Some((header + 1, end))
 }
 
-/// Lines of `name`'s body that run something: not blank, comment or `%{nil}`.
+/// Lines of `name`'s body that run something: not blank, comment, `%{nil}`,
+/// conditional directives, a command whose failure is ignored (see
+/// [`masked`]), or a line inside an `%if 0` block.
 fn commands(lines: &[&str], name: &str) -> usize {
     let Some((start, end)) = section_span(lines, name) else {
         return 0;
     };
-    lines[start..end]
-        .iter()
-        .map(|l| l.trim())
-        .filter(|t| !t.is_empty() && !t.starts_with('#') && *t != "%{nil}" && *t != ":")
-        .count()
+    // One entry per open `%if`: whether it is `0`/`false`, and whether the
+    // `%else` branch is being read.
+    let mut open: Vec<(bool, bool)> = Vec::new();
+    let mut live = 0;
+    for line in &lines[start..end] {
+        let t = line.trim();
+        let word = t.split_whitespace().next().unwrap_or("");
+        match word {
+            "%if" | "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => {
+                let cond = t.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+                open.push((matches!(cond.as_str(), "0" | "false"), false));
+            }
+            "%else" => {
+                if let Some(top) = open.last_mut() {
+                    top.1 = true;
+                }
+            }
+            "%endif" => {
+                open.pop();
+            }
+            _ => {
+                let dead = open.iter().any(|(zero, in_else)| *zero && !in_else);
+                let runs =
+                    !t.is_empty() && !t.starts_with('#') && t != "%{nil}" && t != ":" && !masked(t);
+                if runs && !dead {
+                    live += 1;
+                }
+            }
+        }
+    }
+    live
 }
 
-/// The wheel file a new `Source` line of `fin` names, when `base` names none.
+/// A command whose failure is ignored: `... || true`, `|| :`, `|| exit 0`.
+fn masked(line: &str) -> bool {
+    let squashed: String = line
+        .trim()
+        .trim_end_matches(';')
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    ["||true", "||:", "||exit0", "||/bin/true", "||/usr/bin/true"]
+        .iter()
+        .any(|m| squashed.ends_with(m))
+}
+
+/// The wheel file a new `Source` line of `fin` names: the first, when `base`
+/// names none, or the first one beyond those `base` names.
 fn new_wheel(base: &[&str], fin: &[&str], added: &[usize]) -> Option<String> {
-    if base.iter().any(|l| is_source_wheel(l)) {
+    let had = base.iter().filter(|l| is_source_wheel(l)).count();
+    let has = fin.iter().filter(|l| is_source_wheel(l)).count();
+    if had > 0 && has <= had {
         return None;
     }
     added
@@ -228,40 +276,60 @@ fn is_source_wheel(line: &str) -> bool {
         && t.contains(".whl")
 }
 
+/// Where a line of the spec is: inside `%check`, inside `%prep`.
+#[derive(Clone, Copy)]
+struct Place {
+    check: bool,
+    prep: bool,
+}
+
 /// The test-skipping items one added line of the spec carries.
-fn skipped_in(line: &str, in_check: bool, removed: &[&str]) -> Vec<String> {
+fn skipped_in(line: &str, place: Place, removed: &[&str]) -> Vec<String> {
     let t = line.trim();
     if t.is_empty() || t.starts_with('#') {
         return Vec::new();
     }
+    let testy = place.check || t.to_ascii_lowercase().contains("test");
     let mut out = Vec::new();
     for opt in ["--deselect", "--ignore", "--ignore-glob"] {
         for value in option_values(t, opt) {
             out.push(format!("{opt} {value}"));
         }
     }
-    for opt in ["-k", "-m"] {
-        for value in option_values(t, opt) {
-            if value.split_whitespace().any(|w| w == "not") {
+    if testy {
+        // Any keyword or marker selection is flagged, positive or negative: a
+        // selection that picks fewer tests drops the others just the same.
+        for opt in ["-k", "-m"] {
+            for value in option_values(t, opt) {
                 out.push(format!("{opt} \"{value}\""));
             }
         }
+        if let Some(file) = single_test_file(t) {
+            out.push(format!("only {file}"));
+        }
     }
     if t.contains("ctest") {
-        for value in option_values(t, "-E") {
-            out.push(format!("ctest -E {value}"));
+        for opt in ["-E", "--exclude-regex"] {
+            for value in option_values(t, opt) {
+                out.push(format!("ctest {opt} {value}"));
+            }
         }
     }
-    if let Some(rest) = t.strip_prefix("%bcond_with ") {
-        let name = rest.split_whitespace().next().unwrap_or("");
-        let testish = name.contains("test") || name.contains("check");
-        if testish
-            && removed
-                .iter()
-                .any(|r| r.trim() == format!("%bcond_without {name}"))
-        {
-            out.push(one_line(t));
-        }
+    if testy && masked(t) {
+        out.push(one_line(t));
+    }
+    if let Some((name, false)) = bcond(t)
+        && is_testish(name)
+        && removed.iter().any(|r| bcond(r) == Some((name, true)))
+    {
+        out.push(one_line(t));
+    }
+    if let Some((name, value)) = global_def(t)
+        && is_testish(name)
+        && ((name.starts_with("_without_") && value == "1")
+            || (name.starts_with("_with_") && value == "0"))
+    {
+        out.push(one_line(t));
     }
     const GUARDS: [&str; 6] = [
         "%{?_with",
@@ -271,10 +339,106 @@ fn skipped_in(line: &str, in_check: bool, removed: &[&str]) -> Vec<String> {
         "%{?_without",
         "%{!?_without",
     ];
-    if in_check && GUARDS.iter().any(|g| t.contains(g)) {
+    if place.check && (GUARDS.iter().any(|g| t.contains(g)) || conditional_skip(t)) {
+        out.push(one_line(t));
+    }
+    if place.prep && removes_tests(t) {
         out.push(one_line(t));
     }
     out
+}
+
+fn is_testish(name: &str) -> bool {
+    name.contains("test") || name.contains("check")
+}
+
+/// The name a `%bcond_with NAME` (or `%bcond NAME 0`) line turns off, with
+/// `false`; a `%bcond_without NAME` (or `%bcond NAME 1`) turns on, with `true`.
+fn bcond(line: &str) -> Option<(&str, bool)> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words.as_slice() {
+        ["%bcond_with", name, ..] => Some((name, false)),
+        ["%bcond_without", name, ..] => Some((name, true)),
+        ["%bcond", name, "0"] => Some((name, false)),
+        ["%bcond", name, "1"] => Some((name, true)),
+        _ => None,
+    }
+}
+
+/// The name and value of a `%global` or `%define` line.
+fn global_def(line: &str) -> Option<(&str, &str)> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words.as_slice() {
+        ["%global" | "%define", name, value] => Some((name, value)),
+        _ => None,
+    }
+}
+
+/// A conditional that skips what it guards: `%if 0`, `%if false`, or one on a
+/// `with`/`without` switch (`%if %{with tests}`).
+fn conditional_skip(line: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words.split_first() {
+        Some((first, rest)) if matches!(*first, "%if" | "%elif") => {
+            let cond = rest.join(" ");
+            matches!(cond.as_str(), "0" | "false") || cond.contains("with")
+        }
+        _ => false,
+    }
+}
+
+/// Whether a line removes a test file or directory: `rm -rf tests`,
+/// `rm tests/test_x.py`.
+fn removes_tests(line: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let rm = words.iter().any(|w| {
+        let w = w.trim_matches(|c| matches!(c, '%' | '{' | '}'));
+        w == "rm" || w == "__rm"
+    });
+    rm && words.iter().any(|w| {
+        let p = w
+            .trim_matches(|c| matches!(c, '"' | '\''))
+            .trim_end_matches('/');
+        p.split('/').any(|seg| seg == "test" || seg == "tests")
+            || (p.rsplit('/').next().is_some_and(|b| b.starts_with("test_")) && p.ends_with(".py"))
+    })
+}
+
+/// The one test file or node id a pytest line runs by itself, as a positional
+/// argument (not the value of an option such as `--deselect`).
+fn single_test_file(line: &str) -> Option<String> {
+    const VALUED: &[&str] = &[
+        "-k",
+        "-m",
+        "-p",
+        "-c",
+        "-W",
+        "-E",
+        "--deselect",
+        "--ignore",
+        "--ignore-glob",
+        "--rootdir",
+        "--maxfail",
+        "--junitxml",
+    ];
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let at = words.iter().position(|w| w.contains("pytest"))?;
+    let mut found = Vec::new();
+    let mut skip = false;
+    for w in &words[at + 1..] {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        if matches!(*w, "&&" | "||" | ";" | "|") {
+            break;
+        }
+        if VALUED.contains(w) {
+            skip = true;
+        } else if !w.starts_with('-') && (w.ends_with(".py") || w.contains("::")) {
+            found.push(w.to_string());
+        }
+    }
+    (found.len() == 1).then(|| found.remove(0))
 }
 
 /// The values the option `opt` takes in `t`, as `opt value`, `opt=value` or
@@ -459,6 +623,144 @@ mod tests {
         assert_eq!(
             from_spec_diff(Some(BASE), &fin),
             vec![FixFlag::CheckRemoved]
+        );
+    }
+
+    #[test]
+    fn a_test_command_with_its_failure_ignored_is_flagged_and_is_no_command() {
+        let fin = with("%check\n%pytest\n", "%check\n%pytest || true\n");
+        assert_eq!(
+            from_spec_diff(Some(BASE), &fin),
+            vec![
+                FixFlag::CheckRemoved,
+                FixFlag::TestsSkipped {
+                    items: vec!["%pytest || true".into()]
+                }
+            ]
+        );
+        let fin = with("%check\n%pytest\n", "%check\n%pytest ||:;\n");
+        assert!(from_spec_diff(Some(BASE), &fin).contains(&FixFlag::CheckRemoved));
+    }
+
+    #[test]
+    fn a_check_behind_a_false_conditional_is_removed() {
+        let fin = with("%check\n%pytest\n", "%check\n%if 0\n%pytest\n%endif\n");
+        assert_eq!(
+            from_spec_diff(Some(BASE), &fin),
+            vec![
+                FixFlag::CheckRemoved,
+                FixFlag::TestsSkipped {
+                    items: vec!["%if 0".into()]
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_check_behind_a_with_switch_is_flagged_by_its_condition() {
+        let fin = with(
+            "%check\n%pytest\n",
+            "%check\n%if %{with tests}\n%pytest\n%endif\n",
+        );
+        assert_eq!(
+            from_spec_diff(Some(BASE), &fin),
+            vec![FixFlag::TestsSkipped {
+                items: vec!["%if %{with tests}".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_new_syntax_bcond_switched_off_is_flagged() {
+        let base = format!("%bcond_without tests\n{BASE}");
+        let fin = format!("%bcond tests 0\n{BASE}");
+        assert_eq!(
+            from_spec_diff(Some(&base), &fin),
+            vec![FixFlag::TestsSkipped {
+                items: vec!["%bcond tests 0".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_global_that_switches_the_tests_off_is_flagged() {
+        let fin = format!("%global _without_tests 1\n{BASE}");
+        assert_eq!(
+            from_spec_diff(Some(BASE), &fin),
+            vec![FixFlag::TestsSkipped {
+                items: vec!["%global _without_tests 1".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_keyword_or_marker_selection_is_flagged_positive_or_negative() {
+        for (line, item) in [
+            ("%pytest -k \"(not slow)\"", "-k \"(not slow)\""),
+            ("%pytest -k test_fast", "-k \"test_fast\""),
+            ("%pytest -m smoke", "-m \"smoke\""),
+            ("%pytest -k\"not slow\"", "-k \"not slow\""),
+        ] {
+            let fin = with("%check\n%pytest\n", &format!("%check\n{line}\n"));
+            assert_eq!(
+                from_spec_diff(Some(BASE), &fin),
+                vec![FixFlag::TestsSkipped {
+                    items: vec![item.into()]
+                }],
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pytest_line_running_one_file_is_flagged_and_its_option_values_are_not() {
+        let fin = with("%check\n%pytest\n", "%check\n%pytest tests/test_a.py\n");
+        assert_eq!(
+            from_spec_diff(Some(BASE), &fin),
+            vec![FixFlag::TestsSkipped {
+                items: vec!["only tests/test_a.py".into()]
+            }]
+        );
+        // Two files, or a file as an option's value: not a single-file run.
+        let two = with(
+            "%check\n%pytest\n",
+            "%check\n%pytest tests/a.py tests/b.py\n",
+        );
+        assert!(from_spec_diff(Some(BASE), &two).is_empty());
+    }
+
+    #[test]
+    fn a_ctest_exclusion_is_flagged_under_either_spelling() {
+        let fin = with("%check\n%pytest\n", "%check\nctest --exclude-regex slow_\n");
+        assert_eq!(
+            from_spec_diff(Some(BASE), &fin),
+            vec![FixFlag::TestsSkipped {
+                items: vec!["ctest --exclude-regex slow_".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_test_directory_removed_in_prep_is_flagged() {
+        let fin = with("%setup -q\n", "%setup -q\nrm -rf tests\n");
+        assert_eq!(
+            from_spec_diff(Some(BASE), &fin),
+            vec![FixFlag::TestsSkipped {
+                items: vec!["rm -rf tests".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_second_wheel_beside_the_baseline_one_is_a_switch() {
+        let base = format!("Source1: a-1.0-py3-none-any.whl\n{BASE}");
+        let fin =
+            format!("Source1: a-1.0-py3-none-any.whl\nSource2: b-1.0-py3-none-any.whl\n{BASE}");
+        assert_eq!(
+            from_spec_diff(Some(&base), &fin),
+            vec![FixFlag::WheelSwitch {
+                wheel: "b-1.0-py3-none-any.whl".into()
+            }]
         );
     }
 
