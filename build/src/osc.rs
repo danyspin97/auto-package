@@ -4772,8 +4772,15 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
 
+    let tracked = tracked_files(checkout_dir);
     let mut plan = PublishPlan::default();
     for name in names {
+        // A quilt `series` the pipeline made for its own turns is scratch: it is
+        // published only when the package already has one on OBS.
+        if name == "series" && !tracked.contains(&name) {
+            plan.skipped.push(name);
+            continue;
+        }
         if is_publishable(&name, &spec_text, &series, &sources) {
             plan.files.push(name);
         } else {
@@ -4895,16 +4902,67 @@ fn recipe_file_unused(name: &str, spec_text: &str) -> bool {
             .iter()
             .any(|m| spec_text.contains(m)),
         "_constraints" => {
-            let noarch = spec_text.lines().any(|l| {
-                let l = l.trim();
-                l.get(..9)
-                    .is_some_and(|p| p.eq_ignore_ascii_case("buildarch"))
-                    && l.ends_with("noarch")
-            });
+            // Only the main package's own `BuildArch:` counts: a `noarch`
+            // subpackage (mariadb's `-test`, a `-doc`) says nothing about
+            // the build that `_constraints` sizes.
+            let noarch = spec_text
+                .lines()
+                .take_while(|l| {
+                    let l = l.trim_start();
+                    !(l.starts_with("%package") || l.starts_with("%description"))
+                })
+                .any(|l| {
+                    let l = l.trim();
+                    l.get(..9)
+                        .is_some_and(|p| p.eq_ignore_ascii_case("buildarch"))
+                        && l.ends_with("noarch")
+                });
             noarch && !spec_text.contains("constraints") && !spec_text.contains("%limit_build")
         }
         _ => false,
     }
+}
+
+/// The `project`/`package` a checkout's `_link` points at (`osc branch` makes
+/// one), when it has one.
+fn link_target(checkout_dir: &Path) -> Option<(String, String)> {
+    let xml = fs::read_to_string(checkout_dir.join("_link")).ok()?;
+    let project = extract_xml_attr(&xml, "project")?;
+    let package = extract_xml_attr(&xml, "package")?;
+    Some((project, package))
+}
+
+/// Bring back the build-recipe files (`_constraints`, `_multibuild`) a branch
+/// lost to an earlier run that judged them unused, from the package the branch
+/// was made from, when the spec does use them. Returns the names restored.
+pub fn restore_dropped_recipe_files(checkout_dir: &Path, emit: Emit<'_>) -> Vec<String> {
+    let Some((project, package)) = link_target(checkout_dir) else {
+        return Vec::new();
+    };
+    let Ok(rd) = fs::read_dir(checkout_dir) else {
+        return Vec::new();
+    };
+    let spec_text: String = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "spec"))
+        .filter_map(|p| fs::read_to_string(p).ok())
+        .collect();
+    if spec_text.is_empty() {
+        return Vec::new();
+    }
+    let mut restored = Vec::new();
+    for name in ["_constraints", "_multibuild"] {
+        if checkout_dir.join(name).exists() || recipe_file_unused(name, &spec_text) {
+            continue;
+        }
+        if let Some(text) = cat_file(&project, &package, name, emit)
+            && fs::write(checkout_dir.join(name), text).is_ok()
+        {
+            restored.push(name.to_string());
+        }
+    }
+    restored
 }
 
 /// Delete the build-recipe files of the checkout that its spec has no use for
@@ -6642,7 +6700,7 @@ pub fn fetch_buildlog(
         "buildlog {project} {pkg_name} {repo} {arch}"
     )))?;
 
-    std::fs::write(log_path, &out.stdout)?;
+    proc::write_log(log_path, out.stdout.as_bytes())?;
 
     if !out.success() && out.stdout.is_empty() {
         return Err(Error::OscFailed {
@@ -8064,7 +8122,7 @@ fn obs_build_once(
                 step,
                 message: format!("OBS build status: {label}"),
             });
-            if was_blocked {
+            if was_blocked && resets_block_timer(&prev_status) {
                 last_block_change = Instant::now();
             }
             prev_status = label;
@@ -9803,6 +9861,61 @@ mod transient_broken_tests {
         assert!(collapsed_generated_entry(&format!("{short}{old}"), &old).is_none());
         let both = format!("{new}{old}");
         assert!(collapsed_generated_entry(&both, &both).is_none());
+    }
+
+    #[test]
+    fn a_noarch_subpackage_does_not_make_constraints_unused() {
+        let spec = "Name: m\nVersion: 1\nBuildRequires: gcc\n%description\nx\n%package test\nBuildArch: noarch\n";
+        assert!(!recipe_file_unused("_constraints", spec));
+        let noarch = "Name: m\nBuildArch: noarch\n%description\nx\n";
+        assert!(recipe_file_unused("_constraints", noarch));
+    }
+
+    #[test]
+    fn a_branch_links_back_to_the_package_it_was_made_from() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(link_target(dir.path()), None);
+        fs::write(
+            dir.path().join("_link"),
+            r#"<link project="server:database" package="mariadb">
+  <patches><branch/></patches>
+</link>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            link_target(dir.path()),
+            Some(("server:database".to_string(), "mariadb".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_flip_back_from_stale_does_not_restart_the_stall_timer() {
+        assert!(resets_block_timer("blocked: waiting for rpm-build"));
+        assert!(resets_block_timer("building"));
+        assert!(!resets_block_timer("stale: outdated"));
+    }
+
+    #[test]
+    fn a_series_the_package_never_had_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foo.spec"), "Name: foo\nPatch0: a.patch\n").unwrap();
+        fs::write(dir.path().join("a.patch"), "x").unwrap();
+        fs::write(dir.path().join("series"), "a.patch\n").unwrap();
+        let plan = publish_plan(dir.path());
+        assert!(plan.skipped.contains(&"series".to_string()), "{plan:?}");
+        assert!(plan.files.contains(&"a.patch".to_string()));
+        // One OBS tracks is kept.
+        fs::create_dir_all(dir.path().join(".osc")).unwrap();
+        fs::write(
+            dir.path().join(".osc/_files"),
+            r#"<directory><entry name="series" md5="x"/></directory>"#,
+        )
+        .unwrap();
+        assert!(
+            publish_plan(dir.path())
+                .files
+                .contains(&"series".to_string())
+        );
     }
 
     #[test]
