@@ -56,7 +56,7 @@
 56. Signed checksums file, GPG verify — read when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
 57. Merged into convention 3 — read convention 3 when tests skip or fail because the .so is not in source/
 58. Vendored libraries need their LICENSE in %license — read when sources have _vendor/vendor/bundled dirs
-59. Exact == pin that openSUSE ships at another version — read when OBS says "nothing provides ... = X (got version Y)"
+59. Merged into convention 75 — read convention 75 when OBS says "nothing provides ... = X (got version Y)"
 60. Merged into convention 3 — read convention 3 when choosing BuildArch noarch for a wheel or sdist
 61. [inline] A missing dependency may already be built here — full text for rpm -qlp checks and import-name mismatches
 62. [inline] Dependency needs patching: patch_dependencies — full text for the two cases and the problem text to write
@@ -70,7 +70,7 @@
 70. Merged into convention 34 — read convention 34 when an extra-only requirement or a runtime import is missing
 71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
 72. Merged into convention 39 (rpmlintrc filters) — read convention 39 when rpmlint reports an E:/W: line
-73. Unsatisfiable bounds (Python or C/C++), siblings first — read when a ==, <, >= bound may exceed what the distro or project has
+73. Merged into convention 75 — read convention 75 when a ==, <, >= bound may exceed what the distro or project has
 74. Merged into convention 40 (the changelog field) — read convention 40 when your reply has action edited
 75. Version bounds: keep minimums, upper/== only when satisfied, comment when dropped — read when writing a <, <=, == or >= bound in Requires/BuildRequires
 76. Files of one Python package come from one tree — read when several wheels fill one package, ModuleNotFoundError on a sibling part
