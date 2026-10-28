@@ -6390,6 +6390,28 @@ mod results_cache_tests {
 
     const LONG: Duration = Duration::from_secs(60);
 
+    /// A one-shot gate. A fetch parks on it, so the test decides when an
+    /// in-flight fetch lands instead of sleeping and hoping it is in flight.
+    #[derive(Default)]
+    struct Gate {
+        open: Mutex<bool>,
+        cv: std::sync::Condvar,
+    }
+
+    impl Gate {
+        fn wait(&self) {
+            let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+            while !*open {
+                open = self.cv.wait(open).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+
+        fn release(&self) {
+            *self.open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            self.cv.notify_all();
+        }
+    }
+
     fn key(project: &str) -> ResultsKey {
         (
             project.to_string(),
@@ -6406,18 +6428,21 @@ mod results_cache_tests {
     fn concurrent_waiters_trigger_one_fetch() {
         let cache = ResultsCache::new();
         let fetches = AtomicUsize::new(0);
+        let gate = Gate::default();
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
                 .map(|_| {
                     scope.spawn(|| {
                         cache.get(&key("p"), LONG, None, || {
                             fetches.fetch_add(1, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(150));
+                            gate.wait();
                             doc("<resultlist/>")
                         })
                     })
                 })
                 .collect();
+            // The one fetch lands only once all the waiters have been started.
+            gate.release();
             for h in handles {
                 assert_eq!(&*h.join().unwrap().ok().unwrap(), "<resultlist/>");
             }
@@ -6470,7 +6495,6 @@ mod results_cache_tests {
             .get(&key("p"), LONG, None, || doc("old"))
             .ok()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(5));
         let committed = Instant::now();
         let fresh = cache
             .get(&key("p"), LONG, Some(committed), || doc("new"))
@@ -6489,16 +6513,22 @@ mod results_cache_tests {
     fn a_fresh_read_waits_out_an_older_fetch_and_then_fetches_itself() {
         let cache = ResultsCache::new();
         let fetches = AtomicUsize::new(0);
+        let started = Gate::default();
+        let release = Gate::default();
         std::thread::scope(|scope| {
             let slow = scope.spawn(|| {
                 cache.get(&key("p"), LONG, None, || {
                     fetches.fetch_add(1, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(200));
+                    started.release();
+                    release.wait();
                     doc("before the commit")
                 })
             });
-            std::thread::sleep(Duration::from_millis(50));
+            started.wait();
             let committed = Instant::now();
+            // The old fetch lands before or after the read below asks for its
+            // document; either way the read must not be given it.
+            release.release();
             let fresh = cache
                 .get(&key("p"), LONG, Some(committed), || {
                     fetches.fetch_add(1, Ordering::SeqCst);
