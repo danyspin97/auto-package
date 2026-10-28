@@ -62,7 +62,7 @@
 62. [inline] Dependency needs patching: patch_dependencies — full text for the two cases and the problem text to write
 63. [inline] No TODO placeholders left in a spec — full text for what each skeleton marker needs
 64. [inline] C/C++ libs are never python-<lib> — full text; CUDA/NVIDIA vendor wheels are in skill nvidia-wheels
-65. Runtime Requires are flavor-neutral python-<name> — read when writing any Requires line for a Python dependency
+65. Merged into convention 8 — read convention 8 when writing any Requires line for a Python dependency
 66. Summary and %description must say something — read when writing Summary/%description or the generator left a stub
 67. %check needing GPU/driver/device is not run — read when tests need a GPU, a device or network, or %check has more than six --ignore
 68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
