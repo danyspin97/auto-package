@@ -6,7 +6,7 @@
 6. %pyproject_wheel / %pyproject_install for PEP 517 — read when writing %build or %install of a Python package
 7. %check with %pytest / %pytest_arch and its BuildRequires — read when adding or editing %check of a Python package
 8. Python flavors, %python_expand, %python_files, _multibuild — read when touching flavor macros, multibuild or python_subpackages
-9. Never limit parallelism (-j1) — read when tempted to add -j1 or a job cap to make, cmake or pytest
+9. Never limit parallelism (-j1) — read when the spec or your edit has -j1, -j N, --jobs or -n N on make, cmake, ninja or pytest
 10. %check failure: missing dependency vs cannot run here — read when %check fails (ImportError, fixture not found, collect error)
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
 12. pytest config pitfalls (exit 5, coverage gates, filterwarnings, newer pytest) — read when %check fails oddly on config
