@@ -36,7 +36,7 @@
 36. gettext .mo translations (%find_lang) — read when the package installs locale/ .mo files or rpmlint reports them
 37. -doc subpackage for Sphinx/generated docs — read when upstream ships docs as an artifact or the task asks for -doc
 38. Removed or renamed Python stdlib APIs — read when tests or code fail with AttributeError/ImportError on a stdlib name
-39. rpmlintrc for a genuine false positive — read when rpmlint flags something that is correct to ship
+39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter
 40. The .changes file is written for you — read before editing a .changes file or writing the reasoning sentence
 41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
 42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
@@ -69,7 +69,7 @@
 69. %license files and the licence expression are exact, dist-info licences — read when writing %license lines or License:, or a dist-info holds licenses/
 70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
 71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
-72. rpmlintrc filters only for reported warnings — read when adding addFilter lines or "unused-rpmlintrc-filter" appears
+72. Merged into convention 39 (rpmlintrc filters) — read convention 39 when rpmlint reports an E:/W: line
 73. Unsatisfiable bounds (Python or C/C++), siblings first — read when a ==, <, >= bound may exceed what the distro or project has
 74. Write the changelog line (reasoning sentence) for a reader — read before writing the reasoning of any edit
 75. Version bounds: keep minimums, upper/== only when satisfied, comment when dropped — read when writing a <, <=, == or >= bound in Requires/BuildRequires
