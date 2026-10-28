@@ -11,7 +11,8 @@ hand-written %files entry per language directory. Symptom:
 `LC_MESSAGES/`, or a language directory swallowed into the package's own
 `%{python_sitelib}/<pkg>/` line without being explicitly owned.
 
-- Confirm first with `find %{buildroot} -name '*.mo'` — do not apply this
+- Confirm first (the build log's unpackaged-file list, or Grep/`ls` for
+  `.mo`/`.po` files under `source/`) — do not apply this
   speculatively to a package with no compiled translations.
 - In %install, after %pyproject_install:
     %python_find_lang <name>

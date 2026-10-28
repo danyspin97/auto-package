@@ -30,8 +30,8 @@ generalize perfectly to this package.
   **No SOVERSION set is NOT a reason to drop the split.** Installed
   headers (`.h`/`.hpp`) and `lib/cmake/` / `.pc` files must always go in a
   `-devel` package, or rpmlint's `devel-file-in-non-devel-package`
-  (Badness 50 per header) blows the 999 budget — a header-heavy C++
-  framework like oatpp ships ~170 headers = Badness 8500. Never "simplify"
+  (Badness 50 per header) blows the 999 budget (170 headers = Badness
+  8500). Never "simplify"
   to one package after a link error; fix the link error and keep
   `%package devel`. If the library has no SOVERSION, name the runtime
   package `lib<name>-<version-major>_<minor>` or keep the `.so` in the base
@@ -42,9 +42,11 @@ generalize perfectly to this package.
   subpackage is renamed to the new `lib<name><soversion>` and `%files` lists
   that soname. Do NOT keep the old name by editing `SOVERSION` with `sed`
   or a patch (`SOVERSION 0unstable`, `.so.1.0.0` hard-coded in a compat
-  CMake module): it hides an ABI change from every dependent. Glob the
-  version part with `%{_libdir}/lib<name>.so.%{soversion_dotted}*` rather
-  than `*.so.*` or one hard-coded number.
+  CMake module): it hides an ABI change from every dependent. In `%files`
+  list the soname with its major and glob the rest
+  (`%{_libdir}/lib<name>.so.<soversion>*`, e.g. `libfmt.so.12*`), not
+  `*.so.*`; define `%global sover <soversion>` yourself at the top if you want
+  a macro for it (there is no predefined one).
 - **A header-only library is one noarch `-devel` package.** No runtime
   subpackage, no empty base package: `BuildArch: noarch`, `%files` for the
   headers only. If the CMake config lands in `%{_libdir}`, install it to
@@ -58,7 +60,7 @@ generalize perfectly to this package.
   recipe removed a bundled library (`rm -r 3rd_party/...`) and
   `BuildRequires` the system one, keep doing that on an update.
 - **Install dirs named after a version the CMake script computes**
-  (e.g. `include/oatpp-1.3.0/` while the tag is 1.3.1 — the project parses
+  (e.g. `include/<name>-1.3.0/` while the tag is 1.3.1 — the project parses
   its own header, not the tag): list `%{buildroot}` after `%install` and use
   `%{_includedir}/<name>-*/` globs in `%files devel` rather than
   `%{version}`.
@@ -66,11 +68,11 @@ generalize perfectly to this package.
   fails late (after `%install`, in `50-check-filelist`) with
   `<pkg>.rpm: directories not owned by a package: - /usr/lib64/<name>-X.Y`
   when `%files` lists files *inside* a directory that nothing owns — a
-  file entry claims the file, not its parent. Real example: `oatpp`
-  installs `liboatpp.so` under `%{_libdir}/oatpp-1.3.0/`; listing only
-  `%{_libdir}/oatpp-*/liboatpp.so` leaves the directory orphaned. Fix: add
-  `%dir %{_libdir}/oatpp-*` to the package that owns the files in it (or
-  list the whole directory `%{_libdir}/oatpp-*/` with no `%dir`). The
+  file entry claims the file, not its parent: a library installing
+  `lib<name>.so` under `%{_libdir}/<name>-1.3.0/` and listing only
+  `%{_libdir}/<name>-*/lib<name>.so` leaves the directory orphaned. Fix: add
+  `%dir %{_libdir}/<name>-*` to the package that owns the files in it (or
+  list the whole directory `%{_libdir}/<name>-*/` with no `%dir`). The
   opposite mistake is `RPM build warnings: File listed twice: <dir>` — a
   directory listed as a whole (`%{_includedir}/foo-*/`) plus an extra
   `%dir` line for it, or the same path in two `%files` sections. Pick one
@@ -78,9 +80,9 @@ generalize perfectly to this package.
   `.so` in the runtime package and headers/cmake in `-devel` under one
   versioned dir) is owned by the package it is *not* a leaf-only part of:
   give the `%dir` to the runtime package and list only files in `-devel`
-  — never `%dir` the same path in both. After `%install`, run
-  `find %{buildroot} -type d` against your `%files` to confirm every
-  non-system directory is claimed once. The build log's `check-filelist`
+  — never `%dir` the same path in both. After a build, compare the
+  directories the build log lists under the buildroot with your `%files` to
+  confirm every non-system directory is claimed once. The build log's `check-filelist`
   and `File listed twice` lines are the authoritative list; read them
   before editing `%files`.
 - **`%ldconfig_scriptlets`**: every shared-library subpackage needs
@@ -99,8 +101,7 @@ generalize perfectly to this package.
   loses the single-source-of-truth property of the macro (if openSUSE
   ever changes what ldconfig invocation to use, every manual spec has
   to be hand-updated, while every `%ldconfig_scriptlets` user picks it
-  up for free). The drogon run burned a whole attempt doing this
-  manual rewrite believing the macro was "deprecated" — it is not.
+  up for free). The macro is not deprecated.
 - **CMake `%build`/`%install`**: `%cmake` (configure) then `%cmake_build`,
   then `%cmake_install`. Never hand-write `mkdir build && cd build && cmake
   ..` — the macros already do the out-of-tree build and set the standard
@@ -114,11 +115,12 @@ generalize perfectly to this package.
     * `BUILD_SHARED_LIBS=ON` — the whole point of the shared-library split.
     * `BUILD_STATIC_LIBS=OFF` — openSUSE's `%cmake` already defaults this
       way; set it explicitly if the upstream default is ON.
-    * `BUILD_TESTING=OFF` **when** the test suite's fixtures aren't in the
-      archive (e.g. a `USE_SUBMODULE=OFF` build whose tests reference files
-      from the never-fetched submodule — drogon's `trantor/trantor/tests/
-      server.crt` is the recurring case). Only enable `BUILD_TESTING=ON`
-      if you can actually run `%ctest` AND the fixtures exist in `source/`.
+    * `BUILD_TESTING=ON` with `%ctest` is the default: the tests are the only
+      proof the library works. Turn it OFF only with a quoted build-log line
+      (or a `Grep` hit in `source/`) proving no test can run here, e.g. every
+      test needs a fixture from a never-fetched submodule; when only some
+      tests cannot run, exclude those with `%ctest --exclude-regex
+      '<test1>|<test2>'` and a comment naming the reason.
     * `BUILD_EXAMPLES=OFF` / `BUILD_DEMOS=OFF` — demo apps install to
       `/usr/bin/` under short benign names (`helloworld`, `benchmark`,
       `client`, `websocket_server`, …) and immediately produce an
@@ -129,19 +131,15 @@ generalize perfectly to this package.
       called) — openSUSE strongly prefers system libraries. If this is on,
       the vendored submodule needs to be in the archive AND the system
       package must be absent — rarely the right choice. Pair with
-      `BUILD_TESTING=OFF` per the previous bullet.
-    * Opt-in tool subpackages: a code-gen or CLI tool (drogon's
-      `drogon_ctl`, protobuf's `protoc`, gRPC's `grpc_cpp_plugin`) is a
+      the `BUILD_TESTING` rule of the previous bullet.
+    * Opt-in tool subpackages: a code-gen or CLI tool (protobuf's `protoc`,
+      gRPC's `grpc_cpp_plugin`) is a
       conscious decision — EITHER package it as `-n <name>-tools` /
       `-n <name>-ctl` with its own `%files` section AND leave the
       corresponding `BUILD_<TOOL>` ON, OR drop it entirely with
-      `BUILD_<TOOL>=OFF`. Flipping between the two across attempts just
-      burns attempts: pick one upfront and commit.
-  Real example: drogon took 4 attempts to settle on the right four
-  knobs (`BUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
-  -DUSE_SUBMODULE=OFF`); each wrong attempt cost a full OBS build.
-  Decide all four in one pass by reading `CMakeLists.txt`'s `option(...)`
-  lines directly.
+      `BUILD_<TOOL>=OFF`. Pick one upfront and keep it.
+  Decide all of them in one pass by reading `CMakeLists.txt`'s `option(...)`
+  lines directly: each wrong knob costs a full OBS build.
 - **Meson `%build`/`%install`/`%check`**: the same idea, different macro set —
   `%meson` (configure) then `%meson_build`, `%meson_install`, and
   `%meson_test` for `%check`. Detect via `meson.build` at the source root.
@@ -156,7 +154,8 @@ generalize perfectly to this package.
   `add_test()`; `%make_build check` (sometimes gated behind
   `%if !0%{?qemu_user_space_build}` when the suite needs the build arch's
   native execution) for autotools projects with a `check` target. If
-  neither exists, say so and leave `%check` out with a plain `# no upstream test suite` comment
+  neither exists (Grep `source/` for `add_test`/`check:` finds nothing), say
+  so and leave `%check` out with a plain `# no upstream test suite` comment
   — never `|| true`. For autotools specifically, dump the real test log on
   failure instead of leaving only a generic "check failed" in build.log —
   autotools' own `tests/testsuite.log`/`test-suite.log` has the actual
@@ -208,18 +207,10 @@ generalize perfectly to this package.
   The `%verify(not mode caps)` on the `%files` line suppresses rpm's
   verify-time complaints about the setcap'd file. Real example:
   `gstreamer`'s `gst-ptp-helper`.
-- **Source signature verification**: for a security-relevant system library
-  fetched directly from its own release page (rather than a registry like
-  PyPI with its own trust model), fetching the upstream GPG signature and
-  maintainer keyring alongside the tarball is standard openSUSE practice,
-  not optional hardening — OBS verifies the signature against the keyring
-  automatically when both are present:
-    Source:  <tarball>
-    Source1: <tarball>.sig
-    Source2: <name>.keyring
-  (real examples: `acl`, `attr`, `coreutils`, `bash`, `elfutils`). Worth
-  adding when packaging a widely-depended-on library from source, not
-  required for every single one-off dependency.
+- **Source signature verification**: when the release page publishes a
+  `.sig`/`.asc` next to the tarball, add it and the keyring as sources
+  (convention 93; real examples: `acl`, `attr`, `coreutils`, `bash`,
+  `elfutils`). OBS verifies the signature against the keyring automatically.
 
 ## Things you may see in reference specs that rarely matter for a one-off dependency build
 
@@ -252,11 +243,10 @@ the task specifically calls for it:
 
 OBS builds have no network. GitHub's release archives also omit git
 submodules, so a CMake project that vendors dependencies as submodules
-(ctranslate2's `third_party/`, llama.cpp-style trees) arrives with those
+(a `third_party/` of submodules, llama.cpp-style trees) arrives with those
 directories empty. Do NOT "fix" this with `git submodule update --init`,
-`git clone`, `git config user.email` or a `git commit` in `%prep` — there is
-nothing to fetch from and `python-ctranslate2` burned three attempts on exactly
-that (submodule init, then missing git identity, then the network). Instead,
+`git clone`, `git config user.email` or a `git commit` in `%prep`: there is
+no network and nothing to fetch from. Instead,
 in order of preference:
 1. turn the vendored dependency off and use the distro's `-devel` package
    (`-DWITH_MKL=OFF`, `-DOPENMP_RUNTIME=COMP`, `-DBUILD_CLI=OFF`,
@@ -264,7 +254,7 @@ in order of preference:
    project's CMake options), adding the matching `BuildRequires`;
 2. add the submodule's own release tarball as an extra `SourceN:` (declared
    as a full-URL `Source` fetched by a `_service` with the `download_files`
-   service) and unpack it into the empty directory in
+   service in `mode="manual"`, convention 92) and unpack it into the empty directory in
    `%prep` with `tar -xf %{SOURCE1} --strip-components=1 -C third_party/<dir>`;
 3. if neither is possible, report the dependency in `unresolvable_packages`
    (convention 27) rather than inventing a source.
@@ -275,10 +265,10 @@ The pipeline recognises these in the build log (`log/cause.rs`) and puts the
 recipe first in the turn; apply it instead of returning `blocked`.
 
 - `Cython 3.3 requires the Python Limited API version to be 3.9 or greater`
-  (python-tilelang, scikit-build-core `wheel.py-api = "cp38"`): in `%prep`,
+  (scikit-build-core `wheel.py-api = "cp38"`): in `%prep`,
   `sed -i -E 's/(py-api[[:space:]]*=[[:space:]]*")cp3[0-8]"/\1cp39"/' pyproject.toml`.
-- A CMake licence guard (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION`,
-  python-torchcodec): a fact to check, convention 78; never the S3 download
+- A CMake licence guard (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION`): a fact
+  to check, convention 78; never the S3 download
   option, never `blocked`.
 - CUDA/NVIDIA failures (split `nvidia-cutlass-dsl-libs-*` wheels, a CUDA
   wheel that cannot import without a device): skill nvidia-wheels.

@@ -19,7 +19,7 @@ N1. Preconditions. The sdist (or repo archive) must contain a
    only `package-lock.json`; a project with only `pnpm-lock.yaml` or
    `yarn.lock` cannot use it, so report `use_upstream_wheel` for those and
    say the lock file type in `why`. Find the lock file and the frontend
-   directory with `find source -name package-lock.json -not -path '*/node_modules/*'`
+   directory with Grep/`ls` for `package-lock.json` under `source/` (outside `node_modules/`)
    and read the build hook to see which `npm` commands it runs and where the
    output goes (`build/`, `dist/`, a copy into the package directory).
 

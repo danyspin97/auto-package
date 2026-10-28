@@ -9,6 +9,10 @@ Use the `%service_add_*`/`%service_del_*` scriptlet macros — never hand-write
 `%systemd_post`/raw `systemctl` calls in %post/%postun. `python-Glances` is
 the reference shape:
 
+- The macros need the systemd RPM macros at build time and the ordering
+  dependency at run time, in the package that owns the unit:
+    BuildRequires:  pkgconfig(systemd)
+    %{?systemd_ordering}
 - The unit file arrives as its own numbered source, not out of the
   tarball: `Source2: <name>.service` (and, if the package also ships a
   firewalld rule, `Source3: <name>.firewalld`).
@@ -98,11 +102,13 @@ immediately after install without waiting for the next boot. The `.tmpfiles`
 source file itself uses the systemd-tmpfiles.d(5) line format (e.g.
 `d /run/<name> 0755 <user> <group> -`).
 
-## Runtime-created state files in `%files`
+## Runtime-created files in `%files`
 
-A PID file, socket, or other file the daemon itself creates at runtime (not
-at package-install time) should be `%ghost`-listed, not owned normally —
-otherwise rpm reports it as "Installed (but unpackaged)" the first time it
-appears, or complains about its contents diverging from what was packaged:
+A PID file or socket under `/run` (never `/var/run`, a compatibility symlink)
+is created by the daemon at run time on a tmpfs: do not package it, not even
+as `%ghost`; its directory comes from `tmpfiles.d` above. A state file the
+daemon creates under `/var/lib/<name>/` may be `%ghost`-listed so rpm owns
+the path:
 
-    %ghost %verify(not md5 size mtime) %config(missingok,noreplace) %{_localstatedir}/run/<name>/<name>.pid
+    %dir %{_localstatedir}/lib/<name>
+    %ghost %{_localstatedir}/lib/<name>/<name>.db

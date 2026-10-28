@@ -111,10 +111,9 @@ yourself:
     %python_clone -a %{buildroot}%{_bindir}/<console-script>
     %python_expand %fdupes %{buildroot}%{$python_sitearch}
 
-There is no `%build`. Get the flavors from the `%pythons` definition under `/usr/lib/rpm/macros.d` (grep it) and
+There is no `%build`. Get the flavors from the `%pythons` definition under `/usr/lib/rpm/macros.d` (the Grep tool) and
 pick one wheel per flavor THIS PROJECT BUILDS for the target arch — not every
-CPython PyPI happens to have a wheel for (onnxruntime was rewritten for
-cp311/cp312/cp313/cp314 when only cp313/cp314 are built).
+CPython PyPI happens to have a wheel for.
 `%python<NNN>_pyproject_install` is used by its hardcoded name because the
 shared multi-flavor `%pyproject_install` repeats one argument for every
 flavor.
@@ -125,7 +124,7 @@ downloads the per-flavor wheels itself and writes this spec when every flavor
 has a wheel (`use_upstream_wheel` triggers it), so prefer that. If you must
 declare them by hand, use the `download_files` OBS service — it is the one
 installed here (`/usr/lib/obs/service/`); a `download_file`/`download_url` service
-is NOT available and `osc service ra` fails on it (triton's attempt). Put the
+is NOT available and `osc service ra` fails on it. Put the
 full wheel URL (`urls[].url` from the PyPI JSON,
 `https://files.pythonhosted.org/packages/<h1>/<h2>/<hash>/<file>.whl`) in each
 `Source<N>:` and add:
@@ -138,8 +137,9 @@ The pipeline runs `osc service ra` before the check, so the files arrive on
 their own (the check compares the URL's file name with what is on disk). A bare
 file name in `Source<N>:` with no URL cannot be fetched by the service.
 
-Delete the source tarball the earlier recipe used from the checkout (a spec
-that no longer lists it must not leave it behind to be built from source).
+Drop the source tarball the earlier recipe used from the spec; you have no
+`rm`, and the pipeline deletes the unreferenced file from the checkout and
+OBS at commit.
 If the service fails, the error is shown to you on the next turn.
 
 ## Checks that every prebuilt-wheel spec passes
@@ -173,4 +173,4 @@ If the service fails, the error is shown to you on the next turn.
   wheel with no module.
 - Runtime `Requires:` are `python-<name>`, never `%{python_module <name>}`.
 - `rpmlintrc` filters only for warnings the build log names, anchored with
-  `/usr/lib(64)?/python`.
+  `/usr/lib(64)?/python`, each under a `# reason:` line (convention 39).

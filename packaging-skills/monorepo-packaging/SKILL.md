@@ -46,9 +46,9 @@ The shape:
   runs; they are always present. A BuildRequires on a sibling is a circular
   dependency OBS cannot resolve. Use PYTHONPATH=%{buildroot}%{python_sitearch}
   (or sitelib) in %check to make sibling modules importable instead.
-Check the exact subpackage and %files macro spelling against the openSUSE
-Packaging/Python wiki page and grep `/usr/lib/rpm/macros.d` for the macro; the pipeline validates the spec after
-your turn. Do not guess at macro names.
+Check the exact subpackage and %files macro spelling with the Grep tool
+over `/usr/lib/rpm/macros.d`; the pipeline validates the spec after your
+turn. Do not guess at macro names.
 
 This is the usual answer, not a rule. Leave a project out, and say in your
 reasoning that you did, when:
@@ -65,8 +65,7 @@ before deciding it is in or out.
 macro that auto-generates the `<flavor>-<name>` subpackages) is bound to
 this spec's single top-level `Name:` and can only be invoked once. A
 `%package -n python-<other-name>` block does NOT get flavor-multiplied by
-it — see `/usr/share/doc/packages/python-rpm-macros/README.md` on the
-build host. So when a sibling project is independently versioned and
+it. So when a sibling project is independently versioned and
 released on PyPI under its own name (the exception above), and it is
 ALSO being packaged as its own separate OBS package (check "Other
 projects in this archive" — if a sibling directory declares a name that

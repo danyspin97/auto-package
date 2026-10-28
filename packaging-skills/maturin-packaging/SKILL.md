@@ -51,12 +51,6 @@ e. %build — set CARGO env vars so maturin builds fully offline, plus the
      export CARGO_PROFILE_RELEASE_DEBUG=full
      export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
      export CARGO_PROFILE_RELEASE_STRIP=false
-     # Rust + C LTO interop is broken on openSUSE's toolchain for PyO3.
-     %global _lto_cflags %{nil}
-     # Python 3.12+ enables subinterpreter isolation checks PyO3 doesn't
-     # fully implement; this cfg silences the build-time hard-fail.
-     RUSTFLAGS="${RUSTFLAGS:-} --cfg pyo3_unsafe_allow_subinterpreters"
-     export RUSTFLAGS
      # PyO3's build.rs probes the host interpreter by default; without
      # PYO3_PYTHON it bakes the wrong ABI tag into a flavor's extension.
      # Set it INSIDE the per-flavor expansion, together with the build: a bare
@@ -74,11 +68,16 @@ f. %install — repeat the CARGO vars (they do not persist across sections):
      export CARGO_PROFILE_RELEASE_STRIP=false
      %pyproject_install
      %python_expand %fdupes %{buildroot}/%{$python_sitearch}/*
-     find %{buildroot} -name _current_flavor -delete
 
-g. %check — when the upstream test suite needs something the build worker
-   cannot have (a GPU, network access, model weights fetched at run time),
-   use an import smoke test instead, ON ONE LINE. If it only needs a
+   Workarounds that are NOT part of the default pattern: `%global _lto_cflags
+   %{nil}`, `RUSTFLAGS=... --cfg pyo3_unsafe_allow_subinterpreters`, deleting
+   `_current_flavor` files. Add one only for a build error you quote from this
+   build.log, with a comment above it naming that error (no `%` in the comment).
+
+g. %check — run the upstream test suite (`%pytest_arch`). Only when it needs
+   something the build worker cannot have (a GPU, network access, model weights
+   fetched at run time) and you quote the log line proving no subset can run
+   (convention 11 (iv)), use an import smoke test instead, ON ONE LINE. If it only needs a
    dependency that is not packaged yet, report that dependency instead and
    keep the real tests — see convention 27 (ANY dependency missing from OBS
    is something to build) in the main packaging conventions.
@@ -95,8 +94,8 @@ h. %files %{python_files} — use %{python_sitearch}:
 
 i. "no matching package named `X` found" during the offline build — the
    registry tarball lacks a crate. Do NOT declare the package blocked until
-   you have checked what pulls `X` in (`grep -rn '\bX\b' Cargo.toml
-   */Cargo.toml Cargo.lock` in the unpacked source):
+   you have checked what pulls `X` in (the Grep tool, pattern `\bX\b`, over
+   `source/Cargo.toml`, `source/*/Cargo.toml` and `source/Cargo.lock`):
    - `X` is an `optional = true` dependency enabled only by a feature the
      wheel build does not turn on (`profiling = ["pprof"]`, `jemalloc`,
      `tracing-*` extras), a `[dev-dependencies]` entry, or a `cfg(target_os
@@ -134,7 +133,7 @@ k. `error: queries overflow the depth limit!` from rustc — a crate's generic/
    `lib.rs`. This almost never stops at one crate: fixing it in crate A just
    lets the build progress far enough to hit the identical error in every
    OTHER workspace crate that transitively depends on A's generic code. Once
-   you see it the first time, `grep` every crate's `Cargo.toml` in the
+   you see it the first time, Grep every crate's `Cargo.toml` in the
    workspace for ones that depend on the crate that just needed the fix (and
    check whether any crates upstream already carry the attribute, which
    tells you how widely upstream has already hit this) and patch all of them

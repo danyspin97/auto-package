@@ -10,13 +10,10 @@ entirely with Cargo). They do NOT apply to Python packages whose build
 backend happens to be maturin — those follow the main Python packaging
 conventions (see the maturin-packaging skill).
 
-R1. Rust packages use `cargo-packaging` macros. The mandatory global and
-   BuildRequires are:
-
-     %global rustflags '-Clink-arg=-Wl,-z,relro,-z,now'
+R1. Rust packages use `cargo-packaging` macros; it sets the distro's Rust
+   flags itself (no `rustflags` global). The BuildRequires are:
 
      BuildRequires:  cargo-packaging
-     BuildRequires:  pkgconf
      BuildRequires:  pkgconfig
 
    Add `BuildRequires: pkgconfig(<lib>)` for every C library the crate links
@@ -49,10 +46,20 @@ R4. Install with `%{cargo_install}` (from `cargo-packaging`), which puts the
 
      install -D -m 0755 target/release/<extra-binary> %{buildroot}%{_bindir}/<extra-binary>
 
+R4a. `%check` runs the crate's tests:
+
+     %check
+     %{cargo_test}
+
+   Leave it out only with a quoted log line proving no test can run here
+   (convention 11 (iv)); skip single tests with `-- --skip <name>` and a
+   comment naming the reason.
+
 R4b. `vendor.tar.zst` comes from the `cargo_vendor` OBS service declared in
-   `_service`; you cannot run services. If the checkout has no vendor tarball
-   and `_service` does not declare one, report `blocked` naming the
-   `cargo_vendor` service as the missing step rather than inventing a Source.
+   `_service`; you cannot run services, the pipeline does (`osc service ra`).
+   If the checkout has no vendor tarball and `_service` does not declare one,
+   add a `cargo_vendor` service with `mode="manual"` (convention 92) rather
+   than inventing a Source.
 
 R5. Shell-completion subpackages (bash, zsh, fish): each is `BuildArch: noarch`
    and adds `Supplements: (%{name} and <shell>)` alongside its normal
@@ -64,7 +71,6 @@ R5. Shell-completion subpackages (bash, zsh, fish): each is `BuildArch: noarch`
 
      %package bash-completion
      Summary:        Bash Completion for %{name}
-     Group:          System/Shells
      Requires:       %{name} = %{version}
      Requires:       bash-completion
      Supplements:    (%{name} and bash)
