@@ -81,50 +81,7 @@ pub(crate) fn cmd_build(
     // OBS has as `python-APScheduler` is checked out under that spelling).
     ap_build::osc::try_list_project_packages(project, ap_build::proc::Emit::run(reporter.as_ref()))
         .map_err(|e| color_eyre::eyre::eyre!(e))?;
-    let (name, rpm_name, subprojects) = match &source_repo {
-        None => (name.to_string(), ap_build::osc::rpm_name(name), Vec::new()),
-        Some(repo) => {
-            let probe = ap_build::sources::probe(repo, &version, name)
-                .map_err(|e| color_eyre::eyre::eyre!(e))?;
-            // For monorepos the user-provided name IS the source package name;
-            // the detected project_name is just one subproject and must not
-            // override it. Only apply the detected name for single-project repos.
-            let effective_name = if probe.subprojects.len() > 1 {
-                name.to_string()
-            } else {
-                let declared = probe
-                    .project_name
-                    .clone()
-                    .unwrap_or_else(|| name.to_string());
-                if !declared.eq_ignore_ascii_case(name) {
-                    reporter.report(&Event::Progress {
-                        step: None,
-                        message: format!(
-                            "{repo} calls itself '{declared}', not '{name}' — using that"
-                        ),
-                    });
-                }
-                declared
-            };
-            if probe.subprojects.len() > 1 {
-                reporter.report(&Event::Progress {
-                    step: None,
-                    message: format!(
-                        "{repo} holds {} projects: {}",
-                        probe.subprojects.len(),
-                        probe
-                            .subprojects
-                            .iter()
-                            .map(|(d, _)| d.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                });
-            }
-            let rpm = probe.ecosystem.rpm_name(&effective_name);
-            (effective_name, rpm, probe.subprojects)
-        }
-    };
+    let (name, rpm_name, subprojects) = resolve_names(name, &version, &source_repo, &reporter)?;
     // The run's key is the lowercase guess; the pipeline resolves the spelling
     // OBS lists the package under (`PkgState::obs_name`) in its own preflight.
     // A package branched from another project already has a name, and the
@@ -1570,6 +1527,60 @@ fn resolve_version(
                     v
                 }
             }
+        }
+    })
+}
+
+/// The name and RPM name a build is filed under, and the repository
+/// subprojects. A repository names itself: its own name wins over the guess.
+fn resolve_names(
+    name: &str,
+    version: &str,
+    source_repo: &Option<String>,
+    reporter: &Arc<dyn Reporter + Send + Sync>,
+) -> color_eyre::Result<(String, String, Vec<(String, String)>)> {
+    Ok(match source_repo {
+        None => (name.to_string(), ap_build::osc::rpm_name(name), Vec::new()),
+        Some(repo) => {
+            let probe = ap_build::sources::probe(repo, &version, name)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+            // For monorepos the user-provided name IS the source package name;
+            // the detected project_name is just one subproject and must not
+            // override it. Only apply the detected name for single-project repos.
+            let effective_name = if probe.subprojects.len() > 1 {
+                name.to_string()
+            } else {
+                let declared = probe
+                    .project_name
+                    .clone()
+                    .unwrap_or_else(|| name.to_string());
+                if !declared.eq_ignore_ascii_case(name) {
+                    reporter.report(&Event::Progress {
+                        step: None,
+                        message: format!(
+                            "{repo} calls itself '{declared}', not '{name}' — using that"
+                        ),
+                    });
+                }
+                declared
+            };
+            if probe.subprojects.len() > 1 {
+                reporter.report(&Event::Progress {
+                    step: None,
+                    message: format!(
+                        "{repo} holds {} projects: {}",
+                        probe.subprojects.len(),
+                        probe
+                            .subprojects
+                            .iter()
+                            .map(|(d, _)| d.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+            let rpm = probe.ecosystem.rpm_name(&effective_name);
+            (effective_name, rpm, probe.subprojects)
         }
     })
 }
