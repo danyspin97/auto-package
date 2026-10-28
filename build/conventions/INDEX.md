@@ -44,7 +44,7 @@
 44. Absent test files/fixtures, unknown trove classifier — read when %check misses a conftest/testdata file or the backend rejects a classifier
 45. Django test suites need DJANGO_SETTINGS_MODULE — read when %check says ImproperlyConfigured: settings are not configured
 46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
-47. Set %{optflags} before building a C extension — read when a distutils/setuptools Extension ignores distro flags
+47. Merged into convention 3 — read convention 3 when a distutils/setuptools Extension ignores distro flags
 48. Test-environment setup: %ctest env, UTF-8 locale, git, sandbox — read when %check fails with no missing package
 49. Per-CPython upstream wheels covering our flavors — read when the source cannot be built and wheels exist per cp3NN
 50. OOM / disk-full failures are sizing, not spec bugs — read when the build is killed or says "No space left on device"
@@ -54,10 +54,10 @@
 54. Metapackage subpackage of runtime deps — read when a feature only needs other packages installed, no files
 55. Two-pass pytest (xdist-safe in parallel, rest serial) — read when tests fail only under pytest-xdist -n auto
 56. Signed checksums file, GPG verify — read when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
-57. Tests need the compiled extension in-tree (make inplace) — read when tests skip or fail because the .so is not in source/
+57. Merged into convention 3 — read convention 3 when tests skip or fail because the .so is not in source/
 58. Vendored libraries need their LICENSE in %license — read when sources have _vendor/vendor/bundled dirs
 59. Exact == pin that openSUSE ships at another version — read when OBS says "nothing provides ... = X (got version Y)"
-60. "Pure Python" can ship compiled code, check before noarch — read when choosing BuildArch noarch for a wheel or sdist
+60. Merged into convention 3 — read convention 3 when choosing BuildArch noarch for a wheel or sdist
 61. [inline] A missing dependency may already be built here — full text for rpm -qlp checks and import-name mismatches
 62. [inline] Dependency needs patching: patch_dependencies — full text for the two cases and the problem text to write
 63. [inline] No TODO placeholders left in a spec — full text for what each skeleton marker needs
