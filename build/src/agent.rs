@@ -632,7 +632,7 @@ it, then re-runs this package."#;
 
 /// The conventions whose full text stays in the system prompt: they apply to
 /// nearly every turn (a missing dependency is built, not worked around).
-const INLINE_CONVENTIONS: [u32; 6] = [27, 61, 62, 63, 64, 86];
+const INLINE_CONVENTIONS: [u32; 8] = [27, 40, 61, 62, 63, 64, 86, 89];
 
 /// The index of every convention, one line each (`build/conventions/INDEX.md`).
 const CONVENTIONS_INDEX: &str = include_str!("../conventions/INDEX.md");

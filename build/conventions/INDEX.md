@@ -37,7 +37,7 @@
 37. Merged into convention 53 — read convention 53 when upstream ships docs as an artifact or the task asks for -doc
 38. Merged into convention 14 — read convention 14 when tests or code fail with AttributeError/ImportError on a stdlib name
 39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter
-40. The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
+40. [inline] The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
 41. Merged into convention 90 — read convention 90 when setup.py/setup.cfg lists test-runner or shim requirements
 42. Merged into convention 22 — read convention 22 when the installed version is wrong or the source has a literal 0.0.0
 43. Merged into convention 7 — read convention 7 when pytest ignores options set in setup.cfg
@@ -86,7 +86,7 @@
 86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
 87. Merged into convention 7 — read convention 7 when the prompt lists flaky tests or a %check failure differs between two builds
 88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
-89. SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
+89. [inline] SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
 90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr; keep header, URL:, SPDX License: — read when a spec has Group:, BuildRoot:, %clean or %defattr, or no URL:
 91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
 92. Merged into convention 77 — read convention 77 when you write or edit a _service file
