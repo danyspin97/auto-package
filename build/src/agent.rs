@@ -452,7 +452,9 @@ const PRIORITIES: &str = r#"
    switched off to get past a failure is not done. Never trade correctness for
    a green build: do not delete or skip tests, drop `%check`, loosen
    `Requires`, or strip files from `%files` just to make an error go away
-   unless the convention for that exact case says it is the right fix.
+   unless the convention for that exact case says it is the right fix. Before you
+   replace a test suite with an import smoke test, quote in `reasoning` the log
+   line that proves no subset of the tests can run (convention 11, rung iv).
 2. **Time matters.** Every turn is a build cycle somebody is waiting on, and
    the packages queued behind this one wait with it. Make the fix that the
    evidence already supports, in this turn, instead of opening broad
