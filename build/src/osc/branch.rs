@@ -136,15 +136,89 @@ pub fn branch_api_path_as(
     comment: &str,
     follow_devel: bool,
 ) -> String {
+    branch_api_path_at(
+        source,
+        pkg,
+        target_pkg,
+        target_project,
+        comment,
+        follow_devel,
+        None,
+    )
+}
+
+/// [`branch_api_path_as`] branching the package as it was at `revision` (an
+/// OBS revision number or a srcmd5; the API's `rev` parameter) instead of its
+/// newest revision.
+pub fn branch_api_path_at(
+    source: &str,
+    pkg: &str,
+    target_pkg: &str,
+    target_project: &str,
+    comment: &str,
+    follow_devel: bool,
+    revision: Option<&str>,
+) -> String {
     let ignore = if follow_devel { "" } else { "&ignoredevel=1" };
+    let rev = revision.map_or(String::new(), |r| format!("&rev={}", enc(r)));
     format!(
         "/source/{source}/{}?cmd=branch&target_project={}&target_package={}\
-         {ignore}&comment={}",
+         {ignore}{rev}&comment={}",
         enc(pkg),
         enc(target_project),
         enc(target_pkg),
         enc(comment)
     )
+}
+
+/// The files of `project/pkg` as they were at `revision`, or why that cannot
+/// be read (most often: the package has no such revision).
+pub fn package_files_at_revision(
+    project: &str,
+    pkg: &str,
+    revision: &str,
+    emit: Emit<'_>,
+) -> Result<Vec<String>, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", pkg)?;
+    let xml = api_get(
+        &format!("/source/{project}/{}?rev={}", enc(pkg), enc(revision)),
+        emit,
+    )
+    .map_err(|e| match e {
+        Error::OscFailed { stderr, .. } => Error::NotActionable(format!(
+            "{project}/{pkg} has no revision {revision} ({})",
+            first_line(&stderr)
+        )),
+        other => other,
+    })?;
+    Ok(xml
+        .split("<entry ")
+        .skip(1)
+        .filter_map(|e| extract_xml_attr(&e[..e.find('>').unwrap_or(e.len())], "name"))
+        .collect())
+}
+
+/// The text of `file` in `project/pkg` as it was at `revision`.
+pub fn cat_file_at_revision(
+    project: &str,
+    pkg: &str,
+    file: &str,
+    revision: &str,
+    emit: Emit<'_>,
+) -> Option<String> {
+    check_obs_name("project", project).ok()?;
+    check_obs_name("package", pkg).ok()?;
+    api_get(
+        &format!(
+            "/source/{project}/{}/{}?rev={}",
+            enc(pkg),
+            enc(file),
+            enc(revision)
+        ),
+        emit,
+    )
+    .ok()
 }
 
 /// The devel project `<devel project="..."/>` of a package meta, if it names one.
@@ -217,17 +291,40 @@ pub fn branch_package_as(
     follow_devel: bool,
     emit: Emit<'_>,
 ) -> Result<BranchResult, Error> {
+    branch_package_at(
+        source,
+        pkg,
+        target_pkg,
+        target_project,
+        follow_devel,
+        None,
+        emit,
+    )
+}
+
+/// [`branch_package_as`] at `revision` (a revision number or srcmd5) when
+/// given, else the newest revision.
+pub fn branch_package_at(
+    source: &str,
+    pkg: &str,
+    target_pkg: &str,
+    target_project: &str,
+    follow_devel: bool,
+    revision: Option<&str>,
+    emit: Emit<'_>,
+) -> Result<BranchResult, Error> {
     check_obs_name("project", source)?;
     check_obs_name("package", pkg)?;
     check_obs_name("package", target_pkg)?;
     check_obs_name("project", target_project)?;
-    let path = branch_api_path_as(
+    let path = branch_api_path_at(
         source,
         pkg,
         target_pkg,
         target_project,
         &format!("auto-package: branch for a version update of {pkg}"),
         follow_devel,
+        revision,
     );
     let out = api_call(Some("POST"), &path, None, emit)?;
     if out.success() || classify_branch_failure(&out.stderr) == BranchFailure::AlreadyThere {
@@ -1009,6 +1106,20 @@ mod tests {
             path.contains("&target_package=python-apscheduler&ignoredevel=1&"),
             "{path}"
         );
+    }
+
+    #[test]
+    fn a_revision_is_sent_as_the_rev_parameter() {
+        let at = |rev| branch_api_path_at("S", "p", "p", "T", "c", false, rev);
+        assert_eq!(
+            at(Some("7")),
+            "/source/S/p?cmd=branch&target_project=T&target_package=p&ignoredevel=1&rev=7&comment=c"
+        );
+        let md5 = "0123456789abcdef0123456789abcdef";
+        assert!(at(Some(md5)).contains(&format!("&rev={md5}&comment=")));
+        // Without one the request is what it always was.
+        assert_eq!(at(None), branch_api_path_as("S", "p", "p", "T", "c", false));
+        assert!(!at(None).contains("rev="));
     }
 
     #[test]
