@@ -293,11 +293,15 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
     }
 
     // Patch names that cannot be read as files of the checkout are not
-    // analysed, and say so.
+    // analysed, and say so: the ones the change adds, not the ones the
+    // baseline already names the same way.
+    let base_unread = unanalysed_patches(base.spec.as_deref().unwrap_or(""));
     for raw in unanalysed_patches(&fin_spec.join("\n")) {
-        push(RiskFlag::Unanalysed {
-            what: format!("patch {raw} is not a plain file name of the checkout"),
-        });
+        if !base_unread.contains(&raw) {
+            push(RiskFlag::Unanalysed {
+                what: format!("patch {raw} is not a plain file name of the checkout"),
+            });
+        }
     }
 
     // Expansion and dependency lines: the lines the change added or removed,
@@ -821,6 +825,31 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, RiskFlag::Unanalysed { .. }))
         );
+    }
+
+    #[test]
+    fn an_unread_patch_name_the_baseline_has_is_not_flagged_again() {
+        let spec = "Name: python-foo\nVersion: 1.0\nPatch0: %{vendor}-fix.patch\n";
+        let unread = |flags: &[RiskFlag]| {
+            flags
+                .iter()
+                .any(|f| matches!(f, RiskFlag::Unanalysed { .. }))
+        };
+        let base = Files {
+            spec: Some(spec.to_string()),
+            ..Files::default()
+        };
+        let same = Files {
+            spec: Some(spec.to_string() + "Source1: other.tar.gz\n"),
+            ..Files::default()
+        };
+        assert!(!unread(&from_change(&base, &same, &[])));
+        // A new unread patch is flagged, even when the old one stays.
+        let added = Files {
+            spec: Some(spec.to_string() + "Patch1: %{vendor}-more.patch\n"),
+            ..Files::default()
+        };
+        assert!(unread(&from_change(&base, &added, &[])));
     }
 
     #[test]
