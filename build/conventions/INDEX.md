@@ -9,7 +9,7 @@
 9. Never limit parallelism (-j1) — read when the spec or your edit has -j1, -j N, --jobs or -n N on make, cmake, ninja or pytest
 10. %check failure: missing dependency vs cannot run here — read when %check fails (ImportError, fixture not found, collect error)
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
-12. pytest config pitfalls (exit 5, coverage gates, filterwarnings, newer pytest) — read when %check fails oddly on config
+12. Merged into convention 7 — read convention 7 when %check fails oddly on config
 13. Non-test failures: Source0 mismatch, offline %build errors — read when %prep/%build fails (no such file, name resolution)
 14. Tools, quilt and the PATCH-* tag format — read when adding or editing a PatchN:, creating a file, or using Bash (zypper, osc cat, rpm -qlp)
 15. Missing third-party module in %check, circular deps (Step B) — read when %check says ModuleNotFoundError or a dep cycle
@@ -40,7 +40,7 @@
 40. The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
 41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
 42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
-43. setup.cfg pytest config needs [tool:pytest] — read when pytest ignores options set in setup.cfg
+43. Merged into convention 7 — read convention 7 when pytest ignores options set in setup.cfg
 44. Absent test files/fixtures, unknown trove classifier — read when %check misses a conftest/testdata file or the backend rejects a classifier
 45. Django test suites need DJANGO_SETTINGS_MODULE — read when %check says ImproperlyConfigured: settings are not configured
 46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
@@ -52,7 +52,7 @@
 52. Merged into convention 2 — read convention 2 when the package is a fork or rename of another PyPI project
 53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
 54. Metapackage subpackage of runtime deps — read when a feature only needs other packages installed, no files
-55. Two-pass pytest (xdist-safe in parallel, rest serial) — read when tests fail only under pytest-xdist -n auto
+55. Merged into convention 7 — read convention 7 when tests fail only under pytest-xdist -n auto
 56. Signed checksums file, GPG verify — read when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
 57. Merged into convention 3 — read convention 3 when tests skip or fail because the .so is not in source/
 58. Vendored libraries need their LICENSE in %license — read when sources have _vendor/vendor/bundled dirs
@@ -84,7 +84,7 @@
 84. CUDA at build time: use the upstream wheel; NVIDIA output is not Factory/SLE material — read when the build or sources mention CUDA, cuda.h, nvcc or libcudart
 85. dlopen Requires, cffi minimum, ExclusiveArch propagation, ninja — read when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
 86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
-87. Flaky tests: pytest-rerunfailures or a named deselect — read when the prompt lists flaky tests or a %check failure differs between two builds
+87. Merged into convention 7 — read convention 7 when the prompt lists flaky tests or a %check failure differs between two builds
 88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
 89. SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
 90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr; keep header, URL:, SPDX License: — read when a spec has Group:, BuildRoot:, %clean or %defattr, or no URL:
