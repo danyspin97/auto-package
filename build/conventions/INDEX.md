@@ -15,13 +15,13 @@
 15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
 16. Merged into convention 17 — read convention 17 when writing %files module dirs or an import check for an unfamiliar package
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
-18. Console scripts and python_alternative — read when the package declares scripts/entry points or %files lists /usr/bin
+18. Merged into convention 53 — read convention 53 when the package declares scripts/entry points or %files lists /usr/bin
 19. Single % in RPM macros, never %% — read when a spec line shows %% or an rpmspec macro-parse error
 20. Merged into convention 19 — read convention 19 when about to use a python macro you have not seen in the spec or a skill
 21. Merged into convention 1 — read convention 1 when copying a requirement with extras, markers, commas, ~= or !=
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
 23. Merged into convention 17 — read convention 17 when %files or rpmlint shows tests/docs/setup files at site-packages root
-24. Headers: own headers to -devel, vendored ones deleted — read when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
+24. Merged into convention 53 — read convention 53 when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
 25. Merged into convention 39 — read convention 39 when the build log says "Badness NNNN exceeds threshold"
 26. Merged into convention 22 — read convention 22 when the checkout is a git snapshot or the project sits in a subdirectory
 27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
@@ -32,9 +32,9 @@
 32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
 33. Merged into convention 32 — read convention 32 when the package has no Python and no Cargo
 34. Optional extras are Recommends, not BuildRequires — read when pyproject lists optional-dependencies you consider adding
-35. Systemd service files and system users — read when the package ships a daemon, a .service unit or needs /run dirs
-36. gettext .mo translations (%find_lang) — read when the package installs locale/ .mo files or rpmlint reports them
-37. -doc subpackage for Sphinx/generated docs — read when upstream ships docs as an artifact or the task asks for -doc
+35. Merged into convention 53 — read convention 53 when the package ships a daemon, a .service unit or needs /run dirs
+36. Merged into convention 53 — read convention 53 when the package installs locale/ .mo files or rpmlint reports them
+37. Merged into convention 53 — read convention 53 when upstream ships docs as an artifact or the task asks for -doc
 38. Merged into convention 14 — read convention 14 when tests or code fail with AttributeError/ImportError on a stdlib name
 39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter
 40. The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
@@ -51,7 +51,7 @@
 51. Merged into convention 6 — read convention 6 when build-backend is mesonpy or scikit_build_core
 52. Merged into convention 2 — read convention 2 when the package is a fork or rename of another PyPI project
 53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
-54. Metapackage subpackage of runtime deps — read when a feature only needs other packages installed, no files
+54. Merged into convention 53 — read convention 53 when a feature only needs other packages installed, no files
 55. Merged into convention 7 — read convention 7 when tests fail only under pytest-xdist -n auto
 56. Signed checksums file, GPG verify — read when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
 57. Merged into convention 3 — read convention 3 when tests skip or fail because the .so is not in source/
