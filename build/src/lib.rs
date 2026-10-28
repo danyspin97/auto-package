@@ -9,6 +9,7 @@ pub mod deselect;
 pub mod discovery;
 pub mod distro_bounds;
 pub mod doctor;
+pub mod explain;
 pub mod flavors;
 pub mod http;
 pub mod log;
