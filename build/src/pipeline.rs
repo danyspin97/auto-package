@@ -6517,8 +6517,10 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         &mut st.step_attempts,
         ctx.rpm_name.clone()
     );
-    // What OBS holds is kept once per run, before this step changes the
-    // checkout: `osc rm` in this step may take a stray's pristine copy with it.
+    // What OBS holds is kept before this step changes the checkout, unless a
+    // baseline is already kept: an earlier commit of this run, or an earlier
+    // attempt's that the run start restored (or refused to start over). `osc
+    // rm` in this step may take a stray's pristine copy with it.
     let baseline = ctx.ws.dir().join(OBS_BASELINE_DIR);
     if !baseline.exists()
         && let Err(e) = osc::save_baseline(&ctx.checkout_dir, &baseline)
