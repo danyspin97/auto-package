@@ -5436,7 +5436,8 @@ pub fn begin_baseline(
         restore_baseline(&dir, emit).map_err(|why| {
             format!(
                 "the OBS baseline kept at {} was NOT restored ({why}); \
-                 it is kept there, and nothing was written",
+                 it is kept there, and nothing was written. If OBS is right as it \
+                 is, discard it with `auto-package baseline discard`",
                 dir.display()
             )
         })?;
@@ -5446,14 +5447,41 @@ pub fn begin_baseline(
     Ok(dir)
 }
 
+/// The baseline directories of `pkg` under `root`, one per branch
+/// (`root/<branch>/<pkg>`, see [`begin_baseline`]).
+pub fn baselines_of(root: &Path, pkg: &str) -> Vec<PathBuf> {
+    fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join(pkg))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Drop the pending baseline in `dir` without putting it back: OBS is then
+/// taken as it is. Returns `false` when `dir` holds no pending baseline.
+pub fn discard_pending(dir: &Path) -> std::io::Result<bool> {
+    if !is_pending(dir) {
+        return Ok(false);
+    }
+    fs::remove_dir_all(dir)?;
+    Ok(true)
+}
+
 /// Put the baseline saved in `dir` back into its checkout, and commit what the
 /// attempts sent to OBS with `commit`, the OBS write (the real one is
 /// [`commit`]; tests record the call). A tracked file gets its saved copy back.
 /// A file the attempts added is removed from the checkout, and committed as a
 /// deletion, only when OBS lists it now (`.osc/_files`, which osc updates on a
 /// commit that lands): a file that never reached OBS has nothing to undo.
+///
+/// `obs_check` runs before anything is written, with the checkout: it refuses
+/// (an error) when OBS is no longer where the checkout is (see
+/// [`obs_still_at_checkout`]).
 pub fn restore_baseline_with(
     dir: &Path,
+    obs_check: impl FnOnce(&Path) -> Result<(), String>,
     commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
 ) -> Result<(), String> {
     let attempted = attempted_files(dir);
@@ -5470,6 +5498,7 @@ pub fn restore_baseline_with(
             "refusing to restore {bad:?}: not a plain file name"
         ));
     }
+    obs_check(&checkout)?;
     let mut sent: Vec<String> = Vec::new();
     for name in &attempted {
         if sent.contains(name) {
@@ -5497,13 +5526,41 @@ pub fn restore_baseline_with(
     commit(&checkout, RESTORE_MESSAGE, &sent).map_err(|e| e.to_string())
 }
 
+/// The revision OBS holds for the checkout's package must be the one the
+/// checkout holds (`.osc/_files`, which osc updates when a commit lands). When
+/// it is not, someone committed after the attempt, or the attempt landed but
+/// osc did not record it: either way the restore would overwrite a revision
+/// nobody here has looked at, so it is refused.
+pub fn obs_still_at_checkout(checkout: &Path) -> Result<(), String> {
+    let read = |name: &str| {
+        fs::read_to_string(checkout.join(".osc").join(name))
+            .map(|s| s.trim().to_string())
+            .map_err(|e| format!("cannot read .osc/{name} of {}: {e}", checkout.display()))
+    };
+    let (project, package) = (read("_project")?, read("_package")?);
+    let local = fs::read_to_string(checkout.join(".osc/_files"))
+        .ok()
+        .and_then(|xml| parse_directory_srcmd5(&xml))
+        .ok_or_else(|| format!("the checkout of {project}/{package} records no revision"))?;
+    let head = source_srcmd5(&project, &package, Emit::quiet())
+        .map_err(|e| format!("cannot read the OBS revision of {project}/{package}: {e}"))?;
+    if head == local {
+        return Ok(());
+    }
+    Err(format!(
+        "OBS moved on: {project}/{package} is at revision {head}, the checkout at {local}; \
+         nothing was written to OBS"
+    ))
+}
+
 /// [`restore_baseline_with`] committing through [`commit`], and removing `dir`
 /// once it is restored. A failure leaves `dir` in place, marked as unrestored
 /// (see [`begin_baseline`]). The commit may run after a shutdown: see
-/// [`proc::restoring_after_shutdown`].
+/// [`proc::restoring_after_shutdown`]. Refuses when OBS has moved on (see
+/// [`obs_still_at_checkout`]).
 pub fn restore_baseline(dir: &Path, emit: Emit<'_>) -> Result<(), String> {
     let _restoring = proc::restoring_after_shutdown();
-    match restore_baseline_with(dir, |checkout, message, files| {
+    match restore_baseline_with(dir, obs_still_at_checkout, |checkout, message, files| {
         commit(checkout, message, files, emit)
     }) {
         Ok(()) => {
@@ -5564,9 +5621,11 @@ mod baseline_tests {
         let co = checkout(&[("foo.spec", "a")]);
         let base = tempfile::tempdir().unwrap();
         save_baseline(co.path(), base.path()).unwrap();
-        let res = restore_baseline_with(base.path(), |_, _, _| {
-            unreachable!("nothing was attempted, so nothing is committed")
-        });
+        let res = restore_baseline_with(
+            base.path(),
+            |_| Ok(()),
+            |_, _, _| unreachable!("nothing was attempted, so nothing is committed"),
+        );
         assert_eq!(res, Ok(()));
     }
 
@@ -5587,10 +5646,14 @@ mod baseline_tests {
         write_files_xml(co.path(), &["foo.spec", "foo-2.0.tar.gz"]);
 
         let mut sent = Vec::new();
-        let res = restore_baseline_with(base.path(), |_, message, files| {
-            sent.push((message.to_string(), files.to_vec()));
-            Ok(())
-        });
+        let res = restore_baseline_with(
+            base.path(),
+            |_| Ok(()),
+            |_, message, files| {
+                sent.push((message.to_string(), files.to_vec()));
+                Ok(())
+            },
+        );
         assert_eq!(res, Ok(()));
         assert_eq!(
             fs::read_to_string(co.path().join("foo.spec")).unwrap(),
@@ -5612,9 +5675,11 @@ mod baseline_tests {
         // The commit failed before it landed: OBS does not list the new file.
         fs::write(co.path().join("foo-2.0.tar.gz"), "new").unwrap();
         note_attempt(base.path(), &["foo-2.0.tar.gz".to_string()]).unwrap();
-        let res = restore_baseline_with(base.path(), |_, _, _| {
-            unreachable!("nothing reached OBS, so nothing is committed")
-        });
+        let res = restore_baseline_with(
+            base.path(),
+            |_| Ok(()),
+            |_, _, _| unreachable!("nothing reached OBS, so nothing is committed"),
+        );
         assert_eq!(res, Ok(()));
         assert!(co.path().join("foo-2.0.tar.gz").exists());
     }
@@ -5630,6 +5695,19 @@ mod baseline_tests {
         assert_eq!(first, second);
         assert!(attempted_files(&second).is_empty());
         assert!(second.join("files/foo.spec").exists());
+    }
+
+    #[test]
+    fn discard_pending_removes_only_a_pending_baseline() {
+        let co = checkout(&[("foo.spec", "a")]);
+        let root = tempfile::tempdir().unwrap();
+        let kept =
+            begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+        assert!(!discard_pending(&kept).unwrap());
+        assert!(kept.exists());
+        note_attempt(&kept, &["foo.spec".to_string()]).unwrap();
+        assert!(discard_pending(&kept).unwrap());
+        assert!(!kept.exists());
     }
 
     #[test]
@@ -5686,9 +5764,11 @@ mod baseline_tests {
         let base = tempfile::tempdir().unwrap();
         save_baseline(co.path(), base.path()).unwrap();
         note_attempt(base.path(), &["foo.spec".to_string()]).unwrap();
-        let err = restore_baseline_with(base.path(), |_, _, _| {
-            unreachable!("the baseline cannot be restored, so nothing is committed")
-        })
+        let err = restore_baseline_with(
+            base.path(),
+            |_| Ok(()),
+            |_, _, _| unreachable!("the baseline cannot be restored, so nothing is committed"),
+        )
         .unwrap_err();
         assert!(err.contains("no saved copy"), "{err}");
     }
