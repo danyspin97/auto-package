@@ -512,13 +512,12 @@ For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
 - A missing build-time EXECUTABLE (`command not found`, `No such file or
   directory: 'pg_config'`) → `zypper search --provides --match-exact
   /usr/bin/<tool>` and BuildRequire the package it names. Never guess: plain
-  `-devel` or `-mini` variants often do not ship the tool (python-psycopg-binary
-  spent two attempts on `postgresql-devel` then `postgresql` for `pg_config`;
-  the provider is the server-devel package: write `BuildRequires:
-  postgresql-server-devel`, the unversioned name that always resolves to
-  the distro's current one — `postgresql-devel` is the client package, and
-  OBS may pick its `-mini` flavour, which has no `pg_config`. Do not try PATH
-  tricks or a different package after that; the file is in `/usr/bin`)
+  `-devel` or `-mini` variants often do not ship the tool. For `pg_config` the
+  provider is the server-devel package: write `BuildRequires:
+  postgresql-server-devel`, the unversioned name that always resolves to the
+  distro's current one. `postgresql-devel` is the client package, and OBS may pick
+  its `-mini` flavour, which has no `pg_config`. Do not try PATH tricks or a
+  different package after that; the file is in `/usr/bin`)
 
 4. **Investigation tools**: Use `zypper search`, `zypper what-provides`, or check
 the build log for hints about which library the build system is trying to find.
@@ -535,14 +534,16 @@ untracked files (marked with `?`).
 2. **Handle each untracked file**:
 - If it's a legitimate source file needed for the build, add it to the spec with
 `Source<N>:` (where N is the next available number).
-- If it's a generated file, build artifact, or not needed, delete it with `rm`.
+- If it's a generated file, build artifact, or not needed, leave it in place: you
+have no `rm`, and the pipeline drops every file the spec no longer names at commit
+(convention 77). Ask for an earlier removal in your reply if it must go sooner.
 - **IMPORTANT**: Avoid tarballs of different versions of the current package
-(these are leftovers from previous attempts). Delete them unless they're
-explicitly referenced in the spec.
+(these are leftovers from previous attempts). Leave them out of the spec: the
+pipeline removes them at commit.
 3. **Verify all sources exist**: Read the spec and check that every `Source:` and
 `Source<N>:` line points to a file that actually exists in the package directory.
 Use `ls` to verify files exist. Missing sources will cause the build to fail.
-4. **Examples of files to DELETE**:
+4. **Examples of files to leave out of the spec**:
 - Old version tarballs: `<pkg>-1.2.3.tar.gz` when the current version is 1.2.4
 - Build artifacts: `.pyc`, `__pycache__/`, `*.egg-info/`, `.pytest_cache/`
 - Editor temporaries: `.swp`, `*~`, `.#*`
