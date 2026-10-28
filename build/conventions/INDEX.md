@@ -13,14 +13,14 @@
 13. Non-test failures: Source0 mismatch, offline %build errors — read when %prep/%build fails (no such file, name resolution)
 14. Tools, quilt and the PATCH-* tag format — read when adding or editing a PatchN:, creating a file, or using Bash (zypper, osc cat, rpm -qlp)
 15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
-16. Import name differs from package name — read when writing %files module dirs or an import check for an unfamiliar package
+16. Merged into convention 17 — read convention 17 when writing %files module dirs or an import check for an unfamiliar package
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
 18. Console scripts and python_alternative — read when the package declares scripts/entry points or %files lists /usr/bin
 19. Single % in RPM macros, never %% — read when a spec line shows %% or an rpmspec macro-parse error
 20. Only documented Python macros — read when about to use a python macro you have not seen in the spec or a skill
 21. Merged into convention 1 — read convention 1 when copying a requirement with extras, markers, commas, ~= or !=
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
-23. Stray top-level files in site-packages — read when %files or rpmlint shows tests/docs/setup files at site-packages root
+23. Merged into convention 17 — read convention 17 when %files or rpmlint shows tests/docs/setup files at site-packages root
 24. Headers: own headers to -devel, vendored ones deleted — read when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
 25. rpmlint badness budget (threshold 999) — read when the build log says "Badness NNNN exceeds threshold"
 26. Source from a repository, not an sdist — read when the checkout is a git snapshot or the project sits in a subdirectory
