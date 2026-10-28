@@ -55,7 +55,7 @@
 55. Merged into convention 7 — read convention 7 when tests fail only under pytest-xdist -n auto
 56. Merged into convention 77 — read convention 77 when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
 57. Merged into convention 3 — read convention 3 when tests skip or fail because the .so is not in source/
-58. Vendored libraries need their LICENSE in %license — read when sources have _vendor/vendor/bundled dirs
+58. Merged into convention 91 — read convention 91 when sources have _vendor/vendor/bundled dirs
 59. Merged into convention 75 — read convention 75 when OBS says "nothing provides ... = X (got version Y)"
 60. Merged into convention 3 — read convention 3 when choosing BuildArch noarch for a wheel or sdist
 61. [inline] A missing dependency may already be built here — full text for rpm -qlp checks and import-name mismatches
@@ -65,10 +65,10 @@
 65. Merged into convention 8 — read convention 8 when writing any Requires line for a Python dependency
 66. Merged into convention 63 — read convention 63 when writing Summary/%description or the generator left a stub
 67. Merged into convention 11 — read convention 11 when tests need a GPU, a device or network, or %check has more than six --ignore
-68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
+68. Merged into convention 91 — read convention 91 when a wheel bundles libs or rpm Requires lists odd .so
 69. Merged into convention 5 — read convention 5 when writing %license lines or License:, or a dist-info holds licenses/
 70. Merged into convention 34 — read convention 34 when an extra-only requirement or a runtime import is missing
-71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
+71. Merged into convention 91 — read convention 91 before finishing: check Factory for the same import dir (file conflicts)
 72. Merged into convention 39 (rpmlintrc filters) — read convention 39 when rpmlint reports an E:/W: line
 73. Merged into convention 75 — read convention 75 when a ==, <, >= bound may exceed what the distro or project has
 74. Merged into convention 40 (the changelog field) — read convention 40 when your reply has action edited
