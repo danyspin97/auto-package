@@ -205,11 +205,14 @@ pub fn distro_info(pkg: &str) -> DistroInfo {
     }
     ap_core::diag!("  checking openSUSE:Factory for {name}");
     let spec_file = format!("{name}.spec");
+    let Ok(scratch) = crate::proc::private_dir() else {
+        return DistroInfo::default();
+    };
     let Ok(out) = crate::proc::capture_with_timeout(
         "osc",
         &["cat", "openSUSE:Factory", &name, &spec_file],
         // `osc` looks for a working copy in the directory it starts in.
-        crate::proc::private_dir(),
+        scratch,
         crate::proc::Emit::quiet(),
         Duration::from_secs(45),
     ) else {

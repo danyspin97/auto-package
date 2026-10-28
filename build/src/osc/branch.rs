@@ -550,7 +550,7 @@ pub fn set_project_meta(project: &str, xml: &str, emit: Emit<'_>) -> Result<(), 
     let mut file = tempfile::Builder::new()
         .prefix("ap-prj-meta-")
         .suffix(".xml")
-        .tempfile_in(proc::private_dir())?;
+        .tempfile_in(proc::private_dir()?)?;
     std::io::Write::write_all(&mut file, xml.as_bytes())?;
     let path = file.path().to_string_lossy().into_owned();
     let cmd = format!("meta prj {project} -F");

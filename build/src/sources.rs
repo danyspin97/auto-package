@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::http::FetchFailure;
 
@@ -218,11 +218,60 @@ pub struct RepoProbe {
     pub archive_url: String,
 }
 
+/// An archive in the scratch directory. It is a lease on the file: the file
+/// is deleted when the last `Arc<ArchiveFile>` goes (the cache's own included),
+/// so a path handed out stays valid for as long as its holder keeps the lease,
+/// whatever the cache or [`fetch_archive_to`] does meanwhile.
+#[derive(Debug)]
+pub struct ArchiveFile {
+    path: PathBuf,
+    /// Set once the file was moved away, so there is nothing to delete.
+    moved: std::sync::atomic::AtomicBool,
+}
+
+impl ArchiveFile {
+    fn new(path: PathBuf) -> Arc<Self> {
+        Arc::new(ArchiveFile {
+            path,
+            moved: Default::default(),
+        })
+    }
+}
+
+impl PartialEq for ArchiveFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for ArchiveFile {}
+
+impl std::ops::Deref for ArchiveFile {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for ArchiveFile {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ArchiveFile {
+    fn drop(&mut self) {
+        if !self.moved.load(Ordering::SeqCst) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Archives fetched this run, by URL. The probe downloads the archive it
 /// inspects; the spec generator takes that copy rather than fetching it again.
 #[derive(Default)]
 struct ArchiveCache {
-    files: std::collections::HashMap<String, PathBuf>,
+    files: std::collections::HashMap<String, Arc<ArchiveFile>>,
     /// URLs that answered 404, so they are not asked for again this run.
     missing: std::collections::HashSet<String>,
     /// The latest other failure per URL and when it happened, so callers
@@ -230,8 +279,9 @@ struct ArchiveCache {
     /// repeating the download and its retries.
     failed: std::collections::HashMap<String, (std::time::Instant, FetchFailure)>,
     /// One lock per URL being fetched, so concurrent callers for the same URL
-    /// wait for one download instead of racing to write it.
-    in_flight: std::collections::HashMap<String, std::sync::Arc<Mutex<()>>>,
+    /// wait for one download instead of racing to write it. An entry lives
+    /// only while someone holds or waits for it (see [`Slot`]).
+    in_flight: std::collections::HashMap<String, Arc<SlotState>>,
 }
 
 /// How long a failed download other than a 404 is reused for the same URL.
@@ -240,6 +290,119 @@ const FAILURE_REUSE: std::time::Duration = std::time::Duration::from_secs(30);
 fn archive_cache() -> &'static Mutex<ArchiveCache> {
     static CACHE: OnceLock<Mutex<ArchiveCache>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
+}
+
+/// The state behind a URL's in-flight lock: whether someone has the turn.
+#[derive(Default)]
+struct SlotState {
+    busy: Mutex<bool>,
+    freed: std::sync::Condvar,
+}
+
+/// A turn on a URL's in-flight lock. Dropping it passes the turn on and
+/// removes the map entry when nobody else is waiting on it.
+struct Slot {
+    url: String,
+    state: Arc<SlotState>,
+}
+
+impl Slot {
+    /// Wait for this URL's turn.
+    fn take(url: &str) -> Slot {
+        let state = archive_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .in_flight
+            .entry(url.to_string())
+            .or_default()
+            .clone();
+        let mut busy = state.busy.lock().unwrap_or_else(|e| e.into_inner());
+        while *busy {
+            busy = state.freed.wait(busy).unwrap_or_else(|e| e.into_inner());
+        }
+        *busy = true;
+        drop(busy);
+        Slot {
+            url: url.to_string(),
+            state,
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        *self.state.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.state.freed.notify_one();
+        let mut cache = archive_cache().lock().unwrap_or_else(|e| e.into_inner());
+        // The map's handle and ours: nobody else holds or awaits it. Waiters
+        // cloned theirs under this same lock, so the count cannot rise now.
+        if Arc::strong_count(&self.state) <= 2 {
+            cache.in_flight.remove(&self.url);
+        }
+    }
+}
+
+/// Where archives are downloaded: under the work directory's cache when one was
+/// set (`/tmp` may be a tmpfs, which is memory), else the private directory.
+static SCRATCH_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Put archive scratch space under `dir`. Set once at startup; later calls are
+/// ignored.
+pub fn set_scratch_dir(dir: PathBuf) {
+    let _ = SCRATCH_ROOT.set(dir);
+}
+
+/// The per-process archive directory (mode 0700, created once). Removed by
+/// [`remove_scratch_dir`] at exit; directories of earlier runs that were killed
+/// before they could are swept when they are a day old.
+fn archive_dir() -> Result<&'static Path, FetchFailure> {
+    static DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let err = |e: std::io::Error| e.to_string();
+        let root = match SCRATCH_ROOT.get() {
+            Some(root) => root.clone(),
+            None => crate::proc::private_dir().map_err(err)?.join("archives"),
+        };
+        std::fs::create_dir_all(&root).map_err(err)?;
+        sweep_stale_dirs(&root);
+        use std::os::unix::fs::PermissionsExt;
+        tempfile::Builder::new()
+            .prefix("archives-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(&root)
+            .map(tempfile::TempDir::keep)
+            .map_err(err)
+    })
+    .as_ref()
+    .map(PathBuf::as_path)
+    .map_err(|e| FetchFailure::Transport(e.clone()))
+}
+
+/// Delete `archives-*` directories in `root` untouched for a day.
+fn sweep_stale_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry.file_name().to_string_lossy().starts_with("archives-")
+            && entry
+                .metadata()
+                .ok()
+                .filter(|m| m.is_dir())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(24 * 3600));
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Remove this process's archive directory. Best effort, for process exit.
+pub fn remove_scratch_dir() {
+    if let Ok(dir) = archive_dir() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// Download `url` to `dest`, noting a 404 in the cache.
@@ -261,9 +424,20 @@ fn download_archive(url: &str, dest: &Path) -> Result<(), FetchFailure> {
     Ok(())
 }
 
+/// Drop `url` from the cache. Holders of the file keep it until they let go.
+fn evict_archive(url: &str) {
+    let old = archive_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .files
+        .remove(url);
+    drop(old);
+}
+
 /// The archive at `url` as a file in this process's scratch directory, reused
-/// when it was already fetched this run.
-pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
+/// when it was already fetched this run. The file stays until the returned
+/// lease and every other one for it are dropped.
+pub fn fetch_archive(url: &str) -> Result<Arc<ArchiveFile>, FetchFailure> {
     let cached = || {
         let cache = archive_cache().lock().unwrap_or_else(|e| e.into_inner());
         if cache.missing.contains(url) {
@@ -272,22 +446,15 @@ pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
         cache
             .files
             .get(url)
-            .filter(|p| p.is_file())
-            .map(|p| Ok(p.clone()))
+            .filter(|f| f.is_file())
+            .map(|f| Ok(Arc::clone(f)))
     };
     if let Some(hit) = cached() {
         return hit;
     }
     // Callers wanting the same URL queue on its slot: the first downloads, the
     // rest find the result in the cache. Other URLs proceed in parallel.
-    let slot = archive_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .in_flight
-        .entry(url.to_string())
-        .or_default()
-        .clone();
-    let _turn = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = Slot::take(url);
     if let Some(hit) = cached() {
         return hit;
     }
@@ -302,10 +469,7 @@ pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
         return Err(failure);
     }
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    // Under the private directory, not a predictable name in the shared
-    // temporary one, where another user could have put a link or a file first.
-    let dir = crate::proc::private_dir().join("archives");
-    std::fs::create_dir_all(&dir).map_err(|e| FetchFailure::Transport(e.to_string()))?;
+    let dir = archive_dir()?;
     let base = url
         .split(['?', '#'])
         .next()
@@ -326,17 +490,23 @@ pub fn fetch_archive(url: &str) -> Result<PathBuf, FetchFailure> {
         }
         return Err(failure);
     }
+    let file = ArchiveFile::new(path);
     archive_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .files
-        .insert(url.to_string(), path.clone());
-    Ok(path)
+        .insert(url.to_string(), Arc::clone(&file));
+    Ok(file)
 }
 
 /// Put the archive at `url` at `dest`: the copy the probe fetched when there is
-/// one (moved there, so it is not kept twice), otherwise a fresh download.
+/// one, otherwise a fresh download. The cached file is moved there when nobody
+/// else holds it (so it is not kept twice), and hard-linked or copied when a
+/// reader still has it: the path they were given stays valid.
 pub fn fetch_archive_to(url: &str, dest: &Path) -> Result<(), FetchFailure> {
+    // The URL's turn, so this neither races a download in progress nor starts
+    // a second one.
+    let _turn = Slot::take(url);
     let cached = {
         let mut cache = archive_cache().lock().unwrap_or_else(|e| e.into_inner());
         if cache.missing.contains(url) {
@@ -344,15 +514,28 @@ pub fn fetch_archive_to(url: &str, dest: &Path) -> Result<(), FetchFailure> {
         }
         cache.files.remove(url)
     };
-    if let Some(path) = cached.filter(|p| p.is_file()) {
-        // A rename moves no data; it fails across filesystems (EXDEV), where
-        // a copy is the only way.
-        if std::fs::rename(&path, dest).is_ok() {
-            return Ok(());
-        }
-        if std::fs::copy(&path, dest).is_ok() {
-            let _ = std::fs::remove_file(&path);
-            return Ok(());
+    if let Some(file) = cached.filter(|f| f.is_file()) {
+        // Off the cache nobody can take a new lease, so the count only falls.
+        match Arc::try_unwrap(file) {
+            Ok(file) => {
+                // A rename moves no data; it fails across filesystems (EXDEV),
+                // where a copy is the only way.
+                if std::fs::rename(&file.path, dest).is_ok() {
+                    file.moved.store(true, Ordering::SeqCst);
+                    return Ok(());
+                }
+                if std::fs::copy(&file.path, dest).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(shared) => {
+                let _ = std::fs::remove_file(dest);
+                if std::fs::hard_link(&shared.path, dest).is_ok()
+                    || std::fs::copy(&shared.path, dest).is_ok()
+                {
+                    return Ok(());
+                }
+            }
         }
     }
     download_archive(url, dest)
@@ -382,7 +565,7 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
             Ok(i) => i,
             Err(e) => {
                 failures.push(format!("{url}: {e}"));
-                let _ = std::fs::remove_file(&path);
+                evict_archive(url);
                 continue;
             }
         };
@@ -580,7 +763,7 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
         // `repos/owner/repo/tags?per_page=1` directly.
         &["api", path],
         // `gh` reads `.git` from where it starts; not the shared temp dir.
-        crate::proc::private_dir(),
+        crate::proc::private_dir().ok()?,
         crate::proc::Emit::quiet(),
         std::time::Duration::from_secs(60),
         // `gh` finds its token in its own config, `GH_*` or `GITHUB_*`.
@@ -1717,7 +1900,7 @@ mod tests {
             .lock()
             .unwrap()
             .files
-            .insert(url.to_string(), cached.clone());
+            .insert(url.to_string(), ArchiveFile::new(cached.clone()));
         let dest = dir.path().join("out.tar.gz");
         fetch_archive_to(url, &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"archive");

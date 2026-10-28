@@ -3269,7 +3269,7 @@ pub fn ensure_package(
         let mut file = tempfile::Builder::new()
             .prefix("meta-")
             .suffix(".xml")
-            .tempfile_in(proc::private_dir())?;
+            .tempfile_in(proc::private_dir()?)?;
         std::io::Write::write_all(&mut file, meta.as_bytes())?;
         Ok(file)
     };

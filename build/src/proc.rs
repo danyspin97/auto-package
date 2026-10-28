@@ -52,7 +52,8 @@ pub fn minimal_env(extra_prefixes: &[&str]) -> std::collections::BTreeMap<String
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
     ];
-    std::env::vars()
+    ap_core::env::utf8_vars()
+        .into_iter()
         .filter(|(name, _)| {
             let upper = name.to_ascii_uppercase();
             EXACT.contains(&upper.as_str())
@@ -140,10 +141,12 @@ const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 /// there can be pre-created by someone else (a predictable name, a planted
 /// `.git`), and a symlink or a hostile file in it is read as if it were ours.
 /// This one is created once, with a random name and mode 0700. If it cannot be
-/// created the root directory is returned, which holds nothing of that kind
-/// and nobody else can write to.
-pub fn private_dir() -> &'static Path {
-    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// created, a per-user `0700` directory under the temp dir is used after
+/// checking its owner and mode; if that fails too the error is returned and
+/// the caller must fail, never fall back to a shared path.
+pub fn private_dir() -> std::io::Result<&'static Path> {
+    static DIR: std::sync::OnceLock<Result<PathBuf, (std::io::ErrorKind, String)>> =
+        std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         use std::os::unix::fs::PermissionsExt;
         tempfile::Builder::new()
@@ -151,8 +154,38 @@ pub fn private_dir() -> &'static Path {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
             .map(tempfile::TempDir::keep)
-            .unwrap_or_else(|_| PathBuf::from("/"))
+            .or_else(|_| {
+                // SAFETY: getuid has no preconditions and cannot fail.
+                per_user_dir(&std::env::temp_dir(), unsafe { libc::getuid() })
+            })
+            .map_err(|e| (e.kind(), e.to_string()))
     })
+    .as_ref()
+    .map(PathBuf::as_path)
+    .map_err(|(kind, msg)| {
+        std::io::Error::new(*kind, format!("no private scratch directory: {msg}"))
+    })
+}
+
+/// `<tmp>/auto-package-<uid>`, created with mode 0700 when missing and accepted
+/// only if it is a real directory (not a link) owned by `uid` with no group or
+/// other access.
+fn per_user_dir(tmp: &Path, uid: u32) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let dir = tmp.join(format!("auto-package-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(&dir)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not a private directory of this user", dir.display()),
+        ));
+    }
+    Ok(dir)
 }
 
 /// Remove [`private_dir`] and everything in it. Best effort, for process exit.
@@ -163,10 +196,28 @@ pub fn remove_private_dir() {
     if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let dir = private_dir();
-    if dir != Path::new("/") {
+    crate::sources::remove_scratch_dir();
+    if let Ok(dir) = private_dir() {
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// Write command output to a log file: credentials removed by
+/// [`ap_core::redact::redact`] (the same pass the run log's argv gets), the
+/// file readable by this user only. An existing file is replaced and brought to
+/// that mode too. Output that is not UTF-8 is written with U+FFFD in its place.
+pub fn write_log(path: &Path, output: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let redacted = ap_core::redact::redact(&String::from_utf8_lossy(output));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(redacted.as_bytes())
 }
 
 /// Append `chunk` to `buf`, then drop from the front so at most `cap` bytes
@@ -194,8 +245,6 @@ pub fn capture(
     capture_with_timeout(program, args, cwd, emit, DEFAULT_CAPTURE_TIMEOUT)
 }
 
-/// SIGKILL a child's whole process group (the child must have been spawned
-/// with `process_group(0)`). Best effort: the group may already be gone.
 /// Process groups of children currently running. Children get their own group
 /// (so a timeout can kill their descendants), which also means a terminal
 /// Ctrl-C no longer reaches them — when this process is told to stop it must
@@ -330,6 +379,11 @@ pub fn capture_with_timeout_env(
         .collect();
     emit.started(program, &argv, cwd, None);
 
+    // The one chokepoint every captured `osc` call (`osc api`, `osc results`,
+    // `osc ls`...) passes through: one shared token bucket for the whole run.
+    if Path::new(program).file_name().is_some_and(|n| n == "osc") {
+        ap_core::limits::obs_acquire();
+    }
     let start = Instant::now();
     let mut command = Command::new(program);
     if let Some(env) = env {
@@ -505,6 +559,47 @@ impl Captured {
 }
 
 #[cfg(test)]
+mod write_log_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_log_is_redacted_and_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.log");
+        // A pre-existing, world-readable file with older content.
+        std::fs::write(&path, "old old old old old old old old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_log(
+            &path,
+            b"cloning https://user:hunter2@example.com/r.git\nAuthorization: Bearer abc\nGITHUB_TOKEN=ghp_x ok\n",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for secret in ["hunter2", "Bearer abc", "ghp_x"] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
+        assert!(text.contains("https://***@example.com/r.git"), "{text}");
+        assert!(text.contains(" ok"), "{text}");
+        assert!(!text.contains("old old"));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_new_log_is_created_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.log");
+        write_log(&path, b"plain\xff").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("plain"));
+    }
+}
+
+#[cfg(test)]
 mod capture_timeout_tests {
     use super::*;
 
@@ -611,13 +706,49 @@ mod capture_timeout_tests {
     #[test]
     fn private_dir_is_a_fresh_mode_0700_directory_under_the_temp_dir() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = private_dir();
+        let dir = private_dir().unwrap();
         let meta = std::fs::symlink_metadata(dir).unwrap();
         assert!(meta.is_dir() && !meta.file_type().is_symlink());
         assert_eq!(meta.permissions().mode() & 0o777, 0o700);
         assert!(dir.starts_with(std::env::temp_dir()));
         // The same directory every time within one process.
-        assert_eq!(dir, private_dir());
+        assert_eq!(dir, private_dir().unwrap());
+    }
+
+    #[test]
+    fn per_user_dir_is_verified_and_never_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = unsafe { libc::getuid() };
+        let dir = per_user_dir(tmp.path(), uid).unwrap();
+        assert_eq!(dir, tmp.path().join(format!("auto-package-{uid}")));
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // Reused when it is still private.
+        assert_eq!(per_user_dir(tmp.path(), uid).unwrap(), dir);
+        // Someone else's uid, or loose permissions: refused.
+        assert!(per_user_dir(tmp.path(), uid + 1).is_err());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(per_user_dir(tmp.path(), uid).is_err());
+        // A missing parent is an error, not "/".
+        assert!(per_user_dir(&tmp.path().join("missing"), uid).is_err());
+    }
+
+    #[test]
+    fn minimal_env_skips_non_utf8_values() {
+        use std::os::unix::ffi::OsStringExt;
+        // SAFETY: the name is unique to this test.
+        unsafe {
+            std::env::set_var(
+                "LC_AP_TEST_NON_UTF8",
+                std::ffi::OsString::from_vec(vec![b'a', 0xff]),
+            );
+        }
+        let env = minimal_env(&[]);
+        assert!(!env.contains_key("LC_AP_TEST_NON_UTF8"));
+        unsafe { std::env::remove_var("LC_AP_TEST_NON_UTF8") };
     }
 
     #[test]
