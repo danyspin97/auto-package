@@ -629,17 +629,16 @@ fn resolve_dependency_config(
 /// rendering — the pipeline's package-build threads keep running otherwise,
 /// unaffected by whatever the TUI's own event loop does.
 fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
-    // The TUI leaves the terminal in raw mode + the alternate screen;
-    // without restoring it first, this message and the shell prompt after
-    // exit both land inside that broken state instead of the user's normal
-    // screen.
     // Stop the build workers (own process groups, so the terminal's Ctrl-C
     // never reached them): otherwise `osc`/`claude` outlive this process.
     // Sets the shutdown flag first, so polling loops and the scheduler stop
     // on their next check.
     ap_build::proc::kill_all_groups();
     ap_build::proc::remove_private_dir();
+    ap_build::upstream_cache::flush();
     ap_core::sink::flush_jsonl_sinks();
+    // The TUI leaves raw mode and the alternate screen on; restore them before
+    // printing anything, or it lands in that state.
     if tui_active {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
@@ -655,10 +654,28 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
 }
 
 /// Route Ctrl-C (and, with ctrlc's `termination` feature, SIGTERM/SIGHUP) to
-/// [`handle_interrupt`].
+/// [`handle_interrupt`]. A later call (`--maintenance` runs `update` once per
+/// code stream) points the installed handler at the new run instead of failing.
 fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) -> color_eyre::Result<()> {
-    ctrlc::set_handler(move || handle_interrupt(tui_active, &memory))
-        .map_err(|e| color_eyre::eyre::eyre!("failed to install the interrupt handler: {e}"))
+    type Current = std::sync::Mutex<Option<(bool, Arc<MemorySink>)>>;
+    static CURRENT: Current = std::sync::Mutex::new(None);
+    let first = CURRENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .replace((tui_active, memory))
+        .is_none();
+    if !first {
+        return Ok(());
+    }
+    ctrlc::set_handler(|| {
+        let (tui_active, memory) = CURRENT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("set before the handler");
+        handle_interrupt(tui_active, &memory)
+    })
+    .map_err(|e| color_eyre::eyre::eyre!("failed to install the interrupt handler: {e}"))
 }
 
 /// How a run that was shown in the TUI ends, shared by `build` and `update`.
@@ -882,6 +899,7 @@ fn main() -> color_eyre::Result<()> {
 
     let mut summary: Option<String> = None;
     let result = run(cli, &mut summary);
+    ap_build::upstream_cache::flush();
     ap_core::sink::flush_jsonl_sinks();
     ap_build::proc::remove_private_dir();
     // Printed after `run` returns so the TUI has restored the terminal, and
