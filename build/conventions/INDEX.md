@@ -37,7 +37,7 @@
 37. -doc subpackage for Sphinx/generated docs — read when upstream ships docs as an artifact or the task asks for -doc
 38. Removed or renamed Python stdlib APIs — read when tests or code fail with AttributeError/ImportError on a stdlib name
 39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter
-40. The .changes file is written for you — read before editing a .changes file or writing the reasoning sentence
+40. The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
 41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
 42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
 43. setup.cfg pytest config needs [tool:pytest] — read when pytest ignores options set in setup.cfg
@@ -71,7 +71,7 @@
 71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
 72. Merged into convention 39 (rpmlintrc filters) — read convention 39 when rpmlint reports an E:/W: line
 73. Unsatisfiable bounds (Python or C/C++), siblings first — read when a ==, <, >= bound may exceed what the distro or project has
-74. Write the changelog line (reasoning sentence) for a reader — read before writing the reasoning of any edit
+74. Merged into convention 40 (the changelog field) — read convention 40 when your reply has action edited
 75. Version bounds: keep minimums, upper/== only when satisfied, comment when dropped — read when writing a <, <=, == or >= bound in Requires/BuildRequires
 76. Files of one Python package come from one tree — read when several wheels fill one package, ModuleNotFoundError on a sibling part
 77. Reproducible Source: URLs with #/file fragment — read when adding or editing a Source: for a wheel or GitHub archive
