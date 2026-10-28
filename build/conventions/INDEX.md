@@ -11,7 +11,7 @@
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
 12. pytest config pitfalls (exit 5, coverage gates, filterwarnings, newer pytest) — read when %check fails oddly on config
 13. Non-test failures: Source0 mismatch, offline %build errors — read when %prep/%build fails (no such file, name resolution)
-14. Tools available to you and how to use them — read when unsure which tool or command (Read, Grep, rpm -qlp, zypper) applies
+14. Tools, quilt and the PATCH-* tag format — read when adding or editing a PatchN:, creating a file, or using Bash (zypper, osc cat, rpm -qlp)
 15. Missing third-party module in %check, circular deps (Step B) — read when %check says ModuleNotFoundError or a dep cycle
 16. Import name differs from package name — read when writing %files module dirs or an import check for an unfamiliar package
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
