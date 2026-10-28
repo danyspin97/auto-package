@@ -3818,6 +3818,27 @@ fn cmd_build(
             // One thread per package; OBS builds run concurrently.
             let mut unspawned = fresh.into_iter();
             while let Some((target_info, rpm_name)) = unspawned.next() {
+                // `--max-packages`: stop queueing, say so, let the running ones finish.
+                let max_packages = run_limits::max_packages();
+                if !ap_core::limits::try_start_package(&rpm_name, max_packages) {
+                    let reason = format!(
+                        "not started: --max-packages {max_packages} reached (raise it to build \
+                         more packages in one run)"
+                    );
+                    for (t, rpm) in std::iter::once((target_info, rpm_name)).chain(unspawned) {
+                        reporter.report(&Event::PackageFinished {
+                            pkg: rpm,
+                            version: t.version.clone(),
+                            outcome: PackageOutcome::Failed {
+                                reason: reason.clone(),
+                            },
+                        });
+                    }
+                    drain_in_flight(&rx, &mut in_flight);
+                    return Err(color_eyre::eyre::eyre!(
+                        "--max-packages {max_packages} reached: no more packages are queued in this run"
+                    ));
+                }
                 let pkg_config = PipelineConfig {
                     pkg_name: target_info.name.clone(),
                     rpm_name: rpm_name.clone(),
@@ -4257,6 +4278,13 @@ fn cmd_update(
             ap_build::update::Ecosystem::GitRepo { url } => {
                 (repo_package_name(url), Some(url.clone()))
             }
+            // A release directory: the spec's own `Source:` names the archive
+            // (and its signature) at the new version, so the build is handed the
+            // address of the release it packages, under the package's own name.
+            ap_build::update::Ecosystem::Index { url } => (
+                c.rpm_name.clone(),
+                Some(url.replace(&old_version, &new_version)),
+            ),
             _ => continue,
         };
         reporter.report(&Event::Progress {
@@ -4432,6 +4460,55 @@ impl Sweep {
                     !is_update || tx.send(c).is_ok()
                 },
             )?;
+            plan.finish(reporter.as_ref());
+            Ok(plan)
+        });
+        Self { updates, handle }
+    }
+
+    /// The plan for the one package `--only` names, read at `revision` and
+    /// aimed at `to_version` when given (`update --revision/--to-version`). It
+    /// arrives on `updates` like a sweep's, so the rest of the run is the same.
+    fn start_pinned(
+        project: &str,
+        only: &[String],
+        revision: Option<String>,
+        to_version: Option<String>,
+        reporter: Arc<dyn Reporter + Send + Sync>,
+    ) -> Self {
+        let (tx, updates) = std::sync::mpsc::channel();
+        let (project, only) = (project.to_string(), only.to_vec());
+        let handle = std::thread::spawn(move || {
+            let mut plan = PlanReport::default();
+            let emit = ap_build::proc::Emit::run(reporter.as_ref());
+            let c = ap_build::branch_revision::plan_one(
+                &project,
+                &|n| update_project::wanted_by(&only, &[], n),
+                revision.as_deref(),
+                to_version.as_deref(),
+                emit,
+            )?;
+            plan.add(&c, reporter.as_ref());
+            if let ap_build::update::Decision::Update {
+                ecosystem,
+                old_version,
+                new_version,
+            } = &c.decision
+                && ecosystem.can_build()
+            {
+                if to_version.is_some() || revision.is_some() {
+                    reporter.report(&Event::Progress {
+                        step: None,
+                        message: ap_build::branch_revision::forced_line(
+                            &c.rpm_name,
+                            old_version,
+                            new_version,
+                            revision.as_deref(),
+                        ),
+                    });
+                }
+                let _ = tx.send(c);
+            }
             plan.finish(reporter.as_ref());
             Ok(plan)
         });

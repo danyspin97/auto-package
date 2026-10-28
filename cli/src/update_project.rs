@@ -31,7 +31,7 @@ use super::{
 /// that keeps growing.
 const MAX_DEPENDENCY_ITEMS: usize = 25;
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct UpdateProjectArgs {
     /// OBS project to browse (e.g. Base:System): for packages with a newer
     /// upstream release, or with `lint` for quality problems. It is
@@ -98,8 +98,12 @@ pub struct UpdateProjectArgs {
     pub work_dir: PathBuf,
 
     /// Directory for per-package notes, shared across projects. Kept outside
-    /// work_dir so they survive cleanup.
-    #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
+    /// work_dir and outside this repository; created on first write.
+    #[arg(
+        long = "notes",
+        alias = "notes-dir",
+        default_value = "../auto-package-notes"
+    )]
     pub notes_dir: PathBuf,
 
     /// Repository to build for (default: the branch project's own, Tumbleweed
@@ -116,9 +120,27 @@ pub struct UpdateProjectArgs {
 
     /// Enable interactive TUI mode for the per-package builds. Cannot be
     /// combined with `--submit` unless `--yes` is also given: the TUI owns the
-    /// terminal, so there is nowhere to ask.
+    /// terminal, so there is nowhere to ask. Without `--submit` the TUI stays
+    /// open once everything is built: `d` shows a package's diff, `S` submits
+    /// the selected one and `A` every built one, each after a confirmation.
     #[arg(long, default_value_t = false)]
     pub tui: bool,
+
+    /// `update`: branch this revision of the package (an OBS revision number or
+    /// a srcmd5) instead of the newest one, and update from the version that
+    /// revision has. Needs exactly one package in `--only`. Fails when the
+    /// branch project already has the package, since it would keep another
+    /// revision; delete that branch package first to start over.
+    #[arg(long, value_name = "REV")]
+    pub revision: Option<String>,
+
+    /// `update`: update to this version instead of the newest release found
+    /// upstream. It is checked to exist where the package's source lives (the
+    /// `Source:` URL with the version swapped in, a forge tag, a PyPI release)
+    /// before anything is branched, and may be older than the packaged one (a
+    /// downgrade, noted in the plan). Needs exactly one package in `--only`.
+    #[arg(long, value_name = "VERSION")]
+    pub to_version: Option<String>,
 
     /// Maximum agent fix attempts per package.
     #[arg(long, default_value_t = 10)]
@@ -171,6 +193,70 @@ pub struct UpdateProjectArgs {
     /// existing recipe forward (see `update --regen`).
     #[arg(long, default_value_t = false)]
     pub regen: bool,
+
+    /// Send the packages of `--only` to the maintenance of these code streams
+    /// (update projects such as SUSE:SLE-15-SP7:Update, comma separated, or
+    /// `all`) instead of a submit request: each code stream's update project is
+    /// browsed instead of PROJECT, the change is built in
+    /// `home:<user>:branches:<update project>`, and the packages that built get
+    /// one maintenance request to the maintenance project, after confirmation
+    /// (see `--yes`). Without a value, asks which of the code streams that
+    /// maintain the package. Needs `--bug` (or `--no-bug-ref`). By default a
+    /// backport (see `--maintenance-mode`), which needs `--backport`.
+    #[arg(long, value_name = "CODESTREAM", value_delimiter = ',', num_args = 0..)]
+    pub maintenance: Option<Vec<String>>,
+
+    /// `update --maintenance`: `backport` (the default: each code stream keeps
+    /// its version and gets the fix of `--backport` as a patch, what
+    /// maintenance normally accepts) or `update` (each code stream is updated
+    /// to the newest release, or `--to-version`).
+    #[arg(long, value_name = "MODE")]
+    pub maintenance_mode: Option<String>,
+
+    /// The upstream fix of a maintenance backport (repeatable): a patch file,
+    /// an https URL of a `.patch`/`.diff`, a GitHub/GitLab/Gitea commit URL or
+    /// GitHub pull request (its `.patch` is fetched), or a commit id of
+    /// `--backport-repo`. Stored in each code stream's package as
+    /// `CVE-YYYY-NNNN.patch` (or `fix-<commit>.patch`) and added to its spec.
+    #[arg(long = "backport", value_name = "SRC")]
+    pub backport: Vec<String>,
+
+    /// The https repository (GitHub, GitLab, Gitea) of a `--backport` commit id.
+    #[arg(long, value_name = "URL")]
+    pub backport_repo: Option<String>,
+
+    /// A command that tells which code streams a maintenance fix affects: run
+    /// without a shell as `COMMAND PACKAGE CODESTREAM REFS [BACKPORT...]` for
+    /// each code stream; stdout `affected`, `not-affected <reason>` or
+    /// `unknown` (anything else, a failure or a timeout is `unknown`). A code
+    /// stream it says is not affected is left out, with the reason.
+    #[arg(long, value_name = "COMMAND")]
+    pub affected_by: Option<String>,
+
+    /// Print the code streams each package of `--only` is maintained in, and
+    /// stop. Reads only.
+    #[arg(long, default_value_t = false)]
+    pub maintenance_list: bool,
+
+    /// A bug reference for the maintenance update (`bsc#1234567`,
+    /// `jsc#SLE-12345`, `CVE-2025-1234`); repeatable or comma separated. Added
+    /// to the newest changelog entry and the request description.
+    #[arg(long = "bug", value_name = "REF", value_delimiter = ',')]
+    pub bug: Vec<String>,
+
+    /// Send a maintenance request without a bug reference.
+    #[arg(long, default_value_t = false)]
+    pub no_bug_ref: bool,
+
+    /// Set for the runs of `--maintenance`: PROJECT is an update project,
+    /// which is branched from.
+    #[arg(skip)]
+    pub maintenance_source: bool,
+
+    /// Set for the backport runs of `--maintenance`: the package is built at
+    /// the version it has, with these patches staged for the agent to add.
+    #[arg(skip)]
+    pub backport_job: Option<Arc<ap_build::backport::Job>>,
 }
 
 /// What `update` changes about how one package is built.
@@ -207,6 +293,8 @@ struct Ctx<'a> {
     base_reporter: Arc<dyn Reporter + Send + Sync>,
     tui_ctrl: Option<tui::TuiController>,
     sem: Option<Semaphore>,
+    /// Reads diffs and makes submit requests for the TUI (see [`SubmitBackend`]).
+    backend: Option<Arc<SubmitBackend>>,
 }
 
 impl Ctx<'_> {
@@ -226,6 +314,19 @@ impl Ctx<'_> {
 }
 
 pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
+    if a.maintenance.is_some() || a.maintenance_list {
+        return run_maintenance(a, summary);
+    }
+    if !a.maintenance_source
+        && (a.maintenance_mode.is_some()
+            || !a.backport.is_empty()
+            || a.backport_repo.is_some()
+            || a.affected_by.is_some())
+    {
+        return Err(eyre!(
+            "--maintenance-mode, --backport, --backport-repo and --affected-by are for --maintenance runs"
+        ));
+    }
     if a.in_place && (a.submit || a.branch_project.is_some()) {
         return Err(eyre!(
             "--in-place changes {} itself: there is no branch to name and no request to submit",
@@ -240,6 +341,14 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     if a.improve && a.update_deps {
         return Err(eyre!("--update-deps is only for update"));
     }
+    ap_build::branch_revision::validate_args(
+        &a.only,
+        a.revision.as_deref(),
+        a.to_version.as_deref(),
+        a.in_place,
+        a.improve,
+    )
+    .map_err(|e| eyre!("{e}"))?;
     ap_ecosystem::pip::set_unsafe_resolve(a.unsafe_resolve);
     std::fs::create_dir_all(&a.work_dir)?;
     ap_build::upstream_cache::set_dir(std::path::absolute(&a.work_dir)?);
@@ -268,7 +377,8 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     }
     if a.tui && a.submit && !a.yes && !a.dry_run {
         return Err(eyre!(
-            "--submit asks for confirmation, which the TUI cannot do: pass --yes, or drop --tui"
+            "--submit asks for confirmation on the terminal, which the TUI owns: pass --yes, or drop --submit \
+             and press S (or A) in the TUI to submit with a confirmation"
         ));
     }
 
@@ -364,6 +474,28 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         base_reporter,
         tui_ctrl,
         sem: make_semaphore(a.jobs),
+        backend: None,
+    };
+    // A dry run builds nothing, so there is nothing to diff or submit.
+    let ctx = match (&ctx.tui_ctrl, a.dry_run) {
+        (Some(t), false) => {
+            let backend = Arc::new(SubmitBackend {
+                branch: branch_project.clone(),
+                distro: a.distro.clone(),
+                arch: a.arch.clone(),
+                reporter: reporter.clone(),
+                items: Default::default(),
+                created: Default::default(),
+            });
+            // Left open once everything is built, so a request can still be
+            // made; with `--submit` the run makes them itself and ends as before.
+            t.set_backend(backend.clone(), !a.submit);
+            Ctx {
+                backend: Some(backend),
+                ..ctx
+            }
+        }
+        _ => ctx,
     };
 
     let start = Instant::now();
@@ -405,6 +537,21 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     match &ctx.tui_ctrl {
         Some(t) => {
             t.wait_closed();
+            // Requests made in the TUI after the run ended are not in the summary built above.
+            let from_tui = ctx
+                .backend
+                .as_ref()
+                .map(|b| b.created_lines())
+                .unwrap_or_default();
+            if let Some(text) = summary.as_mut()
+                && !from_tui.is_empty()
+            {
+                text.push_str(&format!(
+                    "submit requests made from the TUI ({}):\n  {}\n",
+                    from_tui.len(),
+                    from_tui.join("\n  ")
+                ));
+            }
             crate::tui_run_exit(t.all_settled(), t.failure(), result, failures)
         }
         None => {
@@ -440,7 +587,9 @@ fn cmd_update_project(
         .map_err(|e| eyre!("could not read the meta of {}: {e}", a.source))?
         .ok_or_else(|| eyre!("OBS project {} does not exist", a.source))?;
     let source_info = osc::parse_project_info(&source_meta);
-    if let Some(kind) = &source_info.kind {
+    if let Some(kind) = &source_info.kind
+        && !(a.maintenance_source && ap_build::maintenance::source_kind_allowed(kind))
+    {
         return Err(eyre!(
             "{} is a {kind} project; branching from maintenance projects is not supported",
             a.source
@@ -465,8 +614,26 @@ fn cmd_update_project(
     // and built as it turns up, while the thread goes on with the others.
     let mut mechanical: HashSet<String> = HashSet::new();
     let (mut sweep, mut audit) = (None, None);
-    if a.improve {
+    // A maintenance backport builds each package at the version it has: no
+    // sweep, the items come straight from the source's specs.
+    let backports: Option<std::cell::RefCell<VecDeque<Item>>> = match &a.backport_job {
+        Some(_) => Some(std::cell::RefCell::new(
+            backport_items(a, emit).map_err(|e| eyre!(e))?.into(),
+        )),
+        None => None,
+    };
+    if backports.is_some() {
+        // The items are queued above.
+    } else if a.improve {
         audit = Some(Audit::start(a, ctx.reporter.clone()));
+    } else if a.revision.is_some() || a.to_version.is_some() {
+        sweep = Some(Sweep::start_pinned(
+            &a.source,
+            &a.only,
+            a.revision.clone(),
+            a.to_version.clone(),
+            ctx.reporter.clone(),
+        ));
     } else {
         sweep = Some(Sweep::start(
             &a.source,
@@ -478,6 +645,9 @@ fn cmd_update_project(
     // The next package to work on, in the order it was found, and whether its
     // findings are only style slips, which are committed without a build.
     let incoming = || -> Option<(Item, bool)> {
+        if let Some(queue) = &backports {
+            return queue.borrow_mut().pop_front().map(|i| (i, false));
+        }
         if let Some(audit) = &audit {
             return audit.items.recv().ok();
         }
@@ -500,7 +670,7 @@ fn cmd_update_project(
         let resolver_for = |obs: Box<dyn depreach::Obs>| {
             DepResolver::new(obs, ctx.reporter.clone(), branch, &a.arch)
         };
-        if a.dry_run && !a.in_place {
+        let resolver = if a.dry_run && !a.in_place {
             resolver_for(Box::new(DryRunObs {
                 inner: live,
                 branch_project: branch.to_string(),
@@ -508,6 +678,13 @@ fn cmd_update_project(
             }))
         } else {
             resolver_for(Box::new(live))
+        };
+        // A maintenance incident builds against the code stream only: its
+        // branch gets no build path that the incident would not have.
+        if a.maintenance_source {
+            resolver.with_frozen_paths(ap_build::maintenance::FROZEN_PATHS_REASON)
+        } else {
+            resolver
         }
     };
     let resolver = Arc::new(resolver);
@@ -564,7 +741,13 @@ fn cmd_update_project(
             continue;
         }
         if !a.dry_run {
-            match branch_item(branch, &mut item, a.follow_devel, ctx) {
+            match branch_item(
+                branch,
+                &mut item,
+                a.follow_devel,
+                a.revision.as_deref(),
+                ctx,
+            ) {
                 Ok(()) => {
                     // Branching may have changed the origin, so the item is
                     // also recorded under its new key: a later discovery of the
@@ -714,6 +897,21 @@ fn cmd_update_project(
         return Ok(());
     }
 
+    if a.dry_run
+        && let Some(job) = &a.backport_job
+    {
+        ctx.say(format!(
+            "dry run: nothing is branched, built or submitted; {} stays untouched",
+            a.source
+        ));
+        for i in &ready {
+            for line in ap_build::backport::dry_run_lines(job, &i.pkg, &i.new_version, branch) {
+                ctx.say(line);
+            }
+        }
+        report.paths.clear();
+        return Ok(());
+    }
     if a.dry_run && a.improve {
         ctx.say(format!(
             "dry run: nothing is branched, built, edited or submitted; {} stays untouched",
@@ -748,6 +946,11 @@ fn cmd_update_project(
         return Ok(());
     }
     if a.dry_run {
+        if let Some(r) = &a.revision {
+            ctx.say(format!(
+                "revision {r} would be branched, and {branch} must not have the package yet"
+            ));
+        }
         let planned: Vec<PathAddition> = report.paths.clone();
         for line in up::dry_run_lines(&up::DryRun {
             source: &a.source,
@@ -1016,16 +1219,456 @@ fn newest_changes(branch: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
 /// Ask a yes/no question on the terminal. Without a terminal there is nobody
 /// to ask, which counts as no.
 fn confirm(question: &str, ctx: &Ctx<'_>) -> bool {
+    confirm_with(question, &|m| ctx.warn(m))
+}
+
+/// [`confirm`] with the warning going to `warn`.
+fn confirm_with(question: &str, warn: &dyn Fn(&str)) -> bool {
+    matches!(
+        ask_line(&format!("{question} [y/N] "), warn)
+            .as_deref()
+            .map(str::to_lowercase)
+            .as_deref(),
+        Some("y" | "yes")
+    )
+}
+
+/// A line typed on the terminal after `prompt`, trimmed; `None` without a
+/// terminal (which is said through `warn`) or when it cannot be read.
+fn ask_line(prompt: &str, warn: &dyn Fn(&str)) -> Option<String> {
     use std::io::{BufRead, IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
-        ctx.warn("cannot ask for confirmation without a terminal; pass --yes to submit unasked");
-        return false;
+        warn("cannot ask for confirmation without a terminal; pass --yes to submit unasked");
+        return None;
     }
-    eprint!("{question} [y/N] ");
+    eprint!("{prompt}");
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer).is_ok()
-        && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+    std::io::stdin().lock().read_line(&mut answer).ok()?;
+    Some(answer.trim().to_string())
+}
+
+/// The item of a maintenance backport for a candidate of the plan: the
+/// package at the version it has (`old_version == new_version`), whatever
+/// upstream released since.
+fn backport_item(origin: &str, c: &update::Candidate) -> Result<Item, String> {
+    let pkg = up::branch_name(&c.rpm_name);
+    let (ecosystem, version) = match &c.decision {
+        update::Decision::Update {
+            ecosystem,
+            old_version,
+            ..
+        } => (ecosystem, old_version),
+        update::Decision::UpToDate { ecosystem, version } => (ecosystem, version),
+        update::Decision::Skipped(why) => {
+            return Err(format!(
+                "{pkg}: cannot be rebuilt for the backport: {why} (the pipeline needs to know its source)"
+            ));
+        }
+    };
+    if !ecosystem.can_build() {
+        return Err(format!(
+            "{pkg}: its source is known only through the {} lookup, which the pipeline cannot rebuild from",
+            ecosystem.tag()
+        ));
+    }
+    Ok(Item {
+        pkg: pkg.to_string(),
+        origin: origin.to_string(),
+        ecosystem: ecosystem.clone(),
+        old_version: version.clone(),
+        new_version: version.clone(),
+        dependency_of: None,
+        findings: Vec::new(),
+    })
+}
+
+/// The packages of `--only` in the source of a backport run, each at its own
+/// version.
+fn backport_items(a: &UpdateProjectArgs, emit: Emit<'_>) -> Result<Vec<Item>, String> {
+    let candidates = update::plan_where(&a.source, &|n| wanted_by(&a.only, &a.exclude, n), emit)?;
+    let mut items: Vec<Item> = Vec::new();
+    for c in &candidates {
+        let item = backport_item(&a.source, c)?;
+        if !items.iter().any(|i| i.pkg == item.pkg) {
+            items.push(item);
+        }
+    }
+    if items.is_empty() {
+        return Err(format!("{} has none of {}", a.source, a.only.join(", ")));
+    }
+    Ok(items)
+}
+
+/// Put the backports into the checkout the pipeline builds `item` from (the
+/// pipeline checks out into `<work dir>/<project>/<package>` and keeps files it
+/// does not track; one the spec does not name is not committed).
+fn stage_backport(
+    branch: &str,
+    item: &Item,
+    job: &ap_build::backport::Job,
+    ctx: &Ctx<'_>,
+) -> Result<(), String> {
+    let emit = Emit::run(ctx.reporter.as_ref());
+    let dir = osc::checkout(branch, &item.pkg, &ctx.work_dir, emit).map_err(|e| e.to_string())?;
+    // A file of the same name in the code stream itself is not ours to replace.
+    let release_files = osc::list_package_files(&item.origin, &item.pkg, emit).unwrap_or_default();
+    for note in ap_build::backport::backport_patches(&dir, job, &release_files)? {
+        ctx.say(format!("{}: {note}", item.pkg));
+    }
+    Ok(())
+}
+
+/// `--maintenance` and `--maintenance-list`: the ordinary run once per code
+/// stream, with the update project as PROJECT and its own branch project, then
+/// the maintenance requests (see `ap_build::maintenance`).
+fn run_maintenance(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
+    use ap_build::maintenance;
+    let say = |m: &str| println!("{m}");
+    let warn = |m: &str| eprintln!("warning: {m}");
+    // Without a terminal the maintenance run says itself what to pass instead.
+    let ask = |q: &str| ask_line(q, &|_| {});
+    let confirm = |q: &str| confirm_with(q, &warn);
+    let mut nothing = |_: &maintenance::BuildJob<'_>| Ok(());
+    if a.maintenance_list {
+        let host = maintenance::Host {
+            say: &say,
+            warn: &warn,
+            ask: &ask,
+            confirm: &confirm,
+            build: &mut nothing,
+        };
+        return maintenance::list(&a.only, &host).map_err(|e| eyre!(e));
+    }
+    if a.submit || a.in_place {
+        return Err(eyre!(
+            "--maintenance sends the change to the maintenance project: it cannot be combined with --submit or --in-place"
+        ));
+    }
+    let mode =
+        maintenance::Mode::parse(a.maintenance_mode.as_deref(), a.improve).map_err(|e| eyre!(e))?;
+    if mode == maintenance::Mode::Backport && (a.to_version.is_some() || a.revision.is_some()) {
+        return Err(eyre!(
+            "--to-version and --revision pick a version; a backport keeps each code stream's own: \
+             pass --maintenance-mode update for a version update"
+        ));
+    }
+    let codestreams = a.maintenance.clone().unwrap_or_default();
+    if !codestreams.is_empty() && !codestreams.iter().any(|c| c == &a.source || c == "all") {
+        say(&format!(
+            "--maintenance: the code streams are the sources; {} is not browsed",
+            a.source
+        ));
+    }
+    let opts = maintenance::Options {
+        packages: a.only.clone(),
+        codestreams,
+        branch_project: a.branch_project.clone(),
+        bugs: a.bug.clone(),
+        no_bug_ref: a.no_bug_ref,
+        dry_run: a.dry_run,
+        yes: a.yes,
+        distro: a.distro.clone(),
+        arch: a.arch.clone(),
+        checkout_dir: std::path::absolute(a.work_dir.join("maintenance"))?,
+        mode,
+        backports: a.backport.clone(),
+        backport_repo: a.backport_repo.clone(),
+        affected_by: a.affected_by.clone(),
+    };
+    let mut summaries: Vec<String> = Vec::new();
+    // Each code stream is its own ordinary run, from its own package.
+    let mut build = |job: &maintenance::BuildJob<'_>| -> Result<(), String> {
+        let mut one = a.clone();
+        one.source = job.source.to_string();
+        one.branch_project = Some(job.branch.to_string());
+        one.maintenance = None;
+        one.maintenance_source = true;
+        one.backport_job = job.backport.cloned();
+        let mut s = None;
+        let result = run(one, &mut s);
+        summaries.extend(s);
+        result.map_err(|e| e.to_string())
+    };
+    let mut host = maintenance::Host {
+        say: &say,
+        warn: &warn,
+        ask: &ask,
+        confirm: &confirm,
+        build: &mut build,
+    };
+    let result = maintenance::run(&opts, &mut host);
+    if !summaries.is_empty() {
+        *summary = Some(summaries.join("\n"));
+    }
+    result.map_err(|e| eyre!(e))
+}
+
+/// The submit request for `item`, after every check that decides whether one
+/// may be made: the update succeeded, the package built in the branch project
+/// at the new version, and no request from the branch is open already. The
+/// reason it may not be made comes back as the `SrOutcome` to record. Shared by
+/// `--submit` and the TUI's submit keys, so both ask exactly the same.
+fn prepare_request(
+    branch: &str,
+    distro: Option<&str>,
+    arch: &str,
+    item: &Item,
+    outcome: &ItemOutcome,
+    reporter: &(dyn Reporter + Send + Sync),
+) -> Result<osc::SubmitRequest, SrOutcome> {
+    let emit = Emit::run(reporter);
+    let say = |m: String| {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: m,
+        })
+    };
+    let warn = |m: String| {
+        reporter.report(&Event::Warning {
+            step: None,
+            message: m,
+        })
+    };
+    let updated = *outcome == ItemOutcome::Updated;
+    // Read before the build status and the spec are checked, so the request is
+    // pinned to a revision at least as old as what was checked.
+    let source_rev = if updated {
+        match osc::source_srcmd5(branch, &item.pkg, emit) {
+            Ok(rev) => Some(rev),
+            Err(e) => {
+                warn(format!(
+                    "no request for {}: could not read its revision: {e}",
+                    item.pkg
+                ));
+                return Err(SrOutcome::Failed(format!(
+                    "could not read the revision: {e}"
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    let build = updated
+        .then(|| {
+            osc::get_overall_build_status(
+                branch,
+                &item.pkg,
+                &crate::choose_distro(distro, branch, arch),
+                arch,
+                emit,
+            )
+            // Name the repository/arch that blocks, not just its status.
+            .map(|(status, at)| match (&status, at) {
+                (osc::BuildStatus::Succeeded, _) | (_, None) => status,
+                (_, Some(at)) => osc::BuildStatus::Unknown(format!("{status} on {at}")),
+            })
+            .map_err(|e| {
+                warn(format!(
+                    "could not read the build status of {}: {e}",
+                    item.pkg
+                ))
+            })
+            .ok()
+        })
+        .flatten();
+    let spec_version = updated
+        .then(|| update::spec_for_package(branch, &item.pkg, emit).ok())
+        .flatten()
+        .and_then(|spec| ap_build::spec::parse_header(&spec))
+        .map(|h| h.version);
+    if let Err(why) = up::sr_eligibility(item, outcome, build.as_ref(), spec_version.as_deref()) {
+        say(format!("no request for {}: {why}", item.pkg));
+        return Err(SrOutcome::NotEligible(why));
+    }
+    match osc::open_submit_requests(branch, &item.pkg, &item.origin, emit) {
+        Ok(open) => {
+            if let Some(first) = open.first() {
+                say(format!(
+                    "no request for {}: request {} from {branch} to {} is already open",
+                    item.pkg, first.id, item.origin
+                ));
+                return Err(SrOutcome::Existing(first.id.clone()));
+            }
+        }
+        Err(e) => {
+            warn(format!(
+                "no request for {}: could not check for an open one: {e}",
+                item.pkg
+            ));
+            return Err(SrOutcome::Failed(format!(
+                "could not check for an open request: {e}"
+            )));
+        }
+    }
+    Ok(osc::SubmitRequest {
+        source_project: branch.to_string(),
+        source_package: item.pkg.clone(),
+        target_project: item.origin.clone(),
+        target_package: item.pkg.clone(),
+        description: up::sr_description(item, newest_changes(branch, &item.pkg, emit).as_deref()),
+        source_rev,
+    })
+}
+
+/// How long `osc rdiff` may take.
+const RDIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// The difference between a package in the project it was branched from and
+/// in the branch project, as `osc rdiff` prints it.
+fn rdiff(
+    origin: &str,
+    pkg: &str,
+    branch: &str,
+    reporter: &(dyn Reporter + Send + Sync),
+) -> Result<String, String> {
+    for name in [origin, pkg, branch] {
+        if !osc::is_valid_obs_name(name) {
+            return Err(format!("{name:?} is not a valid OBS name"));
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let out = ap_build::proc::capture_with_timeout(
+        "osc",
+        &["rdiff", origin, pkg, branch],
+        &cwd,
+        Emit::run(reporter),
+        RDIFF_TIMEOUT,
+    )
+    .map_err(|e| format!("osc rdiff {origin} {pkg} {branch}: {e}"))?;
+    if out.success() {
+        Ok(out.stdout)
+    } else {
+        let why = out.stderr.trim();
+        Err(format!(
+            "osc rdiff {origin} {pkg} {branch} failed: {}",
+            if why.is_empty() { "no output" } else { why }
+        ))
+    }
+}
+
+/// The TUI's way to read diffs and submit. Every package that goes to the
+/// build is registered here with its origin, and the request is made by
+/// [`prepare_request`] and `osc::create_submit_request`, the code `--submit`
+/// runs, so the answer cannot differ between the two.
+struct SubmitBackend {
+    branch: String,
+    distro: Option<String>,
+    arch: String,
+    reporter: Arc<dyn Reporter + Send + Sync>,
+    items: std::sync::Mutex<std::collections::HashMap<String, Item>>,
+    /// `pkg: SR #id` for each request made from the TUI, for the run summary.
+    created: std::sync::Mutex<Vec<String>>,
+}
+
+impl SubmitBackend {
+    fn register(&self, item: &Item) {
+        self.items
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(osc::fuzzy_key(&item.pkg), item.clone());
+    }
+
+    fn item(&self, row: &str) -> Result<Item, String> {
+        self.items
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&osc::fuzzy_key(row))
+            .cloned()
+            .ok_or_else(|| format!("{row} is not a package of this run's branch project"))
+    }
+
+    fn request(&self, row: &str) -> Result<(Item, osc::SubmitRequest), tui::SubmitFailure> {
+        let item = self.item(row).map_err(tui::SubmitFailure::Other)?;
+        // The TUI only offers rows that built; OBS is asked again inside.
+        match prepare_request(
+            &self.branch,
+            self.distro.as_deref(),
+            &self.arch,
+            &item,
+            &ItemOutcome::Updated,
+            self.reporter.as_ref(),
+        ) {
+            Ok(sr) => Ok((item, sr)),
+            Err(outcome) => Err(submit_failure(outcome)),
+        }
+    }
+
+    fn created_lines(&self) -> Vec<String> {
+        self.created
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+/// Why a request was not made, as the TUI shows it.
+fn submit_failure(outcome: SrOutcome) -> tui::SubmitFailure {
+    match outcome {
+        SrOutcome::Existing(id) => tui::SubmitFailure::Existing(id),
+        SrOutcome::NotEligible(why) => tui::SubmitFailure::Other(format!("not eligible: {why}")),
+        SrOutcome::Failed(why) => tui::SubmitFailure::Other(why),
+        SrOutcome::Declined => tui::SubmitFailure::Other("declined".to_string()),
+        SrOutcome::Created(id) => tui::SubmitFailure::Other(format!("already created: {id}")),
+        SrOutcome::NotRequested => tui::SubmitFailure::Other("not requested".to_string()),
+    }
+}
+
+impl tui::PackageBackend for SubmitBackend {
+    fn diff(&self, row: &str) -> Result<String, String> {
+        let item = self.item(row)?;
+        rdiff(
+            &item.origin,
+            &item.pkg,
+            &self.branch,
+            self.reporter.as_ref(),
+        )
+    }
+
+    fn preview(&self, row: &str) -> Result<tui::SubmitPreview, tui::SubmitFailure> {
+        let (item, sr) = self.request(row)?;
+        Ok(tui::SubmitPreview {
+            summary: up::sr_confirmation_lines(&self.branch, &[&item])
+                .pop()
+                .unwrap_or_default(),
+            source: format!("{}/{}", sr.source_project, sr.source_package),
+            target: format!("{}/{}", sr.target_project, sr.target_package),
+            description: sr.description,
+        })
+    }
+
+    fn submit(&self, row: &str) -> Result<String, tui::SubmitFailure> {
+        let (_, sr) = self.request(row)?;
+        match osc::create_submit_request(&sr, Emit::run(self.reporter.as_ref())) {
+            Ok(id) => {
+                self.reporter.report(&Event::Progress {
+                    step: None,
+                    message: format!(
+                        "created request {id}: {}/{} -> {}/{}",
+                        sr.source_project, sr.source_package, sr.target_project, sr.target_package
+                    ),
+                });
+                self.created
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(format!(
+                        "{}: request {id} to {}",
+                        sr.source_package, sr.target_project
+                    ));
+                Ok(id)
+            }
+            Err(e) => {
+                self.reporter.report(&Event::Warning {
+                    step: None,
+                    message: format!(
+                        "could not create the request for {}: {e}",
+                        sr.source_package
+                    ),
+                });
+                Err(tui::SubmitFailure::Other(e.to_string()))
+            }
+        }
+    }
 }
 
 /// Create a submit request, to its origin project, for each package that
@@ -1040,76 +1683,17 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
     let emit = Emit::run(ctx.reporter.as_ref());
     let mut pending: Vec<(usize, osc::SubmitRequest)> = Vec::new();
     for (idx, r) in results.iter_mut().enumerate() {
-        let updated = r.outcome == ItemOutcome::Updated;
-        let build = updated
-            .then(|| {
-                osc::get_overall_build_status(
-                    branch,
-                    &r.item.pkg,
-                    &crate::choose_distro(a.distro.as_deref(), branch, &a.arch),
-                    &a.arch,
-                    emit,
-                )
-                // Name the repository/arch that blocks, not just its status.
-                .map(|(status, at)| match (&status, at) {
-                    (osc::BuildStatus::Succeeded, _) | (_, None) => status,
-                    (_, Some(at)) => osc::BuildStatus::Unknown(format!("{status} on {at}")),
-                })
-                .map_err(|e| {
-                    ctx.warn(format!(
-                        "could not read the build status of {}: {e}",
-                        r.item.pkg
-                    ))
-                })
-                .ok()
-            })
-            .flatten();
-        let spec_version = updated
-            .then(|| update::spec_for_package(branch, &r.item.pkg, emit).ok())
-            .flatten()
-            .and_then(|spec| ap_build::spec::parse_header(&spec))
-            .map(|h| h.version);
-        if let Err(why) =
-            up::sr_eligibility(&r.item, &r.outcome, build.as_ref(), spec_version.as_deref())
-        {
-            ctx.say(format!("no request for {}: {why}", r.item.pkg));
-            r.sr = SrOutcome::NotEligible(why);
-            continue;
+        match prepare_request(
+            branch,
+            a.distro.as_deref(),
+            &a.arch,
+            &r.item,
+            &r.outcome,
+            ctx.reporter.as_ref(),
+        ) {
+            Ok(sr) => pending.push((idx, sr)),
+            Err(sr) => r.sr = sr,
         }
-        match osc::open_submit_requests(branch, &r.item.pkg, &r.item.origin, emit) {
-            Ok(open) => {
-                if let Some(first) = open.first() {
-                    ctx.say(format!(
-                        "no request for {}: request {} from {branch} to {} is already open",
-                        r.item.pkg, first.id, r.item.origin
-                    ));
-                    r.sr = SrOutcome::Existing(first.id.clone());
-                    continue;
-                }
-            }
-            Err(e) => {
-                ctx.warn(format!(
-                    "no request for {}: could not check for an open one: {e}",
-                    r.item.pkg
-                ));
-                r.sr = SrOutcome::Failed(format!("could not check for an open request: {e}"));
-                continue;
-            }
-        }
-        pending.push((
-            idx,
-            osc::SubmitRequest {
-                source_rev: None,
-                source_project: branch.to_string(),
-                source_package: r.item.pkg.clone(),
-                target_project: r.item.origin.clone(),
-                target_package: r.item.pkg.clone(),
-                description: up::sr_description(
-                    &r.item,
-                    newest_changes(branch, &r.item.pkg, emit).as_deref(),
-                ),
-            },
-        ));
     }
     if pending.is_empty() {
         return;
@@ -1167,6 +1751,7 @@ fn branch_item(
     branch: &str,
     item: &mut Item,
     follow_devel: bool,
+    revision: Option<&str>,
     ctx: &Ctx<'_>,
 ) -> Result<(), String> {
     let emit = Emit::run(ctx.reporter.as_ref());
@@ -1183,8 +1768,16 @@ fn branch_item(
     // What the branch project held before this call, so a package the call
     // created can be told apart from one that was already there.
     let packages_before = osc::try_list_project_packages(branch, emit);
-    let result = osc::branch_package(&item.origin, &item.pkg, branch, follow_devel, emit)
-        .map_err(|e| e.to_string());
+    let result = osc::branch_package_at(
+        &item.origin,
+        &item.pkg,
+        &item.pkg,
+        branch,
+        follow_devel,
+        revision,
+        emit,
+    )
+    .map_err(|e| e.to_string());
     // The project's package listing is cached; it has changed now.
     osc::invalidate_project_packages_cache(branch);
     match result? {
@@ -1222,10 +1815,23 @@ fn branch_item(
                 ));
             }
             ctx.say(format!(
-                "branched {}/{} to {}/{}",
-                b.origin_project, item.pkg, b.target_project, b.target_package
+                "branched {}/{}{} to {}/{}",
+                b.origin_project,
+                item.pkg,
+                revision.map_or(String::new(), |r| format!(" at revision {r}")),
+                b.target_project,
+                b.target_package
             ));
             item.origin = b.origin_project;
+        }
+        BranchResult::AlreadyThere if revision.is_some() => {
+            return Err(format!(
+                "{branch} already has {}, which may hold another revision than {}; \
+                 delete {branch}/{} (or pick another --branch-project) to branch that revision",
+                item.pkg,
+                revision.unwrap_or_default(),
+                item.pkg
+            ));
         }
         BranchResult::AlreadyThere => {
             ctx.say(format!("{branch} already has {}; reusing it", item.pkg));
@@ -1302,6 +1908,17 @@ fn reach_dependencies(
     }
 
     let adds = depreach::choose_paths(&verdicts);
+    // A maintenance run adds no build path: a package that needs one fails
+    // its code stream instead (the incident could not build it).
+    if a.maintenance_source {
+        let wanted: Vec<String> = adds
+            .iter()
+            .map(|p| format!("{}/{}", p.project, p.path_repository))
+            .collect();
+        if let Some(why) = ap_build::maintenance::build_path_refusal(&item.pkg, &wanted) {
+            return Err(eyre!(why));
+        }
+    }
     if a.dry_run {
         for p in &adds {
             if !report.paths.contains(p) {
@@ -1376,7 +1993,17 @@ fn build_ready(
 ) {
     ready.sort_by_key(|i| i.dependency_of.is_none());
     for item in std::mem::take(ready) {
-        let done = if a.improve {
+        if let Some(b) = &ctx.backend {
+            b.register(&item);
+        }
+        let done = if let Some(job) = &a.backport_job {
+            ctx.say(format!(
+                "backporting into {} {} in {branch} (the version stays)",
+                item.pkg, item.new_version
+            ));
+            stage_backport(branch, &item, job, ctx)
+                .and_then(|()| build_item(a, branch, &item, resolver, ctx))
+        } else if a.improve {
             ctx.say(format!("improving {} in {branch}", item.pkg));
             if mechanical.contains(&item.pkg) {
                 tidy_item(branch, &item, ctx)
@@ -1423,7 +2050,12 @@ fn build_item(
     let (name, source_repo) = match &item.ecosystem {
         Ecosystem::Pypi { pypi_name } => (pypi_name.clone(), None),
         Ecosystem::GitRepo { url } => (repo_package_name(url), Some(url.clone())),
-        Ecosystem::Index { .. } | Ecosystem::Repology { .. } => {
+        // A release directory: the build gets the address of the release it packages.
+        Ecosystem::Index { url } => (
+            item.pkg.clone(),
+            Some(url.replace(&item.old_version, &item.new_version)),
+        ),
+        Ecosystem::Repology { .. } => {
             return Err(format!(
                 "{}'s source is known only through the {} lookup, which names nothing the pipeline \
                  can fetch and unpack yet",
@@ -1435,7 +2067,11 @@ fn build_item(
     let build = BranchBuild {
         rpm_name: Some(item.pkg.clone()),
         resolver: Some(resolver.clone()),
-        improve: improve_problem(item),
+        improve: a
+            .backport_job
+            .as_ref()
+            .map(|job| job.problem(&item.pkg, &item.new_version))
+            .or_else(|| improve_problem(item)),
         from_version: Some(item.old_version.clone()),
     };
     let distro = crate::choose_distro(a.distro.as_deref(), branch, &a.arch);
@@ -1475,6 +2111,35 @@ fn build_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_request_reaches_the_tui_as_a_reason_or_an_open_request() {
+        assert_eq!(
+            submit_failure(SrOutcome::Existing("7".into())),
+            tui::SubmitFailure::Existing("7".into())
+        );
+        assert_eq!(
+            submit_failure(SrOutcome::NotEligible("it failed".into())),
+            tui::SubmitFailure::Other("not eligible: it failed".into())
+        );
+    }
+
+    #[test]
+    fn the_tui_backend_only_knows_the_packages_it_was_given() {
+        use tui::PackageBackend as _;
+        let b = SubmitBackend {
+            branch: "home:me:branches:Base".into(),
+            distro: None,
+            arch: "x86_64".into(),
+            reporter: Arc::new(ap_core::sink::MemorySink::new()),
+            items: Default::default(),
+            created: Default::default(),
+        };
+        assert!(b.diff("foo").unwrap_err().contains("not a package"));
+        assert!(b.preview("foo").is_err());
+        assert!(b.submit("foo").is_err());
+        assert!(b.created_lines().is_empty());
+    }
     use clap::Parser;
 
     #[derive(Parser)]
@@ -1509,6 +2174,97 @@ mod tests {
         let a = args(&[]);
         assert!(!a.submit && !a.yes && !a.dry_run && !a.update_deps);
         assert_eq!(a.branch_project, None);
+    }
+
+    #[test]
+    fn maintenance_takes_a_list_or_nothing_and_bugs_repeat() {
+        let a = args(&[]);
+        assert_eq!(a.maintenance, None);
+        assert!(!a.maintenance_list && !a.no_bug_ref && !a.maintenance_source && a.bug.is_empty());
+        let a = args(&["--maintenance", "--only", "curl"]);
+        assert_eq!(a.maintenance, Some(vec![]));
+        assert_eq!(a.only, vec!["curl"]);
+        let a = args(&[
+            "--maintenance",
+            "SUSE:SLE-15-SP7:Update,SUSE:SLE-15-SP6:Update",
+            "--bug",
+            "bsc#1234567",
+            "--bug",
+            "CVE-2025-1234,jsc#SLE-1",
+        ]);
+        assert_eq!(
+            a.maintenance,
+            Some(vec![
+                "SUSE:SLE-15-SP7:Update".into(),
+                "SUSE:SLE-15-SP6:Update".into()
+            ])
+        );
+        assert_eq!(a.bug, vec!["bsc#1234567", "CVE-2025-1234", "jsc#SLE-1"]);
+    }
+
+    #[test]
+    fn backport_flags_repeat_without_splitting_urls_and_need_maintenance() {
+        let a = args(&[]);
+        assert!(a.maintenance_mode.is_none() && a.backport.is_empty() && a.backport_job.is_none());
+        let a = args(&[
+            "--maintenance",
+            "all",
+            "--maintenance-mode",
+            "update",
+            "--backport",
+            "https://x.org/a,b.patch",
+            "--backport",
+            "abc1234",
+            "--backport-repo",
+            "https://github.com/o/r",
+            "--affected-by",
+            "/usr/bin/check-affected",
+        ]);
+        assert_eq!(a.maintenance_mode.as_deref(), Some("update"));
+        assert_eq!(a.backport, vec!["https://x.org/a,b.patch", "abc1234"]);
+        assert_eq!(a.backport_repo.as_deref(), Some("https://github.com/o/r"));
+        assert_eq!(a.affected_by.as_deref(), Some("/usr/bin/check-affected"));
+        let mut summary = None;
+        let err = run(args(&["--backport", "fix.patch"]), &mut summary).unwrap_err();
+        assert!(
+            err.to_string().contains("are for --maintenance runs"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_backport_item_keeps_the_packaged_version() {
+        let item = |decision| {
+            backport_item(
+                "SUSE:SLE-15-SP7:Update",
+                &update::Candidate {
+                    rpm_name: "curl".into(),
+                    decision,
+                },
+            )
+        };
+        let eco = Ecosystem::GitRepo {
+            url: "https://github.com/curl/curl".into(),
+        };
+        let got = item(update::Decision::Update {
+            ecosystem: eco.clone(),
+            old_version: "8.6.0".into(),
+            new_version: "8.11.0".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            (got.old_version.as_str(), got.new_version.as_str()),
+            ("8.6.0", "8.6.0")
+        );
+        assert_eq!(got.origin, "SUSE:SLE-15-SP7:Update");
+        let got = item(update::Decision::UpToDate {
+            ecosystem: eco,
+            version: "8.6.0".into(),
+        })
+        .unwrap();
+        assert_eq!(got.new_version, "8.6.0");
+        let err = item(update::Decision::Skipped(update::SkipReason::NoSourceLine)).unwrap_err();
+        assert!(err.contains("cannot be rebuilt for the backport"), "{err}");
     }
 
     #[test]
