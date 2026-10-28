@@ -23,3 +23,20 @@ auto-package is the only thing that changes packages.
 - Run `cargo fmt` before committing and commit its result.
 - Do not build cargo under `/tmp`; `/home` fills up during runs, so check `df`
   and clean `target` after large builds. Ask before deleting anything in `ap-work`.
+
+## Answering questions about a run
+
+When asked what happened to a package (why it failed, what the agent changed,
+what it cost, which tests were flaky), read; do not change anything. Run
+`auto-package explain <pkg> --work-dir <ap-work> [--project <P>] [--run <id>]`
+first: it reads the work directory without a model or the network and says what
+it cannot tell. `docs/agents/work-directory.md` describes the `ap-work` layout,
+`run.jsonl` and the `jq` recipes for what `explain` does not answer, and why the
+agent's `reasoning` is its own summary and not ground truth.
+
+## Package notes live outside the repository
+
+The per-package notes the tool writes (LLM output) are kept in
+`../auto-package-notes` (relative to where the tool runs; `--notes DIR`
+changes it), not in this git tree, and `notes/` is ignored here. Read them
+there; do not recreate `notes/packages/`.
