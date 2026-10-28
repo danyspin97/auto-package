@@ -1955,6 +1955,8 @@ pub fn run_package(
             });
         }
     }
+    // A baseline left by an earlier call for this package is not this call's.
+    let _ = std::fs::remove_dir_all(pkg_run.path.join(OBS_BASELINE_DIR));
     let result = run_package_inner(config, pkg_run, reporter);
     // What the pipeline itself found built is settled for the rest of the run.
     if matches!(
@@ -1986,6 +1988,17 @@ pub fn run_package(
         },
         (result, _) => result,
     };
+    let result = restore_obs_baseline(
+        &pkg_run.path.join(OBS_BASELINE_DIR),
+        reporter,
+        result,
+        |dir| {
+            if crate::proc::shutting_down() {
+                return Err("the run was stopped first, and no command can run now".to_string());
+            }
+            osc::restore_baseline(dir, Emit::run(reporter))
+        },
+    );
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the
     // last attempt ended, instead of only "last_outcome: null" on anything
@@ -6331,6 +6344,65 @@ fn missing_sources_context(missing: &[String], service_error: Option<&str>) -> S
     text
 }
 
+/// Where a run keeps what OBS held before its first commit (see
+/// [`restore_obs_baseline`]).
+const OBS_BASELINE_DIR: &str = "obs-baseline";
+
+/// Puts back the OBS revision a failed run found, when the run committed
+/// anything: the attempts stay in OBS history, but the project must not keep a
+/// revision that does not build (`--in-place` writes the project itself). A
+/// run that wrote nothing has nothing to put back. When the baseline cannot go
+/// back, the failure says so, in its reason, or in a warning for a result that
+/// has none.
+fn restore_obs_baseline(
+    dir: &Path,
+    reporter: &dyn Reporter,
+    result: PipelineResult,
+    restore: impl FnOnce(&Path) -> Result<(), String>,
+) -> PipelineResult {
+    let built = matches!(
+        result,
+        PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. }
+    );
+    if built || osc::attempted_files(dir).is_empty() {
+        let _ = std::fs::remove_dir_all(dir);
+        return result;
+    }
+    match restore(dir) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(dir);
+            reporter.report(&Event::Warning {
+                step: None,
+                message: "restored the OBS baseline: the failed attempt is undone on OBS".into(),
+            });
+            result
+        }
+        Err(why) => {
+            let message = format!(
+                "the OBS baseline was NOT restored ({why}): OBS keeps the failed attempt; \
+                 the saved baseline is in {}",
+                dir.display()
+            );
+            reporter.report(&Event::Warning {
+                step: None,
+                message: message.clone(),
+            });
+            match result {
+                PipelineResult::Failed {
+                    rpm_name,
+                    reason,
+                    kind,
+                } => PipelineResult::Failed {
+                    rpm_name,
+                    reason: format!("{reason}; {message}"),
+                    kind,
+                },
+                other => other,
+            }
+        }
+    }
+}
+
 /// Step: Commit.
 fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     let commit_step = begin_or_fail!(
@@ -6341,6 +6413,17 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         &mut st.step_attempts,
         ctx.rpm_name.clone()
     );
+    // What OBS holds is kept once per run, before this step changes the
+    // checkout: `osc rm` in this step may take a stray's pristine copy with it.
+    let baseline = ctx.pkg_run.path.join(OBS_BASELINE_DIR);
+    if !baseline.exists()
+        && let Err(e) = osc::save_baseline(&ctx.checkout_dir, &baseline)
+    {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(format!(
+            "not committed: the OBS baseline cannot be kept: {e}"
+        )));
+    }
     // The only write to OBS: nothing without a spec, without its sources, or
     // with a placeholder in it goes there, whatever an earlier stage let by.
     let expanded = match ensure_publishable(ctx, commit_step.id) {
@@ -6417,6 +6500,11 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     }
     let mut files = plan.files.clone();
     files.extend(removed);
+    // Noted before the write: a commit that fails half way may still have sent them.
+    if let Err(e) = osc::note_attempt(&baseline, &files) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(format!("not committed: the attempt cannot be noted: {e}")));
+    }
     if let Err(e) = osc::commit(
         &ctx.checkout_dir,
         &commit_message(&ctx.checkout_dir),
@@ -16111,6 +16199,85 @@ mod version_conflict_tests {
              Requires:       python-pydantic\n\
              Requires:       python-redis == 8.0.1\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod obs_baseline_tests {
+    use super::*;
+    use ap_core::sink::NullReporter;
+
+    /// A run directory whose baseline records one attempted commit.
+    fn with_attempt() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(OBS_BASELINE_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        osc::note_attempt(&dir, &["foo.spec".to_string()]).unwrap();
+        (tmp, dir)
+    }
+
+    fn failed(reason: &str) -> PipelineResult {
+        PipelineResult::Failed {
+            rpm_name: "foo".into(),
+            reason: reason.into(),
+            kind: FailureKind::Other,
+        }
+    }
+
+    #[test]
+    fn a_failed_run_that_committed_is_restored_and_its_baseline_cleared() {
+        let (_tmp, dir) = with_attempt();
+        let mut restored = false;
+        let out = restore_obs_baseline(&dir, &NullReporter, failed("build failed"), |_| {
+            restored = true;
+            Ok(())
+        });
+        assert!(restored);
+        match out {
+            PipelineResult::Failed { reason, .. } => assert_eq!(reason, "build failed"),
+            other => panic!("{other:?}"),
+        }
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_run_that_never_committed_restores_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(OBS_BASELINE_DIR);
+        let out = restore_obs_baseline(&dir, &NullReporter, failed("no spec"), |_| {
+            unreachable!("nothing was written, so nothing is restored")
+        });
+        assert!(matches!(out, PipelineResult::Failed { .. }));
+    }
+
+    #[test]
+    fn a_failed_restore_is_said_in_the_reason_and_the_baseline_is_kept() {
+        let (_tmp, dir) = with_attempt();
+        let out = restore_obs_baseline(&dir, &NullReporter, failed("build failed"), |_| {
+            Err("no saved copy of the baseline".into())
+        });
+        match out {
+            PipelineResult::Failed { reason, .. } => {
+                assert!(reason.starts_with("build failed; "), "{reason}");
+                assert!(reason.contains("NOT restored"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn a_blocked_run_keeps_its_result_when_the_restore_fails() {
+        let (_tmp, dir) = with_attempt();
+        let blocked = PipelineResult::MissingDeps {
+            rpm_name: "foo".into(),
+            deps: vec!["bar".into()],
+            patches: vec![],
+            native: vec![],
+            outdated: vec![],
+        };
+        let out = restore_obs_baseline(&dir, &NullReporter, blocked, |_| Err("x".into()));
+        assert!(matches!(out, PipelineResult::MissingDeps { .. }), "{out:?}");
     }
 }
 
