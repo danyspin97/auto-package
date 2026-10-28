@@ -38,7 +38,7 @@
 38. Merged into convention 14 — read convention 14 when tests or code fail with AttributeError/ImportError on a stdlib name
 39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter
 40. The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
-41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
+41. Merged into convention 90 — read convention 90 when setup.py/setup.cfg lists test-runner or shim requirements
 42. Merged into convention 22 — read convention 22 when the installed version is wrong or the source has a literal 0.0.0
 43. Merged into convention 7 — read convention 7 when pytest ignores options set in setup.cfg
 44. Merged into convention 11 — read convention 11 when %check misses a conftest/testdata file or the backend rejects a classifier
