@@ -1173,6 +1173,7 @@ fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
         &dir,
         branch,
         &item.pkg,
+        emit,
     )
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;

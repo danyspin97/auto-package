@@ -5392,17 +5392,37 @@ pub fn attempted_files(dir: &Path) -> Vec<String> {
 /// the directory the checkouts are in (a leading dot: no OBS project has one).
 pub const BASELINE_ROOT: &str = ".obs-baseline";
 
+/// The file a baseline directory holds once a restore of it has failed: the
+/// baseline is then kept, not a live one, and the reason is written in it.
+const UNRESTORED: &str = "unrestored";
+
 /// Keep the baseline of `checkout_dir` for a write made outside a pipeline run,
-/// in `root/<branch>/<pkg>`, replacing an earlier one there. Returns that dir.
+/// in `root/<branch>/<pkg>`. Returns that dir.
+///
+/// An earlier baseline there that a restore failed to put back is restored
+/// first, since a new baseline taken now would hold the failed revision. When
+/// that restore fails the error is returned and the earlier baseline stays
+/// where it is. Any other earlier baseline was undone or is no longer needed,
+/// and is replaced.
 pub fn begin_baseline(
     root: &Path,
     checkout_dir: &Path,
     branch: &str,
     pkg: &str,
-) -> std::io::Result<PathBuf> {
+    emit: Emit<'_>,
+) -> Result<PathBuf, String> {
     let dir = root.join(ap_core::run::sanitize_name(branch)).join(pkg);
+    if dir.join(UNRESTORED).exists() {
+        restore_baseline(&dir, emit).map_err(|why| {
+            format!(
+                "the OBS baseline kept at {} was NOT restored ({why}); \
+                 it is kept there, and nothing was written",
+                dir.display()
+            )
+        })?;
+    }
     let _ = fs::remove_dir_all(&dir);
-    save_baseline(checkout_dir, &dir)?;
+    save_baseline(checkout_dir, &dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -5458,15 +5478,23 @@ pub fn restore_baseline_with(
 }
 
 /// [`restore_baseline_with`] committing through [`commit`], and removing `dir`
-/// once it is restored. The commit may run after a shutdown: see
+/// once it is restored. A failure leaves `dir` in place, marked as unrestored
+/// (see [`begin_baseline`]). The commit may run after a shutdown: see
 /// [`proc::restoring_after_shutdown`].
 pub fn restore_baseline(dir: &Path, emit: Emit<'_>) -> Result<(), String> {
     let _restoring = proc::restoring_after_shutdown();
-    restore_baseline_with(dir, |checkout, message, files| {
+    match restore_baseline_with(dir, |checkout, message, files| {
         commit(checkout, message, files, emit)
-    })?;
-    let _ = fs::remove_dir_all(dir);
-    Ok(())
+    }) {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(dir);
+            Ok(())
+        }
+        Err(why) => {
+            let _ = fs::write(dir.join(UNRESTORED), &why);
+            Err(why)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5575,12 +5603,30 @@ mod baseline_tests {
     fn begin_baseline_replaces_an_earlier_one_for_the_same_package() {
         let co = checkout(&[("foo.spec", "a")]);
         let root = tempfile::tempdir().unwrap();
-        let first = begin_baseline(root.path(), co.path(), "home:u:Base", "foo").unwrap();
-        note_attempt(&first, &["foo.spec".to_string()]).unwrap();
-        let second = begin_baseline(root.path(), co.path(), "home:u:Base", "foo").unwrap();
+        let first =
+            begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+        let second =
+            begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
         assert_eq!(first, second);
         assert!(attempted_files(&second).is_empty());
         assert!(second.join("files/foo.spec").exists());
+    }
+
+    #[test]
+    fn begin_baseline_keeps_an_unrestored_one_and_refuses() {
+        let co = checkout(&[("foo.spec", "a")]);
+        let root = tempfile::tempdir().unwrap();
+        let kept =
+            begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+        // An attempt whose restore cannot run (a file name that is not plain):
+        // no OBS call is made, the restore fails and marks the baseline.
+        note_attempt(&kept, &["../escape".to_string()]).unwrap();
+        assert!(restore_baseline(&kept, Emit::quiet()).is_err());
+        let err = begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet())
+            .unwrap_err();
+        assert!(err.contains(&kept.display().to_string()), "{err}");
+        assert_eq!(attempted_files(&kept), vec!["../escape".to_string()]);
+        assert!(kept.join("files/foo.spec").exists());
     }
 
     /// Rewrite `.osc/_files` as osc would list `names` after a commit.

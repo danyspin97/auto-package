@@ -1910,8 +1910,32 @@ pub fn run_package(
     // The fix-loop and risk flags are not touched here: an earlier run's stay
     // until a commit of this run settles them, so a run that ends AlreadyBuilt
     // or missing_deps still reports what OBS holds.
-    // A baseline left by an earlier call for this package is not this call's.
-    let _ = std::fs::remove_dir_all(pkg_run.path.join(OBS_BASELINE_DIR));
+    // A baseline a failed attempt could not put back is restored before this
+    // run writes anything; if that fails the package does not start.
+    let baseline = match obs_baseline_dir(config) {
+        Ok(dir) => dir,
+        Err(e) => {
+            return PipelineResult::Failed {
+                rpm_name: config.rpm_name.clone(),
+                reason: format!("cannot open the package workspace: {e}"),
+                kind: FailureKind::Other,
+            };
+        }
+    };
+    if baseline.exists()
+        && let Err(why) = osc::restore_baseline(&baseline, Emit::run(reporter))
+    {
+        return PipelineResult::Failed {
+            rpm_name: config.rpm_name.clone(),
+            reason: format!(
+                "not started: the OBS baseline of an earlier failed attempt was NOT \
+                 restored ({why}); OBS keeps that attempt. The baseline is kept in {} \
+                 and is not deleted; fix the cause and run again",
+                baseline.display()
+            ),
+            kind: FailureKind::Other,
+        };
+    }
     let result = run_package_inner(config, pkg_run, reporter);
     // What the pipeline itself found built is settled for the rest of the run.
     if matches!(
@@ -1944,12 +1968,9 @@ pub fn run_package(
         },
         (result, _) => result,
     };
-    let result = restore_obs_baseline(
-        &pkg_run.path.join(OBS_BASELINE_DIR),
-        reporter,
-        result,
-        |dir| osc::restore_baseline(dir, Emit::run(reporter)),
-    );
+    let result = restore_obs_baseline(&baseline, reporter, result, |dir| {
+        osc::restore_baseline(dir, Emit::run(reporter))
+    });
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the
     // last attempt ended, instead of only "last_outcome: null" on anything
@@ -6290,9 +6311,16 @@ fn missing_sources_context(missing: &[String], service_error: Option<&str>) -> S
     text
 }
 
-/// Where a run keeps what OBS held before its first commit (see
-/// [`restore_obs_baseline`]).
+/// Where a package keeps what OBS held before its first commit (see
+/// [`restore_obs_baseline`]). It lives in the package's workspace, not in the
+/// run's directory, so a baseline that could not be put back outlives the run
+/// and is restored before the next one writes.
 const OBS_BASELINE_DIR: &str = "obs-baseline";
+
+/// The baseline directory of `config`'s package (see [`OBS_BASELINE_DIR`]).
+fn obs_baseline_dir(config: &PipelineConfig) -> std::io::Result<PathBuf> {
+    Workspace::open(&config.state_root, &config.rpm_name).map(|ws| ws.dir().join(OBS_BASELINE_DIR))
+}
 
 /// Puts back the OBS revision a failed run found, when the run committed
 /// anything: the attempts stay in OBS history, but the project must not keep a
@@ -6433,7 +6461,7 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     );
     // What OBS holds is kept once per run, before this step changes the
     // checkout: `osc rm` in this step may take a stray's pristine copy with it.
-    let baseline = ctx.pkg_run.path.join(OBS_BASELINE_DIR);
+    let baseline = ctx.ws.dir().join(OBS_BASELINE_DIR);
     if !baseline.exists()
         && let Err(e) = osc::save_baseline(&ctx.checkout_dir, &baseline)
     {
@@ -22319,5 +22347,35 @@ mod flag_survival_tests {
         let st = PkgState::load(&ws);
         assert_eq!(st.fix_flags, vec![crate::fix_flags::FixFlag::CheckRemoved]);
         assert_eq!(st.risk_flags.len(), 1, "{:?}", st.risk_flags);
+    }
+}
+
+#[cfg(test)]
+mod kept_baseline_tests {
+    use super::hygiene_tests::config;
+    use super::*;
+
+    #[test]
+    fn a_package_whose_kept_baseline_does_not_restore_does_not_start() {
+        let state = tempfile::tempdir().unwrap();
+        let cfg = config("foo", state.path());
+        let ws = Workspace::open(state.path(), &cfg.rpm_name).unwrap();
+        let kept = ws.dir().join(OBS_BASELINE_DIR);
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(kept.join("files")).unwrap();
+        std::fs::write(kept.join("checkout"), checkout.path().display().to_string()).unwrap();
+        // An attempt whose file name is not plain: the restore refuses before
+        // any OBS call, so nothing is written and the baseline must stay.
+        osc::note_attempt(&kept, &["../escape".to_string()]).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let run = ap_core::run::RunDir::allocate(tmp.path())
+            .unwrap()
+            .pkg(&cfg.rpm_name);
+        let result = run_package(&cfg, &run, &ap_core::sink::NullReporter);
+        let PipelineResult::Failed { reason, .. } = result else {
+            panic!("expected a refusal, got {result:?}");
+        };
+        assert!(reason.contains(&kept.display().to_string()), "{reason}");
+        assert!(kept.join("files").exists(), "the baseline was deleted");
     }
 }

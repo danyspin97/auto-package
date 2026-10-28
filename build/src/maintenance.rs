@@ -1735,6 +1735,7 @@ fn commit_refs(
         &dir,
         branch,
         pkg,
+        emit,
     )
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     std::fs::write(&path, amended).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
