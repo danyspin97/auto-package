@@ -4314,6 +4314,50 @@ mod tests {
         }
     }
 
+    /// The index marks exactly the inline conventions, so none is listed as on
+    /// demand while it is already in the system prompt.
+    #[test]
+    fn only_the_inline_conventions_are_marked_inline() {
+        for (i, l) in CONVENTIONS_INDEX.lines().enumerate() {
+            let n = i as u32 + 1;
+            assert_eq!(
+                l.contains("[inline]"),
+                INLINE_CONVENTIONS.contains(&n),
+                "index line {n} disagrees with INLINE_CONVENTIONS"
+            );
+        }
+    }
+
+    /// A merged convention is one line pointing at a topic file, and the topic
+    /// file is a convention itself, not another pointer. The topics number
+    /// about thirty (the consolidation target).
+    #[test]
+    fn merged_conventions_point_to_a_topic_file() {
+        let table = crate::conventions_table::CONVENTIONS;
+        let mut topics = 0;
+        for (n, text) in table.iter() {
+            let Some((head, target)) = text.trim_end().split_once(". Merged into ") else {
+                topics += 1;
+                continue;
+            };
+            assert_eq!(head, n.to_string(), "stub {n} starts with another number");
+            assert_eq!(text.lines().count(), 1, "stub {n} is more than one line");
+            let target: u32 = target
+                .trim_end_matches('.')
+                .parse()
+                .unwrap_or_else(|_| panic!("stub {n} names no topic: {text:?}"));
+            let (_, target_text) = table
+                .iter()
+                .find(|(k, _)| *k == target)
+                .expect("a stub names an existing convention");
+            assert!(
+                !target_text.contains(". Merged into "),
+                "stub {n} points at another stub, {target}"
+            );
+        }
+        assert!((25..=35).contains(&topics), "{topics} topic files");
+    }
+
     /// A build log can contain a fence and then text that reads like an
     /// instruction. The block must stay open until the real closing fence.
     #[test]
