@@ -190,6 +190,9 @@ pub enum SrOutcome {
     Existing(String),
     /// The user did not confirm it.
     Declined,
+    /// `--yes` does not approve a request whose change needs a review (see
+    /// its risk flags); the run is refused.
+    NeedsReview,
     /// Not submitted, with the reason (a failed build, a version mismatch).
     NotEligible(String),
     Failed(String),
@@ -461,6 +464,10 @@ pub fn summary_text(
                         SrOutcome::Created(id) => format!("created request {id}"),
                         SrOutcome::Existing(id) => format!("request {id} already open"),
                         SrOutcome::Declined => "not confirmed".to_string(),
+                        SrOutcome::NeedsReview => {
+                            "not submitted: --yes refused the run, a package needs a review"
+                                .to_string()
+                        }
                         SrOutcome::NotEligible(why) => format!("not submitted: {why}"),
                         SrOutcome::Failed(why) => format!("failed: {why}"),
                         SrOutcome::NotRequested => return None,

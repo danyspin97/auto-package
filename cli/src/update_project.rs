@@ -69,7 +69,9 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub submit: bool,
 
-    /// Create the submit requests without asking.
+    /// Create the submit requests without asking. Refuses, and submits
+    /// nothing, when a change needs a review (its "Needs review" lines name
+    /// the packages): run without it to review them.
     #[arg(short, long, default_value_t = false)]
     pub yes: bool,
 
@@ -484,6 +486,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 distro: a.distro.clone(),
                 arch: a.arch.clone(),
                 state_root: ctx.state_root.clone(),
+                yes: a.yes,
                 reporter: reporter.clone(),
                 items: Default::default(),
                 created: Default::default(),
@@ -970,7 +973,7 @@ fn cmd_update_project(
     build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
 
     if a.submit {
-        submit_requests(a, branch, &mut report.results, ctx);
+        submit_requests(a, branch, &mut report.results, ctx).map_err(|e| eyre!("{e}"))?;
     }
     Ok(())
 }
@@ -1584,6 +1587,8 @@ struct SubmitBackend {
     arch: String,
     /// Where each package's state, with its fix-loop flags, is kept.
     state_root: PathBuf,
+    /// `--yes` was given: a request for a change that needs a review is refused.
+    yes: bool,
     reporter: Arc<dyn Reporter + Send + Sync>,
     items: std::sync::Mutex<std::collections::HashMap<String, Item>>,
     /// `pkg: SR #id` for each request made from the TUI, for the run summary.
@@ -1609,6 +1614,10 @@ impl SubmitBackend {
 
     fn request(&self, row: &str) -> Result<(Item, osc::SubmitRequest), tui::SubmitFailure> {
         let item = self.item(row).map_err(tui::SubmitFailure::Other)?;
+        let needing = needing_review(&self.state_root, &[item.pkg.as_str()]);
+        if let Some(lines) = yes_refusal(self.yes, &needing) {
+            return Err(tui::SubmitFailure::Other(lines.join("; ")));
+        }
         // The TUI only offers rows that built; OBS is asked again inside.
         match prepare_request(
             &self.branch,
@@ -1639,6 +1648,9 @@ fn submit_failure(outcome: SrOutcome) -> tui::SubmitFailure {
         SrOutcome::NotEligible(why) => tui::SubmitFailure::Other(format!("not eligible: {why}")),
         SrOutcome::Failed(why) => tui::SubmitFailure::Other(why),
         SrOutcome::Declined => tui::SubmitFailure::Other("declined".to_string()),
+        SrOutcome::NeedsReview => {
+            tui::SubmitFailure::Other("needs a review: run without --yes to review it".to_string())
+        }
         SrOutcome::Created(id) => tui::SubmitFailure::Other(format!("already created: {id}")),
         SrOutcome::NotRequested => tui::SubmitFailure::Other("not requested".to_string()),
     }
@@ -1709,7 +1721,12 @@ impl tui::PackageBackend for SubmitBackend {
 /// project already gets none either (and a request list that cannot be read
 /// counts as unknown, not as empty); and nothing is created before the list
 /// is shown and confirmed, unless `--yes`.
-fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResult], ctx: &Ctx<'_>) {
+fn submit_requests(
+    a: &UpdateProjectArgs,
+    branch: &str,
+    results: &mut [ItemResult],
+    ctx: &Ctx<'_>,
+) -> Result<(), String> {
     let emit = Emit::run(ctx.reporter.as_ref());
     let mut pending: Vec<(usize, osc::SubmitRequest)> = Vec::new();
     for (idx, r) in results.iter_mut().enumerate() {
@@ -1727,7 +1744,7 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
         }
     }
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
 
     let items: Vec<&Item> = pending.iter().map(|(i, _)| &results[*i].item).collect();
@@ -1739,11 +1756,26 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
             ctx.say(format!("      {risk}"));
         }
     }
+    // `--yes` approves the batch without asking, so a batch with a change that
+    // needs a review is refused whole: nothing is submitted.
+    let names: Vec<&str> = pending
+        .iter()
+        .map(|(i, _)| results[*i].item.pkg.as_str())
+        .collect();
+    if let Some(lines) = yes_refusal(a.yes, &needing_review(&ctx.state_root, &names)) {
+        for (idx, _) in &pending {
+            results[*idx].sr = SrOutcome::NeedsReview;
+        }
+        for line in &lines {
+            ctx.warn(line.clone());
+        }
+        return Err(lines[0].clone());
+    }
     if !a.yes && !confirm(&format!("Create {} submit request(s)?", pending.len()), ctx) {
         for (idx, _) in &pending {
             results[*idx].sr = SrOutcome::Declined;
         }
-        return;
+        return Ok(());
     }
 
     for (idx, sr) in pending {
@@ -1764,6 +1796,38 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
             }
         };
     }
+    Ok(())
+}
+
+/// The packages among `pkgs` whose change needs a review (it has risk flags
+/// recorded), with those flags' lines, in the order given.
+fn needing_review(state_root: &Path, pkgs: &[&str]) -> Vec<(String, Vec<String>)> {
+    pkgs.iter()
+        .filter_map(|pkg| {
+            let lines = ap_build::risk_flags::lines_of_package(state_root, pkg);
+            (!lines.is_empty()).then(|| (pkg.to_string(), lines))
+        })
+        .collect()
+}
+
+/// What `--yes` refuses: when it is given and any package needs a review, the
+/// message first, then each such package and its flags, and what to do
+/// instead. `None` when the requests may go on (no `--yes`, or nothing needs a
+/// review).
+fn yes_refusal(yes: bool, needing: &[(String, Vec<String>)]) -> Option<Vec<String>> {
+    if !yes || needing.is_empty() {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "--yes refuses to submit: {} package(s) need a review, nothing was submitted; \
+         run without --yes to review them",
+        needing.len()
+    )];
+    for (pkg, risks) in needing {
+        lines.push(format!("  {pkg}"));
+        lines.extend(risks.iter().map(|r| format!("    {r}")));
+    }
+    Some(lines)
 }
 
 fn visit_key(item: &Item) -> String {
@@ -2147,6 +2211,109 @@ fn build_item(
 mod tests {
     use super::*;
 
+    /// A state root where `python-foo` has a risk flag of its last run and
+    /// `python-bar` has none.
+    fn state_with_a_risk() -> tempfile::TempDir {
+        use ap_build::pipeline::PkgState;
+        use ap_build::risk_flags::{RiskFlag, settle};
+        use ap_build::workspace::Workspace;
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        PkgState::update(&ws, |st| {
+            settle(
+                st,
+                "r1",
+                vec![RiskFlag::ScriptDependency {
+                    added: true,
+                    line: "Requires(post): helper".into(),
+                }],
+            )
+        })
+        .unwrap();
+        Workspace::open(root.path(), "python-bar").unwrap();
+        root
+    }
+
+    fn pkg_item(pkg: &str) -> Item {
+        Item {
+            pkg: pkg.into(),
+            origin: "Base:System".into(),
+            ecosystem: ap_build::update::Ecosystem::GitRepo {
+                url: "https://github.com/a/b".into(),
+            },
+            old_version: "1".into(),
+            new_version: "2".into(),
+            dependency_of: None,
+            findings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn yes_refuses_a_batch_with_a_package_that_needs_a_review() {
+        let root = state_with_a_risk();
+        let needing = needing_review(root.path(), &["python-bar", "python-foo"]);
+        assert_eq!(
+            needing,
+            vec![(
+                "python-foo".to_string(),
+                vec!["RISK: added dependency line: Requires(post): helper".to_string()]
+            )]
+        );
+        let lines = yes_refusal(true, &needing).expect("refused");
+        assert!(lines[0].starts_with("--yes refuses to submit: 1 package(s) need a review"));
+        assert!(lines[0].ends_with("run without --yes to review them"));
+        assert_eq!(lines[1], "  python-foo");
+        assert!(lines[2].contains("Requires(post): helper"));
+        assert!(!lines.iter().any(|l| l.contains("python-bar")));
+    }
+
+    #[test]
+    fn clean_packages_and_an_interactive_run_are_not_refused() {
+        let root = state_with_a_risk();
+        // Only the clean package: nothing needs a review, even with --yes.
+        let clean = needing_review(root.path(), &["python-bar"]);
+        assert!(clean.is_empty());
+        assert_eq!(yes_refusal(true, &clean), None);
+        // Without --yes the confirmation asks instead of refusing.
+        let flagged = needing_review(root.path(), &["python-foo"]);
+        assert_eq!(yes_refusal(false, &flagged), None);
+        // A package with no state at all is clean too.
+        assert!(needing_review(root.path(), &["python-new"]).is_empty());
+    }
+
+    #[test]
+    fn the_tui_refuses_a_flagged_request_under_yes_before_asking_obs() {
+        use tui::PackageBackend as _;
+        let root = state_with_a_risk();
+        let backend = |yes: bool| SubmitBackend {
+            branch: "home:me:branches:Base".into(),
+            distro: None,
+            arch: "x86_64".into(),
+            state_root: root.path().to_path_buf(),
+            yes,
+            reporter: Arc::new(ap_core::sink::MemorySink::new()),
+            items: Default::default(),
+            created: Default::default(),
+        };
+        let flagged = backend(true);
+        flagged.register(&pkg_item("python-foo"));
+        let err = flagged.submit("python-foo").unwrap_err();
+        assert!(
+            matches!(&err, tui::SubmitFailure::Other(m)
+                if m.contains("--yes refuses") && m.contains("run without --yes")),
+            "{err:?}"
+        );
+        // Without --yes the request is not refused here (and this test makes
+        // no OBS call, so the check is what the refusal is tested against).
+        let asked = backend(false);
+        asked.register(&pkg_item("python-foo"));
+        assert!(needing_review(root.path(), &["python-foo"]).len() == 1);
+        assert_eq!(
+            yes_refusal(asked.yes, &needing_review(root.path(), &["python-foo"])),
+            None
+        );
+    }
+
     #[test]
     fn a_refused_request_reaches_the_tui_as_a_reason_or_an_open_request() {
         assert_eq!(
@@ -2167,6 +2334,7 @@ mod tests {
             distro: None,
             arch: "x86_64".into(),
             state_root: PathBuf::from("/nonexistent-state-root"),
+            yes: false,
             reporter: Arc::new(ap_core::sink::MemorySink::new()),
             items: Default::default(),
             created: Default::default(),
