@@ -343,6 +343,10 @@ pub struct PkgState {
     pub risk_flags: Vec<crate::risk_flags::RiskFlag>,
     #[serde(default)]
     pub risk_flags_run_id: Option<String>,
+    /// The version the fix-loop and risk flags were recorded for. A run for
+    /// another version starts with none (see `run_package`).
+    #[serde(default)]
+    pub flags_version: Option<String>,
 }
 
 impl PkgState {
@@ -1873,6 +1877,22 @@ fn lock_error_text(e: &ap_core::proc_lock::LockError) -> String {
     }
 }
 
+/// Drops the fix-loop and risk flags `ws` recorded for another version than
+/// `version`, and records `version` as the one they are for (see
+/// [`run_package`]).
+fn start_flags_for_version(ws: &Workspace, version: &str, reporter: &dyn Reporter) {
+    update_state(ws, reporter, |state| {
+        let other = state.flags_version.as_deref().is_some_and(|v| v != version);
+        if other {
+            state.fix_flags.clear();
+            state.fix_flags_run_id = None;
+            state.risk_flags.clear();
+            state.risk_flags_run_id = None;
+        }
+        state.flags_version = Some(version.to_string());
+    });
+}
+
 pub fn run_package(
     config: &PipelineConfig,
     pkg_run: &PkgRunDir,
@@ -1911,6 +1931,13 @@ pub fn run_package(
     // for it. From here on, an interrupt that finds the run between its write
     // and its restore waits for it.
     let _obs_write = crate::proc::obs_write();
+    // The flags describe one version's change. A run for another version
+    // starts without them: the last version's were never submitted with it.
+    // A state that records no version (written before the field) keeps its
+    // flags and takes this run's version.
+    if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
+        start_flags_for_version(&ws, &config.version, reporter);
+    }
     // The package is being worked on again: its recorded outcome is no longer
     // about the run that is under way. A `missing_deps` or `failed` left from
     // an earlier run read as current while the package built, and when the run
@@ -22357,6 +22384,18 @@ mod flag_survival_tests {
             );
         })
         .unwrap();
+    }
+
+    #[test]
+    fn a_run_for_another_version_starts_without_the_last_versions_flags() {
+        let state = tempfile::tempdir().unwrap();
+        built_with_flags(state.path());
+        let ws = Workspace::open(state.path(), "python-foo").unwrap();
+        PkgState::update(&ws, |st| st.flags_version = Some("0.9".into())).unwrap();
+        start_flags_for_version(&ws, "1.0", &ap_core::sink::NullReporter);
+        let st = PkgState::load(&ws);
+        assert!(st.fix_flags.is_empty() && st.risk_flags.is_empty());
+        assert_eq!(st.flags_version.as_deref(), Some("1.0"));
     }
 
     #[test]

@@ -85,9 +85,10 @@ pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<RiskFlag>) {
     st.risk_flags_run_id = Some(run_id.to_string());
 }
 
-/// Drops the risks of `pkg` once its change is submitted.
+/// Drops the risks of `pkg` once its change is submitted. The workspace is the
+/// one [`try_of_package`] reads.
 pub fn clear_submitted(state_root: &Path, pkg: &str) -> std::io::Result<()> {
-    let Some(ws) = Workspace::find_existing(state_root, &[pkg]) else {
+    let Some(ws) = Workspace::find_by_obs_name(state_root, pkg) else {
         return Ok(());
     };
     PkgState::update(&ws, |st| st.risk_flags.clear()).map(|_| ())

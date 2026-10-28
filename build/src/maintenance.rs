@@ -2221,6 +2221,13 @@ pub fn run_with(
                 for base in &bases {
                     let _ = std::fs::remove_dir_all(base);
                 }
+                // The request text carries the flags from now on.
+                for r in &sent {
+                    let root =
+                        branch_state_root(&opts.work_dir, &r.action.source_project, &opts.arch);
+                    let _ = crate::fix_flags::clear_submitted(&root, pkg);
+                    let _ = crate::risk_flags::clear_submitted(&root, pkg);
+                }
                 (host.say)(&format!(
                     "created maintenance request {id} for {pkg} to {}",
                     req.target_project

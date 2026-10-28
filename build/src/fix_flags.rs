@@ -119,9 +119,10 @@ pub fn try_of_package(state_root: &std::path::Path, pkg: &str) -> std::io::Resul
 }
 
 /// Drops the flags of `pkg` once its change is submitted: the request text
-/// carries them from then on.
+/// carries them from then on. The workspace is the one [`try_of_package`]
+/// reads.
 pub fn clear_submitted(state_root: &std::path::Path, pkg: &str) -> std::io::Result<()> {
-    let Some(ws) = Workspace::find_existing(state_root, &[pkg]) else {
+    let Some(ws) = Workspace::find_by_obs_name(state_root, pkg) else {
         return Ok(());
     };
     PkgState::update(&ws, |st| st.fix_flags.clear()).map(|_| ())
@@ -529,6 +530,31 @@ mod tests {
         PkgState::update(&ws, |st| settle(st, "r1", vec![FixFlag::CheckRemoved])).unwrap();
         clear_submitted(root.path(), "python-foo").unwrap();
         assert!(of_package(root.path(), "python-foo").is_empty());
+    }
+
+    #[test]
+    fn submitting_clears_the_workspace_the_gate_reads() {
+        // The workspace is named for the RPM name; the OBS spelling is found
+        // through the state's `obs_name`, as the gate finds it.
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-apscheduler").unwrap();
+        PkgState::update(&ws, |st| {
+            st.obs_name = Some("python-APScheduler".into());
+            settle(st, "r1", vec![FixFlag::CheckRemoved]);
+        })
+        .unwrap();
+        assert_eq!(
+            try_of_package(root.path(), "python-APScheduler")
+                .unwrap()
+                .len(),
+            1
+        );
+        clear_submitted(root.path(), "python-APScheduler").unwrap();
+        assert!(
+            try_of_package(root.path(), "python-APScheduler")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     const BASE: &str = "Name: python-foo\nVersion: 1.0\nSource0: foo-1.0.tar.gz\n\
