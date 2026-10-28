@@ -2373,6 +2373,22 @@ fn waiting_list(deps: &[String], failed: &[&String]) -> String {
         .join(", ")
 }
 
+/// The packages among `pkgs` whose recorded fix-loop flags are not empty, with
+/// each flag's line, in the order given.
+fn fix_flagged<'a>(
+    state_root: &Path,
+    pkgs: impl Iterator<Item = &'a String>,
+) -> Vec<(String, Vec<String>)> {
+    pkgs.filter_map(|pkg| {
+        let lines: Vec<String> = ap_build::fix_flags::of_package(state_root, pkg)
+            .iter()
+            .map(|f| f.line())
+            .collect();
+        (!lines.is_empty()).then(|| (pkg.clone(), lines))
+    })
+    .collect()
+}
+
 fn print_run_summary(
     memory: &MemorySink,
     project: &str,
@@ -2433,6 +2449,25 @@ fn print_run_summary(
             let _ = writeln!(out, "  {pkg}");
         } else {
             let _ = writeln!(out, "  {pkg} <- {}", waiting_list(&deps, &failed));
+        }
+    }
+
+    // What the fix loop changed in the packages it built or gave up on: the same
+    // lines the changelog and the submit request carry.
+    let flagged = fix_flagged(
+        state_root,
+        latest
+            .iter()
+            .filter(|(_, (_, o))| {
+                matches!(o, PackageOutcome::Built | PackageOutcome::Failed { .. })
+            })
+            .map(|(pkg, _)| pkg),
+    );
+    let _ = writeln!(out, "\nFlagged by the fix loop ({}):", flagged.len());
+    for (pkg, lines) in &flagged {
+        let _ = writeln!(out, "  {pkg}");
+        for line in lines {
+            let _ = writeln!(out, "    {line}");
         }
     }
 
@@ -4558,6 +4593,26 @@ fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts: usize) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_summary_lists_only_packages_with_recorded_flags() {
+        use ap_build::fix_flags::{FixFlag, add, claim};
+        use ap_build::pipeline::PkgState;
+        use ap_build::workspace::Workspace;
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        PkgState::update(&ws, |st| {
+            claim(st, "r1");
+            add(st, FixFlag::CheckRemoved);
+        })
+        .unwrap();
+        Workspace::open(root.path(), "python-bar").unwrap();
+        let pkgs = ["python-foo".to_string(), "python-bar".to_string()];
+        assert_eq!(
+            fix_flagged(root.path(), pkgs.iter()),
+            vec![("python-foo".to_string(), vec![FixFlag::CheckRemoved.line()])]
+        );
+    }
+
     #[test]
     fn the_plan_counts_each_kind_of_package_as_it_is_added() {
         use ap_build::update::{Candidate, Decision, Ecosystem};
