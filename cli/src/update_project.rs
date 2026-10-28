@@ -7,7 +7,7 @@
 //! fix loop, notes, budget and locking behave the same.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -483,6 +483,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 branch: branch_project.clone(),
                 distro: a.distro.clone(),
                 arch: a.arch.clone(),
+                state_root: ctx.state_root.clone(),
                 reporter: reporter.clone(),
                 items: Default::default(),
                 created: Default::default(),
@@ -1433,6 +1434,7 @@ fn prepare_request(
     branch: &str,
     distro: Option<&str>,
     arch: &str,
+    state_root: &Path,
     item: &Item,
     outcome: &ItemOutcome,
     reporter: &(dyn Reporter + Send + Sync),
@@ -1526,7 +1528,11 @@ fn prepare_request(
         source_package: item.pkg.clone(),
         target_project: item.origin.clone(),
         target_package: item.pkg.clone(),
-        description: up::sr_description(item, newest_changes(branch, &item.pkg, emit).as_deref()),
+        description: up::sr_description(
+            item,
+            newest_changes(branch, &item.pkg, emit).as_deref(),
+            &ap_build::fix_flags::of_package(state_root, &item.pkg),
+        ),
         source_rev,
     })
 }
@@ -1575,6 +1581,8 @@ struct SubmitBackend {
     branch: String,
     distro: Option<String>,
     arch: String,
+    /// Where each package's state, with its fix-loop flags, is kept.
+    state_root: PathBuf,
     reporter: Arc<dyn Reporter + Send + Sync>,
     items: std::sync::Mutex<std::collections::HashMap<String, Item>>,
     /// `pkg: SR #id` for each request made from the TUI, for the run summary.
@@ -1605,6 +1613,7 @@ impl SubmitBackend {
             &self.branch,
             self.distro.as_deref(),
             &self.arch,
+            &self.state_root,
             &item,
             &ItemOutcome::Updated,
             self.reporter.as_ref(),
@@ -1707,6 +1716,7 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
             branch,
             a.distro.as_deref(),
             &a.arch,
+            &ctx.state_root,
             &r.item,
             &r.outcome,
             ctx.reporter.as_ref(),
@@ -2151,6 +2161,7 @@ mod tests {
             branch: "home:me:branches:Base".into(),
             distro: None,
             arch: "x86_64".into(),
+            state_root: PathBuf::from("/nonexistent-state-root"),
             reporter: Arc::new(ap_core::sink::MemorySink::new()),
             items: Default::default(),
             created: Default::default(),

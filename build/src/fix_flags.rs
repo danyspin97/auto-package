@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::deselect::is_section;
 use crate::pipeline::PkgState;
+use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -89,7 +90,7 @@ pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<FixFlag>) {
 
 /// The flags the package's last run recorded, for a reader outside the run.
 pub fn of_package(state_root: &std::path::Path, pkg: &str) -> Vec<FixFlag> {
-    crate::workspace::Workspace::find_existing(state_root, &[pkg])
+    Workspace::find_existing(state_root, &[pkg])
         .map(|ws| PkgState::load(&ws).fix_flags)
         .unwrap_or_default()
 }
@@ -453,6 +454,21 @@ mod tests {
         settle(&mut st, "r2", vec![FixFlag::CheckRemoved]);
         assert_eq!(st.fix_flags, vec![FixFlag::CheckRemoved]);
         assert_eq!(st.fix_flags_run_id.as_deref(), Some("r2"));
+    }
+
+    #[test]
+    fn a_reader_outside_the_run_sees_the_flags_the_package_recorded() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(of_package(root.path(), "python-foo").is_empty());
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        PkgState::update(&ws, |st| {
+            settle(st, "r1", vec![FixFlag::CheckRemoved]);
+        })
+        .unwrap();
+        assert_eq!(
+            of_package(root.path(), "python-foo"),
+            vec![FixFlag::CheckRemoved]
+        );
     }
 
     #[test]
