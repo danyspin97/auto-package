@@ -222,8 +222,6 @@ pub enum PipelineResult {
 /// it. Still 0: no re-check has been needed yet.
 pub const POLICY_VERSION: u32 = 0;
 
-/// Distinguishes the temp files of concurrent saves within one process.
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PkgState {
     /// The `POLICY_VERSION` the last successful build was checked against.
@@ -1732,7 +1730,8 @@ const MAX_IMMEDIATE_RATE_LIMIT_RETRIES: u32 = 5;
 
 /// Agent turns running at once, process-wide. Unlimited by default so packages
 /// get built as fast as the API allows; set `AUTO_PACKAGE_AGENT_JOBS=<n>` to cap
-/// it if the model quota (429s) is the bottleneck.
+/// it if the model quota (429s) is the bottleneck. An invalid value means the
+/// default cap, not unlimited.
 static AGENT_ACTIVE: (std::sync::Mutex<usize>, std::sync::Condvar) =
     (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
@@ -1755,15 +1754,38 @@ fn rate_limit_pause(streak: u32) -> std::time::Duration {
     std::time::Duration::from_secs(secs.min(60))
 }
 
+/// Cap used when `AUTO_PACKAGE_AGENT_JOBS` is set to something unusable.
+const DEFAULT_AGENT_JOBS: usize = 8;
+
+/// The cap `AUTO_PACKAGE_AGENT_JOBS` asks for and whether the value was usable.
+/// An unusable value gives the default cap, never "unlimited".
+fn parse_agent_jobs(raw: Option<&str>) -> (Option<usize>, bool) {
+    match raw.map(str::trim) {
+        None | Some("") => (None, true),
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) if n > 0 => (Some(n), true),
+            _ => (Some(DEFAULT_AGENT_JOBS), false),
+        },
+    }
+}
+
 struct AgentSlot;
 
 impl AgentSlot {
-    /// `None` = no cap.
+    /// `None` = no cap (only when the variable is unset or empty).
     fn limit() -> Option<usize> {
-        std::env::var("AUTO_PACKAGE_AGENT_JOBS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|n| *n > 0)
+        let raw = std::env::var_os("AUTO_PACKAGE_AGENT_JOBS");
+        let (cap, valid) = parse_agent_jobs(raw.as_deref().and_then(|v| v.to_str()));
+        if !valid {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "warning: AUTO_PACKAGE_AGENT_JOBS is not a positive number; \
+                     using the default cap of {DEFAULT_AGENT_JOBS}"
+                );
+            });
+        }
+        cap
     }
 
     /// Record a 429: no turn starts again before the pause for it has passed.
@@ -14030,14 +14052,17 @@ fn tarball_has_root_cargo_toml(tarball: &Path) -> bool {
     let Ok(file) = std::fs::File::open(tarball) else {
         return false;
     };
-    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut ar = ap_ecosystem::sdist::bounded_tar_gz(file);
     let Ok(entries) = ar.entries() else {
         return false;
     };
-    entries.flatten().any(|e| {
-        e.path()
-            .is_ok_and(|p| p.components().count() == 2 && p.ends_with("Cargo.toml"))
-    })
+    entries
+        .take(ap_ecosystem::sdist::SCAN_MAX_ENTRIES)
+        .flatten()
+        .any(|e| {
+            e.path()
+                .is_ok_and(|p| p.components().count() == 2 && p.ends_with("Cargo.toml"))
+        })
 }
 
 /// Whether a `.tar.gz` sdist ships a `Cargo.lock` at its top level, or next to
@@ -14046,22 +14071,25 @@ fn tarball_has_cargo_lock(tarball: &Path, manifests: &[String]) -> bool {
     let Ok(file) = std::fs::File::open(tarball) else {
         return false;
     };
-    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut ar = ap_ecosystem::sdist::bounded_tar_gz(file);
     let Ok(entries) = ar.entries() else {
         return false;
     };
-    entries.flatten().any(|e| {
-        e.path().is_ok_and(|p| {
-            if !p.ends_with("Cargo.lock") {
-                return false;
-            }
-            let rel: PathBuf = p.components().skip(1).collect();
-            rel.parent().is_some_and(|dir| {
-                dir.as_os_str().is_empty()
-                    || manifests.iter().any(|m| Path::new(m).parent() == Some(dir))
+    entries
+        .take(ap_ecosystem::sdist::SCAN_MAX_ENTRIES)
+        .flatten()
+        .any(|e| {
+            e.path().is_ok_and(|p| {
+                if !p.ends_with("Cargo.lock") {
+                    return false;
+                }
+                let rel: PathBuf = p.components().skip(1).collect();
+                rel.parent().is_some_and(|dir| {
+                    dir.as_os_str().is_empty()
+                        || manifests.iter().any(|m| Path::new(m).parent() == Some(dir))
+                })
             })
         })
-    })
 }
 
 /// Whether a `.tar.gz` sdist ships a `package-lock.json` (the input the
@@ -14070,16 +14098,19 @@ fn tarball_has_npm_lockfile(tarball: &Path) -> bool {
     let Ok(file) = std::fs::File::open(tarball) else {
         return false;
     };
-    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut ar = ap_ecosystem::sdist::bounded_tar_gz(file);
     let Ok(entries) = ar.entries() else {
         return false;
     };
-    entries.flatten().any(|e| {
-        e.path().is_ok_and(|p| {
-            p.file_name().is_some_and(|n| n == "package-lock.json")
-                && !p.components().any(|c| c.as_os_str() == "node_modules")
+    entries
+        .take(ap_ecosystem::sdist::SCAN_MAX_ENTRIES)
+        .flatten()
+        .any(|e| {
+            e.path().is_ok_and(|p| {
+                p.file_name().is_some_and(|n| n == "package-lock.json")
+                    && !p.components().any(|c| c.as_os_str() == "node_modules")
+            })
         })
-    })
 }
 
 /// The contents of the shallowest `package-lock.json` of a `.tar.gz` sdist that
@@ -14087,9 +14118,14 @@ fn tarball_has_npm_lockfile(tarball: &Path) -> bool {
 fn tarball_npm_lockfile(tarball: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(tarball).ok()?;
-    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut ar = ap_ecosystem::sdist::bounded_tar_gz(file);
     let mut best: Option<(usize, Vec<u8>)> = None;
-    for mut entry in ar.entries().ok()?.flatten() {
+    for mut entry in ar
+        .entries()
+        .ok()?
+        .take(ap_ecosystem::sdist::SCAN_MAX_ENTRIES)
+        .flatten()
+    {
         let Ok(path) = entry.path().map(|p| p.into_owned()) else {
             continue;
         };
@@ -16364,6 +16400,20 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_agent_jobs_value_is_never_unlimited() {
+        assert_eq!(parse_agent_jobs(None), (None, true));
+        assert_eq!(parse_agent_jobs(Some("")), (None, true));
+        assert_eq!(parse_agent_jobs(Some("3")), (Some(3), true));
+        for junk in ["0", "-1", "many", "1.5"] {
+            assert_eq!(
+                parse_agent_jobs(Some(junk)),
+                (Some(DEFAULT_AGENT_JOBS), false),
+                "{junk:?}"
+            );
+        }
+    }
+
+    #[test]
     fn agent_turns_are_uncapped_unless_asked() {
         // SAFETY: tests in this module that touch this variable run serially
         // through the lock below.
@@ -16371,9 +16421,9 @@ mod tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("AUTO_PACKAGE_AGENT_JOBS") };
         assert_eq!(AgentSlot::limit(), None);
-        for junk in ["0", "-1", "many", ""] {
+        for junk in ["0", "-1", "many"] {
             unsafe { std::env::set_var("AUTO_PACKAGE_AGENT_JOBS", junk) };
-            assert_eq!(AgentSlot::limit(), None, "{junk:?}");
+            assert_eq!(AgentSlot::limit(), Some(DEFAULT_AGENT_JOBS), "{junk:?}");
         }
         unsafe { std::env::set_var("AUTO_PACKAGE_AGENT_JOBS", "7") };
         assert_eq!(AgentSlot::limit(), Some(7));
