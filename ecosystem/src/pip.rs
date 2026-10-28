@@ -95,13 +95,29 @@ pub enum Error {
 ///
 /// Caches are stored in `~/.cache/auto-package/pip-resolve/` by default,
 /// or `$XDG_CACHE_HOME/auto-package/pip-resolve/` if XDG_CACHE_HOME is set.
+/// Only absolute paths are accepted; otherwise a per-user directory under the
+/// temp dir is used, so the cache never lands relative to the working directory.
 fn cache_dir() -> std::path::PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(home).join(".cache")
-        });
+    cache_dir_from(
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("HOME"),
+        std::env::temp_dir(),
+        // SAFETY: getuid has no preconditions and cannot fail.
+        unsafe { libc::getuid() },
+    )
+}
+
+fn cache_dir_from(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    tmp: std::path::PathBuf,
+    uid: u32,
+) -> std::path::PathBuf {
+    let absolute =
+        |v: Option<std::ffi::OsString>| v.map(std::path::PathBuf::from).filter(|p| p.is_absolute());
+    let base = absolute(xdg)
+        .or_else(|| absolute(home).map(|h| h.join(".cache")))
+        .unwrap_or_else(|| tmp.join(format!("auto-package-cache-{uid}")));
     base.join("auto-package").join("pip-resolve")
 }
 
@@ -682,8 +698,7 @@ pub fn set_unsafe_resolve(unsafe_resolve: bool) {
 }
 
 fn unsafe_resolve() -> bool {
-    UNSAFE_RESOLVE.load(Ordering::Relaxed)
-        || std::env::var_os(UNSAFE_RESOLVE_ENV).is_some_and(|v| v == "1")
+    UNSAFE_RESOLVE.load(Ordering::Relaxed) || ap_core::env::env_flag(UNSAFE_RESOLVE_ENV)
 }
 
 /// How resolution runs now: unsandboxed on request, sandboxed when bwrap
@@ -1461,6 +1476,29 @@ mod tests {
         );
         assert_ne!(latest, pinned);
         assert!(latest.contains("httpx-latest-"), "{latest}");
+    }
+
+    #[test]
+    fn cache_dir_is_always_absolute() {
+        use std::ffi::OsString;
+        use std::path::{Path, PathBuf};
+        let tmp = PathBuf::from("/tmp");
+        let o = |s: &str| Some(OsString::from(s));
+        let d = |x, h| cache_dir_from(x, h, tmp.clone(), 1000);
+        assert_eq!(
+            d(o("/x"), o("/h")),
+            Path::new("/x/auto-package/pip-resolve")
+        );
+        assert_eq!(
+            d(o(""), o("/h")),
+            Path::new("/h/.cache/auto-package/pip-resolve")
+        );
+        assert_eq!(
+            d(o("rel"), None),
+            Path::new("/tmp/auto-package-cache-1000/auto-package/pip-resolve")
+        );
+        assert!(d(None, o("relhome")).is_absolute());
+        assert!(d(None, None).is_absolute());
     }
 
     #[test]
