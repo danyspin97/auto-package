@@ -5307,6 +5307,209 @@ pub fn commit(
     Ok(())
 }
 
+/// Commit message of the commit that puts a baseline back.
+pub const RESTORE_MESSAGE: &str = "auto-package: restore baseline after failed run";
+
+/// Keep in `dir` what OBS holds for `checkout_dir`, before the run first writes
+/// to it: the names it tracks, and a copy of each one's pristine file (osc's
+/// copy in `.osc/sources`, the revision the checkout was made or last
+/// committed from). A tracked name without a pristine copy is listed anyway, so
+/// the restore can say it cannot put that file back.
+pub fn save_baseline(checkout_dir: &Path, dir: &Path) -> std::io::Result<()> {
+    let saved = dir.join("files");
+    fs::create_dir_all(&saved)?;
+    let tracked = tracked_files(checkout_dir);
+    for name in tracked
+        .iter()
+        .filter(|n| is_safe_file_arg(n) && !n.starts_with('.'))
+    {
+        match fs::copy(
+            checkout_dir.join(".osc/sources").join(name),
+            saved.join(name),
+        ) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    fs::write(dir.join("tracked"), tracked.join("\n"))?;
+    fs::write(
+        dir.join("checkout"),
+        checkout_dir.to_string_lossy().as_bytes(),
+    )
+}
+
+/// Note in `dir` the files a commit is about to send to OBS, before it is made:
+/// an attempt that fails half way may still have written them.
+pub fn note_attempt(dir: &Path, files: &[String]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut list = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("attempted"))?;
+    for name in files {
+        writeln!(list, "{name}")?;
+    }
+    Ok(())
+}
+
+/// The files the run noted as sent to OBS in `dir` (see [`note_attempt`]).
+/// Empty when nothing was written.
+pub fn attempted_files(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("attempted"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Put the baseline saved in `dir` back into its checkout, and commit the
+/// attempted files with `commit`, the OBS write (the real one is [`commit`];
+/// tests record the call). Tracked files get their saved copy back, and files
+/// the run added are removed from the checkout, so the commit deletes them on
+/// OBS.
+pub fn restore_baseline_with(
+    dir: &Path,
+    commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
+) -> Result<(), String> {
+    let attempted = attempted_files(dir);
+    if attempted.is_empty() {
+        return Ok(());
+    }
+    let checkout = fs::read_to_string(dir.join("checkout"))
+        .map(PathBuf::from)
+        .map_err(|e| format!("the checkout the baseline was saved from is unknown: {e}"))?;
+    let tracked = fs::read_to_string(dir.join("tracked")).unwrap_or_default();
+    if let Some(bad) = attempted.iter().find(|n| !is_safe_file_arg(n)) {
+        return Err(format!(
+            "refusing to restore {bad:?}: not a plain file name"
+        ));
+    }
+    for name in &attempted {
+        let target = checkout.join(name);
+        if tracked.lines().any(|t| t == name.as_str()) {
+            let saved = fs::read(dir.join("files").join(name))
+                .map_err(|e| format!("{name}: no saved copy of the baseline ({e})"))?;
+            ap_core::fsx::write_atomic(&target, saved).map_err(|e| format!("{name}: {e}"))?;
+        } else {
+            match fs::remove_file(&target) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{name}: {e}")),
+            }
+        }
+    }
+    commit(&checkout, RESTORE_MESSAGE, &attempted).map_err(|e| e.to_string())
+}
+
+/// [`restore_baseline_with`] committing through [`commit`].
+pub fn restore_baseline(dir: &Path, emit: Emit<'_>) -> Result<(), String> {
+    restore_baseline_with(dir, |checkout, message, files| {
+        commit(checkout, message, files, emit)
+    })
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+
+    /// A checkout as osc leaves it: `.osc/_files` lists the tracked names and
+    /// `.osc/sources` holds their pristine copies.
+    fn checkout(tracked: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let entries: String = tracked
+            .iter()
+            .map(|(name, _)| format!(r#"<entry name="{name}" md5="x"/>"#))
+            .collect();
+        fs::create_dir_all(dir.path().join(".osc/sources")).unwrap();
+        fs::write(
+            dir.path().join(".osc/_files"),
+            format!("<directory>{entries}</directory>"),
+        )
+        .unwrap();
+        for (name, body) in tracked {
+            fs::write(dir.path().join(".osc/sources").join(name), body).unwrap();
+            fs::write(dir.path().join(name), body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn the_baseline_keeps_each_tracked_file_as_osc_has_it() {
+        let co = checkout(&[("foo.spec", "Name: foo\n")]);
+        // The run edits the working copy before its first write.
+        fs::write(co.path().join("foo.spec"), "edited").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        save_baseline(co.path(), base.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(base.path().join("files/foo.spec")).unwrap(),
+            "Name: foo\n"
+        );
+        assert_eq!(
+            fs::read_to_string(base.path().join("tracked")).unwrap(),
+            "foo.spec"
+        );
+    }
+
+    #[test]
+    fn a_run_that_wrote_nothing_restores_nothing() {
+        let co = checkout(&[("foo.spec", "a")]);
+        let base = tempfile::tempdir().unwrap();
+        save_baseline(co.path(), base.path()).unwrap();
+        let res = restore_baseline_with(base.path(), |_, _, _| {
+            unreachable!("nothing was attempted, so nothing is committed")
+        });
+        assert_eq!(res, Ok(()));
+    }
+
+    #[test]
+    fn a_failed_attempt_is_undone_and_its_new_file_removed() {
+        let co = checkout(&[("foo.spec", "Name: foo\n"), ("foo-1.0.tar.gz", "old")]);
+        let base = tempfile::tempdir().unwrap();
+        save_baseline(co.path(), base.path()).unwrap();
+        // The attempt: spec edited, old archive dropped, new archive added.
+        fs::write(co.path().join("foo.spec"), "Name: foo\nVersion: 2\n").unwrap();
+        fs::remove_file(co.path().join("foo-1.0.tar.gz")).unwrap();
+        fs::write(co.path().join("foo-2.0.tar.gz"), "new").unwrap();
+        let attempt: Vec<String> = ["foo.spec", "foo-1.0.tar.gz", "foo-2.0.tar.gz"]
+            .map(String::from)
+            .to_vec();
+        note_attempt(base.path(), &attempt).unwrap();
+
+        let mut sent = Vec::new();
+        let res = restore_baseline_with(base.path(), |_, message, files| {
+            sent.push((message.to_string(), files.to_vec()));
+            Ok(())
+        });
+        assert_eq!(res, Ok(()));
+        assert_eq!(
+            fs::read_to_string(co.path().join("foo.spec")).unwrap(),
+            "Name: foo\n"
+        );
+        assert_eq!(
+            fs::read_to_string(co.path().join("foo-1.0.tar.gz")).unwrap(),
+            "old"
+        );
+        assert!(!co.path().join("foo-2.0.tar.gz").exists());
+        assert_eq!(sent, vec![(RESTORE_MESSAGE.to_string(), attempt)]);
+    }
+
+    #[test]
+    fn a_tracked_file_without_a_saved_copy_is_not_guessed_back() {
+        let co = checkout(&[("foo.spec", "a")]);
+        fs::remove_file(co.path().join(".osc/sources/foo.spec")).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        save_baseline(co.path(), base.path()).unwrap();
+        note_attempt(base.path(), &["foo.spec".to_string()]).unwrap();
+        let err = restore_baseline_with(base.path(), |_, _, _| {
+            unreachable!("the baseline cannot be restored, so nothing is committed")
+        })
+        .unwrap_err();
+        assert!(err.contains("no saved copy"), "{err}");
+    }
+}
+
 /// Query the OBS build status for one repo/arch combination.
 ///
 /// Reads `/build/<project>/_result` (XML) and interprets it with
