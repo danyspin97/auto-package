@@ -2828,23 +2828,19 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              cannot run in this environment (no network, no GPU, no display beyond \
              what xvfb-run supplies, no shipped fixture). Skipping before you have \
              checked what the test actually needs throws away coverage for a problem \
-             a BuildRequires would have fixed — the Oct 6 review flagged the earlier \
-             blanket \"prefer skipping over adding deps\" phrasing as a contradiction \
-             with convention 10, which it was.\n\
+             a BuildRequires would have fixed.\n\
              \n\
              The hint below is a heuristic extract of the failure; read build.log \
              yourself whenever the extract looks like it caught the wrong thing.\n\
              \n\
              Before concluding a prior fix did not work, rule out a stale build.log: \
-             compare this attempt's build.log against the previous one (md5sum, or the \
-             VM boot timestamp/line count) — if they are byte-for-byte identical, OBS \
-             has not actually rebuilt against your last commit yet, and this log says \
+             compare this attempt's build.log with the previous one (Read or Grep the \
+             VM boot timestamp and the line count: you have no md5sum). If they match, \
+             OBS has not actually rebuilt against your last commit yet, and this log says \
              nothing about whether that fix worked. You cannot re-run the build: verify the \
              fix statically (by reading the spec), say in your reasoning that the log looks \
-             stale, and return `no_change` rather than \
-             reverting a plausible fix on the strength of a stale log — two real cases \
-             (`triton`'s `PYTHONPATH` fix, `python-duckdb`'s `%dir` fix) were both nearly \
-             undone this way before the staleness was caught."
+             stale, and return `no_change` rather than reverting a plausible fix on the \
+             strength of a stale log."
         }
         Task::FixAfterValidation => {
             "Fix the spec after it was rejected before any build.\n\
