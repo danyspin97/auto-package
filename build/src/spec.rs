@@ -7894,9 +7894,10 @@ pub fn check_quality_problems(spec: &str) -> Vec<String> {
     if ignores > MAX_CHECK_IGNORES {
         return vec![format!(
             "its %check carries {ignores} `--ignore` options: a suite cut down this far has \
-             one root cause (a device, a missing fixture directory, a network); replace it \
-             with an import smoke test of the package, plus only the tests that can pass \
-             (convention 67)"
+             one root cause (a device, a missing fixture directory, a network): find it and \
+             select the runnable subset by marker or directory instead of ignoring files one \
+             by one (convention 67). An import smoke test only with the quoted log line that \
+             proves no subset can run (convention 11, rung iv)"
         )];
     }
     Vec::new()
