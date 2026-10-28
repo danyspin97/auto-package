@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod distro_bounds;
 pub mod doctor;
 pub mod explain;
+pub mod fix_flags;
 pub mod flaky;
 pub mod flavors;
 pub mod http;

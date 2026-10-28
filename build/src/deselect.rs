@@ -297,7 +297,7 @@ const SECTIONS: &[&str] = &[
     "%posttrans",
 ];
 
-fn is_section(line: &str) -> bool {
+pub(crate) fn is_section(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or("");
     SECTIONS.contains(&first)
 }

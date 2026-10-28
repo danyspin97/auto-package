@@ -351,6 +351,12 @@ pub struct PkgState {
     /// `rpm_name` itself.
     #[serde(default)]
     pub obs_name: Option<String>,
+    /// What the fix loop changed that a reader must be told (see
+    /// [`crate::fix_flags`]), for the run `fix_flags_run_id`.
+    #[serde(default)]
+    pub fix_flags: Vec<crate::fix_flags::FixFlag>,
+    #[serde(default)]
+    pub fix_flags_run_id: Option<String>,
 }
 
 impl PkgState {
@@ -6398,6 +6404,25 @@ fn restore_obs_baseline(
     }
 }
 
+/// What OBS held for `name` when the baseline was kept. `osc::save_baseline`
+/// keeps each tracked file under `files/`; `None` when OBS did not hold it.
+pub(crate) fn baseline_text(baseline: &Path, name: impl AsRef<Path>) -> Option<String> {
+    std::fs::read_to_string(baseline.join("files").join(name)).ok()
+}
+
+/// Records the fix-loop flags of the spec about to be committed: the change
+/// from the OBS baseline (`baseline` holds the files OBS has) to the final spec.
+/// The `blocked` answers the run recorded stay.
+fn settle_fix_flags(ctx: &RunCtx, baseline: &Path) {
+    let spec_name = ctx.spec_path.file_name().unwrap_or_default();
+    let before = baseline_text(baseline, spec_name);
+    let after = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    let found = crate::fix_flags::from_spec_diff(before.as_deref(), &after);
+    update_state(&ctx.ws, ctx.reporter, |st| {
+        crate::fix_flags::settle(st, &ctx.config.run_id, found)
+    });
+}
+
 /// Step: Commit.
 fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     let commit_step = begin_or_fail!(
@@ -6464,6 +6489,7 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
             ),
         });
     }
+    settle_fix_flags(ctx, &baseline);
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
     let plan = osc::publish_plan(&ctx.checkout_dir);
     for name in &plan.skipped {
@@ -10631,6 +10657,17 @@ fn apply_turn_outcome_with(
                 snap.restore_keeping(reporter, Some(step), &keep);
             }
             restore_spec(spec_path, before, Some(step), reporter);
+            // Recorded as a fix-loop flag: a blocked answer is a result the
+            // changelog, the request and the summary must show.
+            if let Ok(ws) = Workspace::open(&config.state_root, rpm_name) {
+                update_state(&ws, reporter, |st| {
+                    crate::fix_flags::claim(st, &config.run_id);
+                    crate::fix_flags::add(
+                        st,
+                        crate::fix_flags::FixFlag::Blocked { why: why.clone() },
+                    );
+                });
+            }
             // Journaled like an edit: a turn that changed nothing is still what
             // the next turn, and whoever reads the notes, needs to know about
             // (python-chromadb's ten identical turns left no trace in them).
@@ -16259,6 +16296,19 @@ mod obs_baseline_tests {
             other => panic!("{other:?}"),
         }
         assert!(dir.exists());
+    }
+
+    #[test]
+    fn the_baseline_is_read_from_the_files_save_baseline_keeps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(OBS_BASELINE_DIR);
+        std::fs::create_dir_all(dir.join("files")).unwrap();
+        std::fs::write(dir.join("files").join("foo.spec"), "Name: foo\n").unwrap();
+        assert_eq!(
+            baseline_text(&dir, "foo.spec").as_deref(),
+            Some("Name: foo\n")
+        );
+        assert_eq!(baseline_text(&dir, "bar.spec"), None);
     }
 
     #[test]
