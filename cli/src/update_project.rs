@@ -1096,6 +1096,7 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
         pending.push((
             idx,
             osc::SubmitRequest {
+                source_rev: None,
                 source_project: branch.to_string(),
                 source_package: r.item.pkg.clone(),
                 target_project: r.item.origin.clone(),

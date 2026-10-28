@@ -844,17 +844,25 @@ pub struct SubmitRequest {
     pub target_project: String,
     pub target_package: String,
     pub description: String,
+    /// The `srcmd5` of the source package the request was prepared and checked
+    /// for. The request is pinned to it, and creating it is refused when the
+    /// source has moved on.
+    pub source_rev: Option<String>,
 }
 
 /// The request document `POST /request?cmd=create` takes.
 pub fn submit_request_xml(sr: &SubmitRequest) -> String {
     format!(
         "<request>\n  <action type=\"submit\">\n    \
-         <source project=\"{}\" package=\"{}\"/>\n    \
+         <source project=\"{}\" package=\"{}\"{}/>\n    \
          <target project=\"{}\" package=\"{}\"/>\n  </action>\n  \
          <description>{}</description>\n</request>\n",
         xml_escape(&sr.source_project),
         xml_escape(&sr.source_package),
+        sr.source_rev
+            .as_deref()
+            .map(|r| format!(" rev=\"{}\"", xml_escape(r)))
+            .unwrap_or_default(),
         xml_escape(&sr.target_project),
         xml_escape(&sr.target_package),
         xml_escape(&sr.description),
@@ -869,12 +877,52 @@ pub fn parse_request_id(xml: &str) -> Option<String> {
         .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// The `srcmd5` in a package listing's `<directory>` tag.
+pub fn parse_directory_srcmd5(xml: &str) -> Option<String> {
+    let rest = &xml[xml.find("<directory")?..];
+    let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
+    extract_xml_attr(tag, "srcmd5").filter(|r| !r.is_empty())
+}
+
+/// The current `srcmd5` of `project/package`.
+pub fn source_srcmd5(project: &str, package: &str, emit: Emit<'_>) -> Result<String, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", package)?;
+    let xml = api_get(&format!("/source/{project}/{}", enc(package)), emit)?;
+    parse_directory_srcmd5(&xml).ok_or_else(|| {
+        Error::NotActionable(format!("OBS returned no revision for {project}/{package}"))
+    })
+}
+
+/// Refuse a request whose source package is no longer at the revision it was
+/// prepared for. `current` reads the revision now.
+pub fn verify_source_rev(
+    sr: &SubmitRequest,
+    current: impl FnOnce() -> Result<String, Error>,
+) -> Result<(), Error> {
+    let Some(expected) = &sr.source_rev else {
+        return Ok(());
+    };
+    let now = current()?;
+    if &now != expected {
+        return Err(Error::NotActionable(format!(
+            "{}/{} changed since the request was prepared (revision {expected}, now {now}); \
+             nothing was submitted, check it again",
+            sr.source_project, sr.source_package
+        )));
+    }
+    Ok(())
+}
+
 /// Create a submit request and return its id.
 pub fn create_submit_request(sr: &SubmitRequest, emit: Emit<'_>) -> Result<String, Error> {
     check_obs_name("project", &sr.source_project)?;
     check_obs_name("package", &sr.source_package)?;
     check_obs_name("project", &sr.target_project)?;
     check_obs_name("package", &sr.target_package)?;
+    verify_source_rev(sr, || {
+        source_srcmd5(&sr.source_project, &sr.source_package, emit)
+    })?;
     let out = api_call(
         Some("POST"),
         "/request?cmd=create",
@@ -1382,7 +1430,40 @@ mod tests {
             target_project: "Base:System".into(),
             target_package: "foo".into(),
             description: "Update to 2 (was 1) & <more>".into(),
+            source_rev: None,
         }
+    }
+
+    #[test]
+    fn submit_request_xml_pins_the_source_revision() {
+        let mut r = sr();
+        r.source_rev = Some("abc123".into());
+        assert!(submit_request_xml(&r).contains(
+            "<source project=\"home:u:branches:Base:System\" package=\"foo\" rev=\"abc123\"/>"
+        ));
+    }
+
+    #[test]
+    fn directory_srcmd5_is_read_from_the_listing() {
+        let xml = r#"<directory name="foo" rev="3" vrev="1" srcmd5="aaa111">
+  <linkinfo project="o" package="foo" srcmd5="bbb222" baserev="bbb222"/>
+  <entry name="foo.spec" md5="x" size="1" mtime="1"/>
+</directory>"#;
+        assert_eq!(parse_directory_srcmd5(xml).as_deref(), Some("aaa111"));
+        assert_eq!(parse_directory_srcmd5("<nope/>"), None);
+    }
+
+    #[test]
+    fn a_moved_source_revision_refuses_the_request() {
+        let mut r = sr();
+        r.source_rev = Some("aaa".into());
+        assert!(verify_source_rev(&r, || Ok("aaa".into())).is_ok());
+        let err = verify_source_rev(&r, || Ok("bbb".into())).unwrap_err();
+        assert!(err.to_string().contains("changed since"), "{err}");
+        assert!(verify_source_rev(&r, || Err(Error::NotActionable("x".into()))).is_err());
+        // An unpinned request is not compared (and the reader is not called).
+        r.source_rev = None;
+        assert!(verify_source_rev(&r, || panic!("read")).is_ok());
     }
 
     #[test]

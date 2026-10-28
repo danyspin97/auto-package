@@ -315,6 +315,25 @@ pub fn latest_changes_entry(changes: &str) -> Option<String> {
     Some(format!("{}\n[...]", cut.trim_end()))
 }
 
+/// Longest changelog text a request description carries.
+const SR_CHANGELOG_MAX: usize = 2000;
+
+/// `text` without control characters (a newline stays; a tab becomes a space)
+/// and cut to [`SR_CHANGELOG_MAX`] characters: the text is package-controlled
+/// and ends up in a request that people read in a terminal or a web page.
+fn sanitize_changelog(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .filter(|c| *c == '\n' || !c.is_control())
+        .collect();
+    if clean.chars().count() <= SR_CHANGELOG_MAX {
+        return clean;
+    }
+    let cut: String = clean.chars().take(SR_CHANGELOG_MAX).collect();
+    format!("{}\n[...]", cut.trim_end())
+}
+
 /// The description of the submit request for `item`.
 pub fn sr_description(item: &Item, changes: Option<&str>) -> String {
     let mut out = if item.findings.is_empty() {
@@ -332,7 +351,7 @@ pub fn sr_description(item: &Item, changes: Option<&str>) -> String {
     };
     if let Some(c) = changes {
         out.push_str("\n\nChangelog:\n");
-        out.push_str(c);
+        out.push_str(&sanitize_changelog(c));
     }
     out.push_str("\n\nBuilt in the branch project by auto-package.");
     out
@@ -654,6 +673,18 @@ Mon Sep  1 09:00:00 UTC 2026 - Dev <dev@example.org>\n\
         let d = sr_description(&i, Some("- Update to 2.0"));
         assert!(d.starts_with("Update foo to 2.0 (was 1.0).\n\nChangelog:\n- Update to 2.0"));
         assert!(!sr_description(&i, None).contains("Changelog"));
+    }
+
+    #[test]
+    fn the_changelog_in_the_description_has_no_control_characters_and_is_capped() {
+        let i = item("foo");
+        let d = sr_description(&i, Some("- ok\x1b[31m red\r\n\x07bell\tTab"));
+        assert!(d.contains("- ok[31m red\nbell Tab"), "{d:?}");
+        assert!(!d.contains('\x1b') && !d.contains('\r') && !d.contains('\x07'));
+        let long = "x".repeat(10_000);
+        let d = sr_description(&i, Some(&long));
+        assert!(d.len() < 2500, "{}", d.len());
+        assert!(d.contains("[...]"));
     }
 
     #[test]
