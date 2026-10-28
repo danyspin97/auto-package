@@ -1395,6 +1395,9 @@ pub struct Options {
     pub arch: String,
     /// Where the checkouts that add the bug references go.
     pub checkout_dir: PathBuf,
+    /// The workspace state directory (`state/`), where a build recorded the
+    /// risk flags `--yes` must not submit past.
+    pub state_root: PathBuf,
     /// Backport (the default of `update`), update or lint.
     pub mode: Mode,
     /// `--backport`: the fixes of a backport, as given.
@@ -1758,6 +1761,20 @@ fn commit_refs(
     }
 }
 
+/// The risk lines `--yes` must not submit past for `pkg`: what its recorded
+/// state says needs a review, or why that state cannot be read. A package with
+/// no recorded state was never built here, so it has none.
+fn yes_blockers(state_root: &std::path::Path, pkg: &str) -> Vec<String> {
+    match crate::risk_flags::try_of_package(state_root, pkg) {
+        Ok(flags) => flags
+            .iter()
+            .map(crate::risk_flags::RiskFlag::line)
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => vec![format!("its recorded state cannot be read: {e}")],
+    }
+}
+
 /// Put back the OBS baselines of branches whose references were committed, for
 /// a maintenance request that could not be created: the references must not
 /// stay on the branches without their request. Returns what could not go back.
@@ -2106,6 +2123,31 @@ pub fn run_with(
                 ));
             }
         }
+        // `--yes` approves without asking, so a package whose change needs a
+        // review (or whose recorded state cannot be read) gets no request.
+        let blockers = if opts.yes {
+            yes_blockers(&opts.state_root, pkg)
+        } else {
+            Vec::new()
+        };
+        if !blockers.is_empty() {
+            (host.warn)(&format!(
+                "--yes refuses to create the maintenance request for {pkg}: it needs a review; \
+                 run without --yes to review it"
+            ));
+            for line in &blockers {
+                (host.warn)(&format!("  {line}"));
+            }
+            for r in &ready {
+                reports[i].push(StreamReport {
+                    stream: r.action.release_project.clone(),
+                    outcome: StreamOutcome::Failed(
+                        "--yes refuses to submit a change that needs a review".into(),
+                    ),
+                });
+            }
+            continue;
+        }
         if !opts.yes && !(host.confirm)(&format!("Create the maintenance request for {pkg}?")) {
             (host.say)(&format!("{pkg}: no maintenance request (declined)"));
             for r in &ready {
@@ -2217,6 +2259,36 @@ mod undo_refs_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn yes_blocks_a_package_whose_recorded_risks_need_a_review_or_cannot_be_read() {
+        use crate::pipeline::PkgState;
+        use crate::risk_flags::{RiskFlag, settle};
+        use crate::workspace::Workspace;
+        let root = tempfile::tempdir().unwrap();
+        // Never built here: nothing recorded, nothing to block on.
+        assert!(super::yes_blockers(root.path(), "python-new").is_empty());
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        PkgState::update(&ws, |st| {
+            settle(
+                st,
+                "r1",
+                vec![RiskFlag::NewScriptlet {
+                    header: "%post".into(),
+                }],
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            super::yes_blockers(root.path(), "python-foo"),
+            vec!["RISK: new scriptlet: %post".to_string()]
+        );
+        std::fs::write(ws.dir().join("state.json"), "{ not json").unwrap();
+        let lines = super::yes_blockers(root.path(), "python-foo");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("cannot be read"), "{lines:?}");
+    }
+
     use super::*;
 
     fn cs(project: &str) -> Codestream {
