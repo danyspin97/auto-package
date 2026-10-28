@@ -8962,6 +8962,7 @@ fn resolve_blocked_with(
 /// call returns. A retry overwrites the error it follows, so the cost cannot
 /// wait for the final result: that would drop the first call's spend.
 fn charge_failed_call(
+    work_dir: &Path,
     ws: &Workspace,
     run_id: &str,
     spent_usd: &mut f64,
@@ -8975,7 +8976,29 @@ fn charge_failed_call(
         // Saved now, not with the next successful turn: a package that
         // stops here would otherwise lose the spend in state.json.
         add_run_spend(ws, run_id, usage.cost_usd());
+        record_daily_spend(work_dir, usage.cost_usd());
     }
+}
+
+/// Add a finished turn's cost to the work directory's daily ledger. Spend
+/// already incurred cannot be refused, so a ledger that cannot be written is
+/// only reported; the next turn then fails closed in `daily_cap_check`.
+fn record_daily_spend(work_dir: &Path, usd: f64) {
+    let dir = ap_core::limits::ledger_dir().unwrap_or_else(|| work_dir.to_path_buf());
+    if let Err(e) = ap_core::ledger::record(&dir, usd) {
+        ap_core::diag!("  cannot record ${usd:.2} in the spend ledger: {e}");
+    }
+}
+
+/// Refuse a turn that would take the day's spend past `--max-total-usd`, or
+/// when the ledger cannot be read or locked.
+fn daily_cap_check(work_dir: &Path) -> Result<(), String> {
+    let dir = ap_core::limits::ledger_dir().unwrap_or_else(|| work_dir.to_path_buf());
+    ap_core::ledger::check(
+        &dir,
+        ap_core::limits::ESTIMATED_TURN_USD,
+        ap_core::limits::max_total_usd(),
+    )
 }
 
 /// Run one agent turn and emit every event it produces.
@@ -9007,6 +9030,15 @@ fn agent_turn(
         step_attempts,
     )
     .map_err(|e| (e.to_string(), FailureKind::Other))?;
+
+    if let Err(message) = daily_cap_check(&config.work_dir) {
+        let step = step.finish(StepOutcome::Failed);
+        reporter.report(&Event::Warning {
+            step: Some(step.id),
+            message: message.clone(),
+        });
+        return Err((message, FailureKind::Exhausted));
+    }
 
     if let Some(hint) = ctx.hint {
         let extract = hint.to_event_extract();
@@ -9118,7 +9150,7 @@ fn agent_turn(
         // separately and retrying in lockstep.
         let slot = AgentSlot::acquire();
         let mut result = crate::agent::turn(make_req(*spent_usd));
-        charge_failed_call(ws, &config.run_id, spent_usd, &result);
+        charge_failed_call(&config.work_dir, ws, &config.run_id, spent_usd, &result);
         // A resumed session can answer in prose ("I already called
         // StructuredOutput in my previous message") without making the call in
         // THIS turn, which leaves nothing to act on (python-brotlicffi's last
@@ -9143,7 +9175,7 @@ fn agent_turn(
             ));
             fresh_session.set(true);
             result = crate::agent::turn(make_req(*spent_usd));
-            charge_failed_call(ws, &config.run_id, spent_usd, &result);
+            charge_failed_call(&config.work_dir, ws, &config.run_id, spent_usd, &result);
         }
         drop(slot);
         if matches!(&result, Err(e) if e.is_rate_limited()) {
@@ -9222,6 +9254,7 @@ fn agent_turn(
         )
     });
     *spent_usd += outcome.usage.cost_usd();
+    record_daily_spend(&config.work_dir, outcome.usage.cost_usd());
 
     // If the claude CLI's final `result` event carried a structured
     // end-early signal but `pick_turn_response` still rescued a usable
@@ -9266,6 +9299,25 @@ fn agent_turn(
         update_state(&ws, reporter, |st| {
             claim_run(st, &config.run_id);
             st.cumulative_spent_usd = *spent_usd;
+        });
+    }
+
+    // A command the allowlist refused is a gap in the tool, not the package's:
+    // say so in the log, so the next run's reader sees what the turn could not do.
+    if !outcome.denied_commands.is_empty() {
+        reporter.report(&Event::Warning {
+            step: Some(step.id),
+            message: format!(
+                "{}: the sandbox refused {} command(s) in this turn: {}",
+                config.rpm_name,
+                outcome.denied_commands.len(),
+                outcome
+                    .denied_commands
+                    .iter()
+                    .map(|c| format!("`{}`", brief(c)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         });
     }
 
