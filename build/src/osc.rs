@@ -66,6 +66,9 @@ pub enum Error {
     #[error("refusing to run the checkout's _service: {reason}")]
     ServiceRejected { reason: String },
 
+    #[error("cannot sandbox the checkout's _service: {0}")]
+    ServiceSandbox(String),
+
     #[error("nothing to publish in {0}: no spec or archive found")]
     NothingToPublish(PathBuf),
 
@@ -4259,8 +4262,8 @@ fn validate_service_param(name: &str, value: &str) -> Result<(), String> {
     if !ALLOWED_SERVICE_PARAMS.contains(&name) {
         return Err(format!("param `{name}` is not allowed"));
     }
-    if name == "url" && !value.starts_with("https://") {
-        return Err(format!("url `{value}` must be https://"));
+    if name == "url" {
+        crate::service_sandbox::check_service_url(value)?;
     }
     if name == "protocol" && value != "https" {
         return Err(format!("protocol `{value}` must be https"));
@@ -4282,7 +4285,16 @@ fn validate_service_param(name: &str, value: &str) -> Result<(), String> {
 /// decodes character references (`&#46;&#46;/`) before using them. Anything
 /// the parser cannot read, any DOCTYPE, processing instruction or entity
 /// other than the five predefined ones is refused.
+#[cfg(test)]
 pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
+    parse_service_xml(xml).map(|_| ())
+}
+
+/// [`validate_service_xml`], returning the services in order with their
+/// decoded (trimmed) params: what is run is what was checked.
+pub(crate) fn parse_service_xml(
+    xml: &[u8],
+) -> Result<Vec<crate::service_sandbox::ServiceCall>, String> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
 
@@ -4292,6 +4304,7 @@ pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
     let mut depth: Vec<String> = Vec::new();
     let mut param: Option<(String, String)> = None;
     let mut seen_root = false;
+    let mut services: Vec<crate::service_sandbox::ServiceCall> = Vec::new();
     loop {
         let event = reader
             .read_event()
@@ -4328,11 +4341,18 @@ pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
                     if !ALLOWED_SERVICES.contains(&name.as_str()) {
                         return Err(format!("service `{name}` is not allowed"));
                     }
+                    services.push(crate::service_sandbox::ServiceCall {
+                        name,
+                        params: Vec::new(),
+                    });
                 }
                 "param" => {
                     let name = name.ok_or("a <param> without a name")?;
                     if empty {
                         validate_service_param(&name, "")?;
+                        if let Some(s) = services.last_mut() {
+                            s.params.push((name, String::new()));
+                        }
                     } else {
                         param = Some((name, String::new()));
                     }
@@ -4350,6 +4370,9 @@ pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
                     && let Some((name, value)) = param.take()
                 {
                     validate_service_param(&name, &value)?;
+                    if let Some(s) = services.last_mut() {
+                        s.params.push((name, value.trim().to_string()));
+                    }
                 }
             }
             Event::Text(t) => {
@@ -4388,38 +4411,54 @@ pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
     if !depth.is_empty() {
         return Err("unclosed element".to_string());
     }
-    Ok(())
+    Ok(services)
 }
 
-/// Run `osc service ra` from `checkout_dir` to fetch sources and vendor Cargo deps.
+/// Whether a package that is blocked now, after `previous` was the status
+/// label, has made progress worth restarting the stall timer for. A flip back
+/// from `stale: ...` (the cross-check reading an older result) is not progress:
+/// dtc sat for 1.5 hours flipping between `blocked` and `stale: outdated`, and
+/// every flip restarted the timer so the stall limit never came.
+fn resets_block_timer(previous: &str) -> bool {
+    !previous.starts_with("stale")
+}
+
+/// Run the checkout's services, as `osc service ra` would, to fetch sources and
+/// vendor Cargo deps.
 ///
 /// The `_service` file is validated first (the agent may have edited it) and
-/// the service runs with a minimal environment, without publishing tokens.
+/// each service runs in a sandbox without the home directory, the session bus
+/// or OBS credentials, its network limited to the source hosts (see
+/// [`crate::service_sandbox`]). Only `AUTO_PACKAGE_UNSAFE_SERVICE=1` runs the
+/// unsandboxed `osc service ra` instead.
 pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
     // Fail closed: only a missing file skips validation.
-    match fs::read(checkout_dir.join("_service")) {
-        Ok(xml) => {
-            validate_service_xml(&xml).map_err(|reason| Error::ServiceRejected { reason })?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+    let services = match fs::read(checkout_dir.join("_service")) {
+        Ok(xml) => parse_service_xml(&xml).map_err(|reason| Error::ServiceRejected { reason })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
             return Err(Error::ServiceRejected {
                 reason: format!("cannot read _service: {e}"),
             });
         }
-    }
-    let out = proc::capture_with_timeout_env(
-        "osc",
-        &["service", "ra"],
-        checkout_dir,
-        emit,
-        proc::DEFAULT_CAPTURE_TIMEOUT,
-        // osc reads its credentials from the desktop keyring at start-up, which
-        // it reaches through the session bus: without the address it dies
-        // with "Unable to initialize SecretService" before any service runs.
-        Some(&proc::minimal_env(&["DBUS_SESSION_BUS_ADDRESS"])),
-    )
-    .map_err(during(format!("service ra in {}", checkout_dir.display())))?;
+    };
+    let out = if !crate::service_sandbox::unsafe_mode() {
+        crate::service_sandbox::run_services(checkout_dir, &services, emit)?
+    } else {
+        proc::capture_with_timeout_env(
+            "osc",
+            &["service", "ra"],
+            checkout_dir,
+            emit,
+            proc::DEFAULT_CAPTURE_TIMEOUT,
+            // osc reads its credentials from the desktop keyring at start-up,
+            // which it reaches through the session bus: without the address it
+            // dies with "Unable to initialize SecretService" before any
+            // service runs.
+            Some(&proc::minimal_env(&["DBUS_SESSION_BUS_ADDRESS"])),
+        )
+        .map_err(during(format!("service ra in {}", checkout_dir.display())))?
+    };
     if !out.success() {
         // `osc service` reports a failing service on stdout and leaves stderr
         // empty, which made the failure read as "failed (exit 1):" and nothing.
@@ -9179,7 +9218,7 @@ mod service_validation_tests {
 
     #[test]
     fn decoded_values_are_what_is_checked() {
-        let xml = r#"<services><service name="tar_scm"><param name="url">https://x/a&amp;b</param><param name="revision"><![CDATA[v1]]></param></service></services>"#;
+        let xml = r#"<services><service name="tar_scm"><param name="url">https://github.com/a&amp;b</param><param name="revision"><![CDATA[v1]]></param></service></services>"#;
         validate_service_xml(xml.as_bytes()).unwrap();
     }
 

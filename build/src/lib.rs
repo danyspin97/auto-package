@@ -22,6 +22,7 @@ pub mod pipeline;
 pub mod proc;
 pub mod quality;
 pub mod redist;
+mod service_sandbox;
 pub mod ship_condition;
 pub mod sources;
 pub mod spec;
