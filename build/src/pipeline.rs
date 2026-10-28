@@ -41,7 +41,6 @@ pub struct PipelineConfig {
     pub arch: String,
     pub max_attempts: usize,
     pub budget_usd: f64,
-    pub agent_backend: AgentBackend,
     pub no_agent: bool,
     /// Rebuild even if state.json says already built.
     pub force: bool,
@@ -142,12 +141,6 @@ impl PipelineConfig {
             .single_flavor()
             .and_then(crate::flavors::abi_tag_for_flavor)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum AgentBackend {
-    #[default]
-    Cli,
 }
 
 /// Why a package failed. Callers decide what to retry, count and give up on
@@ -18797,7 +18790,6 @@ Source:         %{undefined_macro}\n";
             arch: "x86_64".into(),
             max_attempts: 1,
             budget_usd: 1.0,
-            agent_backend: AgentBackend::Cli,
             no_agent: true,
             force: false,
             regen: false,
@@ -18844,7 +18836,6 @@ Source:         %{undefined_macro}\n";
             arch: "x86_64".into(),
             max_attempts: 1,
             budget_usd: 1.0,
-            agent_backend: AgentBackend::Cli,
             no_agent: true,
             force: false,
             regen: false,
@@ -19567,7 +19558,6 @@ mod redist_pipeline_tests {
             arch: arch.into(),
             max_attempts: 1,
             budget_usd: 1.0,
-            agent_backend: AgentBackend::Cli,
             no_agent: true,
             force: false,
             regen: false,
@@ -20367,7 +20357,6 @@ mod hygiene_tests {
             arch: "x86_64".into(),
             max_attempts: 1,
             budget_usd: 1.0,
-            agent_backend: AgentBackend::Cli,
             no_agent: true,
             force: false,
             regen: false,

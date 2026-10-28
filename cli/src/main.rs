@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ap_build::pipeline::{
-    AgentBackend, FailureKind, PipelineConfig, PipelineResult, run_package, select_target,
-};
+use ap_build::pipeline::{FailureKind, PipelineConfig, PipelineResult, run_package, select_target};
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SelectionReason};
 use ap_core::run::RunDir;
 use ap_core::sink::{FanoutReporter, HumanSink, JsonlSink, LogLevel, MemorySink, Reporter};
@@ -99,7 +97,8 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         regen: bool,
 
-        /// Agent backend. Only `cli` is supported in M1.
+        /// Agent backend. Only `cli` is accepted; the flag stays so existing
+        /// invocations still parse.
         #[arg(long, default_value = "cli")]
         agent_backend: String,
 
@@ -2909,7 +2908,6 @@ fn cmd_build(
         arch: arch.to_string(),
         max_attempts,
         budget_usd,
-        agent_backend: AgentBackend::Cli,
         no_agent,
         force,
         regen,
