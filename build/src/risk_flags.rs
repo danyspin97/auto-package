@@ -59,19 +59,12 @@ impl RiskFlag {
     }
 }
 
-/// Keeps `st`'s risk flags for `run_id` only: flags of an earlier run are
-/// dropped the first time this run looks at the package.
-pub fn claim(st: &mut PkgState, run_id: &str) {
-    if st.risk_flags_run_id.as_deref() != Some(run_id) {
-        st.risk_flags.clear();
-        st.risk_flags_run_id = Some(run_id.to_string());
-    }
-}
-
-/// Replaces the risk flags of `run_id` with `found`, the change's own.
+/// Replaces the risk flags with `found`, the change's own, at a commit of
+/// `run_id`. Until then the earlier run's flags stay, since they describe the
+/// revision OBS holds.
 pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<RiskFlag>) {
-    claim(st, run_id);
     st.risk_flags = found;
+    st.risk_flags_run_id = Some(run_id.to_string());
 }
 
 /// The risk flags the package's last run recorded, for a reader outside the run.
@@ -624,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn claiming_a_new_run_drops_the_risks_of_the_earlier_one() {
+    fn a_run_without_a_commit_keeps_the_risks_of_the_earlier_one() {
         let mut st = PkgState::default();
         settle(
             &mut st,
@@ -633,10 +626,9 @@ mod tests {
                 header: "%post".into(),
             }],
         );
-        // A run that fails before its commit found nothing new: no stale flag.
-        claim(&mut st, "r2");
-        assert!(st.risk_flags.is_empty());
-        claim(&mut st, "r2");
+        // A run that ends before its commit (AlreadyBuilt, missing_deps) leaves them.
+        assert_eq!(st.risk_flags.len(), 1);
+        // The commit of a run that found nothing new replaces them.
         settle(&mut st, "r2", vec![]);
         assert!(st.risk_flags.is_empty());
     }

@@ -1907,14 +1907,9 @@ pub fn run_package(
             });
         }
     }
-    // The fix-loop and risk flags are this run's from now on: an earlier run's
-    // are dropped, so a package that fails before its commit shows none of them.
-    if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
-        update_state(&ws, reporter, |state| {
-            crate::fix_flags::claim(state, &config.run_id);
-            crate::risk_flags::claim(state, &config.run_id);
-        });
-    }
+    // The fix-loop and risk flags are not touched here: an earlier run's stay
+    // until a commit of this run settles them, so a run that ends AlreadyBuilt
+    // or missing_deps still reports what OBS holds.
     // A baseline left by an earlier call for this package is not this call's.
     let _ = std::fs::remove_dir_all(pkg_run.path.join(OBS_BASELINE_DIR));
     let result = run_package_inner(config, pkg_run, reporter);
@@ -10535,11 +10530,7 @@ fn apply_turn_outcome_with(
             // changelog, the request and the summary must show.
             if let Ok(ws) = Workspace::open(&config.state_root, rpm_name) {
                 update_state(&ws, reporter, |st| {
-                    crate::fix_flags::claim(st, &config.run_id);
-                    crate::fix_flags::add(
-                        st,
-                        crate::fix_flags::FixFlag::Blocked { why: why.clone() },
-                    );
+                    crate::fix_flags::add_blocked(st, &config.run_id, why.clone());
                 });
             }
             // Journaled like an edit: a turn that changed nothing is still what
@@ -22282,5 +22273,51 @@ mod patch_stage_tests {
                 .unwrap()
                 .contains("z.patch")
         );
+    }
+}
+
+#[cfg(test)]
+mod flag_survival_tests {
+    use super::hygiene_tests::config;
+    use super::*;
+
+    /// A package whose OBS revision is built and recorded, with two flags a
+    /// commit of `r1` settled.
+    fn built_with_flags(root: &Path) {
+        let ws = Workspace::open(root, "python-foo").unwrap();
+        PkgState::update(&ws, |st| {
+            st.last_built_version = Some("1.0".into());
+            st.last_outcome = Some("success".into());
+            crate::fix_flags::settle(st, "r1", vec![crate::fix_flags::FixFlag::CheckRemoved]);
+            crate::risk_flags::settle(
+                st,
+                "r1",
+                vec![crate::risk_flags::RiskFlag::NewScriptlet {
+                    header: "%post".into(),
+                }],
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn an_already_built_run_keeps_the_flags_of_the_revision_it_found() {
+        let state = tempfile::tempdir().unwrap();
+        built_with_flags(state.path());
+        let mut config = config("foo", state.path());
+        config.run_id = "r2".into();
+        let tmp = tempfile::tempdir().unwrap();
+        let run = ap_core::run::RunDir::allocate(tmp.path())
+            .unwrap()
+            .pkg(&config.rpm_name);
+        let result = run_package(&config, &run, &ap_core::sink::NullReporter);
+        assert!(
+            matches!(result, PipelineResult::AlreadyBuilt { .. }),
+            "{result:?}"
+        );
+        let ws = Workspace::open(state.path(), "python-foo").unwrap();
+        let st = PkgState::load(&ws);
+        assert_eq!(st.fix_flags, vec![crate::fix_flags::FixFlag::CheckRemoved]);
+        assert_eq!(st.risk_flags.len(), 1, "{:?}", st.risk_flags);
     }
 }

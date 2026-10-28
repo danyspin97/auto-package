@@ -2486,7 +2486,15 @@ fn print_run_summary(
     // lines the changelog and the submit request carry.
     let touched: Vec<&String> = latest
         .iter()
-        .filter(|(_, (_, o))| matches!(o, PackageOutcome::Built | PackageOutcome::Failed { .. }))
+        .filter(|(_, (_, o))| {
+            matches!(
+                o,
+                PackageOutcome::Built
+                    | PackageOutcome::AlreadyBuilt
+                    | PackageOutcome::MissingDeps { .. }
+                    | PackageOutcome::Failed { .. }
+            )
+        })
         .map(|(pkg, _)| pkg)
         .collect();
     let flagged = fix_flagged(state_root, touched.iter().copied());
@@ -4612,16 +4620,12 @@ fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts: usize) ->
 mod tests {
     #[test]
     fn the_summary_lists_only_packages_with_recorded_flags() {
-        use ap_build::fix_flags::{FixFlag, add, claim};
+        use ap_build::fix_flags::{FixFlag, settle};
         use ap_build::pipeline::PkgState;
         use ap_build::workspace::Workspace;
         let root = tempfile::tempdir().unwrap();
         let ws = Workspace::open(root.path(), "python-foo").unwrap();
-        PkgState::update(&ws, |st| {
-            claim(st, "r1");
-            add(st, FixFlag::CheckRemoved);
-        })
-        .unwrap();
+        PkgState::update(&ws, |st| settle(st, "r1", vec![FixFlag::CheckRemoved])).unwrap();
         Workspace::open(root.path(), "python-bar").unwrap();
         let pkgs = ["python-foo".to_string(), "python-bar".to_string()];
         assert_eq!(
