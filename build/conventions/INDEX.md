@@ -17,7 +17,7 @@
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
 18. Console scripts and python_alternative — read when the package declares scripts/entry points or %files lists /usr/bin
 19. Single % in RPM macros, never %% — read when a spec line shows %% or an rpmspec macro-parse error
-20. Only documented Python macros — read when about to use a python macro you have not seen in the spec or a skill
+20. Merged into convention 19 — read convention 19 when about to use a python macro you have not seen in the spec or a skill
 21. Merged into convention 1 — read convention 1 when copying a requirement with extras, markers, commas, ~= or !=
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
 23. Merged into convention 17 — read convention 17 when %files or rpmlint shows tests/docs/setup files at site-packages root
@@ -77,7 +77,7 @@
 77. Reproducible Source: URLs, one release only — read when adding or editing a Source:, or dropping the old release's archive
 78. Merged into convention 5 — read convention 5 when a build refuses over a licence variable
 79. ELF RPATH/RUNPATH checks before the first build — read when the package ships .so files or rpmlint reports rpath errors
-80. $python only inside %python_expand, braced multi-line form — read when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
+80. Merged into convention 19 — read convention 19 when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
 81. Merged into convention 10 — read convention 10 when tests may need network, GPU, redis, models or repo files
 82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
