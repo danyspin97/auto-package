@@ -2960,7 +2960,18 @@ fn with_flag_lines_in_release_entry(
         .copied()
         .filter(|l| !stale(l))
         .collect();
-    let last = kept
+    // The flags go under the `Update to` bullet: after its last line, before
+    // the next bullet of the entry (a bullet starts at column 0).
+    let is_bullet = |l: &str| !l.starts_with(' ') && (l.starts_with("- ") || l.starts_with("* "));
+    let at = kept
+        .iter()
+        .position(|l| bullet_text(l) == update)
+        .unwrap_or(0);
+    let block_end = kept[at + 1..]
+        .iter()
+        .position(|l| is_bullet(l))
+        .map_or(kept.len(), |i| at + 1 + i);
+    let last = kept[..block_end]
         .iter()
         .rposition(|l| !l.trim().is_empty())
         .map_or(0, |i| i + 1);
@@ -9912,7 +9923,7 @@ mod transient_broken_tests {
         let out = with_flag_lines_in_release_entry(&working, "2.0", &flags).unwrap();
         assert!(
             out.contains(
-                "- Update to 2.0\n- Fix the build\n  FLAG: tests skipped: --deselect t.py::a\n\n"
+                "- Update to 2.0\n  FLAG: tests skipped: --deselect t.py::a\n- Fix the build\n\n"
             ),
             "{out}"
         );
