@@ -184,13 +184,8 @@ thread_local! {
     /// line can carry a `pkg` even though the underlying `Event` variants
     /// only carry a per-package `step: StepId`.
     ///
-    /// The 2026-10-06 external review flagged that `StepId`s are unique
-    /// *within* a package but two parallel package threads both start at
-    /// `StepId(0)`, so a JSONL stream with interleaved events was
-    /// un-attributable without this. Field-level attribution on each `Event`
-    /// variant was the other option but was ruled out because it would have
-    /// required editing all ~124 `Event::*` construction sites across the
-    /// workspace (several of them in files owned by other parallel agents).
+    /// `StepId`s are unique only within a package, so parallel packages both
+    /// start at `StepId(0)`; the `pkg` is what attributes an interleaved line.
     static CURRENT_PKG: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -725,7 +720,11 @@ pub struct JsonlSink {
 
 impl JsonlSink {
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(path)?;
         let writer = Arc::new(Mutex::new(JsonlWriter {
             out: BufWriter::new(file),
             last_flush: Instant::now(),

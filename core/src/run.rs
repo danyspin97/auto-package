@@ -124,12 +124,15 @@ impl RunDir {
     pub fn allocate(work_dir: &Path) -> io::Result<Self> {
         let runs = work_dir.join("runs");
         fs::create_dir_all(&runs)?;
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
         // `create_dir` (not `create_dir_all`) so an ID that is already taken
         // is an error to retry, never a silently shared run directory.
         for _ in 0..16 {
             let run_id = new_run_id();
             let path = runs.join(&run_id.0);
-            match fs::create_dir(&path) {
+            match builder.create(&path) {
                 Ok(()) => {
                     return Ok(Self {
                         path,
@@ -256,6 +259,16 @@ impl StepDir {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn run_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().unwrap();
+        let run = super::RunDir::allocate(work.path()).unwrap();
+        let mode = std::fs::metadata(&run.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
+    }
+
     use super::*;
 
     #[test]
