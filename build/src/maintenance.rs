@@ -47,7 +47,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use crate::backport;
-use crate::osc::{self, Error, xml_escape, xml_unescape};
+use crate::osc::{self, Error};
 use crate::proc::{self, Captured, Emit};
 
 /// The attribute that marks a package (or project) as maintained.
@@ -89,19 +89,6 @@ pub fn maintained_api_path(pkg: &str) -> String {
     )
 }
 
-/// The value of `attr` in the start tag `tag` (the text after the element name).
-fn attr(tag: &str, attr: &str) -> Option<String> {
-    for quote in ['"', '\''] {
-        let key = format!(" {attr}={quote}");
-        let padded = format!(" {tag}");
-        if let Some((_, rest)) = padded.split_once(&key) {
-            let (value, _) = rest.split_once(quote)?;
-            return Some(xml_unescape(value));
-        }
-    }
-    None
-}
-
 /// The start tags of every `<name ...>` element in `xml`, without the name.
 fn start_tags<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
     let open = format!("<{name} ");
@@ -130,13 +117,19 @@ pub fn parse_maintained(xml: &str) -> Vec<Codestream> {
     let mut out: Vec<Codestream> = Vec::new();
     for chunk in xml.split("<package ").skip(1) {
         let head = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
-        let (Some(project), Some(package)) = (attr(head, "project"), attr(head, "package")) else {
+        let (Some(project), Some(package)) = (
+            crate::obs_xml::attr(head, "project"),
+            crate::obs_xml::attr(head, "package"),
+        ) else {
             continue;
         };
         let body = chunk.split("</package>").next().unwrap_or(chunk);
-        let devel = start_tags(body, "devel")
-            .first()
-            .and_then(|t| Some((attr(t, "project")?, attr(t, "package")?)));
+        let devel = start_tags(body, "devel").first().and_then(|t| {
+            Some((
+                crate::obs_xml::attr(t, "project")?,
+                crate::obs_xml::attr(t, "package")?,
+            ))
+        });
         let cs = Codestream {
             project,
             package: without_incident_suffix(&package).to_string(),
@@ -300,7 +293,7 @@ pub fn maintenance_project_search_path() -> String {
 pub fn parse_first_project(xml: &str) -> Option<String> {
     start_tags(xml, "project")
         .first()
-        .and_then(|t| attr(t, "name"))
+        .and_then(|t| crate::obs_xml::attr(t, "name"))
         .filter(|n| osc::is_valid_obs_name(n))
 }
 
@@ -439,7 +432,7 @@ pub fn parse_project_links(meta: &str) -> Vec<String> {
     let head_end = meta.find("<repository").unwrap_or(meta.len());
     start_tags(&meta[..head_end], "link")
         .into_iter()
-        .filter_map(|t| attr(t, "project"))
+        .filter_map(|t| crate::obs_xml::attr(t, "project"))
         .collect()
 }
 
@@ -713,25 +706,25 @@ pub fn request_xml(req: &MaintenanceRequest) -> String {
         x.push_str("  <action type=\"maintenance_incident\">\n");
         x.push_str(&format!(
             "    <source project=\"{}\" package=\"{}\"/>\n",
-            xml_escape(&a.source_project),
-            xml_escape(&a.source_package)
+            crate::obs_xml::escape(&a.source_project),
+            crate::obs_xml::escape(&a.source_package)
         ));
         x.push_str(&format!(
             "    <target project=\"{}\" releaseproject=\"{}\"/>\n",
-            xml_escape(&req.target_project),
-            xml_escape(&a.release_project)
+            crate::obs_xml::escape(&req.target_project),
+            crate::obs_xml::escape(&a.release_project)
         ));
         if let Some(s) = &req.sourceupdate {
             x.push_str(&format!(
                 "    <options>\n      <sourceupdate>{}</sourceupdate>\n    </options>\n",
-                xml_escape(s)
+                crate::obs_xml::escape(s)
             ));
         }
         x.push_str("  </action>\n");
     }
     x.push_str(&format!(
         "  <description>{}</description>\n",
-        xml_escape(&req.description)
+        crate::obs_xml::escape(&req.description)
     ));
     x.push_str("</request>\n");
     x
@@ -802,11 +795,11 @@ pub fn open_incidents_path(project: &str, package: &str) -> String {
 pub fn parse_source_revisions(directory_xml: &str) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(dir) = start_tags(directory_xml, "directory").first() {
-        out.extend(attr(dir, "rev"));
-        out.extend(attr(dir, "srcmd5"));
+        out.extend(crate::obs_xml::attr(dir, "rev"));
+        out.extend(crate::obs_xml::attr(dir, "srcmd5"));
     }
     if let Some(link) = start_tags(directory_xml, "linkinfo").first() {
-        out.extend(attr(link, "xsrcmd5"));
+        out.extend(crate::obs_xml::attr(link, "xsrcmd5"));
     }
     out.retain(|r| !r.is_empty());
     out.dedup();
@@ -844,37 +837,40 @@ pub fn parse_open_incidents(xml: &str) -> Vec<OpenIncident> {
     for req in xml.split("<request ").skip(1) {
         let req = req.split("</request>").next().unwrap_or(req);
         let head = &req[..req.find('>').unwrap_or(req.len())];
-        let Some(id) = attr(head, "id") else {
+        let Some(id) = crate::obs_xml::attr(head, "id") else {
             continue;
         };
         let state = start_tags(req, "state")
             .first()
-            .and_then(|t| attr(t, "name"))
+            .and_then(|t| crate::obs_xml::attr(t, "name"))
             .unwrap_or_default();
         for action in req.split("<action ").skip(1) {
             let action = action.split("</action>").next().unwrap_or(action);
             let head = &action[..action.find('>').unwrap_or(action.len())];
-            if attr(head, "type").as_deref() != Some("maintenance_incident") {
+            if crate::obs_xml::attr(head, "type").as_deref() != Some("maintenance_incident") {
                 continue;
             }
             let Some(source) = start_tags(action, "source").into_iter().next() else {
                 continue;
             };
-            let (Some(sp), Some(spkg)) = (attr(source, "project"), attr(source, "package")) else {
+            let (Some(sp), Some(spkg)) = (
+                crate::obs_xml::attr(source, "project"),
+                crate::obs_xml::attr(source, "package"),
+            ) else {
                 continue;
             };
             // Once accepted, `project` names the incident (`openSUSE:Maintenance:123`);
             // `releaseproject` stays.
             let release = start_tags(action, "target")
                 .first()
-                .and_then(|t| attr(t, "releaseproject"));
+                .and_then(|t| crate::obs_xml::attr(t, "releaseproject"));
             out.push(OpenIncident {
                 id: id.clone(),
                 state: state.clone(),
                 source_project: sp,
                 source_package: spkg,
                 release_project: release,
-                rev: attr(source, "rev").filter(|r| !r.is_empty()),
+                rev: crate::obs_xml::attr(source, "rev").filter(|r| !r.is_empty()),
             });
         }
     }

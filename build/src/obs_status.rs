@@ -48,72 +48,6 @@ impl Tag {
     }
 }
 
-fn decode_entities(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
-    // `&amp;` last, so `&amp;lt;` stays the literal text `&lt;`. Numeric
-    // references (`&#39;`, `&#x27;`) are decoded in one pass beforehand.
-    decode_numeric_entities(s)
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-}
-
-/// Replace `&#NN;` and `&#xHH;` with the character they name; anything that
-/// is not a valid reference is left as written.
-fn decode_numeric_entities(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = rest.find("&#") {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 2..];
-        let decoded = after.find(';').filter(|&e| e <= 8).and_then(|e| {
-            let body = &after[..e];
-            let code = match body.strip_prefix(['x', 'X']) {
-                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-                None => body.parse().ok()?,
-            };
-            Some((char::from_u32(code)?, e))
-        });
-        match decoded {
-            Some((c, e)) => {
-                out.push(c);
-                rest = &after[e + 1..];
-            }
-            None => {
-                out.push_str("&#");
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Parse `key="value"` / `key='value'` pairs from the inside of a tag.
-fn parse_attrs(mut s: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    loop {
-        s = s.trim_start();
-        let Some(eq) = s.find('=') else { break };
-        let key = s[..eq].trim().to_string();
-        let rest = s[eq + 1..].trim_start();
-        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            break;
-        };
-        let body = &rest[1..];
-        let Some(close) = body.find(quote) else { break };
-        if !key.is_empty() {
-            out.push((key, decode_entities(&body[..close])));
-        }
-        s = &body[close + 1..];
-    }
-    out
-}
-
 /// Next tag at or after `from`, skipping text, comments, `<?...?>` and
 /// `<!...>`. `Ok(None)` at a clean end of input; `Err(())` when the input
 /// ends inside a tag or comment (a cut-off document).
@@ -138,7 +72,7 @@ fn scan_tag(xml: &str, mut from: usize) -> Result<Option<Tag>, ()> {
         let self_closing = inner.ends_with('/');
         let inner = inner.trim_start_matches('/').trim_end_matches('/');
         let (name, attrs) = match inner.find(char::is_whitespace) {
-            Some(i) => (&inner[..i], parse_attrs(&inner[i..])),
+            Some(i) => (&inner[..i], crate::obs_xml::attrs(&inner[i..])),
             None => (inner, Vec::new()),
         };
         return Ok(Some(Tag {
@@ -159,7 +93,7 @@ fn next_tag(xml: &str, from: usize) -> Option<Tag> {
 /// Text between `from` and the next `<`, entity-decoded and trimmed.
 fn text_after(xml: &str, from: usize) -> String {
     let rest = xml.get(from..).unwrap_or("");
-    decode_entities(rest.split('<').next().unwrap_or("").trim())
+    crate::obs_xml::unescape(rest.split('<').next().unwrap_or("").trim())
 }
 
 /// Every package status in a `_result` document, across repositories/arches.
@@ -670,15 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_entities_are_decoded_and_bad_ones_left_alone() {
-        assert_eq!(
-            decode_entities("it&#39;s &#x41;&#66; &amp;lt;"),
-            "it's AB &lt;"
-        );
-        assert_eq!(
-            decode_entities("a &#; b &#xZZ; &#99999999999; &#"),
-            "a &#; b &#xZZ; &#99999999999; &#"
-        );
+    fn numeric_references_in_attributes_are_decoded() {
         let xml = "<resultlist><result repository='r' arch='a'><status package='a&#43;&#43;' code='succeeded'/></result></resultlist>";
         assert_eq!(parse_results(xml)[0].pkg, "a++");
     }

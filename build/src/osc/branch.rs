@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use super::{
-    Error, OSC_QUERY_TIMEOUT, anywhere, check_obs_name, during, enc, extract_xml_attr, first_line,
-    is_not_found, is_valid_obs_name, parse_project_repo_paths, xml_escape,
+    Error, OSC_QUERY_TIMEOUT, anywhere, check_obs_name, during, enc, first_line, is_not_found,
+    is_valid_obs_name, parse_project_repo_paths,
 };
 use crate::proc::{self, Captured, Emit};
 
@@ -195,7 +195,7 @@ pub fn package_files_at_revision(
     Ok(xml
         .split("<entry ")
         .skip(1)
-        .filter_map(|e| extract_xml_attr(&e[..e.find('>').unwrap_or(e.len())], "name"))
+        .filter_map(|e| crate::obs_xml::attr(&e[..e.find('>').unwrap_or(e.len())], "name"))
         .collect())
 }
 
@@ -225,7 +225,7 @@ pub fn cat_file_at_revision(
 pub fn parse_devel_project(meta_xml: &str) -> Option<String> {
     let (_, rest) = meta_xml.split_once("<devel ")?;
     let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
-    extract_xml_attr(tag, "project").filter(|p| !p.is_empty())
+    crate::obs_xml::attr(tag, "project").filter(|p| !p.is_empty())
 }
 
 /// The devel project of `project/pkg`, or `None` when it has none or the meta
@@ -383,7 +383,7 @@ pub enum Rebased {
 fn linkinfo_error(xml: &str) -> Option<String> {
     let rest = &xml[xml.find("<linkinfo")?..];
     let tag = &rest[..rest.find('>')?];
-    extract_xml_attr(tag, "error").filter(|e| !e.is_empty())
+    crate::obs_xml::attr(tag, "error").filter(|e| !e.is_empty())
 }
 
 /// Rebase the branched `project/pkg` onto its origin's current sources, so a
@@ -430,8 +430,8 @@ fn linkinfo_is_behind(xml: &str) -> bool {
     };
     let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
     match (
-        extract_xml_attr(tag, "srcmd5"),
-        extract_xml_attr(tag, "baserev"),
+        crate::obs_xml::attr(tag, "srcmd5"),
+        crate::obs_xml::attr(tag, "baserev"),
     ) {
         (Some(current), Some(base)) => current != base,
         _ => true,
@@ -489,7 +489,7 @@ pub fn with_local_blocking(xml: &str) -> Option<String> {
     // Back to front, so earlier offsets stay valid.
     for (start, _) in repository_spans(xml).into_iter().rev() {
         let open_end = out[start..].find('>').map_or(out.len(), |i| start + i);
-        if extract_xml_attr(&out[start..open_end], "block").is_some() {
+        if crate::obs_xml::attr(&out[start..open_end], "block").is_some() {
             continue;
         }
         let at = if out[..open_end].ends_with('/') {
@@ -583,7 +583,7 @@ pub fn parse_project_info(xml: &str) -> ProjectInfo {
     let kind = xml
         .find("<project ")
         .and_then(|i| xml[i..].find('>').map(|e| &xml[i..i + e]))
-        .and_then(|tag| extract_xml_attr(tag, "kind"))
+        .and_then(|tag| crate::obs_xml::attr(tag, "kind"))
         .filter(|k| !k.is_empty() && k != "standard");
     let locked = xml
         .find("<lock>")
@@ -594,12 +594,12 @@ pub fn parse_project_info(xml: &str) -> ProjectInfo {
         .filter_map(|(s, e)| {
             let block = &xml[s..e];
             let open = &block[..block.find('>')? + 1];
-            let name = extract_xml_attr(open, "name")?;
+            let name = crate::obs_xml::attr(open, "name")?;
             let arches = block
                 .split("<arch>")
                 .skip(1)
                 .filter_map(|c| c.split("</arch>").next())
-                .map(|a| crate::osc::xml_unescape(a.trim()))
+                .map(|a| crate::obs_xml::unescape(a.trim()))
                 .collect();
             Some(RepoDef {
                 name,
@@ -683,8 +683,8 @@ impl PathAddition {
     fn element(&self) -> String {
         format!(
             "<path project=\"{}\" repository=\"{}\"/>",
-            xml_escape(&self.project),
-            xml_escape(&self.path_repository)
+            crate::obs_xml::escape(&self.project),
+            crate::obs_xml::escape(&self.path_repository)
         )
     }
 }
@@ -714,7 +714,7 @@ pub fn add_paths_to_meta(
             .into_iter()
             .find(|&(s, _)| {
                 let open_end = xml[s..].find('>').map_or(xml.len(), |i| s + i + 1);
-                extract_xml_attr(&xml[s..open_end], "name").as_deref()
+                crate::obs_xml::attr(&xml[s..open_end], "name").as_deref()
                     == Some(add.repository.as_str())
             })
             .ok_or_else(|| format!("the project meta has no repository {}", add.repository))?;
@@ -813,12 +813,12 @@ pub fn parse_published_binaries(xml: &str) -> Vec<PublishedBinary> {
         .filter_map(|chunk| {
             let tag = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
             Some(PublishedBinary {
-                name: extract_xml_attr(tag, "name")?,
-                project: extract_xml_attr(tag, "project")?,
-                repository: extract_xml_attr(tag, "repository")?,
-                arch: extract_xml_attr(tag, "arch")?,
-                package: extract_xml_attr(tag, "package"),
-                version: extract_xml_attr(tag, "version"),
+                name: crate::obs_xml::attr(tag, "name")?,
+                project: crate::obs_xml::attr(tag, "project")?,
+                repository: crate::obs_xml::attr(tag, "repository")?,
+                arch: crate::obs_xml::attr(tag, "arch")?,
+                package: crate::obs_xml::attr(tag, "package"),
+                version: crate::obs_xml::attr(tag, "version"),
             })
         })
         .collect()
@@ -857,15 +857,15 @@ pub fn submit_request_xml(sr: &SubmitRequest) -> String {
          <source project=\"{}\" package=\"{}\"{}/>\n    \
          <target project=\"{}\" package=\"{}\"/>\n  </action>\n  \
          <description>{}</description>\n</request>\n",
-        xml_escape(&sr.source_project),
-        xml_escape(&sr.source_package),
+        crate::obs_xml::escape(&sr.source_project),
+        crate::obs_xml::escape(&sr.source_package),
         sr.source_rev
             .as_deref()
-            .map(|r| format!(" rev=\"{}\"", xml_escape(r)))
+            .map(|r| format!(" rev=\"{}\"", crate::obs_xml::escape(r)))
             .unwrap_or_default(),
-        xml_escape(&sr.target_project),
-        xml_escape(&sr.target_package),
-        xml_escape(&sr.description),
+        crate::obs_xml::escape(&sr.target_project),
+        crate::obs_xml::escape(&sr.target_package),
+        crate::obs_xml::escape(&sr.description),
     )
 }
 
@@ -873,7 +873,7 @@ pub fn submit_request_xml(sr: &SubmitRequest) -> String {
 pub fn parse_request_id(xml: &str) -> Option<String> {
     let (_, rest) = xml.split_once("<request ")?;
     let (tag, _) = rest.split_once('>')?;
-    extract_xml_attr(tag, "id")
+    crate::obs_xml::attr(tag, "id")
         .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
@@ -881,7 +881,7 @@ pub fn parse_request_id(xml: &str) -> Option<String> {
 pub fn parse_directory_srcmd5(xml: &str) -> Option<String> {
     let rest = &xml[xml.find("<directory")?..];
     let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
-    extract_xml_attr(tag, "srcmd5").filter(|r| !r.is_empty())
+    crate::obs_xml::attr(tag, "srcmd5").filter(|r| !r.is_empty())
 }
 
 /// The current `srcmd5` of `project/package`.
@@ -972,18 +972,18 @@ pub fn parse_open_requests(xml: &str) -> Vec<OpenRequest> {
     for req in xml.split("<request ").skip(1) {
         let req = req.split("</request>").next().unwrap_or(req);
         let head = &req[..req.find('>').unwrap_or(req.len())];
-        let Some(id) = extract_xml_attr(head, "id") else {
+        let Some(id) = crate::obs_xml::attr(head, "id") else {
             continue;
         };
         let state = req
             .split("<state ")
             .nth(1)
-            .and_then(|s| extract_xml_attr(&s[..s.find('>').unwrap_or(s.len())], "name"))
+            .and_then(|s| crate::obs_xml::attr(&s[..s.find('>').unwrap_or(s.len())], "name"))
             .unwrap_or_default();
         for action in req.split("<action ").skip(1) {
             let action = action.split("</action>").next().unwrap_or(action);
             let head = &action[..action.find('>').unwrap_or(action.len())];
-            if extract_xml_attr(head, "type").as_deref() != Some("submit") {
+            if crate::obs_xml::attr(head, "type").as_deref() != Some("submit") {
                 continue;
             }
             let element = |name: &str| {
@@ -996,10 +996,10 @@ pub fn parse_open_requests(xml: &str) -> Vec<OpenRequest> {
                 continue;
             };
             let (Some(sp), Some(spkg), Some(tp), Some(tpkg)) = (
-                extract_xml_attr(source, "project"),
-                extract_xml_attr(source, "package"),
-                extract_xml_attr(target, "project"),
-                extract_xml_attr(target, "package"),
+                crate::obs_xml::attr(source, "project"),
+                crate::obs_xml::attr(source, "package"),
+                crate::obs_xml::attr(target, "project"),
+                crate::obs_xml::attr(target, "package"),
             ) else {
                 continue;
             };

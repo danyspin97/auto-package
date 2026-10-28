@@ -3246,7 +3246,7 @@ fn osc_service_stage(
             .map(|svc| {
                 extra_manifests
                     .iter()
-                    .any(|m| !svc.contains(crate::osc::xml_escape(m).as_str()))
+                    .any(|m| !svc.contains(crate::obs_xml::escape(m).as_str()))
             })
             .unwrap_or(false);
         let need_service =
@@ -12985,7 +12985,7 @@ fn with_service_revision(service: &str, tag: &str) -> Option<String> {
     Some(format!(
         "{}{}{}",
         &service[..start],
-        crate::osc::xml_escape(tag),
+        crate::obs_xml::escape(tag),
         &service[end..]
     ))
 }
@@ -14763,7 +14763,6 @@ fn generate_wheel_binary_spec(
 /// version, and `pkg_name` is used as the `cargo_vendor` `src` directory name
 /// (the directory `tar_scm` creates matches the repo name).
 fn render_service_file(github_url: &str, version: &str, pkg_name: &str) -> String {
-    use crate::osc::xml_escape;
     let git_url = if github_url.ends_with(".git") {
         github_url.to_string()
     } else {
@@ -14778,9 +14777,9 @@ fn render_service_file(github_url: &str, version: &str, pkg_name: &str) -> Strin
     // Every value lands in element text: a `&` or `<` in a URL or a tag would
     // make the file malformed or add elements.
     let (git_url, repo_name, version) = (
-        xml_escape(&git_url),
-        xml_escape(repo_name),
-        xml_escape(version),
+        crate::obs_xml::escape(&git_url),
+        crate::obs_xml::escape(repo_name),
+        crate::obs_xml::escape(version),
     );
     format!(
         "<services>\n\
@@ -14941,9 +14940,8 @@ fn render_maturin_service_file(
     locked: bool,
     root_manifest: bool,
 ) -> String {
-    use crate::osc::xml_escape;
     // The manifest path comes from the sdist's pyproject.toml.
-    let normalized_name = xml_escape(normalized_name);
+    let normalized_name = crate::obs_xml::escape(normalized_name);
     let update = !locked;
     let extra: String = extra_manifests
         .iter()
@@ -14951,7 +14949,7 @@ fn render_maturin_service_file(
         .map(|m| {
             format!(
                 "         \x20    <param name=\"cargotoml\">{}</param>\n",
-                xml_escape(m)
+                crate::obs_xml::escape(m)
             )
         })
         .collect();

@@ -67,7 +67,7 @@ impl Obs for LiveObs {
 /// repository of the source (so the branch builds against what the source
 /// publishes).
 pub fn synthetic_branch_meta(branch: &str, source: &str, source_info: &ProjectInfo) -> String {
-    let esc = crate::osc::xml_escape;
+    let esc = crate::obs_xml::escape;
     let mut xml = format!("<project name=\"{}\">\n", esc(branch));
     for repo in &source_info.repositories {
         xml.push_str(&format!("  <repository name=\"{}\">\n", esc(&repo.name)));
