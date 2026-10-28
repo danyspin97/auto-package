@@ -1967,6 +1967,14 @@ pub fn run_package(
             });
         }
     }
+    // The fix-loop and risk flags are this run's from now on: an earlier run's
+    // are dropped, so a package that fails before its commit shows none of them.
+    if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
+        update_state(&ws, reporter, |state| {
+            crate::fix_flags::claim(state, &config.run_id);
+            crate::risk_flags::claim(state, &config.run_id);
+        });
+    }
     // A baseline left by an earlier call for this package is not this call's.
     let _ = std::fs::remove_dir_all(pkg_run.path.join(OBS_BASELINE_DIR));
     let result = run_package_inner(config, pkg_run, reporter);

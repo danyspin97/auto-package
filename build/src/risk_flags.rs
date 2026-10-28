@@ -61,11 +61,16 @@ impl RiskFlag {
 
 /// Keeps `st`'s risk flags for `run_id` only: flags of an earlier run are
 /// dropped the first time this run looks at the package.
-pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<RiskFlag>) {
+pub fn claim(st: &mut PkgState, run_id: &str) {
     if st.risk_flags_run_id.as_deref() != Some(run_id) {
         st.risk_flags.clear();
         st.risk_flags_run_id = Some(run_id.to_string());
     }
+}
+
+/// Replaces the risk flags of `run_id` with `found`, the change's own.
+pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<RiskFlag>) {
+    claim(st, run_id);
     st.risk_flags = found;
 }
 
@@ -616,6 +621,24 @@ mod tests {
         assert!(!line.contains('\n'));
         assert!(line.starts_with("RISK: "));
         assert!(line.ends_with("..."));
+    }
+
+    #[test]
+    fn claiming_a_new_run_drops_the_risks_of_the_earlier_one() {
+        let mut st = PkgState::default();
+        settle(
+            &mut st,
+            "r1",
+            vec![RiskFlag::NewScriptlet {
+                header: "%post".into(),
+            }],
+        );
+        // A run that fails before its commit found nothing new: no stale flag.
+        claim(&mut st, "r2");
+        assert!(st.risk_flags.is_empty());
+        claim(&mut st, "r2");
+        settle(&mut st, "r2", vec![]);
+        assert!(st.risk_flags.is_empty());
     }
 
     #[test]
