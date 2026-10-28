@@ -40,6 +40,10 @@ use ap_core::event::{Event, PackageOutcome, RunOutcome, SkipReason, StepKind, St
 use ap_core::sink::{MemorySink, Reporter};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+mod modal;
+use modal::{BackendSlot, Job, Modal, SrMark};
+pub use modal::{PackageBackend, SubmitFailure, SubmitPreview, set_explain_dir};
+
 const MAX_LOG_LINES: usize = 300;
 const MAX_AGENT_ACTIVITY: usize = 100;
 
@@ -91,6 +95,8 @@ pub struct TuiController {
     idle: std::sync::Arc<(Mutex<()>, Condvar)>,
     /// The render thread, taken by [`TuiController::wait_closed`].
     render: std::sync::Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// What reads diffs and makes submit requests (see [`TuiController::set_backend`]).
+    backend: BackendSlot,
 }
 
 /// Drop-based terminal restorer.
@@ -313,6 +319,8 @@ impl TuiController {
         // before it does anything else, so a failure comes back here, with
         // nothing printed yet.
         let (ready_tx, ready_rx) = sync_channel::<io::Result<()>>(1);
+        let backend: BackendSlot = std::sync::Arc::new(Mutex::new(None));
+        let thread_backend = backend.clone();
         let render = std::thread::spawn(move || {
             let screen = match Screen::open() {
                 Ok(screen) => screen,
@@ -330,6 +338,7 @@ impl TuiController {
                 memory,
                 scope,
                 thread_settled,
+                thread_backend,
             ) {
                 eprintln!("TUI error: {e}");
                 *thread_failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
@@ -364,7 +373,16 @@ impl TuiController {
             settled,
             idle: std::sync::Arc::new((Mutex::new(()), Condvar::new())),
             render: std::sync::Arc::new(Mutex::new(Some(render))),
+            backend,
         })
+    }
+
+    /// Let the TUI read the diff of a package against its origin and make
+    /// submit requests through `backend` (the `d`, `S` and `A` keys). With
+    /// `hold_open` the TUI stays open once every row is built, so a request can
+    /// still be made; `q` closes it.
+    pub fn set_backend(&self, backend: std::sync::Arc<dyn PackageBackend>, hold_open: bool) {
+        *self.backend.lock().unwrap_or_else(|p| p.into_inner()) = Some((backend, hold_open));
     }
 
     /// The error that ended the render loop before the run closed, if it did.
@@ -808,7 +826,14 @@ struct PkgState {
     /// and deduplicated; empty once the package is retried or finishes any
     /// other way. Kept apart from the log so the Queued list can show it.
     waiting_on: Vec<String>,
+    /// The state of this package's submit request, once one was asked for.
+    sr: Option<SrMark>,
+    /// The spec diffs the run recorded (`SpecChanged`), oldest first.
+    spec_diffs: Vec<String>,
 }
+
+/// Spec diffs kept per package for the diff view's fallback.
+const MAX_SPEC_DIFFS: usize = 40;
 
 impl PkgState {
     /// The version cell: `old → new` for an update, else the version.
@@ -843,6 +868,8 @@ impl PkgState {
             disk_full_detected: false,
             retry_requested: false,
             waiting_on: Vec::new(),
+            sr: None,
+            spec_diffs: Vec::new(),
         }
     }
 
@@ -938,6 +965,9 @@ struct TuiState {
     run_outcome: Option<RunOutcome>,
     /// Whether the run takes the `n` and `r` keys (see `TuiController::new`).
     accepts_requests: bool,
+    /// Whether a backend can read diffs and make submit requests (the `S` and
+    /// `A` keys).
+    can_submit: bool,
     run_start: Option<Instant>,
     /// Toggled with `a` — on by default, so a package that succeeded stays in
     /// the list; off hides the ones `visible_order` would drop once they succeed.
@@ -961,6 +991,7 @@ impl TuiState {
             run_log: VecDeque::new(),
             run_outcome: None,
             accepts_requests: false,
+            can_submit: false,
             resolve_total: None,
             resolve_in_distro: None,
             run_start: None,
@@ -1377,8 +1408,15 @@ impl TuiState {
             Event::SpecChanged {
                 lines_added,
                 lines_removed,
+                diff,
                 ..
             } => {
+                if !diff.is_empty() {
+                    state.spec_diffs.push(diff.clone());
+                    if state.spec_diffs.len() > MAX_SPEC_DIFFS {
+                        state.spec_diffs.remove(0);
+                    }
+                }
                 if *lines_added > 0 || *lines_removed > 0 {
                     state.add_log(
                         LogLevel::Success,
@@ -1417,6 +1455,7 @@ fn run(
     memory: std::sync::Arc<MemorySink>,
     scope: RunScope,
     settled: std::sync::Arc<AtomicBool>,
+    backend: BackendSlot,
 ) -> io::Result<()> {
     let result = event_loop(
         &mut screen.terminal,
@@ -1426,6 +1465,7 @@ fn run(
         &memory,
         scope,
         &settled,
+        &backend,
     );
     let _ = screen.terminal.show_cursor();
     drop(screen);
@@ -1527,7 +1567,9 @@ fn event_loop(
     memory: &MemorySink,
     scope: RunScope,
     settled: &AtomicBool,
+    backend_slot: &BackendSlot,
 ) -> io::Result<()> {
+    let (job_tx, job_rx) = channel::<Job>();
     let mut state = TuiState::new(scope);
     state.accepts_requests = add_tx.is_some();
     // `Some` while the "add package" prompt is open and capturing keys.
@@ -1552,6 +1594,18 @@ fn event_loop(
     };
 
     loop {
+        let (backend, hold_open) = match backend_slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            Some((b, hold)) => (Some(b.clone()), *hold),
+            None => (None, false),
+        };
+        state.can_submit = backend.is_some();
+        while let Ok(job) = job_rx.try_recv() {
+            modal::apply_job(&mut state, &mut browse, job);
+        }
         // Drain everything currently queued so a burst of events (e.g. many
         // packages starting at once) renders as one frame, not one per event.
         // Bounded by time, so producers that never pause can't starve the draw
@@ -1597,11 +1651,14 @@ fn event_loop(
             browse.log_seen = log_seq;
         }
 
-        let hint = over_hint(
-            run_over(&state),
-            run_is_done(&state, work.load(Ordering::SeqCst)),
-            state.accepts_requests,
-        );
+        let done = run_is_done(&state, work.load(Ordering::SeqCst));
+        let hint = if hold_open && done {
+            Some(
+                "Run done: S submit selected \u{2502} A submit all built \u{2502} d diff \u{2502} e explain \u{2502} q quit",
+            )
+        } else {
+            over_hint(run_over(&state), done, state.accepts_requests)
+        };
         let mut feedback = RenderFeedback::default();
         terminal.draw(|f| {
             feedback = render(f, &state, &mut table_state, input.as_deref(), &browse, hint);
@@ -1642,6 +1699,38 @@ fn event_loop(
                             );
                         }
                     }
+                }
+                continue;
+            }
+            // A modal takes every key but Ctrl-C.
+            if browse.modal.is_some()
+                && !(key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(event::KeyModifiers::CONTROL))
+            {
+                match &mut browse.modal {
+                    Some(Modal::Diff(v)) => match modal::diff_key(v, key.code) {
+                        modal::DiffAction::None => {}
+                        modal::DiffAction::Close => browse.modal = None,
+                        action => {
+                            modal::redo_diff(&state, &mut browse, action, backend.as_ref(), &job_tx)
+                        }
+                    },
+                    Some(Modal::Submit(m)) => match modal::submit_key(m, key.code) {
+                        modal::SubmitAction::None => {}
+                        modal::SubmitAction::Close => browse.modal = None,
+                        modal::SubmitAction::Confirm => modal::confirm_submit(
+                            &mut state,
+                            &mut browse,
+                            backend.as_ref(),
+                            &job_tx,
+                        ),
+                    },
+                    Some(Modal::Explain(v)) => {
+                        if modal::explain_key(v, key.code) == modal::ExplainAction::Close {
+                            browse.modal = None;
+                        }
+                    }
+                    None => {}
                 }
                 continue;
             }
@@ -1719,6 +1808,39 @@ fn event_loop(
                     select_prev(&mut selected, &state)
                 }
                 KeyCode::Char('a') => state.show_all = !state.show_all,
+                KeyCode::Char('d') => {
+                    if let Some(row) = selected.as_deref() {
+                        modal::open_diff(&state, &mut browse, row, backend.as_ref(), &job_tx);
+                    }
+                }
+                KeyCode::Char('e') => {
+                    if let Some(row) = selected.as_deref() {
+                        modal::open_explain(
+                            &mut browse,
+                            row,
+                            modal::explain_loader().as_ref(),
+                            &job_tx,
+                        );
+                    }
+                }
+                KeyCode::Char('S') | KeyCode::Char('A') => {
+                    let all = key.code == KeyCode::Char('A');
+                    let rows = modal::submit_rows(&state, selected.as_deref(), all);
+                    if rows.is_empty() {
+                        state.add_global_log(
+                            LogLevel::Info,
+                            "No built package without a submit request".to_string(),
+                        );
+                    } else {
+                        modal::open_submit(
+                            &mut state,
+                            &mut browse,
+                            rows,
+                            backend.as_ref(),
+                            &job_tx,
+                        );
+                    }
+                }
                 // Works in every focus: the lists replace the detail panes
                 // wholesale, so there is no pane the key could belong to.
                 KeyCode::Char('l') => browse.show_lists = !browse.show_lists,
@@ -1840,7 +1962,8 @@ fn event_loop(
         // settled stays open until the user quits.
         if run_is_done(&state, work.load(Ordering::SeqCst)) {
             let at = finished_at.get_or_insert(Instant::now());
-            if at.elapsed() >= Duration::from_secs(2) {
+            // With a backend that keeps the TUI open the user ends it with `q`.
+            if !hold_open && at.elapsed() >= Duration::from_secs(2) {
                 break;
             }
         } else if senders_dropped {
@@ -1956,9 +2079,17 @@ struct BrowseState {
     /// length and a shared offset would end the shorter one early.
     queued_off: usize,
     built_off: usize,
+    /// The diff viewer or submit confirmation, while one is open.
+    modal: Option<Modal>,
+    diff_seq: u64,
 }
 
 impl BrowseState {
+    fn next_seq(&mut self) -> u64 {
+        self.diff_seq += 1;
+        self.diff_seq
+    }
+
     /// Start over for a newly selected package: another package's offsets
     /// mean nothing here.
     fn reset_for_package(&mut self, log_seq: u64) {
@@ -2193,6 +2324,9 @@ fn render(
             .and_then(|name| state.packages.get(name.as_str()))
             .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
     render_footer(f, state, input, browse, footer, retryable, hint);
+    if let Some(m) = &browse.modal {
+        modal::render_modal(f, state, m, area);
+    }
     feedback
 }
 
@@ -2534,7 +2668,10 @@ fn render_table(
         .iter()
         .map(|name| {
             let pkg = &state.packages[*name];
-            let step = pkg.step_text();
+            let step_cell = match &pkg.sr {
+                Some(mark) => Cell::from(Line::from(mark.span())),
+                None => Cell::from(pkg.step_text()),
+            };
             let elapsed = pkg.started.elapsed().as_secs();
             let tries = if pkg.max_tries > 0 {
                 format!("{}/{}", pkg.tries, pkg.max_tries)
@@ -2552,7 +2689,7 @@ fn render_table(
                     },
                 ),
                 Cell::from(pkg.version_label()).style(Style::default().fg(Color::Gray)),
-                Cell::from(step),
+                step_cell,
                 Cell::from(tries),
                 Cell::from(format!("{elapsed}s")),
                 Cell::from(format!("${:.2}", pkg.cost_usd)),
@@ -2974,8 +3111,13 @@ fn render_footer(
     } else {
         ""
     };
+    let diff = if state.can_submit {
+        " │ d diff │ e explain │ S submit │ A submit all"
+    } else {
+        " │ d diff │ e explain"
+    };
     let hints = format!(
-        "  {nav} │ Tab focus │ l lists{add}{} │ a {} succeeded │ {quit}",
+        "  {nav} │ Tab focus │ l lists{add}{diff}{} │ a {} succeeded │ {quit}",
         if retryable {
             " │ r retry (no space left)"
         } else {

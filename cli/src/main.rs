@@ -1,6 +1,7 @@
 //! Command-line surface — REDESIGN M1.
 
 mod cleanup;
+mod diffview;
 mod run_limits;
 mod tui;
 mod update_project;
