@@ -26,7 +26,7 @@
 26. Merged into convention 22 — read convention 22 when the checkout is a git snapshot or the project sits in a subdirectory
 27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
 28. The four exceptions to building a dependency — read when a dependency failed to build, tests need GPU/network, or you return use_upstream_wheel
-29. Missing source code (no sdist, no repo URL) — read when no source tarball or repository URL can be found for the package
+29. Merged into convention 77 — read convention 77 when no source tarball or repository URL can be found for the package
 30. Merged into convention 22 — read convention 22 when the prompt lists several "Other projects in this archive"
 31. Merged into convention 39 — read convention 39 when rpmlint warns on Summary, description or binaries
 32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
@@ -53,7 +53,7 @@
 53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
 54. Merged into convention 53 — read convention 53 when a feature only needs other packages installed, no files
 55. Merged into convention 7 — read convention 7 when tests fail only under pytest-xdist -n auto
-56. Signed checksums file, GPG verify — read when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
+56. Merged into convention 77 — read convention 77 when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
 57. Merged into convention 3 — read convention 3 when tests skip or fail because the .so is not in source/
 58. Vendored libraries need their LICENSE in %license — read when sources have _vendor/vendor/bundled dirs
 59. Merged into convention 75 — read convention 75 when OBS says "nothing provides ... = X (got version Y)"
@@ -79,7 +79,7 @@
 79. Merged into convention 39 — read convention 39 when the package ships .so files or rpmlint reports rpath errors
 80. Merged into convention 19 — read convention 19 when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
 81. Merged into convention 10 — read convention 10 when tests may need network, GPU, redis, models or repo files
-82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
+82. Merged into convention 77 — read convention 77 when requires-python has <, a SourceN is a URL, or Cargo.lock exists
 83. Merged into convention 76 — read convention 76 when several wheels unpack into one top-level dir
 84. Merged into convention 32 — read convention 32 when the build or sources mention CUDA, cuda.h, nvcc or libcudart
 85. Merged into convention 34 — read convention 34 when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
@@ -89,6 +89,6 @@
 89. SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
 90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr; keep header, URL:, SPDX License: — read when a spec has Group:, BuildRoot:, %clean or %defattr, or no URL:
 91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
-92. Every _service you add uses mode="manual" — read when you write or edit a _service file
-93. Upstream .asc/.sig signature: SourceN plus keyring — read when the release page has a .asc, .sig or .sign next to the tarball
+92. Merged into convention 77 — read convention 77 when you write or edit a _service file
+93. Merged into convention 77 — read convention 77 when the release page has a .asc, .sig or .sign next to the tarball
 94. Merged into convention 14 — read convention 14 when the prompt lists patches that failed to apply or you are about to remove a Patch line

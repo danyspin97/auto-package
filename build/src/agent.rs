@@ -3620,7 +3620,7 @@ mod tests {
     #[test]
     fn static_system_prompt_carries_both_conventions_and_workflow() {
         let combined = static_system_prompt();
-        assert!(combined.contains("29. Missing source code"));
+        assert!(combined.contains("29. Merged into convention 77"));
         assert!(combined.contains("### Finding Missing C Headers and Libraries"));
         assert!(combined.contains("## Workflow"));
     }
