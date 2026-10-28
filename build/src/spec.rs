@@ -398,8 +398,8 @@ pub fn parenthesize_conditional_dependencies(spec: &str) -> String {
 /// must already be installed for those scriptlets to run, which RPM only
 /// guarantees via an explicit `Requires(post)`/`Requires(postun)`. Missing
 /// either is silent at generation and review time and only surfaces as
-/// `update-alternatives: command not found` once the scriptlets actually run
-/// (observed on python-triton). Inserted right before `%python_subpackages`,
+/// `update-alternatives: command not found` once the scriptlets actually run.
+/// Inserted right before `%python_subpackages`,
 /// matching where a correctly-written spec of this shape already puts them.
 pub fn fix_missing_alternatives_requires(spec: &str) -> String {
     let needs_it = spec.contains("%python_install_alternative")
@@ -407,8 +407,8 @@ pub fn fix_missing_alternatives_requires(spec: &str) -> String {
     if !needs_it {
         return spec.to_string();
     }
-    let has_post = spec.contains("Requires(post):") && spec.contains("update-alternatives");
-    let has_postun = spec.contains("Requires(postun):") && spec.contains("update-alternatives");
+    let has_post = requires_alternatives_for(spec, "post");
+    let has_postun = requires_alternatives_for(spec, "postun");
     if has_post && has_postun {
         return spec.to_string();
     }
@@ -427,6 +427,22 @@ pub fn fix_missing_alternatives_requires(spec: &str) -> String {
         out.insert(pos + i, line);
     }
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// Whether a `Requires(<phase>[,..]):` line names `update-alternatives`.
+fn requires_alternatives_for(spec: &str, phase: &str) -> bool {
+    spec.lines().any(|line| {
+        let Some(rest) = line.trim_start().strip_prefix("Requires(") else {
+            return false;
+        };
+        let Some((phases, value)) = rest.split_once("):") else {
+            return false;
+        };
+        phases.split(',').any(|p| p.trim() == phase)
+            && value
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .any(|w| w == "update-alternatives")
+    })
 }
 
 fn tag_value<'a>(spec: &'a str, tag: &str) -> Option<&'a str> {
@@ -801,17 +817,56 @@ pub(crate) fn expand_simple_defines(
     expand_once(s, macros)
 }
 
+/// One left-to-right scan that replaces only whole macro identifiers
+/// (`%{ident}` and `%ident`, ident = `[A-Za-z0-9_]+`). `%%`, `%{?x}`,
+/// `%{!?x}`, `%(...)` and unknown names are copied through untouched.
 fn expand_once(s: &str, macros: &std::collections::HashMap<String, String>) -> String {
-    let mut out = s.to_string();
-    // Longest name first: replacing `%rel` before `%release` turns `%release`
-    // into `1ease`, and HashMap order would make that differ from run to run.
-    let mut by_length: Vec<_> = macros.iter().collect();
-    by_length.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(b.0)));
-    for (name, value) in by_length {
-        out = out
-            .replace(&format!("%{{{name}}}"), value)
-            .replace(&format!("%{name}"), value);
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('%') {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + 1..];
+        let (consumed, value) = if after.starts_with('%') {
+            (1, None)
+        } else if let Some(inner) = after.strip_prefix('{') {
+            match inner.find('}') {
+                Some(end) if !inner[..end].is_empty() && inner[..end].chars().all(is_ident) => {
+                    (end + 2, macros.get(&inner[..end]))
+                }
+                _ => (0, None),
+            }
+        } else if after.starts_with('(') {
+            let mut depth = 0usize;
+            let mut end = after.len();
+            for (i, c) in after.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (end, None)
+        } else {
+            let len = after.find(|c: char| !is_ident(c)).unwrap_or(after.len());
+            (len, macros.get(&after[..len]).filter(|_| len > 0))
+        };
+        match value {
+            Some(v) => out.push_str(v),
+            None => {
+                out.push('%');
+                out.push_str(&after[..consumed]);
+            }
+        }
+        rest = &after[consumed..];
     }
+    out.push_str(rest);
     out
 }
 
@@ -1304,6 +1359,26 @@ BuildRequires:  %{python_module pip}
             fix_missing_alternatives_requires(no_alternatives),
             no_alternatives
         );
+    }
+
+    #[test]
+    fn another_requires_line_does_not_count_as_declared() {
+        let spec = "\
+Requires(post): gtk-update-icon-cache
+Requires(postun): update-alternatives
+%python_subpackages
+%install
+%python_install_alternative proton
+";
+        let fixed = fix_missing_alternatives_requires(spec);
+        assert!(
+            fixed.contains("Requires(post):   update-alternatives\n"),
+            "{fixed}"
+        );
+        assert_eq!(fixed.matches("Requires(postun):").count(), 1, "{fixed}");
+        let both = "Requires(post,postun): update-alternatives\n%python_subpackages\n\
+                    %python_install_alternative x\n";
+        assert_eq!(fix_missing_alternatives_requires(both), both);
     }
 }
 
@@ -4494,9 +4569,13 @@ pub fn wheel_has_license_file(layout: &ap_ecosystem::sdist::WheelLayout) -> bool
 pub fn sdist_top_level_license(tarball: &std::path::Path) -> Option<(String, Vec<u8>)> {
     use std::io::Read;
     let file = std::fs::File::open(tarball).ok()?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut archive = ap_ecosystem::sdist::bounded_tar_gz(file);
     let mut best: Option<(String, Vec<u8>)> = None;
-    for entry in archive.entries().ok()? {
+    for entry in archive
+        .entries()
+        .ok()?
+        .take(ap_ecosystem::sdist::SCAN_MAX_ENTRIES)
+    {
         let Ok(entry) = entry else { continue };
         if !entry.header().entry_type().is_file() || entry.size() > (1 << 20) {
             continue;
@@ -6981,6 +7060,46 @@ mod expand_order_tests {
         assert_eq!(expand_once("%release", &macros), "2");
         assert_eq!(expand_once("%rel", &macros), "1");
     }
+
+    fn one(name: &str, value: &str) -> HashMap<String, String> {
+        [(name.to_string(), value.to_string())].into()
+    }
+
+    #[test]
+    fn only_whole_identifiers_are_replaced() {
+        let m = one("pkg", "foo");
+        assert_eq!(expand_once("%pkgdir", &m), "%pkgdir");
+        assert_eq!(expand_once("%pkg-1", &m), "foo-1");
+        assert_eq!(expand_once("%{pkg}dir", &m), "foodir");
+        assert_eq!(expand_once("%pkg_x %pkg", &m), "%pkg_x foo");
+    }
+
+    #[test]
+    fn a_source_with_an_undefined_macro_is_not_a_real_url() {
+        let spec = "Name: foo\nVersion: 1\n%define pkg foo\n\
+                    Source0: https://x.org/%{name}-%version_tag.tar.gz\n\
+                    Source1: https://x.org/%pkgdir/a.tar.gz\n\
+                    Source2: https://x.org/%pkg/%{pkg}-%{version}.tar.gz\n";
+        let got = super::expanded_sources(spec);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].url, "https://x.org/foo/foo-1.tar.gz");
+    }
+
+    #[test]
+    fn unknown_and_special_macros_are_left_alone() {
+        let m = one("name", "foo");
+        for keep in [
+            "%%name",
+            "%{?name}",
+            "%{!?name}",
+            "%(echo %name)",
+            "%{x y}",
+            "100%",
+        ] {
+            assert_eq!(expand_once(keep, &m), keep, "{keep}");
+        }
+        assert_eq!(expand_once("%{name}-%version_tag", &m), "foo-%version_tag");
+    }
 }
 
 #[cfg(test)]
@@ -7106,6 +7225,52 @@ mod review_fix_tests {
             ]
         );
     }
+}
+
+/// The architectures `spec`'s top-level `ExclusiveArch:` allows when none of
+/// them is `arch`, so a build for `arch` can only end `excluded`. `None` when the
+/// spec has no such line, names a macro or `do_not_build` (a switch the tool
+/// owns), has it inside a conditional, or allows `arch`.
+pub fn exclusive_arch_excluding(spec: &str, arch: &str) -> Option<Vec<String>> {
+    let mut depth = 0usize;
+    let mut allowed: Vec<String> = Vec::new();
+    for line in spec.lines() {
+        let t = line.trim_start();
+        if t.starts_with("%description") || t.starts_with("%package") {
+            break;
+        }
+        if t.starts_with("%if") {
+            depth += 1;
+        } else if t.starts_with("%endif") {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0
+            && t.len() > "exclusivearch:".len()
+            && t[.."exclusivearch:".len()].eq_ignore_ascii_case("exclusivearch:")
+        {
+            allowed.extend(
+                t["exclusivearch:".len()..]
+                    .split_whitespace()
+                    .map(str::to_string),
+            );
+        } else if depth > 0
+            && t.get(..14)
+                .is_some_and(|h| h.eq_ignore_ascii_case("exclusivearch:"))
+        {
+            return None;
+        }
+    }
+    if allowed.is_empty()
+        || allowed
+            .iter()
+            .any(|a| a.contains('%') || a == "do_not_build")
+    {
+        return None;
+    }
+    let is_x86_32 = |a: &str| matches!(a, "i386" | "i486" | "i586" | "i686");
+    let hit = allowed
+        .iter()
+        .any(|a| a == arch || (is_x86_32(arch) && is_x86_32(a)));
+    (!hit).then_some(allowed)
 }
 
 /// Lines of `spec` that still carry a `TODO` or `FIXME` placeholder, as `(line number,
@@ -9540,5 +9705,44 @@ mod license_url_injection_tests {
         let spec = wheel_binary_skeleton("pkg", "1.0", wheel, &release, Some(true), Some(&bad_lib));
         assert!(!spec.contains("$(touch x)"), "{spec}");
         assert!(!spec.contains("test -e"), "{spec}");
+    }
+}
+
+#[cfg(test)]
+mod exclusive_arch_tests {
+    use super::exclusive_arch_excluding;
+
+    const LSVPD: &str =
+        "Name: lsvpd\nVersion: 1\nExclusiveArch:  ppc ppc64 ppc64le\n%description\nx\n";
+
+    #[test]
+    fn a_power_only_package_is_excluded_on_x86_64() {
+        assert_eq!(
+            exclusive_arch_excluding(LSVPD, "x86_64"),
+            Some(vec!["ppc".into(), "ppc64".into(), "ppc64le".into()])
+        );
+        assert_eq!(exclusive_arch_excluding(LSVPD, "ppc64le"), None);
+    }
+
+    #[test]
+    fn macros_conditionals_and_the_tool_switch_are_left_alone() {
+        for spec in [
+            "ExclusiveArch: %{ix86} ppc\n",
+            "%ifarch ppc\nExclusiveArch: ppc\n%endif\n",
+            "ExclusiveArch: do_not_build\n",
+            "Name: x\n",
+        ] {
+            assert_eq!(exclusive_arch_excluding(spec, "x86_64"), None, "{spec}");
+        }
+        assert_eq!(
+            exclusive_arch_excluding("ExclusiveArch: i586\n", "i686"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_line_in_a_subpackage_does_not_count() {
+        let spec = "Name: x\n%package devel\nExclusiveArch: ppc\n";
+        assert_eq!(exclusive_arch_excluding(spec, "x86_64"), None);
     }
 }
