@@ -212,6 +212,74 @@ deliberately conservative:
 - the description gives the old and new version and the newest `.changes`
   entry. Created request ids are printed and listed in the summary.
 
+### Maintenance requests (SLE and Leap code streams)
+
+A package in a released code stream (`SUSE:SLE-15-SP7:Update`,
+`openSUSE:Backports:SLE-15-SP7:Update`, ...) is changed through a maintenance
+incident, not a submit request. `--maintenance` does what `osc mbranch` and
+`osc maintenancerequest` do by hand, on top of the ordinary `update`/`lint` run:
+
+```bash
+# Where is the package maintained? (read only)
+auto-package update --project openSUSE:Factory --only tor --maintenance-list
+
+# Backport an upstream fix to every code stream, as a dry run first.
+auto-package update --project openSUSE:Factory --only tor \
+  --maintenance all \
+  --backport https://gitlab.torproject.org/tpo/core/tor/-/commit/0123abc \
+  --bug bsc#1234567 --bug CVE-2025-1234 --dry-run
+```
+
+- `--maintenance [CODESTREAM,...|all]` picks the code streams (the update
+  projects `osc maintained` lists, also without `:Update`); without a value it
+  asks. Each code stream is built from its own package in
+  `home:<you>:branches:<update project>`, then the ones that built go into one
+  `maintenance_incident` request to the maintenance project, after the plan is
+  shown and confirmed (`--yes` to skip the question).
+- `--maintenance-mode backport|update`: `backport` is the default, because it
+  is what maintenance normally accepts: each code stream keeps its version and
+  gets the fix as a patch. `update` updates each code stream to the newest
+  release (or `--to-version`). `lint --maintenance` sends packaging fixes. The
+  plan and the request description say which.
+- `--backport SRC` (repeatable, needed in backport mode): a patch file, an https
+  URL of a `.patch`/`.diff`, a GitHub/GitLab/Gitea commit URL or a GitHub pull
+  request (the forge's `.patch` form is fetched), or a commit id together with
+  `--backport-repo URL`. It is fetched once (https only, private addresses
+  refused, 4 MiB cap, it must be a unified diff), stored in each branch as
+  `CVE-2025-1234.patch` (or `fix-<commit>.patch` without a CVE) and the agent
+  adds it with a `# PATCH-FIX-UPSTREAM <file> <refs> -- <reason>` comment and
+  makes it apply to that code stream's source (rebased with quilt, never
+  trimmed of failing hunks). The `.changes` bullet is written by auto-package:
+  `- Add CVE-2025-1234.patch: <reason> (bsc#1234567, CVE-2025-1234)`.
+- `--bug REF` (repeatable or comma separated): `bsc#`/`boo#`/`bnc#`, `jsc#` or
+  `CVE-` references, added to the newest changelog entry and the description.
+  Required; a backport refuses `--no-bug-ref`.
+- `--affected-by COMMAND`: run as `COMMAND PACKAGE CODESTREAM REFS [BACKPORT...]`
+  per code stream (no shell, 60 s timeout); a first stdout line
+  `not-affected <reason>` leaves the code stream out with that reason,
+  `affected`/`unknown` (or anything else, a failure, a timeout) keeps it.
+  In code, the same seam is the `StreamCheck` trait of `ap_build::maintenance`
+  (`run_with`).
+
+Every code stream ends with a line in the summary: ready (with "applied
+cleanly", "applied after a refresh for this code stream" or "updated to X"),
+left out (an open request from the branch, or an accepted one of the same
+source revision), not affected, or FAILED with the reason; a failed code stream
+is never put into the request, and the run then exits non-zero.
+
+Limits:
+
+- code streams maintained in git (`[git]` lines of `osc maintained`, SLFO) are
+  listed and skipped: not supported yet. A package maintained only in git is
+  not seen at all;
+- a maintenance run adds no build paths to the branch project: a package that
+  needs one fails its code stream, because the incident could not build it;
+  a dependency the pipeline builds itself in the branch does not travel with
+  the request either;
+- a backport is one fix of one package (`--only` names one); the package must
+  have a source auto-package can rebuild (as for `update`);
+- the bug references are checked for their form only, not looked up.
+
 ### Exit codes
 
 - `0`: success.
