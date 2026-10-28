@@ -404,7 +404,7 @@ fn reachable(url: &str) -> bool {
 
 /// Package indexes and release hosts the agent may name, besides the forges that
 /// `ap_ecosystem::forge` knows. Subdomains of an entry are accepted too.
-const TRUSTED_SOURCE_HOSTS: &[&str] = &[
+pub(crate) const TRUSTED_SOURCE_HOSTS: &[&str] = &[
     "pypi.org",
     "files.pythonhosted.org",
     "crates.io",
@@ -433,16 +433,27 @@ fn host_allowed(host: &str) -> bool {
     if ap_ecosystem::forge::is_fixed_forge_host(&host) {
         return true;
     }
-    let extra = std::env::var("AUTO_PACKAGE_SOURCE_HOSTS").unwrap_or_default();
+    let extra = extra_source_hosts();
     TRUSTED_SOURCE_HOSTS
         .iter()
         .copied()
-        .chain(extra.split(',').map(str::trim).filter(|h| !h.is_empty()))
-        .any(|domain| host_is_under(&host, &domain.to_ascii_lowercase()))
+        .chain(extra.iter().map(String::as_str))
+        .any(|domain| host_is_under(&host, domain))
+}
+
+/// The hosts listed in `AUTO_PACKAGE_SOURCE_HOSTS` (comma separated),
+/// lowercased, without a trailing dot. Read by every source host check.
+pub(crate) fn extra_source_hosts() -> Vec<String> {
+    let extra = std::env::var("AUTO_PACKAGE_SOURCE_HOSTS").unwrap_or_default();
+    extra
+        .split(',')
+        .map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
 }
 
 /// `host` is `domain` or one of its subdomains.
-fn host_is_under(host: &str, domain: &str) -> bool {
+pub(crate) fn host_is_under(host: &str, domain: &str) -> bool {
     host == domain || host.strip_suffix(domain).is_some_and(|h| h.ends_with('.'))
 }
 
