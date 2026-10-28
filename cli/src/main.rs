@@ -607,6 +607,12 @@ fn resolve_dependency_config(
     None
 }
 
+/// The longest an interrupted run waits for its OBS baseline restores. A
+/// restore is one `osc addremove` and one `osc ci`, each capped by the restore
+/// timeout; past this wait the restore is left for the next run (its baseline
+/// stays on disk, see `restore_obs_baseline`).
+const RESTORE_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
+
 /// Clean process-wide shutdown for Ctrl-C — restore the terminal if the TUI
 /// had it, print token usage so far, and actually end the process.
 ///
@@ -621,20 +627,41 @@ fn resolve_dependency_config(
 /// rendering — the pipeline's package-build threads keep running otherwise,
 /// unaffected by whatever the TUI's own event loop does.
 fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
+    // A second interrupt while the first one waits for restores ends the wait.
+    static INTERRUPTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INTERRUPTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        std::process::exit(130);
+    }
     // Stop the build workers (own process groups, so the terminal's Ctrl-C
     // never reached them): otherwise `osc`/`claude` outlive this process.
     // Sets the shutdown flag first, so polling loops and the scheduler stop
-    // on their next check.
+    // on their next check. A baseline restore is spared: it puts OBS back.
     ap_build::proc::kill_all_groups();
-    ap_build::proc::remove_private_dir();
-    ap_build::upstream_cache::flush();
-    ap_core::sink::flush_jsonl_sinks();
     // The TUI leaves raw mode and the alternate screen on; restore them before
-    // printing anything, or it lands in that state.
+    // printing anything, or it lands in that state. Done before the wait, so
+    // a second Ctrl-C is a signal again and not a keypress nobody reads.
     if tui_active {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
     }
+    let restoring = ap_build::proc::restores_in_flight();
+    if restoring > 0 {
+        eprintln!(
+            "\nWaiting up to {}s for {restoring} OBS baseline restore(s) to finish \
+             (Ctrl-C again stops waiting)...",
+            RESTORE_WAIT.as_secs()
+        );
+        if !ap_build::proc::wait_for_restores(RESTORE_WAIT) {
+            eprintln!(
+                "warning: an OBS baseline restore did not finish: OBS keeps the failed \
+                 attempt; the saved baseline stays in the work directory and the next \
+                 run of that package restores it first"
+            );
+        }
+    }
+    ap_build::proc::remove_private_dir();
+    ap_build::upstream_cache::flush();
+    ap_core::sink::flush_jsonl_sinks();
     let usage = memory.usage();
     eprintln!(
         "\nInterrupted — tokens: {} in / {} out — cost: ${:.2}",
@@ -665,7 +692,11 @@ fn install_interrupt_handler(tui_active: bool, memory: Arc<MemorySink>) -> color
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .expect("set before the handler");
-        handle_interrupt(tui_active, &memory)
+        // Off this thread: it waits for restores, and a second Ctrl-C must
+        // still reach the handler to end that wait.
+        std::thread::spawn(move || {
+            handle_interrupt(tui_active, &memory);
+        });
     })
     .map_err(|e| color_eyre::eyre::eyre!("failed to install the interrupt handler: {e}"))
 }

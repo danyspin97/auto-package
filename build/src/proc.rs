@@ -245,12 +245,13 @@ pub fn capture(
     capture_with_timeout(program, args, cwd, emit, DEFAULT_CAPTURE_TIMEOUT)
 }
 
-/// Process groups of children currently running. Children get their own group
-/// (so a timeout can kill their descendants), which also means a terminal
-/// Ctrl-C no longer reaches them — when this process is told to stop it must
-/// kill them itself or `osc`/`claude` keep running, orphaned.
-static ACTIVE_GROUPS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// Process groups of children currently running, each with whether it belongs
+/// to a baseline restore (`true`: spared by [`kill_all_groups`]). Children get
+/// their own group (so a timeout can kill their descendants), which also means
+/// a terminal Ctrl-C no longer reaches them — when this process is told to
+/// stop it must kill them itself or `osc`/`claude` keep running, orphaned.
+static ACTIVE_GROUPS: std::sync::Mutex<std::collections::BTreeMap<u32, bool>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Registration of a running child's group; removed on drop.
 pub(crate) struct GroupGuard(u32);
@@ -278,8 +279,14 @@ const RESTORE_TIMEOUT: Duration = Duration::from_secs(120);
 /// ends when the guard drops.
 pub fn restoring_after_shutdown() -> RestoreGuard {
     RESTORING.with(|r| r.set(true));
+    RESTORES_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     RestoreGuard(())
 }
+
+/// Restores that have started and not yet returned, counted across threads.
+/// The interrupt handler waits for them ([`wait_for_restores`]) before the
+/// process exits, so a stopped run does not leave a failed attempt on OBS.
+static RESTORES_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// See [`restoring_after_shutdown`].
 pub struct RestoreGuard(());
@@ -287,6 +294,38 @@ pub struct RestoreGuard(());
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
         RESTORING.with(|r| r.set(false));
+        RESTORES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// How many baseline restores are running right now.
+pub fn restores_in_flight() -> usize {
+    RESTORES_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Wait up to `timeout` for every baseline restore to return. `true` when
+/// none is left running; `false` when the wait ran out first, and the caller
+/// exits with a restore still pending (its baseline stays on disk).
+pub fn wait_for_restores(timeout: Duration) -> bool {
+    wait_until_idle(&RESTORES_IN_FLIGHT, timeout, Duration::from_millis(100))
+}
+
+/// Poll `counter` until it reads zero or `timeout` has passed.
+fn wait_until_idle(
+    counter: &std::sync::atomic::AtomicUsize,
+    timeout: Duration,
+    poll: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if counter.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll.min(deadline - now));
     }
 }
 
@@ -319,7 +358,7 @@ pub(crate) fn track_group(pid: u32) -> io::Result<GroupGuard> {
             "shutting down; child killed",
         ));
     }
-    groups.insert(pid);
+    groups.insert(pid, restoring());
     Ok(GroupGuard(pid))
 }
 
@@ -339,19 +378,25 @@ pub fn shutting_down() -> bool {
     SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// SIGKILL every child still running. For process shutdown (Ctrl-C, quit).
+/// SIGKILL every child still running, except a baseline restore's: that one
+/// is let finish (see [`wait_for_restores`]). For process shutdown (Ctrl-C,
+/// quit).
 pub fn kill_all_groups() {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
     ap_ecosystem::net::request_stop();
-    let pids: Vec<u32> = ACTIVE_GROUPS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .copied()
-        .collect();
+    let pids = sweep_targets(&ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()));
     for pid in pids {
         kill_process_group(pid);
     }
+}
+
+/// The groups a shutdown sweep kills: every registered one but the restores'.
+fn sweep_targets(groups: &std::collections::BTreeMap<u32, bool>) -> Vec<u32> {
+    groups
+        .iter()
+        .filter(|(_, spared)| !**spared)
+        .map(|(pid, _)| *pid)
+        .collect()
 }
 
 /// Why the run was stopped by [`abort_run`]; the first reason wins.
@@ -656,6 +701,36 @@ mod restore_spawn_tests {
         assert!(may_spawn(false, true));
         assert!(!may_spawn(true, false));
         assert!(may_spawn(true, true));
+    }
+
+    #[test]
+    fn a_shutdown_sweep_spares_the_restores_children() {
+        let groups = std::collections::BTreeMap::from([(10, false), (11, true), (12, false)]);
+        assert_eq!(sweep_targets(&groups), vec![10, 12]);
+    }
+
+    #[test]
+    fn the_wait_ends_when_the_last_restore_returns() {
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        assert!(wait_until_idle(&counter, Duration::ZERO, Duration::ZERO));
+        counter.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(!wait_until_idle(
+            &counter,
+            Duration::from_millis(30),
+            Duration::from_millis(5)
+        ));
+        let counter = std::sync::Arc::new(counter);
+        let other = std::sync::Arc::clone(&counter);
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            other.store(0, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(wait_until_idle(
+            &counter,
+            Duration::from_secs(10),
+            Duration::from_millis(5)
+        ));
+        t.join().unwrap();
     }
 
     #[test]
