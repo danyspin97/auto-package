@@ -59,12 +59,24 @@ impl RiskFlag {
     }
 }
 
-/// Replaces the risk flags with `found`, the change's own, at a commit of
-/// `run_id`. Until then the earlier run's flags stay, since they describe the
-/// revision OBS holds.
+/// Adds the risks `found` of a commit of `run_id`. Earlier risks stay until
+/// the package is submitted (see [`clear_submitted`]), for the same reason as
+/// the fix-loop flags: a later commit is compared with the OBS head.
 pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<RiskFlag>) {
-    st.risk_flags = found;
+    for risk in found {
+        if !st.risk_flags.contains(&risk) {
+            st.risk_flags.push(risk);
+        }
+    }
     st.risk_flags_run_id = Some(run_id.to_string());
+}
+
+/// Drops the risks of `pkg` once its change is submitted.
+pub fn clear_submitted(state_root: &Path, pkg: &str) -> std::io::Result<()> {
+    let Some(ws) = Workspace::find_existing(state_root, &[pkg]) else {
+        return Ok(());
+    };
+    PkgState::update(&ws, |st| st.risk_flags.clear()).map(|_| ())
 }
 
 /// The risk flags the package's last run recorded, for a reader outside the run.
@@ -617,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_without_a_commit_keeps_the_risks_of_the_earlier_one() {
+    fn risks_accumulate_until_the_package_is_submitted() {
         let mut st = PkgState::default();
         settle(
             &mut st,
@@ -626,11 +638,12 @@ mod tests {
                 header: "%post".into(),
             }],
         );
-        // A run that ends before its commit (AlreadyBuilt, missing_deps) leaves them.
-        assert_eq!(st.risk_flags.len(), 1);
-        // The commit of a run that found nothing new replaces them.
+        // A run without a commit (AlreadyBuilt, missing_deps) leaves them, and
+        // so does a later commit that finds nothing new.
         settle(&mut st, "r2", vec![]);
-        assert!(st.risk_flags.is_empty());
+        assert_eq!(st.risk_flags.len(), 1);
+        settle(&mut st, "r3", vec![]);
+        assert_eq!(st.risk_flags.len(), 1);
     }
 
     #[test]
@@ -647,8 +660,10 @@ mod tests {
             lines_of_package(root.path(), "python-foo"),
             vec!["RISK: new source host: evil.example.com".to_string()]
         );
-        // A later run that found nothing leaves nothing behind.
+        // A later run that found nothing keeps it until the package is submitted.
         PkgState::update(&ws, |st| settle(st, "r2", vec![])).unwrap();
+        assert_eq!(of_package(root.path(), "python-foo").len(), 1);
+        clear_submitted(root.path(), "python-foo").unwrap();
         assert!(of_package(root.path(), "python-foo").is_empty());
     }
 }

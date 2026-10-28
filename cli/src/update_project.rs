@@ -1683,6 +1683,7 @@ impl tui::PackageBackend for SubmitBackend {
         let (_, sr) = self.request(row)?;
         match osc::create_submit_request(&sr, Emit::run(self.reporter.as_ref())) {
             Ok(id) => {
+                forget_submitted_flags(&self.state_root, &sr.source_package);
                 self.reporter.report(&Event::Progress {
                     step: None,
                     message: format!(
@@ -1711,6 +1712,14 @@ impl tui::PackageBackend for SubmitBackend {
             }
         }
     }
+}
+
+/// Drops the fix-loop and risk flags of a package whose request was created:
+/// the request text carries them from then on. A failure keeps them, which is
+/// the safe side: they are shown again rather than lost.
+fn forget_submitted_flags(state_root: &Path, pkg: &str) {
+    let _ = ap_build::fix_flags::clear_submitted(state_root, pkg);
+    let _ = ap_build::risk_flags::clear_submitted(state_root, pkg);
 }
 
 /// Create a submit request, to its origin project, for each package that
@@ -1785,6 +1794,7 @@ fn submit_requests(
                     "created request {id}: {}/{} -> {}/{}",
                     sr.source_project, sr.source_package, sr.target_project, sr.target_package
                 ));
+                forget_submitted_flags(&ctx.state_root, &sr.source_package);
                 SrOutcome::Created(id)
             }
             Err(e) => {

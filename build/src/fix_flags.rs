@@ -61,37 +61,42 @@ pub(crate) fn one_line(text: &str) -> String {
     format!("{}...", cut.trim_end())
 }
 
-/// Records a `blocked` answer of `run_id`. The other flags stay: they describe
-/// the package's OBS revision until a commit settles them (see [`settle`]).
-/// Blocked answers of an earlier run are dropped here, since this run is the
-/// one that now owns the list.
+/// Records a `blocked` answer of `run_id`.
 pub fn add_blocked(st: &mut PkgState, run_id: &str, why: String) {
-    if st.fix_flags_run_id.as_deref() != Some(run_id) {
-        st.fix_flags
-            .retain(|f| !matches!(f, FixFlag::Blocked { .. }));
-        st.fix_flags_run_id = Some(run_id.to_string());
-    }
     add(st, FixFlag::Blocked { why });
+    st.fix_flags_run_id = Some(run_id.to_string());
 }
 
-/// Adds `flag` unless it is already recorded.
+/// Adds `flag` unless it is already recorded. Tests skipped by an earlier
+/// commit and by this one are one flag listing both.
 pub fn add(st: &mut PkgState, flag: FixFlag) {
+    if let FixFlag::TestsSkipped { items } = &flag
+        && let Some(FixFlag::TestsSkipped { items: have }) = st
+            .fix_flags
+            .iter_mut()
+            .find(|f| matches!(f, FixFlag::TestsSkipped { .. }))
+    {
+        for item in items {
+            if !have.contains(item) {
+                have.push(item.clone());
+            }
+        }
+        return;
+    }
     if !st.fix_flags.contains(&flag) {
         st.fix_flags.push(flag);
     }
 }
 
-/// Replaces the spec-derived flags with `found` (the final spec's own), at a
-/// commit of `run_id`. The `blocked` answers of this same run stay; those of an
-/// earlier run describe an earlier attempt and are dropped.
+/// Adds the spec-derived flags `found` of a commit of `run_id`. Earlier flags
+/// stay: a commit is compared with the OBS head, which already holds the
+/// earlier commits' changes, so their flags would otherwise be lost. They are
+/// dropped once the package is submitted (see [`clear_submitted`]).
 pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<FixFlag>) {
-    let same_run = st.fix_flags_run_id.as_deref() == Some(run_id);
-    st.fix_flags
-        .retain(|f| same_run && matches!(f, FixFlag::Blocked { .. }));
-    st.fix_flags_run_id = Some(run_id.to_string());
     for flag in found {
         add(st, flag);
     }
+    st.fix_flags_run_id = Some(run_id.to_string());
 }
 
 /// The flags the package's last run recorded, for a reader outside the run.
@@ -99,6 +104,15 @@ pub fn of_package(state_root: &std::path::Path, pkg: &str) -> Vec<FixFlag> {
     Workspace::find_existing(state_root, &[pkg])
         .map(|ws| PkgState::load(&ws).fix_flags)
         .unwrap_or_default()
+}
+
+/// Drops the flags of `pkg` once its change is submitted: the request text
+/// carries them from then on.
+pub fn clear_submitted(state_root: &std::path::Path, pkg: &str) -> std::io::Result<()> {
+    let Some(ws) = Workspace::find_existing(state_root, &[pkg]) else {
+        return Ok(());
+    };
+    PkgState::update(&ws, |st| st.fix_flags.clear()).map(|_| ())
 }
 
 /// The flags of a change from `baseline` (the spec OBS holds; `None` for a
@@ -283,17 +297,40 @@ fn option_values(t: &str, opt: &str) -> Vec<String> {
 mod tests {
     use super::*;
     #[test]
-    fn a_later_run_keeps_the_flags_until_a_commit_settles_them() {
+    fn flags_accumulate_until_the_package_is_submitted() {
         let mut st = PkgState::default();
         settle(&mut st, "r1", vec![FixFlag::CheckRemoved]);
-        // r2 ends without a commit (AlreadyBuilt, missing_deps): nothing touches the list.
-        assert_eq!(st.fix_flags, vec![FixFlag::CheckRemoved]);
+        // A run that makes no commit (AlreadyBuilt, missing_deps) and a later
+        // commit that finds nothing new keep what the earlier commit found.
         settle(&mut st, "r2", vec![]);
-        assert!(st.fix_flags.is_empty());
+        assert_eq!(st.fix_flags, vec![FixFlag::CheckRemoved]);
+        settle(
+            &mut st,
+            "r3",
+            vec![FixFlag::TestsSkipped {
+                items: vec!["a".into()],
+            }],
+        );
+        settle(
+            &mut st,
+            "r4",
+            vec![FixFlag::TestsSkipped {
+                items: vec!["a".into(), "b".into()],
+            }],
+        );
+        assert_eq!(
+            st.fix_flags,
+            vec![
+                FixFlag::CheckRemoved,
+                FixFlag::TestsSkipped {
+                    items: vec!["a".into(), "b".into()]
+                }
+            ]
+        );
     }
 
     #[test]
-    fn a_blocked_answer_is_kept_by_its_own_run_and_dropped_by_the_next() {
+    fn a_blocked_answer_survives_later_commits() {
         let mut st = PkgState::default();
         settle(
             &mut st,
@@ -301,21 +338,21 @@ mod tests {
             vec![FixFlag::WheelSwitch { wheel: "w".into() }],
         );
         add_blocked(&mut st, "r2", "no tests".into());
-        assert_eq!(st.fix_flags.len(), 2, "{:?}", st.fix_flags);
-        // The commit of r2 keeps its own block and replaces the spec flags of r1.
         settle(&mut st, "r2", vec![FixFlag::CheckRemoved]);
-        assert_eq!(
-            st.fix_flags,
-            vec![
-                FixFlag::Blocked {
-                    why: "no tests".into()
-                },
-                FixFlag::CheckRemoved
-            ]
-        );
-        // A later run's commit has no block of its own: r2's answer goes.
         settle(&mut st, "r3", vec![]);
-        assert!(st.fix_flags.is_empty());
+        assert_eq!(st.fix_flags.len(), 3, "{:?}", st.fix_flags);
+        assert!(st.fix_flags.contains(&FixFlag::Blocked {
+            why: "no tests".into()
+        }));
+    }
+
+    #[test]
+    fn submitting_a_package_clears_its_flags() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        PkgState::update(&ws, |st| settle(st, "r1", vec![FixFlag::CheckRemoved])).unwrap();
+        clear_submitted(root.path(), "python-foo").unwrap();
+        assert!(of_package(root.path(), "python-foo").is_empty());
     }
 
     const BASE: &str = "Name: python-foo\nVersion: 1.0\nSource0: foo-1.0.tar.gz\n\
@@ -474,20 +511,23 @@ mod tests {
     }
 
     #[test]
-    fn settle_keeps_blocked_answers_and_replaces_spec_flags_of_the_run() {
+    fn settle_keeps_blocked_answers_and_the_spec_flags_of_earlier_commits() {
         let mut st = PkgState::default();
         add_blocked(&mut st, "r1", "no gcc".into());
         settle(&mut st, "r1", vec![FixFlag::CheckRemoved]);
         settle(&mut st, "r1", vec![]);
         assert_eq!(
             st.fix_flags,
-            vec![FixFlag::Blocked {
-                why: "no gcc".into()
-            }]
+            vec![
+                FixFlag::Blocked {
+                    why: "no gcc".into()
+                },
+                FixFlag::CheckRemoved
+            ]
         );
-        // A later run starts from nothing.
+        // A later run adds to them, and owns the run id from then on.
         settle(&mut st, "r2", vec![FixFlag::CheckRemoved]);
-        assert_eq!(st.fix_flags, vec![FixFlag::CheckRemoved]);
+        assert_eq!(st.fix_flags.len(), 2);
         assert_eq!(st.fix_flags_run_id.as_deref(), Some("r2"));
     }
 
