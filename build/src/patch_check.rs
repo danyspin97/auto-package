@@ -179,19 +179,8 @@ pub enum Refresh {
 /// The `PatchN:` lines of `spec`, as `(number, value)`; a bare `Patch:` is 0.
 fn patch_lines(spec: &str) -> Vec<(String, String)> {
     spec.lines()
-        .filter_map(|l| {
-            let (tag, value) = l.split_once(':')?;
-            let tag = tag.trim();
-            let is_patch = tag.len() >= 5
-                && tag
-                    .get(..5)
-                    .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
-                && tag[5..].chars().all(|c| c.is_ascii_digit());
-            is_patch.then(|| {
-                let number = if tag.len() == 5 { "0" } else { &tag[5..] };
-                (number.to_string(), value.trim().to_string())
-            })
-        })
+        .filter_map(|l| crate::spec::parse_source_line(l, &["patch"], str::to_string))
+        .map(|patch| (patch.index.to_string(), patch.url.trim().to_string()))
         .collect()
 }
 

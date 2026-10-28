@@ -122,12 +122,9 @@ pub struct DistroInfo {
 }
 
 /// Value of a `Tag:` line, ignoring case and any trailing `#/rename`.
-fn spec_tag<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
-    let (k, v) = line.split_once(':')?;
-    k.trim()
-        .to_ascii_lowercase()
-        .starts_with(tag)
-        .then(|| v.trim().split('#').next().unwrap_or("").trim())
+fn spec_tag(line: &str, tag: &str) -> Option<String> {
+    crate::spec::parse_source_line(line, &[tag], str::to_string)
+        .map(|source| source.url.trim().to_string())
 }
 
 fn expand_name(s: &str, name: &str) -> String {
@@ -150,7 +147,7 @@ pub fn parse_spec_upstream(spec: &str, name: &str) -> DistroInfo {
     for raw in spec.lines() {
         let line = raw.trim();
         if let Some(v) = spec_tag(line, "url") {
-            let url = expand_name(v, name);
+            let url = expand_name(&v, name);
             if !url.starts_with("http") || url.contains('%') {
                 continue;
             }
@@ -163,7 +160,7 @@ pub fn parse_spec_upstream(spec: &str, name: &str) -> DistroInfo {
             }
             add(&mut info.homepages, url);
         } else if let Some(v) = spec_tag(line, "source") {
-            let src = expand_name(v, name);
+            let src = expand_name(&v, name);
             let path = src.split(['?', '#']).next().unwrap_or("");
             let file = path.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
             if !path.starts_with("http") || !(file.ends_with(".tar.gz") || file.ends_with(".tgz")) {

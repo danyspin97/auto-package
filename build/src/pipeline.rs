@@ -5403,12 +5403,8 @@ fn spec_has_published_defects(spec_path: &Path, rpms_dir: &Path) -> bool {
 fn local_wheel_source(spec: &str, checkout_dir: &Path) -> Option<PathBuf> {
     let version = crate::spec::parse_header(spec).map(|h| h.version);
     spec.lines()
-        .filter_map(|l| {
-            let l = l.trim_start();
-            let (tag, value) = l.split_once(':')?;
-            (tag.starts_with("Source") && !tag.contains('(')).then(|| value.trim())
-        })
-        .map(|v| v.rsplit('/').next().unwrap_or(v))
+        .filter_map(|l| crate::spec::parse_source_line(l.trim_start(), &["source"], str::to_string))
+        .map(|source| source.file().to_string())
         // `%{version}` is the spec's own, so the file is still the one on disk.
         .map(|f| match &version {
             Some(v) => f.replace("%{version}", v).replace("%version", v),
@@ -11931,21 +11927,12 @@ pub(crate) fn stale_patches(
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in spec.lines() {
-        let Some((tag, value)) = line.split_once(':') else {
+        let Some(patch) = crate::spec::parse_source_line(line, &["patch"], str::to_string) else {
             continue;
         };
-        let tag = tag.trim();
-        if !(tag.len() >= 5
-            && tag
-                .get(..5)
-                .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
-            && tag[5..].chars().all(|c| c.is_ascii_digit()))
-        {
-            continue;
-        }
         // Expanded as try_patches expands it (`foo-%{version}.patch`), so the
         // file the spec really names is judged.
-        let name = expand_patch_name(value.trim(), spec);
+        let name = expand_patch_name(&patch.url, spec);
         if name.is_empty()
             || name.contains('%')
             || Path::new(&name).file_name() != Some(name.as_ref())
@@ -12010,17 +11997,12 @@ fn without_patches(spec: &str, names: &[String]) -> String {
     let mut nums: Vec<String> = Vec::new();
     let mut out = String::new();
     for line in spec.lines() {
-        if let Some((tag, value)) = line.split_once(':')
-            && tag
-                .trim()
-                .get(..5)
-                .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
-            && tag.trim()[5..].chars().all(|c| c.is_ascii_digit())
-            && names.contains(&expand_patch_name(value, spec))
+        if let Some(patch) =
+            crate::spec::parse_source_line(line, &["patch"], |v| expand_patch_name(v, spec))
+            && names.contains(&patch.url)
         {
             // A bare `Patch:` is patch 0, as rpm reads it.
-            let num = tag.trim()[5..].to_string();
-            nums.push(if num.is_empty() { "0".to_string() } else { num });
+            nums.push(patch.index.to_string());
             continue;
         }
         out.push_str(line);
@@ -12103,25 +12085,8 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
     // (patch number, file name): a bare `Patch:` is number 0.
     let patches: Vec<(String, String)> = spec
         .lines()
-        .filter_map(|l| {
-            let (tag, value) = l.split_once(':')?;
-            let tag = tag.trim();
-            // `get` rather than slicing: spec text can hold multi-byte
-            // characters, and a mid-character cut would panic.
-            (tag.len() >= 5
-                && tag
-                    .get(..5)
-                    .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
-                && tag[5..].chars().all(|c| c.is_ascii_digit()))
-            .then(|| {
-                let number = if tag.len() == 5 {
-                    "0".to_string()
-                } else {
-                    tag[5..].to_string()
-                };
-                (number, value.trim().to_string())
-            })
-        })
+        .filter_map(|l| crate::spec::parse_source_line(l, &["patch"], str::to_string))
+        .map(|patch| (patch.index.to_string(), patch.url.trim().to_string()))
         .collect();
     if patches.is_empty() || !spec.contains("%autosetup") {
         return Ok(PatchCheck::default());
@@ -12451,19 +12416,10 @@ fn patch_escape_offender(
         }
     }
     for line in spec.lines() {
-        let Some((tag, value)) = line.split_once(':') else {
+        let Some(patch) = crate::spec::parse_source_line(line, &["patch"], str::to_string) else {
             continue;
         };
-        let tag = tag.trim();
-        if !(tag.len() >= 5
-            && tag
-                .get(..5)
-                .is_some_and(|p| p.eq_ignore_ascii_case("patch"))
-            && tag[5..].chars().all(|c| c.is_ascii_digit()))
-        {
-            continue;
-        }
-        let name = expand_patch_name(value, spec);
+        let name = expand_patch_name(&patch.url, spec);
         // A name with a directory part is not a file of this checkout.
         if Path::new(&name).file_name() == Some(name.as_ref()) {
             names.push(name);

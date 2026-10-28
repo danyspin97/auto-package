@@ -155,11 +155,8 @@ pub fn unanalysed_patches(spec: &str) -> Vec<String> {
 fn patch_tags(spec: &str) -> Vec<String> {
     spec.lines()
         .filter_map(|line| {
-            let (tag, rest) = line.split_once(':')?;
-            if !is_tag(tag, "patch") {
-                return None;
-            }
-            rest.split_whitespace().next().map(str::to_string)
+            let patch = crate::spec::parse_source_line(line, &["patch"], str::to_string)?;
+            patch.url.split_whitespace().next().map(str::to_string)
         })
         .collect()
 }
@@ -200,15 +197,7 @@ fn service_names(text: &str) -> Vec<String> {
         .filter_map(|(pos, _)| {
             let rest = &text[pos + "<service".len()..];
             let tag = &rest[..rest.find('>')?];
-            tag.match_indices("name=").find_map(|(at, _)| {
-                let before = tag[..at].chars().last();
-                if !before.is_some_and(char::is_whitespace) {
-                    return None;
-                }
-                let value = &tag[at + "name=".len()..];
-                let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-                value[1..].split(quote).next().map(str::to_string)
-            })
+            crate::obs_xml::attr(tag, "name")
         })
         .collect()
 }
@@ -363,12 +352,6 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
 
 /// Whether `tag` (the text before a colon) is `name` with an optional number
 /// (`Source`, `Source0`, `patch12`).
-fn is_tag(tag: &str, name: &str) -> bool {
-    let tag = tag.trim().to_ascii_lowercase();
-    tag.strip_prefix(name)
-        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
-}
-
 /// Scriptlets the spec may declare, by the word after `%`.
 const SCRIPTLETS: &[&str] = &[
     "pre",
@@ -449,8 +432,8 @@ fn is_script_dependency(line: &str) -> bool {
 fn hosts(files: &Files) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for line in files.spec.as_deref().unwrap_or("").lines() {
-        if let Some((tag, rest)) = line.split_once(':')
-            && (is_tag(tag, "source") || is_tag(tag, "patch"))
+        if crate::spec::parse_source_line(line, &["source", "patch"], str::to_string).is_some()
+            && let Some((_, rest)) = line.split_once(':')
         {
             out.extend(url_hosts(rest));
         }

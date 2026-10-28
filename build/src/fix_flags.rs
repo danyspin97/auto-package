@@ -287,12 +287,8 @@ fn new_wheel(base: &[&str], fin: &[&str], added: &[usize]) -> Option<String> {
 }
 
 fn is_source_wheel(line: &str) -> bool {
-    let t = line.trim();
-    t.len() >= 6
-        && t.is_char_boundary(6)
-        && t[..6].eq_ignore_ascii_case("source")
-        && t.contains(':')
-        && t.contains(".whl")
+    crate::spec::parse_source_line(line, &["source"], str::to_string).is_some()
+        && line.contains(".whl")
 }
 
 /// Where a line of the spec is: inside `%check`, inside `%prep`.

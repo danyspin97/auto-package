@@ -64,8 +64,10 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
     // A spec that builds from a wheel got there by a switch that wrote its
     // provenance into the state directory (see the check below).
     let wheel_spec = spec.as_deref().is_some_and(|spec| {
-        spec.lines()
-            .any(|l| l.trim_start().starts_with("Source") && l.contains(".whl"))
+        spec.lines().any(|l| {
+            crate::spec::parse_source_line(l.trim_start(), &["source"], str::to_string).is_some()
+                && l.contains(".whl")
+        })
     });
     if checkout.is_dir() {
         let archives = source_archives(checkout);
