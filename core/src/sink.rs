@@ -757,8 +757,25 @@ struct JsonlEnvelope<'a> {
     event: &'a Event,
 }
 
+/// `event` with credentials removed from the commands and the agent stream.
+/// Borrowed when it carries none of those.
+fn redacted_event(event: &Event) -> std::borrow::Cow<'_, Event> {
+    use crate::redact::redact;
+    let mut e = event.clone();
+    match &mut e {
+        Event::Command { argv, .. } => argv.iter_mut().for_each(|a| *a = redact(a)),
+        Event::AgentToolUse { input, .. } => *input = redact(input),
+        Event::AgentPrompt { prompt, .. } => *prompt = redact(prompt),
+        Event::AgentReply { raw, .. } => *raw = redact(raw),
+        _ => return std::borrow::Cow::Borrowed(event),
+    }
+    std::borrow::Cow::Owned(e)
+}
+
 impl Reporter for JsonlSink {
     fn report(&self, event: &Event) {
+        let event = redacted_event(event);
+        let event: &Event = &event;
         let envelope = JsonlEnvelope {
             pkg: current_pkg(),
             event,
@@ -861,6 +878,38 @@ impl Reporter for MemorySink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jsonl_events_are_redacted_and_the_file_is_private() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let sink = JsonlSink::open(&path).unwrap();
+        sink.report(&Event::Command {
+            step: None,
+            program: "git".into(),
+            argv: vec!["clone".into(), "https://u:p@h.example/r.git".into()],
+            cwd: "/x".into(),
+            log: None,
+        });
+        sink.report(&Event::AgentToolUse {
+            step: crate::event::StepId(0),
+            tool: "Bash".into(),
+            input: "GITHUB_TOKEN=abc curl -H 'Authorization: Bearer q' x".into(),
+        });
+        flush_jsonl_sinks();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for leak in ["u:p@", "abc", "Bearer"] {
+            assert!(!text.contains(leak), "{leak} leaked: {text}");
+        }
+        assert!(text.contains("https://***@h.example/r.git"), "{text}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+    }
+
     use super::*;
     use crate::event::{StepId, StepKind};
     use std::io::{BufRead, BufReader};
