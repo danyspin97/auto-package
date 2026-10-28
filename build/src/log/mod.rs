@@ -82,6 +82,12 @@ impl ExtractedLog {
 
     /// Convert to the ap-core event type for event emission.
     pub fn to_event_extract(&self) -> ap_core::event::Extract {
+        // A build log is text, so the full disk is read from it here, once.
+        let disk_full = self
+            .error_lines
+            .iter()
+            .any(|l| crate::osc::child_output_says_disk_full(l))
+            || crate::osc::child_output_says_disk_full(&self.excerpt);
         ap_core::event::Extract {
             genre: self.failure.as_ref().map(|f| f.genre.as_str().to_string()),
             phase: self.failure.as_ref().map(|f| f.phase.name().to_string()),
@@ -99,6 +105,7 @@ impl ExtractedLog {
                 .map(std::path::PathBuf::from)
                 .collect(),
             has_signal: self.has_signal(),
+            disk_full,
         }
     }
 

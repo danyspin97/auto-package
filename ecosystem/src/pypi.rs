@@ -121,6 +121,11 @@ impl FetchError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, FetchError::Http { source, .. } if matches!(**source, ureq::Error::StatusCode(404)))
     }
+
+    /// Whether the download or the write failed because the disk is full.
+    pub fn is_disk_full(&self) -> bool {
+        matches!(self, FetchError::Io { source, .. } if ap_core::fsx::is_disk_full(source))
+    }
 }
 
 /// Whole-request timeout for the small JSON endpoints.

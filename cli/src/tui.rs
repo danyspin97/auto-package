@@ -629,17 +629,6 @@ impl PkgStatus {
     }
 }
 
-/// Whether `text` names the classic ENOSPC condition — glibc's `strerror`
-/// text for it, verbatim, is what `tar`, `cp`, and `rpmbuild` all actually
-/// print, so this is the literal signature to look for rather than an errno
-/// number that never reaches the log as such. Matched case-insensitively:
-/// seen both as `No space left on device` and, inside some tools' own
-/// wrapping, lowercased.
-fn looks_like_disk_full(text: &str) -> bool {
-    text.to_ascii_lowercase()
-        .contains("no space left on device")
-}
-
 /// Longest prefix of `s` whose display width fits in `max_width` columns.
 /// Zero-width characters (combining marks, variation selectors) and the
 /// character after a zero-width joiner stay with the character before them,
@@ -1172,8 +1161,8 @@ impl TuiState {
                     PackageOutcome::Built => PkgStatus::Succeeded,
                     PackageOutcome::AlreadyBuilt => PkgStatus::AlreadyBuilt,
                     PackageOutcome::MissingDeps { .. } => PkgStatus::MissingDeps,
-                    PackageOutcome::Failed { reason } => {
-                        if state.disk_full_detected || looks_like_disk_full(reason) {
+                    PackageOutcome::Failed { disk_full, .. } => {
+                        if state.disk_full_detected || *disk_full {
                             PkgStatus::NoSpace
                         } else {
                             PkgStatus::Failed
@@ -1181,7 +1170,7 @@ impl TuiState {
                     }
                 };
                 match outcome {
-                    PackageOutcome::Failed { reason } => {
+                    PackageOutcome::Failed { reason, .. } => {
                         // Keep the failed step so the Step column can name it.
                         // A worker that died mid-step never sent `StepFinished`,
                         // so close the step here.
@@ -1204,7 +1193,7 @@ impl TuiState {
                     PackageOutcome::MissingDeps { deps } => {
                         format!("needs: {}", deps.join(", "))
                     }
-                    PackageOutcome::Failed { reason } => format!("failed: {reason}"),
+                    PackageOutcome::Failed { reason, .. } => format!("failed: {reason}"),
                 };
                 state.add_log(
                     match outcome {
@@ -1316,9 +1305,7 @@ impl TuiState {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));
             }
             Event::ExtractResult { extract, .. } => {
-                if extract.error_lines.iter().any(|l| looks_like_disk_full(l))
-                    || looks_like_disk_full(&extract.excerpt)
-                {
+                if extract.disk_full {
                     state.disk_full_detected = true;
                 }
                 let phase = extract.phase.as_deref().unwrap_or("unknown phase");
@@ -3143,30 +3130,6 @@ fn render_footer(
 }
 
 #[cfg(test)]
-mod disk_full_tests {
-    use super::*;
-
-    #[test]
-    fn matches_the_literal_strerror_text() {
-        assert!(looks_like_disk_full(
-            "error: Bad exit status: cpio: write: No space left on device"
-        ));
-    }
-
-    #[test]
-    fn matches_case_insensitively() {
-        assert!(looks_like_disk_full("NO SPACE LEFT ON DEVICE"));
-    }
-
-    #[test]
-    fn an_unrelated_failure_does_not_match() {
-        assert!(!looks_like_disk_full(
-            "CMake Error: The LOCATION property may not be read from target \"png\""
-        ));
-    }
-}
-
-#[cfg(test)]
 mod truncate_tests {
     use super::*;
 
@@ -3342,6 +3305,7 @@ mod step_state_tests {
                 "failed",
                 PackageOutcome::Failed {
                     reason: "x".to_string(),
+                    disk_full: false,
                 },
             ),
         ));
@@ -3405,6 +3369,7 @@ mod step_state_tests {
             pkg: None,
             event: package_finished(PackageOutcome::Failed {
                 reason: "boom".to_string(),
+                disk_full: false,
             }),
         });
         let pkg = &state.packages["foo"];
@@ -3438,6 +3403,7 @@ mod step_state_tests {
             pkg: None,
             event: package_finished(PackageOutcome::Failed {
                 reason: "boom".to_string(),
+                disk_full: false,
             }),
         });
         state.apply(Msg {
@@ -3487,6 +3453,7 @@ mod step_state_tests {
             pkg: None,
             event: package_finished(PackageOutcome::Failed {
                 reason: "boom".to_string(),
+                disk_full: false,
             }),
         });
         assert!(state.packages["foo"].finished);
@@ -3508,6 +3475,7 @@ mod step_state_tests {
             pkg: None,
             event: package_finished(PackageOutcome::Failed {
                 reason: "boom".to_string(),
+                disk_full: false,
             }),
         });
         assert!(state.packages["foo"].status == PkgStatus::Failed);
@@ -4237,6 +4205,7 @@ mod run_end_tests {
     fn failed() -> PackageOutcome {
         PackageOutcome::Failed {
             reason: "x".to_string(),
+            disk_full: false,
         }
     }
 

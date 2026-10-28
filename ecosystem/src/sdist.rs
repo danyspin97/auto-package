@@ -207,9 +207,7 @@ impl Error {
     pub fn is_disk_full(&self) -> bool {
         match self {
             Error::NoSpace(_) => true,
-            Error::Io { source, .. } | Error::Tar(source) => {
-                source.kind() == std::io::ErrorKind::StorageFull
-            }
+            Error::Io { source, .. } | Error::Tar(source) => ap_core::fsx::is_disk_full(source),
             _ => false,
         }
     }

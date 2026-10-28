@@ -413,7 +413,7 @@ impl HumanSink {
                         format!("◇ blocked on {}", deps.join(", "))
                             .if_supports_color(Stderr, |t| t.yellow()),
                     ),
-                    PackageOutcome::Failed { reason } => format!(
+                    PackageOutcome::Failed { reason, .. } => format!(
                         "{}",
                         format!("✗ failed: {reason}")
                             .if_supports_color(Stderr, |t| t.style(Style::new().red().bold())),

@@ -193,6 +193,12 @@ pub fn wait_for_space(
     Ok(())
 }
 
+/// Whether an I/O error is a full disk: `ENOSPC` (errno 28), or the kind that
+/// Rust maps it to. Use this on the typed error, never on its message.
+pub fn is_disk_full(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::StorageFull || e.raw_os_error() == Some(28)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +369,13 @@ mod tests {
         assert_eq!(ok(None, true), Ok(()));
         assert_eq!(ok(Some(10), true), Ok(()));
         assert_eq!(ok(Some(1), false), Ok(()));
+    }
+
+    #[test]
+    fn a_full_disk_is_recognised_by_kind_or_errno_only() {
+        assert!(is_disk_full(&io::Error::from(io::ErrorKind::StorageFull)));
+        assert!(is_disk_full(&io::Error::from_raw_os_error(28)));
+        assert!(!is_disk_full(&io::Error::from(io::ErrorKind::NotFound)));
+        assert!(!is_disk_full(&io::Error::other("No space left on device")));
     }
 }

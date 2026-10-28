@@ -115,9 +115,20 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+/// Whether the output of a child process (osc's Python traceback, a tool's
+/// error line) says the disk is full. This is the one place the ENOSPC wording
+/// is matched: a child's failure reaches us as text, so there is no errno to
+/// read. Errors this module holds as an [`std::io::Error`] use
+/// [`ap_core::fsx::is_disk_full`] instead.
+pub fn child_output_says_disk_full(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("no space left on device") || t.contains("[errno 28]")
+}
+
 /// Text that marks a failure of the machine or the network rather than of the
 /// package: a dropped or refused connection, a name that did not resolve, a
-/// timeout, an OBS 5xx, a full disk. Matched case-insensitively.
+/// timeout or an OBS 5xx. Matched case-insensitively. A full disk is typed
+/// instead (see [`Error::is_disk_full`]).
 pub fn text_is_transient(text: &str) -> bool {
     let t = text.to_lowercase();
     const MARKS: &[&str] = &[
@@ -138,8 +149,6 @@ pub fn text_is_transient(text: &str) -> bool {
         "service unavailable",
         "gateway time-out",
         "gateway timeout",
-        "no space left on device",
-        "the disk is full",
         "rate limited (429)",
         "broken pipe",
         "unexpected eof",
@@ -268,6 +277,23 @@ mod transient_text_tests {
 const DOWNLOAD_FAILED: &str = "succeeded but downloading the built RPMs failed";
 
 impl Error {
+    /// Whether the failure is a full disk: the OS reported `ENOSPC`, or the
+    /// output of the osc child says so (its Python traceback, a tool's error
+    /// line). The OS case is typed; the child case has only its text.
+    pub fn is_disk_full(&self) -> bool {
+        match self {
+            Error::Launch(e) | Error::Io(e) => ap_core::fsx::is_disk_full(e),
+            Error::Process(p) | Error::Command { source: p, .. } => match p {
+                proc::ProcessError::Io(e) | proc::ProcessError::Launch { source: e, .. } => {
+                    ap_core::fsx::is_disk_full(e)
+                }
+                proc::ProcessError::Timeout { .. } | proc::ProcessError::OutputLost { .. } => false,
+            },
+            Error::OscFailed { stderr, .. } => child_output_says_disk_full(stderr),
+            _ => false,
+        }
+    }
+
     /// Whether the failure says nothing about the package and a later attempt
     /// may succeed: the network, OBS or this machine failed. A wait that gave
     /// up polling counts too (the build itself may have been fine).
@@ -287,7 +313,10 @@ impl Error {
             }
             Error::OscFailed { code, stderr, .. } => {
                 // Our own wait gave up (`-1`) for another reason than a shutdown.
-                *code == 28 || (*code == -1 && stderr != "interrupted") || text_is_transient(stderr)
+                *code == 28
+                    || (*code == -1 && stderr != "interrupted")
+                    || text_is_transient(stderr)
+                    || child_output_says_disk_full(stderr)
             }
             Error::NotActionable(m) => m.contains(DOWNLOAD_FAILED),
             _ => false,
@@ -304,10 +333,10 @@ fn io_is_transient(e: &std::io::Error) -> bool {
             | K::ConnectionAborted
             | K::ConnectionRefused
             | K::BrokenPipe
-            | K::StorageFull
             | K::NetworkUnreachable
             | K::HostUnreachable
-    ) || text_is_transient(&e.to_string())
+    ) || ap_core::fsx::is_disk_full(e)
+        || text_is_transient(&e.to_string())
 }
 
 /// OBS remote build status for a single arch.
@@ -2453,7 +2482,7 @@ pub fn try_list_project_packages(
 
 /// [`try_list_project_packages`] keeping the failure as an [`Error`], so that
 /// its transience (a timeout, an OBS 5xx) reaches the caller.
-fn list_project_packages(
+pub fn list_project_packages(
     project: &str,
     emit: Emit<'_>,
 ) -> Result<Arc<std::collections::HashSet<String>>, Error> {
@@ -3417,7 +3446,7 @@ fn osc_error_text(stderr: &str) -> String {
         }
         None => stderr.trim_end().to_string(),
     };
-    if text.contains("No space left on device") {
+    if child_output_says_disk_full(stderr) {
         format!("{text}\nthe disk is full: free space under the work directory and run again")
     } else {
         text
@@ -8677,7 +8706,7 @@ fn obs_build_once(
                 stdout_bytes: log_bytes,
                 stderr_bytes: 0,
             });
-            let advice = if e.to_string().contains("the disk is full") {
+            let advice = if e.is_disk_full() {
                 // The build is fine; only this machine could not take the files.
                 "The build itself succeeded: free disk space and run again."
             } else {
@@ -10406,9 +10435,34 @@ mod transient_error_tests {
     }
 
     #[test]
+    fn child_output_names_a_full_disk_in_any_case() {
+        assert!(child_output_says_disk_full(
+            "error: Bad exit status: cpio: write: No space left on device"
+        ));
+        assert!(child_output_says_disk_full("NO SPACE LEFT ON DEVICE"));
+        assert!(!child_output_says_disk_full(
+            "CMake Error: The LOCATION property may not be read from target \"png\""
+        ));
+    }
+
+    #[test]
+    fn a_full_disk_is_typed_when_the_os_says_so_and_transient() {
+        let from_os = Error::Io(std::io::Error::from_raw_os_error(28));
+        assert!(from_os.is_disk_full() && from_os.is_transient());
+        let from_child = Error::OscFailed {
+            cmd: "up".into(),
+            code: 1,
+            stderr: "OSError: [Errno 28] No space left on device".into(),
+        };
+        assert!(from_child.is_disk_full() && from_child.is_transient());
+        let other = Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(!other.is_disk_full());
+        assert!(!child_output_says_disk_full("version 2.0.0 is yanked"));
+    }
+
+    #[test]
     fn transient_text_is_recognised() {
         assert!(text_is_transient("Connection reset by peer"));
-        assert!(text_is_transient("No space left on device"));
         assert!(!text_is_transient("version 2.0.0 is yanked"));
         // A word of its own, not a name that contains it.
         assert!(text_is_transient("Error: Timeout"));

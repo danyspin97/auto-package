@@ -164,8 +164,15 @@ pub enum MissingSource {
 pub enum PackageOutcome {
     Built,
     AlreadyBuilt,
-    MissingDeps { deps: Vec<String> },
-    Failed { reason: String },
+    MissingDeps {
+        deps: Vec<String>,
+    },
+    Failed {
+        reason: String,
+        /// The failure was a full disk, so the user can free space and retry.
+        #[serde(default)]
+        disk_full: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +228,9 @@ pub struct Extract {
     pub elided_count: usize,
     pub source_candidates: Vec<PathBuf>,
     pub has_signal: bool,
+    /// The build log says the disk is full (`ENOSPC`).
+    #[serde(default)]
+    pub disk_full: bool,
 }
 
 fn serialize_duration<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {

@@ -1414,7 +1414,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                                             reporter.report(&Event::PackageFinished {
                                                 pkg: row,
                                                 version: String::new(),
-                                                outcome: PackageOutcome::Failed { reason },
+                                                outcome: PackageOutcome::Failed {
+                                                    reason,
+                                                    disk_full: false,
+                                                },
                                             });
                                         }
                                         (Ok(()), Some(row)) if !watch.started() => {
@@ -2295,8 +2298,9 @@ fn package_outcome(result: &PipelineResult) -> PackageOutcome {
         PipelineResult::MissingDeps { deps, .. } => {
             PackageOutcome::MissingDeps { deps: deps.clone() }
         }
-        PipelineResult::Failed { reason, .. } => PackageOutcome::Failed {
+        PipelineResult::Failed { reason, kind, .. } => PackageOutcome::Failed {
             reason: reason.clone(),
+            disk_full: *kind == FailureKind::DiskFull,
         },
     }
 }
@@ -3904,6 +3908,7 @@ fn cmd_build(
                             version: t.version.clone(),
                             outcome: PackageOutcome::Failed {
                                 reason: reason.clone(),
+                                disk_full: false,
                             },
                         });
                     }
@@ -3935,6 +3940,7 @@ fn cmd_build(
                         version: target_info.version.clone(),
                         outcome: PackageOutcome::Failed {
                             reason: reason.clone(),
+                            disk_full: false,
                         },
                     });
                     for (rest, rest_rpm) in unspawned {
@@ -3945,6 +3951,7 @@ fn cmd_build(
                                 reason: format!(
                                     "not started because {rpm_name} has no run directory: {e}"
                                 ),
+                                disk_full: false,
                             },
                         });
                     }
@@ -5349,7 +5356,13 @@ mod settle_tests {
     fn finished_since_only_looks_past_the_mark() {
         let events = vec![
             fin("python-a", PackageOutcome::Built),
-            fin("python-b", PackageOutcome::Failed { reason: "x".into() }),
+            fin(
+                "python-b",
+                PackageOutcome::Failed {
+                    reason: "x".into(),
+                    disk_full: false,
+                },
+            ),
         ];
         assert!(finished_since(&events, 0, "python-a"));
         assert!(!finished_since(&events, 1, "python-a"));
@@ -5362,7 +5375,13 @@ mod settle_tests {
     fn failure_is_withdrawn_when_its_package_is_later_built_as_a_dependency() {
         // The request `foo` fails, then `python-foo` builds as a dependency.
         let events = vec![
-            fin("python-foo", PackageOutcome::Failed { reason: "x".into() }),
+            fin(
+                "python-foo",
+                PackageOutcome::Failed {
+                    reason: "x".into(),
+                    disk_full: false,
+                },
+            ),
             fin("python-foo", PackageOutcome::Built),
         ];
         let mut failures = vec![failed("foo", 1)];
@@ -5447,7 +5466,13 @@ mod settle_tests {
     fn failure_stands_when_the_package_did_not_end_built() {
         let events = vec![
             fin("python-foo", PackageOutcome::Built),
-            fin("python-foo", PackageOutcome::Failed { reason: "x".into() }),
+            fin(
+                "python-foo",
+                PackageOutcome::Failed {
+                    reason: "x".into(),
+                    disk_full: false,
+                },
+            ),
         ];
         let mut failures = vec![failed("foo", 0)];
         withdraw_settled_failures(&mut failures, &row_ends(&events), no_origin);

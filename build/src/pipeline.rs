@@ -167,10 +167,13 @@ pub enum FailureKind {
     /// logged in). Not a package failure: nothing is retried or counted.
     AgentUnavailable,
     /// The network, OBS or this machine failed (a dropped connection, an OBS
-    /// 5xx, a timeout, a full disk), not the package. Recorded as
-    /// `interrupted`, so the package reads as re-runnable; the caller retries
-    /// it within its usual bound.
+    /// 5xx, a timeout), not the package. Recorded as `interrupted`, so the
+    /// package reads as re-runnable; the caller retries it within its usual
+    /// bound.
     Transient,
+    /// The disk is full (`ENOSPC`). Handled like `Transient`, and told apart
+    /// so the user can free space and retry the package.
+    DiskFull,
     /// A patch turn ran but did not make the dependent's shipping condition
     /// true. The package's own condition counters bound the repeats (a second
     /// patch turn, then the upstream wheel), so the caller re-queues the
@@ -1997,6 +2000,7 @@ pub fn run_package(
                     | FailureKind::AgentUnavailable
                     | FailureKind::AgentFailed
                     | FailureKind::Transient
+                    | FailureKind::DiskFull
                     | FailureKind::ConditionUnmet,
                 ..
             },
@@ -2195,6 +2199,9 @@ impl RunCtx<'_> {
     /// A failure of an `osc` call: transient when the network, OBS or this
     /// machine failed rather than the package.
     fn failed_osc(&self, e: &osc::Error) -> PipelineResult {
+        if e.is_disk_full() {
+            return self.failed_as(FailureKind::DiskFull, e.to_string());
+        }
         self.failed_text(e.is_transient(), e.to_string())
     }
 
@@ -2393,11 +2400,11 @@ fn branch_from_linked(
     rpm_name: &str,
     emit: Emit<'_>,
 ) -> Result<Option<String>, BranchError> {
-    let own = match osc::try_list_project_packages(&config.project, emit) {
+    let own = match osc::list_project_packages(&config.project, emit) {
         Ok(own) => own,
-        Err(reason) => {
-            let transient = osc::text_is_transient(&reason);
-            lookup_failure(reason, transient, false, emit)?
+        Err(e) => {
+            let reason = format!("could not list packages of {}: {e}", config.project);
+            lookup_failure(reason, e.is_transient(), false, emit)?
         }
     };
     let key = osc::fuzzy_key(rpm_name);
@@ -2410,11 +2417,11 @@ fn branch_from_linked(
         Err(e) => lookup_failure(e.to_string(), e.is_transient(), false, emit)?,
     };
     for (path_project, _repo) in paths {
-        let listing = match osc::try_list_project_packages(&path_project, emit) {
+        let listing = match osc::list_project_packages(&path_project, emit) {
             Ok(listing) => listing,
-            Err(reason) => {
-                let transient = osc::text_is_transient(&reason);
-                lookup_failure(reason, transient, true, emit)?
+            Err(e) => {
+                let reason = format!("could not list packages of {path_project}: {e}");
+                lookup_failure(reason, e.is_transient(), true, emit)?
             }
         };
         let Some(shipped) = linked_spelling(rpm_name, &listing) else {
@@ -3090,6 +3097,14 @@ fn generate_spec_stage(ctx: &RunCtx, st: &mut RunState) -> Result<SpecInfo, Pipe
                 });
                 // A download that failed on the network is not the package's fault.
                 return Err(ctx.failed_text(osc::text_is_transient(&e), e));
+            }
+            Err(GenSpecError::DiskFull(e)) => {
+                let step = step.finish(StepOutcome::Failed);
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message: e.clone(),
+                });
+                return Err(ctx.failed_as(FailureKind::DiskFull, e));
             }
             Err(GenSpecError::NoReleaseArchive(e)) => {
                 let step = step.finish(StepOutcome::Failed);
@@ -6256,6 +6271,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                                     | FailureKind::RateLimited
                                     | FailureKind::Busy
                                     | FailureKind::Transient
+                                    | FailureKind::DiskFull
                                     | FailureKind::Exhausted
                             ) =>
                         {
@@ -6806,7 +6822,7 @@ fn recorded_outcome(result: &PipelineResult) -> Option<(&'static str, String)> {
         } => None,
         PipelineResult::Failed {
             reason,
-            kind: FailureKind::AgentUnavailable | FailureKind::Transient,
+            kind: FailureKind::AgentUnavailable | FailureKind::Transient | FailureKind::DiskFull,
             ..
         } => Some(("interrupted", reason.clone())),
         PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
@@ -12772,7 +12788,20 @@ enum GenSpecError {
     /// version (a guessed repo for a wheel-only vendor package, or a tag
     /// scheme the archive-URL guesses don't cover). Carries the full message.
     NoReleaseArchive(String),
+    /// The disk is full while the spec is written or the sdist is read or
+    /// fetched. Typed where the error was, so it does not depend on its wording.
+    DiskFull(String),
     Other(String),
+}
+
+/// A generation failure from a step that writes or reads the disk: a full
+/// disk is [`GenSpecError::DiskFull`], anything else [`GenSpecError::Other`].
+fn disk_gen_error(message: String, disk_full: bool) -> GenSpecError {
+    if disk_full {
+        GenSpecError::DiskFull(message)
+    } else {
+        GenSpecError::Other(message)
+    }
 }
 
 impl From<String> for GenSpecError {
@@ -13176,8 +13205,12 @@ fn generate_redist_spec(
     )
     .map_err(GenSpecError::Other)?;
     let spec = crate::spec::strip_ap_fix_comments(&generated.spec);
-    ap_core::fsx::write_atomic(spec_path, &spec)
-        .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
+    ap_core::fsx::write_atomic(spec_path, &spec).map_err(|e| {
+        disk_gen_error(
+            format!("writing spec failed: {e}"),
+            ap_core::fsx::is_disk_full(&e),
+        )
+    })?;
     if let Some(artifact) = artifact {
         write_or_warn(artifact, &spec);
     }
@@ -13312,10 +13345,14 @@ fn generate_spec(
                 }
                 Err(e) => return Err(e),
             };
-            let digest = sha256_file(&tarball)
-                .map_err(|e| GenSpecError::Other(format!("hashing {}: {e}", tarball.display())))?;
+            let digest = sha256_file(&tarball).map_err(|e| {
+                disk_gen_error(
+                    format!("hashing {}: {e}", tarball.display()),
+                    ap_core::fsx::is_disk_full(&e),
+                )
+            })?;
             let info = ap_ecosystem::sdist::inspect_preferring(&tarball, Some(&config.pkg_name))
-                .map_err(|e| GenSpecError::Other(format!("inspecting {url}: {e}")))?;
+                .map_err(|e| disk_gen_error(format!("inspecting {url}: {e}"), e.is_disk_full()))?;
 
             let result =
                 generate_repo_python_spec(config, &tarball, &info, &json, spec_path, step)?;
@@ -13327,15 +13364,15 @@ fn generate_spec(
 
     // Download tarball to checkout dir.
     let tarball = release.sdist.fetch(checkout_dir).map_err(|e| {
-        GenSpecError::Other(format!(
-            "tarball download failed for {}: {e}",
-            release.sdist.url
-        ))
+        disk_gen_error(
+            format!("tarball download failed for {}: {e}", release.sdist.url),
+            e.is_disk_full(),
+        )
     })?;
 
     // Inspect sdist for build system info and top-level dir.
     let sdist_info = sdist::inspect(&tarball)
-        .map_err(|e| GenSpecError::Other(format!("sdist inspect failed: {e}")))?;
+        .map_err(|e| disk_gen_error(format!("sdist inspect failed: {e}"), e.is_disk_full()))?;
 
     let is_maturin = sdist_info.build_system.is_maturin();
 
@@ -14196,9 +14233,11 @@ fn try_wheel_fallback_with(
                 false,
             ) {
                 Some(Ok((_, first))) => Ok(first),
-                Some(Err(GenSpecError::Other(m) | GenSpecError::NoReleaseArchive(m))) => {
-                    Err(format!("per-flavor wheel spec generation failed: {m}"))
-                }
+                Some(Err(
+                    GenSpecError::Other(m)
+                    | GenSpecError::NoReleaseArchive(m)
+                    | GenSpecError::DiskFull(m),
+                )) => Err(format!("per-flavor wheel spec generation failed: {m}")),
                 Some(Err(GenSpecError::WheelOnly { .. })) | None => {
                     Err(format!("no usable upstream wheel either: {e}"))
                 }
@@ -14207,7 +14246,9 @@ fn try_wheel_fallback_with(
     };
     generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step, false)
         .map_err(|e| match e {
-            GenSpecError::Other(msg) | GenSpecError::NoReleaseArchive(msg) => {
+            GenSpecError::Other(msg)
+            | GenSpecError::NoReleaseArchive(msg)
+            | GenSpecError::DiskFull(msg) => {
                 format!("wheel spec generation failed: {msg}")
             }
             GenSpecError::WheelOnly { .. } => {
@@ -20242,6 +20283,11 @@ mod hygiene_tests {
         };
         assert_eq!(
             recorded_outcome(&failed(FailureKind::Transient)).unwrap().0,
+            "interrupted"
+        );
+        // A full disk is re-runnable like the network failures, not a defect.
+        assert_eq!(
+            recorded_outcome(&failed(FailureKind::DiskFull)).unwrap().0,
             "interrupted"
         );
         assert_eq!(

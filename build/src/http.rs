@@ -89,6 +89,8 @@ pub enum FetchFailure {
     TooLarge,
     /// The disk cannot take the download (see [`ap_ecosystem::space`]).
     NoSpace(ap_ecosystem::space::NotEnoughSpace),
+    /// The disk filled up while the download was written (`ENOSPC`).
+    DiskFull(String),
     /// Connection, timeout, other HTTP status, or local I/O.
     Transport(String),
 }
@@ -96,7 +98,7 @@ pub enum FetchFailure {
 impl FetchFailure {
     /// Whether the download failed because the disk is full.
     pub fn is_disk_full(&self) -> bool {
-        matches!(self, FetchFailure::NoSpace(_))
+        matches!(self, FetchFailure::NoSpace(_) | FetchFailure::DiskFull(_))
     }
 }
 
@@ -118,6 +120,7 @@ impl std::fmt::Display for FetchFailure {
                 write!(f, "larger than the {} MiB limit", MAX_DOWNLOAD >> 20)
             }
             FetchFailure::NoSpace(e) => write!(f, "{e}"),
+            FetchFailure::DiskFull(m) => write!(f, "{m}"),
             FetchFailure::Transport(e) => write!(f, "{e}"),
         }
     }
@@ -288,8 +291,14 @@ fn stream_to(mut reader: impl Read, file: &mut std::fs::File) -> Result<Download
             }
         };
         hasher.update(&buf[..n]);
-        file.write_all(&buf[..n])
-            .map_err(|e| FetchFailure::Transport(format!("writing download: {e}")))?;
+        file.write_all(&buf[..n]).map_err(|e| {
+            let message = format!("writing download: {e}");
+            if ap_core::fsx::is_disk_full(&e) {
+                FetchFailure::DiskFull(message)
+            } else {
+                FetchFailure::Transport(message)
+            }
+        })?;
         bytes += n as u64;
     }
     Ok(Download {
@@ -338,6 +347,7 @@ mod tests {
         });
         assert!(full.is_disk_full());
         assert!(full.to_string().contains("not enough free space"));
+        assert!(FetchFailure::DiskFull("x".into()).is_disk_full());
         assert!(!FetchFailure::Transport("x".into()).is_disk_full());
     }
 
