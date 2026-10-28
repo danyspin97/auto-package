@@ -1992,12 +1992,7 @@ pub fn run_package(
         &pkg_run.path.join(OBS_BASELINE_DIR),
         reporter,
         result,
-        |dir| {
-            if crate::proc::shutting_down() {
-                return Err("the run was stopped first, and no command can run now".to_string());
-            }
-            osc::restore_baseline(dir, Emit::run(reporter))
-        },
+        |dir| osc::restore_baseline(dir, Emit::run(reporter)),
     );
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the

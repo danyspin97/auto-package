@@ -5364,11 +5364,30 @@ pub fn attempted_files(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Put the baseline saved in `dir` back into its checkout, and commit the
-/// attempted files with `commit`, the OBS write (the real one is [`commit`];
-/// tests record the call). Tracked files get their saved copy back, and files
-/// the run added are removed from the checkout, so the commit deletes them on
-/// OBS.
+/// Where the baselines of writes made outside a pipeline run are kept, under
+/// the directory the checkouts are in (a leading dot: no OBS project has one).
+pub const BASELINE_ROOT: &str = ".obs-baseline";
+
+/// Keep the baseline of `checkout_dir` for a write made outside a pipeline run,
+/// in `root/<branch>/<pkg>`, replacing an earlier one there. Returns that dir.
+pub fn begin_baseline(
+    root: &Path,
+    checkout_dir: &Path,
+    branch: &str,
+    pkg: &str,
+) -> std::io::Result<PathBuf> {
+    let dir = root.join(ap_core::run::sanitize_name(branch)).join(pkg);
+    let _ = fs::remove_dir_all(&dir);
+    save_baseline(checkout_dir, &dir)?;
+    Ok(dir)
+}
+
+/// Put the baseline saved in `dir` back into its checkout, and commit what the
+/// attempts sent to OBS with `commit`, the OBS write (the real one is
+/// [`commit`]; tests record the call). A tracked file gets its saved copy back.
+/// A file the attempts added is removed from the checkout, and committed as a
+/// deletion, only when OBS lists it now (`.osc/_files`, which osc updates on a
+/// commit that lands): a file that never reached OBS has nothing to undo.
 pub fn restore_baseline_with(
     dir: &Path,
     commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
@@ -5381,33 +5400,49 @@ pub fn restore_baseline_with(
         .map(PathBuf::from)
         .map_err(|e| format!("the checkout the baseline was saved from is unknown: {e}"))?;
     let tracked = fs::read_to_string(dir.join("tracked")).unwrap_or_default();
+    let on_obs = tracked_files(&checkout);
     if let Some(bad) = attempted.iter().find(|n| !is_safe_file_arg(n)) {
         return Err(format!(
             "refusing to restore {bad:?}: not a plain file name"
         ));
     }
+    let mut sent: Vec<String> = Vec::new();
     for name in &attempted {
+        if sent.contains(name) {
+            continue;
+        }
         let target = checkout.join(name);
         if tracked.lines().any(|t| t == name.as_str()) {
             let saved = fs::read(dir.join("files").join(name))
                 .map_err(|e| format!("{name}: no saved copy of the baseline ({e})"))?;
             ap_core::fsx::write_atomic(&target, saved).map_err(|e| format!("{name}: {e}"))?;
-        } else {
+        } else if on_obs.contains(name) {
             match fs::remove_file(&target) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("{name}: {e}")),
             }
+        } else {
+            continue;
         }
+        sent.push(name.clone());
     }
-    commit(&checkout, RESTORE_MESSAGE, &attempted).map_err(|e| e.to_string())
+    if sent.is_empty() {
+        return Ok(());
+    }
+    commit(&checkout, RESTORE_MESSAGE, &sent).map_err(|e| e.to_string())
 }
 
-/// [`restore_baseline_with`] committing through [`commit`].
+/// [`restore_baseline_with`] committing through [`commit`], and removing `dir`
+/// once it is restored. The commit may run after a shutdown: see
+/// [`proc::restoring_after_shutdown`].
 pub fn restore_baseline(dir: &Path, emit: Emit<'_>) -> Result<(), String> {
+    let _restoring = proc::restoring_after_shutdown();
     restore_baseline_with(dir, |checkout, message, files| {
         commit(checkout, message, files, emit)
-    })
+    })?;
+    let _ = fs::remove_dir_all(dir);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5476,6 +5511,8 @@ mod baseline_tests {
             .map(String::from)
             .to_vec();
         note_attempt(base.path(), &attempt).unwrap();
+        // The attempt landed on OBS: osc now lists the new archive, not the old.
+        write_files_xml(co.path(), &["foo.spec", "foo-2.0.tar.gz"]);
 
         let mut sent = Vec::new();
         let res = restore_baseline_with(base.path(), |_, message, files| {
@@ -5493,6 +5530,46 @@ mod baseline_tests {
         );
         assert!(!co.path().join("foo-2.0.tar.gz").exists());
         assert_eq!(sent, vec![(RESTORE_MESSAGE.to_string(), attempt)]);
+    }
+
+    #[test]
+    fn an_attempted_file_that_never_reached_obs_is_left_alone() {
+        let co = checkout(&[("foo.spec", "Name: foo\n")]);
+        let base = tempfile::tempdir().unwrap();
+        save_baseline(co.path(), base.path()).unwrap();
+        // The commit failed before it landed: OBS does not list the new file.
+        fs::write(co.path().join("foo-2.0.tar.gz"), "new").unwrap();
+        note_attempt(base.path(), &["foo-2.0.tar.gz".to_string()]).unwrap();
+        let res = restore_baseline_with(base.path(), |_, _, _| {
+            unreachable!("nothing reached OBS, so nothing is committed")
+        });
+        assert_eq!(res, Ok(()));
+        assert!(co.path().join("foo-2.0.tar.gz").exists());
+    }
+
+    #[test]
+    fn begin_baseline_replaces_an_earlier_one_for_the_same_package() {
+        let co = checkout(&[("foo.spec", "a")]);
+        let root = tempfile::tempdir().unwrap();
+        let first = begin_baseline(root.path(), co.path(), "home:u:Base", "foo").unwrap();
+        note_attempt(&first, &["foo.spec".to_string()]).unwrap();
+        let second = begin_baseline(root.path(), co.path(), "home:u:Base", "foo").unwrap();
+        assert_eq!(first, second);
+        assert!(attempted_files(&second).is_empty());
+        assert!(second.join("files/foo.spec").exists());
+    }
+
+    /// Rewrite `.osc/_files` as osc would list `names` after a commit.
+    fn write_files_xml(checkout: &Path, names: &[&str]) {
+        let entries: String = names
+            .iter()
+            .map(|n| format!(r#"<entry name="{n}" md5="x"/>"#))
+            .collect();
+        fs::write(
+            checkout.join(".osc/_files"),
+            format!("<directory>{entries}</directory>"),
+        )
+        .unwrap();
     }
 
     #[test]

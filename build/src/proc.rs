@@ -261,6 +261,45 @@ pub(crate) struct GroupGuard(u32);
 /// registration instead.
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+thread_local! {
+    /// Set by [`restoring_after_shutdown`] on the thread that restores an OBS
+    /// baseline.
+    static RESTORING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The longest a child of a restore may run: the restore is one short commit,
+/// and a stalled one must not hold up the exit of a stopped run.
+const RESTORE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Lets the calling thread start children after the run was stopped, for the
+/// commit that puts an OBS baseline back: a run that is stopped must still
+/// leave the project as it was. Only `osc::restore_baseline` takes it. Each
+/// child of the thread then gets at most [`RESTORE_TIMEOUT`]. The permission
+/// ends when the guard drops.
+pub fn restoring_after_shutdown() -> RestoreGuard {
+    RESTORING.with(|r| r.set(true));
+    RestoreGuard(())
+}
+
+/// See [`restoring_after_shutdown`].
+pub struct RestoreGuard(());
+
+impl Drop for RestoreGuard {
+    fn drop(&mut self) {
+        RESTORING.with(|r| r.set(false));
+    }
+}
+
+fn restoring() -> bool {
+    RESTORING.with(|r| r.get())
+}
+
+/// Whether a child may start: never once shutdown has begun, except while
+/// restoring a baseline.
+fn may_spawn(shutting_down: bool, restoring: bool) -> bool {
+    !shutting_down || restoring
+}
+
 /// Record `pid` (spawned with `process_group(0)`) as running until the guard drops.
 ///
 /// When shutdown has begun the group is killed at once and an error returned,
@@ -269,7 +308,10 @@ pub(crate) fn track_group(pid: u32) -> io::Result<GroupGuard> {
     // The flag is checked under the lock that `kill_all_groups` takes after
     // setting it: either the sweep sees this pid, or this sees the flag.
     let mut groups = ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner());
-    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+    if !may_spawn(
+        SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst),
+        restoring(),
+    ) {
         drop(groups);
         kill_process_group(pid);
         return Err(io::Error::new(
@@ -373,6 +415,11 @@ pub fn capture_with_timeout_env(
 ) -> Result<Captured, ProcessError> {
     use std::io::Read;
 
+    let timeout = if restoring() {
+        timeout.min(RESTORE_TIMEOUT)
+    } else {
+        timeout
+    };
     let argv: Vec<String> = args
         .iter()
         .map(|a| a.as_ref().to_string_lossy().into_owned())
@@ -596,6 +643,29 @@ mod write_log_tests {
             0o600
         );
         assert!(std::fs::read_to_string(&path).unwrap().starts_with("plain"));
+    }
+}
+
+#[cfg(test)]
+mod restore_spawn_tests {
+    use super::*;
+
+    #[test]
+    fn nothing_starts_after_shutdown_except_a_restore() {
+        assert!(may_spawn(false, false));
+        assert!(may_spawn(false, true));
+        assert!(!may_spawn(true, false));
+        assert!(may_spawn(true, true));
+    }
+
+    #[test]
+    fn the_restore_permission_is_held_by_its_guard_only() {
+        assert!(!restoring());
+        {
+            let _guard = restoring_after_shutdown();
+            assert!(restoring());
+        }
+        assert!(!restoring());
     }
 }
 
