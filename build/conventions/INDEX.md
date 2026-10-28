@@ -10,7 +10,7 @@
 10. %check failure: missing dependency vs cannot run here — read when %check fails (ImportError, fixture not found, collect error)
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
 12. Merged into convention 7 — read convention 7 when %check fails oddly on config
-13. Non-test failures: Source0 mismatch, offline %build errors — read when %prep/%build fails (no such file, name resolution)
+13. Merged into convention 28 — read convention 28 when %prep/%build fails (no such file, name resolution)
 14. Tools, quilt and the PATCH-* tag format — read when adding or editing a PatchN:, creating a file, or using Bash (zypper, osc cat, rpm -qlp)
 15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
 16. Merged into convention 17 — read convention 17 when writing %files module dirs or an import check for an unfamiliar package
