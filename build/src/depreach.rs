@@ -398,6 +398,8 @@ pub struct DepResolver {
     binaries_fetch: Mutex<()>,
     /// The same for path-project metas.
     metas_fetch: Mutex<()>,
+    /// Set for a maintenance run: no build path is added, and this says why.
+    frozen_paths: Option<String>,
 }
 
 /// Requests in flight at once when fetching several chunks or metas.
@@ -420,7 +422,17 @@ impl DepResolver {
             edit: Mutex::new(()),
             binaries_fetch: Mutex::new(()),
             metas_fetch: Mutex::new(()),
+            frozen_paths: None,
         }
+    }
+
+    /// A resolver that checks reachability but adds no build path: a path
+    /// [`DepResolver::add_paths`] would add is refused with `reason` instead.
+    /// Used by maintenance runs, whose incident builds against the code
+    /// stream only.
+    pub fn with_frozen_paths(mut self, reason: &str) -> Self {
+        self.frozen_paths = Some(reason.to_string());
+        self
     }
 
     /// The meta of a project other than the branch project, from the cache
@@ -619,6 +631,13 @@ impl DepResolver {
         let (edited, made) = osc::add_paths_to_meta(&meta, additions)?;
         if made.is_empty() {
             return Ok(made);
+        }
+        if let Some(reason) = &self.frozen_paths {
+            let wanted: Vec<String> = made
+                .iter()
+                .map(|a| format!("{}/{}", a.project, a.path_repository))
+                .collect();
+            return Err(format!("{reason}; it would need {}", wanted.join(", ")));
         }
         self.obs.set_project_meta(&self.branch_project, &edited)?;
         for a in &made {
@@ -943,6 +962,24 @@ mod tests {
             DepState::Reachable { .. }
         ));
         assert!(r.add_paths(&adds).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_frozen_resolver_refuses_a_new_path_and_leaves_the_meta_alone() {
+        let (r, fake) = resolver();
+        let r = r.with_frozen_paths("a maintenance run adds no build paths");
+        let before = fake.metas.lock().unwrap()[BRANCH].clone();
+        let v = r.check(&[pkg("libfoo-devel")]).unwrap();
+        let err = r.add_paths(&choose_paths(&v)).unwrap_err();
+        assert!(
+            err.starts_with(
+                "a maintenance run adds no build paths; it would need devel:languages:c_c++/"
+            ),
+            "{err}"
+        );
+        assert_eq!(fake.metas.lock().unwrap()[BRANCH], before);
+        assert!(r.add_paths(&[]).unwrap().is_empty());
+        assert!(r.cover_dependency(&["libfoo-devel".into()]).is_err());
     }
 
     #[test]
