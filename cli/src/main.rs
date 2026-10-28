@@ -214,8 +214,48 @@ enum Commands {
         name: String,
 
         /// Directory the notes are kept in (the same one builds use).
-        #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
+        #[arg(
+            long = "notes",
+            alias = "notes-dir",
+            default_value = "../auto-package-notes"
+        )]
         notes_dir: PathBuf,
+    },
+
+    /// Explain what happened to a package in a work directory: how its version
+    /// was chosen, each attempt with the agent's own summary, the outcome, the
+    /// cost and the notes kept. Read from the run files only: no model, no
+    /// network, nothing is written.
+    Explain {
+        /// RPM package name, e.g. aws-c-http.
+        name: String,
+
+        #[arg(long, default_value = "ap-work")]
+        work_dir: PathBuf,
+
+        /// OBS project whose work directory to read (needed when the work
+        /// directory holds several projects that know the package).
+        #[arg(long)]
+        project: Option<String>,
+
+        #[arg(long, default_value = "x86_64")]
+        arch: String,
+
+        /// Run id to explain (default: the latest run that touched the package).
+        #[arg(long)]
+        run: Option<String>,
+
+        /// Directory the package notes are kept in.
+        #[arg(
+            long = "notes",
+            alias = "notes-dir",
+            default_value = "../auto-package-notes"
+        )]
+        notes_dir: PathBuf,
+
+        /// Print the same data as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1161,6 +1201,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 _terminal_restore = None;
             }
             ap_core::sink::set_quiet(tui_ctrl.is_some());
+            tui::set_explain_dir(work_dir.clone());
 
             let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
             // Always attached: quiet while the TUI owns the terminal, and it
@@ -1494,9 +1535,68 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 print!("{text}");
             }
         }
+        Commands::Explain {
+            name,
+            work_dir,
+            project,
+            arch,
+            run,
+            notes_dir,
+            json,
+        } => explain_command(
+            &name,
+            &work_dir,
+            project.as_deref(),
+            &arch,
+            run.as_deref(),
+            &notes_dir,
+            json,
+        )?,
         Commands::Update(args) => update_project::run(args, summary)?,
     }
 
+    Ok(())
+}
+
+/// `explain`: print what the work directory says about one package.
+fn explain_command(
+    name: &str,
+    work_dir: &Path,
+    project: Option<&str>,
+    arch: &str,
+    run: Option<&str>,
+    notes_dir: &Path,
+    json: bool,
+) -> color_eyre::Result<()> {
+    use std::io::IsTerminal;
+    let err = |e: String| color_eyre::eyre::eyre!(e);
+    let dir = ap_build::explain::resolve_project_dir(work_dir, project, arch, name).map_err(err)?;
+    ap_build::package_notes::set_notes_dir(std::path::absolute(notes_dir)?);
+    let package_notes = ap_build::package_notes::path_for(name)
+        .map(|_| ap_build::package_notes::read(name))
+        .unwrap_or_default();
+    let ex = ap_build::explain::explain(&ap_build::explain::Query {
+        project_dir: &dir,
+        package: name,
+        run,
+        package_notes,
+    })
+    .map_err(err)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ex)?);
+        return Ok(());
+    }
+    let tty = std::io::stdout().is_terminal();
+    let width = if tty {
+        crossterm::terminal::size().map_or(100, |(w, _)| w as usize)
+    } else {
+        100
+    };
+    let color = tty && std::env::var_os("NO_COLOR").is_none();
+    print!(
+        "{}",
+        ap_build::explain::ansi(&ap_build::explain::render(&ex, width.clamp(40, 140)), color)
+    );
     Ok(())
 }
 
@@ -1590,6 +1690,7 @@ fn update_in_place(
         _terminal_restore = None;
     }
     ap_core::sink::set_quiet(tui_ctrl.is_some());
+    tui::set_explain_dir(work_dir.clone());
 
     let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();
     // Always attached: quiet while the TUI owns the terminal, and it starts
