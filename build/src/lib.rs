@@ -2,6 +2,7 @@
 //! and the validation gate.
 
 pub mod agent;
+pub mod backport;
 mod conventions_table;
 pub mod depclass;
 pub mod depreach;
@@ -14,6 +15,7 @@ pub mod flaky;
 pub mod flavors;
 pub mod http;
 pub mod log;
+pub mod maintenance;
 pub mod nvidia_spec;
 pub mod obs_status;
 pub mod osc;

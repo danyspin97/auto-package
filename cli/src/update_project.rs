@@ -613,15 +613,17 @@ fn cmd_update_project(
         // the branch, and a project changed in place, are read fresh.
         let origin_spec = |item: &Item| {
             if a.in_place {
-                update::spec_for_package(&item.origin, &item.pkg, emit)
+                update::spec_for_package(&item.origin, &item.pkg, emit).ok()
             } else {
-                update::planned_spec(&item.origin, &item.pkg, emit)
+                update::planned_spec(&item.origin, &item.pkg, emit).ok()
             }
         };
         let spec = if a.dry_run {
             origin_spec(&item)
         } else {
-            update::spec_for_package(branch, &item.pkg, emit).or_else(|| origin_spec(&item))
+            update::spec_for_package(branch, &item.pkg, emit)
+                .ok()
+                .or_else(|| origin_spec(&item))
         };
         match spec {
             Some(spec) => {
@@ -824,7 +826,7 @@ impl Audit {
                     if !seen.insert(pkg.to_string()) {
                         return true;
                     }
-                    let Some(spec) = update::planned_spec(&source, pkg, emit) else {
+                    let Ok(spec) = update::planned_spec(&source, pkg, emit) else {
                         warn(format!(
                             "could not read the spec of {pkg}, so it is not checked"
                         ));
@@ -1060,7 +1062,7 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
             })
             .flatten();
         let spec_version = updated
-            .then(|| update::spec_for_package(branch, &r.item.pkg, emit))
+            .then(|| update::spec_for_package(branch, &r.item.pkg, emit).ok())
             .flatten()
             .and_then(|spec| ap_build::spec::parse_header(&spec))
             .map(|h| h.version);

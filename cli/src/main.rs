@@ -1798,6 +1798,7 @@ fn branch_for_patch(
         .cloned()
     {
         let version = ap_build::update::spec_for_package(project, &real, emit)
+            .ok()
             .and_then(|text| ap_build::spec::parse_header(&text))
             .map(|h| h.version)
             .ok_or_else(|| format!("cannot read the Version of {project}/{real}"))?;
@@ -1850,6 +1851,7 @@ fn branch_for_patch(
     }
     ap_build::osc::invalidate_project_packages_cache(project);
     let version = ap_build::update::spec_for_package(project, &real, emit)
+        .ok()
         .and_then(|text| ap_build::spec::parse_header(&text))
         .map(|h| h.version)
         .ok_or_else(|| format!("cannot read the Version of {project}/{real} after branching it"))?;
@@ -1947,6 +1949,7 @@ fn update_config_for_outdated(
         .cloned()
         .unwrap_or(rpm);
     let header = ap_build::update::spec_for_package(project, &real, emit)
+        .ok()
         .and_then(|text| ap_build::spec::parse_header(&text));
     let current = header.as_ref().map(|h| h.version.clone());
     // Where the recipe says its upstream is decides where "newest" comes from:

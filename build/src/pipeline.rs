@@ -10357,7 +10357,7 @@ fn licence_guard_facts(
             Some(b) => b,
             None => {
                 let found = projects.iter().find_map(|proj| {
-                    let text = crate::update::spec_for_package(proj, &pkg, emit)?;
+                    let text = crate::update::spec_for_package(proj, &pkg, emit).ok()?;
                     let lines = recipe_licence_lines(&text);
                     (!lines.is_empty()).then(|| {
                         format!(
@@ -10366,11 +10366,11 @@ fn licence_guard_facts(
                         )
                     })
                 });
-                // `spec_for_package` answers `None` both when the recipe is
-                // absent and when an osc call failed transiently, and the two
-                // cannot be told apart here. Only a found recipe is cached: a
-                // `None` cached for the whole process would hide the recipe
-                // for every later guard in this run.
+                // `spec_for_package` fails both when the recipe is absent and
+                // when an osc call failed transiently, and the two are not
+                // told apart here. Only a found recipe is cached: a `None`
+                // cached for the whole process would hide the recipe for
+                // every later guard in this run.
                 if found.is_some() {
                     CACHE
                         .lock()

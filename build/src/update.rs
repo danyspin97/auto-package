@@ -24,6 +24,7 @@ use crate::osc;
 use crate::proc::Emit;
 use crate::spec;
 use crate::upstream_cache;
+use crate::version::{self, Scheme};
 use ap_core::event::Event;
 use ap_ecosystem::pypi;
 use std::collections::HashMap;
@@ -60,7 +61,10 @@ impl Ecosystem {
     /// others are reported, since the pipeline can neither fetch nor unpack
     /// what they name yet.
     pub fn can_build(&self) -> bool {
-        matches!(self, Ecosystem::Pypi { .. } | Ecosystem::GitRepo { .. })
+        matches!(
+            self,
+            Ecosystem::Pypi { .. } | Ecosystem::GitRepo { .. } | Ecosystem::Index { .. }
+        )
     }
 
     /// A short name for plan output.
@@ -90,7 +94,10 @@ pub enum Decision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
-    SpecFetchFailed,
+    /// The package has no spec file (not retried, nothing to read).
+    NoSpec,
+    /// OBS could not be asked or did not answer, after the retries.
+    ReadFailed(String),
     SpecHeaderMissing,
     NoSourceLine,
     /// No ecosystem matched the `Source:` line.
@@ -137,16 +144,37 @@ pub enum SkipReason {
     NotAnRpmVersion {
         latest: String,
     },
+    /// Upstream's newest release is a pre-release (`1.3.12-pre3`, `2.0rc1`) and
+    /// the package is on a stable one; a pre-release is never offered over it.
+    Prerelease {
+        packaged: String,
+        latest: String,
+    },
+    /// `--to-version` asked for a version that cannot be fetched from where
+    /// the package's source lives.
+    VersionNotFound {
+        version: String,
+        why: String,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SkipReason::SpecFetchFailed => write!(f, "osc cat failed for the spec"),
+            SkipReason::NoSpec => write!(f, "the package has no spec file"),
+            SkipReason::ReadFailed(why) => write!(f, "the spec could not be read: {why}"),
             SkipReason::NotAnRpmVersion { latest } => write!(
                 f,
                 "upstream's newest release ({latest}) is not a valid RPM Version"
             ),
+            SkipReason::Prerelease { packaged, latest } => write!(
+                f,
+                "upstream's newest release ({latest}) is a pre-release and the package is on \
+                 the stable {packaged}; no stable release is newer"
+            ),
+            SkipReason::VersionNotFound { version, why } => {
+                write!(f, "version {version} was not found upstream: {why}")
+            }
             SkipReason::SpecHeaderMissing => write!(f, "spec has no Name:/Version:"),
             SkipReason::NoSourceLine => write!(f, "spec has no Source: line"),
             SkipReason::NotRecognized { source } => {
@@ -157,7 +185,12 @@ impl std::fmt::Display for SkipReason {
                 name,
                 error,
             } => {
-                write!(f, "{ecosystem_tag} lookup for {name} failed: {error}")
+                write!(
+                    f,
+                    "{ecosystem_tag} lookup for {name} failed, so whether a newer version exists is unknown: \
+                     {error}{}",
+                    lookup_hint(error)
+                )
             }
             SkipReason::Snapshot { packaged, latest } => write!(
                 f,
@@ -193,6 +226,24 @@ impl std::fmt::Display for SkipReason {
     }
 }
 
+/// What to do about a failed lookup, from the way it failed.
+fn lookup_hint(error: &str) -> &'static str {
+    let e = error.to_ascii_lowercase();
+    if e.contains("404") || e.contains("410") || e.contains("not found") {
+        " [the upstream address looks dead; point Source:/URL: at the project's current home]"
+    } else if e.contains("certificate") || e.contains("cert verif") {
+        " [the host's TLS certificate is not valid; retry later or use another upstream]"
+    } else if e.contains("has no newest version") {
+        " [Repology knows the project but marks no release as newest; check upstream by hand]"
+    } else if e.contains("429") || e.contains("rate limit") {
+        " [rate limited; retry later]"
+    } else if e.contains("timed out") || e.contains("dns") || e.contains("connection") {
+        " [the host could not be reached; retry later]"
+    } else {
+        ""
+    }
+}
+
 /// The two external lookups [`classify`] needs, bundled so test code can
 /// supply fakes without wiring up every call site.
 pub struct Lookups<'a> {
@@ -214,7 +265,7 @@ pub struct Lookups<'a> {
 /// URL first (the majority of python-* packages), then wheel filenames
 /// (NVIDIA's binary distributions), then bare `-%{version}.tar.gz` templates,
 /// then git forges, then release listings.
-fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
+pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
     let mut out: Vec<Ecosystem> = Vec::new();
     let mut add = |e: Ecosystem| {
         if !out.contains(&e) {
@@ -280,7 +331,7 @@ pub fn declared_upstream(header: &spec::Header) -> DeclaredUpstream {
 
 /// Whether `latest` is strictly newer than `packaged`.
 pub fn is_newer(latest: &str, packaged: &str) -> bool {
-    compare_versions(latest, packaged) == pypi::VersionCompare::Newer
+    compare_versions(latest, packaged, Scheme::Generic) == pypi::VersionCompare::Newer
 }
 
 /// Return a canonical `https://<host>/<project_path>` for a git-forge URL
@@ -341,10 +392,11 @@ pub fn classify<SpecLookup>(
     lookups: &Lookups<'_>,
 ) -> Candidate
 where
-    SpecLookup: Fn(&str) -> Option<String>,
+    SpecLookup: Fn(&str) -> Result<String, ReadError>,
 {
-    let Some(spec_text) = fetch_spec(rpm_name) else {
-        return skipped(rpm_name, SkipReason::SpecFetchFailed);
+    let spec_text = match fetch_spec(rpm_name) {
+        Ok(text) => text,
+        Err(e) => return skipped(rpm_name, e.into()),
     };
     let Some(header) = spec::parse_header(&spec_text) else {
         return skipped(rpm_name, SkipReason::SpecHeaderMissing);
@@ -413,10 +465,19 @@ where
         .iter()
         .find_map(|s| latest.strip_suffix(s))
         .map_or(latest.clone(), str::to_string);
+    if version::is_prerelease(&latest) && !version::is_prerelease(&header.version) {
+        return skipped(
+            rpm_name,
+            SkipReason::Prerelease {
+                packaged: header.version,
+                latest,
+            },
+        );
+    }
     if latest.contains('-') && !header.version.contains('-') {
         return skipped(rpm_name, SkipReason::NotAnRpmVersion { latest });
     }
-    if is_snapshot_version(&header.version) {
+    if version::is_snapshot(&header.version) {
         return skipped(
             rpm_name,
             SkipReason::Snapshot {
@@ -456,7 +517,11 @@ where
             decision,
         };
     }
-    let decision = match compare_versions(&latest, &header.version) {
+    let scheme = match ecosystem {
+        Ecosystem::Pypi { .. } => Scheme::Pep440,
+        _ => Scheme::Generic,
+    };
+    let decision = match compare_versions(&latest, &header.version, scheme) {
         pypi::VersionCompare::Newer => match series_of(rpm_name, &header.version) {
             Some(series) if !in_series(&latest, &series) => {
                 Decision::Skipped(SkipReason::OtherSeries {
@@ -490,21 +555,15 @@ where
     }
 }
 
-/// Whether `latest` is newer than `packaged`: by PEP 440 when both are, and by
-/// comparing their numeric and alphabetic parts otherwise, as most non-Python
-/// projects number their releases.
-fn compare_versions(latest: &str, packaged: &str) -> pypi::VersionCompare {
-    match pypi::compare_pep440(latest, packaged) {
-        // Only versions that look like release numbers: an unexpanded macro or a
-        // word as the packaged version must stay unknown, not become "current".
-        pypi::VersionCompare::Unparseable if plain_version(latest) && plain_version(packaged) => {
-            if crate::sources::version_cmp(latest, packaged).is_gt() {
-                pypi::VersionCompare::Newer
-            } else {
-                pypi::VersionCompare::NotNewer
-            }
-        }
-        decided => decided,
+/// Whether `latest` is newer than `packaged` in `scheme`'s order, or cannot be
+/// told (an unexpanded macro or a word as the packaged version must stay
+/// unknown, not become "current"). See [`version::cmp`].
+fn compare_versions(latest: &str, packaged: &str, scheme: Scheme) -> pypi::VersionCompare {
+    use pypi::VersionCompare::{Newer, NotNewer, Unparseable};
+    match version::cmp(latest, packaged, scheme) {
+        Some(std::cmp::Ordering::Greater) => Newer,
+        Some(_) => NotNewer,
+        None => Unparseable,
     }
 }
 
@@ -515,7 +574,7 @@ fn compare_versions(latest: &str, packaged: &str) -> pypi::VersionCompare {
 fn version_part(found: &str) -> String {
     let found = found.trim();
     if plain_version(found) {
-        return found.strip_prefix(['v', 'V']).unwrap_or(found).to_string();
+        return version::strip_prefix(found).to_string();
     }
     let bytes = found.as_bytes();
     for (i, b) in bytes.iter().enumerate() {
@@ -523,7 +582,7 @@ fn version_part(found: &str) -> String {
             continue;
         }
         let rest = &found[i + 1..];
-        let number = rest.strip_prefix(['v', 'V']).unwrap_or(rest);
+        let number = version::strip_prefix(rest);
         if number.starts_with(|c: char| c.is_ascii_digit()) && plain_version(number) {
             return number.to_string();
         }
@@ -540,18 +599,6 @@ fn computed_prefix(version: &str) -> Option<String> {
     plain_version(known).then(|| known.to_string())
 }
 
-/// The leading dotted numbers of a version: `5.3p20` is `[5, 3]`.
-fn leading_numbers(v: &str) -> Vec<u64> {
-    let v = v.strip_prefix(['v', 'V']).unwrap_or(v);
-    let end = v
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(v.len());
-    v[..end]
-        .split('.')
-        .map_while(|part| part.parse().ok())
-        .collect()
-}
-
 /// The series a package is pinned to by its name: `fmt-9` and `boost-1.85`
 /// name `[9]` and `[1, 85]`. The number must also start the packaged version,
 /// or it is part of the name (`foo-2` packaging 1.4) and pins nothing.
@@ -565,7 +612,7 @@ fn series_of(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
         return None;
     }
     let series: Vec<u64> = suffix.split('.').filter_map(|p| p.parse().ok()).collect();
-    let packaged = leading_numbers(version);
+    let packaged = version::leading_numbers(version);
     (series.len() == suffix.split('.').count()
         && packaged.len() >= series.len()
         && packaged[..series.len()] == series[..])
@@ -574,43 +621,24 @@ fn series_of(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
 
 /// Whether `version` belongs to `series`: it starts with the same numbers.
 fn in_series(version: &str, series: &[u64]) -> bool {
-    leading_numbers(version).starts_with(series)
+    version::leading_numbers(version).starts_with(series)
 }
 
 /// Whether `latest` is ahead of `known` in the components `known` has.
 fn newer_than_known(latest: &str, known: &str) -> bool {
-    let known = leading_numbers(known);
-    let latest = leading_numbers(latest);
-    let n = known.len().min(latest.len());
-    n == known.len() && latest[..n] > known[..n]
-}
-
-/// Whether a version names a commit of a repository rather than a release:
-/// `1.2+git20260727.abc123`, `3.0~svn4411`.
-fn is_snapshot_version(version: &str) -> bool {
-    ["+git", "~git", "+svn", "~svn", "+hg", "+bzr", "+darcs"]
-        .iter()
-        .any(|marker| {
-            version.find(marker).is_some_and(|i| {
-                version[i + marker.len()..].starts_with(|c: char| c.is_ascii_digit())
-            })
-        })
+    version::leading_numbers(latest).len() >= version::leading_numbers(known).len()
+        && version::cmp_common_prefix(latest, known) == Some(std::cmp::Ordering::Greater)
 }
 
 /// Whether `latest` is behind `known` in the components both have.
 fn older_than_known(latest: &str, known: &str) -> bool {
-    let known = leading_numbers(known);
-    let latest = leading_numbers(latest);
-    let n = known.len().min(latest.len());
-    n > 0 && latest[..n] < known[..n]
+    version::cmp_common_prefix(latest, known) == Some(std::cmp::Ordering::Less)
 }
 
 /// A version that starts like a release number (`2.3.1`, `v1.0-rc2`, `20240101`)
 /// and holds only the characters one is written with.
 fn plain_version(v: &str) -> bool {
-    v.strip_prefix(['v', 'V'])
-        .unwrap_or(v)
-        .starts_with(|c: char| c.is_ascii_digit())
+    version::strip_prefix(v).starts_with(|c: char| c.is_ascii_digit())
         && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '~'))
 }
@@ -687,7 +715,7 @@ pub fn plan_each(
     // not the actual `demo.spec`.
     let fetch_spec = |rpm_name: &str| {
         let spec = spec_for_package(project, rpm_name, emit);
-        stash_spec(project, rpm_name, spec.as_ref());
+        stash_spec(project, rpm_name, spec.as_ref().ok());
         spec
     };
     let fetch_pypi_latest = |pypi_name: &str| {
@@ -728,6 +756,7 @@ pub fn plan_each(
             break;
         }
     }
+    upstream_cache::flush();
     let (hits, fetched) = upstream_cache::stats();
     let (hits, fetched) = (hits - hits_before, fetched - fetched_before);
     if hits > 0 {
@@ -759,13 +788,46 @@ fn stash_spec(project: &str, pkg: &str, spec: Option<&String>) {
 /// spec a plan fetched a moment ago is handed over, once, instead of fetching
 /// it again. Taken rather than kept, so a later read, after the package has
 /// been changed, always asks OBS.
-pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Result<String, ReadError> {
     let kept = PLANNED_SPECS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_mut()
         .and_then(|m| m.remove(&(project.to_string(), pkg.to_string())));
-    kept.or_else(|| spec_for_package(project, pkg, emit))
+    match kept {
+        Some(spec) => Ok(spec),
+        None => spec_for_package(project, pkg, emit),
+    }
+}
+
+/// Why a package's spec could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadError {
+    /// OBS answered and the package has no spec file. Not retried.
+    NoSpec,
+    /// OBS could not be asked or did not answer (also: the run was
+    /// interrupted); the text says which step failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::NoSpec => write!(f, "the package has no spec file"),
+            ReadError::Failed(why) => write!(f, "the spec could not be read: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+impl From<ReadError> for SkipReason {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::NoSpec => SkipReason::NoSpec,
+            ReadError::Failed(why) => SkipReason::ReadFailed(why),
+        }
+    }
 }
 
 /// Fetch the primary spec from an OBS package, picking the right filename
@@ -773,23 +835,71 @@ pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> 
 ///
 /// OBS answers slowly or not at all now and then (a sweep of hundreds of
 /// packages saw `osc ls`/`osc cat` time out), so a failed read is repeated a
-/// few times before the package is given up on. A package with no spec at all
-/// is not a failed read and is not retried.
-pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
-    const ATTEMPTS: u32 = 3;
-    for attempt in 1..=ATTEMPTS {
-        if attempt > 1 {
-            std::thread::sleep(std::time::Duration::from_secs(5 * u64::from(attempt - 1)));
+/// few times (waiting between them, and giving up when the run is
+/// interrupted) before the package is given up on as [`ReadError::Failed`]. A
+/// package with no spec at all is [`ReadError::NoSpec`]: not a failed read, and
+/// not retried.
+pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<String, ReadError> {
+    read_spec(
+        pkg,
+        &|| osc::list_package_files(project, pkg, emit),
+        &|file| osc::cat_file(project, pkg, file, emit),
+        // An update project keeps a released package's sources in its newest
+        // incident copy (`pkg.NNNNN`), the plain one empty.
+        &|| {
+            crate::maintenance::newest_incident_package(project, pkg, emit)
+                .map(|incident| spec_for_package(project, &incident, emit))
+        },
+        &|wait| {
+            osc::sleep_interruptible(wait);
+            !crate::proc::shutting_down()
+        },
+    )
+}
+
+/// How often a read is tried, and the wait before attempt `n` (2, 3, ...).
+const READ_ATTEMPTS: u32 = 3;
+
+fn read_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(5 * u64::from(attempt - 1))
+}
+
+/// [`spec_for_package`] with OBS behind closures: `list` is the file listing
+/// (`None` when it failed), `cat` a file's text, `incident` the read of the
+/// newest incident copy when there is one, and `pause` waits and says whether
+/// to go on.
+fn read_spec(
+    pkg: &str,
+    list: &dyn Fn() -> Option<Vec<String>>,
+    cat: &dyn Fn(&str) -> Option<String>,
+    incident: &dyn Fn() -> Option<Result<String, ReadError>>,
+    pause: &dyn Fn(std::time::Duration) -> bool,
+) -> Result<String, ReadError> {
+    let mut why = String::from("no attempt was made");
+    for attempt in 1..=READ_ATTEMPTS {
+        if attempt > 1 && !pause(read_backoff(attempt)) {
+            return Err(ReadError::Failed("interrupted".into()));
         }
-        let Some(files) = osc::list_package_files(project, pkg, emit) else {
+        let Some(files) = list() else {
+            why = "listing the package's files (osc ls) failed".into();
             continue;
         };
-        let picked = pick_spec_filename(pkg, &files)?;
-        if let Some(spec) = osc::cat_file(project, pkg, &picked, emit) {
-            return Some(spec);
+        let Some(picked) = pick_spec_filename(pkg, &files) else {
+            if files.is_empty()
+                && let Some(read) = incident()
+            {
+                return read;
+            }
+            return Err(ReadError::NoSpec);
+        };
+        match cat(&picked) {
+            Some(spec) => return Ok(spec),
+            None => why = format!("reading {picked} (osc cat) failed"),
         }
     }
-    None
+    Err(ReadError::Failed(format!(
+        "{why}, {READ_ATTEMPTS} attempts"
+    )))
 }
 
 /// Pure, testable half of [`spec_for_package`]'s filename picker.
@@ -798,8 +908,7 @@ pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Stri
 /// 1. `<base>.spec`, where `<base>` is the OBS package name with any
 ///    `+<version>` suffix stripped (AppCo convention: `pytorch+2.4` →
 ///    `pytorch.spec`).
-/// 2. `<pkg>.spec` verbatim (the pre-Oct 6 default, for the common
-///    non-AppCo case).
+/// 2. `<pkg>.spec` verbatim (the common non-AppCo case).
 /// 3. Alphabetical first, so multibuild flavors or alternative spec names
 ///    still produce a stable choice across runs.
 ///
@@ -895,7 +1004,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 
     #[test]
     fn flags_a_newer_upstream_release_for_update() {
-        let spec = |_: &str| Some(ATTRS_SPEC.to_string());
+        let spec = |_: &str| Ok(ATTRS_SPEC.to_string());
         let c = classify("python-attrs", &spec, &only_pypi("27.0.0"));
         assert_eq!(
             c.decision,
@@ -911,7 +1020,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 
     #[test]
     fn reports_up_to_date_when_versions_match() {
-        let spec = |_: &str| Some(ATTRS_SPEC.to_string());
+        let spec = |_: &str| Ok(ATTRS_SPEC.to_string());
         let c = classify("python-attrs", &spec, &only_pypi("26.1.0"));
         assert_eq!(
             c.decision,
@@ -926,14 +1035,14 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 
     #[test]
     fn reports_up_to_date_when_packaged_is_newer_than_pypi() {
-        let spec = |_: &str| Some(ATTRS_SPEC.to_string());
+        let spec = |_: &str| Ok(ATTRS_SPEC.to_string());
         let c = classify("python-attrs", &spec, &only_pypi("25.0.0"));
         assert!(matches!(c.decision, Decision::UpToDate { .. }));
     }
 
     #[test]
     fn wheel_only_source_resolves_through_pypi() {
-        let spec = |_: &str| Some(NVIDIA_CUBLAS_SPEC.to_string());
+        let spec = |_: &str| Ok(NVIDIA_CUBLAS_SPEC.to_string());
         let c = classify("python-nvidia-cublas", &spec, &only_pypi("13.2.0.0"));
         assert_eq!(
             c.decision,
@@ -951,7 +1060,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
     fn a_version_an_rpm_cannot_hold_is_skipped_and_a_release_suffix_is_dropped() {
         let spec = "Name: foo\nVersion: 1.0\nURL: https://github.com/o/foo\n\
                     Source0: https://github.com/o/foo/archive/v%{version}.tar.gz\n";
-        let fetch = |_: &str| Some(spec.to_string());
+        let fetch = |_: &str| Ok(spec.to_string());
         let c = classify("foo", &fetch, &only_repo("v25.12.19-2026-02-06-03fffb2"));
         assert_eq!(
             c.decision,
@@ -990,7 +1099,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 
     #[test]
     fn bare_tarball_template_resolves_through_pypi_speculatively() {
-        let spec = |_: &str| Some(TORCHAUDIO_SPEC.to_string());
+        let spec = |_: &str| Ok(TORCHAUDIO_SPEC.to_string());
         let c = classify("python-torchaudio", &spec, &only_pypi("2.5.0"));
         assert_eq!(
             c.decision,
@@ -1006,7 +1115,7 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 
     #[test]
     fn github_source_resolves_through_the_git_forge_api() {
-        let spec = |_: &str| Some(RIPGREP_SPEC.to_string());
+        let spec = |_: &str| Ok(RIPGREP_SPEC.to_string());
         let c = classify("ripgrep", &spec, &only_repo("14.2.0"));
         assert_eq!(
             c.decision,
@@ -1022,14 +1131,20 @@ Source:         https://github.com/BurntSushi/ripgrep/archive/14.1.0.tar.gz
 
     #[test]
     fn skips_when_osc_cat_returns_nothing() {
-        let spec = |_: &str| None;
+        let spec = |_: &str| Err(ReadError::Failed("osc cat".into()));
         let c = classify("gone", &spec, &only_pypi("x"));
-        assert_eq!(c.decision, Decision::Skipped(SkipReason::SpecFetchFailed));
+        assert_eq!(
+            c.decision,
+            Decision::Skipped(SkipReason::ReadFailed("osc cat".into()))
+        );
+        let spec = |_: &str| Err(ReadError::NoSpec);
+        let c = classify("gone", &spec, &only_pypi("x"));
+        assert_eq!(c.decision, Decision::Skipped(SkipReason::NoSpec));
     }
 
     #[test]
     fn skips_when_pypi_lookup_errors() {
-        let spec = |_: &str| Some(ATTRS_SPEC.to_string());
+        let spec = |_: &str| Ok(ATTRS_SPEC.to_string());
         let p: &'static dyn Fn(&str) -> Result<String, String> =
             Box::leak(Box::new(|_: &str| Err("404 Not Found".to_string())));
         let r: &'static dyn Fn(&str) -> Result<String, String> =
@@ -1059,7 +1174,7 @@ Name:           weird
 Version:        1.0
 Source:         file:///opt/thing.tar.gz
 ";
-        let spec = |_: &str| Some(spec_text.to_string());
+        let spec = |_: &str| Ok(spec_text.to_string());
         let c = classify("weird", &spec, &only_pypi("x"));
         // Nothing in the spec says where the source lives, so only Repology
         // is left to ask.
@@ -1089,7 +1204,7 @@ Version:        2.3.1
 Url:            https://savannah.nongnu.org/projects/acl
 Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{version}.tar.xz#/acl.tar.xz
 ";
-        let spec = |_: &str| Some(spec_text.to_string());
+        let spec = |_: &str| Ok(spec_text.to_string());
         let index: &'static dyn Fn(&str) -> Result<String, String> = &|url: &str| {
             assert_eq!(
                 url,
@@ -1109,15 +1224,13 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
                 new_version: "2.3.2".into(),
             }
         );
-        assert!(
-            !matches!(&c.decision, Decision::Update { ecosystem, .. } if ecosystem.can_build())
-        );
+        assert!(matches!(&c.decision, Decision::Update { ecosystem, .. } if ecosystem.can_build()));
     }
 
     #[test]
     fn a_series_package_stays_on_its_series() {
         let spec_text = "Name: fmt-9\nVersion: 9.1.0\n";
-        let spec = |_: &str| Some(spec_text.to_string());
+        let spec = |_: &str| Ok(spec_text.to_string());
         let newest = |v: &'static str| -> &'static dyn Fn(&str) -> Result<String, String> {
             Box::leak(Box::new(move |_: &str| Ok(v.to_string())))
         };
@@ -1150,7 +1263,7 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
     #[test]
     fn a_package_without_a_source_line_is_asked_of_repology() {
         let spec_text = "Name: fillup\nVersion: 1.42\n";
-        let spec = |_: &str| Some(spec_text.to_string());
+        let spec = |_: &str| Ok(spec_text.to_string());
         let repology: &'static dyn Fn(&str) -> Result<String, String> = &|name: &str| {
             assert_eq!(name, "fillup");
             Ok("1.43".to_string())
@@ -1177,7 +1290,7 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
         // `dracut-%{version}.tar.xz` looks like a PyPI project name to the
         // name-based guess, which PyPI does not know.
         let spec_text = "Name: dracut\nVersion: 059\nSource: dracut-%{version}.tar.xz\n";
-        let spec = |_: &str| Some(spec_text.to_string());
+        let spec = |_: &str| Ok(spec_text.to_string());
         let pypi: &'static dyn Fn(&str) -> Result<String, String> =
             &|_: &str| Err("404 Not Found".to_string());
         let lookups = Lookups {
@@ -1203,13 +1316,13 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
 
     #[test]
     fn a_repository_snapshot_is_not_judged_by_a_release() {
-        assert!(is_snapshot_version("2+git20260727.241e0ff"));
-        assert!(is_snapshot_version(
+        assert!(version::is_snapshot("2+git20260727.241e0ff"));
+        assert!(version::is_snapshot(
             "84.87+git20260924.144354a1%{git_version}"
         ));
-        assert!(is_snapshot_version("1.0~svn4411"));
-        assert!(!is_snapshot_version("1.2.3"));
-        assert!(!is_snapshot_version("1.0+gitlab")); // not a date or number after
+        assert!(version::is_snapshot("1.0~svn4411"));
+        assert!(!version::is_snapshot("1.2.3"));
+        assert!(!version::is_snapshot("1.0+gitlab")); // not a date or number after
     }
 
     #[test]
@@ -1233,10 +1346,22 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
     #[test]
     fn dotted_numbers_compare_by_part_and_words_stay_unknown() {
         use pypi::VersionCompare::{Newer, NotNewer, Unparseable};
-        assert!(matches!(compare_versions("2.10", "2.9"), Newer));
-        assert!(matches!(compare_versions("2.9", "2.10"), NotNewer));
-        assert!(matches!(compare_versions("059", "059"), NotNewer));
-        assert!(matches!(compare_versions("1.0", "%{ver}"), Unparseable));
+        assert!(matches!(
+            compare_versions("2.10", "2.9", Scheme::Generic),
+            Newer
+        ));
+        assert!(matches!(
+            compare_versions("2.9", "2.10", Scheme::Generic),
+            NotNewer
+        ));
+        assert!(matches!(
+            compare_versions("059", "059", Scheme::Generic),
+            NotNewer
+        ));
+        assert!(matches!(
+            compare_versions("1.0", "%{ver}", Scheme::Generic),
+            Unparseable
+        ));
     }
 
     #[test]
@@ -1323,7 +1448,7 @@ Name:           python-weird
 Version:        not-a-valid-pep-440
 Source:         https://files.pythonhosted.org/packages/source/w/weird/weird-%{version}.tar.gz
 ";
-        let spec_fn = |_: &str| Some(spec.to_string());
+        let spec_fn = |_: &str| Ok(spec.to_string());
         let c = classify("python-weird", &spec_fn, &only_pypi("2.0.0"));
         match c.decision {
             Decision::Skipped(SkipReason::VersionCompareFailed { packaged, latest }) => {
@@ -1352,7 +1477,7 @@ Name:           pytorch
 Version:        %{package_version}
 Source:         https://files.pythonhosted.org/packages/source/p/pytorch/pytorch-%{version}.tar.gz
 ";
-        let spec_fn = |_: &str| Some(spec.to_string());
+        let spec_fn = |_: &str| Ok(spec.to_string());
         let c = classify("pytorch+2.4", &spec_fn, &only_pypi("2.5.0"));
         assert_eq!(
             c.decision,
@@ -1390,6 +1515,293 @@ Source:         https://files.pythonhosted.org/packages/source/p/pytorch/pytorch
         assert_eq!(
             git_repo_url("git@github.com:NVIDIA/cuda-python.git").as_deref(),
             Some("https://github.com/NVIDIA/cuda-python"),
+        );
+    }
+
+    #[test]
+    fn version_prefixes_and_epochs_are_compared_as_numbers() {
+        use pypi::VersionCompare::{Newer, NotNewer};
+        let table = [
+            ("r63", "62", true),
+            ("r62", "62", false),
+            ("v1.3", "1.2", true),
+            ("1.2.3a", "1.2.3", true),
+            ("1.2.3", "1.2.3a", false),
+            ("1.2.3b", "1.2.3a", true),
+            ("1.10", "1.9a", true),
+            ("1.2.3.4", "1.2.3", true),
+            ("1.2.3.10", "1.2.3.9", true),
+            ("1.2.3.4.5", "1.2.3.4", true),
+            ("2:1.0", "3.0", true),
+            ("3.0", "1:1.0", false),
+            ("1:1.0", "1:1.1", false),
+            ("1.2+git20260101", "1.2", true),
+            ("1.0~rc1", "1.0", false),
+            ("2.0", "1.0~git20260101", true),
+        ];
+        for (latest, packaged, newer) in table {
+            let want = if newer { Newer } else { NotNewer };
+            assert!(
+                compare_versions(latest, packaged, Scheme::Generic) == want,
+                "{latest} vs {packaged}"
+            );
+        }
+    }
+
+    #[test]
+    fn series_helpers_accept_prefixes_and_long_versions() {
+        assert_eq!(version_part("release-1.3"), "1.3");
+        assert_eq!(version_part("r62"), "62");
+        assert_eq!(version::leading_numbers("r62"), vec![62]);
+        assert_eq!(version::leading_numbers("v1.2.3.4"), vec![1, 2, 3, 4]);
+        assert_eq!(version::leading_numbers("1.2.3a"), vec![1, 2, 3]);
+        assert_eq!(series_of("boost-1.85", "1.85.0"), Some(vec![1, 85]));
+        assert_eq!(series_of("fmt-9", "v9.1.0"), Some(vec![9]));
+        assert!(in_series("v9.2", &[9]));
+        assert!(!in_series("10.0", &[9]));
+        assert!(in_series("1.85.0.1", &[1, 85]));
+        assert!(!in_series("1.8", &[1, 85]));
+    }
+
+    #[test]
+    fn an_r_numbered_release_and_a_snapshot_packaged_version() {
+        let spec = "Name: inih\nVersion: 62\nURL: https://github.com/benhoyt/inih\n\
+                    Source0: https://github.com/benhoyt/inih/archive/r%{version}.tar.gz\n";
+        let fetch = |_: &str| Ok(spec.to_string());
+        let c = classify("inih", &fetch, &only_repo("r62"));
+        assert!(
+            matches!(c.decision, Decision::UpToDate { .. }),
+            "{:?}",
+            c.decision
+        );
+        let c = classify("inih", &fetch, &only_repo("r63"));
+        assert!(
+            matches!(c.decision, Decision::Update { ref new_version, .. } if new_version == "63"),
+            "{:?}",
+            c.decision
+        );
+        assert!(version::is_snapshot("1.0~git.20251221"));
+        let spec = "Name: klib\nVersion: 1.0~git.20251221\nURL: https://github.com/attractivechaos/klib\n\
+                    Source0: https://github.com/attractivechaos/klib/archive/master.tar.gz\n";
+        let c = classify("klib", &|_: &str| Ok(spec.to_string()), &only_repo("r394"));
+        assert!(
+            matches!(c.decision, Decision::Skipped(SkipReason::Snapshot { .. })),
+            "{:?}",
+            c.decision
+        );
+    }
+
+    #[test]
+    fn a_prerelease_is_never_offered_over_a_stable_release() {
+        let spec = "Name: foo\nVersion: 1.3.11\nURL: https://github.com/o/foo\n\
+                    Source0: https://github.com/o/foo/archive/v%{version}.tar.gz\n";
+        let fetch = |_: &str| Ok(spec.to_string());
+        for latest in [
+            "1.3.12-pre3",
+            "1.0.0-beta2",
+            "2.0rc1",
+            "2.0.0-alpha",
+            "1.4~git20260101",
+        ] {
+            let c = classify("foo", &fetch, &only_repo(latest));
+            assert!(
+                matches!(c.decision, Decision::Skipped(SkipReason::Prerelease { .. })),
+                "{latest}: {:?}",
+                c.decision
+            );
+        }
+        // A snapshot-dated tag has a `-` and is no release either.
+        let c = classify("foo", &fetch, &only_repo("0.19-20260627"));
+        assert!(matches!(
+            c.decision,
+            Decision::Skipped(SkipReason::NotAnRpmVersion { .. })
+        ));
+        // A package already on a pre-release may move to the next one.
+        let spec = spec.replace("1.3.11", "2.0rc1");
+        let c = classify("foo", &|_: &str| Ok(spec.clone()), &only_repo("2.0rc2"));
+        assert!(
+            matches!(c.decision, Decision::Update { .. }),
+            "{:?}",
+            c.decision
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_says_what_to_do_and_is_not_a_missing_update() {
+        let reason = |error: &str| {
+            SkipReason::LookupFailed {
+                ecosystem_tag: "release listing".into(),
+                name: "https://x/".into(),
+                error: error.into(),
+            }
+            .to_string()
+        };
+        assert!(reason("https://x/: http status: 404").contains("looks dead"));
+        assert!(reason("invalid peer certificate: Expired").contains("certificate"));
+        assert!(reason("Repology has no newest version for it").contains("Repology"));
+        assert!(reason("boom").contains("unknown"));
+    }
+
+    mod reading {
+        use super::super::*;
+        use std::cell::{Cell, RefCell};
+        use std::time::Duration;
+
+        fn files(names: &[&str]) -> Vec<String> {
+            names.iter().map(|s| s.to_string()).collect()
+        }
+
+        /// Runs `read_spec` with a listing and a cat that answer from `list`
+        /// and `cat` (one answer per call, the last one repeating), counting
+        /// the calls and recording the waits.
+        struct Run {
+            lists: Cell<usize>,
+            cats: Cell<usize>,
+            waits: RefCell<Vec<Duration>>,
+        }
+
+        fn run(
+            list: &[Option<Vec<String>>],
+            cat: &[Option<&str>],
+            incident: Option<Result<String, ReadError>>,
+            go_on: bool,
+        ) -> (Result<String, ReadError>, Run) {
+            let r = Run {
+                lists: Cell::new(0),
+                cats: Cell::new(0),
+                waits: RefCell::new(Vec::new()),
+            };
+            let nth = |n: &Cell<usize>, len: usize| {
+                let i = n.get().min(len - 1);
+                n.set(n.get() + 1);
+                i
+            };
+            let out = read_spec(
+                "pkg",
+                &|| list[nth(&r.lists, list.len())].clone(),
+                &|_| cat[nth(&r.cats, cat.len())].map(str::to_string),
+                &|| incident.clone(),
+                &|d| {
+                    r.waits.borrow_mut().push(d);
+                    go_on
+                },
+            );
+            (out, r)
+        }
+
+        #[test]
+        fn a_package_with_no_spec_is_not_retried() {
+            let (out, r) = run(&[Some(files(&["_service", "README"]))], &[None], None, true);
+            assert_eq!(out, Err(ReadError::NoSpec));
+            assert_eq!(r.lists.get(), 1);
+            assert_eq!(r.cats.get(), 0);
+            assert!(r.waits.borrow().is_empty());
+            // An empty listing without an incident copy is no spec either.
+            let (out, r) = run(&[Some(vec![])], &[None], None, true);
+            assert_eq!(out, Err(ReadError::NoSpec));
+            assert_eq!(r.lists.get(), 1);
+        }
+
+        #[test]
+        fn an_empty_package_reads_its_newest_incident_copy() {
+            let (out, _) = run(&[Some(vec![])], &[None], Some(Ok("Name: x".into())), true);
+            assert_eq!(out.as_deref(), Ok("Name: x"));
+            let (out, _) = run(&[Some(vec![])], &[None], Some(Err(ReadError::NoSpec)), true);
+            assert_eq!(out, Err(ReadError::NoSpec));
+        }
+
+        #[test]
+        fn a_failed_read_is_retried_with_a_growing_wait() {
+            let (out, r) = run(
+                &[None, Some(files(&["pkg.spec"]))],
+                &[None, Some("Name: pkg")],
+                None,
+                true,
+            );
+            assert_eq!(out.as_deref(), Ok("Name: pkg"));
+            assert_eq!(r.lists.get(), 3);
+            assert_eq!(
+                *r.waits.borrow(),
+                [Duration::from_secs(5), Duration::from_secs(10)]
+            );
+        }
+
+        #[test]
+        fn giving_up_says_which_step_failed() {
+            let (out, r) = run(&[None], &[None], None, true);
+            let Err(ReadError::Failed(why)) = out else {
+                panic!("expected a failed read");
+            };
+            assert!(
+                why.contains("osc ls") && why.contains("3 attempts"),
+                "{why}"
+            );
+            assert_eq!(r.lists.get(), 3);
+            let (out, r) = run(&[Some(files(&["pkg.spec"]))], &[None], None, true);
+            let Err(ReadError::Failed(why)) = out else {
+                panic!("expected a failed read");
+            };
+            assert!(why.contains("pkg.spec") && why.contains("osc cat"), "{why}");
+            assert_eq!(r.cats.get(), 3);
+        }
+
+        #[test]
+        fn an_interrupt_stops_the_retries() {
+            let (out, r) = run(&[None], &[None], None, false);
+            assert_eq!(out, Err(ReadError::Failed("interrupted".into())));
+            assert_eq!(r.lists.get(), 1);
+            assert_eq!(r.waits.borrow().len(), 1);
+        }
+
+        #[test]
+        fn the_two_failures_are_different_skip_reasons() {
+            assert_eq!(SkipReason::from(ReadError::NoSpec), SkipReason::NoSpec);
+            assert_eq!(
+                SkipReason::from(ReadError::Failed("x".into())),
+                SkipReason::ReadFailed("x".into())
+            );
+            assert_ne!(
+                SkipReason::NoSpec.to_string(),
+                SkipReason::ReadFailed("x".into()).to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn pypi_packages_compare_by_pep440_the_rest_generically() {
+        let spec = "Name: python-x\nVersion: 1.2.3\n\
+                    Source: https://files.pythonhosted.org/packages/source/x/x/x-%{version}.tar.gz\n";
+        // `1.2.3a` is an alpha before 1.2.3 for PyPI.
+        let c = classify(
+            "python-x",
+            &|_: &str| Ok(spec.to_string()),
+            &only_pypi("1.2.3a"),
+        );
+        assert!(
+            matches!(c.decision, Decision::UpToDate { .. }),
+            "{:?}",
+            c.decision
+        );
+        // An RPM-style pre-release version still compares.
+        let spec = spec.replace("1.2.3", "1.0~rc1");
+        let c = classify("python-x", &|_: &str| Ok(spec.clone()), &only_pypi("1.0"));
+        assert!(
+            matches!(c.decision, Decision::Update { .. }),
+            "{:?}",
+            c.decision
+        );
+        // The same trailing-zero version is not an update.
+        let spec = "Name: python-x\nVersion: 2.0\n\
+                    Source: https://files.pythonhosted.org/packages/source/x/x/x-%{version}.tar.gz\n";
+        let c = classify(
+            "python-x",
+            &|_: &str| Ok(spec.to_string()),
+            &only_pypi("2.0.0"),
+        );
+        assert!(
+            matches!(c.decision, Decision::UpToDate { .. }),
+            "{:?}",
+            c.decision
         );
     }
 }
