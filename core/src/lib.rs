@@ -1,5 +1,6 @@
 //! Shared types: errors, events, sinks, and run-directory layout.
 
+pub mod env;
 pub mod error;
 pub mod event;
 pub mod fsx;
