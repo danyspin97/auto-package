@@ -10,8 +10,11 @@
 //! can be refused (see [`LiteralIpGuard`]); a name that resolves to a private
 //! address is the proxy's to deal with.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use ureq::config::Config;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
@@ -173,8 +176,11 @@ pub fn agent(config: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>) -
 
 /// Requests made for one call: the first try plus two retries.
 pub const ATTEMPTS: u32 = 3;
-/// Longest pause taken between attempts, whatever the server asks for.
-const MAX_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longest pause taken between attempts for a `Retry-After` or a rate-limit
+/// reset the server announced.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(120);
+/// Longest backoff before jitter, when the server named no time.
+const MAX_BACKOFF: Duration = Duration::from_secs(32);
 
 /// Whether a failed request is worth repeating: a dropped connection, a
 /// timeout or a failed lookup. A refused private target, a bad URL, an
@@ -187,16 +193,186 @@ fn is_transient(err: &ureq::Error) -> bool {
     }
 }
 
-/// The pause before attempt `attempt + 1` (`attempt` counts from 1): the
-/// server's `Retry-After` in seconds when it sent one, else 1s, 2s, ...
-/// Capped at [`MAX_RETRY_WAIT`].
-fn retry_wait(retry_after: Option<&str>, attempt: u32) -> std::time::Duration {
-    let asked = retry_after
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(std::time::Duration::from_secs);
-    asked
-        .unwrap_or_else(|| std::time::Duration::from_secs(1 << (attempt - 1).min(5)))
-        .min(MAX_RETRY_WAIT)
+/// The exponential backoff before attempt `attempt + 1` (`attempt` counts from
+/// 1): 1s, 2s, 4s ... up to [`MAX_BACKOFF`]. The pause actually taken is a
+/// uniform draw from zero to this (full jitter), so threads that failed
+/// together do not retry together.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs(1 << (attempt.max(1) - 1).min(5)).min(MAX_BACKOFF)
+}
+
+/// The rate-limit related headers of an error answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplyHeaders {
+    /// `Retry-After` in seconds (an HTTP-date is not understood).
+    pub retry_after: Option<u64>,
+    /// `x-ratelimit-remaining`.
+    pub remaining: Option<u64>,
+    /// `x-ratelimit-reset`, seconds since the epoch.
+    pub reset: Option<u64>,
+}
+
+impl ReplyHeaders {
+    fn from_response(resp: &ureq::http::Response<ureq::Body>) -> Self {
+        let num = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        };
+        ReplyHeaders {
+            retry_after: num("retry-after"),
+            remaining: num("x-ratelimit-remaining"),
+            reset: num("x-ratelimit-reset"),
+        }
+    }
+}
+
+/// An error answer that ended a call, with what the server said about rate
+/// limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusFailure {
+    pub status: u16,
+    pub headers: ReplyHeaders,
+}
+
+impl StatusFailure {
+    /// A 429, or a 403 whose quota is used up (`x-ratelimit-remaining: 0`).
+    pub fn is_rate_limit(&self) -> bool {
+        self.status == 429 || (self.status == 403 && self.headers.remaining == Some(0))
+    }
+}
+
+/// Why [`call_with_retries_detailed`] gave up.
+#[derive(Debug)]
+pub enum CallFailure {
+    Status(StatusFailure),
+    Transport(ureq::Error),
+}
+
+impl From<CallFailure> for ureq::Error {
+    fn from(f: CallFailure) -> Self {
+        match f {
+            CallFailure::Status(s) => ureq::Error::StatusCode(s.status),
+            CallFailure::Transport(e) => e,
+        }
+    }
+}
+
+/// What to do about an error answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Final,
+    /// Wait exactly this long (the server named the time).
+    Wait(Duration),
+    /// Wait a jittered backoff of at most this long.
+    Backoff(Duration),
+}
+
+/// Decide what an error answer means. `now` is seconds since the epoch.
+///
+/// 429 and 5xx are repeated. A 403 is final unless its quota is used up
+/// (`x-ratelimit-remaining: 0`), in which case it is repeated after the
+/// announced reset when that is within [`MAX_RETRY_WAIT`]; a reset further off
+/// (GitHub's unauthenticated hour) is final.
+fn judge(status: u16, h: &ReplyHeaders, attempt: u32, now: u64) -> Verdict {
+    if attempt >= ATTEMPTS {
+        return Verdict::Final;
+    }
+    let announced = h.retry_after.map(Duration::from_secs).or_else(|| {
+        h.reset
+            .map(|r| Duration::from_secs(r.saturating_sub(now).saturating_add(1)))
+    });
+    let bounded = |d: Duration| {
+        if d > MAX_RETRY_WAIT {
+            Verdict::Final
+        } else {
+            Verdict::Wait(d)
+        }
+    };
+    match status {
+        429 => match h.retry_after.map(Duration::from_secs) {
+            // Retry-After beyond the bound is clamped, as before; a reset
+            // that far off is not worth waiting for.
+            Some(d) => Verdict::Wait(d.min(MAX_RETRY_WAIT)),
+            None => match announced {
+                Some(d) => bounded(d),
+                None => Verdict::Backoff(backoff(attempt)),
+            },
+        },
+        403 if h.remaining == Some(0) => match announced {
+            Some(d) => bounded(d),
+            None => Verdict::Final,
+        },
+        s if s >= 500 => match h.retry_after.map(Duration::from_secs) {
+            Some(d) => Verdict::Wait(d.min(MAX_RETRY_WAIT)),
+            None => Verdict::Backoff(backoff(attempt)),
+        },
+        _ => Verdict::Final,
+    }
+}
+
+/// One try, as the retry loop sees it.
+enum Outcome<T> {
+    Done(T),
+    Status(u16, ReplyHeaders),
+    Error(ureq::Error),
+}
+
+/// A uniform draw from `[0, max]`, from a small per-process generator: the
+/// quality only has to spread threads apart.
+fn jitter(max: Duration) -> Duration {
+    use std::sync::atomic::AtomicU64;
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    let mut x = STATE.load(Ordering::Relaxed);
+    if x == 0 {
+        x = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64)
+            | 1;
+    }
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    STATE.store(x, Ordering::Relaxed);
+    let millis = max.as_millis() as u64;
+    Duration::from_millis(if millis == 0 { 0 } else { x % (millis + 1) })
+}
+
+/// The retry loop with its clock and sleep injected. `sleep` returns true when
+/// the wait was cut short by a stop request.
+fn retry_loop<T>(
+    mut once: impl FnMut() -> Outcome<T>,
+    now: impl Fn() -> u64,
+    mut jittered: impl FnMut(Duration) -> Duration,
+    mut sleep: impl FnMut(Duration) -> bool,
+) -> Result<T, CallFailure> {
+    let mut attempt = 1;
+    loop {
+        let wait = match once() {
+            Outcome::Done(v) => return Ok(v),
+            Outcome::Status(status, headers) => match judge(status, &headers, attempt, now()) {
+                Verdict::Final => {
+                    return Err(CallFailure::Status(StatusFailure { status, headers }));
+                }
+                Verdict::Wait(d) => d,
+                Verdict::Backoff(max) => jittered(max),
+            },
+            Outcome::Error(e) if is_transient(&e) && attempt < ATTEMPTS => {
+                jittered(backoff(attempt))
+            }
+            Outcome::Error(e) => return Err(CallFailure::Transport(e)),
+        };
+        if sleep(wait) {
+            return Err(CallFailure::Transport(ureq::Error::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "interrupted while waiting to retry",
+                ),
+            )));
+        }
+        attempt += 1;
+    }
 }
 
 /// Set when the process is told to stop; retry pauses end early then.
@@ -208,14 +384,14 @@ pub fn request_stop() {
 }
 
 /// Sleep for `wait`, waking early when `stop` is set. Returns whether it was.
-fn sleep_unless_stopped(wait: std::time::Duration, stop: &AtomicBool) -> bool {
-    const SLICE: std::time::Duration = std::time::Duration::from_millis(100);
-    let end = std::time::Instant::now() + wait;
+fn sleep_unless_stopped(wait: Duration, stop: &AtomicBool) -> bool {
+    const SLICE: Duration = Duration::from_millis(100);
+    let end = Instant::now() + wait;
     loop {
         if stop.load(Ordering::SeqCst) {
             return true;
         }
-        let left = end.saturating_duration_since(std::time::Instant::now());
+        let left = end.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return false;
         }
@@ -223,43 +399,113 @@ fn sleep_unless_stopped(wait: std::time::Duration, stop: &AtomicBool) -> bool {
     }
 }
 
-/// Send the request `build` makes, up to [`ATTEMPTS`] times. Transport
-/// errors and 429/5xx answers are repeated after a pause; any other answer
-/// is final. A final 4xx/5xx comes back as `ureq::Error::StatusCode`, as it
-/// does without this wrapper. Only for requests that are safe to repeat.
-pub fn call_with_retries(
-    mut build: impl FnMut() -> ureq::RequestBuilder<ureq::typestate::WithoutBody>,
-) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
-    let mut attempt = 1;
-    loop {
-        // Status errors are switched off so the headers of a 429 stay readable.
-        let result = build().config().http_status_as_error(false).build().call();
-        let wait = match &result {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if status < 400 {
-                    return result;
-                }
-                if (status != 429 && status < 500) || attempt >= ATTEMPTS {
-                    return Err(ureq::Error::StatusCode(status));
-                }
-                let after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok());
-                retry_wait(after, attempt)
-            }
-            Err(e) if is_transient(e) && attempt < ATTEMPTS => retry_wait(None, attempt),
-            Err(_) => return result,
-        };
-        if sleep_unless_stopped(wait, &STOP) {
-            return Err(ureq::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "interrupted while waiting to retry",
-            )));
+/// A token bucket per host: `rate` requests a second with room for `burst`.
+/// The clock is passed in, so tests need no sleeping.
+#[derive(Debug)]
+pub struct HostLimiter {
+    rate: f64,
+    burst: f64,
+    hosts: Mutex<HashMap<String, (f64, Instant)>>,
+}
+
+/// Default requests per second per host, and the burst allowed.
+pub const HOST_RATE: f64 = 4.0;
+pub const HOST_BURST: f64 = 8.0;
+
+impl HostLimiter {
+    pub fn new(rate: f64, burst: f64) -> Self {
+        HostLimiter {
+            rate: rate.max(0.001),
+            burst: burst.max(1.0),
+            hosts: Mutex::new(HashMap::new()),
         }
-        attempt += 1;
     }
+
+    /// Take a token for `host` at `now`: zero when one was free, else how long
+    /// to wait. The token is spent either way (the balance goes negative), so
+    /// callers queued behind each other get successive slots.
+    pub fn reserve(&self, host: &str, now: Instant) -> Duration {
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        let (tokens, at) = hosts.entry(host.to_string()).or_insert((self.burst, now));
+        let earned = now.saturating_duration_since(*at).as_secs_f64() * self.rate;
+        *tokens = (*tokens + earned).min(self.burst);
+        *at = now;
+        *tokens -= 1.0;
+        if *tokens >= 0.0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(-*tokens / self.rate)
+        }
+    }
+
+    /// Wait for a slot for `host`. Returns true when stopped while waiting.
+    fn acquire(&self, host: &str) -> bool {
+        let wait = self.reserve(host, Instant::now());
+        !wait.is_zero() && sleep_unless_stopped(wait, &STOP)
+    }
+}
+
+/// The one limiter every request through [`call_with_retries_detailed`] shares.
+fn host_limiter() -> &'static HostLimiter {
+    static LIMITER: OnceLock<HostLimiter> = OnceLock::new();
+    LIMITER.get_or_init(|| {
+        HostLimiter::new(
+            ap_core::env::env_positive_f64("AUTO_PACKAGE_HOST_RPS").unwrap_or(HOST_RATE),
+            ap_core::env::env_positive_f64("AUTO_PACKAGE_HOST_BURST").unwrap_or(HOST_BURST),
+        )
+    })
+}
+
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Send the request `build` makes, up to [`ATTEMPTS`] times. Transport
+/// errors, 429 and 5xx answers, and a 403 that says the quota is used up (when
+/// it resets soon) are repeated after a pause. Any other answer is final. A
+/// final 4xx/5xx comes back as `ureq::Error::StatusCode`, as it does without
+/// this wrapper. Only for requests that are safe to repeat.
+pub fn call_with_retries(
+    build: impl FnMut() -> ureq::RequestBuilder<ureq::typestate::WithoutBody>,
+) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    call_with_retries_detailed(build).map_err(Into::into)
+}
+
+/// [`call_with_retries`] that keeps what a final error answer said about rate
+/// limits. Every attempt first takes a slot from the shared per-host limiter.
+pub fn call_with_retries_detailed(
+    mut build: impl FnMut() -> ureq::RequestBuilder<ureq::typestate::WithoutBody>,
+) -> Result<ureq::http::Response<ureq::Body>, CallFailure> {
+    retry_loop(
+        || {
+            let request = build();
+            let host = request
+                .uri_ref()
+                .and_then(|u| u.host())
+                .map(str::to_ascii_lowercase);
+            if let Some(host) = host
+                && host_limiter().acquire(&host)
+            {
+                return Outcome::Error(ureq::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "interrupted while waiting for a request slot",
+                )));
+            }
+            // Status errors are switched off so the headers of a 429 stay readable.
+            match request.config().http_status_as_error(false).build().call() {
+                Ok(resp) if resp.status().as_u16() < 400 => Outcome::Done(resp),
+                Ok(resp) => {
+                    Outcome::Status(resp.status().as_u16(), ReplyHeaders::from_response(&resp))
+                }
+                Err(e) => Outcome::Error(e),
+            }
+        },
+        epoch_now,
+        jitter,
+        |wait| sleep_unless_stopped(wait, &STOP),
+    )
 }
 
 #[cfg(test)]
@@ -338,23 +584,190 @@ mod tests {
         assert!(err.to_string().contains("private or local"), "{err}");
     }
 
+    fn hdr(retry_after: Option<u64>, remaining: Option<u64>, reset: Option<u64>) -> ReplyHeaders {
+        ReplyHeaders {
+            retry_after,
+            remaining,
+            reset,
+        }
+    }
+
     #[test]
-    fn retry_wait_honours_retry_after_up_to_the_cap() {
-        use std::time::Duration;
-        assert_eq!(retry_wait(None, 1), Duration::from_secs(1));
-        assert_eq!(retry_wait(None, 2), Duration::from_secs(2));
-        assert_eq!(retry_wait(Some("5"), 1), Duration::from_secs(5));
-        assert_eq!(retry_wait(Some("86400"), 1), MAX_RETRY_WAIT);
-        // An HTTP-date is not understood; fall back to the backoff.
+    fn backoff_doubles_and_is_capped() {
+        assert_eq!(backoff(1), Duration::from_secs(1));
+        assert_eq!(backoff(2), Duration::from_secs(2));
+        assert_eq!(backoff(30), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn jitter_stays_within_the_bound() {
+        for _ in 0..200 {
+            assert!(jitter(Duration::from_secs(4)) <= Duration::from_secs(4));
+        }
+        assert_eq!(jitter(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn retry_after_is_honoured_up_to_120_seconds() {
+        let none = ReplyHeaders::default();
         assert_eq!(
-            retry_wait(Some("Wed, 21 Oct 2026 07:28:00 GMT"), 2),
-            Duration::from_secs(2)
+            judge(429, &hdr(Some(90), None, None), 1, 0),
+            Verdict::Wait(Duration::from_secs(90))
+        );
+        assert_eq!(
+            judge(503, &hdr(Some(86_400), None, None), 1, 0),
+            Verdict::Wait(MAX_RETRY_WAIT)
+        );
+        assert_eq!(
+            judge(500, &none, 2, 0),
+            Verdict::Backoff(Duration::from_secs(2))
+        );
+        assert_eq!(judge(500, &none, ATTEMPTS, 0), Verdict::Final);
+        assert_eq!(judge(404, &none, 1, 0), Verdict::Final);
+        assert_eq!(judge(403, &none, 1, 0), Verdict::Final);
+    }
+
+    #[test]
+    fn a_403_with_an_empty_quota_waits_for_a_near_reset_only() {
+        // Resets in 10s: wait (plus one second of slack) and try again.
+        assert_eq!(
+            judge(403, &hdr(None, Some(0), Some(1_010)), 1, 1_000),
+            Verdict::Wait(Duration::from_secs(11))
+        );
+        // GitHub's unauthenticated hour is beyond the bound: final.
+        assert_eq!(
+            judge(403, &hdr(None, Some(0), Some(4_600)), 1, 1_000),
+            Verdict::Final
+        );
+        // Quota left: an ordinary refusal.
+        assert_eq!(
+            judge(403, &hdr(None, Some(5), Some(1_010)), 1, 1_000),
+            Verdict::Final
+        );
+        // 429 with a reset but no Retry-After.
+        assert_eq!(
+            judge(429, &hdr(None, None, Some(1_005)), 1, 1_000),
+            Verdict::Wait(Duration::from_secs(6))
         );
     }
 
     #[test]
+    fn rate_limit_detection() {
+        let f = |status, h| StatusFailure { status, headers: h };
+        assert!(f(429, ReplyHeaders::default()).is_rate_limit());
+        assert!(f(403, hdr(None, Some(0), None)).is_rate_limit());
+        assert!(!f(403, hdr(None, Some(3), None)).is_rate_limit());
+        assert!(!f(500, ReplyHeaders::default()).is_rate_limit());
+    }
+
+    #[test]
+    fn the_loop_retries_with_the_injected_clock_and_gives_up_after_the_attempts() {
+        let mut replies = vec![
+            Outcome::Status(429, hdr(Some(7), None, None)),
+            Outcome::Status(403, hdr(None, Some(0), Some(1_003))),
+            Outcome::Done("ok"),
+        ]
+        .into_iter();
+        let mut slept = Vec::new();
+        let got = retry_loop(
+            || replies.next().unwrap(),
+            || 1_000,
+            |max| max,
+            |d| {
+                slept.push(d);
+                false
+            },
+        );
+        assert_eq!(got.unwrap(), "ok");
+        assert_eq!(slept, [Duration::from_secs(7), Duration::from_secs(4)]);
+
+        let mut slept = Vec::new();
+        let got: Result<(), _> = retry_loop(
+            || Outcome::Status(502, ReplyHeaders::default()),
+            || 0,
+            |max| max / 2,
+            |d| {
+                slept.push(d);
+                false
+            },
+        );
+        assert!(matches!(
+            got,
+            Err(CallFailure::Status(StatusFailure { status: 502, .. }))
+        ));
+        // Two pauses, each half (the injected jitter) of the 1s and 2s backoff.
+        assert_eq!(slept, [Duration::from_millis(500), Duration::from_secs(1)]);
+
+        // A transient transport error is retried, a refused target is not.
+        let mut n = 0;
+        let got = retry_loop(
+            || {
+                n += 1;
+                if n == 1 {
+                    Outcome::Error(ureq::Error::HostNotFound)
+                } else {
+                    Outcome::Done(n)
+                }
+            },
+            || 0,
+            |m| m,
+            |_| false,
+        );
+        assert_eq!(got.unwrap(), 2);
+        let got: Result<(), _> = retry_loop(
+            || {
+                Outcome::Error(ureq::Error::Io(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                )))
+            },
+            || 0,
+            |m| m,
+            |_| panic!("must not wait"),
+        );
+        assert!(matches!(got, Err(CallFailure::Transport(_))));
+    }
+
+    #[test]
+    fn a_stop_during_the_pause_ends_the_loop() {
+        let got: Result<(), _> = retry_loop(
+            || Outcome::Status(500, ReplyHeaders::default()),
+            || 0,
+            |m| m,
+            |_| true,
+        );
+        assert!(matches!(
+            got,
+            Err(CallFailure::Transport(ureq::Error::Io(e))) if e.kind() == std::io::ErrorKind::Interrupted
+        ));
+    }
+
+    #[test]
+    fn the_host_limiter_allows_a_burst_then_paces_per_host() {
+        let l = HostLimiter::new(4.0, 8.0);
+        let t0 = Instant::now();
+        for _ in 0..8 {
+            assert_eq!(l.reserve("a.example", t0), Duration::ZERO);
+        }
+        // The ninth waits a quarter second, the tenth half a second.
+        assert_eq!(l.reserve("a.example", t0), Duration::from_millis(250));
+        assert_eq!(l.reserve("a.example", t0), Duration::from_millis(500));
+        // Another host has its own bucket.
+        assert_eq!(l.reserve("b.example", t0), Duration::ZERO);
+        // Time refills it: after 3s the debt of 2 tokens is paid and 8 are spare.
+        let later = t0 + Duration::from_secs(3);
+        for _ in 0..8 {
+            assert_eq!(l.reserve("a.example", later), Duration::ZERO);
+        }
+        // Never more than the burst, however long it idled.
+        let much_later = t0 + Duration::from_secs(3_600);
+        for _ in 0..8 {
+            assert_eq!(l.reserve("c.example", much_later), Duration::ZERO);
+        }
+        assert!(l.reserve("c.example", much_later) > Duration::ZERO);
+    }
+
+    #[test]
     fn a_retry_pause_ends_early_when_stopped() {
-        use std::time::{Duration, Instant};
         let stop = AtomicBool::new(true);
         let t = Instant::now();
         assert!(sleep_unless_stopped(Duration::from_secs(30), &stop));
