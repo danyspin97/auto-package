@@ -3461,6 +3461,7 @@ fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
         raw: String::new(),
         session_id: None,
         ended_early: None,
+        denied_commands: Vec::new(),
     }
 }
 
