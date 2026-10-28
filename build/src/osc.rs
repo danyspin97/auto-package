@@ -4893,21 +4893,8 @@ fn spec_source_names(spec_text: &str) -> Vec<String> {
     spec_text
         .lines()
         .filter_map(|line| {
-            let (tag, value) = line.split_once(':')?;
-            let tag = tag.trim().to_ascii_lowercase();
-            let numbered = |prefix: &str| {
-                tag.strip_prefix(prefix)
-                    .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()))
-            };
-            if !(numbered("source") || numbered("patch")) {
-                return None;
-            }
-            let value = expand(value.trim());
-            let value = value.as_str();
-            let name = match value.split_once("#/") {
-                Some((_, renamed)) => renamed,
-                None => value.rsplit('/').next().unwrap_or(value),
-            };
+            let source = crate::spec::parse_source_line(line, &["source", "patch"], &expand)?;
+            let name = source.file();
             (!name.is_empty()).then(|| name.to_string())
         })
         .collect()
@@ -5148,22 +5135,8 @@ fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[Str
 /// `spec_source_names`. Macros are not expanded: a name written with one
 /// never matches a removed file.
 fn is_removed_rpmlintrc_source(line: &str, removed: &[String]) -> bool {
-    let Some((tag, value)) = line.split_once(':') else {
-        return false;
-    };
-    let tag = tag.trim().to_ascii_lowercase();
-    let is_source = tag
-        .strip_prefix("source")
-        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()));
-    if !is_source {
-        return false;
-    }
-    let value = value.trim();
-    let name = match value.split_once("#/") {
-        Some((_, renamed)) => renamed,
-        None => value.rsplit('/').next().unwrap_or(value),
-    };
-    removed.iter().any(|r| r == name)
+    crate::spec::parse_source_line(line, &["source"], str::to_string)
+        .is_some_and(|source| removed.iter().any(|r| r == source.file()))
 }
 
 /// Delete zero-byte `*.rpmlintrc` files and the `SourceN:` lines of the spec

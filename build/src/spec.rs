@@ -522,6 +522,63 @@ pub struct SourceEntry {
     pub file: String,
 }
 
+/// A `Source`/`SourceN:` (or `Patch`/`PatchN:`) line split into what it names:
+/// the address, and the file name given by a `#/<file>` fragment if there is
+/// one. Built by [`parse_source_line`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLine {
+    /// The N of `SourceN:`; a plain `Source:` is 0, as rpm reads it.
+    pub index: u32,
+    /// The address, with the `#` fragment cut off.
+    pub url: String,
+    /// The text after the first `#`, without its leading `/`.
+    pub rename: Option<String>,
+}
+
+impl SourceLine {
+    /// The file name the source has in the package: the rename when there is
+    /// one, the last part of the address otherwise. Empty when the address
+    /// has no last part.
+    pub fn file(&self) -> &str {
+        match self.rename.as_deref() {
+            Some(r) if !r.is_empty() && !r.contains('/') => r,
+            _ => self.url.rsplit('/').next().unwrap_or(&self.url),
+        }
+    }
+}
+
+/// Parse one spec line whose tag is one of `tags` followed by optional digits
+/// (`source`, `Source0`, `SOURCE12`). The tag is matched without case and
+/// without the spaces around it. `expand` gives the value its macros
+/// expanded, before it is split at `#`; pass the identity to read it raw.
+pub fn parse_source_line(
+    line: &str,
+    tags: &[&str],
+    expand: impl Fn(&str) -> String,
+) -> Option<SourceLine> {
+    let (tag, value) = line.split_once(':')?;
+    let tag = tag.trim().to_ascii_lowercase();
+    let digits = tags.iter().find_map(|t| {
+        let digits = tag.strip_prefix(t)?;
+        digits.chars().all(|c| c.is_ascii_digit()).then_some(digits)
+    })?;
+    let index = if digits.is_empty() {
+        0
+    } else {
+        digits.parse().unwrap_or(u32::MAX)
+    };
+    let expanded = expand(value.trim());
+    let (url, rename) = match expanded.split_once('#') {
+        Some((url, rename)) => (url, Some(rename.trim_start_matches('/').to_string())),
+        None => (expanded.as_str(), None),
+    };
+    Some(SourceLine {
+        index,
+        url: url.to_string(),
+        rename,
+    })
+}
+
 /// Every `SourceN:` of the spec that is a web address, with `%{name}`,
 /// `%{version}`, `%{url}` and the spec's simple defines expanded.
 pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
@@ -534,34 +591,28 @@ pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
     if let Some(url) = &header.url {
         macros.insert("url".to_string(), url.clone());
     }
+    // Twice: a define may be spelled with another.
+    let expand = |value: &str| {
+        let once = expand_simple_defines(value, &macros);
+        expand_simple_defines(&once, &macros)
+    };
     let mut out = Vec::new();
     for line in spec.lines() {
-        let Some(rest) = line.strip_prefix("Source") else {
+        let Some(source) = parse_source_line(line, &["source"], expand) else {
             continue;
         };
-        let digits = rest.chars().take_while(char::is_ascii_digit).count();
-        let Some(value) = rest[digits..].strip_prefix(':') else {
-            continue;
-        };
-        let once = expand_simple_defines(value.trim(), &macros);
-        let expanded = expand_simple_defines(&once, &macros);
-        let (url, rename) = match expanded.split_once('#') {
-            Some((url, rename)) => (url, Some(rename.trim_start_matches('/'))),
-            None => (expanded.as_str(), None),
-        };
-        if !(url.starts_with("http://") || url.starts_with("https://")) || url.contains('%') {
+        if !(source.url.starts_with("http://") || source.url.starts_with("https://"))
+            || source.url.contains('%')
+        {
             continue;
         }
-        let file = match rename {
-            Some(r) if !r.is_empty() && !r.contains('/') => r,
-            _ => url.rsplit('/').next().unwrap_or(url),
-        };
+        let file = source.file();
         if file.is_empty() {
             continue;
         }
         out.push(SourceEntry {
-            url: url.to_string(),
             file: file.to_string(),
+            url: source.url,
         });
     }
     out
@@ -942,6 +993,48 @@ mod tests {
             "Name: x\nSource:         https://h/x-1.tar.gz#/x.tar.gz\nSource1: y\n"
         );
         assert!(set_first_source("Name: x\n", "u").is_none());
+    }
+
+    #[test]
+    fn source_lines_give_index_address_and_file_name() {
+        let raw = |v: &str| v.to_string();
+        let s =
+            parse_source_line("Source3:  https://h/x.tar.gz#/y.tar.gz", &["source"], raw).unwrap();
+        assert_eq!(
+            (s.index, s.url.as_str(), s.file()),
+            (3, "https://h/x.tar.gz", "y.tar.gz")
+        );
+        // A plain `Source:` is Source0; the tag is read without case or spaces.
+        let plain = parse_source_line("  SOURCE : a.tar.gz", &["source"], raw).unwrap();
+        assert_eq!((plain.index, plain.file()), (0, "a.tar.gz"));
+        // `#name` without a slash renames too; an empty or nested rename falls
+        // back to the last part of the address.
+        let file = |line: &str| {
+            parse_source_line(line, &["source"], raw)
+                .unwrap()
+                .file()
+                .to_string()
+        };
+        assert_eq!(file("Source0: https://h/x.tar#n"), "n");
+        assert_eq!(file("Source0: https://h/x.tar#/"), "x.tar");
+        assert_eq!(file("Source0: https://h/x.tar#/a/b"), "x.tar");
+        assert_eq!(file("Source0: https://h/a/x.tar"), "x.tar");
+        // The tag must be one of the given ones, with digits only after it.
+        assert!(parse_source_line("Patch1: a.patch", &["source"], raw).is_none());
+        assert_eq!(
+            parse_source_line("Patch1: a.patch", &["source", "patch"], raw).map(|s| s.index),
+            Some(1)
+        );
+        assert!(parse_source_line("SourceX: a", &["source"], raw).is_none());
+        assert!(parse_source_line("Source0 a.tar", &["source"], raw).is_none());
+        // The value is expanded before it is split at `#`.
+        let macro_url = |v: &str| v.replace("%{u}", "https://h/a#/b");
+        assert_eq!(
+            parse_source_line("Source0: %{u}", &["source"], macro_url).map(|s| s.url),
+            Some("https://h/a".to_string())
+        );
+        let huge = parse_source_line("Source99999999999: a", &["source"], raw).unwrap();
+        assert_eq!(huge.index, u32::MAX);
     }
 
     #[test]
