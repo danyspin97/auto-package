@@ -66,7 +66,7 @@
 66. Summary and %description must say something — read when writing Summary/%description or the generator left a stub
 67. %check needing GPU/driver/device is not run — read when tests need CUDA, a device, a display or network
 68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
-69. %license and the licence expression are exact — read when listing %license files or the licence is multi-licence
+69. %license files and the licence expression are exact, dist-info licences — read when writing %license lines or License:, or a dist-info holds licenses/
 70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
 71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
 72. rpmlintrc filters only for reported warnings — read when adding addFilter lines or "unused-rpmlintrc-filter" appears
