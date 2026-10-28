@@ -25,10 +25,10 @@
 25. rpmlint badness budget (threshold 999) — read when the build log says "Badness NNNN exceeds threshold"
 26. Source from a repository, not an sdist — read when the checkout is a git snapshot or the project sits in a subdirectory
 27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
-28. The four exceptions to building a dependency — read before using any workaround or use_upstream_wheel
+28. The four exceptions to building a dependency — read when a dependency failed to build, tests need GPU/network, or you return use_upstream_wheel
 29. Missing source code (no sdist, no repo URL) — read when no source tarball or repository URL can be found for the package
 30. Monorepos: package every sibling project — read when the prompt lists several "Other projects in this archive"
-31. rpmlint compliance (summary, line length, manpage, rights) — read when rpmlint warns on Summary, description, binaries, perms
+31. rpmlint compliance (summary length, description line length, manpage) — read when rpmlint warns on Summary, description or binaries
 32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
 33. Plain C/C++ packages (CMake/autotools, Skill plain-c-cpp-packaging) — read when the package has no Python and no Cargo
 34. Optional extras are Recommends, not BuildRequires — read when pyproject lists optional-dependencies you consider adding
@@ -41,7 +41,7 @@
 41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
 42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
 43. setup.cfg pytest config needs [tool:pytest] — read when pytest ignores options set in setup.cfg
-44. Absent test files/fixtures and other non-bugs — read when %check fails on a missing conftest, testdata or fixture file
+44. Absent test files/fixtures, unknown trove classifier — read when %check misses a conftest/testdata file or the backend rejects a classifier
 45. Django test suites need DJANGO_SETTINGS_MODULE — read when %check says ImproperlyConfigured: settings are not configured
 46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
 47. Set %{optflags} before building a C extension — read when a distutils/setuptools Extension ignores distro flags
@@ -53,7 +53,7 @@
 53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
 54. Metapackage subpackage of runtime deps — read when a feature only needs other packages installed, no files
 55. Two-pass pytest (xdist-safe in parallel, rest serial) — read when tests fail only under pytest-xdist -n auto
-56. Signed checksums file, GPG verify — read when the upstream signs a checksum list, not the tarball, or a .asc is involved
+56. Signed checksums file, GPG verify — read when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
 57. Tests need the compiled extension in-tree (make inplace) — read when tests skip or fail because the .so is not in source/
 58. Vendored libraries need their LICENSE in %license — read when sources have _vendor/vendor/bundled dirs
 59. Exact == pin that openSUSE ships at another version — read when OBS says "nothing provides ... = X (got version Y)"
@@ -64,7 +64,7 @@
 64. [inline] C/C++ libs are never python-<lib> — full text; CUDA/NVIDIA vendor wheels are in skill nvidia-wheels
 65. Runtime Requires are flavor-neutral python-<name> — read when writing any Requires line for a Python dependency
 66. Summary and %description must say something — read when writing Summary/%description or the generator left a stub
-67. %check needing GPU/driver/device is not run — read when tests need CUDA, a device, a display or network
+67. %check needing GPU/driver/device is not run — read when tests need a GPU, a device or network, or %check has more than six --ignore
 68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
 69. %license files and the licence expression are exact, dist-info licences — read when writing %license lines or License:, or a dist-info holds licenses/
 70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
@@ -74,12 +74,12 @@
 74. Merged into convention 40 (the changelog field) — read convention 40 when your reply has action edited
 75. Version bounds: keep minimums, upper/== only when satisfied, comment when dropped — read when writing a <, <=, == or >= bound in Requires/BuildRequires
 76. Files of one Python package come from one tree — read when several wheels fill one package, ModuleNotFoundError on a sibling part
-77. Reproducible Source: URLs with #/file fragment — read when adding or editing a Source: for a wheel or GitHub archive
+77. Reproducible Source: URLs, one release only — read when adding or editing a Source:, or dropping the old release's archive
 78. Upstream licence guards (e.g. I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION) — read when a build refuses over a licence variable
 79. ELF RPATH/RUNPATH checks before the first build — read when the package ships .so files or rpmlint reports rpath errors
 80. $python only inside %python_expand, braced multi-line form — read when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
 81. Predict the %check environment before building — read when tests may need network, GPU, redis, models or repo files
-82. Four pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when the package has any of these
+82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
 84. CUDA at build time: use the upstream wheel; NVIDIA output is not Factory/SLE material — read when the build or sources mention CUDA, cuda.h, nvcc or libcudart
 85. dlopen Requires, cffi minimum, ExclusiveArch propagation, ninja — read when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
