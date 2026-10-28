@@ -1367,13 +1367,8 @@ struct TurnResponse {
 /// using it salvages a valid fix the pipeline would otherwise discard as
 /// "claude exited 1".
 ///
-/// Last-resort: Haiku occasionally describes the structured response in prose
-/// instead of calling the tool ("I've already called the StructuredOutput tool
-/// at the end of my response. The structured output includes: `**action**:
-/// no_change`, `**unresolvable_packages**: trantor, jsoncpp, ...`"). Parse the
-/// markdown-style `**key**: value` lines so the pipeline can still queue the
-/// reported deps — otherwise the whole turn (and the four C++ libs drogon
-/// listed) is discarded for a formatting mistake.
+/// Only the structured response is an action. Prose in the reply is never
+/// read for one: a turn whose model skipped the tool is a failed turn.
 fn pick_turn_response(result_payload: &str, tool_calls: &[ToolCall]) -> Option<TurnResponse> {
     if let Ok(r) = serde_json::from_str::<TurnResponse>(result_payload.trim()) {
         return Some(r);
@@ -1386,79 +1381,7 @@ fn pick_turn_response(result_payload: &str, tool_calls: &[ToolCall]) -> Option<T
     {
         return Some(r);
     }
-    parse_turn_response_from_prose(result_payload)
-}
-
-/// Extract a [`TurnResponse`] from markdown prose of the form
-/// ```text
-/// - **action**: `no_change`
-/// - **reasoning**: The spec is correct ...
-/// - **evidence**: a, b, c
-/// - **confidence**: `high`
-/// - **unresolvable_packages**: `trantor`, `jsoncpp`
-/// ```
-///
-/// Only used after both JSON parse paths fail. Treats every field as optional
-/// at the parse level — missing required fields fall back to safe defaults
-/// (`action: "no_change"`, empty evidence, `confidence: "low"`) so the
-/// pipeline can at least act on whatever list the model gave; the caller
-/// still rejects a response that has no `action` marker at all, or one whose
-/// action is anything but `no_change` or `blocked`.
-fn parse_turn_response_from_prose(text: &str) -> Option<TurnResponse> {
-    fn find_field(text: &str, key: &str) -> Option<String> {
-        let needle = format!("**{key}**:");
-        let start = text.find(&needle)? + needle.len();
-        let rest = &text[start..];
-        let end = rest.find('\n').unwrap_or(rest.len());
-        Some(rest[..end].trim().to_string())
-    }
-    fn strip_wrapping(s: &str) -> String {
-        s.trim().trim_matches('`').trim().to_string()
-    }
-    fn split_list(s: &str) -> Vec<String> {
-        s.split(',')
-            .map(strip_wrapping)
-            .filter(|v| !v.is_empty())
-            .collect()
-    }
-
-    // Require at least `action` — without it there is no shape at all, and
-    // treating a random text reply as a `no_change` would mask real bugs.
-    let action = strip_wrapping(&find_field(text, "action")?);
-    // Prose is not a verified structured reply, so it may only report that
-    // nothing changed or that the package is blocked. `edited` would claim a
-    // change nobody checked and `use_upstream_wheel` rewrites the package.
-    if action != "no_change" && action != "blocked" {
-        return None;
-    }
-    let reasoning =
-        find_field(text, "reasoning").unwrap_or_else(|| text.trim().chars().take(500).collect());
-    let evidence = find_field(text, "evidence")
-        .map(|s| split_list(&s))
-        .unwrap_or_default();
-    let confidence_raw = find_field(text, "confidence")
-        .map(|s| strip_wrapping(&s))
-        .unwrap_or_else(|| "low".to_string());
-    let confidence = match confidence_raw.to_lowercase().as_str() {
-        "high" => Confidence::High,
-        "medium" => Confidence::Medium,
-        _ => Confidence::Low,
-    };
-    let unresolvable_packages = find_field(text, "unresolvable_packages")
-        .map(|s| split_list(&s))
-        .unwrap_or_default();
-
-    Some(TurnResponse {
-        action,
-        why: String::new(),
-        evidence,
-        reasoning,
-        changelog: String::new(),
-        confidence,
-        unresolvable_packages,
-        patch_dependencies: Vec::new(),
-        stage_files: Vec::new(),
-    })
+    None
 }
 
 /// The final `result` event the claude CLI emits at the end of a turn,
@@ -3860,35 +3783,6 @@ mod tests {
         );
     }
 
-    /// Real-shape regression from drogon run `20261005-145029-f054b0`: Haiku
-    /// described the structured response in prose instead of calling the tool,
-    /// so both JSON paths found nothing and the four reported C++ libraries
-    /// (trantor, jsoncpp, libbrotli, yaml-cpp) got discarded. The prose parser
-    /// recovers at least the actionable `unresolvable_packages` list.
-    #[test]
-    fn pick_turn_response_parses_prose_when_tool_call_was_skipped() {
-        let text = "I've already called the StructuredOutput tool at the end of my response. \
-                    The structured output includes:\n\
-                    \n\
-                    - **action**: `no_change`\n\
-                    - **reasoning**: The spec is correct; deps missing in OBS\n\
-                    - **evidence**: Read drogon.spec, Read CMakeLists.txt\n\
-                    - **confidence**: `high`\n\
-                    - **unresolvable_packages**: `trantor`, `jsoncpp`, `libbrotli`, `yaml-cpp`\n";
-        let resp = pick_turn_response(text, &[])
-            .expect("prose fallback must salvage the four reported deps");
-        assert_eq!(resp.action, "no_change");
-        assert_eq!(resp.confidence, Confidence::High);
-        assert_eq!(
-            resp.unresolvable_packages,
-            vec!["trantor", "jsoncpp", "libbrotli", "yaml-cpp"]
-        );
-        assert_eq!(
-            resp.evidence,
-            vec!["Read drogon.spec", "Read CMakeLists.txt"]
-        );
-    }
-
     #[test]
     fn a_turn_is_not_launched_when_the_budget_is_spent() {
         let dir = tempfile::tempdir().unwrap();
@@ -3900,14 +3794,22 @@ mod tests {
         assert!(err.is_budget_exhausted(), "{err}");
     }
 
+    /// Prose is never an action, whatever markers it carries: the structured
+    /// response (the result JSON or the StructuredOutput call) is the only source.
     #[test]
-    fn prose_fallback_never_accepts_an_edit_or_a_wheel_switch() {
-        for action in ["edited", "use_upstream_wheel", "nonsense"] {
-            let text = format!("- **action**: `{action}`\n- **reasoning**: x\n");
-            assert!(pick_turn_response(&text, &[]).is_none(), "{action}");
-        }
-        let blocked = pick_turn_response("- **action**: `blocked`\n", &[]).unwrap();
-        assert_eq!(blocked.action, "blocked");
+    fn a_reply_in_prose_is_not_a_turn_response() {
+        let text = "I've already called the StructuredOutput tool at the end of my response.\n\
+                    - **action**: `no_change`\n\
+                    - **unresolvable_packages**: `trantor`, `jsoncpp`\n";
+        assert!(pick_turn_response(text, &[]).is_none());
+        let call = ToolCall {
+            name: "StructuredOutput".into(),
+            input: r#"{"action":"blocked","reasoning":"r","evidence":[],"confidence":"low","unresolvable_packages":[],"patch_dependencies":[],"stage_files":[]}"#.into(),
+        };
+        assert_eq!(
+            pick_turn_response("", std::slice::from_ref(&call)).map(|r| r.action),
+            Some("blocked".to_string())
+        );
     }
 
     /// A non-Python package (drogon-shape: no `python-` RPM prefix) must get
@@ -3959,14 +3861,6 @@ mod tests {
         let prompt = build_turn_prompt(&req);
         assert!(prompt.contains("pyproject.toml"));
         assert!(prompt.contains("%{python_module"));
-    }
-
-    #[test]
-    fn prose_fallback_requires_an_action_marker() {
-        // A plain acknowledgement with no **action**: line is just chatter —
-        // treating it as `no_change` would mask real bugs upstream.
-        let text = "The review is complete. See you later.";
-        assert!(pick_turn_response(text, &[]).is_none());
     }
 
     #[test]

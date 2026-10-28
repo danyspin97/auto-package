@@ -8456,70 +8456,6 @@ fn ladder_context(round: usize, rounds: usize, history: &[String], base: Option<
     text
 }
 
-/// Words with which a reason says the fix belongs in another package.
-const SIBLING_CUES: &[&str] = &[
-    "belongs in",
-    "belong in",
-    "sibling",
-    "fix is in",
-    "fix lives in",
-    "must be fixed in",
-    "needs to be patched",
-    "need to be patched",
-    "needs patching",
-    "owned by",
-    "in the dependency",
-];
-
-/// The problem text of the patch request a blocked package sends to the sibling
-/// its reason names. The request carries it, and the sibling records its hash
-/// once it takes the request, so the check before asking uses this same text.
-fn sibling_patch_problem(rpm_name: &str, reason: &str) -> String {
-    format!(
-        "{rpm_name} cannot be built and an agent found the fix belongs in this package: {reason}"
-    )
-}
-
-/// The packages of `available` that a reason names as the place of the fix: a
-/// name from it, or a `prefix-*` glob, when the reason has one of the
-/// [`SIBLING_CUES`]. Never `own`. At most four.
-fn named_sibling_fix(reason: &str, available: &[String], own: &str) -> Vec<String> {
-    let lower = reason.to_lowercase();
-    if !SIBLING_CUES.iter().any(|c| lower.contains(c)) {
-        return Vec::new();
-    }
-    let own_key = osc::fuzzy_key(own);
-    let mut out: Vec<String> = Vec::new();
-    for token in lower.split(|c: char| !(c.is_ascii_alphanumeric() || "._+*-".contains(c))) {
-        let token = token.trim_matches(|c| c == '.' || c == '_');
-        if token.len() < 4 {
-            continue;
-        }
-        let hits: Vec<&String> = if let Some(star) = token.find('*') {
-            let prefix = &token[..star];
-            if prefix.len() < 4 {
-                continue;
-            }
-            available
-                .iter()
-                .filter(|a| a.to_lowercase().starts_with(prefix))
-                .collect()
-        } else {
-            available
-                .iter()
-                .filter(|a| osc::fuzzy_key(a) == osc::fuzzy_key(token))
-                .collect()
-        };
-        for hit in hits {
-            if osc::fuzzy_key(hit) != own_key && !out.contains(hit) {
-                out.push(hit.clone());
-            }
-        }
-    }
-    out.truncate(4);
-    out
-}
-
 /// Largest build log the test-dropping rung reads, from its end.
 const DROP_LOG_CAP: u64 = 8 * 1024 * 1024;
 
@@ -8596,8 +8532,8 @@ fn spec_dependency_names(spec: &str) -> Vec<String> {
 }
 
 /// Sibling packages that have a checkout in the project, among a spec's
-/// dependencies and the packages `extra_text` names (a blocker's reason).
-fn sibling_names(spec: &str, extra_text: &str, available: &[String], own: &str) -> Vec<String> {
+/// dependencies.
+fn sibling_names(spec: &str, available: &[String], own: &str) -> Vec<String> {
     let own_key = osc::fuzzy_key(own);
     let mut out: Vec<String> = Vec::new();
     for dep in spec_dependency_names(spec) {
@@ -8612,20 +8548,12 @@ fn sibling_names(spec: &str, extra_text: &str, available: &[String], own: &str) 
             }
         }
     }
-    // A cue-free mention is still the package to look at: the reader only reads.
-    let mut cued = String::from("sibling ");
-    cued.push_str(extra_text);
-    for hit in named_sibling_fix(&cued, available, own) {
-        if !out.contains(&hit) {
-            out.push(hit);
-        }
-    }
     out.truncate(12);
     out
 }
 
 /// Checkouts, in the project, of the packages `spec`'s package depends on.
-fn sibling_checkouts(config: &PipelineConfig, spec: &str, extra_text: &str) -> Vec<PathBuf> {
+fn sibling_checkouts(config: &PipelineConfig, spec: &str) -> Vec<PathBuf> {
     let project_dir = config.work_dir.join(&config.project);
     let available: Vec<String> = std::fs::read_dir(&project_dir)
         .into_iter()
@@ -8639,7 +8567,7 @@ fn sibling_checkouts(config: &PipelineConfig, spec: &str, extra_text: &str) -> V
         })
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    sibling_names(spec, extra_text, &available, &config.rpm_name)
+    sibling_names(spec, &available, &config.rpm_name)
         .into_iter()
         .map(|n| project_dir.join(n))
         .collect()
@@ -8768,7 +8696,7 @@ fn ladder_key(config: &PipelineConfig, spec: &str) -> u64 {
     // check reads the spec on disk, which may still carry `# ap: fix` lines the
     // agent kept: both sides hash the same stripped text.
     let mut all = crate::spec::strip_ap_fix_comments(spec);
-    for dir in sibling_checkouts(config, spec, "") {
+    for dir in sibling_checkouts(config, spec) {
         if let Some(name) = dir.file_name() {
             all.push_str(
                 &std::fs::read_to_string(dir.join(format!("{}.spec", name.to_string_lossy())))
@@ -8920,13 +8848,6 @@ fn resolve_blocked_with(
             brief(&first)
         ),
     });
-    let project_dir = config.work_dir.join(&config.project);
-    let available: Vec<String> = std::fs::read_dir(&project_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
     let is_python = rpm_name.starts_with("python-");
     // The files each round asked to be copied into the checkout, kept by every
     // later rollback in the ladder. The failed turn's own staged files start it.
@@ -8946,52 +8867,6 @@ fn resolve_blocked_with(
     let mut npm_deferred_round: Option<usize> = None;
     let result = run_ladder(&first, LADDER_ROUNDS, |round, history| {
         let latest = history.last().map(String::as_str).unwrap_or("");
-        // Mechanical: a fix the reason puts in a sibling goes to that package
-        // through the patch request, with no turn spent.
-        if round == 1 || round == 3 {
-            // The text the sibling stores when it takes the request (its
-            // `patched_problems` and `declined_patches` hash it), so the checks
-            // below see a request it already answered.
-            let problem = sibling_patch_problem(rpm_name, latest);
-            let patches: Vec<crate::agent::PatchRequest> =
-                named_sibling_fix(latest, &available, rpm_name)
-                    .into_iter()
-                    // The same two checks the dependency producer makes before it
-                    // asks (see `patch_declined_before` and `already_patched`).
-                    .filter(|n| !patch_declined_before(ctx, n, &problem))
-                    .filter(|n| {
-                        !dependency_workspace(&config.state_root, n).is_some_and(|w| {
-                            patch_request_settled(&PkgState::load(&w).patched_problems, &problem)
-                        })
-                    })
-                    .map(|n| crate::agent::PatchRequest {
-                        condition: None,
-                        name: osc::strip_rpm_prefix(&n).to_string(),
-                        problem: problem.clone(),
-                    })
-                    .collect();
-            if !patches.is_empty() {
-                reporter.report(&Event::Warning {
-                    step: Some(site.step.id),
-                    message: format!(
-                        "{rpm_name}: the blocker names {} as the place of the fix; requesting a \
-                         patch of it instead of asking again",
-                        patches
-                            .iter()
-                            .map(|p| p.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                });
-                return Rung::Abort(PipelineResult::MissingDeps {
-                    rpm_name: rpm_name.clone(),
-                    deps: patches.iter().map(|p| p.name.clone()).collect(),
-                    patches,
-                    native: Vec::new(),
-                    outdated: Vec::new(),
-                });
-            }
-        }
         // Mechanical: when only a few tests of `%check` fail, skip exactly those
         // with the log lines as evidence (an import error is not that: it is a
         // dependency to fix).
@@ -9396,7 +9271,7 @@ fn agent_turn(
         .map(|d| d.join(format!("{obs_name}.spec")))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
-    let sibling_dirs = sibling_checkouts(config, &spec_text, ctx.context.unwrap_or(""));
+    let sibling_dirs = sibling_checkouts(config, &spec_text);
     let sibling_text = sibling_facts(config, &sibling_dirs);
     let facts: Option<String> = match (licence_facts, sibling_text) {
         (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
@@ -10905,7 +10780,7 @@ fn apply_turn_outcome_with(
             // An npm failure in an sdist that ships a package-lock.json is
             // fixable with the `node_modules` OBS service. Send the agent
             // there once; a second `use_upstream_wheel` is honoured.
-            if npm_vendor_route_pending(why, checkout_dir, &notes_path, &config.version) {
+            if npm_vendor_route_pending(checkout_dir, &notes_path, &config.version) {
                 // This arm returns without the acceptance gate, so the turn's
                 // own edits are gated here, before the pipeline adds its files.
                 // A rejection is rolled back (keeping the staged files) and the
@@ -14460,18 +14335,10 @@ fn wheel_rung_round(npm_deferred_round: Option<usize>) -> usize {
 }
 
 /// True when a `use_upstream_wheel` should first be turned into an npm
-/// vendoring attempt: the reason cites npm/node, the sdist has a
-/// package-lock.json, and that redirect has not been given yet.
-fn npm_vendor_route_pending(
-    why: &str,
-    checkout_dir: &Path,
-    notes_path: &Path,
-    version: &str,
-) -> bool {
-    let w = why.to_lowercase();
-    if !(w.contains("npm") || w.contains("node.js") || w.contains("nodejs")) {
-        return false;
-    }
+/// vendoring attempt: the sdist has a package-lock.json outside `node_modules`
+/// and that redirect has not been given yet. Read from the sdist and the
+/// notes, not from the agent's wording, so the route is taken once per package.
+fn npm_vendor_route_pending(checkout_dir: &Path, notes_path: &Path, version: &str) -> bool {
     if std::fs::read_to_string(notes_path).is_ok_and(|n| n.contains(NPM_VENDOR_NOTE_MARKER)) {
         return false;
     }
@@ -17025,16 +16892,16 @@ mod tests {
 
     #[test]
     fn a_sibling_request_is_checked_under_the_text_it_is_sent_as() {
-        let reason = "the fix belongs in python-foo: patch its setup";
+        let problem = "python-bar cannot be built: the fix belongs in python-foo";
         // The sibling records the hash of the request text it was sent.
-        let recorded = vec![hash_spec(&sibling_patch_problem("python-bar", reason))];
+        let recorded = vec![hash_spec(problem)];
         // The check before asking hashes the same text, so the request is over.
-        assert!(patch_request_settled(
+        assert!(patch_request_settled(&recorded, problem));
+        // A different text is not the one that was sent: it does not match.
+        assert!(!patch_request_settled(
             &recorded,
-            &sibling_patch_problem("python-bar", reason)
+            "the fix belongs in python-foo"
         ));
-        // The raw reason is not the text that was sent: it does not match.
-        assert!(!patch_request_settled(&recorded, reason));
     }
 
     #[test]
@@ -19120,39 +18987,22 @@ mod npm_vendor_route_tests {
         let dir = tempfile::tempdir().unwrap();
         sdist(dir.path(), &["package.json", "frontend/package-lock.json"]);
         let notes = dir.path().join("notes.md");
-        let why = "hatch_build.py: npm not found";
-        assert!(npm_vendor_route_pending(why, dir.path(), &notes, "1.0"));
+        assert!(npm_vendor_route_pending(dir.path(), &notes, "1.0"));
         append_notes(notes.clone(), &format!("x {NPM_VENDOR_NOTE_MARKER}\n"));
-        assert!(!npm_vendor_route_pending(why, dir.path(), &notes, "1.0"));
+        assert!(!npm_vendor_route_pending(dir.path(), &notes, "1.0"));
     }
 
     #[test]
-    fn needs_npm_in_why_and_a_lockfile_outside_node_modules() {
+    fn a_lockfile_outside_node_modules_is_what_the_route_needs() {
         let dir = tempfile::tempdir().unwrap();
         let notes = dir.path().join("notes.md");
         sdist(
             dir.path(),
             &["package.json", "node_modules/x/package-lock.json"],
         );
-        assert!(!npm_vendor_route_pending(
-            "npm not found",
-            dir.path(),
-            &notes,
-            "1.0"
-        ));
+        assert!(!npm_vendor_route_pending(dir.path(), &notes, "1.0"));
         sdist(dir.path(), &["package-lock.json"]);
-        assert!(!npm_vendor_route_pending(
-            "nvcc: command not found",
-            dir.path(),
-            &notes,
-            "1.0"
-        ));
-        assert!(npm_vendor_route_pending(
-            "npm: command not found",
-            dir.path(),
-            &notes,
-            "1.0"
-        ));
+        assert!(npm_vendor_route_pending(dir.path(), &notes, "1.0"));
     }
 }
 
@@ -21247,41 +21097,7 @@ mod ladder_tests {
     }
 
     #[test]
-    fn a_fix_the_reason_puts_in_a_sibling_names_that_sibling_only() {
-        let available: Vec<String> = [
-            "python-tokenspeed-mla",
-            "nvidia-cutlass-dsl-libs-base",
-            "nvidia-cutlass-dsl-libs-cu13",
-            "python-numpy",
-        ]
-        .map(String::from)
-        .into();
-        let reason = "The fix belongs in the sibling nvidia-cutlass-dsl-libs-* specs, which are not in this workspace";
-        assert_eq!(
-            named_sibling_fix(reason, &available, "python-tokenspeed-mla"),
-            [
-                "nvidia-cutlass-dsl-libs-base",
-                "nvidia-cutlass-dsl-libs-cu13"
-            ]
-        );
-        // No cue: a passing mention is not a request to patch it.
-        assert!(
-            named_sibling_fix("it needs numpy at runtime (python-numpy)", &available, "x")
-                .is_empty()
-        );
-        // Never the package itself.
-        assert!(
-            named_sibling_fix(
-                "the fix belongs in python-tokenspeed-mla",
-                &available,
-                "python-tokenspeed-mla"
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn sibling_names_come_from_the_spec_dependencies_and_the_reason() {
+    fn sibling_names_come_from_the_spec_dependencies() {
         let spec = "Name: x\nBuildRequires:  %{python_module numpy >= 1}\nRequires: nvidia-cutlass-dsl-libs-base >= 4\nRequires: python3dist(torch)\n";
         let available: Vec<String> = [
             "python-numpy",
@@ -21291,7 +21107,7 @@ mod ladder_tests {
         ]
         .map(String::from)
         .into();
-        let got = sibling_names(spec, "", &available, "python-x");
+        let got = sibling_names(spec, &available, "python-x");
         assert!(got.contains(&"python-numpy".to_string()), "{got:?}");
         assert!(
             got.contains(&"nvidia-cutlass-dsl-libs-base".to_string()),
@@ -21299,8 +21115,8 @@ mod ladder_tests {
         );
         assert!(got.contains(&"python-torch".to_string()), "{got:?}");
         assert!(!got.contains(&"python-unrelated".to_string()), "{got:?}");
-        let named = sibling_names("Name: x\n", "see python-unrelated", &available, "python-x");
-        assert_eq!(named, ["python-unrelated"]);
+        // A name in prose is not a dependency: the reason text no longer names one.
+        assert!(sibling_names("Name: x\n", &available, "python-x").is_empty());
     }
 
     #[test]
@@ -21639,30 +21455,29 @@ mod ladder_tests {
         assert_eq!(state.ladder_spec_hash, Some(case.config_key));
     }
 
+    /// A reason that names a sibling is only text: the ladder does not turn it
+    /// into a patch request. A sibling is asked for through `patch_dependencies`.
     #[test]
-    fn a_sibling_fix_cue_makes_the_patch_request_without_spending_a_turn() {
+    fn a_reason_naming_a_sibling_does_not_request_its_patch() {
         let lookups = std::cell::Cell::new(0);
         let case = run_case(
             "python-tokenspeed-mla",
             false,
             &["python-nvidia-cutlass-dsl"],
             blocked("The fix belongs in the sibling python-nvidia-cutlass-dsl, not here"),
-            Vec::new(),
+            vec![
+                blocked("reason one"),
+                blocked("reason two"),
+                blocked("reason three"),
+            ],
             &lookups,
             None,
         );
-        assert!(case.contexts.is_empty());
-        match case.result {
-            Err(PipelineResult::MissingDeps {
-                patches, rpm_name, ..
-            }) => {
-                assert_eq!(rpm_name, "python-tokenspeed-mla");
-                assert_eq!(patches.len(), 1);
-                assert_eq!(patches[0].name, "nvidia-cutlass-dsl");
-                assert!(patches[0].problem.contains("belongs in the sibling"));
-            }
-            other => panic!("{other:?}"),
-        }
+        assert!(
+            !matches!(case.result, Err(PipelineResult::MissingDeps { .. })),
+            "{:?}",
+            case.result
+        );
     }
 
     #[test]
