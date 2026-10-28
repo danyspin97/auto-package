@@ -52,7 +52,7 @@ impl FixFlag {
 }
 
 /// `text` on one line, its words single-spaced, cut to [`LINE_CAP`] characters.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= LINE_CAP {
         return flat;
@@ -133,7 +133,7 @@ pub fn from_spec_diff(baseline: Option<&str>, fin: &str) -> Vec<FixFlag> {
 }
 
 /// Indices of the lines of `a` that `b` does not have, counting repeats.
-fn extra(a: &[&str], b: &[&str]) -> Vec<usize> {
+pub(crate) fn extra(a: &[&str], b: &[&str]) -> Vec<usize> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for l in b {
         *counts.entry(l.trim()).or_default() += 1;
