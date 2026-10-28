@@ -41,7 +41,7 @@
 41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
 42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
 43. Merged into convention 7 — read convention 7 when pytest ignores options set in setup.cfg
-44. Absent test files/fixtures, unknown trove classifier — read when %check misses a conftest/testdata file or the backend rejects a classifier
+44. Merged into convention 11 — read convention 11 when %check misses a conftest/testdata file or the backend rejects a classifier
 45. Merged into convention 10 — read convention 10 when %check says ImproperlyConfigured: settings are not configured
 46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
 47. Merged into convention 3 — read convention 3 when a distutils/setuptools Extension ignores distro flags
@@ -64,7 +64,7 @@
 64. [inline] C/C++ libs are never python-<lib> — full text; CUDA/NVIDIA vendor wheels are in skill nvidia-wheels
 65. Merged into convention 8 — read convention 8 when writing any Requires line for a Python dependency
 66. Summary and %description must say something — read when writing Summary/%description or the generator left a stub
-67. %check needing GPU/driver/device is not run — read when tests need a GPU, a device or network, or %check has more than six --ignore
+67. Merged into convention 11 — read convention 11 when tests need a GPU, a device or network, or %check has more than six --ignore
 68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
 69. Merged into convention 5 — read convention 5 when writing %license lines or License:, or a dist-info holds licenses/
 70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
