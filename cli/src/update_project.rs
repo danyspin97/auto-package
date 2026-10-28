@@ -1139,6 +1139,7 @@ fn improve_problem(item: &Item) -> Option<String> {
 /// Commit the style fixes of `quality::tidy` for `item` into `branch`, without
 /// a build of our own: OBS rebuilds the commit.
 fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), String> {
+    let _obs_write = ap_build::proc::obs_write();
     let emit = Emit::run(ctx.reporter.as_ref());
     let dir = osc::checkout(branch, &item.pkg, &ctx.work_dir.join("improve"), emit)
         .map_err(|e| e.to_string())?;

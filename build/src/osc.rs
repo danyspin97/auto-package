@@ -5404,17 +5404,26 @@ pub fn attempted_files(dir: &Path) -> Vec<String> {
 pub const BASELINE_ROOT: &str = ".obs-baseline";
 
 /// The file a baseline directory holds once a restore of it has failed: the
-/// baseline is then kept, not a live one, and the reason is written in it.
+/// reason is written in it.
 const UNRESTORED: &str = "unrestored";
+
+/// Whether `dir` holds a baseline that is not yet put back: an attempt noted
+/// in it (see [`note_attempt`]) has not been undone. A run or restore that
+/// succeeds removes the directory, so this is only true while an attempt may
+/// still be on OBS. It also holds after a restore that was cut short (the
+/// process exited), when no `UNRESTORED` reason was written.
+pub fn is_pending(dir: &Path) -> bool {
+    !attempted_files(dir).is_empty() || dir.join(UNRESTORED).exists()
+}
 
 /// Keep the baseline of `checkout_dir` for a write made outside a pipeline run,
 /// in `root/<branch>/<pkg>`. Returns that dir.
 ///
-/// An earlier baseline there that a restore failed to put back is restored
-/// first, since a new baseline taken now would hold the failed revision. When
-/// that restore fails the error is returned and the earlier baseline stays
-/// where it is. Any other earlier baseline was undone or is no longer needed,
-/// and is replaced.
+/// An earlier baseline that is pending (see [`is_pending`]) is restored first,
+/// since a new baseline taken now would hold the failed revision. When that
+/// restore fails the error is returned and the earlier baseline stays where it
+/// is. Any other earlier baseline was undone or is no longer needed, and is
+/// replaced.
 pub fn begin_baseline(
     root: &Path,
     checkout_dir: &Path,
@@ -5423,7 +5432,7 @@ pub fn begin_baseline(
     emit: Emit<'_>,
 ) -> Result<PathBuf, String> {
     let dir = root.join(ap_core::run::sanitize_name(branch)).join(pkg);
-    if dir.join(UNRESTORED).exists() {
+    if is_pending(&dir) {
         restore_baseline(&dir, emit).map_err(|why| {
             format!(
                 "the OBS baseline kept at {} was NOT restored ({why}); \
@@ -5621,6 +5630,23 @@ mod baseline_tests {
         assert_eq!(first, second);
         assert!(attempted_files(&second).is_empty());
         assert!(second.join("files/foo.spec").exists());
+    }
+
+    #[test]
+    fn begin_baseline_refuses_a_pending_one_without_a_reason() {
+        // The process exited during a restore: the attempt is noted, but no
+        // reason was written. The next baseline must not replace it.
+        let co = checkout(&[("foo.spec", "a")]);
+        let root = tempfile::tempdir().unwrap();
+        let kept =
+            begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+        note_attempt(&kept, &["../escape".to_string()]).unwrap();
+        assert!(is_pending(&kept));
+        assert!(!kept.join(UNRESTORED).exists());
+        let err = begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet())
+            .unwrap_err();
+        assert!(err.contains(&kept.display().to_string()), "{err}");
+        assert!(kept.join("files/foo.spec").exists());
     }
 
     #[test]

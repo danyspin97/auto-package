@@ -269,8 +269,9 @@ thread_local! {
 }
 
 /// The longest a child of a restore may run: the restore is one short commit,
-/// and a stalled one must not hold up the exit of a stopped run.
-const RESTORE_TIMEOUT: Duration = Duration::from_secs(120);
+/// and a stalled one must not hold up the exit of a stopped run. A restore runs
+/// two commands (`osc addremove`, `osc ci`), so it takes at most twice this.
+pub const RESTORE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Lets the calling thread start children after the run was stopped, for the
 /// commit that puts an OBS baseline back: a run that is stopped must still
@@ -279,35 +280,51 @@ const RESTORE_TIMEOUT: Duration = Duration::from_secs(120);
 /// ends when the guard drops.
 pub fn restoring_after_shutdown() -> RestoreGuard {
     RESTORING.with(|r| r.set(true));
-    RESTORES_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    RestoreGuard(())
+    RestoreGuard(obs_write())
 }
 
-/// Restores that have started and not yet returned, counted across threads.
-/// The interrupt handler waits for them ([`wait_for_restores`]) before the
-/// process exits, so a stopped run does not leave a failed attempt on OBS.
-static RESTORES_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// OBS writes in progress, counted across threads: a package run (which may
+/// write its project and then restore it), a restore, and an update or
+/// maintenance commit. Taken from the moment a write may start, not from the
+/// first command, so the interrupt handler waits for a run that has not yet
+/// reached its restore.
+static OBS_WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds one OBS write in progress (see [`obs_write`]); released on drop.
+pub struct ObsWriteGuard(());
+
+/// Count an OBS write as in progress until the guard drops.
+pub fn obs_write() -> ObsWriteGuard {
+    OBS_WRITES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ObsWriteGuard(())
+}
+
+impl Drop for ObsWriteGuard {
+    fn drop(&mut self) {
+        OBS_WRITES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// See [`restoring_after_shutdown`].
-pub struct RestoreGuard(());
+pub struct RestoreGuard(ObsWriteGuard);
 
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
         RESTORING.with(|r| r.set(false));
-        RESTORES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-/// How many baseline restores are running right now.
-pub fn restores_in_flight() -> usize {
-    RESTORES_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+/// How many OBS writes are in progress right now (see [`obs_write`]).
+pub fn obs_writes_in_flight() -> usize {
+    OBS_WRITES.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Wait up to `timeout` for every baseline restore to return. `true` when
-/// none is left running; `false` when the wait ran out first, and the caller
-/// exits with a restore still pending (its baseline stays on disk).
-pub fn wait_for_restores(timeout: Duration) -> bool {
-    wait_until_idle(&RESTORES_IN_FLIGHT, timeout, Duration::from_millis(100))
+/// Wait up to `timeout` for every OBS write to return. `true` when none is
+/// left; `false` when the wait ran out first, and the caller exits with a
+/// write still pending. Its baseline then stays on disk, marked pending, and
+/// the next run of that package restores it before writing.
+pub fn wait_for_obs_writes(timeout: Duration) -> bool {
+    wait_until_idle(&OBS_WRITES, timeout, Duration::from_millis(100))
 }
 
 /// Poll `counter` until it reads zero or `timeout` has passed.
@@ -379,7 +396,7 @@ pub fn shutting_down() -> bool {
 }
 
 /// SIGKILL every child still running, except a baseline restore's: that one
-/// is let finish (see [`wait_for_restores`]). For process shutdown (Ctrl-C,
+/// is let finish (see [`wait_for_obs_writes`]). For process shutdown (Ctrl-C,
 /// quit).
 pub fn kill_all_groups() {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);

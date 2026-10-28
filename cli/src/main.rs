@@ -607,11 +607,14 @@ fn resolve_dependency_config(
     None
 }
 
-/// The longest an interrupted run waits for its OBS baseline restores. A
-/// restore is one `osc addremove` and one `osc ci`, each capped by the restore
-/// timeout; past this wait the restore is left for the next run (its baseline
-/// stays on disk, see `restore_obs_baseline`).
-const RESTORE_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
+/// The longest an interrupted run waits for the OBS writes still in progress
+/// (package runs, restores, update commits). A restore is one `osc addremove`
+/// and one `osc ci`, each capped by the restore timeout, so this covers a
+/// restore that runs to its cap. Past it the process exits: a baseline that was
+/// not put back stays on disk marked pending, and the next run of that package
+/// restores it before writing.
+const RESTORE_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(2 * ap_build::proc::RESTORE_TIMEOUT.as_secs() + 30);
 
 /// Clean process-wide shutdown for Ctrl-C — restore the terminal if the TUI
 /// had it, print token usage so far, and actually end the process.
@@ -644,18 +647,18 @@ fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
     }
-    let restoring = ap_build::proc::restores_in_flight();
-    if restoring > 0 {
+    let writing = ap_build::proc::obs_writes_in_flight();
+    if writing > 0 {
         eprintln!(
-            "\nWaiting up to {}s for {restoring} OBS baseline restore(s) to finish \
+            "\nWaiting up to {}s for {writing} OBS write(s) to finish \
              (Ctrl-C again stops waiting)...",
             RESTORE_WAIT.as_secs()
         );
-        if !ap_build::proc::wait_for_restores(RESTORE_WAIT) {
+        if !ap_build::proc::wait_for_obs_writes(RESTORE_WAIT) {
             eprintln!(
-                "warning: an OBS baseline restore did not finish: OBS keeps the failed \
-                 attempt; the saved baseline stays in the work directory and the next \
-                 run of that package restores it first"
+                "warning: an OBS write did not finish: OBS may keep a failed attempt; \
+                 its saved baseline stays in the work directory marked pending, and the \
+                 next run of that package restores it first"
             );
         }
     }

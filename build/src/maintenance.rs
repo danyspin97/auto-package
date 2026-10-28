@@ -1725,6 +1725,7 @@ fn commit_refs(
     refs: &[String],
     bullets: &[(String, String)],
 ) -> Result<Option<PathBuf>, String> {
+    let _obs_write = proc::obs_write();
     let emit = Emit::quiet();
     let dir = osc::checkout(branch, pkg, &opts.checkout_dir, emit).map_err(|e| e.to_string())?;
     let path = dir.join(name);

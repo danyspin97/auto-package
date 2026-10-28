@@ -1906,6 +1906,11 @@ pub fn run_package(
         }
         Err(_) => None,
     };
+    // Counted once the package may write: a run still waiting for another
+    // process's build lock has written nothing, and an interrupt does not wait
+    // for it. From here on, an interrupt that finds the run between its write
+    // and its restore waits for it.
+    let _obs_write = crate::proc::obs_write();
     // The package is being worked on again: its recorded outcome is no longer
     // about the run that is under way. A `missing_deps` or `failed` left from
     // an earlier run read as current while the package built, and when the run
