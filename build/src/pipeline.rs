@@ -3377,6 +3377,769 @@ fn resume_budget(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> 
     Ok(())
 }
 
+// ── carried-forward patches, tested with quilt ───────────────────────────────
+
+/// Runs the quilt check of the spec on disk: the real one runs quilt, a test's
+/// answers from the checkout.
+type PatchCheckFn<'a> =
+    dyn FnMut(&RunCtx, crate::patch_check::Refresh) -> crate::patch_check::CheckReport + 'a;
+
+/// Runs one RefreshPatches agent turn, given the attempt number and the context.
+type PatchTurn<'a> = dyn FnMut(
+        &RunCtx,
+        &mut RunState,
+        usize,
+        &str,
+    ) -> Result<(StepDir, crate::agent::TurnOutcome), (String, FailureKind)>
+    + 'a;
+
+/// Step: the patches a version bump carried forward, pushed with quilt onto the
+/// new sources before the review turn and the first commit. A patch that does
+/// not apply cleanly is the agent's to rebase or remove, for up to
+/// [`crate::patch_check::MAX_ROUNDS`] rounds while each makes progress; only a
+/// patch still failing after that is dropped by the pipeline.
+fn patch_stage(ctx: &RunCtx, st: &mut RunState, spec: &SpecInfo) -> Result<(), PipelineResult> {
+    if spec.carried_from.is_none() || crate::redist::is_redist_package(&ctx.config.rpm_name) {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    if crate::patch_check::declared_patches(&text).is_empty() {
+        return Ok(());
+    }
+    patch_stage_with(
+        ctx,
+        st,
+        &mut run_patch_check,
+        &mut |ctx, st, attempt, context| {
+            agent_turn(
+                TurnCtx {
+                    label: "refresh-patches",
+                    task: crate::agent::Task::RefreshPatches,
+                    event_task: ap_core::event::Task::FixAfterBuild {
+                        attempt: attempt as u32,
+                        max_attempts: ctx.config.max_attempts as u32,
+                    },
+                    attempt,
+                    hint: None,
+                    unresolvable_deps: &[],
+                    unresolvable_detail: &[],
+                    checkout_dir: Some(&ctx.checkout_dir),
+                    from_repo_archive: st.from_repo_archive,
+                    resume: false,
+                    context: Some(context),
+                },
+                ctx.turn_env(),
+                &mut st.spent_usd,
+                &mut st.session_id,
+                &mut st.step_attempts,
+            )
+        },
+    )
+}
+
+/// The quilt check of the spec on disk against this version's source archive.
+fn run_patch_check(
+    ctx: &RunCtx,
+    refresh: crate::patch_check::Refresh,
+) -> crate::patch_check::CheckReport {
+    let spec = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    let tarball = find_tarball(&ctx.checkout_dir, &ctx.config.version);
+    crate::patch_check::check(&spec, &ctx.checkout_dir, tarball.as_deref(), refresh)
+}
+
+/// Every patch `spec` declares with its file's content in `checkout` (`None`
+/// when the file is not there).
+fn patch_files(spec: &str, checkout: &Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+    crate::patch_check::declared_patches(spec)
+        .into_iter()
+        .filter(|(_, n)| !n.is_empty() && Path::new(n).file_name() == Some(n.as_ref()))
+        .map(|(_, n)| {
+            let content = std::fs::read(checkout.join(&n)).ok();
+            (n, content)
+        })
+        .collect()
+}
+
+/// A quilt `series` for the turn's quilt (QUILT_PATCHES points it at the
+/// checkout), in the order and with the levels rpm applies the patches with,
+/// written only when the checkout has none: an existing one is left exactly as
+/// it is. The pipeline's own checks use a scratch series (see `patch_check`).
+fn write_patch_series(spec: &str, checkout: &Path) {
+    if checkout.join("series").exists() {
+        return;
+    }
+    let entries: Vec<crate::patch_check::SeriesEntry> = crate::patch_check::plan_series(spec)
+        .into_iter()
+        .filter_map(|p| match p {
+            crate::patch_check::Planned::Check(e) => Some(e),
+            crate::patch_check::Planned::Skip { .. } => None,
+        })
+        .collect();
+    if !entries.is_empty() {
+        write_or_warn(
+            checkout.join("series"),
+            crate::patch_check::series_text(&entries),
+        );
+    }
+}
+
+/// Take every quilt patch off `source/`, so each round starts from the
+/// pristine new sources (quilt puts the files back from its `.pc` copies).
+fn pop_source_patches(ctx: &RunCtx) {
+    let source = ctx.ws.dir().join("source");
+    if !source.join(".pc").exists() {
+        return;
+    }
+    let mut env = crate::proc::minimal_env(&[]);
+    env.insert(
+        "QUILT_PATCHES".into(),
+        ctx.checkout_dir.display().to_string(),
+    );
+    env.insert("QUILTRC".into(), "/dev/null".into());
+    env.insert("LC_ALL".into(), "C".into());
+    let popped = crate::proc::capture_with_timeout_env(
+        "quilt",
+        &["pop", "-a", "-f"],
+        &source,
+        Emit::quiet(),
+        Duration::from_secs(120),
+        Some(&env),
+    );
+    // 2 is "No patch removed": nothing was applied.
+    match popped {
+        Ok(out) if out.code == 0 || out.code == 2 => {}
+        Ok(out) => ap_core::diag!(
+            "  quilt pop -a in source/ failed: {}{}",
+            out.stdout.trim(),
+            out.stderr.trim()
+        ),
+        Err(e) => ap_core::diag!("  quilt pop -a in source/ could not run: {e}"),
+    }
+}
+
+/// Add one `.changes` bullet for a patch to this release's entry.
+fn add_patch_bullet(ctx: &RunCtx, step: ap_core::event::StepId, bullet: &str) {
+    warn_if_err(
+        ctx.reporter,
+        "adding the .changes entry for a patch",
+        osc::add_release_changes_entry(
+            &ctx.checkout_dir,
+            &ctx.config.version,
+            bullet,
+            Emit::new(ctx.reporter, step),
+        ),
+    );
+}
+
+/// Remove the patches quilt proved already applied in the new sources (the
+/// one proof a removal needs), from the spec and the checkout, with one
+/// `.changes` bullet each that states the proof. Returns a notes line each.
+fn remove_proven_patches(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    names: &[String],
+) -> Vec<String> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let Ok(current) = std::fs::read_to_string(&ctx.spec_path) else {
+        return Vec::new();
+    };
+    write_or_warn(&ctx.spec_path, without_patches(&current, names));
+    drop_series_lines(&ctx.checkout_dir, names);
+    let mut lines = Vec::new();
+    for name in names {
+        let _ = std::fs::remove_file(ctx.checkout_dir.join(name));
+        ctx.reporter.report(&Event::Warning {
+            step: Some(step),
+            message: format!(
+                "{}: removed {name}: quilt reports it already applied in the {} sources \
+                 (`can be reverse-applied`)",
+                ctx.rpm_name, ctx.config.version
+            ),
+        });
+        add_patch_bullet(ctx, step, &crate::patch_check::proven_drop_bullet(name));
+        lines.push(format!(
+            "- {name}: removed by the pipeline: already applied upstream (quilt: can be \
+             reverse-applied)"
+        ));
+    }
+    lines
+}
+
+/// The patches a turn removed (its `PatchN:` line or its file) whose removal is
+/// not proven: quilt, run on the new sources with the patches as they were
+/// before the turn, does not report them `can be reverse-applied`, so their
+/// change is not upstream. Empty when the turn removed nothing or every
+/// removal is proven. `snapshot` holds the patch files as they were.
+fn unproven_patch_removals(
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+) -> Vec<String> {
+    let before_files: std::collections::BTreeMap<String, Option<Vec<u8>>> =
+        crate::patch_check::declared_patches(before)
+            .into_iter()
+            .filter(|(_, n)| !n.is_empty() && Path::new(n).file_name() == Some(n.as_ref()))
+            .map(|(_, n)| {
+                let content = snapshot
+                    .and_then(|s| s.content_of(&n))
+                    .or_else(|| std::fs::read(checkout_dir.join(&n)).ok());
+                (n, content)
+            })
+            .collect();
+    if before_files.is_empty() {
+        return Vec::new();
+    }
+    let after = std::fs::read_to_string(spec_path).unwrap_or_default();
+    let after_names: Vec<String> = crate::patch_check::declared_patches(&after)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    let after_files = before_files
+        .keys()
+        .map(|n| (n.clone(), std::fs::read(checkout_dir.join(n)).ok()))
+        .collect();
+    let (_, removed) = crate::patch_check::diff_patches(&before_files, &after_names, &after_files);
+    if removed.is_empty() {
+        return Vec::new();
+    }
+    let tarball = find_tarball(checkout_dir, &config.version);
+    let report = crate::patch_check::check_files(before, &before_files, tarball.as_deref());
+    removed
+        .into_iter()
+        .filter(|n| !report.proves_applied(n))
+        .collect()
+}
+
+/// What a turn is told when its removal of `names` was refused.
+fn unproven_removal_problem(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| {
+            format!(
+                "removal of {n} is not proven: quilt does not report it `can be \
+                 reverse-applied` on the new sources, so its change is not in them; rebase it \
+                 with quilt (`quilt push -f`, fix the rejected hunks, `quilt refresh`)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Roll back a turn whose edit removed patches without proof, and journal why.
+fn reject_unproven_removal(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_path: PathBuf,
+    keep: &[String],
+    label: &str,
+    unproven: &[String],
+) -> String {
+    let problem = unproven_removal_problem(unproven);
+    restore_spec(spec_path, before, Some(step), reporter);
+    if let Some(snap) = snapshot {
+        snap.restore_keeping(reporter, Some(step), keep);
+    }
+    note_spec_rejection(spec_path, &problem);
+    reporter.report(&Event::Warning {
+        step: Some(step.id),
+        message: format!("{label}: edit rejected: {problem}"),
+    });
+    append_notes(
+        notes_path,
+        &format!(
+            "\n## {label} — edit rejected: a patch removal is not proven\n{problem}\n\
+             A patch is never removed because it does not apply. The edit was rolled back.\n"
+        ),
+    );
+    problem
+}
+
+/// How a RefreshPatches turn's outcome was applied.
+#[derive(Debug, PartialEq)]
+enum PatchTurnApplied {
+    /// The edit was kept.
+    Kept,
+    /// Nothing was kept: no edit, or a spec rpmspec refuses.
+    RolledBack,
+    /// The edit removed patches without proof and was rolled back; what to tell
+    /// the next round.
+    Refused(String),
+}
+
+/// Apply a RefreshPatches turn's outcome. An edit is kept when the spec still
+/// parses, no patch escapes the tree and every patch it removed is proven
+/// already applied; whether the patches apply is the next quilt check's to say
+/// (the usual gate would refuse the edit while any patch still fails, which
+/// would throw away a round that fixed one of several). Anything else is
+/// rolled back.
+fn apply_patch_turn(
+    ctx: &RunCtx,
+    step: &StepDir,
+    outcome: &crate::agent::TurnOutcome,
+    before: &str,
+    snapshot: &CheckoutSnapshot,
+    round: usize,
+) -> PatchTurnApplied {
+    let (reporter, spec_path, notes) = (ctx.reporter, &ctx.spec_path, ctx.ws.notes());
+    let label = format!("RefreshPatches — round {round}");
+    if !matches!(outcome.action, crate::agent::Action::Edited) {
+        snapshot.restore_keeping(reporter, Some(step), &[]);
+        restore_spec(spec_path, before, Some(step), reporter);
+        append_notes(
+            notes,
+            &format!(
+                "\n## {label} — no change\nReasoning: {}\n",
+                brief(&outcome.reasoning)
+            ),
+        );
+        return PatchTurnApplied::RolledBack;
+    }
+    match osc::rpmspec_check(spec_path, Emit::new(reporter, step.id)) {
+        Ok(_) => {}
+        Err(e @ (osc::Error::RpmspecFailed { .. } | osc::Error::UnsandboxedMacro { .. })) => {
+            restore_spec(spec_path, before, Some(step), reporter);
+            snapshot.restore_keeping(reporter, Some(step), &[]);
+            append_notes(notes, &rollback_note(&e.to_string()));
+            return PatchTurnApplied::RolledBack;
+        }
+        Err(e) => skipped_check_note(reporter, step, notes.clone(), "rpmspec", &e.to_string()),
+    }
+    if reject_patch_escape(
+        spec_path,
+        before,
+        Some(snapshot),
+        step,
+        reporter,
+        notes.clone(),
+        &[],
+    )
+    .is_some()
+    {
+        return PatchTurnApplied::RolledBack;
+    }
+    let unproven = unproven_patch_removals(
+        ctx.config,
+        &ctx.checkout_dir,
+        spec_path,
+        before,
+        Some(snapshot),
+    );
+    if !unproven.is_empty() {
+        return PatchTurnApplied::Refused(reject_unproven_removal(
+            spec_path,
+            before,
+            Some(snapshot),
+            step,
+            reporter,
+            notes,
+            &[],
+            &label,
+            &unproven,
+        ));
+    }
+    append_notes(
+        notes,
+        &format!(
+            "\n## {label}\nReasoning: {}\n{}",
+            outcome.reasoning,
+            evidence_lines(&outcome.evidence)
+        ),
+    );
+    PatchTurnApplied::Kept
+}
+
+/// The checkout's `series` without exactly the lines of `names`; every other
+/// line keeps its text and place. No `series`, nothing to do.
+fn drop_series_lines(checkout: &Path, names: &[String]) {
+    let path = checkout.join("series");
+    let Ok(current) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let kept: String = current
+        .split_inclusive('\n')
+        .filter(|line| {
+            line.split_whitespace()
+                .next()
+                .is_none_or(|first| !names.iter().any(|n| n == first))
+        })
+        .collect();
+    if kept != current {
+        write_or_warn(&path, kept);
+    }
+}
+
+/// `spec` without the `%patch` lines that apply the patch numbers in `nums`.
+fn without_patch_applications(spec: &str, nums: &[String]) -> String {
+    let mut kept = String::new();
+    for line in spec.lines() {
+        if !applied_patch_number(line)
+            .is_some_and(|n| nums.iter().any(|m| same_patch_number(m, &n)))
+        {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    kept
+}
+
+/// What a kept round did to the patches, made whole and recorded: a proven
+/// removal the turn left half done (the `PatchN:` line gone but the file or a
+/// `%patch` line left, or the file gone but the line left) is finished, a
+/// removed patch gets its `.changes` bullet, a refreshed one is added to
+/// `refreshed` (its bullet is written once the rounds are over, when it is
+/// still there), and each gets a line in `lines`. `true` when the round changed
+/// or removed a patch.
+fn settle_patch_changes(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    before_spec: &str,
+    before_files: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    round: usize,
+    lines: &mut Vec<String>,
+    refreshed_all: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    let spec = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    let after_names: Vec<String> = crate::patch_check::declared_patches(&spec)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    let after_files = before_files
+        .keys()
+        .map(|n| (n.clone(), std::fs::read(ctx.checkout_dir.join(n)).ok()))
+        .collect();
+    let (refreshed, removed) =
+        crate::patch_check::diff_patches(before_files, &after_names, &after_files);
+    if !removed.is_empty() {
+        let nums: Vec<String> = crate::patch_check::declared_patches(before_spec)
+            .into_iter()
+            .filter(|(_, n)| removed.contains(n))
+            .map(|(num, _)| num)
+            .collect();
+        let fixed = without_patch_applications(&without_patches(&spec, &removed), &nums);
+        if fixed != spec {
+            write_or_warn(&ctx.spec_path, &fixed);
+        }
+        for name in &removed {
+            let _ = std::fs::remove_file(ctx.checkout_dir.join(name));
+        }
+        drop_series_lines(&ctx.checkout_dir, &removed);
+    }
+    for name in &refreshed {
+        refreshed_all.insert(name.clone());
+        lines.push(format!("- {name}: refreshed by the agent (round {round})"));
+    }
+    for name in &removed {
+        add_patch_bullet(ctx, step, &crate::patch_check::proven_drop_bullet(name));
+        lines.push(format!(
+            "- {name}: removed by the agent (round {round}): already applied upstream (quilt: \
+             can be reverse-applied)"
+        ));
+    }
+    !refreshed.is_empty() || !removed.is_empty()
+}
+
+/// One `.changes` bullet per refreshed patch that is still in the spec.
+fn write_refresh_bullets(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+    refreshed: &std::collections::BTreeSet<String>,
+) {
+    let declared = crate::patch_check::declared_patches(
+        &std::fs::read_to_string(&ctx.spec_path).unwrap_or_default(),
+    );
+    for name in refreshed {
+        if declared.iter().any(|(_, n)| n == name) {
+            add_patch_bullet(ctx, step, &crate::patch_check::refresh_bullet(name));
+        }
+    }
+}
+
+/// The failure of a package whose patches still do not apply: they are kept,
+/// and a human decides. Lists each patch with quilt's output and the rejected
+/// hunks.
+fn kept_patches_reason(
+    version: &str,
+    stop: &str,
+    failing: &[&crate::patch_check::PatchResult],
+) -> String {
+    let mut text = format!(
+        "needs a human: {} patch(es) do not apply to the {version} sources and were kept (a \
+         patch is removed only when quilt proves it already applied upstream; {stop}):",
+        failing.len()
+    );
+    for p in failing {
+        if let crate::patch_check::PatchStatus::Fails { output, rejects } = &p.status {
+            text.push_str(&format!(
+                "\n- {}:\n{}",
+                p.name,
+                crate::patch_check::truncate(output, 600)
+            ));
+            if !rejects.is_empty() {
+                text.push_str(&format!(
+                    "\n  rejected hunks:\n{}",
+                    crate::patch_check::truncate(rejects, 1500)
+                ));
+            }
+        } else {
+            text.push_str(&format!("\n- {}", p.name));
+        }
+    }
+    text
+}
+
+/// [`patch_stage`] with the quilt check and the turn runner given.
+fn patch_stage_with(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    check: &mut PatchCheckFn<'_>,
+    turn: &mut PatchTurn<'_>,
+) -> Result<(), PipelineResult> {
+    use crate::patch_check::{MAX_ROUNDS, NextRound, PatchStatus, Refresh};
+    let RunCtx {
+        config,
+        pkg_run,
+        reporter,
+        ws,
+        rpm_name,
+        checkout_dir,
+        spec_path,
+        ..
+    } = ctx;
+    let reporter = *reporter;
+    let step = begin_or_fail!(
+        pkg_run,
+        reporter,
+        StepKind::ValidateSpec,
+        Some("patches"),
+        &mut st.step_attempts,
+        rpm_name.clone()
+    );
+    let step_id = step.id;
+    let progress = |message: String| {
+        reporter.report(&Event::Progress {
+            step: Some(step_id),
+            message,
+        })
+    };
+    // One line per patch for the notes, so a later run knows what was done.
+    let mut lines: Vec<String> = Vec::new();
+    let write_notes = |lines: &[String], heading: &str| {
+        if !lines.is_empty() {
+            append_notes(
+                ws.notes(),
+                &format!(
+                    "\n## Patches carried forward to {} ({heading})\n{}\n",
+                    config.version,
+                    lines.join("\n")
+                ),
+            );
+        }
+    };
+    // A patch quilt proves already applied is removed now: certainly right,
+    // and nothing for a turn to do. The rest of the report is what is left.
+    let mut check_and_settle = |ctx: &RunCtx, lines: &mut Vec<String>| {
+        let mut report = check(ctx, Refresh::No);
+        let proven: Vec<String> = report.already_applied().map(|p| p.name.clone()).collect();
+        lines.extend(remove_proven_patches(ctx, step_id, &proven));
+        report
+            .patches
+            .retain(|p| !matches!(p.status, PatchStatus::AlreadyApplied { .. }));
+        report
+    };
+    let mut report = check_and_settle(ctx, &mut lines);
+    if report.patches.is_empty() || report.not_run.is_some() || report.is_clean() {
+        if report.not_run.is_some() {
+            // Not a success: the patches are left to the `patch` check of ValidateSpec.
+            reporter.report(&Event::Warning {
+                step: Some(step_id),
+                message: format!("{rpm_name}: {}", report.summary()),
+            });
+        } else if !report.patches.is_empty() {
+            progress(format!(
+                "{rpm_name}: the patches apply cleanly to {} ({})",
+                config.version,
+                report.summary()
+            ));
+        }
+        write_notes(&lines, "quilt");
+        step.finish(StepOutcome::Ok);
+        return Ok(());
+    }
+    progress(format!("{rpm_name}: {}", report.summary()));
+    let hints = stale_patches(
+        &std::fs::read_to_string(spec_path).unwrap_or_default(),
+        checkout_dir,
+        &st.sdist_top_level,
+        &config.version,
+    );
+    let mut refreshed: std::collections::BTreeSet<String> = Default::default();
+    let mut rounds = 0usize;
+    // What the last round must hear: why its edit was refused.
+    let mut feedback: Option<String> = None;
+    let stop: String = if config.no_agent {
+        skip_agent(
+            reporter,
+            &mut st.step_attempts,
+            config,
+            st.attempts,
+            st.spent_usd,
+        );
+        "--no-agent is set, so no agent turn rebased them".to_string()
+    } else {
+        loop {
+            if crate::proc::shutting_down() {
+                write_notes(&lines, "quilt, stopped");
+                step.finish(StepOutcome::Failed);
+                return Err(ctx.failed_text(
+                    true,
+                    "stopped while rebasing the patches: the run is shutting down".into(),
+                ));
+            }
+            if st.attempts >= config.max_attempts || st.spent_usd >= config.budget_usd {
+                skip_agent(
+                    reporter,
+                    &mut st.step_attempts,
+                    config,
+                    st.attempts,
+                    st.spent_usd,
+                );
+                break format!(
+                    "no agent turn left after {rounds} round(s): {} of {} attempts, ${:.2} of ${:.2}",
+                    st.attempts, config.max_attempts, st.spent_usd, config.budget_usd
+                );
+            }
+            rounds += 1;
+            st.attempts += 1;
+            persist_attempts(ws, &config.run_id, st.attempts);
+            let before_spec = std::fs::read_to_string(spec_path).unwrap_or_default();
+            let before_files = patch_files(&before_spec, checkout_dir);
+            write_patch_series(&before_spec, checkout_dir);
+            pop_source_patches(ctx);
+            let snapshot = CheckoutSnapshot::take(checkout_dir);
+            let context = format!(
+                "Round {rounds} of at most {MAX_ROUNDS}.\n\n{}{}",
+                feedback
+                    .take()
+                    .map(|f| format!("Your last edit was rolled back: {f}\n\n"))
+                    .unwrap_or_default(),
+                crate::patch_check::agent_report(&report, &config.version, &hints, checkout_dir)
+            );
+            let (turn_step, outcome) = match turn(ctx, st, st.attempts, &context) {
+                Ok(v) => v,
+                Err((e, kind)) => {
+                    discard_failed_turn(
+                        ws.notes(),
+                        reporter,
+                        &snapshot,
+                        spec_path,
+                        &before_spec,
+                        "RefreshPatches",
+                    );
+                    pop_source_patches(ctx);
+                    // The rounds before this one keep their refreshed patches.
+                    write_refresh_bullets(ctx, step_id, &refreshed);
+                    write_notes(&lines, "quilt, stopped");
+                    step.finish(StepOutcome::Failed);
+                    return Err(ctx.failed_as(kind, format!("the agent turn failed: {e}")));
+                }
+            };
+            let applied =
+                apply_patch_turn(ctx, &turn_step, &outcome, &before_spec, &snapshot, rounds);
+            pop_source_patches(ctx);
+            let changed = settle_patch_changes(
+                ctx,
+                step_id,
+                &before_spec,
+                &before_files,
+                rounds,
+                &mut lines,
+                &mut refreshed,
+            );
+            // A refused removal goes back to the agent with the reason: that is
+            // a round worth having, within the bound.
+            let refused = if let PatchTurnApplied::Refused(why) = applied {
+                lines.push(format!("- round {rounds}: {why}"));
+                feedback = Some(why);
+                true
+            } else {
+                false
+            };
+            let next = check_and_settle(ctx, &mut lines);
+            let verdict = crate::patch_check::next_round(
+                rounds,
+                MAX_ROUNDS,
+                report.tally(),
+                next.tally(),
+                changed || refused,
+            );
+            progress(format!(
+                "{rpm_name}: after patch round {rounds}: {}",
+                next.summary()
+            ));
+            report = next;
+            match verdict {
+                NextRound::Again => {}
+                NextRound::Clean => break String::new(),
+                NextRound::NoProgress => break format!("round {rounds} made no progress"),
+                NextRound::OutOfRounds => break format!("{rounds} round(s) did not fix them"),
+            }
+        }
+    };
+    // A patch that applies only with fuzz fails rpm's `--fuzz=0`; refreshing it is
+    // mechanical, so the pipeline does it when no turn did.
+    let fuzzy = report.to_refresh().any(|p| {
+        matches!(
+            p.status,
+            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: true, .. }
+        )
+    });
+    if fuzzy {
+        for p in check(ctx, Refresh::Fuzzy).patches {
+            if let Some(bytes) = &p.refreshed {
+                write_or_warn(checkout_dir.join(&p.name), bytes);
+                refreshed.insert(p.name.clone());
+                lines.push(format!(
+                    "- {}: refreshed by the pipeline (it applied only with fuzz)",
+                    p.name
+                ));
+            }
+        }
+    }
+    write_refresh_bullets(ctx, step_id, &refreshed);
+    for p in &report.patches {
+        match &p.status {
+            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: false, .. } => lines.push(format!(
+                "- {}: applies with an offset; left as it is",
+                p.name
+            )),
+            PatchStatus::NotChecked { reason } => {
+                lines.push(format!("- {}: not checked: {reason}", p.name))
+            }
+            _ => {}
+        }
+    }
+    // What still fails is kept, never dropped: the package stops for a human.
+    let failing: Vec<&crate::patch_check::PatchResult> = report.failing().collect();
+    if !failing.is_empty() {
+        for p in &failing {
+            lines.push(format!("- {}: still does not apply; kept ({stop})", p.name));
+        }
+        write_notes(&lines, "quilt");
+        step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(kept_patches_reason(&config.version, &stop, &failing)));
+    }
+    write_notes(&lines, "quilt");
+    step.finish(StepOutcome::Ok);
+    Ok(())
+}
+
 /// Whether the review turn runs for a package nobody asked to patch. A spec
 /// generated from a CUDA redistributable is never reviewed: it has no source to
 /// read, and the turn can only add a "no test suite" comment.
@@ -3630,10 +4393,12 @@ fn review_stage(
             format!(
                 "This spec is the package's existing recipe carried forward from {old} to {}: \
                  only `Version:` and the source changed. Check what the bump can break, and \
-                 nothing else: patches that no longer apply or that upstream merged (drop \
-                 them, and the `PatchN:` lines), BuildRequires and Requires changed in the \
+                 nothing else: BuildRequires and Requires changed in the \
                  new release's metadata, files added or removed in `%files`, and a `%check` \
-                 skip that is no longer needed. Keep every other decision of the recipe.",
+                 skip that is no longer needed. Keep every other decision of the recipe. \
+                 The patches were already checked with quilt against the new sources: leave \
+                 them alone (a patch removal is accepted only when quilt reports the patch \
+                 `can be reverse-applied`).",
                 config.version
             )
         });
@@ -5071,59 +5836,11 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
         }
     }
 
-    // A patch for another release's tree is dropped, with a note in `.changes`,
-    // before anything is asked of the agent about it. A name prefix that looks
-    // like another release is only a candidate: `-p1` strips it, so the patch
-    // is dropped only when its dry run fails to apply.
-    if !st.sdist_top_level.is_empty()
-        && let Ok(current) = std::fs::read_to_string(spec_path)
-    {
-        let candidates =
-            stale_patches(&current, checkout_dir, &st.sdist_top_level, &config.version);
-        let failing: Vec<String> = if candidates.is_empty() {
-            Vec::new()
-        } else {
-            try_patches(spec_path, &current)
-                .map(|check| check.failed.into_iter().map(|(n, _)| n).collect())
-                .unwrap_or_default()
-        };
-        let stale: Vec<(String, String)> = candidates
-            .into_iter()
-            .filter(|(n, _)| failing.contains(n))
-            .collect();
-        if !stale.is_empty() {
-            let names: Vec<String> = stale.iter().map(|(n, _)| n.clone()).collect();
-            write_or_warn(spec_path, without_patches(&current, &names));
-            for (name, prefix) in &stale {
-                let _ = std::fs::remove_file(checkout_dir.join(name));
-                reporter.report(&Event::Warning {
-                    step: Some(validate_step.id),
-                    message: format!(
-                        "{rpm_name}: dropped {name}: it patches {prefix} and does not apply to the {} sources",
-                        config.version
-                    ),
-                });
-            }
-            warn_if_err(
-                reporter,
-                "adding the .changes entry for the dropped patches",
-                osc::add_release_changes_entry(
-                    checkout_dir,
-                    &config.version,
-                    &format!(
-                        "Drop {}: made for another release, it does not apply to {}",
-                        names.join(", "),
-                        config.version
-                    ),
-                    Emit::new(reporter, validate_step.id),
-                ),
-            );
-        }
-    }
-
-    // A patch that does not apply to the unpacked source (inherited from a
-    // linked package, made for other code) is dropped here too: the agent
-    // cannot make it apply, and an edit is rejected while one is left.
+    // A patch that does not apply to the unpacked source is never dropped for
+    // that: only one quilt proves already applied upstream is removed. Any
+    // other stops the package for a human (an edit is rejected while one is
+    // left, so no fix turn could help). A version bump has already given the
+    // agent its rounds to rebase such a patch (`patch_stage`).
     if let Ok(current) = std::fs::read_to_string(spec_path) {
         match try_patches(spec_path, &current) {
             Ok(check) => {
@@ -5134,33 +5851,37 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
                     });
                 }
                 if !check.failed.is_empty() {
-                    let names: Vec<String> = check.failed.iter().map(|(n, _)| n.clone()).collect();
-                    write_or_warn(spec_path, without_patches(&current, &names));
-                    for (name, why) in &check.failed {
-                        let _ = std::fs::remove_file(checkout_dir.join(name));
-                        reporter.report(&Event::Warning {
-                            step: Some(validate_step.id),
-                            message: format!(
-                                "{rpm_name}: dropped {name}: it does not apply to the {} sources \
-                                 (`patch -p1 --dry-run`): {why}",
-                                config.version
-                            ),
-                        });
+                    let report = run_patch_check(ctx, crate::patch_check::Refresh::No);
+                    let proven: Vec<String> = check
+                        .failed
+                        .iter()
+                        .map(|(n, _)| n.clone())
+                        .filter(|n| report.proves_applied(n))
+                        .collect();
+                    let lines = remove_proven_patches(ctx, validate_step.id, &proven);
+                    if !lines.is_empty() {
+                        append_notes(
+                            ws.notes(),
+                            &format!("\n## Patches (quilt)\n{}\n", lines.join("\n")),
+                        );
                     }
-                    warn_if_err(
-                        reporter,
-                        "adding the .changes entry for the dropped patches",
-                        osc::add_release_changes_entry(
-                            checkout_dir,
-                            &config.version,
-                            &format!(
-                                "Drop {}: it does not apply to {}",
-                                names.join(", "),
-                                config.version
-                            ),
-                            Emit::new(reporter, validate_step.id),
-                        ),
-                    );
+                    let kept: Vec<String> = check
+                        .failed
+                        .iter()
+                        .filter(|(n, _)| !proven.contains(n))
+                        .map(|(n, why)| format!("{n}: {}", brief(why)))
+                        .collect();
+                    if !kept.is_empty() {
+                        validate_step.finish(StepOutcome::Failed);
+                        return Err(ctx.failed(format!(
+                            "needs a human: {} patch(es) do not apply to the {} sources and were \
+                             kept (a patch is removed only when quilt proves it already applied \
+                             upstream): {}",
+                            kept.len(),
+                            config.version,
+                            kept.join("; ")
+                        )));
+                    }
                 }
             }
             Err(e) => reporter.report(&Event::Warning {
@@ -5327,8 +6048,7 @@ fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResul
             // way the package stops here unless the operator has said they
             // reviewed it.
             let guards = crate::spec::unverified_license_guards(&spec_text_now(spec_path));
-            if !guards.is_empty()
-                && std::env::var_os("AUTO_PACKAGE_ALLOW_LICENSE_OVERRIDES").is_none()
+            if !guards.is_empty() && !ap_core::env::env_flag("AUTO_PACKAGE_ALLOW_LICENSE_OVERRIDES")
             {
                 let lines: Vec<String> = guards
                     .iter()
@@ -8720,25 +9440,68 @@ fn sync_quilt_series(expanded_spec: &str, checkout_dir: &Path) {
         patches.push(value.rsplit('/').next().unwrap_or(value).to_string());
     }
 
-    let wanted = if patches.is_empty() {
-        String::new()
-    } else {
-        patches.join("\n") + "\n"
-    };
     let series_path = checkout_dir.join("series");
-    let current = std::fs::read_to_string(&series_path).unwrap_or_default();
-    if current == wanted {
+    let existing = std::fs::read_to_string(&series_path).ok();
+    let wanted = match &existing {
+        // A series that is there is edited, never rewritten: its order, flags
+        // and comments are the maintainer's.
+        Some(current) => minimal_series_update(current, &patches),
+        None if patches.is_empty() => return,
+        None => patches.join("\n") + "\n",
+    };
+    if existing.as_deref() == Some(wanted.as_str()) {
         return;
     }
-    if wanted.is_empty() {
+    if wanted.trim().is_empty() {
         if let Err(e) = std::fs::remove_file(&series_path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
             ap_core::diag!("  cannot remove {}: {e}", series_path.display());
         }
-    } else {
-        write_or_warn(&series_path, &wanted);
+        return;
     }
+    write_or_warn(&series_path, &wanted);
+}
+
+/// `current` with only the lines that no longer match the spec removed (a
+/// patch the spec stopped declaring) and the spec's new patches appended, in
+/// spec order. Every other line keeps its place and text, so a series that is
+/// already right comes back byte for byte.
+fn minimal_series_update(current: &str, spec_patches: &[String]) -> String {
+    let name_of = |line: &str| -> Option<String> {
+        let t = line.trim();
+        (!t.is_empty() && !t.starts_with('#'))
+            .then(|| t.split_whitespace().next().unwrap_or(t).to_string())
+    };
+    let mut out: Vec<&str> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
+    for line in current.lines() {
+        match name_of(line) {
+            Some(name) if !spec_patches.contains(&name) => {}
+            Some(name) => {
+                kept.push(name);
+                out.push(line);
+            }
+            None => out.push(line),
+        }
+    }
+    let mut text = out.join("\n");
+    for p in spec_patches {
+        if !kept.contains(p) {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(p);
+            text.push('\n');
+        }
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if text == current.trim_end_matches('\n').to_string() + "\n" || text == current {
+        return current.to_string();
+    }
+    text
 }
 
 /// Run the extractor over a build log, warning when the sdist root never matched.
@@ -8890,6 +9653,13 @@ impl CheckoutSnapshot {
             checkout_dir: checkout_dir.to_path_buf(),
             files,
         }
+    }
+
+    /// The bytes of `name` when the snapshot was taken, when they were kept.
+    fn content_of(&self, name: &str) -> Option<Vec<u8>> {
+        self.files
+            .get(std::ffi::OsStr::new(name))
+            .and_then(|e| e.content.clone())
     }
 
     /// Whether `name` is in the snapshot with exactly these bytes. A file whose
@@ -17100,6 +17870,28 @@ Patch0:         0001-fix.patch
         assert_eq!(
             std::fs::read_to_string(dir.path().join("series")).unwrap(),
             "0001-new.patch\n"
+        );
+    }
+
+    #[test]
+    fn a_series_is_edited_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = "# maintainer notes\nb.patch -p1\n\na.patch\nold.patch\n";
+        std::fs::write(dir.path().join("series"), before).unwrap();
+        // The spec lists the patches in another order and adds one.
+        let spec = "Name: foo\nPatch0: a.patch\nPatch1: b.patch\nPatch2: new.patch\n";
+        sync_quilt_series(spec, dir.path());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("series")).unwrap(),
+            "# maintainer notes\nb.patch -p1\n\na.patch\nnew.patch\n"
+        );
+        // Already right: untouched, byte for byte.
+        let right = "# keep\nb.patch -p1\na.patch\nnew.patch\n";
+        std::fs::write(dir.path().join("series"), right).unwrap();
+        sync_quilt_series(spec, dir.path());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("series")).unwrap(),
+            right
         );
     }
 
