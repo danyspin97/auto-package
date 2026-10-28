@@ -77,7 +77,7 @@
 77. Reproducible Source: URLs with #/file fragment — read when adding or editing a Source: for a wheel or GitHub archive
 78. Upstream licence guards (e.g. I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION) — read when a build refuses over a licence variable
 79. ELF RPATH/RUNPATH checks before the first build — read when the package ships .so files or rpmlint reports rpath errors
-80. $python only inside %python_expand/%python_exec — read when %build/%install uses $python or "Unterminated {" appears
+80. $python only inside %python_expand, braced multi-line form — read when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
 81. Predict the %check environment before building — read when tests may need network, GPU, redis, models or repo files
 82. Four pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when the package has any of these
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
