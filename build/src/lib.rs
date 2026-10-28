@@ -18,6 +18,7 @@ pub mod nvidia_spec;
 pub mod obs_status;
 pub mod osc;
 pub mod package_notes;
+pub mod patch_check;
 pub mod pipeline;
 pub mod proc;
 pub mod quality;

@@ -10731,7 +10731,7 @@ fn stale_patch_prefix(diff: &str, top_level: &str, version: &str) -> Option<Stri
 /// inherited from a linked Factory package, python-torch's 2.3.1 one against
 /// 2.14): `(file name, prefix it was made for)`. The agent cannot make such a
 /// patch apply, and chasing it cost eleven rejected edits.
-fn stale_patches(
+pub(crate) fn stale_patches(
     spec: &str,
     checkout: &Path,
     top_level: &str,
@@ -10773,7 +10773,7 @@ fn stale_patches(
 /// The patch number a `%patch` line applies, or `None` for any other line.
 /// Covers `%patchN`, `%patch -PN`, `%patch -P N` and the bare `%patch`, which
 /// applies patch 0 as rpm does.
-fn applied_patch_number(line: &str) -> Option<String> {
+pub(crate) fn applied_patch_number(line: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix("%patch")?;
     let digits_len = rest
         .find(|c: char| !c.is_ascii_digit())
@@ -10806,7 +10806,7 @@ fn applied_patch_number(line: &str) -> Option<String> {
 
 /// Whether two patch numbers name the same patch: `Patch01:` and `%patch1` are
 /// both patch 1. Numbers that do not parse compare as text.
-fn same_patch_number(a: &str, b: &str) -> bool {
+pub(crate) fn same_patch_number(a: &str, b: &str) -> bool {
     match (a.parse::<u32>(), b.parse::<u32>()) {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,
@@ -10864,7 +10864,7 @@ struct PatchCheck {
 /// `Patch:`): the `%patchN` line that applies it when that gives one, else the
 /// `%autosetup`/`%autopatch` line, else 1, the default of both macros. Only the
 /// macro lines are read, so a `-p1` anywhere else in the spec is not a level.
-fn spec_patch_level(spec: &str, number: &str) -> u32 {
+pub(crate) fn spec_patch_level(spec: &str, number: &str) -> u32 {
     // rpm takes both `-p0` and the spaced `-p 0` (`%autosetup -p 0` is level 0).
     let level_of = |line: &str| -> Option<u32> {
         let mut toks = line.split_whitespace().skip(1);
@@ -11068,7 +11068,7 @@ fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, String> {
 /// A `PatchN:` value with the spec's `%{name}` and `%{version}` (or the bare
 /// `%name`, `%version`) expanded, so `foo-%{version}-fix.patch` names the file
 /// `foo-1.2-fix.patch`. A spec whose header cannot be read is left as written.
-fn expand_patch_name(raw: &str, spec: &str) -> String {
+pub(crate) fn expand_patch_name(raw: &str, spec: &str) -> String {
     let raw = raw.trim();
     let Some(header) = crate::spec::parse_header(spec) else {
         return raw.to_string();
@@ -11326,7 +11326,7 @@ fn patch_escape_problem(
 /// The source archive in the checkout. A checkout can hold several (an old
 /// version's tarball next to the new one), so prefer the one named for
 /// `version` and break ties by name, never by directory order.
-fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
+pub(crate) fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| {
@@ -11966,7 +11966,7 @@ fn generate_spec(
                             // individual CUDA toolkit component wheels are the
                             // running example) — repackage the wheel itself
                             // rather than getting permanently stuck. See
-                            // convention 24 Exception 3.
+                            // convention 28 Exception 3.
                             return wheel_or_wheel_only(
                                 config,
                                 &json,
@@ -13204,7 +13204,7 @@ fn write_wheel_switch_provenance(
 /// discoverable source repository — a closed-source binary redistribution
 /// (NVIDIA's individual CUDA toolkit component wheels are the running
 /// example: nvcc, cupti, nvrtc, cudart have no public source at all). See
-/// convention 24 Exception 3 in the agent prompt.
+/// convention 28 Exception 3 in the agent prompt.
 /// Repackage the release's upstream wheel when one is usable for every flavor;
 /// otherwise report it wheel-only (with `candidates` for the operator).
 fn wheel_or_wheel_only(
@@ -13756,7 +13756,7 @@ fn render_maturin_service_file(
 /// both the name as written and the one with its first component dropped are
 /// targets. Naming one file too many only extracts it; naming the source side
 /// too few fails the dry run of a valid pure rename.
-fn patch_targets(diff: &str) -> Vec<String> {
+pub(crate) fn patch_targets(diff: &str) -> Vec<String> {
     let mut stripped_names: Vec<&str> = Vec::new();
     let mut bare_names: Vec<&str> = Vec::new();
     for line in diff.lines() {
