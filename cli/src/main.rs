@@ -2379,11 +2379,22 @@ fn fix_flagged<'a>(
     state_root: &Path,
     pkgs: impl Iterator<Item = &'a String>,
 ) -> Vec<(String, Vec<String>)> {
-    pkgs.filter_map(|pkg| {
-        let lines: Vec<String> = ap_build::fix_flags::of_package(state_root, pkg)
+    with_lines(pkgs, |pkg| {
+        ap_build::fix_flags::of_package(state_root, pkg)
             .iter()
             .map(|f| f.line())
-            .collect();
+            .collect()
+    })
+}
+
+/// The packages among `pkgs` that `lines_of` gives lines for, with those
+/// lines, in the order given.
+fn with_lines<'a>(
+    pkgs: impl Iterator<Item = &'a String>,
+    lines_of: impl Fn(&str) -> Vec<String>,
+) -> Vec<(String, Vec<String>)> {
+    pkgs.filter_map(|pkg| {
+        let lines = lines_of(pkg);
         (!lines.is_empty()).then(|| (pkg.clone(), lines))
     })
     .collect()
@@ -2454,17 +2465,26 @@ fn print_run_summary(
 
     // What the fix loop changed in the packages it built or gave up on: the same
     // lines the changelog and the submit request carry.
-    let flagged = fix_flagged(
-        state_root,
-        latest
-            .iter()
-            .filter(|(_, (_, o))| {
-                matches!(o, PackageOutcome::Built | PackageOutcome::Failed { .. })
-            })
-            .map(|(pkg, _)| pkg),
-    );
+    let touched: Vec<&String> = latest
+        .iter()
+        .filter(|(_, (_, o))| matches!(o, PackageOutcome::Built | PackageOutcome::Failed { .. }))
+        .map(|(pkg, _)| pkg)
+        .collect();
+    let flagged = fix_flagged(state_root, touched.iter().copied());
     let _ = writeln!(out, "\nFlagged by the fix loop ({}):", flagged.len());
     for (pkg, lines) in &flagged {
+        let _ = writeln!(out, "  {pkg}");
+        for line in lines {
+            let _ = writeln!(out, "    {line}");
+        }
+    }
+
+    // What the change adds that needs a review before it is submitted.
+    let risks = with_lines(touched.iter().copied(), |pkg| {
+        ap_build::risk_flags::lines_of_package(state_root, pkg)
+    });
+    let _ = writeln!(out, "\nNeeds review ({}):", risks.len());
+    for (pkg, lines) in &risks {
         let _ = writeln!(out, "  {pkg}");
         for line in lines {
             let _ = writeln!(out, "    {line}");
@@ -4610,6 +4630,37 @@ mod tests {
         assert_eq!(
             fix_flagged(root.path(), pkgs.iter()),
             vec![("python-foo".to_string(), vec![FixFlag::CheckRemoved.line()])]
+        );
+    }
+
+    #[test]
+    fn the_summary_lists_the_risks_of_the_last_run_only_for_packages_with_some() {
+        use ap_build::pipeline::PkgState;
+        use ap_build::risk_flags::{RiskFlag, settle};
+        use ap_build::workspace::Workspace;
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        PkgState::update(&ws, |st| {
+            settle(
+                st,
+                "r1",
+                vec![RiskFlag::NewScriptlet {
+                    header: "%post".into(),
+                }],
+            )
+        })
+        .unwrap();
+        Workspace::open(root.path(), "python-bar").unwrap();
+        let pkgs = ["python-foo".to_string(), "python-bar".to_string()];
+        let risks = super::with_lines(pkgs.iter(), |pkg| {
+            ap_build::risk_flags::lines_of_package(root.path(), pkg)
+        });
+        assert_eq!(
+            risks,
+            vec![(
+                "python-foo".to_string(),
+                vec!["RISK: new scriptlet: %post".to_string()]
+            )]
         );
     }
 

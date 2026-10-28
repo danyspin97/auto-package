@@ -1532,6 +1532,7 @@ fn prepare_request(
             item,
             newest_changes(branch, &item.pkg, emit).as_deref(),
             &ap_build::fix_flags::of_package(state_root, &item.pkg),
+            &ap_build::risk_flags::of_package(state_root, &item.pkg),
         ),
         source_rev,
     })
@@ -1731,8 +1732,12 @@ fn submit_requests(a: &UpdateProjectArgs, branch: &str, results: &mut [ItemResul
 
     let items: Vec<&Item> = pending.iter().map(|(i, _)| &results[*i].item).collect();
     ctx.say(format!("submit requests to create ({}):", items.len()));
-    for line in up::sr_confirmation_lines(branch, &items) {
+    for (line, item) in up::sr_confirmation_lines(branch, &items).iter().zip(&items) {
         ctx.say(format!("  {line}"));
+        // What the change adds that needs a look, under the request it is in.
+        for risk in ap_build::risk_flags::lines_of_package(&ctx.state_root, &item.pkg) {
+            ctx.say(format!("      {risk}"));
+        }
     }
     if !a.yes && !confirm(&format!("Create {} submit request(s)?", pending.len()), ctx) {
         for (idx, _) in &pending {

@@ -17,6 +17,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::fix_flags::{extra, one_line};
+use crate::pipeline::PkgState;
+use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -55,6 +57,31 @@ impl RiskFlag {
         };
         one_line(&text)
     }
+}
+
+/// Keeps `st`'s risk flags for `run_id` only: flags of an earlier run are
+/// dropped the first time this run looks at the package.
+pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<RiskFlag>) {
+    if st.risk_flags_run_id.as_deref() != Some(run_id) {
+        st.risk_flags.clear();
+        st.risk_flags_run_id = Some(run_id.to_string());
+    }
+    st.risk_flags = found;
+}
+
+/// The risk flags the package's last run recorded, for a reader outside the run.
+pub fn of_package(state_root: &Path, pkg: &str) -> Vec<RiskFlag> {
+    Workspace::find_existing(state_root, &[pkg])
+        .map(|ws| PkgState::load(&ws).risk_flags)
+        .unwrap_or_default()
+}
+
+/// The lines of the package's risk flags, one each, as the readers print them.
+pub fn lines_of_package(state_root: &Path, pkg: &str) -> Vec<String> {
+    of_package(state_root, pkg)
+        .iter()
+        .map(RiskFlag::line)
+        .collect()
 }
 
 /// What one side of the change holds: the spec, the `_service` file and the
@@ -589,5 +616,24 @@ mod tests {
         assert!(!line.contains('\n'));
         assert!(line.starts_with("RISK: "));
         assert!(line.ends_with("..."));
+    }
+
+    #[test]
+    fn a_reader_outside_the_run_sees_the_risks_of_the_last_run() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(of_package(root.path(), "python-foo").is_empty());
+        let ws = Workspace::open(root.path(), "python-foo").unwrap();
+        let risk = RiskFlag::NewSourceHost {
+            host: "evil.example.com".into(),
+        };
+        PkgState::update(&ws, |st| settle(st, "r1", vec![risk.clone()])).unwrap();
+        assert_eq!(of_package(root.path(), "python-foo"), vec![risk]);
+        assert_eq!(
+            lines_of_package(root.path(), "python-foo"),
+            vec!["RISK: new source host: evil.example.com".to_string()]
+        );
+        // A later run that found nothing leaves nothing behind.
+        PkgState::update(&ws, |st| settle(st, "r2", vec![])).unwrap();
+        assert!(of_package(root.path(), "python-foo").is_empty());
     }
 }

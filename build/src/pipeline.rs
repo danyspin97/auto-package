@@ -357,6 +357,12 @@ pub struct PkgState {
     pub fix_flags: Vec<crate::fix_flags::FixFlag>,
     #[serde(default)]
     pub fix_flags_run_id: Option<String>,
+    /// What the change adds that a reviewer must look at (see
+    /// [`crate::risk_flags`]), for the run `risk_flags_run_id`.
+    #[serde(default)]
+    pub risk_flags: Vec<crate::risk_flags::RiskFlag>,
+    #[serde(default)]
+    pub risk_flags_run_id: Option<String>,
 }
 
 impl PkgState {
@@ -6404,6 +6410,43 @@ fn restore_obs_baseline(
     }
 }
 
+/// Records the risk flags of the change about to be committed: what OBS holds
+/// (`baseline`) against the files on disk. Read from the files, not from what
+/// the agent said.
+fn settle_risk_flags(ctx: &RunCtx, baseline: &Path) {
+    use crate::risk_flags::{Files, archive_files, from_change, patch_names};
+    let spec_name = ctx.spec_path.file_name().unwrap_or_default();
+    let read_patches = |spec: &str, read: &dyn Fn(&str) -> Option<String>| {
+        patch_names(spec)
+            .into_iter()
+            .filter_map(|name| read(&name).map(|text| (name, text)))
+            .collect()
+    };
+    let base_spec = baseline_text(baseline, spec_name);
+    let before = Files {
+        spec: base_spec.clone(),
+        service: baseline_text(baseline, "_service"),
+        patches: read_patches(base_spec.as_deref().unwrap_or(""), &|n| {
+            baseline_text(baseline, n)
+        }),
+    };
+    let fin_spec = std::fs::read_to_string(&ctx.spec_path).ok();
+    let checkout = &ctx.checkout_dir;
+    let after = Files {
+        spec: fin_spec.clone(),
+        service: std::fs::read_to_string(checkout.join("_service")).ok(),
+        patches: read_patches(fin_spec.as_deref().unwrap_or(""), &|n| {
+            std::fs::read_to_string(checkout.join(n)).ok()
+        }),
+    };
+    let tarball = find_tarball(checkout, &ctx.config.version);
+    let archive = archive_files(tarball.as_deref());
+    let found = from_change(&before, &after, &archive);
+    update_state(&ctx.ws, ctx.reporter, |st| {
+        crate::risk_flags::settle(st, &ctx.config.run_id, found)
+    });
+}
+
 /// What OBS held for `name` when the baseline was kept. `osc::save_baseline`
 /// keeps each tracked file under `files/`; `None` when OBS did not hold it.
 pub(crate) fn baseline_text(baseline: &Path, name: impl AsRef<Path>) -> Option<String> {
@@ -6506,6 +6549,7 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         });
     }
     settle_fix_flags(ctx, &baseline, commit_step.id);
+    settle_risk_flags(ctx, &baseline);
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
     let plan = osc::publish_plan(&ctx.checkout_dir);
     for name in &plan.skipped {

@@ -6,6 +6,7 @@
 
 use crate::fix_flags::FixFlag;
 use crate::osc::{self, PathAddition};
+use crate::risk_flags::RiskFlag;
 use crate::update::{Candidate, Decision, Ecosystem};
 
 /// One package to branch and update.
@@ -338,7 +339,14 @@ fn sanitize_changelog(text: &str) -> String {
 /// The description of the submit request for `item`. `flags` are what the
 /// package's fix loop changed (skipped tests, a wheel, a blocked turn); they
 /// come right after the summary, one line each, so a reviewer sees them first.
-pub fn sr_description(item: &Item, changes: Option<&str>, flags: &[FixFlag]) -> String {
+/// `risks` (what the change adds that needs a look) follow them under
+/// "Needs review:".
+pub fn sr_description(
+    item: &Item,
+    changes: Option<&str>,
+    flags: &[FixFlag],
+    risks: &[RiskFlag],
+) -> String {
     let mut out = if item.findings.is_empty() {
         format!(
             "Update {} to {} (was {}).",
@@ -358,6 +366,14 @@ pub fn sr_description(item: &Item, changes: Option<&str>, flags: &[FixFlag]) -> 
             .map(|f| format!("- {}", sanitize_changelog(&f.line())))
             .collect();
         out.push_str("\n\nFlagged for review:\n");
+        out.push_str(&lines.join("\n"));
+    }
+    if !risks.is_empty() {
+        let lines: Vec<String> = risks
+            .iter()
+            .map(|r| format!("- {}", sanitize_changelog(&r.line())))
+            .collect();
+        out.push_str("\n\nNeeds review:\n");
         out.push_str(&lines.join("\n"));
     }
     if let Some(c) = changes {
@@ -492,12 +508,12 @@ mod tests {
             dependency_of: None,
             findings: vec!["no-check: the spec has no %check".into()],
         };
-        let d = sr_description(&i, None, &[]);
+        let d = sr_description(&i, None, &[], &[]);
         assert!(d.starts_with("Improve libfoo 1.0"), "{d}");
         assert!(d.contains("- no-check: the spec has no %check"));
         assert!(!d.contains("was 1.0"));
         i.findings.clear();
-        assert!(sr_description(&i, None, &[]).starts_with("Update libfoo to 1.0 (was 1.0)"));
+        assert!(sr_description(&i, None, &[], &[]).starts_with("Update libfoo to 1.0 (was 1.0)"));
     }
 
     fn update(name: &str, old: &str, new: &str) -> Candidate {
@@ -681,9 +697,9 @@ Mon Sep  1 09:00:00 UTC 2026 - Dev <dev@example.org>\n\
         let mut i = item("foo");
         i.old_version = "1.0".into();
         i.new_version = "2.0".into();
-        let d = sr_description(&i, Some("- Update to 2.0"), &[]);
+        let d = sr_description(&i, Some("- Update to 2.0"), &[], &[]);
         assert!(d.starts_with("Update foo to 2.0 (was 1.0).\n\nChangelog:\n- Update to 2.0"));
-        assert!(!sr_description(&i, None, &[]).contains("Changelog"));
+        assert!(!sr_description(&i, None, &[], &[]).contains("Changelog"));
     }
 
     #[test]
@@ -697,7 +713,7 @@ Mon Sep  1 09:00:00 UTC 2026 - Dev <dev@example.org>\n\
                 wheel: "foo-2.0-py3-none-any.whl".into(),
             },
         ];
-        let d = sr_description(&i, Some("- Update to 2.0"), &flags);
+        let d = sr_description(&i, Some("- Update to 2.0"), &flags, &[]);
         assert!(
             d.starts_with(
                 "Update foo to 2.0 (was 1.0).\n\nFlagged for review:\n- FLAG: %check removed"
@@ -710,17 +726,36 @@ Mon Sep  1 09:00:00 UTC 2026 - Dev <dev@example.org>\n\
             ),
             "{d}"
         );
-        assert!(!sr_description(&i, None, &[]).contains("Flagged"));
+        assert!(!sr_description(&i, None, &[], &[]).contains("Flagged"));
+    }
+
+    #[test]
+    fn the_risks_follow_the_fix_flags_under_needs_review() {
+        let mut i = item("foo");
+        i.old_version = "1.0".into();
+        i.new_version = "2.0".into();
+        let flags = vec![FixFlag::CheckRemoved];
+        let risks = vec![RiskFlag::NewScriptlet {
+            header: "%post".into(),
+        }];
+        let d = sr_description(&i, Some("- Update to 2.0"), &flags, &risks);
+        assert!(
+            d.contains(
+                "\n\nFlagged for review:\n- FLAG: %check removed or left without a test: the tests do not run\n\nNeeds review:\n- RISK: new scriptlet: %post\n\nChangelog:\n"
+            ),
+            "{d}"
+        );
+        assert!(!sr_description(&i, None, &[], &[]).contains("Needs review"));
     }
 
     #[test]
     fn the_changelog_in_the_description_has_no_control_characters_and_is_capped() {
         let i = item("foo");
-        let d = sr_description(&i, Some("- ok\x1b[31m red\r\n\x07bell\tTab"), &[]);
+        let d = sr_description(&i, Some("- ok\x1b[31m red\r\n\x07bell\tTab"), &[], &[]);
         assert!(d.contains("- ok[31m red\nbell Tab"), "{d:?}");
         assert!(!d.contains('\x1b') && !d.contains('\r') && !d.contains('\x07'));
         let long = "x".repeat(10_000);
-        let d = sr_description(&i, Some(&long), &[]);
+        let d = sr_description(&i, Some(&long), &[], &[]);
         assert!(d.len() < 2500, "{}", d.len());
         assert!(d.contains("[...]"));
     }
