@@ -69,8 +69,8 @@ jj workspace (hunk-level `git apply`, see how the 43 existing commits were made)
    (replace the five attribute extractors and two decoders); unify the three `Source` parsers; the
    `osc.rs` tests with real sleeps; remove LLM-prose-driven actions (`parse_turn_response_from_prose`,
    `named_sibling_fix`/`SIBLING_CUES`, keyword-matched `npm_vendor_route_pending`); dead code
-   (`AgentBackend`, `POLICY_VERSION`, retired-state migrations, the `osc results` text fallback,
-   REDESIGN.md); stale comments and history anecdotes; `cmd_build` (1,560 lines) and `run` splits.
+   (`AgentBackend`, `POLICY_VERSION`, retired-state migrations, the `osc results` text fallback);
+   stale comments and history anecdotes; `cmd_build` (1,560 lines) and `run` splits.
 5. **Full crate split** (last, one crate at a time, each its own commits with tests green):
    `ap-obs` (client, serde/quick-xml models, `ObsWriter` live/dry-run/recording, caches owned by a
    client instance), `ap-spec` (AST parser/printer, edits, checks, generation), `ap-agent` (driver,

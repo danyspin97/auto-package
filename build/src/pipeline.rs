@@ -1,4 +1,4 @@
-//! Single-package build pipeline (REDESIGN §2.4, §3.2).
+//! Single-package build pipeline.
 //!
 //! Loop: Checkout → GenerateSpec → FetchSdist → ValidateSpec →
 //!       (Commit → Build → AgentTurn)* → Done

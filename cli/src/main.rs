@@ -1,4 +1,4 @@
-//! Command-line surface — REDESIGN M1.
+//! Command-line surface.
 
 mod cleanup;
 mod diffview;

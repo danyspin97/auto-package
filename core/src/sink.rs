@@ -640,7 +640,7 @@ fn fmt_elapsed(d: Duration) -> String {
 }
 
 /// A grep-able dump: a titled rule, the body, and a footer naming the file it
-/// was also written to. REDESIGN §2.2 — every `--log debug` dump is delimited.
+/// was also written to. Every `--log debug` dump is delimited this way.
 fn delimited(title: &str, body: &str, artifact: &Path) -> String {
     let rule = "─".repeat(58usize.saturating_sub(title.len()));
     format!(

@@ -1,7 +1,7 @@
-//! AI-assisted spec repair — tool-using turn loop only (REDESIGN §2.4).
+//! AI-assisted spec repair — tool-using turn loop only.
 //!
 //! The only backend is the `claude` CLI (`--agent-backend cli`). Vertex AI and
-//! direct-API backends are removed in M1 per REDESIGN §5.1.
+//! direct-API backends are not supported.
 
 use std::collections::BTreeMap;
 use std::process::Command;

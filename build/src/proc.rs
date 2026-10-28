@@ -68,7 +68,7 @@ pub fn minimal_env(extra_prefixes: &[&str]) -> std::collections::BTreeMap<String
 ///
 /// Carried explicitly rather than read from a global: the subprocess layer is
 /// the one place where "what did this program actually do" is knowable, and
-/// `--log debug` promises every argv and cwd (REDESIGN §3.4).
+/// `--log debug` promises every argv and cwd.
 #[derive(Clone, Copy)]
 pub struct Emit<'a> {
     pub reporter: &'a dyn Reporter,
