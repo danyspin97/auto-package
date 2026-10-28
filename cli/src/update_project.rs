@@ -147,8 +147,11 @@ pub struct UpdateProjectArgs {
     /// Maximum number of packages to build concurrently (0 = unlimited). Each
     /// build still runs its own dependency closure, so this bounds the
     /// top-level loop, not every spawned sub-build.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = ap_core::limits::DEFAULT_JOBS)]
     pub jobs: usize,
+
+    #[command(flatten)]
+    pub limits: crate::run_limits::RunLimits,
 
     /// Wait for this many GiB free on the work directory's disk before a
     /// package starts its heavy stages (0 = never wait).

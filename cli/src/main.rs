@@ -1,5 +1,7 @@
 //! Command-line surface — REDESIGN M1.
 
+mod cleanup;
+mod run_limits;
 mod tui;
 mod update_project;
 
@@ -41,8 +43,12 @@ enum Commands {
         work_dir: PathBuf,
 
         /// Directory for per-package notes, shared across projects. Kept outside
-        /// work_dir so they survive cleanup.
-        #[arg(long = "notes", alias = "notes-dir", default_value = "notes/packages")]
+        /// work_dir and outside this repository; created on first write.
+        #[arg(
+            long = "notes",
+            alias = "notes-dir",
+            default_value = "../auto-package-notes"
+        )]
         notes_dir: PathBuf,
 
         /// Repository to build for (default: the project's own, Tumbleweed
@@ -107,13 +113,18 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         unsafe_resolve: bool,
 
-        /// Remove the work directory before building.
+        /// Delete rebuildable caches (rpms/, sdist caches) before building. Keeps
+        /// runs/, state/, ledger.json and osc checkouts; refuses when a checkout
+        /// has uncommitted changes.
         #[arg(long, default_value_t = false)]
         cleanup: bool,
 
         /// Maximum number of packages to build concurrently (0 = unlimited).
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = ap_core::limits::DEFAULT_JOBS)]
         jobs: usize,
+
+        #[command(flatten)]
+        limits: run_limits::RunLimits,
 
         /// Wait for this many GiB free on the work directory's disk before a
         /// package starts its heavy stages (0 = never wait).
@@ -951,6 +962,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             unsafe_resolve,
             cleanup,
             jobs,
+            limits,
             min_free_gb,
             nvidia,
             nvidia_redist,
@@ -971,6 +983,8 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                 ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
             }
             ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
+            limits.apply(&work_dir)?;
+            ap_build::sources::set_scratch_dir(work_dir.join("cache"));
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
             let distro = choose_distro(distro.as_deref(), &project, &arch);
 
@@ -1030,7 +1044,7 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             reject_symlink_project_dir(&project_dir)?;
             // Only a directory this run creates is ours to mark. Marking one that
             // already existed would let a later --cleanup delete the user's files.
-            let mut created_now = !project_dir.exists();
+            let created_now = !project_dir.exists();
             std::fs::create_dir_all(&project_dir)?;
             // Taken before --cleanup touches anything: a second run for this
             // project must not delete state under one that is still building.
@@ -1051,25 +1065,9 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
                         project_dir.display(),
                     ));
                 }
-                // Empty the directory rather than removing it. The lock file and
-                // the marker are kept: the marker is what lets a later --cleanup
-                // run proceed if one of these removes fails part-way. It is
-                // rewritten below once everything else has gone.
-                for entry in std::fs::read_dir(&project_dir)? {
-                    let path = entry?.path();
-                    if path
-                        .file_name()
-                        .is_some_and(|n| n == PROJECT_LOCK_NAME || n == OWNERSHIP_MARKER)
-                    {
-                        continue;
-                    }
-                    if path.is_dir() && !path.is_symlink() {
-                        std::fs::remove_dir_all(&path)?;
-                    } else {
-                        std::fs::remove_file(&path)?;
-                    }
-                }
-                created_now = true;
+                // Only rebuildable caches go; `runs/`, `state/`, `ledger.json`
+                // and the osc checkouts stay (see `cleanup`).
+                cleanup::run(&project_dir)?;
             }
             // Runs after the --cleanup refusal above, so a refused run does not
             // change the process-wide NVIDIA mode or print its warnings.
@@ -1525,8 +1523,11 @@ fn update_in_place(
         unsafe_resolve,
         jobs,
         regen,
+        limits,
         ..
     } = a;
+    limits.apply(&work_dir)?;
+    ap_build::sources::set_scratch_dir(work_dir.join("cache"));
     let distro = choose_distro(distro.as_deref(), &project, &arch);
     ap_build::discovery::set_agent_enabled(!no_agent);
     if !no_agent {
