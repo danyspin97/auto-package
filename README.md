@@ -60,14 +60,18 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--tui`: Enable interactive TUI mode
 - `--log`: Log level when not using TUI: error, warn, info, debug, trace (default: `info`)
 - `--max-attempts`: Maximum AI fix attempts per package (default: 10)
-- `--budget-usd`: USD budget cap for AI calls (default: 2.0)
+- `--budget-usd`: USD budget cap for AI calls, per package and per run (default: 10.0)
+- `--max-total-usd <USD>`: most the AI may spend per UTC day across all runs and processes sharing the work directory, kept in `<work-dir>/ledger.json` (default: 50). A turn that would pass it is refused with a message naming the cap; an unreadable or locked ledger refuses too.
+- `--max-packages <N>`: most packages one run starts, counting the dependency closure (default: 25, 0 = unlimited). Past it nothing more is queued and the run stops and says so.
+- `--notes <DIR>`: where per-package notes are kept (default: `../auto-package-notes`, relative to the current directory; created on first write, outside this repository)
+- OBS requests (`osc api` and the other `osc` calls) share one rate limiter: 5 requests per second, burst 10; `AUTO_PACKAGE_OBS_RPS=<n>` overrides the rate.
 - `--no-agent`: Build only, never call the AI model
 - `--unsafe-resolve`: Run pip without its sandbox (see the threat model)
 - `--source-url [PKG=]URL`: Source repository for a wheel-only package; `PKG=wheel` repackages the upstream wheel instead of building from source (e.g. `--source-url torch=wheel`), replacing an existing source recipe
 - `--force`: Rebuild even if already built
 - `--regen`: Regenerate spec from scratch
-- `--cleanup`: Remove work directory before building
-- `--jobs`: Maximum concurrent builds (0 = unlimited)
+- `--cleanup`: Delete rebuildable caches (`rpms/`, `state/<pkg>/sdist`) before building and print the bytes freed. Never deletes `runs/`, `state/`, `ledger.json` or osc checkouts, and refuses (listing them) when a checkout has uncommitted changes.
+- `--jobs`: Maximum concurrent builds (default: 4; `--jobs 0` = unlimited)
 - A package built from a prebuilt wheel has its unpacked tree (`state/<pkg>/sdist`) deleted once it is Built; a later run unpacks the wheel again.
 - `--min-free-gb`: GiB that must be free on the work directory's disk before a package starts or downloads its RPMs; it waits up to 10 minutes, then fails with `No space left on device` (default: 3, 0 = off)
 - `--nvidia <wheel|redist>`: How the NVIDIA CUDA libraries are packaged: `wheel` repackages the `nvidia-*` PyPI wheels as `python-nvidia-*` (default), `redist` packages NVIDIA's redistributable archives as `cuda-<name>`. The choice is remembered in the work directory (`<project>-<arch>/nvidia-mode`), so a restart keeps it; passing the other value switches it with a warning. `--nvidia-redist` is shorthand for `--nvidia redist`.
@@ -93,7 +97,7 @@ auto-package update --project Base:System --only libfoo,libbar --submit
 
 Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 `--arch`, `--log`, `--tui`, `--max-attempts`, `--budget-usd`, `--no-agent`,
-`--jobs`, `--regen`, `--unsafe-resolve` that `build` takes):
+`--jobs`, `--max-total-usd`, `--max-packages`, `--regen`, `--unsafe-resolve` that `build` takes):
 
 - `--branch-project`: where to branch and build (default
   `home:<osc user>:branches:<SOURCE>`, what `osc branch` uses). Created by the
