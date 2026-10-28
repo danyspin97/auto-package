@@ -61,7 +61,7 @@
 61. [inline] A missing dependency may already be built here — full text for rpm -qlp checks and import-name mismatches
 62. [inline] Dependency needs patching: patch_dependencies — full text for the two cases and the problem text to write
 63. [inline] No TODO placeholders left in a spec — full text for what each skeleton marker needs
-64. [inline] C/C++/CUDA libs are never python-<lib> — full text for NVIDIA nvidia-<lib>-cuNN wheel exceptions
+64. [inline] C/C++ libs are never python-<lib> — full text; CUDA/NVIDIA vendor wheels are in skill nvidia-wheels
 65. Runtime Requires are flavor-neutral python-<name> — read when writing any Requires line for a Python dependency
 66. Summary and %description must say something — read when writing Summary/%description or the generator left a stub
 67. %check needing GPU/driver/device is not run — read when tests need CUDA, a device, a display or network
@@ -81,8 +81,14 @@
 81. Predict the %check environment before building — read when tests may need network, GPU, redis, models or repo files
 82. Four pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when the package has any of these
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
-84. CUDA at build time: nvcc, CUDA headers or libraries, dlopen of CUDA — read when the build or its sources mention CUDA, cuda.h, nvcc or libcudart
+84. CUDA at build time: use the upstream wheel; NVIDIA output is not Factory/SLE material — read when the build or sources mention CUDA, cuda.h, nvcc or libcudart
 85. Dynamic Requires for ctypes/dlopen wrappers, cffi pin, ExclusiveArch propagation, ninja — read when a package dlopens a system .so, uses cffi, requires an arch-limited package or lists ninja
 86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
 87. Flaky tests: pytest-rerunfailures or a named deselect — read when the prompt lists flaky tests or a %check failure differs between two builds
 88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
+89. SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
+90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr; keep header, URL:, SPDX License: — read when a spec has Group:, BuildRoot:, %clean or %defattr, or no URL:
+91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
+92. Every _service you add uses mode="manual" — read when you write or edit a _service file
+93. Upstream .asc/.sig signature: SourceN plus keyring — read when the release page has a .asc, .sig or .sign next to the tarball
+94. Carried-forward patch: rebase with quilt, remove only when reverse-applied — read when the prompt lists patches that failed to apply or you are about to remove a Patch line

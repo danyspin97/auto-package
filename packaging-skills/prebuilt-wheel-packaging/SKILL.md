@@ -25,7 +25,7 @@ must account for. Do this before touching %files; never guess the layout.
   pre-built wheel path directly, no `%pyproject_wheel` step first.
   It already runs once per Python flavor. NEVER wrap it in `%python_expand`
   (the nested expansion breaks the bytecode-compile step with an
-  `IndentationError` — seen on nvidia-cusparselt-cu13 and nvidia-nvjitlink)
+  `IndentationError`)
   and do not replace it with a hand-written `pip install --root`; neither
   fixes anything. If `%check` fails to import the module after install, the
   cause is almost always the site directory (see the next bullet), not the
@@ -38,20 +38,16 @@ must account for. Do this before touching %files; never guess the layout.
     (or `aarch64`) for the architecture it was built for.
   * WHICH DIRECTORY the files land in comes from `Root-Is-Purelib` in
     `source/*.dist-info/WHEEL`, NOT from the tag: `true` → `%{python_sitelib}`,
-    `false` → `%{python_sitearch}`. NVIDIA's CUDA wheels (`...-py3-none-manylinux_*`)
-    say `Root-Is-Purelib: true`, so pip installs them under **sitelib** even
-    though they ship `.so` files and are arch-specific. Specs that switched
-    these to `%{python_sitearch}` packaged nothing and `%check` failed with
-    `ModuleNotFoundError: No module named 'nvidia'` (nvidia-cusparselt-cu13,
-    nvidia-nvjitlink, nvidia-cufile all burned attempts on this); the specs
-    that went green (nvidia-curand, nvidia-cuda-cupti) use `ExclusiveArch`
-    with `%{python_sitelib}`. Use ONE site macro consistently in `%fdupes`,
+    `false` → `%{python_sitearch}`. A `...-py3-none-manylinux_*` wheel saying
+    `Root-Is-Purelib: true` installs under **sitelib** even though it ships
+    `.so` files and is arch-specific; switching it to `%{python_sitearch}`
+    packages nothing and `%check` fails with `ModuleNotFoundError`. Use ONE site macro consistently in `%fdupes`,
     `%check` and `%files`, and do not flip it or add/remove `noarch` unless
     the unpacked `source/` proves the generator wrong — read the `WHEEL`
     file, don't guess. The wheel tag never moves files to sitearch: a purelib
     wheel with `.so` files stays in sitelib with `ExclusiveArch`.
   * SPLIT wheels of one project that fill the same top-level directory
-    (`nvidia-cutlass-dsl-libs-base/-core/-cu12/-cu13`): each lists only its own
+    (conventions 76 and 83): each lists only its own
     files and co-owns shared directories with `%dir` (the skeleton does this from
     the sibling wheels, in any build order; keep it). The tree must live in ONE
     site directory: if a `Root-Is-Purelib: false` wheel shares a top-level
@@ -59,48 +55,38 @@ must account for. Do this before touching %files; never guess the layout.
     `%{python_sitelib}` in `%install` (`mv`, dist-info included); keep those
     lines and do not edit another package's RECORD.
     A namespace tree split over lib and lib64 fails with `No module named
-    'cutlass.cute'` (the `.pth` takes `nvidia_cutlass_dsl.__path__[0]`, the first
-    site directory holding one). A sibling spec generated before the others were
+    '<pkg>.<part>'` (a `.pth` takes the first site directory holding the
+    package). A sibling spec generated before the others were
     known is moved onto the one tree by the pipeline (`with_sibling_tree_in_sitelib`);
     do not work around it with `PYTHONPATH` in `%check`.
 - `%check` for a wheel: there is no source tree, so check the installed
   files. Run any import from a fresh empty directory with
   `PYTHONPATH=%{buildroot}%{$python_sitelib}` (the same site macro the `%files` use) —
   from the build directory the buildroot is not on `sys.path` and the import
-  fails with `ModuleNotFoundError` (six NVIDIA packages spent an attempt on
-  exactly this). Many of these wheels are NAMESPACE or BINARY-ONLY: `nvidia/`
-  has no `__init__.py` and the wheel holds only `lib*.so` and headers, so
-  there is nothing to import (`nvidia-nvjitlink`, `nvidia-cufile`). Then
-  assert the real payload exists instead, with a path taken from RECORD:
-    test -e %{buildroot}%{python_sitelib}/nvidia/cu13/lib/libnvJitLink.so.13
+  fails with `ModuleNotFoundError`. Some wheels are NAMESPACE or BINARY-ONLY:
+  the top directory has no `__init__.py` and the wheel holds only `lib*.so`
+  and headers, so there is nothing to import. Then assert the real payload
+  exists instead, with a path taken from RECORD:
+    test -e %{buildroot}%{python_sitelib}/<ns>/lib/lib<name>.so.<N>
   Never `find %{buildroot}` blindly or rely on a macro inside a `%check`
   shell snippet that RPM has not expanded the way you expect.
-- Namespace package directories (`nvidia/`, `nvidia/cu13/`) shared with other
+- Namespace package directories shared with other
   wheels need `%dir` entries in `%files`, or rpmlint reports
   `directories not owned by a package` (convention 17).
-- Prebuilt vendor binaries trip rpmlint rules a source build would not, and
-  every NVIDIA wheel package has burned two or three attempts rediscovering
-  them one at a time (cudnn, cusparse, cufft, cufile, cusparselt). Do all of
-  this in the FIRST pass:
-  * Headers: delete them in `%install` —
-    `%python_expand rm -rf %{buildroot}%{$python_sitelib}/nvidia/*/include`
-    (what the green nvidia-cuda-cupti and nvidia-curand specs do). Nothing
-    here compiles against them: a package that needs CUDA to build is itself
-    repackaged from its wheel (convention 27), so a `-devel` subpackage buys
-    nothing and costs `%exclude` plumbing and extra rpmlint surface.
-  * `.so` rpmlint noise (`missing-hash-section` at badness 10000 per file,
-    `shared-library-not-executable`, `library-without-ldconfig-post*`) is
-    expected for NVIDIA's prebuilt libraries: add `Source99:
-    python-<name>.rpmlintrc` containing `addFilter("<rule>.*")` for exactly
-    the rules build.log reports (convention 39). Do not try to `chmod`/relink
-    vendor binaries. The skeleton already has `Requires: python-base` (rpmlint
-    `no-dependency-on python-base`; `%python_subpackages` does not add it): keep it.
-  * `%files`: the `%{python_sitelib}/<dist>-%{version}.dist-info/` directory
-    claim already owns `licenses/` and everything under it — a second
-    `%license` line for a file inside it makes "File listed twice" fail the
-    build. Keep ONE of the two. A `%license` path is relative to the build
-    tree, never prefixed with `%{buildroot}` (one attempt added it and broke
-    the file lookup).
+- Prebuilt vendor binaries trip rpmlint rules a source build would not. Do
+  all of this in the FIRST pass:
+  * Headers the wheel only carries along: delete them in `%install`
+    (convention 24); nothing here compiles against them.
+  * `shared-library-not-executable`: `chmod 0755` the shared libraries in
+    `%install`, always. `missing-hash-section` (badness 10000 per file) and
+    `library-without-ldconfig-post*` cannot be fixed for a vendor binary: a
+    `%{name}-rpmlintrc` filter for exactly the rules build.log reports, each
+    with a `# reason:` line (convention 39). The skeleton already has
+    `Requires: python-base` (rpmlint `no-dependency-on python-base`;
+    `%python_subpackages` does not add it): keep it.
+  * `%files` and licences: convention 69's wheel form (`%license` the
+    dist-info copy, list the rest of the dist-info without it). A `%license`
+    path is never prefixed with `%{buildroot}`.
   * Remove pip's `INSTALLER`/`REQUESTED` files from the dist-info in
     `%install` if rpmlint lists them as unpackaged (convention 23).
 - License: read `source/*.dist-info/METADATA`'s `License-Expression` or
@@ -158,15 +144,18 @@ If the service fails, the error is shown to you on the next turn.
 
 ## Checks that every prebuilt-wheel spec passes
 
-- `License:` is `SUSE-NonFree` for NVIDIA's redistributable binaries, joined with
-  `AND` to the open licences of what else is in the wheel; no `LicenseRef-...`
-  spelling (rpmlint: `invalid-license`). Every licence file in the dist-info is a
-  `%license` line.
+- `License:` is `SUSE-NonFree` for redistributable proprietary binaries, joined
+  with `AND` to the open licences of what else is in the wheel; no
+  `LicenseRef-...` spelling (rpmlint: `invalid-license`). Every licence file in
+  the dist-info is a `%license` line (convention 69). Such a package, and any
+  `use_upstream_wheel` output, is not Factory or SLE material: say so in
+  `reasoning`; it is never submitted to OSS projects.
 - Bundled libraries do not leak into dependencies: `%global
   __provides_exclude_from ^%{python_sitearch}/.*$` (`%{python_sitelib}` for a
   purelib wheel), and `%global __requires_exclude` for the sonames only an
-  optional plugin needs (MPI, UCX, fabric) or that another package of the
-  project supplies (then write the explicit `Requires: python-<pkg>`).
+  optional plugin needs or that another package of the project supplies (then
+  write the explicit `Requires: python-<pkg>`); a library that stays bundled
+  gets `Provides: bundled(<name>) = <version>` (convention 91).
 - Console scripts and hashed libraries: the pipeline's skeleton reads the
   wheel. Each `[console_scripts]` entry of its `entry_points.txt` already has
   convention 18's `%python_clone`, `update-alternatives`, `%post`/`%postun` and
@@ -175,13 +164,8 @@ If the service fails, the error is shown to you on the next turn.
   already has `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\.so.*$`. Check
   them, do not duplicate them; rpm honours one `__requires_exclude`, so fold
   another pattern into that line with `|`.
-- NVIDIA driver libraries (`libcuda.so.1`, `libnvidia-ml.so.1`,
-  `libnvidia-ptxjitcompiler`, `libnvcuvid`) come from the host driver and no
-  repository provides them. The skeleton of every compiled wheel already folds
-  the driver regex (`depclass::driver_requires_exclude`) into
-  `%global __requires_exclude`, and the pipeline adds it itself when OBS reports
-  one of them unresolvable (python-flashinfer-python). Never list the driver as
-  a `Requires`, never report it as a missing package, never block on it.
+- NVIDIA/CUDA wheels (driver libraries, `nvidia-*` sonames, headers, split
+  cutlass wheels): load skill nvidia-wheels as well.
 - Delete headers, `*.a` archives, test libraries and other architectures' stubs
   in `%install`; list the remaining files in `%files`.
 - `%check` imports the module when there is one, and a package whose payload other

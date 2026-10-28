@@ -16,6 +16,7 @@
     "./gettext-i18n-packaging",
     "./doc-subpackage",
     "./django-test-settings",
-    "./npm-vendor-packaging"
+    "./npm-vendor-packaging",
+    "./nvidia-wheels"
   ]
 }

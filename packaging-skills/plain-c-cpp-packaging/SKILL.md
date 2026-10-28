@@ -280,9 +280,5 @@ recipe first in the turn; apply it instead of returning `blocked`.
 - A CMake licence guard (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION`,
   python-torchcodec): a fact to check, convention 78; never the S3 download
   option, never `blocked`.
-- `No module named 'cutlass.cute'` behind the split `nvidia-cutlass-dsl-libs-*`
-  wheels: the siblings must share one `%{python_sitelib}` tree (see the
-  prebuilt-wheel skill); do not hide it with `PYTHONPATH`.
-- `%check` of a CUDA wheel that fails at import for want of a device
-  (`cannot import name 'ir' from _mlir`): check the installed files, not an
-  import (convention 67).
+- CUDA/NVIDIA failures (split `nvidia-cutlass-dsl-libs-*` wheels, a CUDA
+  wheel that cannot import without a device): skill nvidia-wheels.
