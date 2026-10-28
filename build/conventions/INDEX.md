@@ -18,7 +18,7 @@
 18. Console scripts and python_alternative — read when the package declares scripts/entry points or %files lists /usr/bin
 19. Single % in RPM macros, never %% — read when a spec line shows %% or an rpmspec macro-parse error
 20. Only documented Python macros — read when about to use a python macro you have not seen in the spec or a skill
-21. One simple constraint per BuildRequires, not PEP 508 — read when copying a requirement with extras, markers or commas
+21. One simple constraint per BuildRequires, not PEP 508 — read when copying a requirement with extras, markers, commas, ~= or !=
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
 23. Stray top-level files in site-packages — read when %files or rpmlint shows tests/docs/setup files at site-packages root
 24. Bundled headers in a non-devel package (devel-file-in-non-devel-package) — read when rpmlint reports that error
@@ -70,9 +70,9 @@
 70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
 71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
 72. rpmlintrc filters only for reported warnings — read when adding addFilter lines or "unused-rpmlintrc-filter" appears
-73. Unsatisfiable bounds, build sibling packages first — read when upstream pins its own sibling with == / >= newer than ours
+73. Unsatisfiable bounds (Python or C/C++), siblings first — read when a ==, <, >= bound may exceed what the distro or project has
 74. Write the changelog line (reasoning sentence) for a reader — read before writing the reasoning of any edit
-75. Keep upstream bounds, say when relaxed — read when about to drop or loosen a version bound in Requires/BuildRequires
+75. Version bounds: keep minimums, upper/== only when satisfied, comment when dropped — read when writing a <, <=, == or >= bound in Requires/BuildRequires
 76. Files of one Python package come from one tree — read when several wheels fill one package, ModuleNotFoundError on a sibling part
 77. Reproducible Source: URLs with #/file fragment — read when adding or editing a Source: for a wheel or GitHub archive
 78. Upstream licence guards (e.g. I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION) — read when a build refuses over a licence variable
