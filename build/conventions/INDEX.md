@@ -18,7 +18,7 @@
 18. Console scripts and python_alternative — read when the package declares scripts/entry points or %files lists /usr/bin
 19. Single % in RPM macros, never %% — read when a spec line shows %% or an rpmspec macro-parse error
 20. Only documented Python macros — read when about to use a python macro you have not seen in the spec or a skill
-21. One simple constraint per BuildRequires, not PEP 508 — read when copying a requirement with extras, markers, commas, ~= or !=
+21. Merged into convention 1 — read convention 1 when copying a requirement with extras, markers, commas, ~= or !=
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
 23. Stray top-level files in site-packages — read when %files or rpmlint shows tests/docs/setup files at site-packages root
 24. Headers: own headers to -devel, vendored ones deleted — read when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
