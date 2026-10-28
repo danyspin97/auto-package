@@ -155,6 +155,7 @@ dependencies = [
  "bzip2",
  "flate2",
  "hex",
+ "libc",
  "lzma-rust2",
  "pep440_rs",
  "serde",

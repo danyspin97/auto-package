@@ -196,12 +196,31 @@ pub enum Error {
 
     #[error("pyproject.toml is not valid TOML: {0}")]
     Toml(#[from] toml::de::Error),
+
+    /// The disk cannot take the extraction (see [`crate::space`]).
+    #[error("{0}")]
+    NoSpace(#[from] crate::space::NotEnoughSpace),
+}
+
+impl Error {
+    /// Whether the failure is a full disk, from our own check or from the OS.
+    pub fn is_disk_full(&self) -> bool {
+        match self {
+            Error::NoSpace(_) => true,
+            Error::Io { source, .. } | Error::Tar(source) => {
+                source.kind() == std::io::ErrorKind::StorageFull
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Extraction caps: a hostile or corrupt archive must not exhaust the disk
 /// or the inode table. Generous enough for any real sdist or CUDA wheel.
 const MAX_ENTRIES: usize = 200_000;
-const MAX_TOTAL_BYTES: u64 = 4 << 30;
+/// Default cap on the bytes one extraction may write; `AUTO_PACKAGE_MAX_EXTRACT_GB`
+/// (a positive number, fractions allowed) overrides it. See [`max_total_bytes`].
+const MAX_TOTAL_BYTES: u64 = 2 << 30;
 const MAX_FILE_BYTES: u64 = 2 << 30;
 /// Cap on a manifest read during inspection.
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
