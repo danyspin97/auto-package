@@ -83,4 +83,6 @@
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
 84. CUDA at build time: nvcc, CUDA headers or libraries, dlopen of CUDA — read when the build or its sources mention CUDA, cuda.h, nvcc or libcudart
 85. Dynamic Requires for ctypes/dlopen wrappers, cffi pin, ExclusiveArch propagation, ninja — read when a package dlopens a system .so, uses cffi, requires an arch-limited package or lists ninja
-86. [inline] Carried-forward recipe: change only what the release forces; follow upstream SONAME; no fake stand-ins; quote version bounds; header-only is one noarch devel
+86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
+87. Flaky tests: pytest-rerunfailures or a named deselect — read when the prompt lists flaky tests or a %check failure differs between two builds
+88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
