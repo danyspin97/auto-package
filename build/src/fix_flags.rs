@@ -206,28 +206,40 @@ fn commands(lines: &[&str], name: &str) -> usize {
     let Some((start, end)) = section_span(lines, name) else {
         return 0;
     };
-    // One entry per open `%if`: whether it is `0`/`false`, and whether the
-    // `%else` branch is being read.
-    let mut open: Vec<(bool, bool)> = Vec::new();
+    // One entry per open conditional. `dead`: the branch being read is known
+    // not to run (its condition is `0`/`false`, or an earlier branch is known
+    // to run). `done`: an earlier branch is known to run, so the later
+    // `%elif`/`%else` branches do not. A condition that is neither is read as
+    // live, as before.
+    let mut open: Vec<Branch> = Vec::new();
     let mut live = 0;
     for line in &lines[start..end] {
         let t = line.trim();
         let word = t.split_whitespace().next().unwrap_or("");
+        let cond = t.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+        let zero = matches!(cond.as_str(), "0" | "false");
+        let known_true = matches!(cond.as_str(), "1" | "true");
         match word {
-            "%if" | "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => {
-                let cond = t.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
-                open.push((matches!(cond.as_str(), "0" | "false"), false));
+            "%if" | "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => open.push(Branch {
+                dead: zero,
+                done: known_true,
+            }),
+            "%elif" | "%elifarch" | "%elifnarch" | "%elifos" | "%elifnos" => {
+                if let Some(top) = open.last_mut() {
+                    top.dead = top.done || zero;
+                    top.done |= known_true;
+                }
             }
             "%else" => {
                 if let Some(top) = open.last_mut() {
-                    top.1 = true;
+                    top.dead = top.done;
                 }
             }
             "%endif" => {
                 open.pop();
             }
             _ => {
-                let dead = open.iter().any(|(zero, in_else)| *zero && !in_else);
+                let dead = open.iter().any(|b| b.dead);
                 let runs =
                     !t.is_empty() && !t.starts_with('#') && t != "%{nil}" && t != ":" && !masked(t);
                 if runs && !dead {
@@ -237,6 +249,12 @@ fn commands(lines: &[&str], name: &str) -> usize {
         }
     }
     live
+}
+
+/// One open conditional of [`commands`] (see there).
+struct Branch {
+    dead: bool,
+    done: bool,
 }
 
 /// A command whose failure is ignored: `... || true`, `|| :`, `|| exit 0`.
@@ -555,6 +573,21 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn commands_follow_elif_and_else_chains() {
+        let count = |body: &str| {
+            let spec = format!("%check\n{body}%files\n");
+            let lines: Vec<&str> = spec.lines().collect();
+            commands(&lines, "%check")
+        };
+        // The `%elif 1` branch runs; the `%if 0` one does not.
+        assert_eq!(count("%if 0\n%pytest\n%elif 1\npytest\n%endif\n"), 1);
+        // The `%if 1` branch runs, so the `%elif` and `%else` ones do not.
+        assert_eq!(count("%if 1\npytest\n%elif 0\nx\n%else\ny\n%endif\n"), 1);
+        // An unknown `%elif` may run, and so may the `%else`.
+        assert_eq!(count("%if 0\na\n%elif foo\nb\n%else\nc\n%endif\n"), 2);
     }
 
     const BASE: &str = "Name: python-foo\nVersion: 1.0\nSource0: foo-1.0.tar.gz\n\
