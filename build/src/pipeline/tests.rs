@@ -112,10 +112,18 @@ fn the_packages_own_version_is_left_to_the_update_entry() {
 }
 
 #[test]
-fn changes_message_is_the_first_sentence_on_one_line() {
+fn changes_message_keeps_one_bullet_per_line() {
     assert_eq!(
-        changes_message("Relax the numpy bound.\nIt broke the build. More text."),
-        "Relax the numpy bound"
+        changes_message("Relax the numpy bound.\nDrop the old pin. More text."),
+        "Relax the numpy bound\nDrop the old pin"
+    );
+    assert_eq!(
+        changes_message("- Add a.patch to fix x\n- Drop y"),
+        "Add a.patch to fix x\nDrop y"
+    );
+    assert_eq!(
+        changes_message("The build log showed it"),
+        "Fix the packaging"
     );
     assert_eq!(changes_message("   "), "Update the packaging");
     assert!(!changes_message(&"word ".repeat(100)).ends_with("..."));

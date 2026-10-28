@@ -10602,6 +10602,17 @@ fn apply_turn_outcome_with(
                         message: format!("{rpm_name}: dropped the empty '{name}'"),
                     });
                 }
+                // One bullet per changelog line; the reasoning is prose, so only
+                // its first sentence becomes the bullet.
+                let source = if outcome.changelog.trim().is_empty() {
+                    outcome
+                        .reasoning
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    outcome.changelog.clone()
+                };
                 warn_if_err(
                     reporter,
                     "adding the .changes entry for the agent's edit",
@@ -10610,19 +10621,7 @@ fn apply_turn_outcome_with(
                         &config.version,
                         &without_own_version(
                             &without_macros(
-                                &{
-                                    let m =
-                                        changes_message(if outcome.changelog.trim().is_empty() {
-                                            &outcome.reasoning
-                                        } else {
-                                            &outcome.changelog
-                                        });
-                                    if is_narration(&m) {
-                                        "Fix the packaging".to_string()
-                                    } else {
-                                        m
-                                    }
-                                },
+                                &changes_message(&source),
                                 &config.pkg_name,
                                 &config.version,
                             ),
@@ -11470,9 +11469,34 @@ fn licence_guard_facts(
     })
 }
 
-/// The one-line `.changes` bullet for an agent turn: the first sentence of its
-/// `reasoning`, on a single line and not longer than a changelog line should be.
-fn changes_message(reasoning: &str) -> String {
+/// The `.changes` bullets for an agent turn: one bullet per line of `text` (the
+/// changelog field, or the reasoning flattened to one line), each on a single
+/// line of at most 120 characters. A line that only narrates becomes the
+/// generic bullet.
+fn changes_message(text: &str) -> String {
+    let bullets: Vec<String> = text
+        .lines()
+        .map(|l| l.trim().trim_start_matches(['-', '*']).trim())
+        .map(change_bullet)
+        .filter(|b| !b.is_empty())
+        .map(|b| {
+            if is_narration(&b) {
+                "Fix the packaging".to_string()
+            } else {
+                b
+            }
+        })
+        .collect();
+    if bullets.is_empty() {
+        "Update the packaging".to_string()
+    } else {
+        bullets.join("\n")
+    }
+}
+
+/// One bullet from one line: its first sentence, on one line, cut to 120
+/// characters. Empty when the line has no words.
+fn change_bullet(reasoning: &str) -> String {
     let flat = reasoning.split_whitespace().collect::<Vec<_>>().join(" ");
     let first = flat
         .split_once(". ")
@@ -11484,7 +11508,7 @@ fn changes_message(reasoning: &str) -> String {
     let first = without_file_list(&first);
     // A changelog line is read at a glance: past 120 characters it is cut at a
     // clause boundary (or at a word when there is none), with no ellipsis.
-    let mut line: String = if first.chars().count() > 120 {
+    let line: String = if first.chars().count() > 120 {
         let cut: String = first.chars().take(120).collect();
         // Boundary candidates must leave a meaningful head.
         let clause = [", ", "; ", ": ", " - ", " — ", " ("]
@@ -11501,9 +11525,6 @@ fn changes_message(reasoning: &str) -> String {
     } else {
         first.to_string()
     };
-    if line.is_empty() {
-        line = "Update the packaging".to_string();
-    }
     line
 }
 

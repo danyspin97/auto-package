@@ -2863,6 +2863,20 @@ pub fn add_release_changes_entry(
     message: &str,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
+    // One bullet per line of `message`: each is folded into the entry in turn.
+    for bullet in message.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        add_release_bullet(checkout_dir, version, bullet, emit)?;
+    }
+    Ok(())
+}
+
+/// One bullet of [`add_release_changes_entry`].
+fn add_release_bullet(
+    checkout_dir: &Path,
+    version: &str,
+    message: &str,
+    emit: Emit<'_>,
+) -> Result<(), Error> {
     if let Ok(rd) = fs::read_dir(checkout_dir) {
         let mut files: Vec<PathBuf> = rd
             .flatten()
