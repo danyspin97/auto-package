@@ -736,104 +736,21 @@ pub(crate) fn cmd_build(
                 retry_group.push(dep);
             }
 
-            for (dep_rpm, _version, handle, dep) in handles {
-                let result = join_package(handle, &dep_rpm);
-                // Aborted run: the results are not outcomes of the packages.
-                if ap_build::proc::abort_reason().is_some() {
-                    continue;
-                }
-                let key = ap_build::osc::fuzzy_key(&dep);
-                match result {
-                    PipelineResult::Built { .. } => {
-                        ap_core::diag!("built dep {dep_rpm}");
-                        dep_drops.note_outcome(
-                            &dep_rpm,
-                            "it was built this run, yet the package that needs it still \
-                             reports it missing (a name mismatch?)",
-                        );
-                    }
-                    PipelineResult::AlreadyBuilt { .. } => {
-                        ap_core::diag!("dep {dep_rpm} already built");
-                        dep_drops.note_outcome(
-                            &dep_rpm,
-                            "it was already built, yet the package that needs it still \
-                             reports it missing (a name mismatch?)",
-                        );
-                    }
-                    PipelineResult::MissingDeps {
-                        deps: more,
-                        patches,
-                        native,
-                        outdated,
-                        ..
-                    } => {
-                        patch_requests.record(&patches);
-                        native_names.record(&native);
-                        outdated_names.record(&outdated);
-                        dep_drops.note_outcome(
-                            &dep_rpm,
-                            format!("it could not be built until {} exist", more.join(", ")),
-                        );
-                        // It needs packages of its own: once those have had
-                        // their batch it is run again, instead of staying
-                        // "attempted" while the package waiting on it is
-                        // abandoned. Bounded like any other retry.
-                        let rounds = dep_rounds.entry(key.clone()).or_insert(0);
-                        *rounds += 1;
-                        if !more.is_empty() && *rounds < max_dep_attempts {
-                            attempted_deps.remove(&key);
-                            retrying.insert(key);
-                            retry_group.push(dep);
-                        }
-                        pending_deps.extend(more);
-                    }
-                    PipelineResult::Failed { reason, kind, .. } => {
-                        // A dependency OBS or the pipeline failed is run
-                        // again through the normal pipeline when the package
-                        // needing it names it once more, rather than counted
-                        // as attempted and dropped after one go — unless it
-                        // used up its allowance, which a second round would
-                        // only repeat. Rounds are bounded and an attempt
-                        // within a round resumes the package's persisted
-                        // attempt count.
-                        let rounds = dep_rounds.entry(key.clone()).or_insert(0);
-                        *rounds += 1;
-                        let retry = dep_failure_retries(kind, *rounds, max_dep_attempts);
-                        if retry {
-                            attempted_deps.remove(&key);
-                            retrying.insert(key);
-                            // Run again once the rest of this batch has had its
-                            // turn, whether or not a dependent names it again:
-                            // the dependent may have given up on seeing it failed.
-                            retry_group.push(dep.clone());
-                        }
-                        dep_drops.note_outcome(
-                            &dep_rpm,
-                            format!(
-                                "its build failed ({reason}){}",
-                                if retry {
-                                    "; it is tried once more if it is still needed"
-                                } else {
-                                    ""
-                                }
-                            ),
-                        );
-                        pkg_reporter(&dep_rpm).report(&Event::Warning {
-                            step: None,
-                            message: format!(
-                                "dependency {dep_rpm} failed to build ({reason}); \
-                                 retrying the package that needs it"
-                            ),
-                        });
-                        // Record it so the dependent package's agent can see
-                        // that this one was attempted — without that evidence
-                        // it can only report the dep again and stall.
-                        if !config.failed_deps.contains(&dep_rpm) {
-                            config.failed_deps.push(dep_rpm);
-                        }
-                    }
-                }
+            DepLedger {
+                attempted_deps: &mut attempted_deps,
+                dep_rounds: &mut dep_rounds,
+                retrying: &mut retrying,
+                pending_deps: &mut pending_deps,
+                retry_group: &mut retry_group,
+                config: &mut config,
+                patch_requests: &patch_requests,
+                native_names: &native_names,
+                outdated_names: &outdated_names,
+                dep_drops: &dep_drops,
+                pkg_reporter: &pkg_reporter,
+                max_dep_attempts,
             }
+            .record(handles);
             if ap_build::proc::abort_reason().is_some() {
                 return Err(color_eyre::eyre::eyre!("run aborted"));
             }
@@ -1641,5 +1558,132 @@ impl DepSpawner<'_> {
             result
         });
         Some((dep_rpm, dep_version, handle, dep))
+    }
+}
+
+/// What a round of dependency builds leaves for the rest of the run.
+struct DepLedger<'a> {
+    attempted_deps: &'a mut std::collections::HashSet<String>,
+    dep_rounds: &'a mut std::collections::HashMap<String, usize>,
+    retrying: &'a mut std::collections::HashSet<String>,
+    pending_deps: &'a mut Vec<String>,
+    retry_group: &'a mut Vec<String>,
+    config: &'a mut PipelineConfig,
+    patch_requests: &'a PatchRequests,
+    native_names: &'a NativeNames,
+    outdated_names: &'a OutdatedNames,
+    dep_drops: &'a DepDrops,
+    pkg_reporter: &'a dyn Fn(&str) -> Arc<dyn Reporter + Send + Sync>,
+    max_dep_attempts: usize,
+}
+
+type DepHandle = (
+    String,
+    String,
+    std::thread::JoinHandle<PipelineResult>,
+    String,
+);
+
+impl DepLedger<'_> {
+    /// Record how each dependency build in `handles` ended.
+    fn record(&mut self, handles: Vec<DepHandle>) {
+        for (dep_rpm, _version, handle, dep) in handles {
+            let result = join_package(handle, &dep_rpm);
+            // Aborted run: the results are not outcomes of the packages.
+            if ap_build::proc::abort_reason().is_some() {
+                continue;
+            }
+            let key = ap_build::osc::fuzzy_key(&dep);
+            match result {
+                PipelineResult::Built { .. } => {
+                    ap_core::diag!("built dep {dep_rpm}");
+                    self.dep_drops.note_outcome(
+                        &dep_rpm,
+                        "it was built this run, yet the package that needs it still \
+                         reports it missing (a name mismatch?)",
+                    );
+                }
+                PipelineResult::AlreadyBuilt { .. } => {
+                    ap_core::diag!("dep {dep_rpm} already built");
+                    self.dep_drops.note_outcome(
+                        &dep_rpm,
+                        "it was already built, yet the package that needs it still \
+                         reports it missing (a name mismatch?)",
+                    );
+                }
+                PipelineResult::MissingDeps {
+                    deps: more,
+                    patches,
+                    native,
+                    outdated,
+                    ..
+                } => {
+                    self.patch_requests.record(&patches);
+                    self.native_names.record(&native);
+                    self.outdated_names.record(&outdated);
+                    self.dep_drops.note_outcome(
+                        &dep_rpm,
+                        format!("it could not be built until {} exist", more.join(", ")),
+                    );
+                    // It needs packages of its own: once those have had
+                    // their batch it is run again, instead of staying
+                    // "attempted" while the package waiting on it is
+                    // abandoned. Bounded like any other retry.
+                    let rounds = self.dep_rounds.entry(key.clone()).or_insert(0);
+                    *rounds += 1;
+                    if !more.is_empty() && *rounds < self.max_dep_attempts {
+                        self.attempted_deps.remove(&key);
+                        self.retrying.insert(key);
+                        self.retry_group.push(dep);
+                    }
+                    self.pending_deps.extend(more);
+                }
+                PipelineResult::Failed { reason, kind, .. } => {
+                    // A dependency OBS or the pipeline failed is run
+                    // again through the normal pipeline when the package
+                    // needing it names it once more, rather than counted
+                    // as attempted and dropped after one go — unless it
+                    // used up its allowance, which a second round would
+                    // only repeat. Rounds are bounded and an attempt
+                    // within a round resumes the package's persisted
+                    // attempt count.
+                    let rounds = self.dep_rounds.entry(key.clone()).or_insert(0);
+                    *rounds += 1;
+                    let retry = dep_failure_retries(kind, *rounds, self.max_dep_attempts);
+                    if retry {
+                        self.attempted_deps.remove(&key);
+                        self.retrying.insert(key);
+                        // Run again once the rest of this batch has had its
+                        // turn, whether or not a dependent names it again:
+                        // the dependent may have given up on seeing it failed.
+                        self.retry_group.push(dep.clone());
+                    }
+                    self.dep_drops.note_outcome(
+                        &dep_rpm,
+                        format!(
+                            "its build failed ({reason}){}",
+                            if retry {
+                                "; it is tried once more if it is still needed"
+                            } else {
+                                ""
+                            }
+                        ),
+                    );
+                    (self.pkg_reporter)(&dep_rpm).report(&Event::Warning {
+                        step: None,
+                        message: format!(
+                            "dependency {dep_rpm} failed to build ({reason}); \
+                             self.retrying the package that needs it"
+                        ),
+                    });
+                    // Record it so the dependent package's agent can see
+                    // that this one was attempted — without that evidence
+                    // it can only report the dep again and stall.
+                    if !self.config.failed_deps.contains(&dep_rpm) {
+                        self.config.failed_deps.push(dep_rpm);
+                    }
+                }
+            }
+        }
     }
 }
