@@ -30,7 +30,7 @@
 30. Merged into convention 22 — read convention 22 when the prompt lists several "Other projects in this archive"
 31. rpmlint compliance (summary length, description line length, manpage) — read when rpmlint warns on Summary, description or binaries
 32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
-33. Plain C/C++ packages (CMake/autotools, Skill plain-c-cpp-packaging) — read when the package has no Python and no Cargo
+33. Merged into convention 32 — read convention 32 when the package has no Python and no Cargo
 34. Optional extras are Recommends, not BuildRequires — read when pyproject lists optional-dependencies you consider adding
 35. Systemd service files and system users — read when the package ships a daemon, a .service unit or needs /run dirs
 36. gettext .mo translations (%find_lang) — read when the package installs locale/ .mo files or rpmlint reports them
@@ -46,7 +46,7 @@
 46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
 47. Merged into convention 3 — read convention 3 when a distutils/setuptools Extension ignores distro flags
 48. Merged into convention 10 — read convention 10 when %check fails with no missing package
-49. Per-CPython upstream wheels covering our flavors — read when the source cannot be built and wheels exist per cp3NN
+49. Merged into convention 32 — read convention 32 when the source cannot be built and wheels exist per cp3NN
 50. OOM / disk-full failures are sizing, not spec bugs — read when the build is killed or says "No space left on device"
 51. Merged into convention 6 — read convention 6 when build-backend is mesonpy or scikit_build_core
 52. Merged into convention 2 — read convention 2 when the package is a fork or rename of another PyPI project
@@ -81,7 +81,7 @@
 81. Merged into convention 10 — read convention 10 when tests may need network, GPU, redis, models or repo files
 82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
-84. CUDA at build time: use the upstream wheel; NVIDIA output is not Factory/SLE material — read when the build or sources mention CUDA, cuda.h, nvcc or libcudart
+84. Merged into convention 32 — read convention 32 when the build or sources mention CUDA, cuda.h, nvcc or libcudart
 85. dlopen Requires, cffi minimum, ExclusiveArch propagation, ninja — read when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
 86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
 87. Merged into convention 7 — read convention 7 when the prompt lists flaky tests or a %check failure differs between two builds
