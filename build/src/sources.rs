@@ -796,8 +796,8 @@ fn try_gh_api(url: &str) -> Option<Result<String, String>> {
     Some(Ok(out.stdout))
 }
 
-/// Fall-back auth for raw HTTP: a bearer token for GitHub, a PRIVATE-
-/// TOKEN header for GitLab. Only used when `gh`/`glab` aren't on PATH or
+/// Fall-back auth for raw HTTP: a bearer token for GitHub, a PRIVATE-TOKEN
+/// (or JOB-TOKEN) header for GitLab. Only used when `gh`/`glab` aren't on PATH or
 /// the URL isn't one those CLIs can talk to.
 fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
     // Decide on the parsed HOST, never a substring: `https://evil.com/api.github.com/x`
@@ -820,29 +820,122 @@ fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
             .to_ascii_lowercase()
     });
     if host == "gitlab.com" || self_hosted.as_deref() == Some(host.as_str()) {
-        return first_set(&["GITLAB_TOKEN", "CI_JOB_TOKEN"]).map(|tok| ("PRIVATE-TOKEN", tok));
+        return gitlab_auth(|v| first_set(&[v]));
     }
     None
 }
 
-/// Translate a bare `url: <ureq Error>` string into a message that names
-/// the specific failure modes a forge API call usually hits.
+/// `GITLAB_TOKEN` is a personal/project token (`PRIVATE-TOKEN`); `CI_JOB_TOKEN`
+/// is a job token and GitLab only accepts it in `JOB-TOKEN`.
+fn gitlab_auth(var: impl Fn(&str) -> Option<String>) -> Option<(&'static str, String)> {
+    var("GITLAB_TOKEN")
+        .map(|tok| ("PRIVATE-TOKEN", tok))
+        .or_else(|| var("CI_JOB_TOKEN").map(|tok| ("JOB-TOKEN", tok)))
+}
+
+/// Why a request to a forge API failed, from the status and headers of the
+/// answer rather than from the text of an error message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgeError {
+    /// 404.
+    NotFound,
+    /// 401: the credential sent was rejected.
+    Unauthorized,
+    /// 429, or 403 with the quota used up (`x-ratelimit-remaining: 0`).
+    RateLimited {
+        status: u16,
+        /// The wait the server asked for, in seconds, when it said.
+        retry_after: Option<u64>,
+    },
+    /// Any other error status.
+    Status(u16),
+    /// No usable answer: connection, timeout, body, redirect or local failure.
+    Transport(String),
+}
+
+impl ForgeError {
+    /// From the final error answer of a retried call.
+    fn from_status_failure(f: &ap_ecosystem::net::StatusFailure) -> Self {
+        if f.is_rate_limit() {
+            return ForgeError::RateLimited {
+                status: f.status,
+                retry_after: f.headers.retry_after,
+            };
+        }
+        Self::from_status(f.status)
+    }
+
+    fn from_status(status: u16) -> Self {
+        match status {
+            404 => ForgeError::NotFound,
+            401 => ForgeError::Unauthorized,
+            429 => ForgeError::RateLimited {
+                status,
+                retry_after: None,
+            },
+            s => ForgeError::Status(s),
+        }
+    }
+
+    fn from_call_failure(f: &ap_ecosystem::net::CallFailure) -> Self {
+        match f {
+            ap_ecosystem::net::CallFailure::Status(s) => Self::from_status_failure(s),
+            ap_ecosystem::net::CallFailure::Transport(e) => Self::from_ureq(e),
+        }
+    }
+
+    fn from_ureq(e: &ureq::Error) -> Self {
+        match e {
+            ureq::Error::StatusCode(s) => Self::from_status(*s),
+            other => ForgeError::Transport(other.to_string()),
+        }
+    }
+
+    /// 403 and 429 both mean "refused for now" to the user, whether or not the
+    /// answer said the quota was spent.
+    fn is_refusal(&self) -> bool {
+        matches!(
+            self,
+            ForgeError::RateLimited { .. } | ForgeError::Status(403)
+        )
+    }
+}
+
+impl std::fmt::Display for ForgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ForgeError::NotFound => write!(f, "http status: 404"),
+            ForgeError::Unauthorized => write!(f, "http status: 401"),
+            ForgeError::RateLimited {
+                status,
+                retry_after: Some(s),
+            } => write!(f, "http status: {status} (retry after {s}s)"),
+            ForgeError::RateLimited { status, .. } => write!(f, "http status: {status}"),
+            ForgeError::Status(s) => write!(f, "http status: {s}"),
+            ForgeError::Transport(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Translate a forge API failure into a message that names the specific
+/// failure modes a forge API call usually hits.
 ///
 /// Only reached on the raw-HTTP fall-back path — `gh` is strongly
 /// preferred for GitHub and has its own friendlier errors (see
 /// [`try_gh_api`]).
-fn describe_forge_http_error(url: &str, raw: &str) -> String {
+fn describe_forge_http_error(url: &str, err: &ForgeError) -> String {
     let authed = forge_auth_header(url).is_some();
-    if raw.contains("status: 403") || raw.contains("status: 429") {
+    let github = crate::http::host_of(url).as_deref() == Some("api.github.com");
+    if err.is_refusal() {
         if authed {
             format!(
-                "{url}: {raw} (your GITHUB_TOKEN/GITLAB_TOKEN is being \
+                "{url}: {err} (your GITHUB_TOKEN/GITLAB_TOKEN is being \
                  rate-limited — wait or rotate to a token with a higher \
                  quota)"
             )
-        } else if url.contains("api.github.com") {
+        } else if github {
             format!(
-                "{url}: {raw} (GitHub unauthenticated REST is 60 req/hour \
+                "{url}: {err} (GitHub unauthenticated REST is 60 req/hour \
                  per IP; install the `gh` CLI and run `gh auth login` so \
                  this process can use its auth automatically, or set \
                  GITHUB_TOKEN/GH_TOKEN, or pass --version to skip the \
@@ -850,19 +943,19 @@ fn describe_forge_http_error(url: &str, raw: &str) -> String {
             )
         } else {
             format!(
-                "{url}: {raw} (rate-limited; set GITLAB_TOKEN for \
+                "{url}: {err} (rate-limited; set GITLAB_TOKEN for \
                  authenticated access, or pass --version to skip the API \
                  call)"
             )
         }
-    } else if raw.contains("status: 401") {
+    } else if *err == ForgeError::Unauthorized {
         format!(
-            "{url}: {raw} (the authentication token this process has for \
+            "{url}: {err} (the authentication token this process has for \
              the forge was rejected — rotate it, or unset it to retry \
              unauthenticated)"
         )
     } else {
-        format!("{url}: {raw}")
+        format!("{url}: {err}")
     }
 }
 
@@ -899,7 +992,7 @@ fn http_get_text(url: &str) -> Result<String, String> {
         } else {
             None
         };
-        let resp = ap_ecosystem::net::call_with_retries(|| {
+        let resp = ap_ecosystem::net::call_with_retries_detailed(|| {
             let mut req = agent
                 .get(&current)
                 .header("User-Agent", "auto-package")
@@ -909,7 +1002,7 @@ fn http_get_text(url: &str) -> Result<String, String> {
             }
             req
         })
-        .map_err(|e| describe_forge_http_error(url, &e.to_string()))?;
+        .map_err(|e| describe_forge_http_error(url, &ForgeError::from_call_failure(&e)))?;
         let status = resp.status().as_u16();
         if (300..400).contains(&status)
             && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
@@ -920,7 +1013,7 @@ fn http_get_text(url: &str) -> Result<String, String> {
         if status >= 400 {
             return Err(describe_forge_http_error(
                 url,
-                &format!("http status: {status}"),
+                &ForgeError::from_status(status),
             ));
         }
         return crate::http::read_text(resp).map_err(|e| format!("{url}: {e}"));
@@ -1138,29 +1231,14 @@ pub fn parse_index_links(html: &str) -> Vec<String> {
     out
 }
 
-/// Component-wise version comparison: numeric parts compare as numbers
-/// (`1.10 > 1.9`), anything else lexically. A shorter version that is a
-/// prefix of a longer one sorts first.
+/// See [`crate::version::sort_cmp`].
 pub(crate) fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let split = |v: &str| -> Vec<String> { v.split(['.', '-', '_']).map(str::to_string).collect() };
-    let (pa, pb) = (split(a), split(b));
-    for (x, y) in pa.iter().zip(&pb) {
-        let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
-            (Ok(nx), Ok(ny)) => nx.cmp(&ny),
-            _ => x.cmp(y),
-        };
-        if ord != std::cmp::Ordering::Equal {
-            return ord;
-        }
-    }
-    pa.len().cmp(&pb.len())
+    crate::version::sort_cmp(a, b)
 }
 
+/// See [`crate::version::is_prerelease`].
 pub(crate) fn is_prerelease(version: &str) -> bool {
-    let v = version.to_ascii_lowercase();
-    ["rc", "alpha", "beta", "pre", "dev", "snapshot", "git"]
-        .iter()
-        .any(|m| v.contains(m))
+    crate::version::is_prerelease(version)
 }
 
 /// The release a version split off an archive name stands for: a trailing
@@ -1945,7 +2023,7 @@ mod tests {
 
         let msg = describe_forge_http_error(
             "https://api.github.com/repos/drogonframework/drogon/tags?per_page=1",
-            "http status: 403",
+            &ForgeError::Status(403),
         );
 
         // Restore before any assertion that might panic.
@@ -1978,7 +2056,7 @@ mod tests {
 
         let msg = describe_forge_http_error(
             "https://api.github.com/repos/x/y/releases/latest",
-            "http status: 403",
+            &ForgeError::Status(403),
         );
 
         unsafe {
@@ -1998,12 +2076,192 @@ mod tests {
     fn describe_forge_error_leaves_non_auth_errors_alone() {
         let msg = describe_forge_http_error(
             "https://api.github.com/repos/x/y/tags?per_page=1",
-            "http status: 500",
+            &ForgeError::Status(500),
         );
         assert!(
             msg.contains("500") && !msg.contains("GITHUB_TOKEN"),
             "non-auth errors stay a raw passthrough; got {msg:?}"
         );
+    }
+
+    #[test]
+    fn forge_errors_are_typed_from_the_status_and_headers() {
+        use ap_ecosystem::net::{ReplyHeaders, StatusFailure};
+        let fail = |status, remaining, retry_after| StatusFailure {
+            status,
+            headers: ReplyHeaders {
+                retry_after,
+                remaining,
+                reset: None,
+            },
+        };
+        assert_eq!(
+            ForgeError::from_status_failure(&fail(429, None, Some(30))),
+            ForgeError::RateLimited {
+                status: 429,
+                retry_after: Some(30)
+            }
+        );
+        assert_eq!(
+            ForgeError::from_status_failure(&fail(403, Some(0), None)),
+            ForgeError::RateLimited {
+                status: 403,
+                retry_after: None
+            }
+        );
+        assert_eq!(
+            ForgeError::from_status_failure(&fail(403, Some(7), None)),
+            ForgeError::Status(403)
+        );
+        assert_eq!(ForgeError::from_status(404), ForgeError::NotFound);
+        assert_eq!(ForgeError::from_status(401), ForgeError::Unauthorized);
+        assert_eq!(
+            ForgeError::from_ureq(&ureq::Error::StatusCode(502)),
+            ForgeError::Status(502)
+        );
+        assert!(matches!(
+            ForgeError::from_ureq(&ureq::Error::HostNotFound),
+            ForgeError::Transport(_)
+        ));
+    }
+
+    #[test]
+    fn a_transport_message_that_mentions_a_status_is_not_a_rate_limit() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let msg = describe_forge_http_error(
+            "https://gitlab.com/api/v4/projects/x",
+            &ForgeError::Transport("proxy said status: 403".into()),
+        );
+        assert!(!msg.contains("rate-limited"), "{msg}");
+    }
+
+    #[test]
+    fn github_is_decided_by_the_host_not_a_substring() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = (
+            std::env::var("GH_TOKEN").ok(),
+            std::env::var("GITHUB_TOKEN").ok(),
+        );
+        // SAFETY: serialised by ENV_LOCK; restored below.
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+        let limited = ForgeError::RateLimited {
+            status: 429,
+            retry_after: Some(5),
+        };
+        let real = describe_forge_http_error("https://api.github.com/repos/x/y", &limited);
+        let fake = describe_forge_http_error("https://evil.example/api.github.com/x", &limited);
+        unsafe {
+            if let Some(v) = saved.0 {
+                std::env::set_var("GH_TOKEN", v);
+            }
+            if let Some(v) = saved.1 {
+                std::env::set_var("GITHUB_TOKEN", v);
+            }
+        }
+        assert!(
+            real.contains("60 req/hour") && real.contains("retry after 5s"),
+            "{real}"
+        );
+        assert!(!fake.contains("60 req/hour"), "{fake}");
+    }
+
+    #[test]
+    fn a_path_handed_out_survives_the_handover_to_a_destination() {
+        // A thread holds the probe's copy while another takes it for the
+        // checkout: the first path must still be readable afterwards.
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("cached.tar.gz");
+        std::fs::write(&cached, b"archive").unwrap();
+        let url = "https://example.invalid/zz-lease-1.0.tar.gz";
+        let lease = ArchiveFile::new(cached.clone());
+        archive_cache()
+            .lock()
+            .unwrap()
+            .files
+            .insert(url.to_string(), Arc::clone(&lease));
+        let held = fetch_archive(url).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (b2, dest) = (barrier.clone(), dir.path().join("out.tar.gz"));
+        let t = std::thread::spawn({
+            let dest = dest.clone();
+            move || {
+                b2.wait();
+                fetch_archive_to(url, &dest).unwrap();
+                b2.wait();
+            }
+        });
+        barrier.wait();
+        barrier.wait();
+        t.join().unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"archive");
+        assert_eq!(std::fs::read(&*held).unwrap(), b"archive");
+        // Nobody can fetch it from the cache any more, and the entry is gone.
+        assert!(!archive_cache().lock().unwrap().files.contains_key(url));
+        // The file goes when the last lease does.
+        drop((held, lease));
+        assert!(!cached.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"archive");
+    }
+
+    #[test]
+    fn an_unshared_archive_is_moved_not_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("only.tar.gz");
+        std::fs::write(&cached, b"x").unwrap();
+        let url = "https://example.invalid/zz-lease-sole-1.0.tar.gz";
+        archive_cache()
+            .lock()
+            .unwrap()
+            .files
+            .insert(url.to_string(), ArchiveFile::new(cached.clone()));
+        let dest = dir.path().join("dest.tar.gz");
+        fetch_archive_to(url, &dest).unwrap();
+        assert!(!cached.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"x");
+    }
+
+    #[test]
+    fn evicting_keeps_the_file_for_whoever_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e.tar.gz");
+        std::fs::write(&path, b"x").unwrap();
+        let url = "https://example.invalid/zz-evict-1.0.tar.gz";
+        let file = ArchiveFile::new(path.clone());
+        archive_cache()
+            .lock()
+            .unwrap()
+            .files
+            .insert(url.to_string(), Arc::clone(&file));
+        evict_archive(url);
+        assert!(path.exists());
+        drop(file);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn in_flight_slots_are_serialised_and_removed_when_idle() {
+        let url = "https://example.invalid/zz-slot-1.0.tar.gz";
+        let first = Slot::take(url);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let waiter = std::thread::spawn({
+            let (order, started) = (order.clone(), started.clone());
+            move || {
+                started.wait();
+                let _second = Slot::take(url);
+                order.lock().unwrap().push("second");
+            }
+        });
+        started.wait();
+        // The waiter cannot have the turn while `first` is held.
+        order.lock().unwrap().push("first");
+        drop(first);
+        waiter.join().unwrap();
+        assert_eq!(*order.lock().unwrap(), ["first", "second"]);
+        assert!(!archive_cache().lock().unwrap().in_flight.contains_key(url));
     }
 
     #[test]
@@ -2476,6 +2734,27 @@ mod tests {
     }
 
     #[test]
+    fn gitlab_tokens_use_the_header_gitlab_expects() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(
+            gitlab_auth(env(&[("CI_JOB_TOKEN", "job")])),
+            Some(("JOB-TOKEN", "job".to_string()))
+        );
+        assert_eq!(
+            gitlab_auth(env(&[("GITLAB_TOKEN", "pat"), ("CI_JOB_TOKEN", "job")])),
+            Some(("PRIVATE-TOKEN", "pat".to_string()))
+        );
+        assert_eq!(gitlab_auth(env(&[])), None);
+    }
+
+    #[test]
     fn forge_tokens_go_to_exact_hosts_over_https_only() {
         // SAFETY of test env: variables are process-global; use unlikely values
         // and only assert the negative cases plus host routing.
@@ -2687,5 +2966,62 @@ mod tests {
             .call()
             .unwrap();
         assert_eq!(resp.status().as_u16(), 200, "{url}");
+    }
+
+    #[test]
+    fn version_cmp_orders_numbers_letters_and_markers() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let table = [
+            ("1.10", "1.9", Greater),
+            ("1.2.3.4", "1.2.3", Greater),
+            ("1.2.3a", "1.2.3", Greater),
+            ("1.2.3a", "1.10", Less),
+            ("1.0rc1", "1.0", Less),
+            ("1.0-beta2", "1.0-beta10", Less),
+            ("1.0~git20260101", "1.0", Less),
+            ("1.0+git20260101", "1.0", Greater),
+            ("1.0.1", "1.0rc2", Greater),
+            ("007", "7", Equal),
+            ("1.0", "1.0", Equal),
+        ];
+        for (a, b, want) in table {
+            assert_eq!(version_cmp(a, b), want, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn prerelease_words_are_whole_words() {
+        for v in [
+            "1.0rc1",
+            "2.0-beta2",
+            "1.3.12-pre3",
+            "1.0~git",
+            "3.0.dev1",
+            "1.0+git20260101",
+        ] {
+            assert!(is_prerelease(v), "{v}");
+        }
+        for v in [
+            "1.2.3",
+            "4.3.8.src",
+            "1.2.3a",
+            "2.1.13-stable",
+            "1.0-prefix",
+            "1.0.arch",
+        ] {
+            assert!(!is_prerelease(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn release_versions_drop_source_markers_and_reject_builds() {
+        assert_eq!(release_version("3.9.5-src").as_deref(), Some("3.9.5"));
+        assert_eq!(release_version("4.3.8.src").as_deref(), Some("4.3.8"));
+        assert_eq!(release_version("1.10-win32-dll-openssl"), None);
+        assert_eq!(
+            release_version("1.0.0-beta2").as_deref(),
+            Some("1.0.0-beta2")
+        );
+        assert_eq!(release_version("latest"), None);
     }
 }
