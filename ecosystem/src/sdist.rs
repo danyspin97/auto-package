@@ -229,6 +229,35 @@ const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 const MAX_EXPANSION: u64 = 200;
 const EXPANSION_ALLOWANCE: u64 = 64 << 20;
 
+/// The total-bytes cap for one extraction.
+fn max_total_bytes() -> u64 {
+    ap_core::env::env_positive_f64("AUTO_PACKAGE_MAX_EXTRACT_GB")
+        .map_or(MAX_TOTAL_BYTES, |gb| (gb * (1u64 << 30) as f64) as u64)
+}
+
+/// What an extraction of `archive` is expected to write, reserved before it
+/// starts: six times the archive (typical for source tarballs), at least 64 MiB
+/// and at most [`max_total_bytes`].
+fn extraction_estimate(archive: &Path) -> u64 {
+    let compressed = std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
+    compressed
+        .saturating_mul(6)
+        .max(64 << 20)
+        .min(max_total_bytes())
+}
+
+/// Caps for the read-only scans of a `.tar.gz` that look for one file: entries
+/// visited and decompressed bytes read, so a hostile archive cannot stall them.
+pub const SCAN_MAX_ENTRIES: usize = 100_000;
+pub const SCAN_MAX_BYTES: u64 = 1 << 30;
+
+/// A `.tar.gz` reader that stops after [`SCAN_MAX_BYTES`] of decompressed data
+/// (the entries past it read as a truncated archive). Pair it with
+/// `.entries()?.take(SCAN_MAX_ENTRIES)`.
+pub fn bounded_tar_gz<R: Read>(file: R) -> tar::Archive<std::io::Take<flate2::read::GzDecoder<R>>> {
+    tar::Archive::new(flate2::read::GzDecoder::new(file).take(SCAN_MAX_BYTES))
+}
+
 /// Running totals checked against the extraction caps.
 #[derive(Default)]
 struct Budget {
@@ -279,9 +308,10 @@ impl Budget {
                 "entry of {size} bytes (limit {MAX_FILE_BYTES})"
             )));
         }
-        if self.bytes > MAX_TOTAL_BYTES {
+        let max_total = max_total_bytes();
+        if self.bytes > max_total {
             return Err(Error::LimitExceeded(format!(
-                "more than {MAX_TOTAL_BYTES} uncompressed bytes"
+                "more than {max_total} uncompressed bytes"
             )));
         }
         self.check_ratio()
@@ -301,7 +331,7 @@ impl Budget {
         out: &mut impl std::io::Write,
     ) -> Result<(), Error> {
         let before = self.bytes.saturating_sub(declared);
-        let allowed = MAX_FILE_BYTES.min(MAX_TOTAL_BYTES.saturating_sub(before));
+        let allowed = MAX_FILE_BYTES.min(max_total_bytes().saturating_sub(before));
         // Read one byte past the allowance so overshoot is detectable.
         let written =
             std::io::copy(&mut input.take(allowed.saturating_add(1)), out).map_err(|e| {
@@ -1427,12 +1457,23 @@ fn check_link(root: &Path, link: &Path, target: &Path) -> Result<(), Error> {
 
 /// [`extract`] restricted to the entries `keep` accepts. The path it is given
 /// is the entry's path inside the archive (including the top-level directory).
-/// Skipped entries are still decompressed on the way past, but never written.
+/// Skipped entries are still decompressed on the way past and counted against
+/// the extraction budget, but never written.
 pub fn extract_where(
     tarball: &Path,
     dest: &Path,
     keep: impl Fn(&Path) -> bool,
 ) -> Result<(), Error> {
+    // At most a couple of unpacks at a time, each with its expected size
+    // reserved against the free space of the destination's filesystem.
+    let _slot = crate::space::extraction_slot();
+    let _lease = crate::space::lease(
+        &format!("extracting {}", tarball.display()),
+        dest.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+        extraction_estimate(tarball),
+    )?;
     let mut partial = dest.as_os_str().to_owned();
     partial.push(".partial");
     let partial = PathBuf::from(partial);
@@ -1475,10 +1516,11 @@ fn extract_into(tarball: &Path, dest: &Path, keep: &dyn Fn(&Path) -> bool) -> Re
             // `unpack_in` keeps tar-rs's traversal and symlink protections.
             for entry in archive.entries().map_err(Error::Tar)? {
                 let mut entry = entry.map_err(Error::Tar)?;
+                // Charged before `keep`: a skipped entry is still decompressed.
+                budget.charge(entry.size())?;
                 if !keep(&entry.path().map_err(Error::Tar)?) {
                     continue;
                 }
-                budget.charge(entry.size())?;
                 if let Some(reason) = escaping_link(&entry) {
                     tracing::warn!("skipping tar entry: {reason}");
                     continue;
@@ -3335,6 +3377,47 @@ build-backend = "flit_core.buildapi"
     }
 
     #[test]
+    fn filtered_out_entries_still_count_against_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("bomb.tar.zst");
+        // zstd packs zeros about 10000:1, far past the allowed expansion.
+        let big = vec![0u8; 100 << 20];
+        write_tar_zst(
+            &src,
+            &[("thing-1.0/big.bin", &big), ("thing-1.0/setup.py", b"x")],
+        );
+        let out = dir.path().join("out");
+        let err = extract_where(&src, &out, |p| p.ends_with("setup.py")).unwrap_err();
+        assert!(matches!(err, Error::LimitExceeded(_)), "{err}");
+    }
+
+    #[test]
+    fn bounded_scan_reads_a_normal_archive_and_stops_at_the_byte_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.tar.gz");
+        write_tar(&src, &[("t/a", b"1"), ("t/b", b"2")]);
+        let mut ar = bounded_tar_gz(std::fs::File::open(&src).unwrap());
+        let names: Vec<_> = ar
+            .entries()
+            .unwrap()
+            .take(SCAN_MAX_ENTRIES)
+            .flatten()
+            .map(|e| e.path().unwrap().into_owned())
+            .collect();
+        assert_eq!(names, [Path::new("t/a"), Path::new("t/b")]);
+        // The reader is cut after the cap: a stream longer than it is truncated.
+        let mut zeros = flate2::read::GzDecoder::new(std::io::Cursor::new({
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            std::io::Write::write_all(&mut enc, &vec![0u8; 1 << 20]).unwrap();
+            enc.finish().unwrap()
+        }))
+        .take(1000);
+        let mut sink = Vec::new();
+        zeros.read_to_end(&mut sink).unwrap();
+        assert_eq!(sink.len(), 1000);
+    }
+
+    #[test]
     fn extract_tar_bz2() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.tar.bz2");
@@ -3472,6 +3555,43 @@ build-backend = "flit_core.buildapi"
         let raw = "[tool.poetry]\nname = \"pp\"\n";
         let p: PyprojectToml = toml::from_str(raw).unwrap();
         assert_eq!(p.declared_name().as_deref(), Some("pp"));
+    }
+
+    #[test]
+    fn the_extraction_estimate_is_six_times_the_archive_within_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.tar.gz");
+        std::fs::write(&small, b"x").unwrap();
+        assert_eq!(extraction_estimate(&small), 64 << 20);
+        assert_eq!(extraction_estimate(&dir.path().join("absent")), 64 << 20);
+        let big = dir.path().join("big.tar.gz");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(100 << 20)
+            .unwrap();
+        assert_eq!(
+            extraction_estimate(&big),
+            (600 << 20).min(max_total_bytes())
+        );
+        assert!(max_total_bytes() <= 4 << 30);
+    }
+
+    #[test]
+    fn a_full_disk_is_recognised_by_kind() {
+        let full = Error::Io {
+            path: PathBuf::new(),
+            source: std::io::Error::from(std::io::ErrorKind::StorageFull),
+        };
+        assert!(full.is_disk_full());
+        let no_space = Error::from(crate::space::NotEnoughSpace {
+            what: "x".into(),
+            needed: 1,
+            free: 0,
+            reserved: 0,
+            margin: 0,
+        });
+        assert!(no_space.is_disk_full());
+        assert!(!Error::LimitExceeded("x".into()).is_disk_full());
     }
 
     #[test]
