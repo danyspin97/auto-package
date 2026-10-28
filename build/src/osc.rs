@@ -7519,7 +7519,7 @@ fn build_details(project: &str, pkg_name: &str, repo: &str, arch: &str) -> Optio
 
 /// Sleep for `total`, waking each second to notice a shutdown request, so a
 /// long poll delay does not hold up an interrupt.
-fn sleep_interruptible(total: Duration) {
+pub(crate) fn sleep_interruptible(total: Duration) {
     let end = Instant::now() + total;
     while !crate::proc::shutting_down() {
         let left = end.saturating_duration_since(Instant::now());

@@ -10,10 +10,8 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::sources::{
-    archive_name_version, fetch_index, index_dir, is_any_archive, is_prerelease, last_segment,
-    version_cmp,
-};
+use crate::sources::{archive_name_version, fetch_index, index_dir, is_any_archive, last_segment};
+use crate::version::{is_prerelease, sort_cmp as version_cmp};
 
 const USER_AGENT: &str = "auto-package";
 
@@ -48,19 +46,29 @@ pub fn latest_in_index(source: &str) -> Result<String, String> {
     newest_for(&links, &name).ok_or_else(|| format!("no release of {name} listed for {source}"))
 }
 
-/// When the URL has a path segment that is the project's prefix plus the
-/// packaged version (`mariadb-13.0.2`), the directory above it and that prefix
-/// (`mariadb-`).
+/// When the URL has a path segment that is the packaged version, alone
+/// (`1.2.3`), with a `v` (`v1.2.3`) or behind the project's prefix
+/// (`mariadb-13.0.2`), the directory above it and that prefix (`mariadb-`).
+/// The segment is matched ignoring case; the version may not be the first path
+/// segment after the host.
 fn versioned_directory(source: &str, version: &str) -> Option<(String, String)> {
     let path = source.split(['?', '#']).next().unwrap_or(source);
     let (scheme, rest) = path.split_once("://")?;
     let segments: Vec<&str> = rest.split('/').collect();
+    let version = version.trim_start_matches(['v', 'V']);
     // Host first, file last: only the directories between count.
     for i in 1..segments.len().saturating_sub(1) {
-        if let Some(prefix) = segments[i].strip_suffix(version)
-            && !prefix.is_empty()
-            && prefix.ends_with(['-', '_'])
-        {
+        let segment = segments[i];
+        let Some(cut) = segment.len().checked_sub(version.len()) else {
+            continue;
+        };
+        let (Some(prefix), Some(tail)) = (segment.get(..cut), segment.get(cut..)) else {
+            continue;
+        };
+        if !tail.eq_ignore_ascii_case(version) {
+            continue;
+        }
+        if matches!(prefix, "" | "v" | "V") || (prefix.len() > 1 && prefix.ends_with(['-', '_'])) {
             return Some((
                 format!("{scheme}://{}", segments[..i].join("/")),
                 prefix.to_string(),
@@ -71,11 +79,17 @@ fn versioned_directory(source: &str, version: &str) -> Option<(String, String)> 
 }
 
 /// The highest version among the directories `<prefix><version>/` of a
-/// listing; pre-releases only when there is nothing else.
+/// listing; pre-releases only when there is nothing else. Directories that are
+/// not versions (`latest`, `stable`, `current`) are ignored.
 fn newest_release_directory(links: &[String], prefix: &str) -> Option<String> {
     let mut versions: Vec<String> = links
         .iter()
-        .filter_map(|l| l.trim_end_matches('/').strip_prefix(prefix))
+        .map(|l| l.trim_end_matches('/'))
+        .filter(|l| {
+            l.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        })
+        .filter_map(|l| l.get(prefix.len()..))
         .filter_map(crate::sources::release_version)
         .collect();
     let stable: Vec<String> = versions
@@ -200,7 +214,9 @@ pub fn latest_on_repology(name: &str) -> Result<String, String> {
             "https://repology.org/api/v1/project/{}",
             urlencoding::encode(&project)
         );
-        space_out_repology();
+        if !space_out_repology() {
+            return Err("interrupted".to_string());
+        }
         match get_text(&url).and_then(|body| newest_on_repology(&body)) {
             Ok(v) => return Ok(v),
             Err(e) => last = e,
@@ -209,14 +225,27 @@ pub fn latest_on_repology(name: &str) -> Result<String, String> {
     Err(last)
 }
 
-fn space_out_repology() {
+/// Wait for this request's turn, one `REPOLOGY_SPACING` after the previous
+/// one. The turn is reserved under the lock and the wait happens outside it,
+/// in short steps that notice a shutdown, so a second caller never sits on the
+/// mutex behind a sleeper. `false` when the run was interrupted meanwhile.
+fn space_out_repology() -> bool {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
-    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(at) = *last {
-        let wait = REPOLOGY_SPACING.saturating_sub(at.elapsed());
-        std::thread::sleep(wait);
-    }
-    *last = Some(Instant::now());
+    let now = Instant::now();
+    let turn = {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let turn = next_turn(*last, now, REPOLOGY_SPACING);
+        *last = Some(turn);
+        turn
+    };
+    crate::osc::sleep_interruptible(turn.saturating_duration_since(now));
+    !crate::proc::shutting_down()
+}
+
+/// When the next request may go out: now, or `spacing` after the one before it
+/// (itself possibly still in the future, when callers queue up).
+fn next_turn(last: Option<Instant>, now: Instant, spacing: Duration) -> Instant {
+    last.map_or(now, |at| now.max(at + spacing))
 }
 
 /// The highest version among the entries of a Repology project that are
@@ -360,6 +389,21 @@ mod tests {
     }
 
     #[test]
+    fn repology_requests_queue_one_spacing_apart() {
+        let spacing = Duration::from_secs(1);
+        let t0 = Instant::now();
+        // The first goes at once; one right behind it waits out the spacing.
+        assert_eq!(next_turn(None, t0, spacing), t0);
+        assert_eq!(next_turn(Some(t0), t0, spacing), t0 + spacing);
+        // Callers that arrive together get consecutive turns, not the same one.
+        let second = next_turn(Some(t0), t0, spacing);
+        assert_eq!(next_turn(Some(second), t0, spacing), t0 + 2 * spacing);
+        // After a long pause there is nothing to wait for.
+        let later = t0 + Duration::from_secs(60);
+        assert_eq!(next_turn(Some(t0), later, spacing), later);
+    }
+
+    #[test]
     fn repology_gives_the_highest_newest_version() {
         let body = r#"[
             {"repo":"a","version":"2.3.1","status":"newest"},
@@ -369,5 +413,79 @@ mod tests {
         assert_eq!(newest_on_repology(body).as_deref(), Ok("2.10.0"));
         assert!(newest_on_repology("[]").is_err());
         assert!(newest_on_repology("not json").is_err());
+    }
+
+    #[test]
+    fn a_versioned_directory_is_found_in_each_host_layout() {
+        let cases = [
+            // `v` directories
+            (
+                "https://dl.example.org/pkg/v1.2.3/foo-1.2.3.tar.gz",
+                "https://dl.example.org/pkg",
+                "v",
+            ),
+            (
+                "https://dl.example.org/pkg/V1.2.3/foo-1.2.3.tar.gz",
+                "https://dl.example.org/pkg",
+                "V",
+            ),
+            // bare version directory
+            (
+                "https://dl.example.org/foo/1.2.3/foo-1.2.3.tar.gz",
+                "https://dl.example.org/foo",
+                "",
+            ),
+            // upper-case spelling of the version
+            (
+                "https://dl.example.org/foo/Foo-1.2.3/foo-1.2.3.tar.gz",
+                "https://dl.example.org/foo",
+                "Foo-",
+            ),
+        ];
+        for (url, base, prefix) in cases {
+            assert_eq!(
+                versioned_directory(url, "1.2.3"),
+                Some((base.to_string(), prefix.to_string())),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            versioned_directory("https://ftp.gnu.org/gnu/foo/foo-1.2.3.tar.gz", "1.2.3"),
+            None
+        );
+    }
+
+    #[test]
+    fn directories_that_are_not_releases_are_ignored() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let links = l(&[
+            "latest/",
+            "stable/",
+            "current",
+            "v1.9.0/",
+            "v1.10.0/",
+            "v2.0.0-rc1/",
+            "v1.10.1.tar.gz",
+            "v1.8.0/",
+        ]);
+        assert_eq!(
+            newest_release_directory(&links, "v").as_deref(),
+            Some("1.10.0")
+        );
+        let links = l(&["1.2/", "1.10/", "Latest/", "2.0-beta1/", "../"]);
+        assert_eq!(
+            newest_release_directory(&links, "").as_deref(),
+            Some("1.10")
+        );
+        let links = l(&["Foo-1.0/", "foo-1.1/", "foo-latest/"]);
+        assert_eq!(
+            newest_release_directory(&links, "foo-").as_deref(),
+            Some("1.1")
+        );
+        // Only pre-releases: they are all there is.
+        assert_eq!(
+            newest_release_directory(&l(&["v2.0-rc1/", "v2.0-rc2/"]), "v").as_deref(),
+            Some("2.0-rc2")
+        );
     }
 }
