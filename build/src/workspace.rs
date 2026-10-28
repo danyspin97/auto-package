@@ -18,11 +18,15 @@ use ap_core::sink::Reporter;
 
 const GIB: u64 = 1 << 30;
 
+/// The free space a package needs by default (`--min-free-gb` changes it).
+pub const DEFAULT_MIN_FREE_BYTES: u64 = 3 * GIB;
+
 /// Free space a package needs on the work directory's filesystem before its
 /// heavy stages start, in bytes. 0 turns the guard off. Set once at startup
-/// from `--min-free-gb`. Off in this crate's own tests, whose pipeline runs on
-/// whatever disk the tests happen to have and must not wait ten minutes for it.
-static MIN_FREE_BYTES: AtomicU64 = AtomicU64::new(if cfg!(test) { 0 } else { 3 * GIB });
+/// from `--min-free-gb` through [`set_min_free_gb`]; the default is
+/// [`DEFAULT_MIN_FREE_BYTES`] in tests too. Tests of the waiting itself pass
+/// the minimum explicitly to [`await_disk_space_with`].
+static MIN_FREE_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_MIN_FREE_BYTES);
 
 /// How often, and for how long, a package waits for the disk to recover.
 const DISK_WAIT_INTERVAL: Duration = Duration::from_secs(30);
@@ -30,6 +34,11 @@ const DISK_WAIT_LIMIT: Duration = Duration::from_secs(600);
 
 pub fn set_min_free_gb(gb: u64) {
     MIN_FREE_BYTES.store(gb.saturating_mul(GIB), Ordering::Relaxed);
+}
+
+/// The free space a package needs before its heavy stages start, in bytes.
+pub fn min_free_bytes() -> u64 {
+    MIN_FREE_BYTES.load(Ordering::Relaxed)
 }
 
 fn gib(bytes: u64) -> String {
@@ -46,14 +55,12 @@ pub fn await_disk_space(
     step: Option<StepId>,
 ) -> Result<(), String> {
     await_disk_space_with(
-        MIN_FREE_BYTES.load(Ordering::Relaxed),
+        min_free_bytes(),
         || free_bytes(dir),
         |d| {
-            if crate::proc::shutting_down() {
-                return false;
-            }
-            std::thread::sleep(d);
-            true
+            // Wakes every second, so an interrupt does not wait out the tick.
+            crate::osc::sleep_interruptible(d);
+            !crate::proc::shutting_down()
         },
         DISK_WAIT_INTERVAL,
         DISK_WAIT_LIMIT,
@@ -107,7 +114,7 @@ fn await_disk_space_with(
 /// short of room for a few big packages. `None` when there is enough, the guard
 /// is off or the free space is unknown.
 pub fn low_space_warning(dir: &Path) -> Option<String> {
-    let min = MIN_FREE_BYTES.load(Ordering::Relaxed);
+    let min = min_free_bytes();
     let free = free_bytes(dir)?;
     low_space_message(dir, free, min)
 }
@@ -520,6 +527,32 @@ mod tests {
             None,
         );
         assert_eq!(off, Ok(()));
+    }
+
+    #[test]
+    fn the_default_minimum_is_three_gib_and_not_test_dependent() {
+        assert_eq!(DEFAULT_MIN_FREE_BYTES, 3 * GIB);
+        assert_eq!(gib(DEFAULT_MIN_FREE_BYTES), "3.0 GiB");
+    }
+
+    #[test]
+    fn a_shutdown_ends_the_wait_without_an_error() {
+        let rep = Collect(Default::default());
+        let mut sleeps = 0;
+        let r = await_disk_space_with(
+            3 * GIB,
+            || Some(GIB),
+            |_| {
+                sleeps += 1;
+                false
+            },
+            Duration::from_secs(30),
+            Duration::from_secs(600),
+            &rep,
+            None,
+        );
+        assert_eq!(r, Ok(()));
+        assert_eq!(sleeps, 1);
     }
 
     #[test]
