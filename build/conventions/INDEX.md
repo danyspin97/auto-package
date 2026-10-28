@@ -12,7 +12,7 @@
 12. Merged into convention 7 — read convention 7 when %check fails oddly on config
 13. Non-test failures: Source0 mismatch, offline %build errors — read when %prep/%build fails (no such file, name resolution)
 14. Tools, quilt and the PATCH-* tag format — read when adding or editing a PatchN:, creating a file, or using Bash (zypper, osc cat, rpm -qlp)
-15. Missing third-party module in %check, circular deps (Step B) — read when %check says ModuleNotFoundError or a dep cycle
+15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
 16. Import name differs from package name — read when writing %files module dirs or an import check for an unfamiliar package
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
 18. Console scripts and python_alternative — read when the package declares scripts/entry points or %files lists /usr/bin
@@ -42,10 +42,10 @@
 42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
 43. Merged into convention 7 — read convention 7 when pytest ignores options set in setup.cfg
 44. Absent test files/fixtures, unknown trove classifier — read when %check misses a conftest/testdata file or the backend rejects a classifier
-45. Django test suites need DJANGO_SETTINGS_MODULE — read when %check says ImproperlyConfigured: settings are not configured
+45. Merged into convention 10 — read convention 10 when %check says ImproperlyConfigured: settings are not configured
 46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
 47. Merged into convention 3 — read convention 3 when a distutils/setuptools Extension ignores distro flags
-48. Test-environment setup: %ctest env, UTF-8 locale, git, sandbox — read when %check fails with no missing package
+48. Merged into convention 10 — read convention 10 when %check fails with no missing package
 49. Per-CPython upstream wheels covering our flavors — read when the source cannot be built and wheels exist per cp3NN
 50. OOM / disk-full failures are sizing, not spec bugs — read when the build is killed or says "No space left on device"
 51. Merged into convention 6 — read convention 6 when build-backend is mesonpy or scikit_build_core
@@ -78,7 +78,7 @@
 78. Merged into convention 5 — read convention 5 when a build refuses over a licence variable
 79. ELF RPATH/RUNPATH checks before the first build — read when the package ships .so files or rpmlint reports rpath errors
 80. $python only inside %python_expand, braced multi-line form — read when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
-81. Predict the %check environment before building — read when tests may need network, GPU, redis, models or repo files
+81. Merged into convention 10 — read convention 10 when tests may need network, GPU, redis, models or repo files
 82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
 84. CUDA at build time: use the upstream wheel; NVIDIA output is not Factory/SLE material — read when the build or sources mention CUDA, cuda.h, nvcc or libcudart
