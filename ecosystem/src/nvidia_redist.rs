@@ -237,9 +237,12 @@ pub fn parse(json: &str, base_url: &str) -> Result<Manifest, Error> {
     })
 }
 
-fn version_key(name: &str) -> Option<Vec<u64>> {
+/// The dotted-number version in a `redistrib_X.Y.Z.json` name.
+fn manifest_version(name: &str) -> Option<&str> {
     let v = name.strip_prefix("redistrib_")?.strip_suffix(".json")?;
-    v.split('.').map(|p| p.parse().ok()).collect()
+    v.split('.')
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(v)
 }
 
 /// The highest `redistrib_X.Y.Z.json` named in a directory listing.
@@ -250,10 +253,15 @@ pub fn latest_manifest_name(index_html: &str) -> Option<String> {
         .filter_map(|rest| {
             let end = rest.find(".json")? + ".json".len();
             let name = format!("redistrib_{}", &rest[..end]);
-            Some((version_key(&name)?, name))
+            manifest_version(&name)?;
+            Some(name)
         })
-        .max_by(|a, b| a.0.cmp(&b.0))
-        .map(|(_, n)| n)
+        .max_by(|a, b| {
+            crate::version::sort_cmp(
+                manifest_version(a).unwrap_or_default(),
+                manifest_version(b).unwrap_or_default(),
+            )
+        })
 }
 
 fn get(url: &str) -> Result<String, Error> {
@@ -649,6 +657,14 @@ mod tests {
             Some("redistrib_13.10.0.json")
         );
         assert_eq!(latest_manifest_name("<a href='cuda/'>"), None);
+        // Four components, leading zeros, and names that are not versions.
+        let html = "<a href='redistrib_12.4.1.json'>x</a><a href='redistrib_12.4.1.1.json'>x</a>\
+                    <a href='redistrib_12.04.0.json'>x</a><a href='redistrib_12.x.json'>x</a>\
+                    <a href='redistrib_13.beta.json'>x</a>";
+        assert_eq!(
+            latest_manifest_name(html).as_deref(),
+            Some("redistrib_12.4.1.1.json")
+        );
     }
 
     #[test]

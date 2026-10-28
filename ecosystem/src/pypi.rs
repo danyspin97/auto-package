@@ -965,14 +965,14 @@ pub enum VersionCompare {
     Unparseable,
 }
 
-/// Compare two PEP 440 version strings three-way.
+/// Compare two PEP 440 version strings three-way, strictly: a version that is
+/// not PEP 440 is `Unparseable` (no generic fallback, no epoch or `v`/`r`
+/// prefix handling; [`crate::version::cmp`] has those).
 pub fn compare_pep440(latest: &str, packaged: &str) -> VersionCompare {
-    use pep440_rs::Version;
-    use std::str::FromStr;
-    let Ok(l) = Version::from_str(latest) else {
-        return VersionCompare::Unparseable;
-    };
-    let Ok(p) = Version::from_str(packaged) else {
+    let (Some(l), Some(p)) = (
+        crate::version::parse_pep440(latest),
+        crate::version::parse_pep440(packaged),
+    ) else {
         return VersionCompare::Unparseable;
     };
     if l > p {
@@ -982,13 +982,15 @@ pub fn compare_pep440(latest: &str, packaged: &str) -> VersionCompare {
     }
 }
 
-/// True iff `latest` is a strictly newer PEP 440 version than `packaged`.
+/// True iff `latest` is a strictly newer version than `packaged` in PyPI's
+/// order ([`crate::version::cmp`] with [`crate::version::Scheme::Pep440`]).
 ///
 /// Returns `false` for an unparseable input too; callers that must
-/// distinguish "cannot compare" from "not newer" need [`compare_pep440`]'s
-/// three-way result instead — see its doc comment for why.
+/// distinguish "cannot compare" from "not newer" need
+/// [`crate::version::cmp`]'s `Option` instead — see [`VersionCompare`] for why.
 pub fn is_newer_pep440(latest: &str, packaged: &str) -> bool {
-    matches!(compare_pep440(latest, packaged), VersionCompare::Newer)
+    crate::version::cmp(latest, packaged, crate::version::Scheme::Pep440)
+        == Some(std::cmp::Ordering::Greater)
 }
 
 #[cfg(test)]

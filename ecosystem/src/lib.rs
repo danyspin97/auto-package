@@ -7,3 +7,4 @@ pub mod pip;
 mod pip_sandbox;
 pub mod pypi;
 pub mod sdist;
+pub mod version;
