@@ -44,7 +44,7 @@ pub enum Kind {
 }
 
 fn parse_version(text: &str) -> Option<Version> {
-    Version::from_str(text.trim()).ok()
+    crate::version::parse_pep440(text)
 }
 
 /// `>=1.2,<2` (or `(>=1.2, <2)`) as a bound. `None` when it is not understood,
@@ -366,8 +366,8 @@ pub fn plan(
 /// without this the run would end having built everything but the package that
 /// was asked for, with nothing saying why.
 pub fn stale_root_message(node: &Node, shipped: &str, project: &str) -> Option<String> {
-    let (shipped_v, resolved_v) = (parse_version(shipped)?, parse_version(&node.version)?);
-    (shipped_v < resolved_v).then(|| {
+    use crate::version::{Scheme, cmp};
+    (cmp(shipped, &node.version, Scheme::Pep440)? == std::cmp::Ordering::Less).then(|| {
         format!(
             "{} {shipped} (shipped by a project {project} links to) is older than the {} that was resolved, and counts \
              as available: nothing builds it here (pass --force to branch it into this project and update it to {})",
