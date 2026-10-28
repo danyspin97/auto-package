@@ -127,7 +127,7 @@ pub fn dry_run_lines(d: &DryRun<'_>) -> Vec<String> {
     ));
     for i in d.items {
         out.push(format!(
-            "  {}  {} -> {}  (from {}{})",
+            "  {}  {} -> {}  (from {}{}{})",
             i.pkg,
             i.old_version,
             i.new_version,
@@ -135,7 +135,11 @@ pub fn dry_run_lines(d: &DryRun<'_>) -> Vec<String> {
             i.dependency_of
                 .as_ref()
                 .map(|p| format!(", needed by {p}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            match crate::branch_revision::direction_note(&i.old_version, &i.new_version) {
+                "" => String::new(),
+                note => format!(", {note}"),
+            }
         ));
     }
     if d.paths.is_empty() {
