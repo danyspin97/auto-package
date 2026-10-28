@@ -186,53 +186,16 @@ pub(crate) fn cmd_build(
     // auto-selected one") — so skip the sweep when it's set even if the
     // flag was passed; a `--target` run meant to isolate and debug one
     // package should not pick up unrelated project-wide work.
-    if sweep && explicit_target.is_none() {
-        // The root target itself must never enter this generic sweep: it
-        // goes on to `resolve_dependency_config` just like any other
-        // runtime-discovered dependency, which always re-fetches the
-        // *latest* PyPI release and clears `source_repo` (see its doc
-        // comment) — silently discarding this exact invocation's
-        // `--version`/`--source-url`/`--url` and spawning a second,
-        // wrongly-configured `run_package` thread racing the correctly
-        // configured one `select_target` selects below, against the same
-        // checkout and rpm name. OBS showing the root package itself as
-        // Failed/Unresolvable/Broken from an earlier interrupted run is
-        // exactly the common case this would trigger on.
-        let root_key = ap_build::osc::fuzzy_key(&rpm_name);
-        let already_stuck: Vec<String> =
-            ap_build::osc::get_project_build_statuses(project, distro, arch)?
-                .into_iter()
-                .filter(|(_, status)| {
-                    matches!(
-                        status,
-                        ap_build::osc::BuildStatus::Unresolvable
-                            | ap_build::osc::BuildStatus::Failed
-                            | ap_build::osc::BuildStatus::Broken
-                    )
-                })
-                .map(|(pkg, _)| pkg)
-                .filter(|pkg| ap_build::osc::fuzzy_key(pkg) != root_key)
-                .collect();
-        if !already_stuck.is_empty() {
-            ap_core::diag!(
-                "{} package(s) already unresolvable/failed/broken in {project}, queuing: {}",
-                already_stuck.len(),
-                already_stuck.join(", ")
-            );
-        }
-        // Keyed by `fuzzy_key`, not the raw stripped name: OBS's real listing
-        // and whatever spelling an agent later reports the same dependency
-        // under (`pydantic_core` vs. the real `pydantic-core`, say) are not
-        // guaranteed to agree on separators — see `osc::fuzzy_key`'s doc
-        // comment. An exact-string seed set would silently fail to recognize
-        // its own entries.
-        stuck_seeds.extend(
-            already_stuck
-                .iter()
-                .map(|pkg| ap_build::osc::fuzzy_key(pkg.strip_prefix("python-").unwrap_or(pkg))),
-        );
-        pending_deps.extend(already_stuck);
-    }
+    seed_stuck_deps(
+        project,
+        distro,
+        arch,
+        sweep,
+        explicit_target,
+        &rpm_name,
+        &mut pending_deps,
+        &mut stuck_seeds,
+    )?;
 
     // A failed top-level target is retried automatically: it stays in the
     // dependency closure, so the next iteration's `select_target` re-selects
@@ -1583,4 +1546,67 @@ fn resolve_names(
             (effective_name, rpm, probe.subprojects)
         }
     })
+}
+
+/// Queue the packages OBS already reports as unresolvable, failed or broken in
+/// `project`, when `--sweep` asks for it. The root package itself is never
+/// queued here (see the comment in the body).
+fn seed_stuck_deps(
+    project: &str,
+    distro: &str,
+    arch: &str,
+    sweep: bool,
+    explicit_target: Option<&str>,
+    rpm_name: &str,
+    pending_deps: &mut Vec<String>,
+    stuck_seeds: &mut std::collections::HashSet<String>,
+) -> color_eyre::Result<()> {
+    if sweep && explicit_target.is_none() {
+        // The root target itself must never enter this generic sweep: it
+        // goes on to `resolve_dependency_config` just like any other
+        // runtime-discovered dependency, which always re-fetches the
+        // *latest* PyPI release and clears `source_repo` (see its doc
+        // comment) — silently discarding this exact invocation's
+        // `--version`/`--source-url`/`--url` and spawning a second,
+        // wrongly-configured `run_package` thread racing the correctly
+        // configured one `select_target` selects below, against the same
+        // checkout and rpm name. OBS showing the root package itself as
+        // Failed/Unresolvable/Broken from an earlier interrupted run is
+        // exactly the common case this would trigger on.
+        let root_key = ap_build::osc::fuzzy_key(&rpm_name);
+        let already_stuck: Vec<String> =
+            ap_build::osc::get_project_build_statuses(project, distro, arch)?
+                .into_iter()
+                .filter(|(_, status)| {
+                    matches!(
+                        status,
+                        ap_build::osc::BuildStatus::Unresolvable
+                            | ap_build::osc::BuildStatus::Failed
+                            | ap_build::osc::BuildStatus::Broken
+                    )
+                })
+                .map(|(pkg, _)| pkg)
+                .filter(|pkg| ap_build::osc::fuzzy_key(pkg) != root_key)
+                .collect();
+        if !already_stuck.is_empty() {
+            ap_core::diag!(
+                "{} package(s) already unresolvable/failed/broken in {project}, queuing: {}",
+                already_stuck.len(),
+                already_stuck.join(", ")
+            );
+        }
+        // Keyed by `fuzzy_key`, not the raw stripped name: OBS's real listing
+        // and whatever spelling an agent later reports the same dependency
+        // under (`pydantic_core` vs. the real `pydantic-core`, say) are not
+        // guaranteed to agree on separators — see `osc::fuzzy_key`'s doc
+        // comment. An exact-string seed set would silently fail to recognize
+        // its own entries.
+        stuck_seeds.extend(
+            already_stuck
+                .iter()
+                .map(|pkg| ap_build::osc::fuzzy_key(pkg.strip_prefix("python-").unwrap_or(pkg))),
+        );
+        pending_deps.extend(already_stuck);
+    }
+    Ok(())
 }
