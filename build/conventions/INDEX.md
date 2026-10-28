@@ -66,7 +66,7 @@
 66. Summary and %description must say something — read when writing Summary/%description or the generator left a stub
 67. %check needing GPU/driver/device is not run — read when tests need a GPU, a device or network, or %check has more than six --ignore
 68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
-69. %license files and the licence expression are exact, dist-info licences — read when writing %license lines or License:, or a dist-info holds licenses/
+69. Merged into convention 5 — read convention 5 when writing %license lines or License:, or a dist-info holds licenses/
 70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
 71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
 72. Merged into convention 39 (rpmlintrc filters) — read convention 39 when rpmlint reports an E:/W: line
@@ -75,7 +75,7 @@
 75. Version bounds: keep minimums, upper/== only when satisfied, comment when dropped — read when writing a <, <=, == or >= bound in Requires/BuildRequires
 76. Files of one Python package come from one tree — read when several wheels fill one package, ModuleNotFoundError on a sibling part
 77. Reproducible Source: URLs, one release only — read when adding or editing a Source:, or dropping the old release's archive
-78. Upstream licence guards (e.g. I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION) — read when a build refuses over a licence variable
+78. Merged into convention 5 — read convention 5 when a build refuses over a licence variable
 79. ELF RPATH/RUNPATH checks before the first build — read when the package ships .so files or rpmlint reports rpath errors
 80. $python only inside %python_expand, braced multi-line form — read when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
 81. Predict the %check environment before building — read when tests may need network, GPU, redis, models or repo files
