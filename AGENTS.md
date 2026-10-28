@@ -1,5 +1,7 @@
 # Instructions for agents working in this repository
 
+If you delegate work to other agents, read ORCHESTRATOR.md first.
+
 ## Never touch packages yourself: always use auto-package
 
 auto-package is the only thing that changes packages.
@@ -23,6 +25,51 @@ auto-package is the only thing that changes packages.
 - Run `cargo fmt` before committing and commit its result.
 - Do not build cargo under `/tmp`; `/home` fills up during runs, so check `df`
   and clean `target` after large builds. Ask before deleting anything in `ap-work`.
+
+## Rules for every worker agent
+
+These add to the rules above and to the brief. On conflict, the stricter rule wins.
+
+Workspace
+- One jj workspace per task: `jj workspace add /home/danyspin97/ap-<task> -r <base>`.
+  Work only there. Never touch the main checkout or another agent's workspace.
+- Set only the bookmark named in the brief (`jj bookmark set <task> -r @-`).
+  Do not move, create or delete other bookmarks, and do not rewrite commits
+  below `<base>` or another agent's commits. Your own unpublished commits in
+  your workspace may be rewritten.
+- You cannot `rm -rf`. Run `jj workspace forget ap-<task>` only if the brief
+  says so; leave the directory for the user.
+
+Cargo and disk
+- Every cargo call: `CARGO_TARGET_DIR=/home/danyspin97/proj/coding/auto-package/target cargo ...`.
+  Never create `target/` inside a workspace or under `/tmp`.
+- Run `df -h /home` before building. Below 2.5 GB free: stop and report.
+
+Commits
+- One concern per commit. Subject <= 60 chars, imperative, `area: what` (see `jj log`).
+- Body wrapped at 72, stating only causes the diff shows. No history, no
+  "as discussed", no claims the diff does not support.
+- Trailer, exactly: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`
+- Every commit compiles and passes on its own: `cargo fmt`,
+  `cargo check -q --all-targets`, `cargo test -q -p <crate>` for the crates it
+  touches and their dependents. Crates: `ap-build`, `ap-cli`, `ap-core`, `ap-ecosystem`.
+- Split a hunk that mixes two concerns at hunk or line level. Every
+  intermediate tree is a prefix of the final diff: no commit adds what a later
+  one removes. If the brief gives a target, `jj diff --from <expected> --to @-`
+  must be empty.
+
+Review findings
+- Verify each claim in the code first. If it is wrong, do not "fix" it; report
+  it with file:line evidence.
+- Squash each fix into the commit it repairs (`jj squash --into <rev>`), then
+  re-run the checks from there to the tip.
+
+Report
+- Report once, at the end, with nothing before it: commits (change id and
+  subject, in order); tests (commands and results); items skipped and why;
+  limits (unverified, guesses, known risks). A short true report beats a
+  complete-looking one.
+- If asked again for the report, answer only the specific question.
 
 ## Answering questions about a run
 
