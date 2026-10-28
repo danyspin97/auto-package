@@ -2898,6 +2898,98 @@ pub fn add_release_changes_entry(
     add_changes_entry(checkout_dir, message, emit)
 }
 
+/// Sets the flag lines of this release's `.changes` entry: each `lines` item
+/// becomes an indented continuation line under the `Update to <version>` bullet
+/// of the newest entry, so the bullet stays one bullet. Flag lines an earlier
+/// pass wrote are replaced, so the entry says what the package is now. When
+/// the newest entry is not this release's, each line is added as a bullet of
+/// its own, unless the file already has it.
+pub fn set_flag_lines(
+    checkout_dir: &Path,
+    version: &str,
+    lines: &[String],
+    emit: Emit<'_>,
+) -> Result<(), Error> {
+    let file = newest_changes_file(checkout_dir);
+    if let Some(file) = &file
+        && let Ok(text) = fs::read_to_string(file)
+        && let Some(folded) = with_flag_lines_in_release_entry(&text, version, lines)
+    {
+        if folded != text {
+            return fs::write(file, folded).map_err(|e| {
+                Error::NotActionable(format!("cannot write {}: {e}", file.display()))
+            });
+        }
+        return Ok(());
+    }
+    let present = file
+        .as_ref()
+        .and_then(|f| fs::read_to_string(f).ok())
+        .unwrap_or_default();
+    for line in lines {
+        if !present.lines().any(|l| l.trim() == format!("- {line}")) {
+            add_changes_entry(checkout_dir, line, emit)?;
+        }
+    }
+    Ok(())
+}
+
+/// The first `.changes` file of `checkout_dir`, in name order.
+fn newest_changes_file(checkout_dir: &Path) -> Option<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(checkout_dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "changes"))
+        .collect();
+    files.sort();
+    files.into_iter().next()
+}
+
+/// `changes` with its `Update to <version>` entry's flag lines set to `lines`
+/// (see [`set_flag_lines`]). `None` when the newest entry is not that release's.
+fn with_flag_lines_in_release_entry(
+    changes: &str,
+    version: &str,
+    lines: &[String],
+) -> Option<String> {
+    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let all: Vec<&str> = changes.lines().collect();
+    let first = all.iter().position(|l| is_separator(l.trim()))?;
+    let end = all[first + 1..]
+        .iter()
+        .position(|l| is_separator(l.trim()))
+        .map_or(all.len(), |i| first + 1 + i);
+    let bullet_text = |l: &str| l.trim().trim_start_matches(['-', '*', ' ']).to_string();
+    let update = format!("Update to {version}");
+    if !all[first + 1..end]
+        .iter()
+        .map(|l| bullet_text(l))
+        .any(|t| t == update)
+    {
+        return None;
+    }
+    // A continuation line of an earlier flag set: two spaces, then `FLAG: `.
+    let stale = |l: &str| l.starts_with("  ") && l.trim_start().starts_with("FLAG: ");
+    let kept: Vec<&str> = all[first + 1..end]
+        .iter()
+        .copied()
+        .filter(|l| !stale(l))
+        .collect();
+    let last = kept
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let mut out: Vec<String> = all[..=first].iter().map(|l| l.to_string()).collect();
+    out.extend(kept[..last].iter().map(|l| l.to_string()));
+    out.extend(lines.iter().map(|l| format!("  {l}")));
+    out.extend(kept[last..].iter().map(|l| l.to_string()));
+    out.extend(all[end..].iter().map(|l| l.to_string()));
+    let mut text = out.join("\n");
+    text.push('\n');
+    Some(text)
+}
+
 /// `changes` with `- message` added to the newest entry, when that entry says
 /// `Update to <version>`. `None` otherwise; unchanged text when the entry
 /// already has the bullet.
@@ -10120,6 +10212,34 @@ mod transient_broken_tests {
         // An earlier release's entry is never added to.
         assert!(with_bullet_in_release_entry(&working, "1.0", "x").is_none());
         assert!(with_bullet_in_release_entry(&old, "2.0", "x").is_none());
+    }
+
+    #[test]
+    fn flag_lines_go_under_the_release_bullet_and_replace_stale_ones() {
+        let sep = "-".repeat(67);
+        let old = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 1.0\n");
+        let new = format!(
+            "{sep}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n- Update to 2.0\n- Fix the build\n\n"
+        );
+        let working = format!("{new}{old}");
+        let flags = vec!["FLAG: tests skipped: --deselect t.py::a".to_string()];
+        let out = with_flag_lines_in_release_entry(&working, "2.0", &flags).unwrap();
+        assert!(
+            out.contains(
+                "- Update to 2.0\n- Fix the build\n  FLAG: tests skipped: --deselect t.py::a\n\n"
+            ),
+            "{out}"
+        );
+        assert!(out.ends_with(&old));
+        // Setting the same flags again changes nothing; a cleared set removes them.
+        assert_eq!(
+            with_flag_lines_in_release_entry(&out, "2.0", &flags).unwrap(),
+            out
+        );
+        let cleared = with_flag_lines_in_release_entry(&out, "2.0", &[]).unwrap();
+        assert_eq!(cleared, working);
+        // An earlier release's entry is never written to.
+        assert!(with_flag_lines_in_release_entry(&working, "1.0", &flags).is_none());
     }
 
     #[test]

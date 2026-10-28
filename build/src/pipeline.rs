@@ -6413,7 +6413,7 @@ pub(crate) fn baseline_text(baseline: &Path, name: impl AsRef<Path>) -> Option<S
 /// Records the fix-loop flags of the spec about to be committed: the change
 /// from the OBS baseline (`baseline` holds the files OBS has) to the final spec.
 /// The `blocked` answers the run recorded stay.
-fn settle_fix_flags(ctx: &RunCtx, baseline: &Path) {
+fn settle_fix_flags(ctx: &RunCtx, baseline: &Path, step: ap_core::event::StepId) {
     let spec_name = ctx.spec_path.file_name().unwrap_or_default();
     let before = baseline_text(baseline, spec_name);
     let after = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
@@ -6421,6 +6421,22 @@ fn settle_fix_flags(ctx: &RunCtx, baseline: &Path) {
     update_state(&ctx.ws, ctx.reporter, |st| {
         crate::fix_flags::settle(st, &ctx.config.run_id, found)
     });
+    // The flags go into the changelog entry, one line each under its bullet.
+    let lines: Vec<String> = PkgState::load(&ctx.ws)
+        .fix_flags
+        .iter()
+        .map(crate::fix_flags::FixFlag::line)
+        .collect();
+    warn_if_err(
+        ctx.reporter,
+        "adding the fix-loop flags to the .changes entry",
+        osc::set_flag_lines(
+            &ctx.checkout_dir,
+            &ctx.config.version,
+            &lines,
+            Emit::new(ctx.reporter, step),
+        ),
+    );
 }
 
 /// Step: Commit.
@@ -6489,7 +6505,7 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
             ),
         });
     }
-    settle_fix_flags(ctx, &baseline);
+    settle_fix_flags(ctx, &baseline, commit_step.id);
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
     let plan = osc::publish_plan(&ctx.checkout_dir);
     for name in &plan.skipped {
