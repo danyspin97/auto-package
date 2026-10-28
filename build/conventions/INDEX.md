@@ -67,7 +67,7 @@
 67. Merged into convention 11 — read convention 11 when tests need a GPU, a device or network, or %check has more than six --ignore
 68. Bundled .so in prebuilt wheels must not leak into dependencies — read when a wheel bundles libs or rpm Requires lists odd .so
 69. Merged into convention 5 — read convention 5 when writing %license lines or License:, or a dist-info holds licenses/
-70. Optional deps are not Requires; undeclared imports are — read when an extra-only requirement or a runtime import is missing
+70. Merged into convention 34 — read convention 34 when an extra-only requirement or a runtime import is missing
 71. Do not ship what the distro already ships — read before finishing: check Factory for the same import dir (file conflicts)
 72. Merged into convention 39 (rpmlintrc filters) — read convention 39 when rpmlint reports an E:/W: line
 73. Unsatisfiable bounds (Python or C/C++), siblings first — read when a ==, <, >= bound may exceed what the distro or project has
@@ -82,7 +82,7 @@
 82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
 83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
 84. Merged into convention 32 — read convention 32 when the build or sources mention CUDA, cuda.h, nvcc or libcudart
-85. dlopen Requires, cffi minimum, ExclusiveArch propagation, ninja — read when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
+85. Merged into convention 34 — read convention 34 when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
 86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
 87. Merged into convention 7 — read convention 7 when the prompt lists flaky tests or a %check failure differs between two builds
 88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
