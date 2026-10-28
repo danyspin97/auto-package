@@ -35,7 +35,7 @@
 35. Systemd service files and system users — read when the package ships a daemon, a .service unit or needs /run dirs
 36. gettext .mo translations (%find_lang) — read when the package installs locale/ .mo files or rpmlint reports them
 37. -doc subpackage for Sphinx/generated docs — read when upstream ships docs as an artifact or the task asks for -doc
-38. Removed or renamed Python stdlib APIs — read when tests or code fail with AttributeError/ImportError on a stdlib name
+38. Merged into convention 14 — read convention 14 when tests or code fail with AttributeError/ImportError on a stdlib name
 39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter
 40. The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
 41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
@@ -91,4 +91,4 @@
 91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
 92. Every _service you add uses mode="manual" — read when you write or edit a _service file
 93. Upstream .asc/.sig signature: SourceN plus keyring — read when the release page has a .asc, .sig or .sign next to the tarball
-94. Carried-forward patch: rebase with quilt, remove only when reverse-applied — read when the prompt lists patches that failed to apply or you are about to remove a Patch line
+94. Merged into convention 14 — read convention 14 when the prompt lists patches that failed to apply or you are about to remove a Patch line
