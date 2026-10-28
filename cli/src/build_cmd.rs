@@ -70,64 +70,7 @@ pub(crate) fn cmd_build(
     // Resolve the version if it was not pinned. A repository has no package
     // index behind it, so "latest" comes from the forge's own release list.
     let pinned_version = version.map(str::to_string);
-    let version = match version {
-        Some(v) => v.to_string(),
-        None => {
-            if let Some(repo) = &source_repo {
-                let v = ap_build::sources::latest_release(repo)
-                    .map_err(|e| color_eyre::eyre::eyre!(e))?;
-                reporter.report(&Event::Progress {
-                    step: None,
-                    message: format!("{repo} latest release is {v}"),
-                });
-                v
-            } else if let Some(v) =
-                ap_build::redist::latest_version(&ap_build::redist::Network, name)
-            {
-                // `--nvidia-redist`: NVIDIA's version of the component.
-                v.map_err(|e| color_eyre::eyre::eyre!(e))?
-            } else {
-                // Probe PyPI first — the overwhelmingly common case — then
-                // fall back to public-source-repository discovery for names
-                // PyPI does not carry (standalone Rust crates, plain C/C++
-                // libraries, or PyPI releases that ship no usable sdist).
-                // Mirrors `resolve_dependency_config` so a bare CLI name
-                // goes through the same resolution a runtime-discovered
-                // dependency does, instead of hard-failing the moment PyPI
-                // comes back empty.
-                // Version-only probe, not fetch_latest_release: a wheel-only
-                // release (common for vendor SDKs) has a legitimate
-                // info.version but no sdist, and the full parser would reject
-                // it before the repo-fallback path even got a chance to run.
-                let pypi_version = pypi_latest_version(name, reporter.as_ref());
-                if let Some(v) = pypi_version {
-                    v
-                } else {
-                    let repos = ap_build::pipeline::find_source_repo_candidates(name);
-                    let Some(repo_url) = repos.verified.first() else {
-                        return Err(color_eyre::eyre::eyre!(
-                            "{name} has no usable PyPI release and no \
-                             discoverable public source repository. Pass \
-                             --url, --source-url, or a repository URL as \
-                             the positional argument to point it at the \
-                             source."
-                        ));
-                    };
-                    let v = ap_build::sources::latest_release(repo_url)
-                        .map_err(|e| color_eyre::eyre::eyre!(e))?;
-                    reporter.report(&Event::Progress {
-                        step: None,
-                        message: format!(
-                            "{name}: not on PyPI, using discovered source \
-                             repository {repo_url} (latest release {v})"
-                        ),
-                    });
-                    source_repo = Some(repo_url.clone());
-                    v
-                }
-            }
-        }
-    };
+    let version = resolve_version(name, version, &mut source_repo, &reporter)?;
 
     // A repository tells us two things we were only guessing at: whether it is
     // a Python project or a Rust crate, and what it actually calls itself. Ask
@@ -1560,4 +1503,73 @@ pub(crate) fn cmd_build(
             // now available.
         }
     }
+}
+
+/// The version to build: the pinned one, or the latest release of the
+/// source repository, the name on the command line, or the repository
+/// discovered for it. `source_repo` is set when a repository is discovered.
+fn resolve_version(
+    name: &str,
+    version: Option<&str>,
+    source_repo: &mut Option<String>,
+    reporter: &Arc<dyn Reporter + Send + Sync>,
+) -> color_eyre::Result<String> {
+    Ok(match version {
+        Some(v) => v.to_string(),
+        None => {
+            if let Some(repo) = &source_repo {
+                let v = ap_build::sources::latest_release(repo)
+                    .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                reporter.report(&Event::Progress {
+                    step: None,
+                    message: format!("{repo} latest release is {v}"),
+                });
+                v
+            } else if let Some(v) =
+                ap_build::redist::latest_version(&ap_build::redist::Network, name)
+            {
+                // `--nvidia-redist`: NVIDIA's version of the component.
+                v.map_err(|e| color_eyre::eyre::eyre!(e))?
+            } else {
+                // Probe PyPI first — the overwhelmingly common case — then
+                // fall back to public-source-repository discovery for names
+                // PyPI does not carry (standalone Rust crates, plain C/C++
+                // libraries, or PyPI releases that ship no usable sdist).
+                // Mirrors `resolve_dependency_config` so a bare CLI name
+                // goes through the same resolution a runtime-discovered
+                // dependency does, instead of hard-failing the moment PyPI
+                // comes back empty.
+                // Version-only probe, not fetch_latest_release: a wheel-only
+                // release (common for vendor SDKs) has a legitimate
+                // info.version but no sdist, and the full parser would reject
+                // it before the repo-fallback path even got a chance to run.
+                let pypi_version = pypi_latest_version(name, reporter.as_ref());
+                if let Some(v) = pypi_version {
+                    v
+                } else {
+                    let repos = ap_build::pipeline::find_source_repo_candidates(name);
+                    let Some(repo_url) = repos.verified.first() else {
+                        return Err(color_eyre::eyre::eyre!(
+                            "{name} has no usable PyPI release and no \
+                             discoverable public source repository. Pass \
+                             --url, --source-url, or a repository URL as \
+                             the positional argument to point it at the \
+                             source."
+                        ));
+                    };
+                    let v = ap_build::sources::latest_release(repo_url)
+                        .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                    reporter.report(&Event::Progress {
+                        step: None,
+                        message: format!(
+                            "{name}: not on PyPI, using discovered source \
+                             repository {repo_url} (latest release {v})"
+                        ),
+                    });
+                    *source_repo = Some(repo_url.clone());
+                    v
+                }
+            }
+        }
+    })
 }
