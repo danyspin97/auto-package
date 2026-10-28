@@ -21,7 +21,7 @@
 21. One simple constraint per BuildRequires, not PEP 508 — read when copying a requirement with extras, markers, commas, ~= or !=
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
 23. Stray top-level files in site-packages — read when %files or rpmlint shows tests/docs/setup files at site-packages root
-24. Bundled headers in a non-devel package (devel-file-in-non-devel-package) — read when rpmlint reports that error
+24. Headers: own headers to -devel, vendored ones deleted — read when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
 25. rpmlint badness budget (threshold 999) — read when the build log says "Badness NNNN exceeds threshold"
 26. Source from a repository, not an sdist — read when the checkout is a git snapshot or the project sits in a subdirectory
 27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
