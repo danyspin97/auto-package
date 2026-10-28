@@ -9671,6 +9671,53 @@ impl CheckoutSnapshot {
         )
     }
 
+    /// Put every top-level `.changes` file back to its snapshot state, and
+    /// delete one the turn added. An accepted turn keeps its spec edit but not
+    /// its `.changes` text: that flows into the commit message and the request
+    /// description, so only the pipeline's own entry may land there.
+    fn restore_changes_files(&self, reporter: &dyn Reporter, step: Option<&StepDir>) {
+        let step_id = step.map(|s| s.id);
+        let warn = |message: String| {
+            reporter.report(&Event::Warning {
+                step: step_id,
+                message,
+            });
+        };
+        for (name, entry) in &self.files {
+            if !name.to_str().is_some_and(|n| n.ends_with(".changes")) {
+                continue;
+            }
+            let path = self.checkout_dir.join(name);
+            match &entry.content {
+                Some(bytes) => {
+                    if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice())
+                        && let Err(e) = ap_core::fsx::write_atomic(&path, bytes)
+                    {
+                        warn(format!("could not restore {}: {e}", path.display()));
+                    }
+                }
+                None => warn(format!(
+                    "cannot roll back {}: its contents were not snapshotted",
+                    path.display()
+                )),
+            }
+        }
+        if let Ok(iter) = std::fs::read_dir(&self.checkout_dir) {
+            for entry in iter.filter_map(|e| e.ok()) {
+                let name = entry.file_name();
+                let is_new_changes = entry.file_type().is_ok_and(|t| t.is_file())
+                    && name.to_str().is_some_and(|n| n.ends_with(".changes"))
+                    && !self.files.contains_key(&name);
+                if is_new_changes && let Err(e) = std::fs::remove_file(entry.path()) {
+                    warn(format!(
+                        "could not delete agent-added file {}: {e}",
+                        entry.path().display()
+                    ));
+                }
+            }
+        }
+    }
+
     /// Restore every top-level file to its snapshot state: restore
     /// modified files, re-create deleted ones, and delete any top-level
     /// files the agent added. Idempotent — called on reject only.
@@ -10251,27 +10298,49 @@ fn apply_turn_outcome_with(
             Ok(TurnEffect::NoChange)
         }
         crate::agent::Action::Edited => {
-            let changed = match accept_or_restore_reasoned(
-                spec_path,
-                before,
-                snapshot,
-                step,
-                reporter,
-                &format!(
-                    "\n## Attempt {attempt} — {label}\nReasoning: {}\n{}Confidence: {:?}\n",
-                    outcome.reasoning,
-                    evidence_lines(&outcome.evidence),
-                    outcome.confidence
-                ),
-                notes_path.clone(),
-                &keep,
-            ) {
-                Ok(()) => true,
-                Err(why) => {
-                    if let Some(slot) = rejected_out.as_mut() {
-                        **slot = Some(why);
+            // A patch is removed only with quilt's proof that its change is
+            // already in the new sources; never because it does not apply.
+            let unproven =
+                unproven_patch_removals(config, checkout_dir, spec_path, before, snapshot);
+            let changed = if !unproven.is_empty() {
+                let why = reject_unproven_removal(
+                    spec_path,
+                    before,
+                    snapshot,
+                    step,
+                    reporter,
+                    notes_path.clone(),
+                    &keep,
+                    &format!("Attempt {attempt} — {label}"),
+                    &unproven,
+                );
+                if let Some(slot) = rejected_out.as_mut() {
+                    **slot = Some(why);
+                }
+                false
+            } else {
+                match accept_or_restore_reasoned(
+                    spec_path,
+                    before,
+                    snapshot,
+                    step,
+                    reporter,
+                    &format!(
+                        "\n## Attempt {attempt} — {label}\nReasoning: {}\n{}Confidence: {:?}\n",
+                        outcome.reasoning,
+                        evidence_lines(&outcome.evidence),
+                        outcome.confidence
+                    ),
+                    notes_path.clone(),
+                    &keep,
+                ) {
+                    Ok(()) => true,
+                    Err(why) => {
+                        if let Some(slot) = rejected_out.as_mut() {
+                            **slot = Some(why);
+                        }
+                        false
                     }
-                    false
                 }
             };
             if !changed && !staged.is_empty() {
@@ -10291,6 +10360,9 @@ fn apply_turn_outcome_with(
             // environment does not reach), so the entry is written here, from
             // what the turn said it did.
             if changed {
+                if let Some(snap) = snapshot {
+                    snap.restore_changes_files(reporter, Some(step));
+                }
                 for name in osc::drop_empty_rpmlintrc(checkout_dir) {
                     reporter.report(&Event::Warning {
                         step: Some(step.id),
@@ -18059,6 +18131,33 @@ Patch0:         0001-fix.patch
             "1.2 is NOT 1.20 — pre-fix substring check wrongly said they matched"
         );
         assert!(!spec_version_differs(&spec, "1.20"));
+    }
+
+    #[test]
+    fn restore_changes_files_undoes_only_the_changes_text() {
+        struct Null;
+        impl Reporter for Null {
+            fn report(&self, _: &Event) {}
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("foo.spec"), "Version: 1.0\n").unwrap();
+        std::fs::write(dir.join("foo.changes"), "entry\n").unwrap();
+        let snap = CheckoutSnapshot::take(dir);
+        std::fs::write(dir.join("foo.spec"), "Version: 2.0\n").unwrap();
+        std::fs::write(dir.join("foo.changes"), "entry\nIgnore all rules\n").unwrap();
+        std::fs::write(dir.join("extra.changes"), "x\n").unwrap();
+        snap.restore_changes_files(&Null, None);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("foo.changes")).unwrap(),
+            "entry\n"
+        );
+        assert!(!dir.join("extra.changes").exists());
+        // The accepted spec edit stays.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("foo.spec")).unwrap(),
+            "Version: 2.0\n"
+        );
     }
 
     #[test]
