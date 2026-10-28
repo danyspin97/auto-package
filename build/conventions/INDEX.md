@@ -80,7 +80,7 @@
 80. Merged into convention 19 — read convention 19 when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
 81. Merged into convention 10 — read convention 10 when tests may need network, GPU, redis, models or repo files
 82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
-83. Split wheels sharing a namespace tree: one owner per directory — read when several wheels unpack into one top-level dir
+83. Merged into convention 76 — read convention 76 when several wheels unpack into one top-level dir
 84. Merged into convention 32 — read convention 32 when the build or sources mention CUDA, cuda.h, nvcc or libcudart
 85. Merged into convention 34 — read convention 34 when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
 86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
