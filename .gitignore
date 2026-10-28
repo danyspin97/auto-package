@@ -9,3 +9,6 @@
 # Lock and scratch files the notes update creates while it runs.
 /notes/packages/*.lock
 /notes/packages/.scratch-*
+
+# Package notes live outside the repo (default ../auto-package-notes).
+/notes/
