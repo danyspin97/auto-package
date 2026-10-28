@@ -1,7 +1,7 @@
 1. BuildRequires constraint syntax inside %{python_module ...} — read when writing or fixing a BuildRequires with >=, <, ==
 2. Normalized vs display vs import names — read when a Requires/dist-info/%files name has odd casing, dashes or dots
 3. Arch-specific vs noarch, C libs and -devel names — read when deciding BuildArch, or an extension links a C/C++ library
-4. Maturin (Rust-in-Python) packages — read when build-backend is maturin or the source has Cargo.toml plus pyproject.toml
+4. Merged into convention 6 — read convention 6 when build-backend is maturin or the source has Cargo.toml plus pyproject.toml
 5. License must be an SPDX expression — read when License is FIXME, not SPDX, or no LICENSE file exists in the sdist
 6. %pyproject_wheel / %pyproject_install for PEP 517 — read when writing %build or %install of a Python package
 7. %check with %pytest / %pytest_arch and its BuildRequires — read when adding or editing %check of a Python package
@@ -48,7 +48,7 @@
 48. Test-environment setup: %ctest env, UTF-8 locale, git, sandbox — read when %check fails with no missing package
 49. Per-CPython upstream wheels covering our flavors — read when the source cannot be built and wheels exist per cp3NN
 50. OOM / disk-full failures are sizing, not spec bugs — read when the build is killed or says "No space left on device"
-51. meson-python / scikit-build-core args via PIP_CONFIG_SETTINGS — read when build-backend is mesonpy or scikit_build_core
+51. Merged into convention 6 — read convention 6 when build-backend is mesonpy or scikit_build_core
 52. Merged into convention 2 — read convention 2 when the package is a fork or rename of another PyPI project
 53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
 54. Metapackage subpackage of runtime deps — read when a feature only needs other packages installed, no files
