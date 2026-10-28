@@ -1899,38 +1899,58 @@ pub fn run_package(
     reporter: &dyn Reporter,
 ) -> PipelineResult {
     let _in_flight = InFlightGuard::acquire(&config.rpm_name);
-    // The in-flight guard is per process; this lock keeps a second `ap` on the
-    // same state root from building the same package at once. Held for the
-    // whole run. A failed open is left for `run_package_inner` to report.
-    let _build_lock = match Workspace::open(&config.state_root, &config.rpm_name) {
-        Ok(ws) => {
-            let lock_path = ws.dir().join("build.lock");
-            match ap_core::proc_lock::lock_with_wait(&lock_path, BUILD_LOCK_WAIT) {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    let kind = match e {
-                        ap_core::proc_lock::LockError::Held(_) => FailureKind::Busy,
-                        ap_core::proc_lock::LockError::Io(_) => FailureKind::Other,
-                    };
-                    return PipelineResult::Failed {
-                        rpm_name: config.rpm_name.clone(),
-                        reason: format!(
-                            "could not take {}: {}",
-                            lock_path.display(),
-                            lock_error_text(&e)
-                        ),
-                        kind,
-                    };
-                }
-            }
-        }
-        Err(_) => None,
+    let _build_lock = match take_build_lock(config) {
+        Ok(lock) => lock,
+        Err(failed) => return failed,
     };
     // Counted once the package may write: a run still waiting for another
     // process's build lock has written nothing, and an interrupt does not wait
     // for it. From here on, an interrupt that finds the run between its write
     // and its restore waits for it.
     let _obs_write = crate::proc::obs_write();
+    mark_run_started(config, reporter);
+    // The fix-loop and risk flags are not touched here: an earlier run's stay
+    // until a commit of this run settles them, so a run that ends AlreadyBuilt
+    // or missing_deps still reports what OBS holds.
+    let baseline = match restore_stale_baseline(config, reporter) {
+        Ok(dir) => dir,
+        Err(failed) => return failed,
+    };
+    let result = run_package_inner(config, pkg_run, reporter);
+    finish_package(config, pkg_run, reporter, result, &baseline)
+}
+
+/// Takes the package's build lock, held for the whole run. This keeps a second
+/// `ap` on the same state root from building the same package at once. A
+/// failed open is left for `run_package_inner` to report, so it takes no lock.
+fn take_build_lock(config: &PipelineConfig) -> Result<Option<std::fs::File>, PipelineResult> {
+    let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) else {
+        return Ok(None);
+    };
+    let lock_path = ws.dir().join("build.lock");
+    match ap_core::proc_lock::lock_with_wait(&lock_path, BUILD_LOCK_WAIT) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) => {
+            let kind = match e {
+                ap_core::proc_lock::LockError::Held(_) => FailureKind::Busy,
+                ap_core::proc_lock::LockError::Io(_) => FailureKind::Other,
+            };
+            Err(PipelineResult::Failed {
+                rpm_name: config.rpm_name.clone(),
+                reason: format!(
+                    "could not take {}: {}",
+                    lock_path.display(),
+                    lock_error_text(&e)
+                ),
+                kind,
+            })
+        }
+    }
+}
+
+/// Records that the run has started: the flags of another version are
+/// dropped, and an outcome left by an earlier run is marked as running.
+fn mark_run_started(config: &PipelineConfig, reporter: &dyn Reporter) {
     // The flags describe one version's change. A run for another version
     // starts without them: the last version's were never submitted with it.
     // A state that records no version (written before the field) keeps its
@@ -1955,25 +1975,29 @@ pub fn run_package(
             });
         }
     }
-    // The fix-loop and risk flags are not touched here: an earlier run's stay
-    // until a commit of this run settles them, so a run that ends AlreadyBuilt
-    // or missing_deps still reports what OBS holds.
-    // A baseline a failed attempt could not put back is restored before this
-    // run writes anything; if that fails the package does not start.
+}
+
+/// Puts back a baseline that a failed attempt could not restore, before this
+/// run writes anything. Returns the baseline directory; if the restore fails
+/// the package does not start.
+fn restore_stale_baseline(
+    config: &PipelineConfig,
+    reporter: &dyn Reporter,
+) -> Result<PathBuf, PipelineResult> {
     let baseline = match obs_baseline_dir(config) {
         Ok(dir) => dir,
         Err(e) => {
-            return PipelineResult::Failed {
+            return Err(PipelineResult::Failed {
                 rpm_name: config.rpm_name.clone(),
                 reason: format!("cannot open the package workspace: {e}"),
                 kind: FailureKind::Other,
-            };
+            });
         }
     };
     if baseline.exists()
         && let Err(why) = osc::restore_baseline(&baseline, Emit::run(reporter))
     {
-        return PipelineResult::Failed {
+        return Err(PipelineResult::Failed {
             rpm_name: config.rpm_name.clone(),
             reason: format!(
                 "not started: the OBS baseline of an earlier failed attempt was NOT \
@@ -1992,9 +2016,20 @@ pub fn run_package(
                     .display(),
             ),
             kind: FailureKind::Other,
-        };
+        });
     }
-    let result = run_package_inner(config, pkg_run, reporter);
+    Ok(baseline)
+}
+
+/// Settles a finished run: marks what it built, restores the OBS baseline,
+/// records why it ended, and runs the notes and release steps for a build.
+fn finish_package(
+    config: &PipelineConfig,
+    pkg_run: &PkgRunDir,
+    reporter: &dyn Reporter,
+    result: PipelineResult,
+    baseline: &Path,
+) -> PipelineResult {
     // What the pipeline itself found built is settled for the rest of the run.
     if matches!(
         result,
@@ -2026,7 +2061,7 @@ pub fn run_package(
         },
         (result, _) => result,
     };
-    let result = restore_obs_baseline(&baseline, reporter, result, |dir| {
+    let result = restore_obs_baseline(baseline, reporter, result, |dir| {
         osc::restore_baseline(dir, Emit::run(reporter))
     });
     // Persist last-attempt status in the durable workspace so a resumed run
