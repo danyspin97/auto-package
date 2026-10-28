@@ -100,10 +100,22 @@ pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<FixFlag>) {
 }
 
 /// The flags the package's last run recorded, for a reader outside the run.
+/// Empty when they cannot be read; a reader that must not act on that uses
+/// [`try_of_package`].
 pub fn of_package(state_root: &std::path::Path, pkg: &str) -> Vec<FixFlag> {
-    Workspace::find_existing(state_root, &[pkg])
-        .map(|ws| PkgState::load(&ws).fix_flags)
-        .unwrap_or_default()
+    try_of_package(state_root, pkg).unwrap_or_default()
+}
+
+/// The flags of the package OBS calls `pkg`, or why they cannot be read: no
+/// workspace for it, or a state file that is missing or corrupt.
+pub fn try_of_package(state_root: &std::path::Path, pkg: &str) -> std::io::Result<Vec<FixFlag>> {
+    let ws = Workspace::find_by_obs_name(state_root, pkg).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no build state for {pkg} in {}", state_root.display()),
+        )
+    })?;
+    Ok(PkgState::read_strict(&ws)?.fix_flags)
 }
 
 /// Drops the flags of `pkg` once its change is submitted: the request text

@@ -1614,8 +1614,8 @@ impl SubmitBackend {
 
     fn request(&self, row: &str) -> Result<(Item, osc::SubmitRequest), tui::SubmitFailure> {
         let item = self.item(row).map_err(tui::SubmitFailure::Other)?;
-        let needing = needing_review(&self.state_root, &[item.pkg.as_str()]);
-        if let Some(lines) = yes_refusal(self.yes, &needing) {
+        let gate = review_gate(&self.state_root, &[item.pkg.as_str()]);
+        if let Some(lines) = yes_refusal(self.yes, &gate) {
             return Err(tui::SubmitFailure::Other(lines.join("; ")));
         }
         // The TUI only offers rows that built; OBS is asked again inside.
@@ -1771,7 +1771,7 @@ fn submit_requests(
         .iter()
         .map(|(i, _)| results[*i].item.pkg.as_str())
         .collect();
-    if let Some(lines) = yes_refusal(a.yes, &needing_review(&ctx.state_root, &names)) {
+    if let Some(lines) = yes_refusal(a.yes, &review_gate(&ctx.state_root, &names)) {
         for (idx, _) in &pending {
             results[*idx].sr = SrOutcome::NeedsReview;
         }
@@ -1811,31 +1811,59 @@ fn submit_requests(
 
 /// The packages among `pkgs` whose change needs a review (it has risk flags
 /// recorded), with those flags' lines, in the order given.
-fn needing_review(state_root: &Path, pkgs: &[&str]) -> Vec<(String, Vec<String>)> {
-    pkgs.iter()
-        .filter_map(|pkg| {
-            let lines = ap_build::risk_flags::lines_of_package(state_root, pkg);
-            (!lines.is_empty()).then(|| (pkg.to_string(), lines))
-        })
-        .collect()
+fn review_gate(state_root: &Path, pkgs: &[&str]) -> ReviewGate {
+    let mut gate = ReviewGate::default();
+    for pkg in pkgs {
+        match ap_build::risk_flags::try_of_package(state_root, pkg) {
+            Ok(flags) => {
+                let lines: Vec<String> = flags.iter().map(|f| f.line()).collect();
+                if !lines.is_empty() {
+                    gate.needing.push((pkg.to_string(), lines));
+                }
+            }
+            Err(e) => gate.unreadable.push(format!("{pkg}: {e}")),
+        }
+    }
+    gate
 }
 
-/// What `--yes` refuses: when it is given and any package needs a review, the
-/// message first, then each such package and its flags, and what to do
-/// instead. `None` when the requests may go on (no `--yes`, or nothing needs a
-/// review).
-fn yes_refusal(yes: bool, needing: &[(String, Vec<String>)]) -> Option<Vec<String>> {
-    if !yes || needing.is_empty() {
+/// What the review gate found among the packages of a batch.
+#[derive(Debug, Default, PartialEq)]
+struct ReviewGate {
+    /// The packages that need a review, with each risk's line.
+    needing: Vec<(String, Vec<String>)>,
+    /// The packages whose recorded state cannot be read, with why. Nothing is
+    /// known about them, so `--yes` does not go ahead for them either.
+    unreadable: Vec<String>,
+}
+
+/// What `--yes` refuses: when it is given and any package needs a review or
+/// has a state that cannot be read, the message first, then each such package
+/// and its flags or its error. `None` when the requests may go on (no `--yes`,
+/// or nothing needs a review and every state was read).
+fn yes_refusal(yes: bool, gate: &ReviewGate) -> Option<Vec<String>> {
+    if !yes || (gate.needing.is_empty() && gate.unreadable.is_empty()) {
         return None;
     }
-    let mut lines = vec![format!(
-        "--yes refuses to submit: {} package(s) need a review, nothing was submitted; \
-         run without --yes to review them",
-        needing.len()
-    )];
-    for (pkg, risks) in needing {
-        lines.push(format!("  {pkg}"));
-        lines.extend(risks.iter().map(|r| format!("    {r}")));
+    let mut lines = Vec::new();
+    if !gate.needing.is_empty() {
+        lines.push(format!(
+            "--yes refuses to submit: {} package(s) need a review, nothing was submitted; \
+             run without --yes to review them",
+            gate.needing.len()
+        ));
+        for (pkg, risks) in &gate.needing {
+            lines.push(format!("  {pkg}"));
+            lines.extend(risks.iter().map(|r| format!("    {r}")));
+        }
+    }
+    if !gate.unreadable.is_empty() {
+        lines.push(format!(
+            "--yes refuses to submit: the recorded state of {} package(s) cannot be read, \
+             nothing was submitted; run without --yes to look at them",
+            gate.unreadable.len()
+        ));
+        lines.extend(gate.unreadable.iter().map(|u| format!("  {u}")));
     }
     Some(lines)
 }
@@ -2240,7 +2268,8 @@ mod tests {
             )
         })
         .unwrap();
-        Workspace::open(root.path(), "python-bar").unwrap();
+        let bar = Workspace::open(root.path(), "python-bar").unwrap();
+        PkgState::update(&bar, |_| {}).unwrap();
         root
     }
 
@@ -2261,15 +2290,15 @@ mod tests {
     #[test]
     fn yes_refuses_a_batch_with_a_package_that_needs_a_review() {
         let root = state_with_a_risk();
-        let needing = needing_review(root.path(), &["python-bar", "python-foo"]);
+        let gate = review_gate(root.path(), &["python-bar", "python-foo"]);
         assert_eq!(
-            needing,
+            gate.needing,
             vec![(
                 "python-foo".to_string(),
                 vec!["RISK: added dependency line: Requires(post): helper".to_string()]
             )]
         );
-        let lines = yes_refusal(true, &needing).expect("refused");
+        let lines = yes_refusal(true, &gate).expect("refused");
         assert!(lines[0].starts_with("--yes refuses to submit: 1 package(s) need a review"));
         assert!(lines[0].ends_with("run without --yes to review them"));
         assert_eq!(lines[1], "  python-foo");
@@ -2281,14 +2310,45 @@ mod tests {
     fn clean_packages_and_an_interactive_run_are_not_refused() {
         let root = state_with_a_risk();
         // Only the clean package: nothing needs a review, even with --yes.
-        let clean = needing_review(root.path(), &["python-bar"]);
-        assert!(clean.is_empty());
+        let clean = review_gate(root.path(), &["python-bar"]);
         assert_eq!(yes_refusal(true, &clean), None);
         // Without --yes the confirmation asks instead of refusing.
-        let flagged = needing_review(root.path(), &["python-foo"]);
+        let flagged = review_gate(root.path(), &["python-foo"]);
         assert_eq!(yes_refusal(false, &flagged), None);
-        // A package with no state at all is clean too.
-        assert!(needing_review(root.path(), &["python-new"]).is_empty());
+        // A package with no state at all cannot be read: --yes does not go ahead.
+        let unknown = review_gate(root.path(), &["python-new"]);
+        assert_eq!(unknown.unreadable.len(), 1, "{unknown:?}");
+        assert!(yes_refusal(true, &unknown).is_some());
+        assert_eq!(yes_refusal(false, &unknown), None);
+    }
+
+    #[test]
+    fn a_corrupt_state_refuses_under_yes_and_a_renamed_one_is_found_by_its_obs_name() {
+        use ap_build::pipeline::PkgState;
+        use ap_build::risk_flags::RiskFlag;
+        use ap_build::workspace::Workspace;
+        let root = state_with_a_risk();
+        // The workspace is named for the RPM name; the OBS name is the other spelling.
+        let ws = Workspace::open(root.path(), "python-apscheduler").unwrap();
+        PkgState::update(&ws, |st| {
+            st.obs_name = Some("python-APScheduler".into());
+            ap_build::risk_flags::settle(
+                st,
+                "r1",
+                vec![RiskFlag::NewScriptlet {
+                    header: "%post".into(),
+                }],
+            )
+        })
+        .unwrap();
+        let gate = review_gate(root.path(), &["python-APScheduler"]);
+        assert_eq!(gate.needing.len(), 1, "{gate:?}");
+        assert!(gate.unreadable.is_empty());
+        std::fs::write(ws.dir().join("state.json"), "{ not json").unwrap();
+        let gate = review_gate(root.path(), &["python-APScheduler"]);
+        assert!(gate.needing.is_empty());
+        assert_eq!(gate.unreadable.len(), 1, "{gate:?}");
+        assert!(yes_refusal(true, &gate).is_some());
     }
 
     #[test]
@@ -2317,9 +2377,9 @@ mod tests {
         // no OBS call, so the check is what the refusal is tested against).
         let asked = backend(false);
         asked.register(&pkg_item("python-foo"));
-        assert!(needing_review(root.path(), &["python-foo"]).len() == 1);
+        assert_eq!(review_gate(root.path(), &["python-foo"]).needing.len(), 1);
         assert_eq!(
-            yes_refusal(asked.yes, &needing_review(root.path(), &["python-foo"])),
+            yes_refusal(asked.yes, &review_gate(root.path(), &["python-foo"])),
             None
         );
     }

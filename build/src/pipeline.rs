@@ -584,6 +584,22 @@ impl PkgState {
         }))
     }
 
+    /// Reads the state as it is: a missing, unreadable or corrupt file is an
+    /// error, never an empty state. For readers that must not act on a state
+    /// they cannot see, such as the `--yes` gate. Unlike [`Self::try_load`] it
+    /// does not move a corrupt file aside.
+    pub fn read_strict(ws: &Workspace) -> std::io::Result<Self> {
+        let path = ws.state_json();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        serde_json::from_str(&text).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} is corrupt: {e}", path.display()),
+            )
+        })
+    }
+
     /// Written to a temporary file and renamed, so a crash mid-write leaves
     /// the previous state rather than a truncated one. Errors name the file.
     pub fn save(&self, ws: &Workspace) -> std::io::Result<()> {

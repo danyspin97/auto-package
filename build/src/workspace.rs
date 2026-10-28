@@ -170,6 +170,27 @@ impl Workspace {
         })
     }
 
+    /// The workspace of the package OBS calls `obs_pkg`. A workspace is named
+    /// for the RPM name, which can differ from the OBS spelling
+    /// (`python-apscheduler` for `python-APScheduler`), so the directory of
+    /// that exact name is tried first, then the workspace whose state records
+    /// `obs_name`. `None` when there is none.
+    pub fn find_by_obs_name(state_root: &Path, obs_pkg: &str) -> Option<Self> {
+        if let Some(ws) = Self::find_existing(state_root, &[obs_pkg]) {
+            return Some(ws);
+        }
+        let entries = fs::read_dir(state_root).ok()?;
+        entries.flatten().find_map(|entry| {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                return None;
+            }
+            let ws = Self { dir };
+            let state = crate::pipeline::PkgState::read_strict(&ws).ok()?;
+            (state.obs_name.as_deref() == Some(obs_pkg)).then_some(ws)
+        })
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
