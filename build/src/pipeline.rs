@@ -2191,6 +2191,10 @@ struct RunState {
     last_log_digest: Option<String>,
     /// Consecutive fix rounds that were given a log identical to the one before.
     identical_logs: usize,
+    /// The shape of the failure the last fix turn was given (see
+    /// [`failure_shape`]) and how many builds in a row failed with it.
+    last_failure_shape: Option<String>,
+    same_shape_failures: usize,
     /// SHA-256 of the spec an unresolvable build was retried for after a
     /// bound was relaxed: the retry is only worth a build when the spec
     /// then differs from this.
@@ -2443,16 +2447,32 @@ fn run_stages(
         session_id: None,
         last_log_digest: None,
         identical_logs: 0,
+        same_shape_failures: 0,
+        last_failure_shape: None,
         relaxed_from_spec: None,
         post_review_done: false,
         post_review_revert: None,
     };
 
     let obs_status = checkout_stage(&ctx, &mut st)?;
+    // A package that builds only on other architectures ends `excluded` on OBS
+    // after a whole update and review turn (lsvpd: ppc only, on x86_64).
+    if let Ok(text) = std::fs::read_to_string(&ctx.spec_path)
+        && let Some(allowed) = crate::spec::exclusive_arch_excluding(&text, &config.arch)
+    {
+        return Err(ctx.failed(format!(
+            "not actionable: the spec's ExclusiveArch ({}) does not include {}",
+            allowed.join(" "),
+            config.arch
+        )));
+    }
     let spec = generate_spec_stage(&ctx, &mut st)?;
     osc_service_stage(&ctx, &mut st, &spec)?;
     fetch_sdist_stage(&ctx, &mut st, spec.need_spec)?;
     resume_budget(&ctx, &mut st)?;
+    // The carried-forward patches against the new sources, before the review
+    // turn and the first commit.
+    patch_stage(&ctx, &mut st, &spec)?;
 
     let build_log_nonempty = ctx
         .ws
@@ -7686,6 +7706,23 @@ fn fix_after_build(
         log: build_log.to_path_buf(),
     });
 
+    // A failure that comes back in the same shape with only a name changed
+    // (pcp: four builds in a row, each `cd` into one more PMDA directory 7.2.2
+    // no longer installs) is a family of defects fixed one per build.
+    let shape = failure_shape(&extract);
+    if shape.is_some() && shape == st.last_failure_shape {
+        st.same_shape_failures += 1;
+    } else {
+        st.same_shape_failures = 0;
+    }
+    st.last_failure_shape = shape;
+    let context_owned: Option<String> = match (context, same_shape_note(st.same_shape_failures)) {
+        (Some(c), Some(n)) => Some(format!("{c}\n\n{n}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, n) => n,
+    };
+    let context = context_owned.as_deref();
+
     let clean = strip_and_rewrite(spec_path);
     let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
     let turn = agent_turn(
@@ -7801,6 +7838,60 @@ fn fix_after_build(
         return Err(missing);
     }
     Ok(RoundEnd::Retry)
+}
+
+/// The shape of a build failure: its phase and last error line with every path
+/// cut to its directory, digits and temp-file names blurred. Two failures with
+/// the same shape differ only in a name (which directory, which file).
+fn failure_shape(extract: &crate::log::ExtractedLog) -> Option<String> {
+    let phase = extract.failed_section.clone().unwrap_or_default();
+    let line = extract
+        .excerpt
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !l.starts_with('+'))
+        .or_else(|| extract.error_lines.first().map(String::as_str))?;
+    let words: Vec<String> = line
+        .split_whitespace()
+        .map(|w| {
+            let w = w.trim_end_matches(':');
+            let w = match w.rfind('/') {
+                Some(i) if i > 0 => &w[..i],
+                _ => w,
+            };
+            let mut out = String::with_capacity(w.len());
+            let mut digits = false;
+            for c in w.chars() {
+                if c.is_ascii_digit() {
+                    if !digits {
+                        out.push('#');
+                    }
+                    digits = true;
+                } else {
+                    digits = false;
+                    out.push(c);
+                }
+            }
+            out
+        })
+        .collect();
+    Some(format!("{phase}|{}", words.join(" ")))
+}
+
+/// What the fix turn is told after `repeats` consecutive builds failed in the
+/// same shape (see [`failure_shape`]); `None` for the first or second one.
+fn same_shape_note(repeats: usize) -> Option<String> {
+    (repeats >= 1).then(|| {
+        format!(
+            "This is build failure number {} in a row of the same kind: only the name in the \
+             error changed (a different directory, file or test), so each fix repaired one \
+             instance and the next build found another. Do not fix just the one in this log: \
+             find every other instance of the same pattern in the spec now (every loop entry, \
+             subpackage, `%files` or list line of that kind), check each against the unpacked \
+             source and against what this build installed, and fix them all in this one edit.",
+            repeats + 1
+        )
+    })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -19997,6 +20088,8 @@ mod hygiene_tests {
             session_id: None,
             last_log_digest: None,
             identical_logs: 0,
+            same_shape_failures: 0,
+            last_failure_shape: None,
             relaxed_from_spec: None,
             post_review_done: false,
             post_review_revert: None,
@@ -20221,6 +20314,8 @@ mod hygiene_tests {
             session_id: None,
             last_log_digest: None,
             identical_logs: 0,
+            same_shape_failures: 0,
+            last_failure_shape: None,
             relaxed_from_spec: None,
             post_review_done: false,
             post_review_revert: None,
@@ -20450,6 +20545,8 @@ mod hygiene_tests {
             session_id: None,
             last_log_digest: None,
             identical_logs: 0,
+            same_shape_failures: 0,
+            last_failure_shape: None,
             relaxed_from_spec: None,
             post_review_done: false,
             post_review_revert: None,
@@ -20854,6 +20951,8 @@ mod ladder_tests {
             session_id: None,
             last_log_digest: None,
             identical_logs: 0,
+            same_shape_failures: 0,
+            last_failure_shape: None,
             relaxed_from_spec: None,
             post_review_done: false,
             post_review_revert: None,
