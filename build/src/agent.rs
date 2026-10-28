@@ -2924,14 +2924,13 @@ fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              only as far as the current sources need to compile. Then:\n\
              1. Read the package's spec, its patch list and `source/` (the unpacked \
                 sources) to see where the code goes.\n\
-             2. Create the patch with quilt (`quilt new`, `quilt add`, edit the file, \
-                `quilt refresh`) or write a unified diff against `source/` as \
-                `<name>.patch`; the file lives in the checkout beside the spec and is \
-                listed as a `PatchN:` line with a comment saying what it restores and \
-                the upstream commit it comes from, and applied by `%autosetup -p1` or \
-                `%patch`.\n\
-             3. The `.changes` entry is added for you from your `reasoning`: make its \
-                first sentence say what the patch restores.\n\
+             2. Create the patch with quilt only (`quilt new`, `quilt add`, edit the file, \
+                `quilt refresh`, convention 14): never write a `.patch` file by hand. The \
+                patch lives in the checkout beside the spec and is listed as a `PatchN:` \
+                line with a comment saying what it restores and the upstream commit it \
+                comes from, and applied by `%autosetup -p1` or `%patch`.\n\
+             3. Give the changelog field one bullet naming the patch file and what it \
+                restores (convention 40): the pipeline writes the `.changes` entry from it.\n\
              Do not change the package's version, its sources or anything unrelated to \
              the problem. If you cannot find the code upstream, or the patch would \
              need more than restoring it, return `use_upstream_wheel` when this is a Python \
