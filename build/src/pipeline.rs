@@ -6343,6 +6343,18 @@ fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
         commit_step.finish(StepOutcome::Failed);
         return Err(ctx.failed(reason));
     }
+    for name in osc::restore_dropped_recipe_files(
+        &ctx.checkout_dir,
+        Emit::new(ctx.reporter, commit_step.id),
+    ) {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: format!(
+                "{}: restored '{name}' from the package this one was branched from: the spec uses it",
+                ctx.rpm_name
+            ),
+        });
+    }
     for name in osc::drop_unused_recipe_files(&ctx.checkout_dir) {
         ctx.reporter.report(&Event::Warning {
             step: Some(commit_step.id),
@@ -6831,6 +6843,20 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
     let reporter = *reporter;
     let build_step = build_step.finish(StepOutcome::Ok);
     record_rpmlint(config, obs_name, ws, reporter);
+    // A build that passes after tests failed in an earlier one: those tests are
+    // flaky, and the notes keep that so nobody "fixes" them later.
+    if let Some(probe) = crate::flaky::load_probe(ws.dir(), &config.run_id)
+        && !probe.compared
+    {
+        append_notes(
+            ws.notes(),
+            &format!(
+                "\n## flaky tests\nfailed in one build and passed in the next, with no change: {}\n",
+                probe.first.iter().cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+        crate::flaky::clear_probe(ws.dir());
+    }
     st.step_attempts
         .skip(reporter, StepKind::ExtractFailure, SkipReason::NoFailure);
     record_built_state(ctx);
@@ -7566,6 +7592,26 @@ fn unresolvable_deps_round(
 
 /// An ordinary build failure: check the attempt/budget limits, then run a
 /// fix-after-build turn and apply it.
+/// Save the first flaky-test probe; false (with a warning) when it could not be
+/// written, so the caller does not start a rebuild nobody could compare.
+fn save_flaky_probe(
+    dir: &Path,
+    probe: &crate::flaky::Probe,
+    reporter: &dyn Reporter,
+    step: ap_core::event::StepId,
+) -> bool {
+    match crate::flaky::save_probe(dir, probe) {
+        Ok(()) => true,
+        Err(e) => {
+            reporter.report(&Event::Warning {
+                step: Some(step),
+                message: format!("could not save the flaky-test probe, so no extra build: {e}"),
+            });
+            false
+        }
+    }
+}
+
 fn fix_after_build(
     ctx: &RunCtx,
     st: &mut RunState,
@@ -7602,6 +7648,67 @@ fn fix_after_build(
     // repeat the last one: python-chromadb and python-torchcodec spent five to
     // ten turns on one stale log. A rebuild is asked for once; the same log
     // again ends the package with the reason.
+    // Only tests failed: one more build tells a flaky test from a stable failure
+    // before the agent is asked about it (convention 87).
+    let mut flaky_context: Option<String> = None;
+    if !ap_core::env::env_flag("AUTO_PACKAGE_NO_FLAKY_RETRY") {
+        let log_text = std::fs::read_to_string(build_log).unwrap_or_default();
+        let ids = crate::flaky::failing_ids(&log_text);
+        match (crate::flaky::load_probe(ws.dir(), &config.run_id), ids) {
+            // The guard saves the probe; when that fails there is no retry, or
+            // every round would ask for another rebuild.
+            (None, Some(ids))
+                if save_flaky_probe(
+                    ws.dir(),
+                    &crate::flaky::Probe {
+                        run_id: config.run_id.clone(),
+                        first: ids.clone(),
+                        compared: false,
+                    },
+                    reporter,
+                    build_step.id,
+                ) =>
+            {
+                let started = osc::rebuild(
+                    &config.project,
+                    obs_name,
+                    &config.distro,
+                    &config.arch,
+                    Emit::new(reporter, build_step.id),
+                );
+                reporter.report(&Event::Warning {
+                    step: Some(build_step.id),
+                    message: match started {
+                        Ok(_) => format!(
+                            "only {} test(s) failed: asked OBS for one more build of the same \
+                             sources to tell flaky tests from stable failures",
+                            ids.len()
+                        ),
+                        Err(e) => format!(
+                            "only {} test(s) failed; the rebuild that would tell whether they \
+                             are flaky could not be requested: {e}",
+                            ids.len()
+                        ),
+                    },
+                });
+                return Ok(RoundEnd::Retry);
+            }
+            (Some(mut probe), second) if !probe.compared => {
+                probe.compared = true;
+                let _ = crate::flaky::save_probe(ws.dir(), &probe);
+                if let Some(second) = second
+                    && let Some(verdict) = crate::flaky::compare(&probe.first, &second)
+                {
+                    append_notes(
+                        ws.notes(),
+                        &format!("\n## flaky tests\n{}\n", verdict.note()),
+                    );
+                    flaky_context = Some(verdict.context());
+                }
+            }
+            _ => {}
+        }
+    }
     let digest = sha256_file(build_log).ok();
     let previous = std::mem::replace(&mut st.last_log_digest, digest.clone());
     let mut fresh_note: Option<String> = None;
@@ -7652,6 +7759,12 @@ fn fix_after_build(
              result of your last change."
                 .to_string(),
         );
+    }
+    if let Some(fc) = flaky_context {
+        fresh_note = Some(match fresh_note {
+            Some(f) => format!("{f}\n\n{fc}"),
+            None => fc,
+        });
     }
     let context_owned: Option<String> = match (context, fresh_note) {
         (Some(c), Some(f)) => Some(format!("{c}\n\n{f}")),
