@@ -211,18 +211,8 @@ pub enum PipelineResult {
 
 // ── durable package state ─────────────────────────────────────────────────────
 
-/// The policy the pipeline enforces. Bump it only for a large change, such as
-/// switching a family of packages from source builds to upstream wheels: every
-/// package whose recorded policy is older is checked again on its next run,
-/// even if it built successfully before. Small convention changes do not bump
-/// it. Still 0: no re-check has been needed yet.
-pub const POLICY_VERSION: u32 = 0;
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PkgState {
-    /// The `POLICY_VERSION` the last successful build was checked against.
-    #[serde(default)]
-    pub policy_version: u32,
     pub last_built_version: Option<String>,
     pub last_outcome: Option<String>,
     /// One-line reason recorded for the most recent unsuccessful outcome
@@ -382,7 +372,6 @@ impl PkgState {
 ///
 /// - `running` left by a process that died (nothing holds the package's
 ///   `build.lock`) becomes `interrupted`, so the package reads as re-runnable.
-/// - `blocked` and `waiting_on_blocked` (retired outcomes) become `interrupted`.
 /// - `missing_deps` whose waited-on dependencies are all built (their own
 ///   state says `success`) becomes `interrupted` too: the wait is over.
 ///
@@ -435,14 +424,6 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
                     "the dependencies it waited on are built; ready to run again",
                 )
             }
-            // The retired terminal states: `blocked` is no longer an outcome (a
-            // turn that says so is taken through the resolution ladder), and
-            // its dependents waited on it. Both read as re-runnable.
-            Some("blocked" | "waiting_on_blocked") => (
-                "interrupted",
-                "retired `blocked` state: blocked is not an outcome any more; the next run \
-                 takes this package through the resolution ladder",
-            ),
             _ => continue,
         };
         if PkgState::update(&ws, |st| {
@@ -499,7 +480,6 @@ pub fn reconcile_with_obs(
             state.last_outcome.as_deref(),
             Some("failed" | "interrupted" | "missing_deps")
         ) || statuses.get(&name.to_lowercase()) != Some(&osc::BuildStatus::Succeeded)
-            || !state.policy_current()
         {
             continue;
         }
@@ -522,7 +502,6 @@ pub fn reconcile_with_obs(
                 // The rpmlint log of what was fetched, as a normal download does.
                 let lint = record_rpmlint_logs(rpms_dir, &obs, &version, &ws);
                 let saved = PkgState::update(&ws, |st| {
-                    st.policy_version = POLICY_VERSION;
                     st.last_built_version = Some(version);
                     st.last_outcome = Some("success".to_string());
                     st.last_failure_reason = None;
@@ -658,15 +637,6 @@ impl PkgState {
     pub fn is_built(&self, version: &str) -> bool {
         self.last_built_version.as_deref() == Some(version)
             && self.last_outcome.as_deref() == Some("success")
-            && self.policy_current()
-    }
-
-    /// Whether the last success was checked against the current policy.
-    // The comparison is always true while POLICY_VERSION is 0; it becomes a
-    // real check the first time the version is bumped.
-    #[allow(clippy::absurd_extreme_comparisons)]
-    pub fn policy_current(&self) -> bool {
-        self.policy_version >= POLICY_VERSION
     }
 
     /// The ladder history of a failed resolution of exactly this spec content,
@@ -2624,13 +2594,6 @@ fn preflight<'a>(
     if !config.force && prior.is_built(&config.version) && !unfinished {
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
     }
-    if prior.last_outcome.as_deref() == Some("success") && !prior.policy_current() {
-        update_state(&ws, reporter, |stale| {
-            stale.reviewed_version = None;
-            stale.reviewed_spec_hash = None;
-        });
-    }
-
     Ok(RunCtx {
         config,
         pkg_run,
@@ -2804,11 +2767,9 @@ fn checkout_stage(
         && !spec_has_published_defects(spec_path, &config.rpms_dir)
         && !wheel_policy_pending(&config.source_urls, &config.pkg_name, spec_path)
         && matches!(obs_status, Some(osc::BuildStatus::Succeeded))
-        && PkgState::load(ws).policy_current()
         && reconcile_rpms(config, obs_name, ws, reporter)
     {
         update_state(ws, reporter, |state| {
-            state.policy_version = POLICY_VERSION;
             state.last_built_version = Some(config.version.clone());
             state.last_outcome = Some("success".to_string());
             state.last_failure_reason = None;
@@ -7093,7 +7054,6 @@ fn record_built_state(ctx: &RunCtx) {
         ..
     } = ctx;
     update_state(ws, *reporter, |state| {
-        state.policy_version = POLICY_VERSION;
         state.last_built_version = Some(config.version.clone());
         state.last_outcome = Some("success".to_string());
         state.last_failure_reason = None;
@@ -16957,6 +16917,25 @@ mod tests {
     }
 
     #[test]
+    fn a_state_json_with_retired_fields_still_loads() {
+        // Written by older builds: `policy_version` and an outcome that is no
+        // longer produced. Unknown fields are ignored, so the package loads
+        // with the fields it still has and the rest falls to the defaults.
+        let root = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(root.path(), "python-old").unwrap();
+        std::fs::create_dir_all(ws.dir()).unwrap();
+        std::fs::write(
+            ws.state_json(),
+            r#"{"policy_version":0,"last_built_version":"3.11.0","last_outcome":"success","retired_field":[1,2]}"#,
+        )
+        .unwrap();
+        let st = PkgState::try_load(&ws).unwrap();
+        assert_eq!(st.last_built_version.as_deref(), Some("3.11.0"));
+        assert!(st.is_built("3.11.0"));
+        assert!(!ws.state_json().with_extension("json.bad").exists());
+    }
+
+    #[test]
     fn a_release_archive_is_saved_under_the_suffix_of_its_own_kind() {
         assert_eq!(
             archive_save_suffix("https://x/foo-1.0.tar.gz"),
@@ -17875,7 +17854,6 @@ mod tests {
     #[test]
     fn only_success_is_a_built_state() {
         let make = |outcome: &str| PkgState {
-            policy_version: POLICY_VERSION,
             last_built_version: Some("1.0".into()),
             last_outcome: Some(outcome.into()),
             last_failure_reason: None,
@@ -18936,23 +18914,6 @@ mod prompt_notes_tests {
 }
 
 #[cfg(test)]
-mod policy_tests {
-    use super::*;
-
-    #[test]
-    fn a_success_under_the_current_policy_is_built() {
-        let st = PkgState {
-            last_built_version: Some("1.0".into()),
-            last_outcome: Some("success".into()),
-            policy_version: POLICY_VERSION,
-            ..Default::default()
-        };
-        assert!(st.policy_current());
-        assert!(st.is_built("1.0"));
-    }
-}
-
-#[cfg(test)]
 mod npm_vendor_route_tests {
     use super::*;
 
@@ -19903,38 +19864,6 @@ mod hygiene_tests {
         let old: PkgState =
             serde_json::from_str(r#"{"blocked_spec_hash": 5, "blocked_reason": "x"}"#).unwrap();
         assert_eq!(old.ladder_spec_hash, None);
-    }
-
-    #[test]
-    fn retired_blocked_states_are_migrated_to_a_rerunnable_state() {
-        let root = tempfile::tempdir().unwrap();
-        write_state(
-            root.path(),
-            "python-b",
-            "blocked",
-            Some("Source10 is not in the checkout"),
-        );
-        write_state(
-            root.path(),
-            "python-w",
-            "waiting_on_blocked",
-            Some("waiting on blocked package: python-b"),
-        );
-        write_state(root.path(), "python-f", "failed", Some("x"));
-        let changed = reconcile_state(root.path());
-        assert_eq!(changed.len(), 2, "{changed:?}");
-        for n in ["python-b", "python-w"] {
-            assert_eq!(
-                outcome(root.path(), n).as_deref(),
-                Some("interrupted"),
-                "{n}"
-            );
-            let ws = Workspace::open(root.path(), n).unwrap();
-            let why = PkgState::load(&ws).last_failure_reason.unwrap();
-            assert!(why.contains("resolution ladder"), "{why}");
-        }
-        assert_eq!(outcome(root.path(), "python-f").as_deref(), Some("failed"));
-        assert!(reconcile_state(root.path()).is_empty());
     }
 
     fn write_state(root: &Path, name: &str, outcome: &str, reason: Option<&str>) {
