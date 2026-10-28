@@ -738,7 +738,7 @@ component and a `-devel` package for its headers:
 
 They install under NVIDIA's own tree `/usr/local/cuda-<major>.<minor>` (headers in
 `include/`, libraries in `lib64/`, pkg-config files in `pkg-config/`; look the
-exact version up with `ls -d /usr/local/cuda-*` or `rpm -ql cuda-cudart-devel`).
+exact version up with `rpm -ql cuda-cudart-devel`).
 
 - A BUILD-time need for CUDA headers or libraries (`cuda.h`, `cuda_runtime.h`,
   `cupti.h`, `nvrtc.h`, `-lcudart`, `find_package(CUDAToolkit)` that only needs
@@ -1881,6 +1881,23 @@ fn read_tool_denied_tools() -> Vec<String> {
             .filter(|p| **p != "readelf")
             .map(|p| format!("Bash({p} *|*)")),
     );
+    // Absolute paths for `ls` and `readelf`, in any spelling the shell turns
+    // into a path (plain, quoted, `--opt=/abs`, a quote pair hiding the `/`).
+    // The grants are relative to the turn's directory, and a deny cannot
+    // carve out the workspace, so an absolute path is refused even inside it:
+    // the prompts name files relative to the checkout.
+    for p in ["ls", "readelf"] {
+        for pat in [
+            "/*", "* /*", "\"/*", "* \"/*", "'/*", "* '/*", "*=/*", "\"\"*", "''*", "* \"\"*",
+            "* ''*",
+        ] {
+            denied.push(format!("Bash({p} {pat})"));
+        }
+    }
+    // `readelf @file` reads its arguments from a file (binutils expands a
+    // leading `@`), so the response-file form is refused wherever it appears.
+    denied.push("Bash(readelf @*)".into());
+    denied.push("Bash(readelf * @*)".into());
     // `osc cat <url>` is an API GET to any host: no URL, and no option that
     // could change the API server.
     denied.push("Bash(osc cat *://*)".into());
@@ -4953,6 +4970,40 @@ mod tests {
     }
 
     #[test]
+    fn ls_and_readelf_refuse_absolute_paths_and_response_files() {
+        let ws = std::path::Path::new("/srv/ws");
+        let denied = turn_denied_tools(ws, None);
+        let patterns = bash_deny_patterns(&denied);
+        let is_denied = |c: &str| patterns.iter().any(|p| glob_matches(p, c));
+        for c in [
+            "ls /etc",
+            "ls -la /srv/ws/checkout",
+            "ls \"/etc\"",
+            "ls '/etc'",
+            "ls ''/etc",
+            "ls --hide=/etc",
+            "readelf -d /usr/lib64/libfoo.so",
+            "readelf -d -- /usr/lib64/libfoo.so",
+            "readelf -d \"/usr/lib64/libfoo.so\"",
+            "readelf @args.txt",
+            "readelf -d @args.txt",
+            "readelf -d @args.txt | grep NEEDED",
+        ] {
+            assert!(is_denied(c), "{c:?} is allowed");
+        }
+        for c in [
+            "ls src",
+            "ls -la",
+            "readelf -d libfoo.so",
+            "readelf -d a@b.so",
+        ] {
+            assert!(!is_denied(c), "{c:?} is denied");
+        }
+        let tools = turn_allowed_tools(Task::FixAfterBuild, ws, None);
+        assert!(tools.contains("Bash(ls *)") && tools.contains("Bash(readelf *)"));
+    }
+
+    #[test]
     fn osc_cat_url_forms_are_denied_and_documented_form_is_not() {
         let denied = turn_denied_tools(std::path::Path::new("/srv/ws"), None);
         let patterns = bash_deny_patterns(&denied);
@@ -5065,11 +5116,10 @@ mod tests {
             "cd source && quilt refresh",
             "rpm -qlp /srv/ws/rpms/python-foo-1.0-1.1.noarch.rpm",
             "ls",
-            "ls -d /usr/local/cuda-*",
-            "ls /srv/ws/checkout/src",
-            "readelf -d /usr/lib64/libfoo.so",
-            "readelf -d /usr/lib64/libfoo.so | grep NEEDED",
-            "readelf -d /usr/lib64/libfoo.so | grep -E 'RPATH|RUNPATH'",
+            "ls src",
+            "readelf -d libfoo.so",
+            "readelf -d libfoo.so | grep NEEDED",
+            "readelf -d libfoo.so | grep -E 'RPATH|RUNPATH'",
             "osc status",
             "osc cat openSUSE:Factory python-foo python-foo.spec",
             "zypper search -s --match-exact python313-foo",
