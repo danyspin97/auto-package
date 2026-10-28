@@ -367,23 +367,6 @@ impl BuildStatus {
         )
     }
 
-    /// Decode one of `osc results <project>`'s single-letter per-package
-    /// status codes (see its own "Legend:" footer).
-    fn from_code(c: char) -> Self {
-        match c {
-            '.' => BuildStatus::Succeeded,
-            ' ' => BuildStatus::Disabled,
-            'U' => BuildStatus::Unresolvable,
-            'F' => BuildStatus::Failed,
-            'B' => BuildStatus::Broken,
-            'b' => BuildStatus::Blocked,
-            '%' | 'd' | 'S' => BuildStatus::Building,
-            's' => BuildStatus::Scheduled,
-            'x' => BuildStatus::Excluded,
-            other => BuildStatus::Unknown(other.to_string()),
-        }
-    }
-
     pub fn is_success(&self) -> bool {
         matches!(self, BuildStatus::Succeeded)
     }
@@ -5639,45 +5622,45 @@ mod baseline_tests {
 /// trusted once the job history confirms it was built from the source
 /// revision currently on the server (otherwise `Unknown("stale: ...")`).
 ///
-/// If the API call cannot run or its answer lacks the package, falls back to
-/// scraping `osc results` so a surprising response shape degrades to the old
-/// behaviour instead of breaking the build loop. An HTTP error from the API
-/// (401, 429, 503, ...) is returned as is: the fallback would meet the same
-/// refusal and only add load.
+/// If the API call cannot run or its answer lacks the package, the status is
+/// `Unknown` for this read, so the build loop polls again instead of failing.
+/// An HTTP error from the API (401, 429, 503, ...) is returned as is.
 pub fn get_build_status(
     project: &str,
     pkg_name: &str,
     repo: &str,
     arch: &str,
-    emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    if let Some(status) = get_build_status_xml(project, pkg_name, repo, arch, false, None)? {
-        return Ok(status);
+    match get_build_status_xml(project, pkg_name, repo, arch, false, None)? {
+        Some(status) => Ok(status),
+        None => Ok(no_result_status()),
     }
-    get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
+}
+
+/// The status of a package the `_result` document does not list (or could not
+/// be read for).
+fn no_result_status() -> BuildStatus {
+    BuildStatus::Unknown("no results".to_string())
 }
 
 /// [`get_build_status`] for a package whose sources were just committed: a
 /// built verdict only counts once the job history shows it came from the
 /// revision now on the server (see [`obs_status::Evidence::confirm`]), so the
 /// previous revision's `failed`/`succeeded` is never mistaken for the result.
-/// Without the XML answer there is no job history to check, so the table
-/// fallback applies as usual. `committed` is when the commit was done: the
-/// `_result` document is never older than that (see [`ResultsCache::get`]).
+/// Without the XML answer there is no job history to check, so the status is
+/// `Unknown`. `committed` is when the commit was done: the `_result` document
+/// is never older than that (see [`ResultsCache::get`]).
 fn get_build_status_after_commit(
     project: &str,
     pkg_name: &str,
     repo: &str,
     arch: &str,
     committed: Instant,
-    emit: Emit<'_>,
 ) -> Result<BuildStatus, Error> {
-    if let Some(status) =
-        get_build_status_xml(project, pkg_name, repo, arch, true, Some(committed))?
-    {
-        return Ok(status);
+    match get_build_status_xml(project, pkg_name, repo, arch, true, Some(committed))? {
+        Some(status) => Ok(status),
+        None => Ok(no_result_status()),
     }
-    get_build_status_from_results_table(project, pkg_name, repo, arch, emit)
 }
 
 /// What every repository/arch of `pkg_name` says, as one status: `Succeeded`
@@ -5694,10 +5677,9 @@ pub fn get_overall_build_status(
     pkg_name: &str,
     repo: &str,
     arch: &str,
-    emit: Emit<'_>,
 ) -> Result<(BuildStatus, Option<String>), Error> {
     const MAX_WAIT: Duration = Duration::from_secs(1800);
-    let own = get_build_status(project, pkg_name, repo, arch, emit)?;
+    let own = get_build_status(project, pkg_name, repo, arch)?;
     if !own.is_success() {
         return Ok((own, Some(format!("{repo}/{arch}"))));
     }
@@ -5780,14 +5762,13 @@ fn overall_status(
     }
 }
 
-/// The `osc results` human-table path only — no XML, no staleness
-/// resolution via job history. Used by [`get_build_status`] as its fallback
-/// when the XML `_result` document is unreadable, and by [`obs_build`] as an
-/// independent second opinion when the XML path's answer has stopped
-/// changing for a long time: the two paths hit different OBS code (an XML
-/// API document vs. a human-table-rendering endpoint), so if one of them is
-/// silently serving a stale/cached snapshot, the other is the cheapest way
-/// to notice without guessing at why.
+/// The `osc results` human-table path only — no XML, no staleness resolution
+/// via job history. Used by [`obs_build`] as an independent second opinion
+/// when the XML path's answer has stopped changing for a long time: the two
+/// paths hit different OBS code (an XML API document vs. a
+/// human-table-rendering endpoint), so if one of them is silently serving a
+/// stale/cached snapshot, the other is the cheapest way to notice without
+/// guessing at why.
 fn get_build_status_from_results_table(
     project: &str,
     pkg_name: &str,
@@ -6197,9 +6178,8 @@ fn get_build_status_xml(
     let entries = match obs_package_entries(project, repo, arch, pkg_name, fresh_since) {
         Ok(Some(entries)) => entries,
         Ok(None) => return Ok(None),
-        // An HTTP error (login, rate limit, outage) would repeat through the
-        // `osc results` fallback, which only adds another request to a
-        // server that is already refusing: report it.
+        // An HTTP error (login, rate limit, outage) would repeat on the next
+        // read, so it is reported rather than turned into an empty answer.
         Err(ApiFailure::Http(code, msg)) => {
             return Err(Error::OscFailed {
                 cmd: format!("api /build/{project}/_result"),
@@ -6551,7 +6531,7 @@ mod results_cache_tests {
             .unwrap();
         assert_eq!(single.load(Ordering::SeqCst), 1);
         assert_eq!(entries[0].code, "scheduled");
-        // Missing there too: no entry, the caller falls back to `osc results`.
+        // Missing there too: no entry, so the caller reads it as no result.
         let none = entries_of(
             &cache,
             "ghost",
@@ -6630,8 +6610,8 @@ mod wait_pacing_tests {
     }
 }
 
-/// Parsing half of the `osc results` fallback in [`get_build_status`], split
-/// out so it is testable without shelling out to `osc`.
+/// Parsing half of the table read in [`get_build_status_from_results_table`],
+/// split out so it is testable without shelling out to `osc`.
 ///
 /// `osc results --verbose -r <repo> -a <arch> <project> <pkg>` prints one line
 /// per result as `<repo> <arch> <pkg> <status>` (osc's `get_results` format,
@@ -6792,74 +6772,39 @@ openSUSE_Tumbleweed x86_64 python-foo building
     }
 }
 
-/// Query the OBS build status of every package in `project` for one
-/// repo/arch in a single call.
-///
-/// Runs `osc results -r <repo> -a <arch> <project>` (no package name lists
-/// every package). Unlike the single-package form, this layout is NOT
-/// `<pkg> ... <status-word>` per line: `osc` prints the package names as an
-/// indented tree, one per line, wrapping into as many same-order blocks as
-/// fit the terminal width, and after each block a single status line packs
-/// one letter code per package into fixed two-column slots (`<code><sep>`),
-/// e.g. `. B U U . U ...  openSUSE_Tumbleweed x86_64 (published)`. A blank
-/// (space) code means "disabled" — indistinguishable from the column
-/// separator under naive whitespace splitting — hence the positional
-/// indexing here instead of `split_whitespace`.
+/// Every package's status in `project` for one repository and architecture,
+/// read from the `_result` document. Multibuild flavors are folded into their
+/// base package (see [`fold_flavor_statuses`]).
 pub fn get_project_build_statuses(
     project: &str,
     repo: &str,
     arch: &str,
-    emit: Emit<'_>,
 ) -> Result<HashMap<String, BuildStatus>, Error> {
     check_obs_name("project", project)?;
     check_obs_name("repo", repo)?;
     check_obs_name("arch", arch)?;
-    // XML first: one entry per package with a named code, instead of the
-    // positional letter table below (which depends on terminal width and
-    // `osc`'s padding). Fall back to the table if the API path yields nothing.
-    if let Some(xml) = osc_api(&format!(
+    let path = format!(
         "/build/{}/_result?repository={}&arch={}",
         enc(project),
         enc(repo),
         enc(arch)
-    )) {
-        let statuses = match project_statuses_from_xml(&xml, repo, arch) {
-            Ok(statuses) => statuses,
-            Err(e) => {
-                // A cut-off listing must not read as a partial set of statuses.
-                ap_core::diag!("  cannot read the OBS results listing: {e}");
-                HashMap::new()
-            }
-        };
-        if !statuses.is_empty() {
-            return Ok(fold_flavor_statuses(statuses));
+    );
+    // An empty map reads as "no package has a status", so a listing that
+    // cannot be read is an error rather than an empty answer.
+    let xml = osc_api_checked(&path).map_err(|e| match e {
+        ApiFailure::Http(code, msg) => Error::OscFailed {
+            cmd: format!("api {path}"),
+            code: i32::from(code),
+            stderr: msg,
+        },
+        ApiFailure::Other(msg) => {
+            Error::NotActionable(format!("cannot read the OBS results listing: {msg}"))
         }
-    }
-
-    // An empty map reads as "no package has a status", so a failed listing
-    // is an error rather than an empty answer.
-    let cmd = format!("results -r {repo} -a {arch} {project}");
-    let out = proc::capture_with_timeout(
-        "osc",
-        &["results", "-r", repo, "-a", arch, project],
-        &anywhere(),
-        emit,
-        OSC_ARTIFACT_TIMEOUT,
-    )
-    .map_err(during(cmd.clone()))?;
-    if !out.success() {
-        return Err(Error::OscFailed {
-            cmd,
-            code: out.code,
-            stderr: out.stderr,
-        });
-    }
-
-    Ok(fold_flavor_statuses(parse_project_build_statuses(
-        &out.stdout,
-        repo,
-        arch,
-    )))
+    })?;
+    // A cut-off listing must not read as a partial set of statuses.
+    let statuses = project_statuses_from_xml(&xml, repo, arch)
+        .map_err(|e| Error::NotActionable(format!("cannot read the OBS results listing: {e}")))?;
+    Ok(fold_flavor_statuses(statuses))
 }
 
 /// A package is only as built as its worst multibuild flavor: `python-mcp` is
@@ -6921,59 +6866,6 @@ fn project_statuses_from_xml(
         .filter(|e| e.repo == repo && e.arch == arch)
         .map(|e| (e.pkg.clone(), obs_status::resolve_lenient(&e)))
         .collect())
-}
-
-/// Parsing half of [`get_project_build_statuses`], split out so it is
-/// testable without shelling out to `osc`.
-fn parse_project_build_statuses(
-    stdout: &str,
-    repo: &str,
-    arch: &str,
-) -> HashMap<String, BuildStatus> {
-    let marker = format!(" {repo} {arch} (");
-    let mut statuses = HashMap::new();
-    let mut pending_pkgs: Vec<String> = Vec::new();
-
-    for line in stdout.lines() {
-        if line.trim() == "Legend:" {
-            break;
-        }
-        if let Some(marker_idx) = line.find(&marker) {
-            let chars: Vec<char> = line.chars().collect();
-            let n = pending_pkgs.len();
-            // The code table is dense two-char slots (`<code><sep>`), but
-            // real `osc` builds disagree on whether there's a leading sep
-            // before the first code and a trailing one after the last: some
-            // print it flush (`code sep code ... code`, length `2n-1`, codes
-            // at `2*i`), others pad both ends (`sep code sep ... code sep`,
-            // length `2n+1`, codes at `1 + 2*i`). Derive the offset from the
-            // actual prefix length instead of hardcoding one — hardcoding
-            // `2*i` silently read every code as its own separator space
-            // against the padded form, making every package look
-            // "disabled" and so falsely resolvable.
-            let prefix_len = line[..marker_idx].chars().count() as isize;
-            let offset = if n > 0 {
-                ((prefix_len - 2 * n as isize + 1) / 2).max(0) as usize
-            } else {
-                0
-            };
-            for (i, pkg) in pending_pkgs.iter().enumerate() {
-                if let Some(&c) = chars.get(offset + 2 * i)
-                    && c != ' '
-                {
-                    statuses.insert(pkg.clone(), BuildStatus::from_code(c));
-                }
-            }
-            pending_pkgs.clear();
-            continue;
-        }
-        let name = line.trim_start_matches([' ', '|']).trim();
-        if !name.is_empty() {
-            pending_pkgs.push(name.to_string());
-        }
-    }
-
-    statuses
 }
 
 /// Fetch the OBS build log into `log_path`.
@@ -7051,9 +6943,7 @@ pub fn rebuild(
     }
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(90) && !crate::proc::shutting_down() {
-        if get_build_status(project, pkg_name, repo, arch, Emit::quiet())
-            .is_ok_and(|s| !s.is_terminal())
-        {
+        if get_build_status(project, pkg_name, repo, arch).is_ok_and(|s| !s.is_terminal()) {
             return Ok(true);
         }
         sleep_interruptible(Duration::from_secs(5));
@@ -7325,70 +7215,22 @@ pub fn get_binaries(
     Ok(())
 }
 
-/// Try to extract unresolvable package names (and their raw version-detail
-/// lines, see [`extract_unresolvable_detail`]) from `osc results --verbose`.
-///
-/// Used as a fallback when the build log doesn't contain "nothing provides" lines.
-fn get_unresolvable_from_results(
-    project: &str,
-    pkg_name: &str,
-    repo: &str,
-    arch: &str,
-    emit: Emit<'_>,
-) -> (Vec<String>, Vec<String>) {
-    if ![project, pkg_name, repo, arch]
-        .iter()
-        .all(|n| is_valid_obs_name(n))
-    {
-        return (Vec::new(), Vec::new());
-    }
-    let out = match proc::capture(
-        "osc",
-        &[
-            "results",
-            "--verbose",
-            "-r",
-            repo,
-            "-a",
-            arch,
-            project,
-            pkg_name,
-        ],
-        &anywhere(),
-        emit,
-    ) {
-        Ok(out) => out,
-        Err(e) => {
-            ap_core::diag!("  osc results --verbose {project}/{pkg_name}: {e}");
-            return (vec![], vec![]);
-        }
-    };
-    (
-        extract_unresolvable(&out.stdout),
-        extract_unresolvable_detail(&out.stdout),
-    )
-}
-
 /// Get the unresolvable package names (and raw detail lines) OBS already
-/// knows about for a package, without triggering a new build: reads whatever
-/// build log already sits at `log_path`, falling back to `osc results
-/// --verbose` when that log has no "nothing provides" lines (the same
-/// fallback [`obs_build`] uses for a build it just ran). Exposed so a caller
-/// that finds a package already `Unresolvable` on restart can inform the fix
-/// agent immediately instead of spending an attempt rediscovering it through
-/// a fresh build.
+/// knows about for a package, without triggering a new build: the `_result`
+/// document first, then whatever build log already sits at `log_path`. Exposed
+/// so a caller that finds a package already `Unresolvable` on restart can
+/// inform the fix agent immediately instead of spending an attempt
+/// rediscovering it through a fresh build.
 pub fn current_unresolvable(
     project: &str,
     pkg_name: &str,
     repo: &str,
     arch: &str,
     log_path: &Path,
-    emit: Emit<'_>,
 ) -> (Vec<String>, Vec<String>) {
     // The `_result` document is what OBS says about the current revision in
     // exactly this repository and architecture; a build log may be left over
-    // from an older revision, and the `osc results` text is a rendering of
-    // that same document, so both only run when it gives nothing.
+    // from an older revision, so it only runs when the document gives nothing.
     if let Some(details) = unresolvable_details(project, pkg_name, repo, arch) {
         let names = extract_unresolvable(&details);
         if !names.is_empty() {
@@ -7396,12 +7238,10 @@ pub fn current_unresolvable(
         }
     }
     let log_text = read_log_lossy(log_path).unwrap_or_default();
-    let mut names = extract_unresolvable(&log_text);
-    let mut detail = extract_unresolvable_detail(&log_text);
-    if names.is_empty() {
-        (names, detail) = get_unresolvable_from_results(project, pkg_name, repo, arch, emit);
-    }
-    (names, detail)
+    (
+        extract_unresolvable(&log_text),
+        extract_unresolvable_detail(&log_text),
+    )
 }
 
 /// The `<details>` text of `pkg_name`'s `unresolvable` status in this one
@@ -8323,14 +8163,7 @@ fn obs_build_once(
             });
         }
 
-        let status = match get_build_status_after_commit(
-            project,
-            pkg_name,
-            repo,
-            arch,
-            committed,
-            Emit::quiet(),
-        ) {
+        let status = match get_build_status_after_commit(project, pkg_name, repo, arch, committed) {
             Ok(s) => {
                 poll_errors = 0;
                 s
@@ -8659,8 +8492,7 @@ fn obs_build_once(
 
     Err(match status {
         BuildStatus::Unresolvable => {
-            let (names, detail) =
-                current_unresolvable(project, &log_pkg, repo, arch, log_path, emit);
+            let (names, detail) = current_unresolvable(project, &log_pkg, repo, arch, log_path);
             Error::UnresolvableDeps { names, detail }
         }
         BuildStatus::Broken if !broken_is_confirmed(log_path) => {
@@ -9015,79 +8847,6 @@ mod project_build_statuses_tests {
     fn a_cut_off_listing_is_an_error_not_a_partial_map() {
         let cut = &TWO_ARCHES[..TWO_ARCHES.find("arch=\"x86_64\"").unwrap() + 20];
         assert!(project_statuses_from_xml(cut, "openSUSE_Tumbleweed", "i586").is_err());
-    }
-
-    /// Regression test for the off-by-one that used to read the separator
-    /// space between status codes instead of the code itself, silently
-    /// returning no statuses at all and making every OBS-known package look
-    /// "resolvable" regardless of its actual build state.
-    #[test]
-    fn reads_status_codes_at_even_columns_not_the_separators() {
-        let stdout = "\
-python-foo
-python-bar
-python-baz
-. B U openSUSE_Tumbleweed x86_64 (published)
-Legend:
- . succeeded
-";
-        let statuses = parse_project_build_statuses(stdout, "openSUSE_Tumbleweed", "x86_64");
-
-        assert_eq!(statuses.get("python-foo"), Some(&BuildStatus::Succeeded));
-        assert_eq!(statuses.get("python-bar"), Some(&BuildStatus::Broken));
-        assert_eq!(statuses.get("python-baz"), Some(&BuildStatus::Unresolvable));
-    }
-
-    /// Regression test for the padded real-world format seen from actual
-    /// `osc results` output on a project with many packages: a leading
-    /// separator before the first code and a trailing one after the last
-    /// (`" . . F ...  openSUSE_Tumbleweed x86_64 (published)"`, note the
-    /// double space before the repo name), as opposed to the flush format
-    /// the other tests here use. Both must parse to the same codes.
-    #[test]
-    fn reads_status_codes_in_the_padded_real_world_format() {
-        let stdout = "\
-python-foo
-python-bar
-python-baz
- . B U  openSUSE_Tumbleweed x86_64 (published)
-Legend:
-";
-        let statuses = parse_project_build_statuses(stdout, "openSUSE_Tumbleweed", "x86_64");
-
-        assert_eq!(statuses.get("python-foo"), Some(&BuildStatus::Succeeded));
-        assert_eq!(statuses.get("python-bar"), Some(&BuildStatus::Broken));
-        assert_eq!(statuses.get("python-baz"), Some(&BuildStatus::Unresolvable));
-    }
-
-    #[test]
-    fn a_space_code_is_treated_as_no_status_rather_than_disabled() {
-        // The blank/disabled code is indistinguishable from the column
-        // separator, so it must be skipped rather than recorded — a caller
-        // treating "no entry" as "not resolvable" is the safe default.
-        let stdout = "\
-python-foo
-python-bar
-.   openSUSE_Tumbleweed x86_64 (published)
-Legend:
-";
-        let statuses = parse_project_build_statuses(stdout, "openSUSE_Tumbleweed", "x86_64");
-
-        assert_eq!(statuses.get("python-foo"), Some(&BuildStatus::Succeeded));
-        assert_eq!(statuses.get("python-bar"), None);
-    }
-
-    #[test]
-    fn stops_parsing_at_the_legend_footer() {
-        let stdout = "\
-python-foo
-F openSUSE_Tumbleweed x86_64 (published)
-Legend:
-F failed
-";
-        let statuses = parse_project_build_statuses(stdout, "openSUSE_Tumbleweed", "x86_64");
-        assert_eq!(statuses.get("python-foo"), Some(&BuildStatus::Failed));
-        assert_eq!(statuses.len(), 1);
     }
 }
 

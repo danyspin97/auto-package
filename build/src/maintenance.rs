@@ -1622,7 +1622,7 @@ fn check_stream(
 ) -> Result<Ready, StreamOutcome> {
     let emit = Emit::quiet();
     let repo = osc::choose_repository(&t.branch, opts.distro.as_deref(), &opts.arch).0;
-    match osc::get_overall_build_status(&t.branch, pkg, &repo, &opts.arch, emit) {
+    match osc::get_overall_build_status(&t.branch, pkg, &repo, &opts.arch) {
         Ok((osc::BuildStatus::Succeeded, _)) => {}
         Ok((status, at)) => {
             let at = at.map(|a| format!(" on {a}")).unwrap_or_default();

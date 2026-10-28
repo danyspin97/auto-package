@@ -965,13 +965,8 @@ pub fn select_target(
             Ok::<_, String>(linked)
         });
         let statuses_handle = scope.spawn(|| {
-            osc::get_project_build_statuses(
-                &obs_project,
-                &config.distro,
-                &config.arch,
-                Emit::run(reporter),
-            )
-            .map_err(|e| format!("could not read build status of {obs_project}: {e}"))
+            osc::get_project_build_statuses(&obs_project, &config.distro, &config.arch)
+                .map_err(|e| format!("could not read build status of {obs_project}: {e}"))
         });
         let nodes = ap_ecosystem::pip::resolve(name, pinned_version);
         // Join the fetches (likely already done while pip was resolving).
@@ -2711,13 +2706,7 @@ fn checkout_stage(
         // Fetch this package's current OBS build status once; reused below both
         // to grab the build log on failure and to skip the rest of the
         // pipeline when it already succeeded and nothing would change.
-        let status = osc::get_build_status(
-            &config.project,
-            obs_name,
-            &config.distro,
-            &config.arch,
-            emit,
-        );
+        let status = osc::get_build_status(&config.project, obs_name, &config.distro, &config.arch);
         // Without the status the build is handled as if OBS had not answered;
         // say so rather than discard the error.
         warn_if_err(
@@ -5468,8 +5457,7 @@ fn project_view(ctx: &RunCtx, step: ap_core::event::StepId) -> Option<ProjectVie
     let emit = Emit::new(ctx.reporter, step);
     let listing = osc::try_list_project_packages(&config.project, emit).ok()?;
     let statuses =
-        osc::get_project_build_statuses(&config.project, &config.distro, &config.arch, emit)
-            .ok()?;
+        osc::get_project_build_statuses(&config.project, &config.distro, &config.arch).ok()?;
     let mut linked = Vec::new();
     for (path_project, _repo) in osc::get_project_repo_paths(&config.project, emit).ok()? {
         let l = osc::try_list_project_packages(&path_project, emit).ok()?;

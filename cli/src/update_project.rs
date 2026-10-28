@@ -1016,7 +1016,7 @@ impl Audit {
             };
             let emit = Emit::run(reporter.as_ref());
             let distro = osc::choose_repository(&source, distro.as_deref(), &arch).0;
-            let statuses = osc::get_project_build_statuses(&source, &distro, &arch, emit)
+            let statuses = osc::get_project_build_statuses(&source, &distro, &arch)
                 .map_err(|e| {
                     warn(format!(
                         "could not read the build results of {source}, so broken builds and rpmlint are not checked: {e}"
@@ -1481,7 +1481,6 @@ fn prepare_request(
                 &item.pkg,
                 &crate::choose_distro(distro, branch, arch),
                 arch,
-                emit,
             )
             // Name the repository/arch that blocks, not just its status.
             .map(|(status, at)| match (&status, at) {

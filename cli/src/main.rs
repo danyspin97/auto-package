@@ -954,13 +954,7 @@ pub(crate) fn init_disk_guard(
         eprintln!("note: {name} was left unfinished; now {outcome}");
     }
     // What OBS shows for the project, asked once for the reconcile and the self-check.
-    let statuses = ap_build::osc::get_project_build_statuses(
-        project,
-        distro,
-        arch,
-        ap_build::proc::Emit::quiet(),
-    )
-    .ok();
+    let statuses = ap_build::osc::get_project_build_statuses(project, distro, arch).ok();
     // A package state.json calls unfinished while OBS shows it built gets its
     // RPMs fetched and its state corrected.
     if let Some(statuses) = &statuses {
@@ -2504,15 +2498,10 @@ fn print_run_summary(
 
     // OBS reports names in lower case, and this run's packages are already in
     // the built list above, so they are not repeated here.
-    let statuses = ap_build::osc::get_project_build_statuses(
-        project,
-        distro,
-        arch,
-        ap_build::proc::Emit::quiet(),
-    )
-    // Only the "already built" extras come from this listing; without it the
-    // summary still lists everything this run built.
-    .unwrap_or_default();
+    let statuses = ap_build::osc::get_project_build_statuses(project, distro, arch)
+        // Only the "already built" extras come from this listing; without it the
+        // summary still lists everything this run built.
+        .unwrap_or_default();
     let built_lower: Vec<String> = built.iter().map(|p| p.to_lowercase()).collect();
     let mut cached: Vec<&String> = statuses
         .iter()
@@ -2992,24 +2981,20 @@ fn cmd_build(
         // Failed/Unresolvable/Broken from an earlier interrupted run is
         // exactly the common case this would trigger on.
         let root_key = ap_build::osc::fuzzy_key(&rpm_name);
-        let already_stuck: Vec<String> = ap_build::osc::get_project_build_statuses(
-            project,
-            distro,
-            arch,
-            ap_build::proc::Emit::run(reporter.as_ref()),
-        )?
-        .into_iter()
-        .filter(|(_, status)| {
-            matches!(
-                status,
-                ap_build::osc::BuildStatus::Unresolvable
-                    | ap_build::osc::BuildStatus::Failed
-                    | ap_build::osc::BuildStatus::Broken
-            )
-        })
-        .map(|(pkg, _)| pkg)
-        .filter(|pkg| ap_build::osc::fuzzy_key(pkg) != root_key)
-        .collect();
+        let already_stuck: Vec<String> =
+            ap_build::osc::get_project_build_statuses(project, distro, arch)?
+                .into_iter()
+                .filter(|(_, status)| {
+                    matches!(
+                        status,
+                        ap_build::osc::BuildStatus::Unresolvable
+                            | ap_build::osc::BuildStatus::Failed
+                            | ap_build::osc::BuildStatus::Broken
+                    )
+                })
+                .map(|(pkg, _)| pkg)
+                .filter(|pkg| ap_build::osc::fuzzy_key(pkg) != root_key)
+                .collect();
         if !already_stuck.is_empty() {
             ap_core::diag!(
                 "{} package(s) already unresolvable/failed/broken in {project}, queuing: {}",
@@ -3091,8 +3076,7 @@ fn cmd_build(
             let lookup_emit = ap_build::proc::Emit::run(reporter.as_ref());
             let own_listing = ap_build::osc::try_list_project_packages(project, lookup_emit)
                 .map_err(|e| color_eyre::eyre::eyre!(e))?;
-            let own_statuses =
-                ap_build::osc::get_project_build_statuses(project, distro, arch, lookup_emit)?;
+            let own_statuses = ap_build::osc::get_project_build_statuses(project, distro, arch)?;
             let mut linked_listings = Vec::new();
             for (path_project, _repo) in
                 ap_build::osc::get_project_repo_paths(project, lookup_emit)?
