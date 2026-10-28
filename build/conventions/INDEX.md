@@ -23,11 +23,11 @@
 23. Merged into convention 17 — read convention 17 when %files or rpmlint shows tests/docs/setup files at site-packages root
 24. Headers: own headers to -devel, vendored ones deleted — read when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
 25. rpmlint badness budget (threshold 999) — read when the build log says "Badness NNNN exceeds threshold"
-26. Source from a repository, not an sdist — read when the checkout is a git snapshot or the project sits in a subdirectory
+26. Merged into convention 22 — read convention 22 when the checkout is a git snapshot or the project sits in a subdirectory
 27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
 28. The four exceptions to building a dependency — read when a dependency failed to build, tests need GPU/network, or you return use_upstream_wheel
 29. Missing source code (no sdist, no repo URL) — read when no source tarball or repository URL can be found for the package
-30. Monorepos: package every sibling project — read when the prompt lists several "Other projects in this archive"
+30. Merged into convention 22 — read convention 22 when the prompt lists several "Other projects in this archive"
 31. rpmlint compliance (summary length, description line length, manpage) — read when rpmlint warns on Summary, description or binaries
 32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
 33. Plain C/C++ packages (CMake/autotools, Skill plain-c-cpp-packaging) — read when the package has no Python and no Cargo
@@ -39,7 +39,7 @@
 39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter
 40. The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
 41. Obsolete setup.py shims (pytest-runner, setup_requires) — read when setup.py/setup.cfg lists test-runner or shim requirements
-42. Hardcoded or placeholder version strings — read when the installed version is wrong or the source has a literal 0.0.0
+42. Merged into convention 22 — read convention 22 when the installed version is wrong or the source has a literal 0.0.0
 43. Merged into convention 7 — read convention 7 when pytest ignores options set in setup.cfg
 44. Merged into convention 11 — read convention 11 when %check misses a conftest/testdata file or the backend rejects a classifier
 45. Merged into convention 10 — read convention 10 when %check says ImproperlyConfigured: settings are not configured
