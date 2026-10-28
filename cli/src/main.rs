@@ -74,13 +74,9 @@ enum Commands {
         /// one package, within one CLI invocation — see
         /// `PkgState::cumulative_spent_usd`).
         ///
-        /// $0.30 was the Oct 2026 default; drogon-shaped C++ builds
-        /// routinely need 5–10 agent turns to work through missing
-        /// BuildRequires and CMake flag discovery, and $0.30 burned out
-        /// mid-fix in a well-reproduced case. $4.00 followed, and large
-        /// closures (open-webui's ML stack) then ran packages into it, so
-        /// the default is $10.00: the point of the cap is to stop a runaway,
-        /// not to ration an ordinary hard package.
+        /// The cap stops a runaway, not an ordinary hard package: C++ builds
+        /// can need 5–10 agent turns to work through missing BuildRequires and
+        /// CMake flag discovery, and large closures run many packages through it.
         #[arg(long, default_value_t = 10.0)]
         budget_usd: f64,
 
@@ -170,10 +166,9 @@ enum Commands {
         /// the requested target's own dependency closure needs.
         ///
         /// Off by default so a build request targets exactly what was
-        /// asked for; the Oct 6 review flagged the implicit sweep (then
-        /// always-on) as broadening the operation beyond the requested
-        /// closure and quietly resolving unrelated packages to current
-        /// upstream versions.
+        /// asked for: a sweep would broaden the operation beyond the requested
+        /// closure and quietly resolve unrelated packages to current upstream
+        /// versions.
         #[arg(long, default_value_t = false)]
         sweep: bool,
     },
@@ -383,10 +378,9 @@ fn pypi_latest_version(name: &str, reporter: &dyn Reporter) -> Option<String> {
 /// wheel-only PyPI release does (`find_source_repo_candidates`).
 ///
 /// For non-Python parents (plain C/C++, Rust): skips PyPI and goes straight to
-/// source-repo discovery. A C++ library like `trantor` (drogon's TCP backend)
-/// collides on PyPI with an unrelated Python package of the same name — PyPI
-/// first would silently queue `python-trantor` from that unrelated project
-/// instead of the C++ library the parent actually links against. The parent's
+/// source-repo discovery. A C++ library can share its name with an unrelated
+/// PyPI package, and PyPI first would queue that package instead of the C++
+/// library the parent actually links against. The parent's
 /// ecosystem is read off `config.rpm_name`'s `python-` prefix, which the
 /// upstream probe sets through `Ecosystem::rpm_name` (see `build/src/sources.rs`).
 ///
@@ -476,14 +470,13 @@ fn resolve_dependency_config(
     // Try candidate upstream-project spellings in sequence: the agent is
     // supposed to translate OBS's BuildRequires-shape name
     // (`libtrantor-devel`) into the upstream project name (`trantor`)
-    // before reporting, but doesn't always — the drogon case landed
-    // `trantor-devel` here, which `find_source_repo_candidates` couldn't
-    // match. Canonicalize mechanically so a partially-translated dep
+    // before reporting, but doesn't always, and a partially-translated name
+    // (`trantor-devel`) would not match `find_source_repo_candidates`.
+    // Canonicalize mechanically so a partially-translated dep
     // still has a chance.
     //
     // For EACH candidate name, try EACH verified repo URL — the search
-    // can return several same-named repos (three different `trantor`
-    // projects on GitHub, for example) and the first one may be a
+    // can return several same-named repos, and the first one may be a
     // dead fork with no tags. Only give up once no verified URL for any
     // candidate name yields a usable release.
     let mut all_attempts: Vec<String> = Vec::new();
@@ -581,8 +574,8 @@ fn resolve_dependency_config(
 
     // No candidate × repo combination yielded a usable release. Build
     // one warning that names every URL we actually tried and why each
-    // failed, so the user can see 'yes we tried an-tao/trantor but it
-    // returned Y' instead of a bare 'no source repo found'.
+    // failed, so the user can see which URL was tried and why it did not
+    // work, instead of a bare 'no source repo found'.
     let detail = if probe_failure_warnings.is_empty() {
         format!(
             "no verified source repository found at all (tried names: {})",
@@ -1072,11 +1065,10 @@ fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<()> {
             // several arches) side by side. `--cleanup` scopes to just
             // this project-arch's subdir.
             //
-            // The arch suffix guards against cross-arch bleed — the external
-            // 2026-10-06 review flagged that running once with `--arch x86_64`
-            // and then with `--arch aarch64` under the same `--work-dir`
-            // SHARED state (RPMs, source checkouts, state.json), so each
-            // arch's artifacts collided with the other's.
+            // The arch suffix keeps architectures apart: running with
+            // `--arch x86_64` and then `--arch aarch64` under the same
+            // `--work-dir` must not share state (RPMs, source checkouts,
+            // state.json).
             //
             // Guarded by an ownership marker (`.auto-package`) written at
             // the project_dir root on first creation. `--cleanup` refuses
@@ -1656,9 +1648,8 @@ fn update_in_place(
         .map_err(|e: String| color_eyre::eyre::eyre!(e))?;
 
     // Same per-project-arch subdir layout as Build (see that arm for
-    // the rationale, including the Oct 6 cross-arch-bleed review) — a
-    // single `--work-dir` can hold state for multiple OBS projects
-    // (and arches) side by side.
+    // the rationale): a single `--work-dir` can hold state for multiple OBS
+    // projects (and arches) side by side.
     std::fs::create_dir_all(&work_dir)?;
     let project_dir = work_dir.join(format!(
         "{}-{}",
@@ -2710,8 +2701,7 @@ fn cmd_build(
     // When true, also opportunistically retry every OTHER
     // Failed/Unresolvable/Broken package in the project (not just the ones
     // the requested target's own dep closure needs). Off by default; see
-    // the `--sweep` doc on `Commands::Build` for why the Oct 6 review
-    // flipped this from always-on to opt-in.
+    // the `--sweep` doc on `Commands::Build` for why it is opt-in.
     sweep: bool,
     mut source_repo: Option<String>,
     source_urls: Arc<ap_build::sources::SourceMap>,
@@ -2732,9 +2722,8 @@ fn cmd_build(
     // `report()` call so JsonlSink (and any other reporter that cares) can
     // tag its output line with the package name — otherwise JSONL step
     // events from two parallel package threads would be indistinguishable
-    // (same `StepId(0)` for both). The 2026-10-06 external review flagged
-    // this gap: the TUI already had attribution via `tap`, but the base
-    // JSONL stream had none.
+    // (same `StepId(0)` for both), so the base JSONL stream tags each line
+    // with its package as the TUI does via `tap`.
     let pkg_reporter = |pkg: &str| -> Arc<dyn Reporter + Send + Sync> {
         let tagged: Arc<dyn Reporter + Send + Sync> = Arc::new(
             ap_core::sink::PkgContextReporter::new(base_reporter.clone(), Some(pkg.to_string())),
@@ -2956,12 +2945,10 @@ fn cmd_build(
     // whole project, including packages unrelated to whatever target this
     // invocation happens to name.
     //
-    // OFF by default (Oct 6 review finding #5): the implicit always-on
-    // sweep broadened a build request beyond its own dependency closure
-    // and quietly resolved unrelated stuck packages to current upstream
-    // versions. The user opts in with `--sweep` when they want that; the
-    // default build now stays scoped to what the requested target
-    // actually needs.
+    // OFF by default: a sweep would broaden a build request beyond its own
+    // dependency closure and quietly resolve unrelated stuck packages to
+    // current upstream versions. The user opts in with `--sweep`; the default
+    // build stays scoped to what the requested target actually needs.
     //
     // `--target` asks for exactly one node and nothing else — see its help
     // text ("Build this specific dependency node instead of the
@@ -3332,17 +3319,14 @@ fn cmd_build(
                     // Unknown/missing-status), which is exactly the case
                     // this queue exists to retry.
                     //
-                    // This used to be a pure "name present in the union of
-                    // listed packages" check, which the Oct 6 review's
-                    // finding #1 called out for `select_target` and the
-                    // user re-reported for this mini-loop: a source entry
-                    // in the own project with status Disabled or no entry
-                    // at all for the requested distro/arch counted as
-                    // "present → resolved", silently dropping the dep from
-                    // the queue even though no built binary existed. The
-                    // UnresolvableDeps path from `pipeline.rs` reaches
-                    // here, so dropping a dep here means the whole
-                    // UnresolvableDeps queue appears to do nothing.
+                    // A name present in the union of listed packages is not
+                    // enough: a source entry in the own project with status
+                    // Disabled, or no entry at all for the requested
+                    // distro/arch, must not count as "present → resolved",
+                    // or the dep is dropped from the queue though no built
+                    // binary exists. The UnresolvableDeps path from
+                    // `pipeline.rs` reaches here, so dropping a dep here
+                    // would make that whole queue appear to do nothing.
                     //
                     // Linked (upstream) project packages are still trusted
                     // on mere presence — we don't own or rebuild those and
@@ -3761,12 +3745,9 @@ fn cmd_build(
                         .cloned()
                         .collect();
                     if new_deps.is_empty() && !remaining.is_empty() {
-                        // Previously fell through to `return Ok(())` here,
-                        // which the drogon-shaped case (keeps surfacing
-                        // the SAME unresolvable deps because the agent
-                        // can't rename them to anything findable on a
-                        // forge) silently exited successful on. A target
-                        // that still needs deps was NOT built — surface
+                        // A target that still needs deps was not built, so
+                        // this is a failure, not success, when the same
+                        // unresolvable deps keep coming back. Surface
                         // that as a failure, same shape as the frontier
                         // path's no-progress give-up.
                         let unbuildable = config.unbuildable_deps.join(", ");
@@ -4024,8 +4005,7 @@ fn cmd_build(
                     patch_requests.record(&patches);
                     native_names.record(&native);
                     outdated_names.record(&outdated);
-                    // No-progress detection (review finding #15 in the Sep
-                    // report; still open in Oct). A package that keeps
+                    // No-progress detection. A package that keeps
                     // surfacing MissingDeps on names already in
                     // `attempted_deps` — and therefore skipped by the
                     // mini-loop every time — is not making progress; it is
@@ -4217,11 +4197,9 @@ fn cmd_build(
                 drain_in_flight(&rx, &mut in_flight);
                 return Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"));
             }
-            // A `--target` run returning `MissingDeps` previously fell through
-            // to `None => Ok(())` here, reporting success for a target that
-            // was *not* built. The Oct 6 review reproduced this: an explicit
-            // target whose first batch yielded `MissingDeps` exited 0 with
-            // nothing green. Make unresolved work a non-success outcome: if
+            // A `--target` run returning `MissingDeps` must not report success
+            // for a target that was *not* built. Make unresolved work a
+            // non-success outcome: if
             // this batch surfaced genuinely new deps (not ones we have
             // already tried and failed/gave-up on), loop around once to let
             // them build via the top-of-loop pending-deps processor and
@@ -4264,8 +4242,7 @@ fn cmd_build(
 /// existing recipe's hand-tuned decisions (patches, BuildRequires choices,
 /// `%check` skips); the user opts in when upstream has changed build system
 /// or dependency layout enough that reusing the old recipe is worse than
-/// starting over. The Oct 6 review flagged the previous always-regenerate
-/// default as silently discarding recipe-specific work.
+/// starting over. Reusing the recipe by default keeps its recipe-specific work.
 ///
 /// Rebuilds run sequentially by default (`--jobs 1`) because each one already
 /// kicks off its own dep-closure concurrency inside `cmd_build`; stacking

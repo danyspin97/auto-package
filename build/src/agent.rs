@@ -48,9 +48,9 @@ const AGENT_ENV_ALLOW_PREFIXES: &[&str] = &["LC_", "XDG_", "ANTHROPIC_", "CLAUDE
 /// Env vars this process explicitly STRIPS from the Claude subprocess
 /// environment (publishing credentials, cloud / forge push tokens).
 ///
-/// The Oct 2026 external review flagged the agent subprocess as inheriting
-/// the full caller environment. The environment is now an allowlist
-/// ([`AGENT_ENV_ALLOW`]); this denylist and the credential-shape checks are a
+/// The agent subprocess does not inherit the full caller environment: the
+/// environment is an allowlist ([`AGENT_ENV_ALLOW`]); this denylist and the
+/// credential-shape checks are a
 /// second layer over the names that pass it.
 ///
 /// Publishing (osc commit, GitHub pushes, cloud deploys) all happens in
@@ -683,9 +683,9 @@ fn materialise_conventions(workspace: &std::path::Path) -> std::io::Result<()> {
 /// Everything sent to `claude --append-system-prompt`: [`PRIORITIES`], [`conventions_prompt`] plus
 /// [`STATIC_WORKFLOW`], neither of which varies by package, task, or attempt.
 ///
-/// This used to be interpolated straight into the per-turn user prompt
-/// (`-p`) alongside genuinely dynamic content — package name, workspace
-/// paths, notes.md, build failure hints. Since Anthropic's prompt cache
+/// This is kept out of the per-turn user prompt (`-p`), which carries the
+/// genuinely dynamic content: package name, workspace paths, notes.md, build
+/// failure hints. Since Anthropic's prompt cache
 /// only hits on a byte-identical prefix, mixing ~140KB of unchanging
 /// instructions into a string that's different on every single call meant
 /// it could never be served from cache, on any turn, for any package. As a
@@ -1060,9 +1060,7 @@ pub struct TurnRequest<'a> {
     /// the agent gets: a plain-C/C++ or Rust package has no pyproject.toml,
     /// no `%{python_module ...}` macros, no `%python_subpackages`, so handing
     /// it the Python-centric checklist (import name, console scripts, pytest
-    /// config, %fdupes sitelib vs. sitearch) is a wall of irrelevant work —
-    /// a real drogon run spent a whole Review turn concluding "no_change"
-    /// against a 10-item Python checklist.
+    /// config, %fdupes sitelib vs. sitearch) is a wall of irrelevant work.
     pub is_python: bool,
     pub task: Task,
     pub attempt: usize,
@@ -1407,10 +1405,8 @@ struct ResultEvent {
     session_id: Option<String>,
     /// When claude ends mid-turn — budget cap, rate limit, context
     /// overflow — the result event carries `is_error: true` plus a
-    /// `subtype` identifying which. Previously ignored, which turned
-    /// every one of those into an opaque `claude exited 1` with no
-    /// hint of what the user should actually do about it. The real
-    /// drogon-build case the user hit was
+    /// `subtype` identifying which. Reading it turns each of those into a
+    /// specific message rather than an opaque `claude exited 1`, e.g.
     /// `subtype: "error_max_budget_usd"` with
     /// `errors: ["Reached maximum budget ($0.03)"]`.
     #[serde(default)]
@@ -2090,7 +2086,7 @@ fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // Scrub the inherited environment before applying any `.env(...)` call
     // below: `env_clear` drops the parent env, `envs(scrubbed)` adds back
     // only the allow-listed entries. See `scrub_env_for_agent` for the
-    // rationale (Oct 2026 review of this file). Any extra `cmd.env(...)`
+    // rationale. Any extra `cmd.env(...)`
     // after this point — e.g. QUILT_PATCHES below — is additive and NOT
     // credential-shaped, so it is fine to set after the clear.
     //
@@ -2552,8 +2548,7 @@ fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
 /// built around pyproject.toml, `%{python_module ...}` macros, `%pytest`,
 /// `%python_subpackages`, `%fdupes` sitelib/sitearch and so on — a wall of
 /// text that reduces to "no_change" at the first checklist item for a
-/// package that has none of those shapes (real case: drogon, run
-/// `20261005-145029-f054b0`). This branch keeps only the items that still
+/// package that has none of those shapes. This branch keeps only the items that still
 /// apply (license, Source0 extension, sibling projects) and hands the rest
 /// off to the appropriate `packaging-skills/` entry.
 fn review_prompt_non_python() -> &'static str {

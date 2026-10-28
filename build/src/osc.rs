@@ -20,8 +20,7 @@ fn anywhere() -> PathBuf {
 }
 
 /// Fired at most once per process the first time `rpmspec --parse` is
-/// invoked, surfacing the known host-vs-target-repo macro-mismatch gap the
-/// 2026-10-06 external review flagged. Behavior is unchanged — this just
+/// invoked, surfacing the host-vs-target-repo macro-mismatch gap. It only
 /// tells the user to treat a passing `rpmspec` as a cheap syntax check, not
 /// as a reproduction of what the OBS worker will do.
 fn emit_host_macro_warning(emit: Emit<'_>) {
@@ -442,8 +441,7 @@ fn classify_build_failure(log: &str) -> FailureKind {
 /// OBS's `<details>` for an `unresolvable` package joins every missing
 /// requirement onto ONE line (`nothing provides python314-fastar, nothing
 /// provides python313-fastar, ...`), while a build log has one per line, so a
-/// line may hold several. Reading only the first, as this used to, queued
-/// `python314-fastar,` (comma included) and lost everything after it.
+/// line may hold several. Every segment is read, not only the first.
 fn nothing_provides_segments(line: &str) -> Vec<String> {
     const MARKER: &str = "nothing provides ";
     let line = line.trim();
@@ -2628,8 +2626,7 @@ mod project_packages_cache_tests {
 /// than guess `<pkg>.spec` — AppCo's versioned-library convention gives one
 /// OBS package per upstream version (`pytorch+2.4`, `pytorch+2.5`), each
 /// holding a plain `<base-name>.spec` (`pytorch.spec`) that has no relation
-/// to the OBS package name. The guess silently missed every one of these
-/// before (Oct 6 review finding #3).
+/// to the OBS package name, so the guess is not enough on its own.
 pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Vec<String>> {
     if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) {
         return None;
@@ -4184,8 +4181,8 @@ pub fn has_local_changes(checkout_dir: &Path, emit: Emit<'_>) -> bool {
     // `osc status` failed for a reason other than the one recognized,
     // repairable case (a network/server hiccup, say), or `repair_wc` itself
     // failed — either way `out.stdout` is from a failed invocation and
-    // almost certainly empty, which used to fall through to the same
-    // "no local changes" read as an actually-clean checkout. The caller
+    // almost certainly empty, which must not read as an actually-clean
+    // checkout ("no local changes"). The caller
     // uses this to gate skipping a rebuild (see the `AlreadyBuilt` fast path
     // in pipeline.rs), so treat "couldn't tell" as "has changes" — silently
     // skipping a needed rebuild is far worse than running an unnecessary one.
@@ -4735,7 +4732,7 @@ fn sandbox_spec_dir(spec_path: &Path, cwd: &Path) -> PathBuf {
 /// Judges on exit status only (warnings in stderr are not treated as failures).
 /// Returns the expanded spec on success (stdout from `rpmspec --parse`).
 ///
-/// **Caveat (flagged by the 2026-10-06 external review):** `rpmspec` expands
+/// **Caveat:** `rpmspec` expands
 /// macros using the **host** RPM configuration, not the target build repo's
 /// configuration. A spec that `rpmspec --parse`s cleanly on this machine can
 /// still fail to parse (or expand to different Requires / BuildRequires) on
@@ -8415,10 +8412,9 @@ fn obs_build_once(
     let elapsed = start.elapsed();
 
     if status.is_success() {
-        // Download the built RPMs. The Oct 6 review's reproduction of
-        // 'succeeded status followed by a failing getbinaries still
-        // returns success, leaving the RPM directory empty' turned on
-        // this call being non-fatal: a succeeded OBS build without any
+        // Download the built RPMs. A succeeded status followed by a failing
+        // getbinaries must not still return success with the RPM directory
+        // empty, so this call is fatal: a succeeded OBS build without any
         // locally-downloaded artifacts is NOT a success a dependent
         // build can rely on — `rpm_satisfies_dep` can't find anything,
         // the dep is reported unresolvable even though OBS says the
@@ -8554,7 +8550,7 @@ mod package_listing_tests {
     #[test]
     fn get_binaries_reports_an_uncreatable_destination() {
         // A regular file in the path makes `create_dir_all` fail before any
-        // `osc` call, which used to be ignored.
+        // `osc` call.
         let file = std::env::temp_dir().join(format!("ap-osc-notdir-{}", std::process::id()));
         std::fs::write(&file, b"x").unwrap();
         let r = get_binaries("p", "pkg", "r", "a", &file.join("rpms"), Emit::quiet());

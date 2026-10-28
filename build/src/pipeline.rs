@@ -221,14 +221,9 @@ pub struct PkgState {
     /// run.jsonl stream. Preserved across runs the same way `last_outcome`
     /// is; cleared when the package next succeeds.
     ///
-    /// Updated on every unsuccessful [`PipelineResult`], not just `Failed`:
-    /// before this covered `MissingDeps` too, a round that reported a
-    /// missing dependency left whatever `Failed` reason happened to be here
-    /// from an earlier, unrelated round untouched — observed on
-    /// python-accelerate, where this field kept describing a long-resolved
-    /// version-mismatch bug through several later `MissingDeps` rounds and a
-    /// `%check` fix attempt, misleadingly implying that old bug was still
-    /// the live blocker.
+    /// Updated on every unsuccessful [`PipelineResult`], not just `Failed`, so
+    /// a `MissingDeps` round replaces the reason too and it never describes an
+    /// older, unrelated failure.
     #[serde(default)]
     pub last_failure_reason: Option<String>,
     /// Version for which the pre-build Review turn was already run and
@@ -262,8 +257,7 @@ pub struct PkgState {
     /// run. Persisted so an outer-loop retry WITHIN that run (which
     /// recreates `run_package` from scratch for the same package)
     /// enforces `budget_usd` as a per-package cap rather than resetting
-    /// to zero on every call — the Sep review called out the per-call
-    /// reset as "neither a whole-closure nor a durable per-package cap".
+    /// to zero on every call.
     ///
     /// Deliberately scoped to one run (keyed by `cumulative_spent_run_id`)
     /// rather than running since the dawn of time: a fresh invocation of
@@ -625,15 +619,10 @@ impl PkgState {
 
     /// Does state.json record a GREEN build of this version?
     ///
-    /// Only `success` qualifies. `wheel-only` previously counted too, but
-    /// the Sep review (reproduced in the Oct follow-up) called that out:
-    /// the generation branch that writes `wheel-only` ALSO returns
-    /// `PipelineResult::Failed { reason: "wheel-only package - candidates: ..." }`.
-    /// So the state tag and the pipeline result disagree — a package the
-    /// pipeline reports as failed looks "already built" to the very next
-    /// `select_target` call, which then skips it forever and anything
-    /// that depends on it is unresolvable with no visible retry.
-    /// `wheel-only` is a terminal failure marker, not a success.
+    /// Only `success` qualifies. `wheel-only` is a terminal failure marker, not
+    /// a success: the branch that writes it also returns `PipelineResult::Failed`,
+    /// and a package the pipeline reports as failed must not look "already
+    /// built" to `select_target`.
     pub fn is_built(&self, version: &str) -> bool {
         self.last_built_version.as_deref() == Some(version)
             && self.last_outcome.as_deref() == Some("success")
@@ -736,9 +725,8 @@ pub struct TargetInfo {
 /// fuzzily — `-`/`_`/`.` and case are not meaningful dependency identity (see
 /// `fuzzy_key`'s doc comment), and a caller has no way to know in advance
 /// which of the two spellings a given node happens to be keyed under. Getting
-/// this wrong used to silently check out and commit to a brand-new,
-/// wrongly-named OBS package instead of the real one (`python-backports.zstd`
-/// vs. the actual `python-backports-zstd`) rather than failing loudly.
+/// this wrong would silently check out and commit to a brand-new, wrongly-named
+/// OBS package (`python-backports.zstd` for `python-backports-zstd`).
 fn find_explicit_target<'a>(
     nodes: &'a [ap_ecosystem::pip::Node],
     target: &str,
@@ -769,15 +757,9 @@ fn find_explicit_target<'a>(
 /// `Excluded`, `Unknown`, or `None` (no entry at all for this distro/arch) —
 /// is a no.
 ///
-/// This used to allow every non-{Failed, Unresolvable, Broken} status through
-/// (and `None` fell into "non-failed" too), which treated a Disabled source
-/// and a never-built-for-this-arch package as if their binaries were sitting
-/// in the repo waiting to be installed. The mocked disabled-source case the
-/// Oct 6 review probed with (`demo==999.0` returning Ok with no RPM produced)
-/// was exactly this: a `python-demo` source existed in the project, OBS
-/// reported it Disabled, `select_target` saw "not Failed/Unresolvable/Broken",
-/// called the package resolvable, found nothing left to build, and the whole
-/// run exited successful.
+/// Only a built status counts as resolvable. A Disabled source or a package
+/// never built for this arch has no binaries in the repo, so reading it as
+/// resolvable would leave nothing to build and let the run exit successfully.
 pub fn status_is_resolvable(status: Option<&osc::BuildStatus>) -> bool {
     matches!(
         status,
@@ -923,8 +905,7 @@ fn version_conflicts(project: &str, root: &str, nodes: &[ap_ecosystem::pip::Node
 /// OBS and locally. Without this, `--force` is unenforceable from here —
 /// `run_package`'s own force check only fires if the package reaches it in the
 /// first place, and `select_target` would otherwise skip it before it ever
-/// does. This was the mechanical path the Oct 6 review's `update --force
-/// --regen` reproducer took to return Ok without ever running a build.
+/// does.
 ///
 /// Returns `Ok(vec![])` when every package in the closure is already
 /// resolvable, or when nothing further can be built because everything left
@@ -1006,7 +987,7 @@ pub fn select_target(
     // presence, with no build-status check: we don't own or rebuild those
     // packages, so there is nothing to retry, and querying that project's
     // build status per its own repo/arch is unreliable (naming and listing
-    // quirks in a project we don't control) — requiring it previously caused
+    // quirks in a project we don't control) — requiring it would cause
     // already-available packages like `python-setuptools` to be queued for
     // packaging again. Presence in the linked project's sources is exactly
     // the signal OBS itself uses to consider a package "available".
@@ -1020,10 +1001,10 @@ pub fn select_target(
     // `osc::rpm_name` is only a guess — openSUSE has no single deterministic
     // rule for how a PyPI name's separators map to the RPM name (see its doc
     // comment: `pydantic_core` is packaged as `python-pydantic-core`, but
-    // `typing_extensions` keeps its underscore). Comparing the guess for
-    // exact string equality against the real project listings previously
-    // made already-available packages like `python-pydantic-core` look
-    // unresolvable and get queued as duplicates. Index both listings by a
+    // `typing_extensions` keeps its underscore). Exact string equality against
+    // the real project listings would make already-available packages like
+    // `python-pydantic-core` look unresolvable and get queued as duplicates.
+    // Index both listings by a
     // separator-blind `fuzzy_key` instead, and use the *real* listed name
     // (not the guess) for the build-status lookup once a match is found.
     // Several listed spellings can share a key (`python-APScheduler` and
@@ -1055,11 +1036,9 @@ pub fn select_target(
     let mut resolution: Vec<Resolution> = nodes
         .iter()
         .map(|n| {
-            // `--force` on the root was previously only observed inside
-            // `run_package`, which never ran if `select_target` had already
-            // skipped the package: so a `--force` or `update --force --regen`
-            // against a package OBS already showed green silently exited
-            // successful without building anything (Oct 6 review finding #1).
+            // `--force` on the root is checked here, not only inside
+            // `run_package`: that never runs if `select_target` already skipped
+            // the package, and the run would then exit without building.
             // Mark the user's own requested root as unresolved up front so it
             // reaches the frontier; the rest of the closure still goes
             // through the ordinary resolvability check below so a forced
@@ -1650,11 +1629,11 @@ pub fn is_system_tool_alias(name: &str) -> bool {
 /// Normalize a PyPI package name to a consistent lookup key.
 ///
 /// Delegates to [`osc::fuzzy_key`] rather than keeping a second, weaker
-/// definition here: this used to only lowercase and fold `-` into `_`,
-/// which still let a dotted name (`ruamel.yaml`) fail to match a
-/// `requires_dist` entry spelling it with a hyphen or underscore instead —
-/// the exact same class of bug `fuzzy_key`'s doc comment documents for RPM
-/// names, just on the PyPI-graph side of this module instead of the OBS
+/// definition here: lowercasing and folding `-` into `_` alone would not match
+/// a dotted name (`ruamel.yaml`) against a `requires_dist` entry spelling it
+/// with a hyphen or underscore. The same class of mismatch `fuzzy_key`'s doc
+/// comment documents for RPM names applies on the PyPI-graph side too, instead
+/// of the OBS
 /// side.
 fn normalize_pkg_name(name: &str) -> String {
     osc::fuzzy_key(name)
@@ -1984,10 +1963,9 @@ pub fn run_package(
     // unsuccessful path, which otherwise left state.json untouched and made
     // a mid-run crash indistinguishable from "never attempted".
     //
-    // `MissingDeps` is covered here too, not just `Failed` — see
-    // `PkgState::last_failure_reason`'s doc comment for the stale-reason bug
-    // this closes (a `MissingDeps` round used to leave an older, unrelated
-    // `Failed` reason sitting in state.json untouched).
+    // `MissingDeps` is covered here too, not just `Failed`, so an older
+    // `Failed` reason never stays in state.json (see
+    // `PkgState::last_failure_reason`).
     let outcome = recorded_outcome(&result);
     let ws = Workspace::open(&config.state_root, &config.rpm_name)
         .inspect_err(|e| {
@@ -8227,10 +8205,9 @@ Describing an edit in prose is not accepted; only the StructuredOutput call is."
 ///
 /// The default `Display` for `Error::Failed`/`Error::EndedEarly` is useful
 /// for debugging (full stderr dump) but doesn't tell the user how to fix
-/// the common cases. In particular, the drogon-build crash the Oct 2026
-/// user hit was `claude exited 1` with empty stderr because
-/// `--max-budget-usd` ran out mid-turn — nothing in the opaque message
-/// pointed at the one knob (`--budget-usd`) they needed to raise. The
+/// the common cases. For example, `claude exited 1` with empty stderr can mean
+/// `--max-budget-usd` ran out mid-turn, and nothing in the opaque message points
+/// at the one knob (`--budget-usd`) to raise. The
 /// claude CLI DOES emit the diagnosis in the stream (`subtype:
 /// "error_max_budget_usd"`, `errors: ["Reached maximum budget (...)"]`)
 /// and `Error::EndedEarly` carries both; translate them into something
@@ -8239,7 +8216,7 @@ Describing an edit in prose is not accepted; only the StructuredOutput call is."
 /// Pull the inner CLI message out via `ended_early_message()` rather than
 /// embedding `{e}`'s `Display` — `Display` prepends
 /// `"claude ended turn with <subtype>: "` AND repeats the subtype, so
-/// wrapping it in the budget sentence used to produce
+/// wrapping it in the budget sentence would produce
 /// `"model budget of $2.00 (--budget-usd) exhausted mid-turn (claude
 /// ended turn with error_max_budget_usd: Reached maximum budget ($0.03))"`
 /// — two different dollar figures with no indication that $2.00 is the
@@ -9705,7 +9682,7 @@ fn write_download_service(expanded_spec: &str, missing: &[String], checkout_dir:
 /// `series` forever: `%autosetup -p1`'s quilt backend chokes trying to
 /// apply a patch the current spec no longer declares, which looks like a
 /// spurious, unexplained `%prep` failure on a spec that presently declares
-/// zero patches (observed on python-python-docx). Idempotent and run on
+/// zero patches. Idempotent and run on
 /// every `ValidateSpec` visit, like `missing_source_files`.
 fn sync_quilt_series(expanded_spec: &str, checkout_dir: &Path) {
     let mut patches = Vec::new();
@@ -9815,9 +9792,8 @@ fn extract_build_log(
             ),
         });
     }
-    // Note: We used to warn about missing osc timestamp prefixes, but this is
-    // harmless and not actionable — the extractor still works, just with
-    // slightly less accurate anchoring. Removed to reduce noise.
+    // Missing osc timestamp prefixes are not warned about: the extractor still
+    // works, with slightly less accurate anchoring, and there is nothing to act on.
 
     extracted
 }
@@ -10250,10 +10226,9 @@ fn gate_turn_edit_without_accept(
 /// "spec-only restore", for edits that must keep files written outside the
 /// snapshot (the staged files of a turn).
 ///
-/// Oct 6 review (reproducing Sep): the pre-fix function restored only the
-/// spec text, so a `.changes`/patch/`_service` edit the agent made in the
-/// same turn survived even when the spec itself was rejected. The next
-/// turn then saw a half-reverted state and could commit it.
+/// A rejected turn must roll back the whole checkout, not only the spec: a
+/// `.changes`/patch/`_service` edit made in the same turn would otherwise
+/// survive the rejection, and the next turn could commit it.
 fn accept_or_restore_with_snapshot(
     spec_path: &Path,
     before: &str,
@@ -10434,11 +10409,10 @@ struct ApplyTurnCtx<'a> {
     /// Full-checkout snapshot taken BEFORE the agent turn ran. When `Some`,
     /// a rejected / blocked / no-change outcome rolls back every top-level
     /// checkout file the agent may have edited (patches, `.changes`,
-    /// `_service`, …), not just the spec. The Sep review called out spec-
-    /// only rollback as insufficient; this field is the plumbing. Each
+    /// `_service`, …), not just the spec. Each
     /// call site opts in by capturing a snapshot right before `agent_turn`
     /// and passing `Some(&snap)` here. Sites that don't opt in get the
-    /// pre-fix spec-only restore (safe default).
+    /// spec-only restore (the default).
     snapshot: Option<&'a CheckoutSnapshot>,
     /// Files staged into the checkout by earlier rounds of the same resolution
     /// ladder. Every restore keeps them, so a later round's rollback does not
@@ -10549,7 +10523,7 @@ fn apply_turn_outcome_with(
     }
     let effect = match &outcome.action {
         crate::agent::Action::Blocked { why } => {
-            // Oct 6 finding (sibling of #7): on Blocked, restore the full
+            // On Blocked, restore the full
             // checkout too — the agent may have written speculative
             // patches/_service files before deciding it's blocked, and
             // those should not survive the rejection.
@@ -10878,10 +10852,9 @@ fn apply_turn_outcome_with(
     // checkout that had none before — is actually materialised on disk
     // before the next validation sees it. Convention 13's "the checkout
     // does not gain a file just because the spec now names it correctly"
-    // trip-up (drogon-shape case) costs an entire extra attempt without
-    // this. Called unconditionally rather than only when `_service` already
-    // existed, because that gate would silently miss exactly the case this
-    // was added for; `osc` itself is the authority on what to do when none
+    // trip-up costs an entire extra attempt without this. Called
+    // unconditionally rather than only when `_service` already existed,
+    // because that gate would silently miss the case this exists for; `osc` itself is the authority on what to do when none
     // is present. Non-fatal: a service failure here surfaces as a warning
     // and lets the existing validation gate catch any actual breakage,
     // instead of masking whatever the agent was trying to fix behind an
@@ -13908,8 +13881,8 @@ fn generate_repo_python_spec(
     // function's own doc comment on `pypi_json` says that's expected
     // ("py2pack fills in what it can and the review turn supplies the
     // rest from the source"), and the design intent is to still produce
-    // a usable skeleton. Previously the code tried `parse_release_with_tarball("")`
-    // anyway, got `Error::Malformed`, and surfaced a hard
+    // a usable skeleton. The code tries `parse_release_with_tarball("")`
+    // first, gets `Error::Malformed`, and surfaces a hard
     // "project is not on PyPI, so py2pack has nothing to describe it
     // with" error that killed the whole pipeline run — exactly the
     // crash the user hit on `llama-cpp-scripts` (llama.cpp's root
@@ -13985,10 +13958,9 @@ fn generate_repo_python_spec(
 /// no wheel either, the caller still fails the package.
 ///
 /// Returns the picked [`ap_ecosystem::pypi::WheelFile`] so the caller can
-/// write a provenance record alongside the spec. The Oct 6 review called
-/// out that previously the only check was "a wheel exists" — the agent's
-/// claim that the source genuinely cannot be built was never independently
-/// verifiable after the fact. We cannot verify "source builds are
+/// write a provenance record alongside the spec. The only check is that a wheel
+/// exists; the agent's claim that the source cannot be built is not verified
+/// here. We cannot verify "source builds are
 /// impossible" from here (that is a factual claim about an environment OBS
 /// controls), but we can at least pin the exact artifact that got
 /// substituted and the reasoning that justified it, so a human reviewer
@@ -14980,7 +14952,7 @@ fn drop_first_component(name: &str) -> String {
 fn maturin_manifest_path(tarball: &Path) -> Result<Option<String>, String> {
     let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
     // Only the two root manifests are needed; unpacking the whole sdist for
-    // them is what this used to do.
+    // them is what this does instead.
     ap_ecosystem::sdist::extract_where(tarball, scratch.path(), |p| {
         let depth = p
             .components()
@@ -15098,8 +15070,8 @@ fn brief(text: &str) -> String {
 }
 
 fn append_notes(notes_path: PathBuf, section: &str) {
-    // Append, never read-modify-write: a failed read used to replace the
-    // whole journal with just this section.
+    // Append, never read-modify-write: a failed read would replace the whole
+    // journal with just this section.
     use std::io::Write;
     let result = std::fs::OpenOptions::new()
         .create(true)
@@ -15122,12 +15094,12 @@ fn append_notes(notes_path: PathBuf, section: &str) {
 ///
 /// * **Glob-aware membership**. Cargo's `members = ["crates/*"]` syntax is
 ///   a glob; literal filesystem existence of a path named `crates/*`
-///   previously said "not there, remove it", collapsing a perfectly valid
+///   would otherwise say "not there, remove it", collapsing a perfectly valid
 ///   workspace to `members = []`. `member_resolves` now expands single-
 ///   segment wildcards and keeps the member when any filesystem entry
 ///   matches the pattern.
 ///
-/// * **Original tarball preserved**. The repack previously overwrote the
+/// * **Original tarball preserved**. The repack must not overwrite the
 ///   downloaded archive in place, destroying the pristine SHA256 identity
 ///   the caller had just verified. The original is now kept as
 ///   `<name>.orig.tar.gz` next to the modified one so provenance survives.
@@ -15494,7 +15466,7 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
 
     // Known package mappings for special cases
     // NOTE: nvidia-cuda-nvrtc, nvidia-cuda-runtime, nvidia-cuda-cupti and
-    // nvidia-cuda-nvcc used to map here too. They don't: NVIDIA/cuda-python
+    // nvidia-cuda-nvcc are not mapped here: NVIDIA/cuda-python
     // is the *bindings* monorepo (cuda.bindings/cuda.core/cuda.pathfinder) —
     // it does not contain the closed-source nvcc compiler, cupti profiler,
     // nvrtc or cudart binaries those wheels actually redistribute. There is
@@ -16480,9 +16452,8 @@ mod tests {
         assert_eq!(PkgState::load(&ws).cumulative_attempts, 100);
     }
 
-    /// A truncated/corrupt state.json used to be silently replaced by the
-    /// default on the next save, erasing the package's history. It must be
-    /// kept aside instead.
+    /// A truncated or corrupt state.json must be kept aside, not replaced by
+    /// the default on the next save, which would erase the package's history.
     #[test]
     fn a_corrupt_state_file_is_preserved_not_overwritten() {
         let root = tempfile::tempdir().unwrap();
