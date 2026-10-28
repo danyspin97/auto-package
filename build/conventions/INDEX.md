@@ -22,13 +22,13 @@
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
 23. Merged into convention 17 — read convention 17 when %files or rpmlint shows tests/docs/setup files at site-packages root
 24. Headers: own headers to -devel, vendored ones deleted — read when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
-25. rpmlint badness budget (threshold 999) — read when the build log says "Badness NNNN exceeds threshold"
+25. Merged into convention 39 — read convention 39 when the build log says "Badness NNNN exceeds threshold"
 26. Merged into convention 22 — read convention 22 when the checkout is a git snapshot or the project sits in a subdirectory
 27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
 28. The four exceptions to building a dependency — read when a dependency failed to build, tests need GPU/network, or you return use_upstream_wheel
 29. Missing source code (no sdist, no repo URL) — read when no source tarball or repository URL can be found for the package
 30. Merged into convention 22 — read convention 22 when the prompt lists several "Other projects in this archive"
-31. rpmlint compliance (summary length, description line length, manpage) — read when rpmlint warns on Summary, description or binaries
+31. Merged into convention 39 — read convention 39 when rpmlint warns on Summary, description or binaries
 32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
 33. Merged into convention 32 — read convention 32 when the package has no Python and no Cargo
 34. Optional extras are Recommends, not BuildRequires — read when pyproject lists optional-dependencies you consider adding
@@ -43,7 +43,7 @@
 43. Merged into convention 7 — read convention 7 when pytest ignores options set in setup.cfg
 44. Merged into convention 11 — read convention 11 when %check misses a conftest/testdata file or the backend rejects a classifier
 45. Merged into convention 10 — read convention 10 when %check says ImproperlyConfigured: settings are not configured
-46. Stray shebang in a library file — read when rpmlint reports script-without-shebang/non-executable-script on a module
+46. Merged into convention 39 — read convention 39 when rpmlint reports script-without-shebang/non-executable-script on a module
 47. Merged into convention 3 — read convention 3 when a distutils/setuptools Extension ignores distro flags
 48. Merged into convention 10 — read convention 10 when %check fails with no missing package
 49. Merged into convention 32 — read convention 32 when the source cannot be built and wheels exist per cp3NN
@@ -76,7 +76,7 @@
 76. Files of one Python package come from one tree — read when several wheels fill one package, ModuleNotFoundError on a sibling part
 77. Reproducible Source: URLs, one release only — read when adding or editing a Source:, or dropping the old release's archive
 78. Merged into convention 5 — read convention 5 when a build refuses over a licence variable
-79. ELF RPATH/RUNPATH checks before the first build — read when the package ships .so files or rpmlint reports rpath errors
+79. Merged into convention 39 — read convention 39 when the package ships .so files or rpmlint reports rpath errors
 80. Merged into convention 19 — read convention 19 when %build/%install/%check uses $python or %{$python_*}, or "Unterminated {" appears
 81. Merged into convention 10 — read convention 10 when tests may need network, GPU, redis, models or repo files
 82. Pre-build reads: requires-python cap, SourceN URLs, cargo build.rs, pybind11 — read when requires-python has <, a SourceN is a URL, or Cargo.lock exists
