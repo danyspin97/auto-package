@@ -1,6 +1,7 @@
 use super::*;
 use crate::pipeline::build_round::*;
 use crate::pipeline::keep_version::*;
+use crate::pipeline::wheel_switch::*;
 
 mod part2;
 mod part3;

@@ -2,6 +2,7 @@ use super::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::npm_vendor::*;
 use crate::pipeline::sibling::*;
+use crate::pipeline::wheel_switch::*;
 
 mod part2;
 

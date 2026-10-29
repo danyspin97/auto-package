@@ -6,6 +6,7 @@ use crate::pipeline::run::*;
 use crate::pipeline::slots::*;
 use crate::pipeline::spec_edits::*;
 use crate::pipeline::target::*;
+use crate::pipeline::wheel_switch::*;
 
 #[test]
 fn only_success_is_a_built_state() {

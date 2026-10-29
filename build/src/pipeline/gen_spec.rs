@@ -3,6 +3,7 @@
 use super::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
+use crate::pipeline::wheel_switch::*;
 
 pub(super) enum GenSpecError {
     WheelOnly {
