@@ -175,6 +175,13 @@ fn a_per_patch_answer_keeps_the_rebased_patch_and_rolls_back_the_blocked_one() {
         ],
     );
     needs_human(&case.result, "b.patch");
+    match &case.result {
+        Err(PipelineResult::Failed { reason, .. }) => assert!(
+            reason.contains("b.patch") && reason.contains("blocked by the agent: hunk 1 is gone"),
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
     assert_eq!(
         std::fs::read_to_string(case.checkout.join("a.patch")).unwrap(),
         "clean\n"
@@ -199,6 +206,30 @@ fn a_per_patch_answer_keeps_the_rebased_patch_and_rolls_back_the_blocked_one() {
         "{}",
         case.notes
     );
+}
+
+#[test]
+fn a_later_answer_replaces_an_earlier_block() {
+    use crate::agent::{PatchAnswer, PatchAnswerStatus};
+    let answer = |name: &str, status| PatchAnswer {
+        name: name.into(),
+        status,
+        reason: format!("{name} is {status:?}"),
+    };
+    let mut blocked = Vec::new();
+    record_patch_answers(
+        &mut blocked,
+        &[
+            answer("a.patch", PatchAnswerStatus::Blocked),
+            answer("b.patch", PatchAnswerStatus::Blocked),
+        ],
+    );
+    record_patch_answers(
+        &mut blocked,
+        &[answer("a.patch", PatchAnswerStatus::Rebased)],
+    );
+    let names: Vec<&str> = blocked.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["b.patch"]);
 }
 
 #[test]

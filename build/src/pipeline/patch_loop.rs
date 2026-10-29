@@ -97,6 +97,8 @@ pub(super) fn patch_stage_with(
     let mut rounds = 0usize;
     // What the last round must hear: why its edit was refused.
     let mut feedback: Option<String> = None;
+    // The patches the agent blocked, each with its latest answer.
+    let mut blocked: Vec<crate::agent::PatchAnswer> = Vec::new();
     let stop: String = if config.no_agent {
         skip_agent(
             reporter,
@@ -181,7 +183,7 @@ pub(super) fn patch_stage_with(
                     }
                     write_notes(&lines, "quilt, stopped");
                     step.finish(StepOutcome::Failed);
-                    let reason = if failing.is_empty() {
+                    let reason = if failing.is_empty() && blocked.is_empty() {
                         format!("{stopped}; the edits quilt proves apply were kept")
                     } else {
                         format!(
@@ -189,7 +191,8 @@ pub(super) fn patch_stage_with(
                             kept_patches_reason(
                                 &config.version,
                                 "the rest were rolled back",
-                                &failing
+                                &failing,
+                                &blocked
                             )
                         )
                     };
@@ -204,6 +207,7 @@ pub(super) fn patch_stage_with(
                     a.name, a.status, a.reason
                 ));
             }
+            record_patch_answers(&mut blocked, &outcome.patch_answers);
             pop_source_patches(ctx);
             let changed = settle_patch_changes(
                 ctx,
@@ -267,17 +271,37 @@ pub(super) fn patch_stage_with(
     }
     // What still fails is kept, never dropped: the package stops for a human.
     let failing: Vec<&crate::patch_check::PatchResult> = report.failing().collect();
-    if !failing.is_empty() {
+    // A patch the agent blocked ends the package too, whatever quilt says.
+    if !failing.is_empty() || !blocked.is_empty() {
         for p in &failing {
             lines.push(format!("- {}: still does not apply; kept ({stop})", p.name));
         }
         write_notes(&lines, "quilt");
         step.finish(StepOutcome::Failed);
-        return Err(ctx.failed(kept_patches_reason(&config.version, &stop, &failing)));
+        return Err(ctx.failed(kept_patches_reason(
+            &config.version,
+            &stop,
+            &failing,
+            &blocked,
+        )));
     }
     write_notes(&lines, "quilt");
     step.finish(StepOutcome::Ok);
     Ok(())
+}
+
+/// Folds one turn's per-patch answers into `blocked`: each patch keeps only its
+/// latest answer, so a patch that a later round ported leaves the list.
+pub(super) fn record_patch_answers(
+    blocked: &mut Vec<crate::agent::PatchAnswer>,
+    answers: &[crate::agent::PatchAnswer],
+) {
+    for a in answers {
+        blocked.retain(|b| b.name != a.name);
+        if a.status == crate::agent::PatchAnswerStatus::Blocked {
+            blocked.push(a.clone());
+        }
+    }
 }
 
 /// Writes each patch of `report` that quilt refreshed into the checkout, with a

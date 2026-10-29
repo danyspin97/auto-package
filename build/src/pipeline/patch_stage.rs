@@ -514,18 +514,24 @@ pub(super) fn write_refresh_bullets(
     }
 }
 
-/// The failure of a package whose patches still do not apply: they are kept,
-/// and a human decides. Lists each patch with quilt's output and the rejected
-/// hunks.
+/// The failure of a package whose patches still do not apply, or that the agent
+/// blocked: they are kept, and a human decides. Lists each patch with quilt's
+/// output and the rejected hunks, and each blocked patch with the agent's reason.
 pub(super) fn kept_patches_reason(
     version: &str,
     stop: &str,
     failing: &[&crate::patch_check::PatchResult],
+    blocked: &[crate::agent::PatchAnswer],
 ) -> String {
+    let blocked_only: Vec<&crate::agent::PatchAnswer> = blocked
+        .iter()
+        .filter(|b| !failing.iter().any(|p| p.name == b.name))
+        .collect();
     let mut text = format!(
-        "needs a human: {} patch(es) do not apply to the {version} sources and were kept (a \
-         patch is removed only when quilt proves it already applied upstream; {stop}):",
-        failing.len()
+        "needs a human: {} patch(es) do not apply to the {version} sources or were blocked by \
+         the agent, and were kept (a patch is removed only when quilt proves it already applied \
+         upstream; {stop}):",
+        failing.len() + blocked_only.len()
     );
     for p in failing {
         if let crate::patch_check::PatchStatus::Fails { output, rejects } = &p.status {
@@ -543,6 +549,15 @@ pub(super) fn kept_patches_reason(
         } else {
             text.push_str(&format!("\n- {}", p.name));
         }
+        if let Some(b) = blocked.iter().find(|b| b.name == p.name) {
+            text.push_str(&format!("\n  blocked by the agent: {}", b.reason));
+        }
+    }
+    for b in blocked_only {
+        text.push_str(&format!(
+            "\n- {} (blocked by the agent): {}",
+            b.name, b.reason
+        ));
     }
     text
 }
