@@ -2,6 +2,7 @@
 //! the flag lines, and the wrapping of unpublished entries.
 
 use super::*;
+use crate::osc::publish::*;
 
 /// Create an initial `.changes` entry for a new package using `osc vc`.
 ///

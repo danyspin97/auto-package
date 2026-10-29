@@ -1,4 +1,5 @@
 use super::*;
+use crate::osc::publish::*;
 
 #[test]
 fn a_tracked_file_missing_from_the_checkout_is_committed_as_deleted() {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::osc::publish::*;
 
 #[test]
 fn the_match_names_the_projects_and_the_arch() {
