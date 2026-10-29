@@ -7,10 +7,6 @@
 
 use std::time::Duration;
 
-use super::{
-    Error, OSC_QUERY_TIMEOUT, anywhere, check_obs_name, during, enc, first_line, is_not_found,
-    is_valid_obs_name, parse_project_repo_paths,
-};
 use crate::proc::{self, Captured, Emit};
 mod api;
 pub use api::*;
