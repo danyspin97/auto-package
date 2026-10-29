@@ -1,4 +1,3 @@
-
 #[test]
 fn the_first_source_value_is_replaced_in_place() {
     let spec = "Name: x\nSource:         x-1.tar.gz\nSource1: y\n";

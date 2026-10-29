@@ -1,4 +1,3 @@
-
 use super::set_version;
 
 #[test]

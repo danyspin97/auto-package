@@ -1,4 +1,3 @@
-
 use super::add_console_script_alternatives;
 
 const SPEC: &str = "Name: python-x\n%python_subpackages\n\n%install\n%pyproject_install\n\

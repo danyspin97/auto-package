@@ -1,4 +1,3 @@
-
 use super::{license_guard_overrides, unverified_license_guards};
 
 /// torchcodec: the guard asks whether the FFmpeg linked is licence-compatible;

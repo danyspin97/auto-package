@@ -1,4 +1,3 @@
-
 use super::exclusive_arch_excluding;
 
 const LSVPD: &str = "Name: lsvpd\nVersion: 1\nExclusiveArch:  ppc ppc64 ppc64le\n%description\nx\n";

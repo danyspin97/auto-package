@@ -1,4 +1,3 @@
-
 use super::*;
 
 const SPEC: &str = "Name: python-x\nVersion: 1.2\nSource0: https://files/x-%{version}.tar.gz\n\

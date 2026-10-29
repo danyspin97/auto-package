@@ -1,4 +1,3 @@
-
 use super::collapse_dist_info_license_lines;
 
 #[test]
