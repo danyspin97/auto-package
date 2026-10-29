@@ -212,11 +212,11 @@ pub use select::*;
 mod blocked;
 pub use blocked::*;
 mod slots;
-pub(super) use slots::*;
+use slots::*;
 mod run;
 pub use run::*;
 mod obs_names;
-pub(super) use obs_names::*;
+use obs_names::*;
 mod checkout;
 use checkout::*;
 mod generate_stage;
@@ -236,7 +236,7 @@ mod fix_after;
 use fix_after::*;
 mod commit;
 mod validate;
-pub(super) use commit::*;
+use commit::*;
 mod build_round;
 mod unresolvable;
 
@@ -260,7 +260,7 @@ macro_rules! begin_or_fail {
 }
 use begin_or_fail;
 mod agent;
-pub(super) use agent::*;
+use agent::*;
 mod ladder;
 pub use ladder::*;
 mod logs;
