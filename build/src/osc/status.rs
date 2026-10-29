@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::osc::query::*;
+use crate::osc::results::*;
 
 /// Query the OBS build status for one repo/arch combination.
 ///

@@ -2,6 +2,7 @@
 //! fetch and parse of the listing.
 
 use super::*;
+use crate::osc::results::*;
 
 pub(super) static PROJECT_PACKAGES_CACHE: OnceLock<
     Mutex<HashMap<String, Arc<std::collections::HashSet<String>>>>,

@@ -19,7 +19,7 @@ struct Stub {
 impl Stub {
     /// A stub whose body is `script` (sh); the directory also holds the
     /// `env.txt` and `args.txt` it records and a `payload` file for `cat`.
-    fn new(script: &str, payload: &str) -> Stub {
+    pub(super) fn new(script: &str, payload: &str) -> Stub {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("payload"), payload).unwrap();
         let body = format!(

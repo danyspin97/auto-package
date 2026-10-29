@@ -72,7 +72,7 @@ mod tests {
     /// tests don't need a dev-dependency on `tempfile`.
     struct TempDir(PathBuf);
     impl TempDir {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             let base = std::env::temp_dir();
             // Nanosecond timestamp + pid is enough entropy for parallel tests.
             let nanos = std::time::SystemTime::now()

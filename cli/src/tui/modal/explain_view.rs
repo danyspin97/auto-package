@@ -50,7 +50,7 @@ pub struct ExplainView {
 }
 
 impl ExplainView {
-    fn new(row: &str, seq: u64) -> Self {
+    pub(super) fn new(row: &str, seq: u64) -> Self {
         Self {
             row: row.to_string(),
             load: ExplainLoad::Loading,

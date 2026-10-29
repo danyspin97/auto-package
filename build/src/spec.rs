@@ -818,7 +818,7 @@ struct CondFrame {
 }
 
 impl CondFrame {
-    fn new(state: Option<bool>) -> Self {
+    pub(super) fn new(state: Option<bool>) -> Self {
         CondFrame {
             state,
             prior: Taken::No,
