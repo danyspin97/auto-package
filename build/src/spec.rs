@@ -6891,12 +6891,33 @@ BuildRequires:  %{python_module pip}
     /// their own: it would drift from the generated one.
     #[test]
     fn nothing_else_quotes_the_old_hashed_libs_regex() {
-        for (name, text) in [
-            ("depclass.rs", include_str!("depclass.rs")),
-            ("agent.rs", include_str!("agent.rs")),
-        ] {
+        for name in ["depclass", "agent"] {
+            let text = module_source(name);
             assert!(!text.contains("[0-9a-f]{8}.*"), "{name} quotes a regex");
         }
+    }
+
+    /// The text of module `name`: `src/<name>.rs` and every `.rs` file under
+    /// `src/<name>/`, so that a module split into children is still whole.
+    fn module_source(name: &str) -> String {
+        fn collect(dir: &std::path::Path, out: &mut String) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push_str(&std::fs::read_to_string(&path).unwrap());
+                    out.push('\n');
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = std::fs::read_to_string(src.join(format!("{name}.rs"))).unwrap();
+        collect(&src.join(name), &mut out);
+        out
     }
 
     #[test]
