@@ -1,5 +1,4 @@
 use super::check_is_file_probe_only;
-use crate::spec::checks::*;
 
 #[test]
 fn only_file_probes_are_weak() {

@@ -1,5 +1,4 @@
 use super::*;
-use crate::spec::checks::*;
 
 #[test]
 fn many_ignores_are_flagged_and_few_are_not() {

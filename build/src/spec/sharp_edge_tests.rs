@@ -1,5 +1,4 @@
 use super::*;
-use crate::spec::checks::*;
 
 #[test]
 fn a_licence_term_is_added_to_the_whole_expression() {

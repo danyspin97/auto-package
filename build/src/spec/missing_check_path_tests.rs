@@ -1,5 +1,4 @@
 use super::*;
-use crate::spec::checks::*;
 
 #[test]
 fn only_absent_test_paths_that_are_run_are_reported() {
