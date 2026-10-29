@@ -25,6 +25,7 @@ auto-package is the only thing that changes packages.
 - Run `cargo fmt` before committing and commit its result.
 - Do not build cargo under `/tmp`; `/home` fills up during runs, so check `df`
   and clean `target` after large builds. Ask before deleting anything in `ap-work`.
+- Source files stay at most 600 lines (enforced by a test).
 
 ## Rules for every worker agent
 
