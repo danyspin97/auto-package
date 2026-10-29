@@ -3,6 +3,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::dep_edit::*;
+use crate::pipeline::ladder::*;
 use crate::pipeline::linked::*;
 
 /// Step: PreFix (restart with previous build log).
