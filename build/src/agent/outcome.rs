@@ -247,8 +247,9 @@ pub(super) fn refresh_patches_task() -> &'static str {
        `cd source && quilt refresh -p ab --no-timestamps --no-index` (`-p 0` instead of \
        `-p ab` for a `-p0` patch); quilt writes the patch back into the checkout\n\
      - `cd source && quilt diff`, `quilt files`, `quilt series`, `quilt top` to look.\n\
-     A patch that applies with an offset or fuzz: `quilt push`, then the same refresh. \
-     Keep each patch's comment header (PATCH-FIX-UPSTREAM / PATCH-FIX-OPENSUSE and the \
+     The pipeline refreshed every patch that applies with an offset or fuzz before you \
+     started: each patch you are given has rejected hunks. Keep each patch's comment \
+     header (PATCH-FIX-UPSTREAM / PATCH-FIX-OPENSUSE and the \
      reference) as it is, and never write a .patch file by hand. `patch --dry-run` \
      (relative paths only) is a read-only fallback when quilt cannot be used, never \
      the main tool and never used to apply.\n\

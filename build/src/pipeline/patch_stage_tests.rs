@@ -1,6 +1,8 @@
 use super::*;
 use crate::patch_check::{CheckReport, PatchResult, PatchStatus, Refresh};
 
+mod part2;
+
 /// A scripted turn: what it does to the checkout, then its answer.
 type Script = Box<dyn FnMut(&Path, &Path) -> crate::agent::TurnOutcome>;
 
@@ -25,8 +27,9 @@ fn quilt_missing() -> bool {
 }
 
 /// The check a test runs instead of quilt: a patch file holding `clean`
-/// applies, one holding `FUZZ` applies with fuzz (and refreshes to `clean`),
-/// one holding `UPSTREAM` is already applied, anything else fails.
+/// applies, one holding `FUZZ` applies with fuzz and one holding `OFFSET` with
+/// an offset (both refresh to `clean` in `Refresh::Offset`), one holding
+/// `UPSTREAM` is already applied, anything else fails.
 fn fake_check(ctx: &RunCtx, refresh: Refresh) -> CheckReport {
     let spec = std::fs::read_to_string(&ctx.spec_path).unwrap();
     let patches = crate::patch_check::declared_patches(&spec)
@@ -39,7 +42,15 @@ fn fake_check(ctx: &RunCtx, refresh: Refresh) -> CheckReport {
                         fuzz: true,
                         output: "Hunk #1 succeeded at 3 with fuzz 1.".into(),
                     },
-                    (refresh == Refresh::Fuzzy).then(|| b"clean\n".to_vec()),
+                    (refresh == Refresh::Offset).then(|| b"clean\n".to_vec()),
+                )
+            } else if body.contains("OFFSET") {
+                (
+                    PatchStatus::AppliesWithOffsetOrFuzz {
+                        fuzz: false,
+                        output: "Hunk #1 succeeded at 5 (offset 2 lines).".into(),
+                    },
+                    (refresh == Refresh::Offset).then(|| b"clean\n".to_vec()),
                 )
             } else if body.contains("UPSTREAM") {
                 (
@@ -401,181 +412,5 @@ fn a_removal_quilt_proves_is_kept_with_its_bullet() {
         1,
         "one bullet per patch: {}",
         case.changes
-    );
-}
-
-#[test]
-fn the_rounds_are_bounded() {
-    let scripts: Vec<Script> = (0..crate::patch_check::MAX_ROUNDS)
-        .map(|i| -> Script {
-            Box::new(move |checkout, _| {
-                // A change every round, but never one that applies.
-                std::fs::write(checkout.join("b.patch"), format!("try {i}")).unwrap();
-                outcome(crate::agent::Action::Edited, "Refresh b.patch")
-            })
-        })
-        .collect();
-    let case = run(&[("b.patch", "old")], false, 10, scripts);
-    assert_eq!(case.contexts.len(), crate::patch_check::MAX_ROUNDS);
-    assert!(
-        case.contexts[3].starts_with("Round 4 of at most 4"),
-        "{}",
-        case.contexts[3]
-    );
-    needs_human(&case.result, "b.patch");
-    assert!(case.spec.contains("b.patch"), "{}", case.spec);
-    assert_eq!(drop_bullets(&case.changes), 0, "{}", case.changes);
-}
-
-#[test]
-fn without_the_agent_failing_patches_are_kept_and_fuzzy_ones_refreshed() {
-    let case = run(
-        &[("b.patch", "old"), ("c.patch", "FUZZ")],
-        true,
-        10,
-        Vec::new(),
-    );
-    assert!(case.contexts.is_empty());
-    assert_eq!(case.attempts, 0);
-    needs_human(&case.result, "b.patch");
-    assert!(case.spec.contains("b.patch"), "{}", case.spec);
-    assert_eq!(
-        bullets(&case.changes, "Refresh c.patch"),
-        1,
-        "{}",
-        case.changes
-    );
-    assert_eq!(
-        std::fs::read_to_string(case.checkout.join("c.patch")).unwrap(),
-        "clean\n"
-    );
-    assert!(case.notes.contains("--no-agent is set"), "{}", case.notes);
-}
-
-#[test]
-fn no_turn_runs_past_the_attempt_limit() {
-    let case = run(&[("b.patch", "old")], false, 0, Vec::new());
-    assert!(case.contexts.is_empty());
-    needs_human(&case.result, "b.patch");
-    assert!(case.notes.contains("no agent turn left"), "{}", case.notes);
-}
-
-#[test]
-fn clean_patches_need_no_turn() {
-    let case = run(&[("a.patch", "clean")], false, 10, Vec::new());
-    assert!(case.result.is_ok(), "{:?}", case.result);
-    assert!(case.contexts.is_empty());
-    assert_eq!(case.attempts, 0);
-    assert_eq!(bullets(&case.changes, "Refresh a.patch"), 0);
-}
-
-#[test]
-fn the_generic_gate_names_only_the_unproven_removals() {
-    if quilt_missing() {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let checkout = dir.path();
-    source_tarball(checkout);
-    std::fs::write(checkout.join("up.patch"), UPSTREAM_DIFF).unwrap();
-    std::fs::write(checkout.join("a.patch"), FOREIGN_DIFF).unwrap();
-    let spec_path = checkout.join("foo.spec");
-    let before =
-        "Name: foo\nVersion: 1.0\nPatch0: up.patch\nPatch1: a.patch\n%prep\n%autosetup -p1\n";
-    std::fs::write(&spec_path, before).unwrap();
-    let snapshot = CheckoutSnapshot::take(checkout);
-    let mut config = super::hygiene_tests::config("foo", checkout);
-    config.version = "1.0".into();
-    // Both removed: the files deleted, the lines gone.
-    std::fs::remove_file(checkout.join("up.patch")).unwrap();
-    std::fs::remove_file(checkout.join("a.patch")).unwrap();
-    std::fs::write(
-        &spec_path,
-        "Name: foo\nVersion: 1.0\n%prep\n%autosetup -p1\n",
-    )
-    .unwrap();
-    let unproven = unproven_patch_removals(&config, checkout, &spec_path, before, Some(&snapshot));
-    assert_eq!(unproven, ["a.patch"]);
-    assert!(unproven_removal_problem(&unproven).contains("rebase it with quilt"));
-    // Nothing removed: nothing to prove.
-    std::fs::write(&spec_path, before).unwrap();
-    std::fs::write(checkout.join("up.patch"), UPSTREAM_DIFF).unwrap();
-    std::fs::write(checkout.join("a.patch"), FOREIGN_DIFF).unwrap();
-    assert!(
-        unproven_patch_removals(&config, checkout, &spec_path, before, Some(&snapshot)).is_empty()
-    );
-}
-
-#[test]
-fn dropping_a_patch_removes_exactly_its_lines() {
-    let spec = "Name: foo\nPatch1: a.patch\nPatch2: b.patch\n%prep\n%setup\n%patch -P 1 -p1\n%patch2 -p1\n";
-    let out = without_patch_applications(spec, &["1".to_string()]);
-    assert!(!out.contains("-P 1") && out.contains("%patch2"), "{out}");
-    let dir = tempfile::tempdir().unwrap();
-    let series = "# keep me\na.patch -p0\nb.patch\n  \nc.patch";
-    std::fs::write(dir.path().join("series"), series).unwrap();
-    drop_series_lines(dir.path(), &["a.patch".to_string()]);
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("series")).unwrap(),
-        "# keep me\nb.patch\n  \nc.patch"
-    );
-}
-
-#[test]
-fn the_refresh_series_is_the_spec_beside_an_untouched_checkout_series() {
-    let dir = tempfile::tempdir().unwrap();
-    let series = "a.patch -p0\n";
-    std::fs::write(dir.path().join("series"), series).unwrap();
-    let spec =
-        "Name: foo\nPatch0: z.patch\nPatch1: y.patch\n%prep\n%autosetup -p1\n%patch -P 1 -p0\n";
-    let (guard, notes) = write_rebase_series(spec, dir.path());
-    let scratch = dir.path().join(crate::agent::REFRESH_SERIES);
-    assert_eq!(
-        std::fs::read_to_string(&scratch).unwrap(),
-        "z.patch\ny.patch -p0\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("series")).unwrap(),
-        series
-    );
-    assert!(notes.iter().any(|n| n.contains("a.patch")), "{notes:?}");
-    drop(guard);
-    assert!(!scratch.exists());
-}
-
-#[test]
-fn a_checkout_series_that_disagrees_with_the_spec_is_reported() {
-    let entries = vec![
-        crate::patch_check::SeriesEntry {
-            number: "1".into(),
-            name: "y.patch".into(),
-            level: 0,
-        },
-        crate::patch_check::SeriesEntry {
-            number: "0".into(),
-            name: "z.patch".into(),
-            level: 1,
-        },
-    ];
-    let notes = series_disagreements("a.patch\ny.patch\ngone.patch -p1\n", &entries, |n| {
-        n != "gone.patch"
-    });
-    let text = notes.join("\n");
-    assert!(
-        text.contains("names a.patch, which the spec does not apply"),
-        "{text}"
-    );
-    assert!(
-        text.contains("applies y.patch with -p1, the spec with -p0"),
-        "{text}"
-    );
-    assert!(
-        text.contains("names gone.patch, which the checkout does not have"),
-        "{text}"
-    );
-    assert!(text.contains("does not list z.patch"), "{text}");
-    assert!(
-        series_disagreements("y.patch -p0\nz.patch\n", &entries, |_| true).is_empty(),
-        "an agreeing series has no notes"
     );
 }

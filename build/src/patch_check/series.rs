@@ -153,13 +153,14 @@ impl CheckReport {
     }
 }
 
-/// Whether the check rewrites fuzzy patches with `quilt refresh` and returns them.
+/// Whether the check rewrites patches that applied with an offset or fuzz with
+/// `quilt refresh`, and returns them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
     No,
-    /// Refresh each patch that applied with fuzz (the pipeline's last resort
-    /// when no agent turn refreshed it; an offset alone is left as it is).
-    Fuzzy,
+    /// Refresh each patch that applied with an offset or with fuzz: quilt makes
+    /// it exact, and rpm's `%autosetup` (`--fuzz=0`) applies only exact patches.
+    Offset,
 }
 
 /// The `PatchN:` lines of `spec`, as `(number, value)`; a bare `Patch:` is 0.

@@ -332,7 +332,7 @@ fn real_quilt_classifies_good_fuzzy_and_bad_patches() {
     let spec = "Name: foo\nVersion: 1.0\nPatch0: good.patch\nPatch1: bad.patch\nPatch2: fuzz.patch\n\
                     Patch3: up.patch\n%prep\n%autosetup -p1\n";
     let before = std::fs::read(dir.path().join("fuzz.patch")).unwrap();
-    let report = check(spec, dir.path(), Some(&tar), Refresh::Fuzzy);
+    let report = check(spec, dir.path(), Some(&tar), Refresh::Offset);
     assert_eq!(report.not_run, None, "{report:?}");
     let status = |n: &str| {
         report

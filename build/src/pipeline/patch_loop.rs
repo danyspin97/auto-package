@@ -61,8 +61,8 @@ pub(super) fn patch_stage_with(
     };
     // A patch quilt proves already applied is removed now: certainly right,
     // and nothing for a turn to do. The rest of the report is what is left.
-    let mut check_and_settle = |ctx: &RunCtx, lines: &mut Vec<String>| {
-        let mut report = check(ctx, Refresh::No);
+    let mut check_and_settle = |ctx: &RunCtx, lines: &mut Vec<String>, refresh: Refresh| {
+        let mut report = check(ctx, refresh);
         let proven: Vec<String> = report.already_applied().map(|p| p.name.clone()).collect();
         lines.extend(remove_proven_patches(ctx, step_id, &proven));
         report
@@ -70,8 +70,18 @@ pub(super) fn patch_stage_with(
             .retain(|p| !matches!(p.status, PatchStatus::AlreadyApplied { .. }));
         report
     };
-    let mut report = check_and_settle(ctx, &mut lines);
+    let mut report = check_and_settle(ctx, &mut lines, Refresh::No);
+    // A patch that applies only with an offset or fuzz is refreshed here, by
+    // the pipeline, before any turn: the agent is handed only the patches that
+    // have rejects.
+    let mut refreshed: std::collections::BTreeSet<String> = Default::default();
+    if report.to_refresh().next().is_some() {
+        let offsets = check_and_settle(ctx, &mut lines, Refresh::Offset);
+        refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
+        report = check_and_settle(ctx, &mut lines, Refresh::No);
+    }
     if report.patches.is_empty() || report.not_run.is_some() || report.is_clean() {
+        write_refresh_bullets(ctx, step_id, &refreshed);
         if report.not_run.is_some() {
             // Not a success: the patches are left to the `patch` check of ValidateSpec.
             reporter.report(&Event::Warning {
@@ -96,7 +106,6 @@ pub(super) fn patch_stage_with(
         &st.sdist_top_level,
         &config.version,
     );
-    let mut refreshed: std::collections::BTreeSet<String> = Default::default();
     let mut rounds = 0usize;
     // What the last round must hear: why its edit was refused.
     let mut feedback: Option<String> = None;
@@ -195,7 +204,7 @@ pub(super) fn patch_stage_with(
             } else {
                 false
             };
-            let next = check_and_settle(ctx, &mut lines);
+            let next = check_and_settle(ctx, &mut lines, Refresh::No);
             let verdict = crate::patch_check::next_round(
                 rounds,
                 MAX_ROUNDS,
@@ -216,33 +225,21 @@ pub(super) fn patch_stage_with(
             }
         }
     };
-    // A patch that applies only with fuzz fails rpm's `--fuzz=0`; refreshing it is
-    // mechanical, so the pipeline does it when no turn did.
-    let fuzzy = report.to_refresh().any(|p| {
-        matches!(
-            p.status,
-            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: true, .. }
-        )
-    });
-    if fuzzy {
-        for p in check(ctx, Refresh::Fuzzy).patches {
-            if let Some(bytes) = &p.refreshed {
-                write_or_warn(checkout_dir.join(&p.name), bytes);
-                refreshed.insert(p.name.clone());
-                lines.push(format!(
-                    "- {}: refreshed by the pipeline (it applied only with fuzz)",
-                    p.name
-                ));
-            }
-        }
+    // A patch an agent turn left with an offset or fuzz (fuzz fails rpm's
+    // `--fuzz=0`) is refreshed the same way the pre-pass refreshed the rest.
+    if report.to_refresh().next().is_some() {
+        let offsets = check_and_settle(ctx, &mut lines, Refresh::Offset);
+        refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
     }
     write_refresh_bullets(ctx, step_id, &refreshed);
     for p in &report.patches {
         match &p.status {
-            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: false, .. } => lines.push(format!(
-                "- {}: applies with an offset; left as it is",
-                p.name
-            )),
+            PatchStatus::AppliesWithOffsetOrFuzz { .. } if !refreshed.contains(&p.name) => {
+                lines.push(format!(
+                    "- {}: applies with an offset or fuzz and quilt could not refresh it; left as it is",
+                    p.name
+                ))
+            }
             PatchStatus::NotChecked { reason } => {
                 lines.push(format!("- {}: not checked: {reason}", p.name))
             }
@@ -262,6 +259,27 @@ pub(super) fn patch_stage_with(
     write_notes(&lines, "quilt");
     step.finish(StepOutcome::Ok);
     Ok(())
+}
+
+/// Writes each patch of `report` that quilt refreshed into the checkout, with a
+/// note for each. Returns the names written.
+fn write_refreshed_patches(
+    ctx: &RunCtx,
+    report: &crate::patch_check::CheckReport,
+    lines: &mut Vec<String>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for p in &report.patches {
+        if let Some(bytes) = &p.refreshed {
+            write_or_warn(ctx.checkout_dir.join(&p.name), bytes);
+            lines.push(format!(
+                "- {}: refreshed by the pipeline (it applied with an offset or fuzz)",
+                p.name
+            ));
+            names.push(p.name.clone());
+        }
+    }
+    names
 }
 
 /// Whether the review turn runs for a package nobody asked to patch. A spec
