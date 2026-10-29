@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::dep_edit::*;
 
 #[test]
 fn no_baseline_judges_only_the_patches_obs_does_not_publish() {

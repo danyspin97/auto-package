@@ -1,6 +1,7 @@
 //! The prefix stage and the missing dependencies a turn reports.
 
 use super::*;
+use crate::pipeline::dep_edit::*;
 use crate::pipeline::linked::*;
 
 /// Step: PreFix (restart with previous build log).

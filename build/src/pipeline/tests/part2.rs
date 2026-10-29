@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::checkout::*;
+use crate::pipeline::dep_edit::*;
 use crate::pipeline::obs_names::*;
 use crate::pipeline::state::*;
 

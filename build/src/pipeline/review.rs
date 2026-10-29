@@ -1,6 +1,7 @@
 //! The review stage: the pre-build review turn and the stale build log reason.
 
 use super::*;
+use crate::pipeline::dep_edit::*;
 
 /// Step: Review (freshly generated specs, or existing spec with no prior build).
 pub(super) fn review_stage(
