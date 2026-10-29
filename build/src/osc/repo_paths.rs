@@ -2,6 +2,7 @@
 //! repositories.
 
 use super::*;
+use crate::osc::poll::*;
 use crate::osc::query::*;
 
 type RepoPaths = Vec<(String, String)>;

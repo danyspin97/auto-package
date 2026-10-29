@@ -2,6 +2,7 @@
 //! the parse of the result XML.
 
 use super::*;
+use crate::osc::poll::*;
 use crate::osc::query::*;
 use crate::osc::results::*;
 

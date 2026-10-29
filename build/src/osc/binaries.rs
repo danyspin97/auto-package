@@ -2,6 +2,7 @@
 //! RPM counts of a build.
 
 use super::*;
+use crate::osc::poll::*;
 
 /// Fetch the OBS build log into `log_path`.
 ///
