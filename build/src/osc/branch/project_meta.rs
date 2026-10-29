@@ -4,6 +4,7 @@
 use super::*;
 use crate::osc::error::*;
 use crate::osc::names::*;
+use crate::osc::repo_paths::*;
 
 /// One `<repository>` of a project meta.
 #[derive(Debug, Clone, PartialEq, Eq)]
