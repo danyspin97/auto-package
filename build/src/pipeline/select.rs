@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::blocked::*;
+use crate::pipeline::gen_spec::*;
 use crate::pipeline::linked::*;
 use crate::pipeline::obs_names::*;
 use crate::pipeline::slots::*;

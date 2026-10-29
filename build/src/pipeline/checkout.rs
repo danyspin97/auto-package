@@ -4,6 +4,7 @@
 use super::*;
 use crate::pipeline::build_round::*;
 use crate::pipeline::commit::*;
+use crate::pipeline::gen_spec::*;
 use crate::pipeline::linked::*;
 use crate::pipeline::rpm_deps::*;
 
