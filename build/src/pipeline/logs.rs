@@ -2,6 +2,7 @@
 //! dropped tests.
 
 use super::*;
+use crate::pipeline::licence::*;
 
 /// Largest build log the test-dropping rung reads, from its end.
 const DROP_LOG_CAP: u64 = 8 * 1024 * 1024;

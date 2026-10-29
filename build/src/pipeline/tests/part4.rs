@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::dep_edit::*;
+use crate::pipeline::licence::*;
 use crate::pipeline::run::*;
 use crate::pipeline::slots::*;
 use crate::pipeline::spec_edits::*;

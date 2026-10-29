@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::licence::*;
 use crate::pipeline::logs::*;
 
 #[test]

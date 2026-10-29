@@ -20,6 +20,7 @@ fn stale_failure_state_needs_rpm_reconcile() {
 }
 
 use super::*;
+use crate::pipeline::licence::*;
 
 #[test]
 fn the_changelog_has_no_macros_for_the_packages_own_name_and_version() {

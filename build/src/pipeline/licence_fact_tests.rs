@@ -1,4 +1,4 @@
-use super::recipe_licence_lines;
+use crate::pipeline::licence::recipe_licence_lines;
 
 #[test]
 fn the_licence_lines_of_a_recipe_are_listed_with_their_numbers() {
