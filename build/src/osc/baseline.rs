@@ -1,0 +1,236 @@
+//! The baselines of a package: saving, noting the attempts, and restoring the
+//! baseline when a run fails.
+
+use super::*;
+
+/// Commit message of the commit that puts a baseline back.
+pub const RESTORE_MESSAGE: &str = "auto-package: restore baseline after failed run";
+
+/// Keep in `dir` what OBS holds for `checkout_dir`, before the run first writes
+/// to it: the names it tracks, and a copy of each one's pristine file (osc's
+/// copy in `.osc/sources`, the revision the checkout was made or last
+/// committed from). A tracked name without a pristine copy is listed anyway, so
+/// the restore can say it cannot put that file back.
+pub fn save_baseline(checkout_dir: &Path, dir: &Path) -> std::io::Result<()> {
+    let saved = dir.join("files");
+    fs::create_dir_all(&saved)?;
+    let tracked = tracked_files(checkout_dir);
+    for name in tracked
+        .iter()
+        .filter(|n| is_safe_file_arg(n) && !n.starts_with('.'))
+    {
+        match fs::copy(
+            checkout_dir.join(".osc/sources").join(name),
+            saved.join(name),
+        ) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    fs::write(dir.join("tracked"), tracked.join("\n"))?;
+    fs::write(
+        dir.join("checkout"),
+        checkout_dir.to_string_lossy().as_bytes(),
+    )
+}
+
+/// Note in `dir` the files a commit is about to send to OBS, before it is made:
+/// an attempt that fails half way may still have written them.
+pub fn note_attempt(dir: &Path, files: &[String]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut list = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("attempted"))?;
+    for name in files {
+        writeln!(list, "{name}")?;
+    }
+    Ok(())
+}
+
+/// The files the run noted as sent to OBS in `dir` (see [`note_attempt`]).
+/// Empty when nothing was written.
+pub fn attempted_files(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("attempted"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Where the baselines of writes made outside a pipeline run are kept, under
+/// the directory the checkouts are in (a leading dot: no OBS project has one).
+pub const BASELINE_ROOT: &str = ".obs-baseline";
+
+/// The file a baseline directory holds once a restore of it has failed: the
+/// reason is written in it.
+pub(super) const UNRESTORED: &str = "unrestored";
+
+/// Whether `dir` holds a baseline that is not yet put back: an attempt noted
+/// in it (see [`note_attempt`]) has not been undone. A run or restore that
+/// succeeds removes the directory, so this is only true while an attempt may
+/// still be on OBS. It also holds after a restore that was cut short (the
+/// process exited), when no `UNRESTORED` reason was written.
+pub fn is_pending(dir: &Path) -> bool {
+    !attempted_files(dir).is_empty() || dir.join(UNRESTORED).exists()
+}
+
+/// Keep the baseline of `checkout_dir` for a write made outside a pipeline run,
+/// in `root/<branch>/<pkg>`. Returns that dir.
+///
+/// An earlier baseline that is pending (see [`is_pending`]) is restored first,
+/// since a new baseline taken now would hold the failed revision. When that
+/// restore fails the error is returned and the earlier baseline stays where it
+/// is. Any other earlier baseline was undone or is no longer needed, and is
+/// replaced.
+pub fn begin_baseline(
+    root: &Path,
+    checkout_dir: &Path,
+    branch: &str,
+    pkg: &str,
+    emit: Emit<'_>,
+) -> Result<PathBuf, String> {
+    let dir = root.join(ap_core::run::sanitize_name(branch)).join(pkg);
+    if is_pending(&dir) {
+        restore_baseline(&dir, emit).map_err(|why| {
+            format!(
+                "the OBS baseline kept at {} was NOT restored ({why}); \
+                 it is kept there, and nothing was written. If OBS is right as it \
+                 is, discard it with `auto-package baseline discard`",
+                dir.display()
+            )
+        })?;
+    }
+    let _ = fs::remove_dir_all(&dir);
+    save_baseline(checkout_dir, &dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// The baseline directories of `pkg` under `root`, one per branch
+/// (`root/<branch>/<pkg>`, see [`begin_baseline`]).
+pub fn baselines_of(root: &Path, pkg: &str) -> Vec<PathBuf> {
+    fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join(pkg))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Drop the pending baseline in `dir` without putting it back: OBS is then
+/// taken as it is. Returns `false` when `dir` holds no pending baseline.
+pub fn discard_pending(dir: &Path) -> std::io::Result<bool> {
+    if !is_pending(dir) {
+        return Ok(false);
+    }
+    fs::remove_dir_all(dir)?;
+    Ok(true)
+}
+
+/// Put the baseline saved in `dir` back into its checkout, and commit what the
+/// attempts sent to OBS with `commit`, the OBS write (the real one is
+/// [`commit`]; tests record the call). A tracked file gets its saved copy back.
+/// A file the attempts added is removed from the checkout, and committed as a
+/// deletion, only when OBS lists it now (`.osc/_files`, which osc updates on a
+/// commit that lands): a file that never reached OBS has nothing to undo.
+///
+/// `obs_check` runs before anything is written, with the checkout: it refuses
+/// (an error) when OBS is no longer where the checkout is (see
+/// [`obs_still_at_checkout`]).
+pub fn restore_baseline_with(
+    dir: &Path,
+    obs_check: impl FnOnce(&Path) -> Result<(), String>,
+    commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
+) -> Result<(), String> {
+    let attempted = attempted_files(dir);
+    if attempted.is_empty() {
+        return Ok(());
+    }
+    let checkout = fs::read_to_string(dir.join("checkout"))
+        .map(PathBuf::from)
+        .map_err(|e| format!("the checkout the baseline was saved from is unknown: {e}"))?;
+    let tracked = fs::read_to_string(dir.join("tracked")).unwrap_or_default();
+    let on_obs = tracked_files(&checkout);
+    if let Some(bad) = attempted.iter().find(|n| !is_safe_file_arg(n)) {
+        return Err(format!(
+            "refusing to restore {bad:?}: not a plain file name"
+        ));
+    }
+    obs_check(&checkout)?;
+    let mut sent: Vec<String> = Vec::new();
+    for name in &attempted {
+        if sent.contains(name) {
+            continue;
+        }
+        let target = checkout.join(name);
+        if tracked.lines().any(|t| t == name.as_str()) {
+            let saved = fs::read(dir.join("files").join(name))
+                .map_err(|e| format!("{name}: no saved copy of the baseline ({e})"))?;
+            ap_core::fsx::write_atomic(&target, saved).map_err(|e| format!("{name}: {e}"))?;
+        } else if on_obs.contains(name) {
+            match fs::remove_file(&target) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{name}: {e}")),
+            }
+        } else {
+            continue;
+        }
+        sent.push(name.clone());
+    }
+    if sent.is_empty() {
+        return Ok(());
+    }
+    commit(&checkout, RESTORE_MESSAGE, &sent).map_err(|e| e.to_string())
+}
+
+/// The revision OBS holds for the checkout's package must be the one the
+/// checkout holds (`.osc/_files`, which osc updates when a commit lands). When
+/// it is not, someone committed after the attempt, or the attempt landed but
+/// osc did not record it: either way the restore would overwrite a revision
+/// nobody here has looked at, so it is refused.
+pub fn obs_still_at_checkout(checkout: &Path) -> Result<(), String> {
+    let read = |name: &str| {
+        fs::read_to_string(checkout.join(".osc").join(name))
+            .map(|s| s.trim().to_string())
+            .map_err(|e| format!("cannot read .osc/{name} of {}: {e}", checkout.display()))
+    };
+    let (project, package) = (read("_project")?, read("_package")?);
+    let local = fs::read_to_string(checkout.join(".osc/_files"))
+        .ok()
+        .and_then(|xml| parse_directory_srcmd5(&xml))
+        .ok_or_else(|| format!("the checkout of {project}/{package} records no revision"))?;
+    let head = source_srcmd5(&project, &package, Emit::quiet())
+        .map_err(|e| format!("cannot read the OBS revision of {project}/{package}: {e}"))?;
+    if head == local {
+        return Ok(());
+    }
+    Err(format!(
+        "OBS moved on: {project}/{package} is at revision {head}, the checkout at {local}; \
+         nothing was written to OBS"
+    ))
+}
+
+/// [`restore_baseline_with`] committing through [`commit`], and removing `dir`
+/// once it is restored. A failure leaves `dir` in place, marked as unrestored
+/// (see [`begin_baseline`]). The commit may run after a shutdown: see
+/// [`proc::restoring_after_shutdown`]. Refuses when OBS has moved on (see
+/// [`obs_still_at_checkout`]).
+pub fn restore_baseline(dir: &Path, emit: Emit<'_>) -> Result<(), String> {
+    let _restoring = proc::restoring_after_shutdown();
+    match restore_baseline_with(dir, obs_still_at_checkout, |checkout, message, files| {
+        commit(checkout, message, files, emit)
+    }) {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(dir);
+            Ok(())
+        }
+        Err(why) => {
+            let _ = fs::write(dir.join(UNRESTORED), &why);
+            Err(why)
+        }
+    }
+}
