@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// A checkout at `<base>/pkg`. The base is its own temp dir so that any

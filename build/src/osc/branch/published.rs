@@ -2,6 +2,7 @@
 //! name, and the parsing and searching of the published list.
 
 use super::*;
+use crate::osc::error::*;
 
 /// A binary OBS has published, as `/search/published/binary/id` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]

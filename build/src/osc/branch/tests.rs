@@ -1,4 +1,5 @@
 use super::*;
+use crate::osc::error::*;
 
 #[test]
 fn repositories_without_a_block_get_a_local_one() {

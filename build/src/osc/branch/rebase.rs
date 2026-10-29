@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::osc::branch::project_meta::*;
+use crate::osc::error::*;
 
 /// The API request that rebases a branched package onto the current sources
 /// of its origin (what `osc rebase` does).

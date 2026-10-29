@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// `/build/home:dspinella:open-webui/_result` as OBS returned it for the

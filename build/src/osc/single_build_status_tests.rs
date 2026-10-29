@@ -1,4 +1,3 @@
-
 use super::*;
 
 const REPO: &str = "openSUSE_Tumbleweed";

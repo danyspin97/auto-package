@@ -2,6 +2,7 @@
 //! meta document, and the build paths added to it.
 
 use super::*;
+use crate::osc::error::*;
 
 /// One `<repository>` of a project meta.
 #[derive(Debug, Clone, PartialEq, Eq)]

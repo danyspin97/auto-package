@@ -2,6 +2,7 @@
 //! the listing of open requests.
 
 use super::*;
+use crate::osc::error::*;
 
 /// A submit request to create.
 #[derive(Debug, Clone, PartialEq, Eq)]

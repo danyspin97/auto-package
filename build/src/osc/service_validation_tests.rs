@@ -1,4 +1,3 @@
-
 use super::validate_service_xml;
 
 #[test]

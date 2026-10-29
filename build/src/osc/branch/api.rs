@@ -2,6 +2,7 @@
 //! read.
 
 use super::*;
+use crate::osc::error::*;
 
 /// Run `osc api` with an optional HTTP method and body.
 pub(super) fn api_call(

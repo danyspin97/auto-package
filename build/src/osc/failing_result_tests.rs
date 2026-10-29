@@ -1,4 +1,3 @@
-
 use super::*;
 
 const XML: &str = r#"<resultlist state="x">

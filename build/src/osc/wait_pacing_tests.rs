@@ -1,4 +1,3 @@
-
 use super::*;
 
 const SECS: fn(u64) -> Duration = Duration::from_secs;

@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// A checkout as osc leaves it: `.osc/_files` lists the tracked names and
