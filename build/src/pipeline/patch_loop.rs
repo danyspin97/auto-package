@@ -198,6 +198,12 @@ pub(super) fn patch_stage_with(
             };
             let applied =
                 apply_patch_turn(ctx, &turn_step, &outcome, &before_spec, &snapshot, rounds);
+            for a in &outcome.patch_answers {
+                lines.push(format!(
+                    "- round {rounds}: {} {:?}: {}",
+                    a.name, a.status, a.reason
+                ));
+            }
             pop_source_patches(ctx);
             let changed = settle_patch_changes(
                 ctx,
@@ -371,6 +377,7 @@ pub(super) fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
         unresolvable_packages: Vec::new(),
         patch_dependencies: Vec::new(),
         stage_files: Vec::new(),
+        patch_answers: Vec::new(),
         confidence: crate::agent::Confidence::High,
         usage: crate::agent::Usage::default(),
         tool_calls: Vec::new(),

@@ -226,6 +226,8 @@ mod patch_loop;
 use patch_loop::*;
 mod patch_refresh;
 use patch_refresh::*;
+mod refresh_series;
+use refresh_series::*;
 mod review;
 use review::*;
 mod deps_turn;

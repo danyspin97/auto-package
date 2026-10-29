@@ -264,8 +264,11 @@ pub(super) fn refresh_patches_task() -> &'static str {
      \n\
      A command the sandbox refuses is a bug in the tool: name the exact command in \
      `reasoning`, and never skip a check because of it. Change nothing else in the \
-     spec. Return `edited` when you rebased or removed a patch, `no_change` when you \
-     could not port one (say which hunk and why)."
+     spec. Answer with `patches`: one entry per patch, its `name`, and a `status` of \
+     `rebased` (ported with quilt), `removed` (quilt proved it applied upstream) or \
+     `blocked` (not ported; say which hunk and why) with a `reason`. Only the patches \
+     you list are kept, so a patch you leave out is rolled back. `action` is `edited` \
+     when an entry is `rebased` or `removed`, else `no_change`."
 }
 
 /// Input to one agent turn.
@@ -381,6 +384,9 @@ pub struct TurnOutcome {
     pub patch_dependencies: Vec<PatchRequest>,
     /// Files the pipeline copies into the package checkout for the turn.
     pub stage_files: Vec<crate::stage::StageFile>,
+    /// A RefreshPatches turn's answer for each patch it touched or could not
+    /// port. Empty for every other task.
+    pub patch_answers: Vec<PatchAnswer>,
     pub confidence: Confidence,
     pub usage: Usage,
     pub tool_calls: Vec<ToolCall>,

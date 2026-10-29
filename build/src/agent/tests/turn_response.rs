@@ -53,6 +53,21 @@ fn pick_turn_response_prefers_result_payload_over_tool_call() {
 }
 
 #[test]
+fn a_per_patch_answer_is_parsed_from_the_turn_response() {
+    let payload = r#"{"action":"edited","reasoning":"r","evidence":[],"confidence":"high",
+        "patches":[{"name":"a.patch","status":"rebased","reason":"ported hunk 2"},
+                   {"name":"b.patch","status":"blocked","reason":"hunk 1 is gone"}]}"#;
+    let resp = pick_turn_response(payload, &[]).unwrap();
+    assert_eq!(resp.patches.len(), 2);
+    assert_eq!(resp.patches[0].status, PatchAnswerStatus::Rebased);
+    assert_eq!(resp.patches[1].status, PatchAnswerStatus::Blocked);
+    assert_eq!(resp.patches[1].name, "b.patch");
+    // A status outside the three is not an answer.
+    let bad = payload.replace("blocked", "maybe");
+    assert!(pick_turn_response(&bad, &[]).is_none());
+}
+
+#[test]
 fn a_stage_files_request_is_parsed_from_the_turn_response() {
     let payload = r#"{"action":"no_change","reasoning":"r","evidence":[],"confidence":"high",
             "stage_files":[{"from":"source/package-lock.json","to":"package-lock.json"},

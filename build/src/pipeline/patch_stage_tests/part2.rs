@@ -139,6 +139,69 @@ fn a_failed_turn_keeps_the_edit_quilt_proves_and_rolls_back_the_rest() {
 }
 
 #[test]
+fn a_per_patch_answer_keeps_the_rebased_patch_and_rolls_back_the_blocked_one() {
+    let case = run(
+        &[("a.patch", "old"), ("b.patch", "old")],
+        false,
+        10,
+        vec![
+            Box::new(|checkout, _| {
+                std::fs::write(checkout.join("a.patch"), "clean\n").unwrap();
+                std::fs::write(checkout.join("b.patch"), "half done").unwrap();
+                let mut out = outcome(crate::agent::Action::NoChange, "");
+                out.patch_answers = vec![
+                    crate::agent::PatchAnswer {
+                        name: "a.patch".into(),
+                        status: crate::agent::PatchAnswerStatus::Rebased,
+                        reason: "ported".into(),
+                    },
+                    crate::agent::PatchAnswer {
+                        name: "b.patch".into(),
+                        status: crate::agent::PatchAnswerStatus::Blocked,
+                        reason: "hunk 1 is gone".into(),
+                    },
+                ];
+                out
+            }),
+            Box::new(|_, _| {
+                let mut out = outcome(crate::agent::Action::NoChange, "");
+                out.patch_answers = vec![crate::agent::PatchAnswer {
+                    name: "b.patch".into(),
+                    status: crate::agent::PatchAnswerStatus::Blocked,
+                    reason: "hunk 1 is gone".into(),
+                }];
+                out
+            }),
+        ],
+    );
+    needs_human(&case.result, "b.patch");
+    assert_eq!(
+        std::fs::read_to_string(case.checkout.join("a.patch")).unwrap(),
+        "clean\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.checkout.join("b.patch")).unwrap(),
+        "old"
+    );
+    assert_eq!(
+        bullets(&case.changes, "Refresh a.patch"),
+        1,
+        "{}",
+        case.changes
+    );
+    assert!(
+        case.notes.contains("b.patch Blocked: hunk 1 is gone"),
+        "{}",
+        case.notes
+    );
+    assert!(
+        case.notes.contains("a.patch Rebased: ported"),
+        "{}",
+        case.notes
+    );
+}
+
+#[test]
 fn no_turn_runs_past_the_attempt_limit() {
     let case = run(&[("b.patch", "old")], false, 0, Vec::new());
     assert!(case.contexts.is_empty());

@@ -50,6 +50,20 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
         "additionalProperties": false
       }
     },
+    "patches": {
+      "type": "array",
+      "description": "RefreshPatches only: one entry per patch you rebased, removed or could not port. Leave it empty for any other task.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"type": "string", "enum": ["rebased", "removed", "blocked"]},
+          "reason": {"type": "string"}
+        },
+        "required": ["name", "status", "reason"],
+        "additionalProperties": false
+      }
+    },
     "stage_files": {
       "type": "array",
       "items": {
@@ -67,6 +81,28 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
   "required": ["action", "reasoning", "evidence", "confidence"],
   "additionalProperties": false
 }"#;
+
+/// What a RefreshPatches turn did with one patch.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PatchAnswer {
+    /// The patch's file name, as the spec's `PatchN:` line gives it.
+    pub name: String,
+    pub status: PatchAnswerStatus,
+    /// What was done, or why the patch could not be ported.
+    pub reason: String,
+}
+
+/// The outcome of one patch in a RefreshPatches turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PatchAnswerStatus {
+    /// Ported with quilt; the pipeline checks it applies.
+    Rebased,
+    /// Removed: its change is already in the new sources (quilt proved it).
+    Removed,
+    /// Not ported; its edits are rolled back and the reason is reported.
+    Blocked,
+}
 
 /// A dependency the distro already ships, but whose shipped version breaks the
 /// package being worked on in a way only a patch to that dependency fixes
@@ -103,6 +139,8 @@ pub(super) struct TurnResponse {
     pub(super) patch_dependencies: Vec<PatchRequest>,
     #[serde(default)]
     pub(super) stage_files: Vec<crate::stage::StageFile>,
+    #[serde(default)]
+    pub(super) patches: Vec<PatchAnswer>,
 }
 
 /// Pick a usable `TurnResponse` out of a finished turn's output.

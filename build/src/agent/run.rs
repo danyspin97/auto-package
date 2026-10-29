@@ -498,6 +498,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         unresolvable_packages: resp.unresolvable_packages,
         patch_dependencies: resp.patch_dependencies,
         stage_files: resp.stage_files,
+        patch_answers: resp.patches,
         confidence: resp.confidence,
         usage,
         tool_calls,
