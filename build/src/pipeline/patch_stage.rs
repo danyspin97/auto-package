@@ -2,6 +2,7 @@
 //! proven and unproven removals of patches.
 
 use super::*;
+use crate::pipeline::patch_loop::*;
 
 // ── carried-forward patches, tested with quilt ───────────────────────────────
 
