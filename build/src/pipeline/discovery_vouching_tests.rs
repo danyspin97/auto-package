@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::validate::*;
 
 /// The names in the context come from the spec, so one that tries to close
 /// the data block and issue an instruction stays inside it.
