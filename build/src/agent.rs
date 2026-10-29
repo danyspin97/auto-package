@@ -22,6 +22,8 @@ pub use response::*;
 mod tools;
 pub(crate) use tools::REFRESH_SERIES;
 use tools::*;
+mod edit_bytes;
+use edit_bytes::*;
 mod run;
 mod user_prompt;
 pub(crate) use user_prompt::*;

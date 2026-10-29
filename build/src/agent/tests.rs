@@ -1,5 +1,6 @@
 use super::*;
 mod denies;
+mod edit_bytes;
 mod errors;
 mod prompt;
 mod scrub;

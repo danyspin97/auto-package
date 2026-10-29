@@ -234,7 +234,7 @@ fn cli_form(text: &str) -> String {
 /// Whether `command` is allowed by the `Bash(...)` grants of `tools` and no
 /// deny of `denied` matches it. A grant `x *` also matches the bare `x`.
 /// Rules and the command are compared in the CLI's form ([`cli_form`]).
-fn command_allowed(tools: &str, denied: &str, command: &str) -> bool {
+pub(super) fn command_allowed(tools: &str, denied: &str, command: &str) -> bool {
     let command = cli_form(command);
     let granted = bash_deny_patterns(tools).iter().any(|p| {
         let p = cli_form(p);

@@ -142,6 +142,7 @@ pub(super) fn turn_allowed_tools(
         let p = permission_path(root);
         tools.push_str(&format!(",Edit({p}/**),Write({p}/**),Read({p}/**)"));
     }
+    tools.push_str(&edit_bytes_grant(task, edit_bytes_command().as_deref()));
     tools
 }
 
@@ -227,6 +228,10 @@ pub(super) fn turn_denied_tools(
     denied.extend(quilt_denied_tools(workspace));
     denied.extend(patch_denied_tools(workspace));
     denied.extend(read_tool_denied_tools());
+    denied.extend(edit_bytes_denies(
+        workspace,
+        edit_bytes_command().as_deref(),
+    ));
     denied.join(",")
 }
 
@@ -371,7 +376,7 @@ fn patch_denied_tools(workspace: &std::path::Path) -> Vec<String> {
 /// space (`quilt add x<tab>/abs` is refused by `* /*`), and a newline between
 /// commands is checked line by line (one refused line refuses the whole
 /// command).
-fn path_and_metachar_denies(workspace: &std::path::Path, program: &str) -> Vec<String> {
+pub(super) fn path_and_metachar_denies(workspace: &std::path::Path, program: &str) -> Vec<String> {
     let prefixes: Vec<String> = source_prefixes(workspace)
         .into_iter()
         .map(|p| format!("{p}{program}"))

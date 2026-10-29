@@ -10,6 +10,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub mod request;
+
 #[cfg(test)]
 mod tests;
 
@@ -27,6 +29,9 @@ pub enum Error {
         /// The first byte offsets of the matches, for a several-match report.
         at: String,
     },
+    /// The request names a file or scratch text it may not use.
+    #[error("refused: {0}")]
+    Refused(String),
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
