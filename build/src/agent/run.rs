@@ -2,6 +2,7 @@
 //! limits, and parse the answer into a turn outcome.
 
 use super::*;
+use crate::agent::build_prompt::*;
 
 pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);

@@ -3,6 +3,7 @@
 use super::prompt::*;
 use super::scrub::*;
 use super::*;
+use crate::agent::build_prompt::*;
 
 /// Real shape from a `drogon` build where the claude CLI hit its budget
 /// cap AFTER the model had already emitted a valid `StructuredOutput`

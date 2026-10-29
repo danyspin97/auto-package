@@ -1,6 +1,7 @@
 //! Prompt and conventions tests: what the turn is told, and the review prompts.
 
 use super::*;
+use crate::agent::build_prompt::*;
 
 /// The conventions are cross-referenced by number in the prompt itself
 /// ("see convention 9"), so a duplicate or skipped number silently points
