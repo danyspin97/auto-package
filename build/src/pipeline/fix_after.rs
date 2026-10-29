@@ -4,6 +4,7 @@ use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::snapshot::*;
+use crate::pipeline::spec_edits::*;
 
 /// One fix-after-validation agent turn: counts the attempt, runs the turn and
 /// applies its outcome. `apply_label` names the apply step and

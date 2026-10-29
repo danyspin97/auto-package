@@ -2,6 +2,7 @@ use super::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::run::*;
 use crate::pipeline::slots::*;
+use crate::pipeline::spec_edits::*;
 use crate::pipeline::target::*;
 
 #[test]

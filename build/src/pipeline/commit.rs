@@ -2,6 +2,7 @@
 //! the recorded outcome, and the retries of service runs.
 
 use super::*;
+use crate::pipeline::spec_edits::*;
 
 /// Step: Commit.
 pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {

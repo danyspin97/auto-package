@@ -5,6 +5,7 @@ use crate::pipeline::agent::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::snapshot::*;
+use crate::pipeline::spec_edits::*;
 
 /// Step: Review (freshly generated specs, or existing spec with no prior build).
 pub(super) fn review_stage(

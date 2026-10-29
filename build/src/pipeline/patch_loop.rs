@@ -4,6 +4,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::snapshot::*;
+use crate::pipeline::spec_edits::*;
 
 /// [`patch_stage`] with the quilt check and the turn runner given.
 pub(super) fn patch_stage_with(
