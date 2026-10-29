@@ -1,0 +1,275 @@
+use super::*;
+
+fn write(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+const RUN: &str = "20261027-175210-aaaa-1-0";
+
+fn events(extra: &[&str]) -> String {
+    let mut v = vec![
+            r#"{"event":"run_started","run_id":"R","argv":["auto-package","update","--project","p","--budget-usd","2.5","--work-dir","/w"],"work_dir":"/w"}"#.to_string(),
+            r#"{"event":"target_selected","pkg":"foo","version":"2.0","reason":"FirstUnbuiltDependency","blocked_by":[],"from_version":"1.0"}"#.to_string(),
+            r#"{"event":"target_selected","pkg":"other","version":"9","reason":"ExplicitOverride","blocked_by":[],"from_version":"9"}"#.to_string(),
+            r#"{"pkg":"foo","event":"step_started","step":1,"kind":"AgentTurn","attempt":1,"round":0,"detail":"review"}"#.to_string(),
+            r#"{"pkg":"foo","event":"agent_prompt","step":1,"task":{"FixAfterBuild":{"attempt":1,"max_attempts":10}}}"#.to_string(),
+            r#"{"pkg":"foo","event":"agent_reply","step":1,"response":{"action":"Edited","reasoning":"Add a missing BuildRequires.","evidence":["Read build.log: nothing provides bar-devel"],"confidence":"High"},"usage":{"input_tokens":5,"output_tokens":100,"cost_usd":0.25}}"#.to_string(),
+            r#"{"pkg":"foo","event":"spec_changed","step":1,"lines_added":3,"lines_removed":1}"#.to_string(),
+            r#"{"pkg":"foo","event":"step_finished","step":1,"outcome":"Ok","elapsed":20555}"#.to_string(),
+            r#"{"pkg":"foo","event":"warning","step":1,"message":"OBS build status still building after 132s with no change"}"#.to_string(),
+            r#"{"pkg":"foo","event":"warning","step":1,"message":"OBS build status still building after 264s with no change"}"#.to_string(),
+        ];
+    v.extend(extra.iter().map(|s| s.to_string()));
+    v.join("\n") + "\n"
+}
+
+fn fixture(extra: &[&str]) -> tempfile::TempDir {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path();
+    write(&d.join("runs").join(RUN).join("run.jsonl"), &events(extra));
+    write(
+        &d.join("runs")
+            .join(RUN)
+            .join("foo/002-agent-review/response.json"),
+        "{}",
+    );
+    write(
+        &d.join("state/foo/state.json"),
+        r#"{"last_outcome":"failed","last_failure_reason":"gave up","obs_name":"foo","cumulative_spent_usd":0.25,"cumulative_spent_run_id":"20261027-175210-aaaa-1-0"}"#,
+    );
+    write(
+        &d.join("proj/foo/foo.spec"),
+        "Name: foo\nVersion:        2.0\n",
+    );
+    write(
+        &d.join("proj/foo/foo.changes"),
+        "-------------------------------------------------------------------\nMon Oct 26 10:00:00 UTC 2026 - a@b.c\n\n- Update to 2.0\n\n-------------------------------------------------------------------\nOld\n\n- Old entry\n",
+    );
+    t
+}
+
+fn query<'a>(d: &'a Path) -> Query<'a> {
+    Query {
+        project_dir: d,
+        package: "foo",
+        run: None,
+        package_notes: String::new(),
+    }
+}
+
+#[test]
+fn a_failed_package_is_explained_from_its_files() {
+    let t = fixture(&[
+        r#"{"pkg":"foo","event":"step_started","step":2,"kind":"Build","attempt":1,"round":1,"detail":null}"#,
+        r#"{"pkg":"foo","event":"build_failed","step":2,"classification":"CheckFailed","log":"LOG"}"#,
+        r#"{"pkg":"foo","event":"step_finished","step":2,"outcome":"Failed","elapsed":61000}"#,
+        r#"{"pkg":"foo","event":"package_finished","version":"2.0","outcome":{"Failed":{"reason":"gave up after 2 attempts"}}}"#,
+        r#"{"event":"run_finished","outcome":"Failed","elapsed":70000}"#,
+    ]);
+    let d = t.path();
+    write(
+        &d.join("state/foo/build.log"),
+        "[  5s] ok\n[ 10s] error: Bad exit status from /var/tmp/rpm-tmp (%check)\n[ 11s] + echo done\n",
+    );
+    let ex = explain(&query(d)).unwrap();
+    assert_eq!(ex.run.as_deref(), Some(RUN));
+    assert_eq!(ex.version.from.as_deref(), Some("1.0"));
+    assert_eq!(ex.version.to.as_deref(), Some("2.0"));
+    assert_eq!(ex.version.selections, 1);
+    assert_eq!(ex.version.spec_version.as_deref(), Some("2.0"));
+    assert_eq!(ex.outcome.result, "failed");
+    assert_eq!(
+        ex.outcome.detail.as_deref(),
+        Some("gave up after 2 attempts")
+    );
+    assert_eq!(
+        ex.outcome.log_errors,
+        vec!["Bad exit status from /var/tmp/rpm-tmp (%check)"]
+    );
+    assert_eq!(ex.outcome.changelog.len(), 2);
+    assert!(ex.outcome.changelog[1].contains("Update to 2.0"));
+    assert_eq!(ex.attempts.len(), 2);
+    let a = &ex.attempts[0];
+    assert_eq!((a.spec_added, a.spec_removed), (Some(3), Some(1)));
+    assert_eq!(a.agent_turn, Some(1));
+    assert_eq!(
+        a.agent.as_ref().unwrap().task.as_deref(),
+        Some("FixAfterBuild 1/10")
+    );
+    assert!(a.dir.as_deref().unwrap().ends_with("002-agent-review"));
+    assert_eq!(
+        ex.attempts[1]
+            .build
+            .as_ref()
+            .unwrap()
+            .classification
+            .as_deref(),
+        Some("CheckFailed")
+    );
+    assert_eq!(ex.cost.total_usd, 0.25);
+    assert_eq!(ex.cost.budget_usd, 2.5);
+    assert!(!ex.cost.budget_is_default);
+    assert_eq!(ex.cost.state_spent_usd, Some(0.25));
+    // The other package's events and the two status polls are not mixed in.
+    assert_eq!(ex.warnings.len(), 1);
+    assert!(ex.warnings[0].message.contains("2 such status warnings"));
+    assert_eq!(ex.run_info.finished.as_deref(), Some("Failed"));
+}
+
+#[test]
+fn an_interrupted_run_says_so_and_invents_no_outcome() {
+    let t = fixture(&[]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(ex.outcome.result, "no result recorded");
+    assert!(ex.run_info.finished.is_none());
+    let text = plain(&render(&ex, 80));
+    assert!(text.contains("not finished"), "{text}");
+    assert!(text.contains("interrupted or is still going"), "{text}");
+    assert!(text.contains("model's own summary"), "{text}");
+}
+
+#[test]
+fn the_latest_run_that_touched_the_package_is_the_default_and_run_picks_another() {
+    let t = fixture(&[]);
+    let d = t.path();
+    let newer = "20261028-000000-bbbb-1-0";
+    write(
+        &d.join("runs").join(newer).join("run.jsonl"),
+        "{\"event\":\"run_started\",\"argv\":[\"x\"]}\n",
+    );
+    let untouched = "20261029-000000-cccc-1-0";
+    write(
+        &d.join("runs").join(untouched).join("run.jsonl"),
+        "{\"event\":\"run_started\",\"argv\":[\"x\"]}\n",
+    );
+    let ex = explain(&query(d)).unwrap();
+    assert_eq!(
+        ex.run.as_deref(),
+        Some(RUN),
+        "newer runs without the package are skipped"
+    );
+    let ex = explain(&Query {
+        run: Some(newer),
+        ..query(d)
+    })
+    .unwrap();
+    assert_eq!(ex.run.as_deref(), Some(newer));
+    assert_eq!(ex.other_runs, vec![RUN.to_string()]);
+    assert!(
+        explain(&Query {
+            run: Some("nope"),
+            ..query(d)
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn missing_files_and_garbage_lines_are_tolerated() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path();
+    write(
+        &d.join("runs/r1/run.jsonl"),
+        "not json {\"pkg\":\"foo\"\n{\"pkg\":\"foo\",\"event\":\"step_started\",\"step\":0,\"kind\":\"Checkout\"}\n",
+    );
+    let ex = explain(&query(d)).unwrap();
+    assert_eq!(ex.run_info.unreadable_lines, 1);
+    assert_eq!(ex.attempts.len(), 1);
+    assert!(ex.unknown.iter().any(|u| u.contains("no state.json")));
+    let nothing = tempfile::tempdir().unwrap();
+    assert!(
+        explain(&query(nothing.path()))
+            .unwrap_err()
+            .contains("nothing about foo")
+    );
+    assert!(
+        explain(&Query {
+            package: "../x",
+            ..query(d)
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn flaky_verdicts_and_rejections_are_reported() {
+    let t = fixture(&[
+        r#"{"pkg":"foo","event":"spec_rejected","step":1,"reason":{"Placeholders":{"lines":["4: FIXME"]}},"restored_from":"/x"}"#,
+        r#"{"pkg":"foo","event":"missing_packages","step":1,"names":["bar-devel"],"source":"BuildLog"}"#,
+    ]);
+    let d = t.path();
+    write(
+        &d.join("runs")
+            .join(RUN)
+            .join("foo/002-agent-review/prompt.md"),
+        "x\n## Flaky tests (read by the pipeline)\n\nintro\n- Failed in ONE build only (flaky; convention 87): t1\n- Failed in BOTH builds (a real failure): t2\nDo not fix\n",
+    );
+    let ex = explain(&Query {
+        package_notes: "- flaky tests (failed in one of two builds): t1; stable failures: t2\n"
+            .into(),
+        ..query(d)
+    })
+    .unwrap();
+    assert_eq!(ex.flaky.len(), 3, "{:?}", ex.flaky);
+    assert!(
+        ex.warnings
+            .iter()
+            .any(|w| w.message.contains("rejected") && w.message.contains("FIXME"))
+    );
+    assert_eq!(
+        ex.attempts[0].build.as_ref().unwrap().missing,
+        vec!["bar-devel"]
+    );
+    assert_eq!(
+        ex.attempts[0].rejected.as_deref(),
+        Some("Placeholders: 4: FIXME")
+    );
+}
+
+#[test]
+fn the_text_wraps_to_the_width_and_colours_only_when_asked() {
+    let t = fixture(&[]);
+    let notes = "# foo\n".to_string() + &"word ".repeat(80);
+    let ex = explain(&Query {
+        package_notes: notes,
+        ..query(t.path())
+    })
+    .unwrap();
+    for width in [40, 72] {
+        let lines = render(&ex, width);
+        for l in &lines {
+            let n: usize = l.iter().map(|s| s.text.chars().count()).sum();
+            assert!(n <= width, "{n} > {width}: {l:?}");
+        }
+    }
+    let lines = render(&ex, 80);
+    assert!(!ansi(&lines, false).contains('\u{1b}'));
+    assert!(ansi(&lines, true).contains("\u{1b}[1m"));
+    let json = serde_json::to_value(&ex).unwrap();
+    assert_eq!(json["package"], "foo");
+    assert_eq!(json["attempts"][0]["agent"]["action"], "Edited");
+}
+
+#[test]
+fn the_project_directory_is_resolved_like_the_other_commands() {
+    let t = tempfile::tempdir().unwrap();
+    let w = t.path();
+    write(&w.join("home_x_p-x86_64/state/foo/state.json"), "{}");
+    write(&w.join("home_y_q-x86_64/state/bar/state.json"), "{}");
+    let one = resolve_project_dir(w, None, "x86_64", "foo").unwrap();
+    assert!(one.ends_with("home_x_p-x86_64"));
+    assert!(resolve_project_dir(w, None, "x86_64", "nope").is_err());
+    let by_name = resolve_project_dir(w, Some("home:x:p"), "x86_64", "foo").unwrap();
+    assert!(by_name.ends_with("home_x_p-x86_64"));
+    assert_eq!(
+        resolve_project_dir(&one, None, "x86_64", "foo").unwrap(),
+        one
+    );
+    write(&w.join("home_y_q-x86_64/state/foo/state.json"), "{}");
+    assert!(
+        resolve_project_dir(w, None, "x86_64", "foo")
+            .unwrap_err()
+            .contains("several")
+    );
+}
