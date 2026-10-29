@@ -2,6 +2,7 @@
 //! file reads.
 
 use super::*;
+use crate::osc::query::*;
 
 /// Enumerate the files committed to an OBS package.
 ///

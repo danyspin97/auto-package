@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::osc::error::*;
+use crate::osc::query::*;
 
 /// A binary OBS has published, as `/search/published/binary/id` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]

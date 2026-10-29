@@ -4,6 +4,7 @@
 use super::*;
 use crate::osc::error::*;
 use crate::osc::names::*;
+use crate::osc::query::*;
 
 /// A submit request to create.
 #[derive(Debug, Clone, PartialEq, Eq)]

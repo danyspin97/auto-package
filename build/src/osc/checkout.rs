@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::osc::publish::*;
+use crate::osc::query::*;
 use crate::osc::service::*;
 
 /// The error `ensure_package` reports when the project listing cannot be read.

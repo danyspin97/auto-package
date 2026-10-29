@@ -2,6 +2,7 @@
 //! the parse of the result XML.
 
 use super::*;
+use crate::osc::query::*;
 
 /// Query the OBS build status for one repo/arch combination.
 ///

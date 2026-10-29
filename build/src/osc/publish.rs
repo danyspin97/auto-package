@@ -2,6 +2,7 @@
 //! restored, the tracked strays, and the commit.
 
 use super::*;
+use crate::osc::query::*;
 
 /// What a checkout publishes to OBS, split by [`publish_plan`].
 #[derive(Debug, Default, PartialEq, Eq)]

@@ -5,6 +5,7 @@ use super::*;
 use crate::osc::branch::rebase::*;
 use crate::osc::error::*;
 use crate::osc::names::*;
+use crate::osc::query::*;
 
 /// Where a branched package ended up and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
