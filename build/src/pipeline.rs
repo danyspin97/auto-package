@@ -265,6 +265,8 @@ macro_rules! begin_or_fail {
 use begin_or_fail;
 mod agent;
 use agent::*;
+mod agent_response;
+use agent_response::*;
 mod ladder;
 pub use ladder::*;
 mod logs;

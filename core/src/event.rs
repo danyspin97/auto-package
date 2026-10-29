@@ -216,6 +216,20 @@ pub struct AgentResponseData {
     pub reasoning: String,
     pub evidence: Vec<String>,
     pub confidence: Option<String>,
+    /// The turn's changelog entry; empty when it gave none.
+    #[serde(default)]
+    pub changelog: String,
+    /// A refresh turn's answer for each patch it touched; empty otherwise.
+    #[serde(default)]
+    pub patches: Vec<PatchAnswerData>,
+}
+
+/// One patch's answer in a refresh turn: its name, its status and the reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchAnswerData {
+    pub name: String,
+    pub status: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

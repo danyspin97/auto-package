@@ -546,12 +546,7 @@ pub(super) fn agent_turn(
         artifact: prompt_path,
     });
 
-    let response = ap_core::event::AgentResponseData {
-        action: format!("{:?}", outcome.action),
-        reasoning: outcome.reasoning.clone(),
-        evidence: outcome.evidence.clone(),
-        confidence: Some(format!("{:?}", outcome.confidence)),
-    };
+    let response = response_data(&outcome);
     let response_path = step.file("response.json");
     if let Ok(json) = serde_json::to_string_pretty(&response) {
         write_or_warn(&response_path, json);
