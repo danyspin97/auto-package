@@ -2,6 +2,7 @@
 //! names, the C extension arch, the stray macros and the missing alternatives.
 
 use super::*;
+use crate::spec::parse::*;
 
 /// Fix the `%autosetup -n` value in a spec to match the actual tarball directory.
 ///
