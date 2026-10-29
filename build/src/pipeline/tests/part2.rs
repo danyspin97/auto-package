@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::state::*;
 
 #[test]
 fn a_linked_spelling_that_differs_in_separators_is_the_same_package() {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::state::*;
 
 /// Drops the fix-loop and risk flags `ws` recorded for another version than
 /// `version`, and records `version` as the one they are for (see
