@@ -2,6 +2,7 @@
 //! and the budget a resumed run keeps.
 
 use super::*;
+use crate::pipeline::carry::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::rpm_deps::*;
 
