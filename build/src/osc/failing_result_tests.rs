@@ -1,4 +1,5 @@
 use super::*;
+use crate::osc::binaries::*;
 
 const XML: &str = r#"<resultlist state="x">
   <result project="p" repository="openSUSE_Tumbleweed" arch="x86_64" code="published" state="published">
