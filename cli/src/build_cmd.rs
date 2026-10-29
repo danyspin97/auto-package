@@ -17,6 +17,8 @@ mod ledger;
 mod queue;
 use ledger::*;
 use queue::*;
+mod single;
+use single::*;
 mod frontier;
 use frontier::*;
 mod resolve;
@@ -278,92 +280,36 @@ pub(crate) fn cmd_build(
             max_dep_attempts,
         })?;
 
-        // A repository target is a single package: there is no PyPI closure to
-        // walk, and pip could not resolve the name even if we asked it to.
-        // Missing deps surface as MissingDeps; we build them via the PyPI path
-        // in the pending_deps loop above, then retry this package.
         if source_repo.is_some() {
-            let pkg_run = run_dir.pkg(&rpm_name);
-            pkg_run.ensure()?;
-            reporter.report(&Event::TargetSelected {
-                pkg: rpm_name.clone(),
-                version: version.clone(),
-                reason: SelectionReason::ExplicitOverride,
-                blocked_by: vec![],
-                from_version: branch.and_then(|b| b.from_version.clone()),
-            });
-            let r = pkg_reporter(&rpm_name);
-            let result = run_package(&config, &pkg_run, r.as_ref());
-            let outcome = package_outcome(&result);
-            r.report(&Event::PackageFinished {
-                pkg: rpm_name.clone(),
-                version: version.clone(),
-                outcome,
-            });
-            match result {
-                PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. } => return Ok(()),
-                PipelineResult::MissingDeps {
-                    deps,
-                    patches,
-                    native,
-                    outdated,
-                    ..
-                } => {
-                    patch_requests.record(&patches);
-                    native_names.record(&native);
-                    outdated_names.record(&outdated);
-                    // Only queue deps we haven't tried yet; if every dep was
-                    // already attempted we cannot make progress. Compared by
-                    // `fuzzy_key`, not the raw string — see its doc comment.
-                    // A dep attempted earlier may have been built locally since;
-                    // it is available now, so drop it before judging progress.
-                    let remaining: Vec<String> = deps
-                        .iter()
-                        .filter(|d| {
-                            built_locally(&config.state_root, &ap_build::osc::rpm_name(d)).is_none()
-                        })
-                        .cloned()
-                        .collect();
-                    let new_deps: Vec<String> = remaining
-                        .iter()
-                        .filter(|d| !attempted_deps.contains(&ap_build::osc::fuzzy_key(d)))
-                        .cloned()
-                        .collect();
-                    if new_deps.is_empty() && !remaining.is_empty() {
-                        // A target that still needs deps was not built, so
-                        // this is a failure, not success, when the same
-                        // unresolvable deps keep coming back. Surface
-                        // that as a failure, same shape as the frontier
-                        // path's no-progress give-up.
-                        let unbuildable = config.unbuildable_deps.join(", ");
-                        let failed = config.failed_deps.join(", ");
-                        return Err(color_eyre::eyre::eyre!(
-                            "{rpm_name} needs {} but every one has already \
-                             been attempted without success{}{}; cannot \
-                             build. Why each one is out of reach:\n{}\n\
-                             (no PyPI release AND no discoverable source repo is \
-                             the usual answer — pass --source-url to \
-                             point it at one).",
-                            deps.join(", "),
-                            if unbuildable.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" (unbuildable: {unbuildable})")
-                            },
-                            if failed.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" (failed-to-build: {failed})")
-                            },
-                            dep_drops.explain(&deps),
-                        ));
-                    }
-                    pending_deps.extend(new_deps);
-                    continue;
-                }
-                PipelineResult::Failed { reason, .. } => {
-                    return Err(color_eyre::eyre::eyre!("{rpm_name} failed: {reason}"));
-                }
+            match single_repo_build(Build {
+                project,
+                distro,
+                arch,
+                rpm_name: &rpm_name,
+                version: &version,
+                cover_flavors: &cover_flavors,
+                branch,
+                state_root,
+                reporter: &reporter,
+                pkg_reporter: &pkg_reporter,
+                tui_ctrl: &tui_ctrl,
+                sem: &sem,
+                run_dir,
+                dep_drops: &dep_drops,
+                patch_requests: &patch_requests,
+                native_names: &native_names,
+                outdated_names: &outdated_names,
+                attempted_deps: &mut attempted_deps,
+                deferred_once: &mut deferred_once,
+                retrying: &mut retrying,
+                dep_rounds: &mut dep_rounds,
+                stuck_seeds: &mut stuck_seeds,
+                pending_deps: &mut pending_deps,
+                config: &mut config,
+                max_dep_attempts,
+            })? {
+                Flow::Done => return Ok(()),
+                Flow::Retry => continue,
             }
         }
 
