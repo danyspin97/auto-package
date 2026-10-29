@@ -5,6 +5,7 @@ use super::*;
 use crate::pipeline::checkout::*;
 use crate::pipeline::generate_stage::*;
 use crate::pipeline::patch_stage::*;
+use crate::pipeline::review::*;
 
 pub fn run_package(
     config: &PipelineConfig,
