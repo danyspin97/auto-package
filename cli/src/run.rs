@@ -574,6 +574,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             json,
         )?,
         Commands::Baseline { command } => baseline_command(command)?,
+        Commands::EditBytes(args) => edit_bytes::run(&args)?,
         Commands::Update(args) => update_project::run(args, summary)?,
     }
 

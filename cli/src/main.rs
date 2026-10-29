@@ -3,6 +3,7 @@
 mod build_cmd;
 mod cleanup;
 mod diffview;
+mod edit_bytes;
 mod run_limits;
 mod tui;
 mod update_project;
@@ -224,6 +225,11 @@ enum Commands {
         #[command(subcommand)]
         command: BaselineCommand,
     },
+
+    /// Replace the one occurrence of a byte sequence in a file under the new
+    /// sources, byte for byte: the refresh turn's helper for a file its Edit
+    /// tool refuses as not UTF-8. Run from the workspace.
+    EditBytes(edit_bytes::EditBytesArgs),
 
     /// Explain what happened to a package in a work directory: how its version
     /// was chosen, each attempt with the agent's own summary, the outcome, the
