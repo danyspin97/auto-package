@@ -2,6 +2,7 @@
 //! and the reconciliation of the RPMs with the state.
 
 use super::*;
+use crate::pipeline::build_round::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::linked::*;
 

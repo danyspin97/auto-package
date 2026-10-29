@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::blocked::*;
+use crate::pipeline::build_round::*;
 use crate::pipeline::slots::*;
 
 /// Packages the pipeline itself reported built (or already built) in this
