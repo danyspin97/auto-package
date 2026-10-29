@@ -840,50 +840,10 @@ fn start_tui(
         }
     }
 }
-
-/// Name of the per-project lock file, kept inside the project directory.
-const PROJECT_LOCK_NAME: &str = ".auto-package.lock";
+mod project_lock;
+use project_lock::*;
 mod nvidia;
 use nvidia::*;
-
-fn reject_symlink_project_dir(dir: &Path) -> color_eyre::Result<()> {
-    if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(color_eyre::eyre::eyre!(
-            "{} is a symlink; refusing to use it as a project directory. \
-             Remove it, or point --work-dir somewhere else.",
-            dir.display()
-        ));
-    }
-    Ok(())
-}
-
-/// Advisory per-project lock: an `flock(2)` on a file in the project
-/// directory, held for as long as `file` stays open. The kernel releases it
-/// when the process exits or is killed, so no stale lock can block a later run.
-struct ProjectLock {
-    _file: std::fs::File,
-}
-
-impl ProjectLock {
-    fn acquire(project_dir: &Path) -> color_eyre::Result<Self> {
-        let path = project_dir.join(PROJECT_LOCK_NAME);
-        match ap_core::proc_lock::try_lock(&path) {
-            Ok(file) => Ok(Self { _file: file }),
-            Err(ap_core::proc_lock::LockError::Held(pid)) => {
-                let who = pid.map_or(String::from("another process"), |p| format!("pid {p}"));
-                Err(color_eyre::eyre::eyre!(
-                    "another auto-package run ({who}) is using {}; \
-                     wait for it to finish.",
-                    project_dir.display(),
-                ))
-            }
-            Err(ap_core::proc_lock::LockError::Io(e)) => Err(color_eyre::eyre::eyre!(
-                "could not take the project lock {}: {e}",
-                path.display()
-            )),
-        }
-    }
-}
 
 /// Exit status of a run stopped because the agent cannot work (claude is not
 /// logged in): distinct from 130 (interrupted) and 1 (an ordinary failure).

@@ -1800,7 +1800,7 @@ impl AgentSlot {
         }
     }
 
-    fn acquire() -> Self {
+    pub(super) fn acquire() -> Self {
         Self::wait_out_rate_limit();
         let (lock, cvar) = &AGENT_ACTIVE;
         let max = Self::limit();
@@ -1849,7 +1849,7 @@ static IN_FLIGHT: (
 struct InFlightGuard(String);
 
 impl InFlightGuard {
-    fn acquire(rpm_name: &str) -> Self {
+    pub(super) fn acquire(rpm_name: &str) -> Self {
         let (lock, cvar) = &IN_FLIGHT;
         let mut busy = lock.lock().unwrap_or_else(|e| e.into_inner());
         while busy.contains(rpm_name) {
