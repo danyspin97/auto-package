@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::logs::*;
+use crate::pipeline::rejection::*;
 use crate::pipeline::sibling::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
