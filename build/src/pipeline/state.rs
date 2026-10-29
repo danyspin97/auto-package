@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::blocked::*;
+use crate::pipeline::slots::*;
 
 /// Packages the pipeline itself reported built (or already built) in this
 /// process, by `fuzzy_key`. The resolver reads OBS statuses, which can keep

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::blocked::*;
+use crate::pipeline::slots::*;
 
 /// Warnings for the packages `root`'s closure needs at a version another root
 /// built into the same `project` resolved differently (open-webui pins

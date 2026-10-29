@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::slots::*;
 use crate::pipeline::target::*;
 
 #[test]
