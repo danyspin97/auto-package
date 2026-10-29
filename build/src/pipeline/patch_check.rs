@@ -155,9 +155,13 @@ pub(super) struct PatchCheck {
 }
 
 /// The `-pN` strip level the spec applies patch `number` with (`"0"` for a bare
-/// `Patch:`): the `%patchN` line that applies it when that gives one, else the
-/// `%autosetup`/`%autopatch` line, else 1, the default of both macros. Only the
-/// macro lines are read, so a `-p1` anywhere else in the spec is not a level.
+/// `Patch:`). The `%patch` line that applies it gives its own `-pN`, and a
+/// `%patch` line without one is level 0, as rpm runs a bare `%patch` with
+/// `-p0`. Failing that, the `%autosetup`/`%autopatch` line's `-pN` is the level.
+/// Those two macros pass no `-p` when none is given, so patch then looks each
+/// file up by its base name; 1 stands in for that case, which is the level of
+/// the usual `a/` `b/` diffs. Otherwise 1, quilt's default. Only the macro lines
+/// are read, so a `-p1` anywhere else in the spec is not a level.
 pub(crate) fn spec_patch_level(spec: &str, number: &str) -> u32 {
     // rpm takes both `-p0` and the spaced `-p 0` (`%autosetup -p 0` is level 0).
     let level_of = |line: &str| -> Option<u32> {
@@ -183,10 +187,8 @@ pub(crate) fn spec_patch_level(spec: &str, number: &str) -> u32 {
         if first.starts_with("%patch")
             && applied_patch_number(line).is_some_and(|n| same_patch_number(&n, number))
         {
-            if let Some(level) = level_of(line) {
-                return level;
-            }
-        } else if general.is_none() && matches!(first, "%autosetup" | "%autopatch" | "%setup") {
+            return level_of(line).unwrap_or(0);
+        } else if general.is_none() && matches!(first, "%autosetup" | "%autopatch") {
             general = level_of(line);
         }
     }

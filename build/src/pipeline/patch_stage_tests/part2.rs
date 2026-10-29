@@ -324,6 +324,16 @@ fn the_refresh_series_is_the_spec_beside_an_untouched_checkout_series() {
 }
 
 #[test]
+fn a_bare_patch_line_is_written_to_the_refresh_series_at_level_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = "Name: foo\nPatch1: y.patch\n%prep\n%setup -q\n%patch -P 1\n";
+    let (guard, _notes) = write_rebase_series(spec, dir.path());
+    let scratch = dir.path().join(crate::agent::REFRESH_SERIES);
+    assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "y.patch -p0\n");
+    drop(guard);
+}
+
+#[test]
 fn a_checkout_series_that_disagrees_with_the_spec_is_reported() {
     let entries = vec![
         crate::patch_check::SeriesEntry {

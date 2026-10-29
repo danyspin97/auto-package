@@ -271,10 +271,11 @@ fn spec_patch_level_reads_every_form_of_the_patch_line() {
         spec_patch_level("%prep\n%autosetup -N\n%patch -p0 -P 1\n", "1"),
         0
     );
-    // A `%patch -P` line with no `-p` takes the macro level, as before.
+    // A `%patch -P` line with no `-p` is level 0 whatever the macro says: rpm
+    // runs a bare `%patch` with `-p0`.
     assert_eq!(
         spec_patch_level("%prep\n%autosetup -p2\n%patch -P 1\n", "1"),
-        2
+        0
     );
     // The `%autosetup` default is 1, and an explicit `-p1` is the same.
     assert_eq!(spec_patch_level("%prep\n%autosetup -p1\n", "3"), 1);
@@ -296,6 +297,50 @@ fn spec_patch_level_reads_the_spaced_dash_p_as_rpm_does() {
     // `-p` after other options.
     assert_eq!(spec_patch_level("%prep\n%autosetup -N -p 0\n", "0"), 0);
     assert_eq!(spec_patch_level("%prep\n%patch -p 0 -P 1\n", "1"), 0);
+}
+
+#[test]
+fn a_bare_patch_line_is_level_zero_as_rpm_runs_it() {
+    assert_eq!(spec_patch_level("%prep\n%patch -P 1\n", "1"), 0);
+    assert_eq!(spec_patch_level("%prep\n%patch1\n", "1"), 0);
+    assert_eq!(spec_patch_level("%prep\n%patch -P 1 -p1\n", "1"), 1);
+    assert_eq!(spec_patch_level("%prep\n%patch -P 1 -p 0\n", "1"), 0);
+    // The `%autosetup` line's level does not reach a `%patch` line of its own.
+    assert_eq!(
+        spec_patch_level("%prep\n%autosetup -p1\n%patch -P 1\n", "1"),
+        0
+    );
+    assert_eq!(spec_patch_level("%prep\n%setup -q\n%patch -P 4\n", "4"), 0);
+    // Without a `%patch` line for the number, the macro line decides.
+    assert_eq!(
+        spec_patch_level("%prep\n%autosetup -p1\n%patch -P 2\n", "1"),
+        1
+    );
+}
+
+#[test]
+fn autosetup_without_a_level_is_level_one() {
+    // rpm passes no `-p` to patch here (the file is looked up by base name);
+    // level 1 is the stand-in the check uses.
+    assert_eq!(spec_patch_level("%prep\n%autosetup\n", "1"), 1);
+    assert_eq!(spec_patch_level("%prep\n%autopatch\n", "1"), 1);
+    assert_eq!(spec_patch_level("%prep\n%autopatch -p1\n", "1"), 1);
+    assert_eq!(spec_patch_level("%prep\n%autopatch -p0\n", "1"), 0);
+}
+
+#[test]
+fn the_mariadb_prep_lines_give_their_rpm_levels() {
+    // server:database/mariadb rev 354: `%setup -q`, bare `%patch -P 1` and
+    // `%patch -P 4`, then `-p1` for the rest.
+    let mut spec = String::from("Name: mariadb\n%prep\n%setup -q\n%patch -P 1\n%patch -P 4\n");
+    for n in 6..=14 {
+        spec.push_str(&format!("%patch -P {n} -p1\n"));
+    }
+    assert_eq!(spec_patch_level(&spec, "1"), 0);
+    assert_eq!(spec_patch_level(&spec, "4"), 0);
+    for n in 6..=14 {
+        assert_eq!(spec_patch_level(&spec, &n.to_string()), 1, "patch {n}");
+    }
 }
 
 #[test]
