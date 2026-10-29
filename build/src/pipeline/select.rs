@@ -1,6 +1,7 @@
 //! Selecting the target of a run: its version conflicts and the selection itself.
 
 use super::*;
+use crate::pipeline::blocked::*;
 
 /// Warnings for the packages `root`'s closure needs at a version another root
 /// built into the same `project` resolved differently (open-webui pins

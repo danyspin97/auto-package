@@ -2,6 +2,7 @@
 //! the reconciliation of the state with OBS and with the checkout.
 
 use super::*;
+use crate::pipeline::blocked::*;
 
 /// Packages the pipeline itself reported built (or already built) in this
 /// process, by `fuzzy_key`. The resolver reads OBS statuses, which can keep
