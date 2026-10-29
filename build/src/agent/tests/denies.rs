@@ -10,20 +10,22 @@ fn quilt_and_rpm_denies_cover_brace_glob_quote_and_tab_forms() {
     let list: Vec<&str> = denied.split(',').collect();
     for prefix in ["quilt", "cd source && quilt"] {
         for rule in [
-            "* \"/*", "* '/*", "*=/*", "*{*", "*}*", "*[*", "*]*", "*?*", "*!*", "*\\*", "*\t*",
-            "*\n*",
+            "* \"/*", "* '/*", "*=/*", "*{*", "*}*", "*[*", "*]*", "*?*", "*!*", "*\\*",
         ] {
             let rule = format!("Bash({prefix} {rule})");
             assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
         }
     }
-    for rule in [
-        "Bash(rpm *{*)",
-        "Bash(rpm *}*)",
-        "Bash(rpm *\t*)",
-        "Bash(rpm *..*)",
-    ] {
+    for rule in ["Bash(rpm *{*)", "Bash(rpm *}*)", "Bash(rpm *..*)"] {
         assert!(list.contains(&rule), "missing {rule}: {denied}");
+    }
+    // Whitespace-control characters in a rule are read as separators, so
+    // none may appear: `*<tab>*` would deny every two-word command.
+    for rule in &list {
+        assert!(
+            !rule.contains(['\t', '\n']),
+            "a deny rule has a tab or newline: {rule:?}"
+        );
     }
     // The reviewer's bypass: brace expansion turns one word into an
     // absolute path that `quilt add *` would otherwise grant.

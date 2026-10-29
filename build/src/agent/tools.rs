@@ -238,6 +238,10 @@ pub(super) fn turn_denied_tools(
 /// the engine's handling of redirection targets is not something to rely on.
 /// `|` is denied for every grant except `readelf`, because the prompt documents
 /// `readelf -d <lib> | grep NEEDED` (`grep` has no grant of its own).
+///
+/// No tab or newline pattern: the CLI reads the whitespace of a rule as a
+/// separator, so `*<tab>*` becomes `* *` and denies every command with two
+/// words (see [`path_and_metachar_denies`]).
 fn read_tool_denied_tools() -> Vec<String> {
     let prefixes = [
         "ls",
@@ -248,8 +252,8 @@ fn read_tool_denied_tools() -> Vec<String> {
         "zypper info",
     ];
     let patterns = [
-        "*{*", "*}*", "*[*", "*]*", "*?*", "*`*", "*$*", "*..*", "*~*", "*\\*", "*\t*", "*\n*",
-        "*>*", "*<*", "*;*", "*&*", "*(*", "*)*", "*!*",
+        "*{*", "*}*", "*[*", "*]*", "*?*", "*`*", "*$*", "*..*", "*~*", "*\\*", "*>*", "*<*",
+        "*;*", "*&*", "*(*", "*)*", "*!*",
     ];
     let mut denied: Vec<String> = prefixes
         .iter()
@@ -354,6 +358,14 @@ fn patch_denied_tools(workspace: &std::path::Path) -> Vec<String> {
 
 /// The path and metacharacter denies of a granted `program` (quilt, `patch`),
 /// for every prefix of [`source_prefixes`].
+///
+/// Tab and newline have no pattern of their own. The CLI reads the whitespace
+/// of a rule as a separator, so `*<tab>*` is the rule `* *` and refuses every
+/// command with two words, so `quilt refresh -p ab ...` and `quilt pop -a` are
+/// refused. A tab in an argument is matched as a
+/// space (`quilt add x<tab>/abs` is refused by `* /*`), and a newline between
+/// commands is checked line by line (one refused line refuses the whole
+/// command).
 fn path_and_metachar_denies(workspace: &std::path::Path, program: &str) -> Vec<String> {
     let prefixes: Vec<String> = source_prefixes(workspace)
         .into_iter()
@@ -383,8 +395,6 @@ fn path_and_metachar_denies(workspace: &std::path::Path, program: &str) -> Vec<S
         "*?*",
         "*!*",
         "*\\*",
-        "*\t*",
-        "*\n*",
     ];
     prefixes
         .iter()
@@ -411,9 +421,10 @@ fn rpm_denied_tools() -> Vec<String> {
         "-*D*",
     ];
     // `{`/`}` are brace expansion, `[`/`]`/`?` globs and `..` a parent path:
-    // each turns the granted directory prefix into a path outside it.
+    // each turns the granted directory prefix into a path outside it. No tab
+    // or newline entry: see `path_and_metachar_denies`.
     let metachars = [
-        ";", "&", "|", "`", "$(", "%(", ">", "<", "{", "}", "[", "]", "?", "..", "\t", "\n",
+        ";", "&", "|", "`", "$(", "%(", ">", "<", "{", "}", "[", "]", "?", "..",
     ];
     options
         .iter()
