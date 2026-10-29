@@ -2,6 +2,7 @@
 //! lock, and the stages in order.
 
 use super::*;
+use crate::pipeline::agent::*;
 use crate::pipeline::build_round::*;
 use crate::pipeline::checkout::*;
 use crate::pipeline::commit::*;

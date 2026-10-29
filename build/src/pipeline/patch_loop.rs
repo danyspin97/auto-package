@@ -2,6 +2,7 @@
 //! wheel outcome handling.
 
 use super::*;
+use crate::pipeline::agent::*;
 
 /// [`patch_stage`] with the quilt check and the turn runner given.
 pub(super) fn patch_stage_with(

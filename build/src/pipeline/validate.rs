@@ -1,6 +1,7 @@
 //! The validation round: validating a spec and the context of missing sources.
 
 use super::*;
+use crate::pipeline::agent::*;
 use crate::pipeline::commit::*;
 
 /// Step: ValidateSpec. A rejected spec runs a fix turn and asks for another

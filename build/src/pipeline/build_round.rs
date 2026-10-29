@@ -2,6 +2,7 @@
 //! review with its revert.
 
 use super::*;
+use crate::pipeline::agent::*;
 use crate::pipeline::unresolvable::*;
 
 /// Step: Build (wait for OBS remote build, fetch log, download RPMs), then

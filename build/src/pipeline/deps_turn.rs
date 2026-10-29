@@ -1,6 +1,7 @@
 //! The prefix stage and the missing dependencies a turn reports.
 
 use super::*;
+use crate::pipeline::agent::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::linked::*;
 

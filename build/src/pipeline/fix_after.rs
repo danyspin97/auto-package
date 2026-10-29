@@ -1,6 +1,7 @@
 //! The fixes that follow a failed validation or build, and the flaky probe they save.
 
 use super::*;
+use crate::pipeline::agent::*;
 
 /// One fix-after-validation agent turn: counts the attempt, runs the turn and
 /// applies its outcome. `apply_label` names the apply step and

@@ -1,6 +1,7 @@
 //! The round for unresolvable dependencies.
 
 use super::*;
+use crate::pipeline::agent::*;
 
 /// OBS reported unresolvable dependencies for the build.
 pub(super) fn unresolvable_deps_round(
