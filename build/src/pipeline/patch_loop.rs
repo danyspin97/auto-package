@@ -137,7 +137,14 @@ pub(super) fn patch_stage_with(
             persist_attempts(ws, &config.run_id, st.attempts);
             let before_spec = std::fs::read_to_string(spec_path).unwrap_or_default();
             let before_files = patch_files(&before_spec, checkout_dir);
-            write_patch_series(&before_spec, checkout_dir);
+            // Dropped at the end of this round: the file is never left behind.
+            let (_series, series_notes) = write_rebase_series(&before_spec, checkout_dir);
+            if rounds == 1 {
+                for note in &series_notes {
+                    progress(format!("{rpm_name}: {note}"));
+                    lines.push(format!("- series: {note}"));
+                }
+            }
             pop_source_patches(ctx);
             let snapshot = CheckoutSnapshot::take(checkout_dir);
             let context = format!(

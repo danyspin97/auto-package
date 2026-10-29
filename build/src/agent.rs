@@ -20,6 +20,7 @@ pub use outcome::*;
 mod response;
 pub use response::*;
 mod tools;
+pub(crate) use tools::REFRESH_SERIES;
 use tools::*;
 mod run;
 mod user_prompt;

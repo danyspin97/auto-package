@@ -90,6 +90,11 @@ pub(crate) fn quilt_env(
     env
 }
 
+/// The quilt series a [`Task::RefreshPatches`] turn reads, a file the pipeline
+/// writes into the checkout for that round (the spec's patches in rpm's order
+/// and levels). It is never the checkout's own `series`.
+pub(crate) const REFRESH_SERIES: &str = "series-rebase";
+
 /// Tool allowlist for one agent turn.
 ///
 /// The turn reads hostile upstream content (sdists, build logs, notes), so it

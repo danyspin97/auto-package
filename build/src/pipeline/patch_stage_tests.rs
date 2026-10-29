@@ -265,11 +265,10 @@ fn a_turn_that_rebases_the_failing_patch_ends_the_loop_with_its_bullet() {
         "{}",
         case.notes
     );
-    // No series existed, so one was written for the turn's quilt.
-    assert_eq!(
-        std::fs::read_to_string(case.checkout.join("series")).unwrap(),
-        "a.patch\nb.patch\n"
-    );
+    // The turn's series is the round's scratch file: the checkout has none, and
+    // none is left behind.
+    assert!(!case.checkout.join("series").exists());
+    assert!(!case.checkout.join(crate::agent::REFRESH_SERIES).exists());
 }
 
 #[test]
@@ -520,14 +519,63 @@ fn dropping_a_patch_removes_exactly_its_lines() {
         std::fs::read_to_string(dir.path().join("series")).unwrap(),
         "# keep me\nb.patch\n  \nc.patch"
     );
-    // An existing series is left as it is for the turn.
-    write_patch_series(
-        "Name: foo\nPatch0: z.patch\n%prep\n%autosetup -p1\n",
-        dir.path(),
+}
+
+#[test]
+fn the_refresh_series_is_the_spec_beside_an_untouched_checkout_series() {
+    let dir = tempfile::tempdir().unwrap();
+    let series = "a.patch -p0\n";
+    std::fs::write(dir.path().join("series"), series).unwrap();
+    let spec =
+        "Name: foo\nPatch0: z.patch\nPatch1: y.patch\n%prep\n%autosetup -p1\n%patch -P 1 -p0\n";
+    let (guard, notes) = write_rebase_series(spec, dir.path());
+    let scratch = dir.path().join(crate::agent::REFRESH_SERIES);
+    assert_eq!(
+        std::fs::read_to_string(&scratch).unwrap(),
+        "z.patch\ny.patch -p0\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("series")).unwrap(),
+        series
+    );
+    assert!(notes.iter().any(|n| n.contains("a.patch")), "{notes:?}");
+    drop(guard);
+    assert!(!scratch.exists());
+}
+
+#[test]
+fn a_checkout_series_that_disagrees_with_the_spec_is_reported() {
+    let entries = vec![
+        crate::patch_check::SeriesEntry {
+            number: "1".into(),
+            name: "y.patch".into(),
+            level: 0,
+        },
+        crate::patch_check::SeriesEntry {
+            number: "0".into(),
+            name: "z.patch".into(),
+            level: 1,
+        },
+    ];
+    let notes = series_disagreements("a.patch\ny.patch\ngone.patch -p1\n", &entries, |n| {
+        n != "gone.patch"
+    });
+    let text = notes.join("\n");
+    assert!(
+        text.contains("names a.patch, which the spec does not apply"),
+        "{text}"
     );
     assert!(
-        !std::fs::read_to_string(dir.path().join("series"))
-            .unwrap()
-            .contains("z.patch")
+        text.contains("applies y.patch with -p1, the spec with -p0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("names gone.patch, which the checkout does not have"),
+        "{text}"
+    );
+    assert!(text.contains("does not list z.patch"), "{text}");
+    assert!(
+        series_disagreements("y.patch -p0\nz.patch\n", &entries, |_| true).is_empty(),
+        "an agreeing series has no notes"
     );
 }

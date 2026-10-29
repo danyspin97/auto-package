@@ -237,7 +237,8 @@ pub(super) fn refresh_patches_task() -> &'static str {
     "The package was bumped to a new version and quilt says some of its patches no \
      longer apply cleanly; the report is under \"Context\". Rebase ONLY the patches, \
      with quilt. In `source/` (the new sources) quilt is ready: `QUILT_PATCHES` is the \
-     checkout and its `series` lists the patches in order. These exact commands work:\n\
+     checkout and `QUILT_SERIES` is `series-rebase`, which lists the patches in the \
+     spec's order with the level each is applied with. These exact commands work:\n\
      - `cd source && quilt pop -a` (start from the pristine tree)\n\
      - `cd source && quilt push` (the next patch; quilt has no dry run: push, read its \
        output, `quilt pop` to undo)\n\
