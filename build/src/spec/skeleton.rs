@@ -2,6 +2,7 @@
 //! project skeletons, and the flavor version.
 
 use super::*;
+use crate::spec::requires_exclude::*;
 use crate::spec::rpmlintrc::*;
 
 /// [`wheel_binary_skeleton`] for a release whose wheels are each locked to one
