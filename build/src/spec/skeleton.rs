@@ -4,6 +4,7 @@
 use super::*;
 use crate::spec::requires_exclude::*;
 use crate::spec::rpmlintrc::*;
+use crate::spec::siblings::*;
 use crate::spec::wheel::*;
 
 /// [`wheel_binary_skeleton`] for a release whose wheels are each locked to one
