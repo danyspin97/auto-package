@@ -1,6 +1,6 @@
 //! Reading a spec: its header tags and the build requirements in it.
 
-use super::*;
+use crate::spec::expand::*;
 
 pub(super) fn tag_value<'a>(spec: &'a str, tag: &str) -> Option<&'a str> {
     spec.lines()

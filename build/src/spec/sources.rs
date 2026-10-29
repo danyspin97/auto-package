@@ -2,6 +2,7 @@
 //! source and adopting the sources of a tree.
 
 use super::*;
+use crate::spec::expand::*;
 
 /// A `SourceN:` entry that names something to download.
 #[derive(Debug, Clone, PartialEq, Eq)]
