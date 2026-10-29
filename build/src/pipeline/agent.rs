@@ -72,6 +72,7 @@ pub(super) fn friendly_agent_error(
     e: &crate::agent::Error,
     budget_usd: f64,
     pkg_name: &str,
+    max_turns: u32,
 ) -> String {
     if e.is_not_logged_in() {
         return crate::agent::NOT_LOGGED_IN_MESSAGE.to_string();
@@ -87,11 +88,15 @@ pub(super) fn friendly_agent_error(
         );
     }
     if e.is_max_turns() {
+        let used = match e {
+            crate::agent::Error::EndedEarly(x) => x.turns,
+            _ => 0,
+        };
         return format!(
-            "the agent ran out of turns (--max-turns) before it answered for {pkg_name}. \
-             This is not a response-format problem and is not retried as one; the \
-             prompt + partial output are preserved in the step dir (crash-prompt.md, \
-             crash-stdout.log)."
+            "the agent used {used} of its {max_turns} turns (--max-turns) before it answered \
+             for {pkg_name}. A turn that runs out of turns is never retried, so the package \
+             stops here; the prompt + partial output are preserved in the step dir \
+             (crash-prompt.md, crash-stdout.log)."
         );
     }
     if e.is_rate_limited() {
@@ -433,7 +438,12 @@ pub(super) fn agent_turn(
                 }
             }
             let step = step.finish(StepOutcome::Failed);
-            let message = friendly_agent_error(&e, config.budget_usd, &config.pkg_name);
+            let message = friendly_agent_error(
+                &e,
+                config.budget_usd,
+                &config.pkg_name,
+                crate::agent::max_agent_turns(ctx.task),
+            );
             let kind = if e.is_not_logged_in() {
                 FailureKind::AgentUnavailable
             } else if e.is_rate_limited() {

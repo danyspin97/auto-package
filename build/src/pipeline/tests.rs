@@ -162,10 +162,13 @@ fn max_turns_is_reported_as_its_own_failure_not_a_format_problem() {
         message: "error_max_turns".into(),
         stdout: String::new(),
         prompt: String::new(),
+        turns: 41,
         usage: Default::default(),
     }));
-    let msg = friendly_agent_error(&e, 2.0, "python-foo");
-    assert!(msg.contains("ran out of turns"), "{msg}");
+    let msg = friendly_agent_error(&e, 2.0, "python-foo", 40);
+    assert!(msg.contains("used 41 of its 40 turns"), "{msg}");
+    assert!(msg.contains("never retried"), "{msg}");
+    assert!(!msg.contains("not retried as one"), "{msg}");
 }
 
 #[test]

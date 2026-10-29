@@ -36,6 +36,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
             ),
             stdout: String::new(),
             prompt,
+            turns: 0,
             usage: Usage::default(),
         })));
     }
@@ -410,6 +411,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     message: signal.message,
                     stdout: stdout_raw,
                     prompt: prompt.clone(),
+                    turns: result_event.num_turns,
                     usage: Usage {
                         input_tokens: result_event.usage.input_tokens,
                         output_tokens: result_event.usage.output_tokens,

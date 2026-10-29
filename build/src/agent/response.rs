@@ -14,7 +14,7 @@ pub(super) const MAX_AGENT_TURNS: u32 = 40;
 /// The cap for one task's `claude` call. A RefreshPatches turn rebases every
 /// rejected hunk of the package, one quilt cycle per patch, so it gets more
 /// turns than the rest.
-pub(super) fn max_agent_turns(task: Task) -> u32 {
+pub(crate) fn max_agent_turns(task: Task) -> u32 {
     match task {
         Task::RefreshPatches => 80,
         _ => MAX_AGENT_TURNS,

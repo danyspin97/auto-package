@@ -9,6 +9,7 @@ fn is_budget_exhausted_recognises_the_subtype_the_claude_cli_emits() {
         message: "Reached maximum budget ($0.03)".to_string(),
         stdout: String::new(),
         prompt: String::new(),
+        turns: 0,
         usage: Usage::default(),
     }));
     assert!(e.is_budget_exhausted());
@@ -23,6 +24,7 @@ fn is_budget_exhausted_recognises_the_subtype_the_claude_cli_emits() {
         message: "rate limited".to_string(),
         stdout: String::new(),
         prompt: String::new(),
+        turns: 0,
         usage: Usage::default(),
     }));
     assert!(!not_budget.is_budget_exhausted());
@@ -85,6 +87,7 @@ pub(super) fn ended(subtype: &str, message: &str) -> Error {
         message: message.to_string(),
         stdout: String::new(),
         prompt: String::new(),
+        turns: 0,
         usage: Usage::default(),
     }))
 }
@@ -199,6 +202,7 @@ fn error_subtype_is_an_end_early_signal_even_without_is_error() {
         message: sig.message,
         stdout: String::new(),
         prompt: String::new(),
+        turns: 0,
         usage: Usage::default(),
     }));
     assert!(err.is_max_turns());

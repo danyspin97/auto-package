@@ -48,6 +48,8 @@ pub struct EndedEarlyError {
     pub message: String,
     pub stdout: String,
     pub prompt: String,
+    /// The model turns the cut-off run took (the CLI's own count).
+    pub turns: usize,
     /// What the cut-off turn still cost. The budget cap is only enforced if
     /// the caller charges this, so it is kept rather than dropped.
     pub usage: Usage,
