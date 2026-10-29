@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::patch_check::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::spec_edits::*;
 
 /// Step: Commit.

@@ -2,6 +2,7 @@
 //! download service and the quilt series.
 
 use super::*;
+use crate::pipeline::prompt_notes::*;
 
 /// Drop stale `# ap: fix` comments from the spec on disk and return the result.
 ///

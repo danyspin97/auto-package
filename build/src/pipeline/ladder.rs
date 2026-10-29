@@ -5,6 +5,7 @@ use super::*;
 use crate::pipeline::apply_turn::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::logs::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rejection::*;
 use crate::pipeline::sibling::*;
 use crate::pipeline::snapshot::*;

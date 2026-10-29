@@ -5,6 +5,7 @@ use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::apply_turn::*;
 use crate::pipeline::patch_check::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 

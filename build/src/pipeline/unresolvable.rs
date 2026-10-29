@@ -3,6 +3,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rpm_deps::*;
 
 /// OBS reported unresolvable dependencies for the build.

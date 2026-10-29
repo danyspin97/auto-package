@@ -7,6 +7,7 @@ use crate::pipeline::build_round::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::gen_spec::*;
 use crate::pipeline::linked::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rpm_deps::*;
 
 /// Whether the spec at `path` still carries a TODO placeholder (convention 63).

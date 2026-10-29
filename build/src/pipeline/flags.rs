@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::run::*;
 use crate::pipeline::state::*;
 

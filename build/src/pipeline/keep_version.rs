@@ -1,6 +1,7 @@
 //! Running the services while keeping the version, and staging the requested files.
 
 use super::*;
+use crate::pipeline::prompt_notes::*;
 
 /// `osc service ra` runs EVERY service of the checkout, `mode="disabled"` ones
 /// included. An existing package's `_service` is the one OBS holds: a

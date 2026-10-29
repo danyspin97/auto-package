@@ -1,6 +1,7 @@
 //! Generating a spec: the entry points, the errors, and the wheel policy.
 
 use super::*;
+use crate::pipeline::prompt_notes::*;
 
 pub(super) enum GenSpecError {
     WheelOnly {

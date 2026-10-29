@@ -6,6 +6,7 @@ use crate::pipeline::agent::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::patch_loop::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rejection::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;

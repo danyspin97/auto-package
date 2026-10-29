@@ -2,6 +2,7 @@
 //! and the run state and spend they update.
 
 use super::*;
+use crate::pipeline::prompt_notes::*;
 
 /// The source archive in the checkout. A checkout can hold several (an old
 /// version's tarball next to the new one), so prefer the one named for

@@ -1,6 +1,7 @@
 //! Carrying a spec forward from the previous version: the repo and service forms.
 
 use super::*;
+use crate::pipeline::prompt_notes::*;
 
 /// Bump the spec already in the checkout to `config.version` without
 /// regenerating it: set its `Version:`, fetch the new PyPI sdist in place of

@@ -6,6 +6,7 @@ use crate::pipeline::apply_turn::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::logs::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 

@@ -6,6 +6,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::carry::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::gen_spec::*;
+use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rpm_deps::*;
 
 /// Step: GenerateSpec (if needed). Sets `sdist_top_level` and
