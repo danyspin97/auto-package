@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::classify::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::render::*;
