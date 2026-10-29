@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::osc::error::*;
+use crate::osc::names::*;
 
 /// Run `osc api` with an optional HTTP method and body.
 pub(super) fn api_call(

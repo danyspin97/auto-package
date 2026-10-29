@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::osc::error::*;
+use crate::osc::names::*;
 
 /// One `<repository>` of a project meta.
 #[derive(Debug, Clone, PartialEq, Eq)]
