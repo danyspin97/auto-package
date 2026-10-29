@@ -1,6 +1,7 @@
 //! Applying a turn's outcome to the checkout and resetting it.
 
 use super::*;
+use crate::pipeline::keep_version::*;
 
 /// Everything [`apply_turn_outcome`] needs besides the outcome itself and the
 /// reporter — bundled so the function doesn't trip clippy's argument-count
