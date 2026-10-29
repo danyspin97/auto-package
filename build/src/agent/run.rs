@@ -78,7 +78,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         "--max-budget-usd",
         &format!("{remaining_usd:.4}"),
         "--max-turns",
-        &MAX_AGENT_TURNS.to_string(),
+        &max_agent_turns(req.task).to_string(),
         // Path rules in `--allowed-tools` are only enforced in the default
         // permission mode, and user settings could widen them, so the turn
         // runs with project settings only, as the notes turn does.

@@ -3,6 +3,15 @@
 use super::*;
 
 #[test]
+fn refresh_turns_get_a_higher_turn_cap_and_the_others_keep_the_default() {
+    assert_eq!(max_agent_turns(Task::RefreshPatches), 80);
+    for task in [Task::Review, Task::FixAfterBuild, Task::PostBuildReview] {
+        assert_eq!(max_agent_turns(task), MAX_AGENT_TURNS);
+    }
+    assert_eq!(MAX_AGENT_TURNS, 40);
+}
+
+#[test]
 fn turn_tools_have_no_rpmspec_and_no_bare_quilt_and_deny_settings_writes() {
     let ws = std::path::Path::new("/srv/ws");
     let co = Some(std::path::Path::new("/srv/ws/checkout"));
