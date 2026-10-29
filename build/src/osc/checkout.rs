@@ -2,6 +2,7 @@
 //! checkouts set aside, the pull with its recovery, and the conflict file.
 
 use super::*;
+use crate::osc::service::*;
 
 /// The error `ensure_package` reports when the project listing cannot be read.
 /// A transient failure keeps its classification so that the caller retries;
