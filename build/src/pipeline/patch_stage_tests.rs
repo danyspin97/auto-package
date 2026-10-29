@@ -123,6 +123,22 @@ fn run(
     max_attempts: usize,
     scripts: Vec<Script>,
 ) -> Case {
+    let mut queue = std::collections::VecDeque::from(scripts);
+    run_turns(patches, no_agent, max_attempts, &mut |ctx, _| {
+        let mut script = queue
+            .pop_front()
+            .expect("the loop asked for more turns than the script has");
+        Ok(script(&ctx.checkout_dir, &ctx.spec_path))
+    })
+}
+
+/// [`run`] with each turn answered by `turn`, which may also fail.
+fn run_turns(
+    patches: &[(&str, &str)],
+    no_agent: bool,
+    max_attempts: usize,
+    turn: &mut dyn FnMut(&RunCtx, &str) -> Result<crate::agent::TurnOutcome, (String, FailureKind)>,
+) -> Case {
     let root = tempfile::tempdir().unwrap();
     let work = root.path().join("work");
     let state_root = work.join("state");
@@ -181,14 +197,10 @@ fn run(
     };
     let step_path = root.path().join("step");
     std::fs::create_dir_all(&step_path).unwrap();
-    let mut queue = std::collections::VecDeque::from(scripts);
     let mut contexts = Vec::new();
     let result = patch_stage_with(&ctx, &mut st, &mut fake_check, &mut |ctx, _, _, context| {
         contexts.push(context.to_string());
-        let mut script = queue
-            .pop_front()
-            .expect("the loop asked for more turns than the script has");
-        let out = script(&ctx.checkout_dir, &ctx.spec_path);
+        let out = turn(ctx, context)?;
         Ok((
             StepDir {
                 path: step_path.clone(),

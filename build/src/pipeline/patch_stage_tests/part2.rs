@@ -91,6 +91,54 @@ fn offset_patches_are_refreshed_before_any_turn_and_only_rejects_reach_the_agent
 }
 
 #[test]
+fn a_failed_turn_keeps_the_edit_quilt_proves_and_rolls_back_the_rest() {
+    let case = run_turns(
+        &[("a.patch", "old"), ("b.patch", "old")],
+        false,
+        10,
+        &mut |ctx, _| {
+            std::fs::write(ctx.checkout_dir.join("a.patch"), "clean\n").unwrap();
+            std::fs::write(ctx.checkout_dir.join("b.patch"), "half done").unwrap();
+            Err((
+                "max turns reached (41 of 40)".to_string(),
+                FailureKind::AgentFailed,
+            ))
+        },
+    );
+    let Err(PipelineResult::Failed { reason, .. }) = &case.result else {
+        panic!("{:?}", case.result);
+    };
+    assert!(reason.starts_with("the agent turn failed"), "{reason}");
+    assert!(
+        reason.contains("needs a human") && reason.contains("b.patch"),
+        "{reason}"
+    );
+    assert!(reason.contains("+new"), "{reason}");
+    assert_eq!(
+        std::fs::read_to_string(case.checkout.join("a.patch")).unwrap(),
+        "clean\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.checkout.join("b.patch")).unwrap(),
+        "old"
+    );
+    assert!(case.spec.contains("Patch1: b.patch"), "{}", case.spec);
+    assert_eq!(
+        bullets(&case.changes, "Refresh a.patch"),
+        1,
+        "{}",
+        case.changes
+    );
+    assert!(case.notes.contains("- a.patch: kept"), "{}", case.notes);
+    assert!(
+        case.notes
+            .contains("- b.patch: rolled back, its edit does not apply"),
+        "{}",
+        case.notes
+    );
+}
+
+#[test]
 fn no_turn_runs_past_the_attempt_limit() {
     let case = run(&[("b.patch", "old")], false, 0, Vec::new());
     assert!(case.contexts.is_empty());

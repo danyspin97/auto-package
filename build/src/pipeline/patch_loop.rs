@@ -9,7 +9,6 @@ use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::render::*;
 use crate::pipeline::snapshot::*;
-use crate::pipeline::spec_edits::*;
 
 /// [`patch_stage`] with the quilt check and the turn runner given.
 pub(super) fn patch_stage_with(
@@ -59,26 +58,15 @@ pub(super) fn patch_stage_with(
             );
         }
     };
-    // A patch quilt proves already applied is removed now: certainly right,
-    // and nothing for a turn to do. The rest of the report is what is left.
-    let mut check_and_settle = |ctx: &RunCtx, lines: &mut Vec<String>, refresh: Refresh| {
-        let mut report = check(ctx, refresh);
-        let proven: Vec<String> = report.already_applied().map(|p| p.name.clone()).collect();
-        lines.extend(remove_proven_patches(ctx, step_id, &proven));
-        report
-            .patches
-            .retain(|p| !matches!(p.status, PatchStatus::AlreadyApplied { .. }));
-        report
-    };
-    let mut report = check_and_settle(ctx, &mut lines, Refresh::No);
+    let mut report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
     // A patch that applies only with an offset or fuzz is refreshed here, by
     // the pipeline, before any turn: the agent is handed only the patches that
     // have rejects.
     let mut refreshed: std::collections::BTreeSet<String> = Default::default();
     if report.to_refresh().next().is_some() {
-        let offsets = check_and_settle(ctx, &mut lines, Refresh::Offset);
+        let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Offset);
         refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
-        report = check_and_settle(ctx, &mut lines, Refresh::No);
+        report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
     }
     if report.patches.is_empty() || report.not_run.is_some() || report.is_clean() {
         write_refresh_bullets(ctx, step_id, &refreshed);
@@ -167,20 +155,45 @@ pub(super) fn patch_stage_with(
             let (turn_step, outcome) = match turn(ctx, st, st.attempts, &context) {
                 Ok(v) => v,
                 Err((e, kind)) => {
-                    discard_failed_turn(
-                        ws.notes(),
-                        reporter,
+                    // The edits quilt proves apply stay; the rest of the turn is
+                    // rolled back, and what still fails is reported per patch.
+                    let stopped = format!("the agent turn failed: {e}");
+                    let kept = keep_proven_edits(
+                        ctx,
+                        step_id,
+                        check,
+                        &mut lines,
                         &snapshot,
-                        spec_path,
                         &before_spec,
-                        "RefreshPatches",
+                        &before_files,
                     );
+                    refreshed.extend(kept);
                     pop_source_patches(ctx);
+                    let report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
                     // The rounds before this one keep their refreshed patches.
                     write_refresh_bullets(ctx, step_id, &refreshed);
+                    let failing: Vec<&crate::patch_check::PatchResult> = report.failing().collect();
+                    for p in &failing {
+                        lines.push(format!(
+                            "- {}: still does not apply; kept ({stopped})",
+                            p.name
+                        ));
+                    }
                     write_notes(&lines, "quilt, stopped");
                     step.finish(StepOutcome::Failed);
-                    return Err(ctx.failed_as(kind, format!("the agent turn failed: {e}")));
+                    let reason = if failing.is_empty() {
+                        format!("{stopped}; the edits quilt proves apply were kept")
+                    } else {
+                        format!(
+                            "{stopped}; {}",
+                            kept_patches_reason(
+                                &config.version,
+                                "the rest were rolled back",
+                                &failing
+                            )
+                        )
+                    };
+                    return Err(ctx.failed_as(kind, reason));
                 }
             };
             let applied =
@@ -204,7 +217,7 @@ pub(super) fn patch_stage_with(
             } else {
                 false
             };
-            let next = check_and_settle(ctx, &mut lines, Refresh::No);
+            let next = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
             let verdict = crate::patch_check::next_round(
                 rounds,
                 MAX_ROUNDS,
@@ -228,7 +241,7 @@ pub(super) fn patch_stage_with(
     // A patch an agent turn left with an offset or fuzz (fuzz fails rpm's
     // `--fuzz=0`) is refreshed the same way the pre-pass refreshed the rest.
     if report.to_refresh().next().is_some() {
-        let offsets = check_and_settle(ctx, &mut lines, Refresh::Offset);
+        let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Offset);
         refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
     }
     write_refresh_bullets(ctx, step_id, &refreshed);
