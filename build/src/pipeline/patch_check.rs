@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::tarball::*;
 
 /// The tree prefix a patch was made for when it names another release: the first
 /// path component of its diff names is `<name>-<version>` with a version other

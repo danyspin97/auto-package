@@ -4,6 +4,7 @@ use crate::pipeline::rpm_deps::*;
 use crate::pipeline::run::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
+use crate::pipeline::tarball::*;
 
 #[test]
 fn sync_quilt_series_rewrites_to_match_the_specs_current_patches() {

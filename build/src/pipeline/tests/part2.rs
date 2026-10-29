@@ -7,6 +7,7 @@ use crate::pipeline::patch_check::*;
 use crate::pipeline::patch_condition::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::state::*;
+use crate::pipeline::tarball::*;
 
 #[test]
 fn a_linked_spelling_that_differs_in_separators_is_the_same_package() {

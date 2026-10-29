@@ -10,6 +10,7 @@ use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::rpm_deps::*;
+use crate::pipeline::tarball::*;
 
 /// Step: GenerateSpec (if needed). Sets `sdist_top_level` and
 /// `from_repo_archive` on the state.
