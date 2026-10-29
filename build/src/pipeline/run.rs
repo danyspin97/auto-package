@@ -2,6 +2,7 @@
 //! lock, and the stages in order.
 
 use super::*;
+use crate::pipeline::checkout::*;
 
 pub fn run_package(
     config: &PipelineConfig,
