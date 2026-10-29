@@ -2,6 +2,7 @@
 //! built RPMs and the rpmlint logs, and the build log tail.
 
 use super::*;
+use crate::osc::build_once::*;
 
 /// The end of a package's latest build log for `repo`/`arch`, where the
 /// rpmlint block is, or `None` when OBS has no log for it.
