@@ -1,0 +1,206 @@
+//! Tests for reading the turn response and the review prompt variants.
+
+use super::prompt::*;
+use super::scrub::*;
+use super::*;
+
+/// Real shape from a `drogon` build where the claude CLI hit its budget
+/// cap AFTER the model had already emitted a valid `StructuredOutput`
+/// call: the final `result` event's `result` field was empty and the CLI
+/// exited 1, so the previous `turn()` returned `Error::Failed` and the
+/// pipeline logged "agent error: claude exited 1" even though the model's
+/// answer was sitting right there in the tool-call stream.
+#[test]
+fn pick_turn_response_falls_back_to_structured_output_tool_call() {
+    let tool_calls = vec![
+        ToolCall {
+            name: "Read".into(),
+            input: "{}".into(),
+        },
+        ToolCall {
+            name: "StructuredOutput".into(),
+            input: r#"{
+                    "action": "no_change",
+                    "reasoning": "deps missing — report trantor",
+                    "evidence": ["Read drogon.spec"],
+                    "confidence": "high",
+                    "unresolvable_packages": ["trantor"]
+                }"#
+            .into(),
+        },
+    ];
+    let resp = pick_turn_response("", &tool_calls)
+        .expect("fallback must salvage the StructuredOutput call");
+    assert_eq!(resp.action, "no_change");
+    assert_eq!(resp.unresolvable_packages, vec!["trantor"]);
+}
+
+#[test]
+fn pick_turn_response_prefers_result_payload_over_tool_call() {
+    let tool_calls = vec![ToolCall {
+        name: "StructuredOutput".into(),
+        input: r#"{"action":"no_change","reasoning":"stale","evidence":[],"confidence":"low"}"#
+            .into(),
+    }];
+    let resp = pick_turn_response(
+        r#"{"action":"edited","reasoning":"fresh","evidence":["x"],"confidence":"high"}"#,
+        &tool_calls,
+    )
+    .expect("result payload must take priority");
+    assert_eq!(resp.action, "edited");
+    assert_eq!(resp.reasoning, "fresh");
+}
+
+#[test]
+fn a_stage_files_request_is_parsed_from_the_turn_response() {
+    let payload = r#"{"action":"no_change","reasoning":"r","evidence":[],"confidence":"high",
+            "stage_files":[{"from":"source/package-lock.json","to":"package-lock.json"},
+                           {"from":"x.spec","to":"y.spec","package":"dep"}]}"#;
+    let resp = pick_turn_response(payload, &[]).unwrap();
+    assert_eq!(resp.stage_files.len(), 2);
+    assert_eq!(resp.stage_files[0].to, "package-lock.json");
+    assert_eq!(resp.stage_files[1].package.as_deref(), Some("dep"));
+    assert!(
+        STATIC_WORKFLOW.contains("stage_files") && STATIC_WORKFLOW.contains("last-resort answer")
+    );
+}
+
+#[test]
+fn a_patch_request_carries_its_machine_checkable_condition() {
+    let payload = r#"{"action":"no_change","reasoning":"x","confidence":"high",
+            "patch_dependencies":[
+              {"name":"torch","problem":"p","condition":{"path":"torch/utils/benchmark/utils","package":"python-torch","not_in":["devel"]}},
+              {"name":"other","problem":"q"}]}"#;
+    let resp = pick_turn_response(payload, &[]).unwrap();
+    let c = resp.patch_dependencies[0].condition.as_ref().unwrap();
+    assert_eq!(c.path, "torch/utils/benchmark/utils");
+    assert_eq!(c.package.as_deref(), Some("python-torch"));
+    assert!(resp.patch_dependencies[1].condition.is_none());
+    assert!(
+        STATIC_WORKFLOW.contains("\"condition\"") && all_conventions().contains("\"condition\"")
+    );
+    assert!(TURN_RESPONSE_SCHEMA.contains("\"not_in\""));
+}
+
+#[test]
+fn no_convention_tells_the_agent_to_return_blocked() {
+    // `blocked` is named once, as the last-resort answer of a resolver
+    // round; every convention names the concrete resolution instead.
+    let all = format!("{}{STATIC_WORKFLOW}", all_conventions());
+    assert!(!all.contains("return `blocked`") && !all.contains("return `\"blocked\"`"));
+    assert!(!all.contains("with `blocked`") && !all.contains("is not an accepted answer"));
+    assert_eq!(all.matches("last-resort answer").count(), 1);
+}
+
+#[test]
+fn pick_turn_response_returns_none_when_nothing_usable() {
+    assert!(pick_turn_response("", &[]).is_none());
+    assert!(
+        pick_turn_response(
+            "",
+            &[ToolCall {
+                name: "Read".into(),
+                input: "{}".into()
+            }]
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn a_turn_is_not_launched_when_the_budget_is_spent() {
+    let dir = tempfile::tempdir().unwrap();
+    let subprojects: Vec<(String, String)> = Vec::new();
+    let mut req = request(dir.path(), &subprojects);
+    req.budget_usd = 2.0;
+    req.spent_usd = 1.95;
+    let err = turn(req).err().expect("no turn may start");
+    assert!(err.is_budget_exhausted(), "{err}");
+}
+
+/// Prose is never an action, whatever markers it carries: the structured
+/// response (the result JSON or the StructuredOutput call) is the only source.
+#[test]
+fn a_reply_in_prose_is_not_a_turn_response() {
+    let text = "I've already called the StructuredOutput tool at the end of my response.\n\
+                    - **action**: `no_change`\n\
+                    - **unresolvable_packages**: `trantor`, `jsoncpp`\n";
+    assert!(pick_turn_response(text, &[]).is_none());
+    let call = ToolCall {
+            name: "StructuredOutput".into(),
+            input: r#"{"action":"blocked","reasoning":"r","evidence":[],"confidence":"low","unresolvable_packages":[],"patch_dependencies":[],"stage_files":[]}"#.into(),
+        };
+    assert_eq!(
+        pick_turn_response("", std::slice::from_ref(&call)).map(|r| r.action),
+        Some("blocked".to_string())
+    );
+}
+
+/// A non-Python package (drogon-shape: no `python-` RPM prefix) must get
+/// the shorter non-Python Review prompt. The Python checklist mentions
+/// pyproject.toml, `%python_module`, `%pytest` — none of which apply.
+#[test]
+fn review_prompt_drops_python_checklist_for_non_python_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path();
+    // `source/` exists for a real review turn — make sure the workspace
+    // map description doesn't tell the agent to read pyproject.toml under
+    // a non-Python package's `source/`.
+    std::fs::create_dir_all(tmp.join("source")).unwrap();
+    let subprojects: Vec<(String, String)> = Vec::new();
+    let mut req = request(tmp, &subprojects);
+    req.is_python = false;
+    req.pkg_name = "drogon";
+    let prompt = build_turn_prompt(&req);
+    assert!(
+        prompt.contains("This is NOT a Python package"),
+        "non-Python Review prompt should announce the branch; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("plain-c-cpp-packaging"),
+        "non-Python Review prompt should point at the plain-c-cpp skill"
+    );
+    // The Python checklist's defining items must not appear:
+    for python_term in [
+        "pyproject.toml",
+        "%{python_module",
+        "%python_subpackages",
+        "%pytest",
+        "python_sitelib",
+        "console_scripts",
+    ] {
+        assert!(
+            !prompt.contains(python_term),
+            "non-Python Review prompt still contains Python-only term {python_term:?}"
+        );
+    }
+}
+
+/// A Python package must still get the full Python checklist.
+#[test]
+fn review_prompt_keeps_python_checklist_for_python_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let subprojects: Vec<(String, String)> = Vec::new();
+    let req = request(dir.path(), &subprojects); // is_python: true from request()
+    let prompt = build_turn_prompt(&req);
+    assert!(prompt.contains("pyproject.toml"));
+    assert!(prompt.contains("%{python_module"));
+}
+
+#[test]
+fn named_variables_are_passed_through_but_not_osc_credentials() {
+    let vars = vec![
+        pair("AWS_PROFILE", "bedrock"),
+        pair("AWS_SECRET_ACCESS_KEY", "k"),
+        pair("AWS_REGION", "us-east-1"),
+        pair("OSC_PASSWORD", "hunter2"),
+        pair("GITHUB_TOKEN", "t"),
+    ];
+    let pass = parse_pass_list(" AWS_PROFILE, AWS_REGION ,,OSC_PASSWORD,AWS_SECRET_ACCESS_KEY");
+    let kept = scrub_env_for_agent_passing(vars.clone(), &[], &pass);
+    assert_eq!(kept.get("AWS_PROFILE").map(String::as_str), Some("bedrock"));
+    assert!(kept.contains_key("AWS_REGION") && kept.contains_key("AWS_SECRET_ACCESS_KEY"));
+    assert!(!kept.contains_key("OSC_PASSWORD") && !kept.contains_key("GITHUB_TOKEN"));
+    // Without the list none of them gets through.
+    assert!(scrub_env_for_agent(vars, &[]).is_empty());
+}
