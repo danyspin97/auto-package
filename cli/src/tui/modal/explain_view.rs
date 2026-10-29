@@ -75,7 +75,7 @@ impl ExplainView {
         cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
     }
 
-    fn total(&self) -> usize {
+    pub(super) fn total(&self) -> usize {
         self.lines(self.width.get()).len()
     }
 

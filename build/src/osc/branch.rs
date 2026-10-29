@@ -1079,7 +1079,7 @@ mod tests {
 </project>
 "#;
 
-    fn add(repo: &str, project: &str, path_repo: &str) -> PathAddition {
+    pub(super) fn add(repo: &str, project: &str, path_repo: &str) -> PathAddition {
         PathAddition {
             repository: repo.into(),
             project: project.into(),

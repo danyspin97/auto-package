@@ -69,7 +69,7 @@ impl DiffView {
         cache.as_ref().map(|(_, r)| f(r))
     }
 
-    fn total(&self) -> usize {
+    pub(super) fn total(&self) -> usize {
         self.with_rendered(self.width.get(), |r| r.lines.len())
             .unwrap_or(0)
     }
