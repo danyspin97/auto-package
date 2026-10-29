@@ -1,4 +1,5 @@
 use super::*;
+use crate::spec::checks::*;
 
 const SPEC: &str = "Name: python-x\nVersion: 1.2\nSource0: https://files/x-%{version}.tar.gz\n\
 Source1: x.rpmlintrc\nBuildRequires: a\n\n%description\nd\n\n%prep\n%autosetup -p1 \\\n  -n x-%{version}\n\

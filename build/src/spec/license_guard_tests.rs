@@ -1,4 +1,5 @@
 use super::{license_guard_overrides, unverified_license_guards};
+use crate::spec::checks::*;
 
 /// torchcodec: the guard asks whether the FFmpeg linked is licence-compatible;
 /// a spec that says what was checked builds, one that does not, or one that

@@ -1,4 +1,5 @@
 use super::todo_placeholders;
+use crate::spec::checks::*;
 
 #[test]
 fn finds_markers_outside_the_changelog_only() {

@@ -1,4 +1,5 @@
 use super::set_version;
+use crate::spec::checks::*;
 
 #[test]
 fn plain_version_is_replaced_and_the_rest_kept() {

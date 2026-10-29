@@ -1,4 +1,5 @@
 use super::*;
+use crate::spec::checks::*;
 
 /// "removed duplicate BuildRequires" appears in 20 of the 25 attempt
 /// journals — py2pack emits the PyPI build requirements and we then add

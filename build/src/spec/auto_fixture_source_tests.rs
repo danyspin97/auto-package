@@ -1,4 +1,5 @@
 use super::*;
+use crate::spec::checks::*;
 
 const SPEC: &str = "Name: python-x\nVersion: 1.2\nSource0: https://files/x-%{version}.tar.gz\n\
 %description\nd\n\n%prep\n%autosetup\n%check\n%pytest tests/test_configs tests/test_configs/a.yml\n";
