@@ -3,6 +3,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::ladder::*;
+use crate::pipeline::logs::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 

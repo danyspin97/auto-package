@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::logs::*;
 
 #[test]
 fn a_spent_ladder_fails_exhausted_with_every_reason_and_is_remembered() {
