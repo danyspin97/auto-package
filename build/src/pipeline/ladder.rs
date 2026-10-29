@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::sibling::*;
+use crate::pipeline::snapshot::*;
 
 // ── resolution ladder ─────────────────────────────────────────────────────────
 //

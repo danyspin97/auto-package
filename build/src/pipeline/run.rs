@@ -10,6 +10,7 @@ use crate::pipeline::deps_turn::*;
 use crate::pipeline::generate_stage::*;
 use crate::pipeline::patch_stage::*;
 use crate::pipeline::review::*;
+use crate::pipeline::snapshot::*;
 use crate::pipeline::validate::*;
 
 pub fn run_package(

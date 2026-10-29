@@ -4,6 +4,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::patch_loop::*;
+use crate::pipeline::snapshot::*;
 
 // ── carried-forward patches, tested with quilt ───────────────────────────────
 

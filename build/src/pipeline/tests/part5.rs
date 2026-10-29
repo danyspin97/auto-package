@@ -1,6 +1,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::run::*;
+use crate::pipeline::snapshot::*;
 
 #[test]
 fn sync_quilt_series_rewrites_to_match_the_specs_current_patches() {

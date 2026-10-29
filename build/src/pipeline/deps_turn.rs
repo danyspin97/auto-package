@@ -5,6 +5,7 @@ use crate::pipeline::agent::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::linked::*;
+use crate::pipeline::snapshot::*;
 
 /// Step: PreFix (restart with previous build log).
 /// When this is a restart (spec was not regenerated) and a previous non-empty
