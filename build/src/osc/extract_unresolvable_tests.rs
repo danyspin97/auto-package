@@ -1,4 +1,5 @@
 use super::*;
+use crate::osc::unresolvable::*;
 
 #[test]
 fn a_provider_choice_line_is_read() {
