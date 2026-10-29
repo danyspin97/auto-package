@@ -1,6 +1,7 @@
 //! Switching a package to a wheel: the rung round, its reason and provenance.
 
 use super::*;
+use crate::pipeline::wheel_spec::*;
 
 /// The ladder round the mechanical wheel rung runs in: round 2, or two rounds
 /// after a round that deferred to the npm vendoring route. The round in between

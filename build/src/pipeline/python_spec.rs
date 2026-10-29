@@ -2,6 +2,7 @@
 //! fallback.
 
 use super::*;
+use crate::pipeline::wheel_spec::*;
 
 pub(super) fn generate_rust_spec(
     config: &PipelineConfig,
