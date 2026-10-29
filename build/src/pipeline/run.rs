@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::checkout::*;
+use crate::pipeline::generate_stage::*;
 
 pub fn run_package(
     config: &PipelineConfig,
