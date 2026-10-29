@@ -2,6 +2,7 @@
 //! builds through them.
 
 use super::*;
+use crate::pipeline::sibling::*;
 
 // ── resolution ladder ─────────────────────────────────────────────────────────
 //
