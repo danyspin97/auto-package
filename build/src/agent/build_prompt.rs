@@ -687,7 +687,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          {hint}",
         pkg = req.pkg_name,
         version = req.version,
-        task = task_desc,
+        task = format!("{task_desc}{}", edit_bytes_addendum(req.task)),
         budget = budget_line,
         map = workspace_map,
         source_note = source_note,

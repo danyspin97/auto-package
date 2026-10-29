@@ -256,8 +256,9 @@ pub(super) fn refresh_patches_task() -> &'static str {
      Do one patch per cycle: `quilt pop -a`, `quilt push` (the next patch), the edit, \
      `quilt refresh`; push the next patch only after that. Do not read the series file \
      (`quilt series` lists it), and do not create directories: quilt keeps its state in \
-     `source/.pc`. Edit and Write refuse a file that is not UTF-8, and no other tool \
-     here may edit it: answer that patch as `blocked` and name the file in its reason.\n\
+     `source/.pc`. Edit and Write refuse a file that is not UTF-8: that file is edited with the \
+     byte-edit helper described below, and a patch the helper cannot edit is answered \
+     `blocked` with the reason.\n\
      The pipeline refreshed every patch that applies with an offset or fuzz before you \
      started: each patch you are given has rejected hunks. Keep each patch's comment \
      header (PATCH-FIX-UPSTREAM / PATCH-FIX-OPENSUSE and the \

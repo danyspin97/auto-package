@@ -1,8 +1,10 @@
 //! Tests for the byte-edit helper's grant: where it is granted, the shapes it
 //! may run, and the shapes the denies refuse.
 
+use super::prompt::request;
 use super::tools::*;
 use super::*;
+use crate::agent::build_prompt::*;
 
 const CMD: &str = "/opt/ap/bin/auto-package";
 
@@ -126,4 +128,30 @@ fn chaining_substitution_redirection_and_quotes_are_refused() {
         let command = helper(args);
         assert!(!command_allowed(&tools, &denied, &command), "{command}");
     }
+}
+
+#[test]
+fn the_refresh_prompt_names_the_one_call_and_the_blocked_fallback() {
+    let text = refresh_helper_text(Some(CMD));
+    let call = "/opt/ap/bin/auto-package edit-bytes source/<path> --old-file \
+                byte-edit/old.txt --new-file byte-edit/new.txt";
+    assert!(text.contains(call), "{text}");
+    for needle in ["zero or several", "`blocked`", "quilt refresh"] {
+        assert!(text.contains(needle), "{needle}: {text}");
+    }
+    let none = refresh_helper_text(None);
+    assert!(!none.contains("edit-bytes"), "{none}");
+    assert!(none.contains("`blocked`"), "{none}");
+}
+
+#[test]
+fn only_the_refresh_prompt_is_given_the_helper() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut refresh = request(dir.path(), &[]);
+    refresh.task = Task::RefreshPatches;
+    let prompt = build_turn_prompt(&refresh);
+    assert!(!prompt.contains("no other tool"), "{prompt}");
+    assert!(prompt.contains("byte-edit/old.txt"), "{prompt}");
+    let other = build_turn_prompt(&request(dir.path(), &[]));
+    assert!(!other.contains("edit-bytes"), "{other}");
 }
