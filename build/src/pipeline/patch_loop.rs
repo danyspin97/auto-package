@@ -228,6 +228,14 @@ pub(super) fn patch_stage_with(
                 false
             };
             let next = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
+            // The round stalls when every patch still failing was blocked in it
+            // and no file is different from before it: another turn would be
+            // given the same patches and answer the same way.
+            let after_spec = std::fs::read_to_string(spec_path).unwrap_or_default();
+            let unchanged =
+                after_spec == before_spec && patch_files(&after_spec, checkout_dir) == before_files;
+            let remaining: Vec<String> = next.failing().map(|p| p.name.clone()).collect();
+            let stalled = all_blocked_stall(&remaining, &outcome.patch_answers, unchanged);
             let verdict = crate::patch_check::next_round(
                 rounds,
                 MAX_ROUNDS,
@@ -240,6 +248,12 @@ pub(super) fn patch_stage_with(
                 next.summary()
             ));
             report = next;
+            if stalled {
+                break format!(
+                    "round {rounds} blocked every remaining patch and changed no file, so \
+                     another turn would repeat it"
+                );
+            }
             match verdict {
                 NextRound::Again => {}
                 NextRound::Clean => break String::new(),
@@ -288,6 +302,24 @@ pub(super) fn patch_stage_with(
     write_notes(&lines, "quilt");
     step.finish(StepOutcome::Ok);
     Ok(())
+}
+
+/// Whether a round stalls: every patch in `remaining` (the ones still failing
+/// after it) has a `blocked` answer in `answers`, and the round changed no file
+/// (`unchanged`). An empty `remaining` never stalls.
+pub(super) fn all_blocked_stall(
+    remaining: &[String],
+    answers: &[crate::agent::PatchAnswer],
+    unchanged: bool,
+) -> bool {
+    use crate::agent::PatchAnswerStatus::Blocked;
+    unchanged
+        && !remaining.is_empty()
+        && remaining.iter().all(|name| {
+            answers
+                .iter()
+                .any(|a| &a.name == name && a.status == Blocked)
+        })
 }
 
 /// Folds one turn's per-patch answers into `blocked`: each patch keeps only its

@@ -359,3 +359,59 @@ fn a_checkout_series_that_disagrees_with_the_spec_is_reported() {
         "an agreeing series has no notes"
     );
 }
+
+#[test]
+fn an_all_blocked_round_that_changes_nothing_ends_the_loop_at_once() {
+    let case = run(
+        &[("b.patch", "old")],
+        false,
+        10,
+        // One script only: a second turn would fail the test in `run`.
+        vec![Box::new(|_, _| {
+            let mut out = outcome(crate::agent::Action::NoChange, "");
+            out.patch_answers = vec![crate::agent::PatchAnswer {
+                name: "b.patch".into(),
+                status: crate::agent::PatchAnswerStatus::Blocked,
+                reason: "hunk 1 is gone".into(),
+            }];
+            out
+        })],
+    );
+    assert_eq!(case.contexts.len(), 1, "{:?}", case.contexts);
+    needs_human(&case.result, "b.patch");
+    match &case.result {
+        Err(PipelineResult::Failed { reason, .. }) => assert!(
+            reason.contains("blocked by the agent: hunk 1 is gone")
+                && reason.contains("blocked every remaining patch and changed no file"),
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_stall_needs_every_failing_patch_blocked_and_no_file_changed() {
+    use crate::agent::{PatchAnswer, PatchAnswerStatus};
+    let answer = |name: &str, status| PatchAnswer {
+        name: name.into(),
+        status,
+        reason: String::new(),
+    };
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let blocked = PatchAnswerStatus::Blocked;
+    let both = [answer("a.patch", blocked), answer("b.patch", blocked)];
+    let stall = crate::pipeline::patch_loop::all_blocked_stall;
+    assert!(stall(&names(&["a.patch", "b.patch"]), &both, true));
+    // A file changed: the round made a difference, so it is not a stall.
+    assert!(!stall(&names(&["a.patch", "b.patch"]), &both, false));
+    // A failing patch with no blocked answer.
+    let one = [answer("a.patch", blocked)];
+    assert!(!stall(&names(&["a.patch", "b.patch"]), &one, true));
+    let rebased = [
+        answer("a.patch", PatchAnswerStatus::Rebased),
+        answer("b.patch", blocked),
+    ];
+    assert!(!stall(&names(&["a.patch", "b.patch"]), &rebased, true));
+    // Nothing still failing is not a stall: the check decides.
+    assert!(!stall(&[], &both, true));
+}
