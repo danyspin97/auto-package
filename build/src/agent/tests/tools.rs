@@ -386,7 +386,10 @@ fn the_refresh_commands_are_allowed_and_dangerous_forms_are_not() {
         "cd source && patch -p1 --dry-run --fuzz=0 -f -i fix.patch",
         "cd source && patch -R -p1 --dry-run -i fix.patch",
         "patch -p0 --dry-run -i fix.patch",
+        "patch --dry-run -p0 -i fix.patch",
+        "cd source && patch --dry-run -p0 -i fix.patch",
         "cd /srv/ws/source && patch -p1 --dry-run -i fix.patch",
+        "cd /srv/ws/source && patch --dry-run -p1 -i fix.patch",
     ] {
         assert!(
             command_allowed(&tools, &denied, command),
@@ -422,6 +425,48 @@ fn the_refresh_commands_are_allowed_and_dangerous_forms_are_not() {
             "{command:?} is allowed"
         );
     }
+}
+
+#[test]
+fn the_dry_run_shapes_a_refresh_turn_sent_stay_refused_and_the_prompt_says_why() {
+    // The two `patch --dry-run` checks one turn sent and the sandbox
+    // refused. Both name the checkout's patch with `../../../`, the only
+    // way out of `source/` to it: a parent path is refused by design.
+    let base = "/home/danyspin97/Music/ap-work/home_dspinella_auto-package_mariadb-refresh4-x86_64";
+    let ws = std::path::PathBuf::from(format!("{base}/state/mariadb"));
+    let co = std::path::PathBuf::from(format!(
+        "{base}/home:dspinella:auto-package:mariadb-refresh4/mariadb"
+    ));
+    let tools = turn_allowed_tools(Task::RefreshPatches, &ws, Some(&co));
+    let denied = turn_denied_tools(&ws, Some(&co));
+    let patch = "../../../home:dspinella:auto-package:mariadb-refresh4/mariadb/mariadb-10.2.4-logrotate.patch";
+    for command in [
+        format!("cd {base}/state/mariadb/source && patch -p0 --dry-run -i {patch}"),
+        format!("cd source && patch --dry-run -p0 -i {patch}"),
+        format!("patch --dry-run -p0 -i {patch}"),
+    ] {
+        assert!(
+            !command_allowed(&tools, &denied, &command),
+            "{command:?} is allowed"
+        );
+    }
+    // The forms that name a workspace-relative file stay granted.
+    for command in [
+        "patch --dry-run -p0 -i fix.patch",
+        "patch -p0 --dry-run -i fix.patch",
+        "cd source && patch -p0 --dry-run -i fix.patch",
+    ] {
+        assert!(
+            command_allowed(&tools, &denied, command),
+            "{command:?} is refused"
+        );
+    }
+    // A checkout patch cannot be named without `..`, so the prompt has to
+    // say that a dry run cannot read it and that quilt is the check.
+    let prompt = refresh_patches_task();
+    assert!(prompt.contains("outside the workspace"), "{prompt}");
+    assert!(prompt.contains("check each patch with quilt"), "{prompt}");
+    assert!(!prompt.contains("(relative paths only)"), "{prompt}");
 }
 
 #[test]

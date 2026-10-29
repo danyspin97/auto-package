@@ -262,8 +262,10 @@ pub(super) fn refresh_patches_task() -> &'static str {
      started: each patch you are given has rejected hunks. Keep each patch's comment \
      header (PATCH-FIX-UPSTREAM / PATCH-FIX-OPENSUSE and the \
      reference) as it is, and never write a .patch file by hand. `patch --dry-run` \
-     (relative paths only) is a read-only fallback when quilt cannot be used, never \
-     the main tool and never used to apply.\n\
+     is a read-only fallback when quilt cannot be used, never the main tool and \
+     never used to apply. The checkout's patch files are outside the workspace, and \
+     a path to them needs `..`, which the sandbox refuses by design: a dry run cannot \
+     read them, so check each patch with quilt.\n\
      \n\
      A patch is NEVER removed because it does not apply, nor because it only touches \
      tests: a failing hunk in a test file or a `.result` file is rebased like any \
