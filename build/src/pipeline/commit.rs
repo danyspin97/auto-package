@@ -2,6 +2,7 @@
 //! the recorded outcome, and the retries of service runs.
 
 use super::*;
+use crate::pipeline::patch_check::*;
 use crate::pipeline::spec_edits::*;
 
 /// Step: Commit.

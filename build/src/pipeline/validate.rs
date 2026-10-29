@@ -4,6 +4,7 @@ use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::keep_version::*;
+use crate::pipeline::patch_check::*;
 use crate::pipeline::spec_edits::*;
 
 /// Step: ValidateSpec. A rejected spec runs a fix turn and asks for another

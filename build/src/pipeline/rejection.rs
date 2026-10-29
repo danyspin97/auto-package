@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::licence::*;
+use crate::pipeline::patch_check::*;
 
 /// How many times the same validation error rejected an edit of one spec, in
 /// this process. A fourth identical turn would be re-prompting for the same
