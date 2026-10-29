@@ -1,4 +1,5 @@
 use super::*;
+use crate::osc::status::*;
 
 #[test]
 fn a_trailing_unpublished_marker_is_stripped_with_or_without_the_space() {
