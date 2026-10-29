@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod backport;
 pub mod branch_revision;
+pub mod byte_edit;
 mod conventions_table;
 pub mod depclass;
 pub mod depreach;
