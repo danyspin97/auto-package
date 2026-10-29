@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::patch_condition::*;
 
 #[test]
 fn failures_counted_while_unsaved_join_the_stored_count() {

@@ -2,6 +2,7 @@ use super::*;
 use crate::pipeline::checkout::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::obs_names::*;
+use crate::pipeline::patch_condition::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::state::*;
 

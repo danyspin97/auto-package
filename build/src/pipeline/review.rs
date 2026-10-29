@@ -5,6 +5,7 @@ use crate::pipeline::agent::*;
 use crate::pipeline::apply_turn::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::ladder::*;
+use crate::pipeline::patch_condition::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 

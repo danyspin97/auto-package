@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::patch_condition::*;
 
 #[test]
 fn a_failed_state_that_obs_built_is_reconciled_by_downloading_its_rpms() {

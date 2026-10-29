@@ -7,6 +7,7 @@ use crate::pipeline::dep_edit::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::linked::*;
 use crate::pipeline::logs::*;
+use crate::pipeline::patch_condition::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 

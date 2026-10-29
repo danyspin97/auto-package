@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::patch_condition::*;
 use crate::ship_condition::{FilesCondition, Verdict, check};
 
 fn cond(package: Option<&str>) -> FilesCondition {

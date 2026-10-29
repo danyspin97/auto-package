@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::Action;
+use crate::pipeline::patch_condition::*;
 
 #[test]
 fn a_patch_turn_that_finds_nothing_to_change_is_satisfied_not_failed() {
