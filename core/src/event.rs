@@ -345,6 +345,13 @@ pub enum Event {
         step: StepId,
         usage: Usage,
     },
+    /// An agent turn that failed (it crashed, timed out or ran out of turns)
+    /// still cost money, and has no reply: its cost is counted with its own
+    /// event, so the run's turns and cost add up.
+    FailedTurnUsage {
+        step: StepId,
+        usage: Usage,
+    },
     /// Agent turn completed. Named AgentReply to avoid collision with AgentResponseData.
     AgentReply {
         step: StepId,

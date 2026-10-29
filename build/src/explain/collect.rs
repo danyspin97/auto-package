@@ -142,8 +142,8 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         .filter_map(|a| a.agent.as_ref().and_then(|g| g.cost_usd))
         .sum();
     ex.cost = Cost {
-        total_usd: turn_cost + p.notes_cost,
-        turns: p.attempts.iter().filter(|a| a.agent.is_some()).count(),
+        total_usd: turn_cost + p.failed_turn_cost + p.notes_cost,
+        turns: p.attempts.iter().filter(|a| a.agent.is_some()).count() + p.failed_turns,
         budget_usd: budget,
         budget_is_default: is_default,
         state_spent_usd: state.as_ref().and_then(|s| {
@@ -181,6 +181,9 @@ pub(super) struct Parsed {
     pub(super) finished: Option<Value>,
     pub(super) build_log: Option<String>,
     pub(super) notes_cost: f64,
+    /// The failed agent turns of the run: their cost and how many there were.
+    pub(super) failed_turn_cost: f64,
+    pub(super) failed_turns: usize,
     pub(super) bad_lines: usize,
 }
 

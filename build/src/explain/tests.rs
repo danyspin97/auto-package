@@ -118,6 +118,20 @@ fn a_failed_package_is_explained_from_its_files() {
 }
 
 #[test]
+fn a_failed_turn_counts_as_a_turn_and_its_cost() {
+    let t = fixture(&[
+        r#"{"pkg":"foo","event":"failed_turn_usage","step":1,"usage":{"input_tokens":9,"output_tokens":40,"cost_usd":0.0532}}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert!(
+        (ex.cost.total_usd - 0.3032).abs() < 1e-9,
+        "{:?}",
+        ex.cost.total_usd
+    );
+    assert_eq!(ex.cost.turns, 2);
+}
+
+#[test]
 fn an_interrupted_run_says_so_and_invents_no_outcome() {
     let t = fixture(&[]);
     let ex = explain(&query(t.path())).unwrap();

@@ -29,6 +29,7 @@ impl HumanSink {
             | Event::SpecChanged { .. }
             | Event::PackageFinished { .. }
             | Event::NotesUsage { .. }
+            | Event::FailedTurnUsage { .. }
             | Event::Progress { .. } => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }

@@ -143,6 +143,8 @@ fn charge_failed_call(
     run_id: &str,
     spent_usd: &mut f64,
     result: &Result<crate::agent::TurnOutcome, crate::agent::Error>,
+    reporter: &dyn Reporter,
+    step: ap_core::event::StepId,
 ) {
     let Err(e) = result else {
         return;
@@ -153,6 +155,16 @@ fn charge_failed_call(
         // stops here would otherwise lose the spend in state.json.
         add_run_spend(ws, run_id, usage.cost_usd());
         record_daily_spend(work_dir, usage.cost_usd());
+        if usage.cost_usd() > 0.0 || usage.input_tokens + usage.output_tokens > 0 {
+            reporter.report(&Event::FailedTurnUsage {
+                step,
+                usage: ap_core::event::Usage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cost_usd: usage.cost_usd(),
+                },
+            });
+        }
     }
 }
 
@@ -326,7 +338,15 @@ pub(super) fn agent_turn(
         // separately and retrying in lockstep.
         let slot = AgentSlot::acquire();
         let mut result = crate::agent::turn(make_req(*spent_usd));
-        charge_failed_call(&config.work_dir, ws, &config.run_id, spent_usd, &result);
+        charge_failed_call(
+            &config.work_dir,
+            ws,
+            &config.run_id,
+            spent_usd,
+            &result,
+            reporter,
+            step.id,
+        );
         // A resumed session can answer in prose ("I already called
         // StructuredOutput in my previous message") without making the call in
         // THIS turn, which leaves nothing to act on (python-brotlicffi's last
@@ -351,7 +371,15 @@ pub(super) fn agent_turn(
             ));
             fresh_session.set(true);
             result = crate::agent::turn(make_req(*spent_usd));
-            charge_failed_call(&config.work_dir, ws, &config.run_id, spent_usd, &result);
+            charge_failed_call(
+                &config.work_dir,
+                ws,
+                &config.run_id,
+                spent_usd,
+                &result,
+                reporter,
+                step.id,
+            );
         }
         drop(slot);
         if matches!(&result, Err(e) if e.is_rate_limited()) {

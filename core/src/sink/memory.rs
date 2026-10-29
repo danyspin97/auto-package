@@ -44,7 +44,9 @@ impl Default for MemorySink {
 impl Reporter for MemorySink {
     fn report(&self, event: &Event) {
         match event {
-            Event::AgentReply { usage, .. } | Event::NotesUsage { usage, .. } => {
+            Event::AgentReply { usage, .. }
+            | Event::NotesUsage { usage, .. }
+            | Event::FailedTurnUsage { usage, .. } => {
                 let mut st = self.lock();
                 st.usage.input_tokens += usage.input_tokens;
                 st.usage.output_tokens += usage.output_tokens;

@@ -173,6 +173,22 @@ fn memory_sink_keeps_usage_totals_and_finished_packages_only() {
 }
 
 #[test]
+fn a_failed_turn_adds_its_usage_to_the_run_total() {
+    let sink = MemorySink::new();
+    sink.report(&Event::FailedTurnUsage {
+        step: crate::event::StepId(3),
+        usage: Usage {
+            input_tokens: 2,
+            output_tokens: 5,
+            cost_usd: 0.0532,
+        },
+    });
+    let total = sink.usage();
+    assert_eq!((total.input_tokens, total.output_tokens), (2, 5));
+    assert!((total.cost_usd - 0.0532).abs() < 1e-9);
+}
+
+#[test]
 fn jsonl_envelope_omits_pkg_when_no_context() {
     let path = tmp_path("nopkg");
     let sink = JsonlSink::open(&path).unwrap();

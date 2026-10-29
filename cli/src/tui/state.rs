@@ -419,7 +419,7 @@ impl TuiState {
                 state.add_agent_activity(ActivityKind::Task, task_str.clone());
                 state.add_log(LogLevel::Info, format!("Agent: {task_str}"));
             }
-            Event::NotesUsage { usage, .. } => {
+            Event::NotesUsage { usage, .. } | Event::FailedTurnUsage { usage, .. } => {
                 state.input_tokens += usage.input_tokens;
                 state.output_tokens += usage.output_tokens;
                 state.cost_usd += usage.cost_usd;

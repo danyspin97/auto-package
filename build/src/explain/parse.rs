@@ -155,6 +155,10 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
                 }
             }
             "notes_usage" => p.notes_cost += v["usage"]["cost_usd"].as_f64().unwrap_or(0.0),
+            "failed_turn_usage" => {
+                p.failed_turns += 1;
+                p.failed_turn_cost += v["usage"]["cost_usd"].as_f64().unwrap_or(0.0);
+            }
             "warning" => {
                 if let Some(m) = v["message"].as_str() {
                     p.warnings.push((step, m.to_string()));
