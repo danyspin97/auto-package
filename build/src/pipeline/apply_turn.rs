@@ -4,6 +4,7 @@ use super::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::licence::*;
+use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 

@@ -6,6 +6,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::carry::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::gen_spec::*;
+use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rpm_deps::*;
 

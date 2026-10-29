@@ -5,6 +5,7 @@ use super::*;
 use crate::pipeline::apply_turn::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::logs::*;
+use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::rejection::*;

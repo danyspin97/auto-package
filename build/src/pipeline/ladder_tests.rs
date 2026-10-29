@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::keep_version::*;
+use crate::pipeline::npm_vendor::*;
 use crate::pipeline::sibling::*;
 
 mod part2;

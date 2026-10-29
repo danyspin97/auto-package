@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::npm_vendor::*;
 
 fn sdist(dir: &Path, files: &[&str]) {
     let file = std::fs::File::create(dir.join("pkg-1.0.tar.gz")).unwrap();
