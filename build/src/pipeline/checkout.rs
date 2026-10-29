@@ -2,6 +2,7 @@
 //! and the reconciliation of the RPMs with the state.
 
 use super::*;
+use crate::pipeline::linked::*;
 
 /// Whether the spec at `path` still carries a TODO placeholder (convention 63).
 /// An unreadable spec has none.

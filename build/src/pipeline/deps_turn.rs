@@ -1,6 +1,7 @@
 //! The prefix stage and the missing dependencies a turn reports.
 
 use super::*;
+use crate::pipeline::linked::*;
 
 /// Step: PreFix (restart with previous build log).
 /// When this is a restart (spec was not regenerated) and a previous non-empty
