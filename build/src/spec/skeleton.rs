@@ -2,6 +2,7 @@
 //! project skeletons, and the flavor version.
 
 use super::*;
+use crate::spec::license::*;
 use crate::spec::requires_exclude::*;
 use crate::spec::rpmlintrc::*;
 use crate::spec::siblings::*;

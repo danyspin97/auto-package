@@ -2,6 +2,7 @@
 //! with them, and the runtime dependencies and file entries of a spec.
 
 use super::*;
+use crate::spec::license::*;
 
 /// Generate an openSUSE RPM spec for `release`.
 ///
