@@ -1,4 +1,3 @@
-
 use super::restore_if_taken;
 use std::cell::Cell;
 use std::sync::atomic::AtomicBool;

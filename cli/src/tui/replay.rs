@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// Feeds a recorded run (`AP_REPLAY=<run.jsonl>`) through the table state and
