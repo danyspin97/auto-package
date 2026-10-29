@@ -229,7 +229,7 @@ pub(super) fn turn_denied_tools(
 /// the result back to the model (`ls`, `osc cat`, `readelf`, `zypper`). Their
 /// trailing `*` also matches brace or glob expansion, backticks, `$(`, `..`
 /// and `~`, which can name files outside what the turn should see. Only these
-/// metacharacters are denied: `ls -d /usr/local/cuda-*` and the quoted
+/// metacharacters are denied: `ls -d lib/cuda-*` and the quoted
 /// `zypper search 'python313-*<stem>*'` form stay allowed, and `*` is not
 /// denied for that reason.
 ///

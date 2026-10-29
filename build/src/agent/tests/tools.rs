@@ -197,16 +197,127 @@ pub(super) fn bash_deny_patterns(denied: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The form the CLI matches a rule or a command in: a tab or a newline is
+/// a space, so a rule `*<tab>*` is the rule `* *`.
+fn cli_form(text: &str) -> String {
+    text.replace(['\t', '\n'], " ")
+}
+
 /// Whether `command` is allowed by the `Bash(...)` grants of `tools` and no
 /// deny of `denied` matches it. A grant `x *` also matches the bare `x`.
+/// Rules and the command are compared in the CLI's form ([`cli_form`]).
 fn command_allowed(tools: &str, denied: &str, command: &str) -> bool {
-    let granted = bash_deny_patterns(tools)
-        .iter()
-        .any(|p| glob_matches(p, command) || p.strip_suffix(" *") == Some(command));
+    let command = cli_form(command);
+    let granted = bash_deny_patterns(tools).iter().any(|p| {
+        let p = cli_form(p);
+        glob_matches(&p, &command) || p.strip_suffix(" *") == Some(command.as_str())
+    });
     let refused = bash_deny_patterns(denied)
         .iter()
-        .any(|p| glob_matches(p, command));
+        .any(|p| glob_matches(&cli_form(p), &command));
     granted && !refused
+}
+
+#[test]
+fn the_commands_a_refresh_turn_was_refused_are_allowed() {
+    // Commands one refresh-patches turn ran that the sandbox refused, with
+    // the workspace and checkout paths of that turn.
+    let base = "/home/danyspin97/Music/ap-work/home_dspinella_auto-package_mariadb-refresh2-x86_64";
+    let ws = std::path::PathBuf::from(format!("{base}/state/mariadb"));
+    let co = std::path::PathBuf::from(format!(
+        "{base}/home:dspinella:auto-package:mariadb-refresh2/mariadb"
+    ));
+    let tools = turn_allowed_tools(Task::RefreshPatches, &ws, Some(&co));
+    let denied = turn_denied_tools(&ws, Some(&co));
+    let src = format!("cd {base}/state/mariadb/source && ");
+    let in_workspace = format!("{src}quilt refresh -p ab --no-timestamps --no-index");
+    for command in [
+        in_workspace.as_str(),
+        "quilt refresh -p ab --no-timestamps --no-index",
+        "quilt refresh -p ab --no-timestamps --no-index mariadb-10.2.4-logrotate.patch",
+        "quilt refresh --no-timestamps --no-index",
+        "cd source && quilt refresh -p ab --no-timestamps --no-index",
+        "cd source && quilt refresh -p 0 --no-timestamps --no-index",
+        "cd source && quilt pop -a",
+        "quilt pop -a",
+        "cd source && quilt push",
+        "cd source && quilt series",
+        "cd source && quilt diff",
+        "quilt top",
+        "ls -la sdist",
+    ] {
+        assert!(
+            command_allowed(&tools, &denied, command),
+            "{command:?} is refused"
+        );
+    }
+}
+
+#[test]
+fn dangerous_variants_of_the_granted_commands_stay_refused() {
+    let base = "/home/danyspin97/Music/ap-work/home_dspinella_auto-package_mariadb-refresh2-x86_64";
+    let ws = std::path::PathBuf::from(format!("{base}/state/mariadb"));
+    let co = std::path::PathBuf::from(format!(
+        "{base}/home:dspinella:auto-package:mariadb-refresh2/mariadb"
+    ));
+    let rpms = std::path::PathBuf::from(format!("{base}/rpms"));
+    let tools = format!(
+        "{}{}",
+        turn_allowed_tools(Task::RefreshPatches, &ws, Some(&co)),
+        rpm_inspection_tools(Some(&rpms))
+    );
+    let denied = turn_denied_tools(&ws, Some(&co));
+    let in_workspace = format!("cd {base}/state/mariadb/source && ");
+    let inside = format!("{in_workspace}quilt refresh -p ab --no-index {base}/rpms/fix.patch");
+    for command in [
+        // Absolute paths, outside the tree or inside it, in every spelling.
+        "quilt refresh -p ab --no-index /etc/passwd",
+        "quilt refresh -p ab --no-index --opt=/etc/passwd",
+        "cd source && quilt refresh -p ab --no-index \"/etc/passwd\"",
+        "quilt add x\t/etc/hostname",
+        "quilt add x\t\"/etc/hostname\"",
+        "ls -la /etc",
+        "ls\t-la\t/etc",
+        "ls -d /usr/local/cuda-*",
+        inside.as_str(),
+        // Another patches directory, by option.
+        "quilt push -P /etc",
+        "cd source && quilt push -P ../../x",
+        "quilt push -P ~/patches",
+        // Parent paths, brace, glob, quote and substitution forms.
+        "quilt refresh -p ab --no-index ../x",
+        "quilt refresh -p ab --no-index {,/etc/x}",
+        "quilt refresh -p ab --no-index $(id)",
+        "quilt refresh -p ab --no-index `id`",
+        "quilt refresh -p ab --no-index f?.patch",
+        "ls -la ..",
+        // Chaining, redirection and pipes.
+        "cd source && quilt pop -a; rm -rf x",
+        "cd source && quilt pop -a && rm -rf x",
+        "cd source && quilt pop -a 2>&1 | tail -3",
+        "cd source && quilt refresh -p ab --no-index > /etc/x",
+        "quilt refresh -p ab --no-index | tee x",
+        // Commands that are not granted.
+        "quilt setup mariadb.spec",
+        "quilt edit fix.patch",
+        "quilt shell",
+        "cd /etc && quilt pop -a",
+        "echo \"QP=$QUILT_PATCHES\"",
+        "cat ~/.quiltrc",
+        "readelf -d @/etc/x",
+        "readelf @x",
+    ] {
+        assert!(
+            !command_allowed(&tools, &denied, command),
+            "{command:?} is allowed"
+        );
+    }
+    // rpm listing of the rpms directory is granted; its expansion options
+    // are not, even after the file name.
+    let listing = format!("rpm -qlp {base}/rpms/a.rpm");
+    assert!(command_allowed(&tools, &denied, &listing), "{listing:?}");
+    let eval = format!("{listing} --eval '%(id)'");
+    assert!(!command_allowed(&tools, &denied, &eval), "{eval:?}");
 }
 
 #[test]
