@@ -9,6 +9,7 @@ use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::rejection::*;
+use crate::pipeline::render::*;
 use crate::pipeline::sibling::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::render::*;
 
 /// `osc service ra` runs EVERY service of the checkout, `mode="disabled"` ones
 /// included. An existing package's `_service` is the one OBS holds: a

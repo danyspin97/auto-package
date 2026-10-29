@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::render::*;
 
 /// Drop stale `# ap: fix` comments from the spec on disk and return the result.
 ///

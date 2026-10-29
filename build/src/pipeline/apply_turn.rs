@@ -7,6 +7,7 @@ use crate::pipeline::licence::*;
 use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
+use crate::pipeline::render::*;
 use crate::pipeline::wheel_switch::*;
 
 /// Everything [`apply_turn_outcome`] needs besides the outcome itself and the

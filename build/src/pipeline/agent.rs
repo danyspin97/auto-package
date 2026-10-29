@@ -5,6 +5,7 @@ use super::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::render::*;
 use crate::pipeline::sibling::*;
 
 /// The shared run environment an agent turn works in.

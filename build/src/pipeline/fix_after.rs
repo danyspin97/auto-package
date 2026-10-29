@@ -7,6 +7,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::logs::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::render::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 

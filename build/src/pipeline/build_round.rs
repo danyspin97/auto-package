@@ -6,6 +6,7 @@ use crate::pipeline::agent::*;
 use crate::pipeline::apply_turn::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::render::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 use crate::pipeline::unresolvable::*;
