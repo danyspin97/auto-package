@@ -7,6 +7,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::patch_condition::*;
+use crate::pipeline::python_spec::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 

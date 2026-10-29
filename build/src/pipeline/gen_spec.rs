@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::python_spec::*;
 
 pub(super) enum GenSpecError {
     WheelOnly {

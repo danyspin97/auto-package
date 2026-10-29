@@ -5,6 +5,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::python_spec::*;
 
 /// Everything [`apply_turn_outcome`] needs besides the outcome itself and the
 /// reporter — bundled so the function doesn't trip clippy's argument-count
