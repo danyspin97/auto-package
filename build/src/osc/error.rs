@@ -2,6 +2,7 @@
 //! tests of its text, and the host macro warning.
 
 use super::*;
+use crate::osc::checkout::*;
 
 /// Fired at most once per process the first time `rpmspec --parse` is
 /// invoked, surfacing the host-vs-target-repo macro-mismatch gap. It only
