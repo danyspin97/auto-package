@@ -2,6 +2,7 @@
 //! the reads of a package at a revision, and the failure classification.
 
 use super::*;
+use crate::osc::branch::rebase::*;
 
 /// Where a branched package ended up and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
