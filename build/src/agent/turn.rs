@@ -2,6 +2,7 @@
 //! launches, its deadlines and stream limits, the capped line reader, the model
 //! for each attempt, and the entry point with its logged-in check.
 
+use super::run::*;
 use super::*;
 
 /// What a test can change about how a turn launches and watches `claude`:
