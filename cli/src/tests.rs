@@ -1,4 +1,3 @@
-
 #[test]
 fn the_summary_lists_only_packages_with_recorded_flags() {
     use ap_build::fix_flags::{FixFlag, settle};

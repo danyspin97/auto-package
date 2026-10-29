@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn fin(pkg: &str, outcome: PackageOutcome) -> Event {
