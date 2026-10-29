@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::osc::query::*;
+use crate::osc::spec_info::*;
 
 /// What a published-binary search matches a name by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

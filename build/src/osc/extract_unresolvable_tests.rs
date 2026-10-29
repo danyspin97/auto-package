@@ -1,4 +1,5 @@
 use super::*;
+use crate::osc::spec_info::*;
 use crate::osc::unresolvable::*;
 
 #[test]

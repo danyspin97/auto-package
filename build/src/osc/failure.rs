@@ -2,6 +2,7 @@
 //! the unresolvable names and version misses read from a build log.
 
 use super::*;
+use crate::osc::spec_info::*;
 
 /// OBS remote build status for a single arch.
 #[derive(Debug, Clone, PartialEq, Eq)]

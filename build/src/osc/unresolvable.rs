@@ -2,6 +2,7 @@
 //! details and the blockers they name.
 
 use super::*;
+use crate::osc::spec_info::*;
 
 /// Get the unresolvable package names (and raw detail lines) OBS already
 /// knows about for a package, without triggering a new build: the `_result`
