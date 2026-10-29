@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::run::*;
 
 #[test]
 fn sync_quilt_series_rewrites_to_match_the_specs_current_patches() {
