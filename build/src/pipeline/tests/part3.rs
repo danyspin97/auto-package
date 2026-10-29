@@ -4,6 +4,7 @@ use crate::pipeline::dep_edit::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
+use crate::pipeline::repo_search::*;
 use crate::pipeline::rpm_deps::*;
 use crate::pipeline::snapshot::*;
 
