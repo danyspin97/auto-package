@@ -2,6 +2,7 @@
 //! and the budget a resumed run keeps.
 
 use super::*;
+use crate::pipeline::commit::*;
 
 /// Step: GenerateSpec (if needed). Sets `sdist_top_level` and
 /// `from_repo_archive` on the state.
