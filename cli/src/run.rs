@@ -573,26 +573,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             &notes_dir,
             json,
         )?,
-        Commands::Baseline {
-            command:
-                BaselineCommand::Discard {
-                    name,
-                    project,
-                    arch,
-                    work_dir,
-                },
-        } => {
-            let removed = discard_pending_baselines(&work_dir, &project, &arch, &name)?;
-            if removed.is_empty() {
-                println!("{name}: no pending OBS baseline in {}", work_dir.display());
-            }
-            for dir in removed {
-                println!(
-                    "{name}: discarded the pending baseline in {}; OBS is taken as it is",
-                    dir.display()
-                );
-            }
-        }
+        Commands::Baseline { command } => baseline_command(command)?,
         Commands::Update(args) => update_project::run(args, summary)?,
     }
 

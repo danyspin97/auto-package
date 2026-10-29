@@ -61,3 +61,27 @@ pub(super) fn discard_pending_baselines(
     }
     Ok(removed)
 }
+
+/// Runs one `baseline` subcommand and prints what it did.
+pub(super) fn baseline_command(command: BaselineCommand) -> color_eyre::Result<()> {
+    match command {
+        BaselineCommand::Discard {
+            name,
+            project,
+            arch,
+            work_dir,
+        } => {
+            let removed = discard_pending_baselines(&work_dir, &project, &arch, &name)?;
+            if removed.is_empty() {
+                println!("{name}: no pending OBS baseline in {}", work_dir.display());
+            }
+            for dir in removed {
+                println!(
+                    "{name}: discarded the pending baseline in {}; OBS is taken as it is",
+                    dir.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
