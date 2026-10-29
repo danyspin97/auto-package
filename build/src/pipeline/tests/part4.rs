@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::target::*;
 
 #[test]
 fn only_success_is_a_built_state() {
