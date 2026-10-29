@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::archive::*;
 use crate::pipeline::dep_edit::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::rpm_deps::*;

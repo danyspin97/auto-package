@@ -2,6 +2,7 @@
 //! and the budget a resumed run keeps.
 
 use super::*;
+use crate::pipeline::archive::*;
 use crate::pipeline::carry::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::gen_spec::*;

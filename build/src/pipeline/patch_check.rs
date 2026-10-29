@@ -2,6 +2,7 @@
 //! sources, and the escapes of a patch from its tree.
 
 use super::*;
+use crate::pipeline::archive::*;
 
 /// The tree prefix a patch was made for when it names another release: the first
 /// path component of its diff names is `<name>-<version>` with a version other

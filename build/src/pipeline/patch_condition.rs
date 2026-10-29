@@ -2,6 +2,7 @@
 //! condition, and the decline and failure of a request.
 
 use super::*;
+use crate::pipeline::archive::*;
 
 /// How many different patch requests one package takes in total. A dependent
 /// words the same defect differently every round (python-torch was asked eleven

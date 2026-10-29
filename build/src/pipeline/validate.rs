@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::agent::*;
+use crate::pipeline::archive::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::patch_check::*;

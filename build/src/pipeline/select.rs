@@ -1,6 +1,7 @@
 //! Selecting the target of a run: its version conflicts and the selection itself.
 
 use super::*;
+use crate::pipeline::archive::*;
 use crate::pipeline::blocked::*;
 use crate::pipeline::gen_spec::*;
 use crate::pipeline::linked::*;

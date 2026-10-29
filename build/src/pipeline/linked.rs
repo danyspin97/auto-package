@@ -2,6 +2,7 @@
 //! local wheel source.
 
 use super::*;
+use crate::pipeline::archive::*;
 
 /// A package a linked project ships whose version misses a bound this package
 /// declares for it.

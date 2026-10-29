@@ -1,6 +1,7 @@
 //! Applying a turn's outcome to the checkout and resetting it.
 
 use super::*;
+use crate::pipeline::archive::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::licence::*;
 

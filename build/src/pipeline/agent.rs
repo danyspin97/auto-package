@@ -2,6 +2,7 @@
 //! skip handling around it.
 
 use super::*;
+use crate::pipeline::archive::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::sibling::*;
 
