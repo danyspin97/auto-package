@@ -275,7 +275,8 @@ pub(super) fn refresh_patches_task() -> &'static str {
      \n\
      A command the sandbox refuses is a bug in the tool: name the exact command in \
      `reasoning`, and never skip a check because of it. Change nothing else in the \
-     spec. Answer with `patches`: one entry per patch, its `name`, and a `status` of \
+     spec. Answer with `patches`, which this turn must give: a non-empty list with one \
+     entry per patch, its `name`, and a `status` of \
      `rebased` (ported with quilt), `removed` (quilt proved it applied upstream) or \
      `blocked` (not ported; say which hunk and why) with a `reason`. Only the patches \
      you list are kept, so a patch you leave out is rolled back. `action` is `edited` \

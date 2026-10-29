@@ -92,6 +92,24 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
+/// The turn schema for one task. A RefreshPatches turn must answer with a
+/// non-empty `patches` list: the schema says so, and [`pick_turn_response_where`]
+/// refuses an answer without one.
+pub(super) fn turn_response_schema(task: Task) -> String {
+    let Ok(mut schema) = serde_json::from_str::<serde_json::Value>(TURN_RESPONSE_SCHEMA) else {
+        return TURN_RESPONSE_SCHEMA.to_string();
+    };
+    if task == Task::RefreshPatches {
+        if let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut()) {
+            required.push("patches".into());
+        }
+        if let Some(patches) = schema.pointer_mut("/properties/patches") {
+            patches["minItems"] = 1.into();
+        }
+    }
+    schema.to_string()
+}
+
 /// What a RefreshPatches turn did with one patch.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PatchAnswer {
@@ -168,18 +186,31 @@ pub(super) fn pick_turn_response(
     result_payload: &str,
     tool_calls: &[ToolCall],
 ) -> Option<TurnResponse> {
-    if let Ok(r) = serde_json::from_str::<TurnResponse>(result_payload.trim()) {
+    pick_turn_response_where(result_payload, tool_calls, |_| true)
+}
+
+/// [`pick_turn_response`] with `usable` deciding which parsed response answers
+/// the turn. The `result` payload is tried first, then the last
+/// `StructuredOutput` call. A response `usable` refuses is no answer at all,
+/// so the turn falls through to the next source.
+pub(super) fn pick_turn_response_where(
+    result_payload: &str,
+    tool_calls: &[ToolCall],
+    usable: impl Fn(&TurnResponse) -> bool,
+) -> Option<TurnResponse> {
+    let parse = |text: &str| {
+        serde_json::from_str::<TurnResponse>(text)
+            .ok()
+            .filter(|r| usable(r))
+    };
+    if let Some(r) = parse(result_payload.trim()) {
         return Some(r);
     }
-    if let Some(r) = tool_calls
+    tool_calls
         .iter()
         .rev()
         .find(|t| t.name == "StructuredOutput")
-        .and_then(|t| serde_json::from_str::<TurnResponse>(&t.input).ok())
-    {
-        return Some(r);
-    }
-    None
+        .and_then(|t| parse(&t.input))
 }
 
 /// The final `result` event the claude CLI emits at the end of a turn,

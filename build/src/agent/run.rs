@@ -61,6 +61,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // added back by `agent_env`.
     let scrubbed_env = agent_env();
     cmd.env_clear().envs(&scrubbed_env);
+    let schema = turn_response_schema(req.task);
     cmd.args([
         "--print",
         "--verbose",
@@ -69,7 +70,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         "--model",
         model,
         "--json-schema",
-        TURN_RESPONSE_SCHEMA,
+        schema.as_str(),
         "--add-dir",
         &req.workspace.to_string_lossy(),
         "--allowed-tools",
@@ -393,7 +394,9 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // `result_event.result` empty even when the model DID produce a valid
     // `StructuredOutput` call before being cut off, and treating that as a
     // hard package failure throws away a usable fix for no good reason.
-    let resp = match pick_turn_response(&result_event.result, &tool_calls) {
+    let needs_patches =
+        |r: &TurnResponse| req.task != Task::RefreshPatches || !r.patches.is_empty();
+    let resp = match pick_turn_response_where(&result_event.result, &tool_calls, needs_patches) {
         Some(r) => r,
         None => {
             // Prefer the structured end-early signals the claude CLI
@@ -430,12 +433,19 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     usage,
                 }
             } else {
-                Error::Parse {
-                    message: format!(
-                        "no usable turn response: result event is {:?} \
-                         and no StructuredOutput tool call was made",
+                // A RefreshPatches answer that names no patch is a retryable
+                // "no usable turn response", the same as a missing answer.
+                let detail = if pick_turn_response(&result_event.result, &tool_calls).is_some() {
+                    "the answer has no `patches` list, which a RefreshPatches turn must give"
+                        .to_string()
+                } else {
+                    format!(
+                        "result event is {:?} and no StructuredOutput tool call was made",
                         result_event.result
-                    ),
+                    )
+                };
+                Error::Parse {
+                    message: format!("no usable turn response: {detail}"),
                     stdout: stdout_raw,
                     prompt: prompt.clone(),
                     usage,

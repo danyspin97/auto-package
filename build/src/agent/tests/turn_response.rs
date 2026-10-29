@@ -68,6 +68,47 @@ fn a_per_patch_answer_is_parsed_from_the_turn_response() {
 }
 
 #[test]
+fn a_refresh_turn_schema_requires_a_patches_list() {
+    let refresh: serde_json::Value =
+        serde_json::from_str(&turn_response_schema(Task::RefreshPatches)).unwrap();
+    let required = refresh["required"].as_array().unwrap();
+    assert!(required.iter().any(|r| r == "patches"), "{required:?}");
+    assert_eq!(refresh["properties"]["patches"]["minItems"], 1);
+    let other: serde_json::Value =
+        serde_json::from_str(&turn_response_schema(Task::FixAfterBuild)).unwrap();
+    let required = other["required"].as_array().unwrap();
+    assert!(required.iter().all(|r| r != "patches"), "{required:?}");
+    assert!(other["properties"]["patches"].get("minItems").is_none());
+}
+
+#[test]
+fn a_refresh_answer_without_patches_falls_through_to_the_tool_call() {
+    let no_list = r#"{"action":"edited","reasoning":"r","evidence":[],"confidence":"high"}"#;
+    let with_list = r#"{"action":"edited","reasoning":"r","evidence":[],"confidence":"high",
+        "patches":[{"name":"a.patch","status":"rebased","reason":"ported"}]}"#;
+    let needs_patches = |r: &TurnResponse| !r.patches.is_empty();
+    // The result payload has no list: the StructuredOutput call does.
+    let call = ToolCall {
+        name: "StructuredOutput".into(),
+        input: with_list.into(),
+    };
+    let resp =
+        pick_turn_response_where(no_list, std::slice::from_ref(&call), needs_patches).unwrap();
+    assert_eq!(resp.patches.len(), 1);
+    // No list anywhere: no usable answer, though a plain one parses.
+    assert!(pick_turn_response_where(no_list, &[], needs_patches).is_none());
+    assert!(pick_turn_response(no_list, &[]).is_some());
+    let empty_call = ToolCall {
+        name: "StructuredOutput".into(),
+        input: no_list.into(),
+    };
+    assert!(
+        pick_turn_response_where(no_list, std::slice::from_ref(&empty_call), needs_patches)
+            .is_none()
+    );
+}
+
+#[test]
 fn a_stage_files_request_is_parsed_from_the_turn_response() {
     let payload = r#"{"action":"no_change","reasoning":"r","evidence":[],"confidence":"high",
             "stage_files":[{"from":"source/package-lock.json","to":"package-lock.json"},
