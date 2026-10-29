@@ -33,9 +33,12 @@ pub(super) struct SnapshotEntry {
     pub(super) content: Option<Vec<u8>>,
 }
 
-/// Top-level files the agent is allowed to change; their contents are kept.
+/// Top-level files whose contents are kept: the files the agent is allowed to
+/// change, and the refresh series the pipeline writes before a snapshot is
+/// taken (see `write_rebase_series`), which a rollback must be able to put back.
 fn is_agent_editable(name: &str) -> bool {
     name == "series"
+        || name == crate::agent::REFRESH_SERIES
         || name == "_service"
         || [".spec", ".patch", ".diff", ".changes"]
             .iter()

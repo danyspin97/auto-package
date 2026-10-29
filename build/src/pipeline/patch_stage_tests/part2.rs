@@ -334,6 +334,37 @@ fn a_bare_patch_line_is_written_to_the_refresh_series_at_level_zero() {
 }
 
 #[test]
+fn a_rollback_puts_the_refresh_series_back_without_a_warning() {
+    struct Collect(std::sync::Mutex<Vec<String>>);
+    impl Reporter for Collect {
+        fn report(&self, e: &Event) {
+            if let Event::Warning { message, .. } = e {
+                self.0.lock().unwrap().push(message.clone());
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path();
+    let spec = "Name: foo\nPatch1: y.patch\n%prep\n%setup -q\n%patch -P 1\n";
+    let (guard, _) = write_rebase_series(spec, checkout);
+    let scratch = checkout.join(crate::agent::REFRESH_SERIES);
+    let written = std::fs::read_to_string(&scratch).unwrap();
+    // Taken after the pipeline wrote the series, as a round does.
+    let snapshot = CheckoutSnapshot::take(checkout);
+    let reporter = Collect(Default::default());
+    // A turn that removes the series, then one that rewrites it.
+    std::fs::remove_file(&scratch).unwrap();
+    snapshot.restore_keeping(&reporter, None, &[]);
+    assert_eq!(std::fs::read_to_string(&scratch).unwrap(), written);
+    std::fs::write(&scratch, "other.patch\n").unwrap();
+    snapshot.restore_keeping(&reporter, None, &[]);
+    assert_eq!(std::fs::read_to_string(&scratch).unwrap(), written);
+    assert!(reporter.0.lock().unwrap().is_empty(), "{:?}", reporter.0);
+    drop(guard);
+    assert!(!scratch.exists());
+}
+
+#[test]
 fn a_checkout_series_that_disagrees_with_the_spec_is_reported() {
     let entries = vec![
         crate::patch_check::SeriesEntry {
