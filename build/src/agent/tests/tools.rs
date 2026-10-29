@@ -73,6 +73,25 @@ fn turn_tools_cover_the_quilt_forms_the_prompts_use() {
 }
 
 #[test]
+fn the_refresh_turn_has_one_quilt_call_grant_and_no_env_prefix_or_mkdir() {
+    // The single `cd source && quilt <sub>` call is what the prompt asks
+    // for; chains, environment prefixes and scratch directories stay refused.
+    let tools = turn_allowed_tools(
+        Task::RefreshPatches,
+        std::path::Path::new("/srv/ws"),
+        Some(std::path::Path::new("/srv/ws/checkout")),
+    );
+    let list: Vec<&str> = tools.split(',').collect();
+    assert!(list.contains(&"Bash(cd source && quilt pop *)"), "{tools}");
+    assert!(
+        list.contains(&"Bash(cd /srv/ws/source && quilt push *)"),
+        "{tools}"
+    );
+    assert!(!tools.contains("mkdir"), "{tools}");
+    assert!(!tools.contains("QUILT_"), "{tools}");
+}
+
+#[test]
 fn skills_do_not_tell_the_turn_to_run_rpmspec() {
     let skills = concat!(env!("CARGO_MANIFEST_DIR"), "/../packaging-skills");
     for entry in std::fs::read_dir(skills).unwrap() {

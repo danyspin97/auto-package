@@ -247,6 +247,15 @@ pub(super) fn refresh_patches_task() -> &'static str {
        `cd source && quilt refresh -p ab --no-timestamps --no-index` (`-p 0` instead of \
        `-p ab` for a `-p0` patch); quilt writes the patch back into the checkout\n\
      - `cd source && quilt diff`, `quilt files`, `quilt series`, `quilt top` to look.\n\
+     Each quilt command is one Bash call of the form `cd source && quilt <sub> ...`: the \
+     working directory is the workspace, not `source/`. Do not chain several commands \
+     with `&&`, `;` or `|` (the sandbox refuses them), and do not put environment \
+     variables on the command line: QUILT_PATCHES and QUILT_SERIES are already set. \
+     Do one patch per cycle: `quilt pop -a`, `quilt push` (the next patch), the edit, \
+     `quilt refresh`; push the next patch only after that. Do not read the series file \
+     (`quilt series` lists it), and do not create directories: quilt keeps its state in \
+     `source/.pc`. Edit and Write refuse a file that is not UTF-8, and no other tool \
+     here may edit it: answer that patch as `blocked` and name the file in its reason.\n\
      The pipeline refreshed every patch that applies with an offset or fuzz before you \
      started: each patch you are given has rejected hunks. Keep each patch's comment \
      header (PATCH-FIX-UPSTREAM / PATCH-FIX-OPENSUSE and the \
