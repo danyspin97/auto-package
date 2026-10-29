@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pipeline::commit::*;
+use crate::pipeline::rpm_deps::*;
 
 /// Step: GenerateSpec (if needed). Sets `sdist_top_level` and
 /// `from_repo_archive` on the state.

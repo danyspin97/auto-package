@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::agent::*;
+use crate::pipeline::rpm_deps::*;
 
 /// OBS reported unresolvable dependencies for the build.
 pub(super) fn unresolvable_deps_round(

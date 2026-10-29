@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::agent::*;
+use crate::pipeline::rpm_deps::*;
 use crate::pipeline::run::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;

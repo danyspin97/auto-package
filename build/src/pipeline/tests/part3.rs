@@ -1,5 +1,6 @@
 use super::*;
 use crate::pipeline::dep_edit::*;
+use crate::pipeline::rpm_deps::*;
 use crate::pipeline::snapshot::*;
 
 #[test]
