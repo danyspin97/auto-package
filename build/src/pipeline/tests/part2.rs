@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::obs_names::*;
 use crate::pipeline::state::*;
 
 #[test]
