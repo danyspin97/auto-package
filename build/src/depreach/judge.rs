@@ -54,37 +54,42 @@ pub fn is_distro_project(project: &str) -> bool {
         .any(|p| project.starts_with(p))
 }
 
-/// The projects reachable from `repository` of a project, in path order, the
-/// project itself first. `info_of` yields the meta of a path project, or
-/// `None` for one that cannot be read, which then ends that branch of the walk.
+/// The `(project, repository)` pairs `repository` of a project builds against.
+fn repository_pairs(info: &ProjectInfo, repository: &str) -> Vec<osc::PathPair> {
+    info.repositories
+        .iter()
+        .filter(|r| r.name == repository)
+        .flat_map(|r| r.paths.clone())
+        .collect()
+}
+
+/// The projects reachable from `repository` of a project, the project itself
+/// first, then in OBS path order (see [`osc::walk_path_pairs`]). `info_of`
+/// yields the meta of a path project, or `None` for one that cannot be read:
+/// the project is still listed, but its paths are not followed.
 pub(super) fn reachable_projects(
     own: &str,
     own_info: &ProjectInfo,
     repository: &str,
     info_of: &mut dyn FnMut(&str) -> Option<ProjectInfo>,
 ) -> Vec<String> {
+    let found = osc::walk_path_pairs(
+        own,
+        repository_pairs(own_info, repository),
+        usize::MAX,
+        osc::MAX_BUILD_PATH_NODES,
+        |project, repo, _, _| {
+            let paths = info_of(project)
+                .map(|info| repository_pairs(&info, repo))
+                .unwrap_or_default();
+            Ok::<_, std::convert::Infallible>(Some(((), paths)))
+        },
+    )
+    .unwrap_or_default();
     let mut order = vec![own.to_string()];
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut queue: std::collections::VecDeque<(String, String)> = own_info
-        .repositories
-        .iter()
-        .filter(|r| r.name == repository)
-        .flat_map(|r| r.paths.clone())
-        .collect();
-    while let Some((project, repo)) = queue.pop_front() {
-        if seen.len() >= MAX_PATH_NODES || !seen.insert((project.clone(), repo.clone())) {
-            continue;
-        }
+    for (project, _, ()) in found {
         if !order.contains(&project) {
-            order.push(project.clone());
-        }
-        if let Some(info) = info_of(&project) {
-            queue.extend(
-                info.repositories
-                    .iter()
-                    .filter(|r| r.name == repo)
-                    .flat_map(|r| r.paths.clone()),
-            );
+            order.push(project);
         }
     }
     order

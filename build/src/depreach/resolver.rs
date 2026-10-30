@@ -166,7 +166,8 @@ impl DepResolver {
             .flat_map(|r| r.paths.clone())
             .collect();
         while !level.is_empty() {
-            level.retain(|node| seen.len() < MAX_PATH_NODES && seen.insert(node.clone()));
+            level
+                .retain(|node| seen.len() < osc::MAX_BUILD_PATH_NODES && seen.insert(node.clone()));
             let missing: Vec<&str> = {
                 let metas = self.metas.lock().unwrap_or_else(|e| e.into_inner());
                 let mut unique = HashSet::new();

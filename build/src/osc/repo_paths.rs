@@ -5,10 +5,17 @@ use super::*;
 use crate::osc::poll::*;
 use crate::osc::query::*;
 
-type RepoPaths = Vec<(String, String)>;
+/// One `<path>` of a project's `<repository>`: the repository `repository` of
+/// the project builds against `path_repository` of `project`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildPath {
+    pub repository: String,
+    pub project: String,
+    pub path_repository: String,
+}
 
 /// `get_project_repo_paths` answers by project, shared for a few minutes.
-static REPO_PATHS_CACHE: std::sync::Mutex<Option<HashMap<String, (Instant, RepoPaths)>>> =
+static REPO_PATHS_CACHE: std::sync::Mutex<Option<HashMap<String, (Instant, Vec<BuildPath>)>>> =
     std::sync::Mutex::new(None);
 
 /// Forget a project's cached build paths: its meta was just written.
@@ -22,30 +29,20 @@ pub(crate) fn invalidate_repo_paths(project: &str) {
     }
 }
 
-/// Return the `(project, repository)` pairs the OBS project's repositories
-/// build against.
+/// Return the build paths of each repository of the OBS project `project`.
 ///
 /// Parses `osc meta prj <project>` XML and extracts every
-/// `<path project="..." repository="..."/>` element. These are the upstream
-/// projects and repositories (e.g. `openSUSE:Factory`, repository
-/// `snapshot`) whose packages are considered "already available" and do not
-/// need to be built.
-///
-/// The repository half of each pair is deliberately not used by either
-/// caller to filter further ([`select_target`]'s resolvability check and
-/// the CLI's queue filter both just list every package name in
-/// `path_project`, regardless of that package's build status *in* the named
-/// repository) — a package whose build in the linked repo is disabled or
-/// broken there is currently still treated as available here. Narrowing that
-/// would need a per-repo build-status query in addition to this one; nothing
-/// does that today.
+/// `<path project="..." repository="..."/>` element, keeping the repository it
+/// belongs to: a project has several repositories (`openSUSE_Tumbleweed`,
+/// `16.0`, ...), each building against its own paths. Callers follow the
+/// paths of the repository they build for only, see
+/// [`super::build_paths::build_path_pairs`]. A package whose build in the
+/// linked repository is disabled or broken there is still treated as
+/// available: no per-repo build-status query is made for it.
 ///
 /// A failed query is an `Err`, never an empty list: empty reads as "no build
 /// paths", which widens the set of packages reported missing.
-pub fn get_project_repo_paths(
-    project: &str,
-    emit: Emit<'_>,
-) -> Result<Vec<(String, String)>, Error> {
+pub fn get_project_build_paths(project: &str, emit: Emit<'_>) -> Result<Vec<BuildPath>, Error> {
     check_obs_name("project", project)?;
     // The build paths of a project change when someone edits its meta, not during a
     // run: one answer is shared for a few minutes. A timed-out query is tried
@@ -77,7 +74,7 @@ pub fn get_project_repo_paths(
         .map_err(during(cmd.clone()))
         {
             Ok(out) if out.success() => {
-                let paths = parse_project_repo_paths(&out.stdout);
+                let paths = parse_build_paths(&out.stdout);
                 REPO_PATHS_CACHE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -100,8 +97,43 @@ pub fn get_project_repo_paths(
     Err(last.expect("three attempts were made"))
 }
 
-/// Parsing half of [`get_project_repo_paths`], split out so it is testable
+/// The `(project, repository)` pairs of every build path of `project`, whatever
+/// repository it belongs to, each pair once. A caller that follows the paths of
+/// one repository uses [`get_project_build_paths`] instead.
+pub fn get_project_repo_paths(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<Vec<(String, String)>, Error> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for build_path in get_project_build_paths(project, emit)? {
+        let pair = (build_path.project, build_path.path_repository);
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    Ok(pairs)
+}
+
+/// Parsing half of [`get_project_build_paths`], split out so it is testable
 /// without shelling out to `osc`.
+pub(super) fn parse_build_paths(xml: &str) -> Vec<BuildPath> {
+    crate::osc::branch::parse_project_info(xml)
+        .repositories
+        .into_iter()
+        .flat_map(|repo| {
+            repo.paths
+                .into_iter()
+                .map(move |(project, path_repository)| BuildPath {
+                    repository: repo.name.clone(),
+                    project,
+                    path_repository,
+                })
+        })
+        .collect()
+}
+
+/// The `(project, repository)` pairs of every `<path>` in `xml`, whatever
+/// repository it belongs to, each pair once.
 pub(super) fn parse_project_repo_paths(xml: &str) -> Vec<(String, String)> {
     let mut paths = Vec::new();
     for chunk in xml.split("<path ").skip(1) {

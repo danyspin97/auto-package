@@ -38,6 +38,10 @@ pub use distro::*;
 mod distro_provides_tests;
 mod repo_paths;
 pub use repo_paths::*;
+mod build_paths;
+pub use build_paths::*;
+#[cfg(test)]
+mod build_paths_tests;
 mod published;
 pub use published::*;
 

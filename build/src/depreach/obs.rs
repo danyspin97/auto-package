@@ -3,10 +3,6 @@ use super::*;
 /// How many names one search request carries.
 pub(super) const SEARCH_CHUNK: usize = 20;
 
-/// Bound on the path graph walked from a repository, against a cyclic or
-/// absurdly deep chain.
-pub(super) const MAX_PATH_NODES: usize = 64;
-
 /// What the resolver asks of OBS. A trait so the logic runs against fixtures.
 pub trait Obs: Send + Sync {
     /// The meta XML of a project, `None` when it does not exist.

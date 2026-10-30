@@ -40,6 +40,15 @@ pub(super) fn insert_if_current(
     }
 }
 
+/// One lock per project, held while its listing is fetched.
+static LISTING_FETCH_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn listing_fetch_lock(project: &str) -> Arc<Mutex<()>> {
+    let locks = LISTING_FETCH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = locks.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(guard.entry(project.to_owned()).or_default())
+}
+
 /// Return the set of package names that exist in `project`.
 ///
 /// The result is cached per project name so repeated calls within a process
@@ -71,12 +80,23 @@ pub fn list_project_packages(
     emit: Emit<'_>,
 ) -> Result<Arc<std::collections::HashSet<String>>, Error> {
     let cache = PROJECT_PACKAGES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached = || {
+        cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(project)
+            .map(Arc::clone)
+    };
+    if let Some(pkgs) = cached() {
+        return Ok(pkgs);
+    }
 
-    {
-        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pkgs) = guard.get(project) {
-            return Ok(Arc::clone(pkgs));
-        }
+    // Threads that miss the cache for one project together wait for a single
+    // fetch instead of each making its own.
+    let fetch_lock = listing_fetch_lock(project);
+    let _fetching = fetch_lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(pkgs) = cached() {
+        return Ok(pkgs);
     }
 
     let generation = project_generation(project);
