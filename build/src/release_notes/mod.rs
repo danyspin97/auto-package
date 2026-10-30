@@ -17,6 +17,17 @@ use crate::version;
 
 use render::Notes;
 
+/// Writes the recap of updating from `old` to `new` under the `Update to`
+/// bullet of the newest `.changes` entry in `checkout_dir`.
+pub fn add_recap(
+    checkout_dir: &std::path::Path,
+    repo_url: Option<&str>,
+    old: Option<&str>,
+    new: &str,
+) -> Result<(), crate::osc::Error> {
+    crate::osc::set_update_notes(checkout_dir, new, &update_notes(repo_url, old, new))
+}
+
 /// The recap lines (`* item`, continuation lines indented) for updating a
 /// package from `old` to `new`, whose source is the repository `repo_url`.
 /// Never empty: a package whose notes cannot be found says so.

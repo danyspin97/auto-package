@@ -134,6 +134,16 @@ pub(super) fn generate_spec_stage(
                             Emit::new(reporter, step.id),
                         ),
                     );
+                    warn_if_err(
+                        reporter,
+                        "adding the upstream recap to the update .changes entry",
+                        crate::release_notes::add_recap(
+                            checkout_dir,
+                            config.source_repo.as_deref(),
+                            old_version.as_deref(),
+                            &config.version,
+                        ),
+                    );
                 }
                 // Link spec.generated into the workspace so the review agent can compare.
                 #[cfg(unix)]
