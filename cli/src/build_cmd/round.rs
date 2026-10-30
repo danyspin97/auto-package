@@ -116,6 +116,24 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
         if fresh.is_empty() && in_flight.is_empty() {
             break;
         }
+        // The requested root this invocation already finished is not started
+        // again: the closure should have resolved it. Stopping here keeps a
+        // resolution defect from rebuilding it round after round.
+        let fresh_rpms: Vec<String> = fresh.iter().map(|(_, rpm)| rpm.clone()).collect();
+        if let Some(rpm) = finished_reselected(
+            &fresh_rpms,
+            |rpm| finished_roots.contains(rpm),
+            explicit_target.is_some(),
+        ) {
+            let message = format!(
+                "{rpm} already finished built in this run, yet the closure selects it \
+                 again; building it again would only repeat that build, so the run stops \
+                 here. This is a defect of the dependency resolution to investigate"
+            );
+            drain_in_flight(&rx, in_flight);
+            return Err(color_eyre::eyre::eyre!(message));
+        }
+
         for (t, rpm_name) in &fresh {
             if let Some(tc) = &tui_ctrl {
                 tc.note_origin(rpm_name, &t.name);

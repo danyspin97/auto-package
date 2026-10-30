@@ -31,6 +31,22 @@ pub(crate) fn unstarted_targets(
         .collect()
 }
 
+/// The first of `rpms` that `finished` reports as already built by this
+/// invocation. The frontier must not start such a package again: its build is
+/// done, so starting it again only repeats it, round after round. An explicit
+/// `--target` names exactly one node and builds it as named, so it is never
+/// reported.
+pub(crate) fn finished_reselected<'a>(
+    rpms: &'a [String],
+    finished: impl Fn(&str) -> bool,
+    explicit_target: bool,
+) -> Option<&'a String> {
+    if explicit_target {
+        return None;
+    }
+    rpms.iter().find(|rpm| finished(rpm))
+}
+
 /// Forwards every event to `inner` and remembers whether a package was
 /// selected to start, so a retry that returns `Ok` without starting anything
 /// can be told apart from one that built something.
@@ -173,5 +189,58 @@ pub(crate) fn request_names(
     match req {
         tui::AddRequest::New(name) => (Some(name), None),
         tui::AddRequest::Retry(row) => (origin_of(&row), Some(row)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ap_build::pipeline::{FinishedRoots, PipelineResult};
+
+    /// A set in which `rpm` was finished by the invocation that owns it.
+    fn finished_by_this_invocation(rpm: &str) -> FinishedRoots {
+        let mut roots = FinishedRoots::default();
+        roots.note(
+            rpm,
+            rpm,
+            &PipelineResult::Built {
+                rpm_name: rpm.to_string(),
+            },
+        );
+        roots
+    }
+
+    #[test]
+    fn a_root_this_invocation_finished_is_reported_when_selected_again() {
+        let fresh = vec!["python-cffi".to_string(), "python-pywayland".to_string()];
+        let mine = finished_by_this_invocation("python-pywayland");
+        assert_eq!(
+            finished_reselected(&fresh, |r| mine.contains(r), false).map(String::as_str),
+            Some("python-pywayland")
+        );
+    }
+
+    #[test]
+    fn the_same_name_finished_by_another_invocation_is_not_reported() {
+        let fresh = vec!["python-pywayland".to_string()];
+        let other = finished_by_this_invocation("python-pywayland");
+        let mine = FinishedRoots::default();
+        assert!(finished_reselected(&fresh, |r| mine.contains(r), false).is_none());
+        assert!(other.contains("python-pywayland"));
+    }
+
+    #[test]
+    fn an_explicit_target_is_built_as_named_even_when_already_finished() {
+        let fresh = vec!["python-pywayland".to_string()];
+        let mine = finished_by_this_invocation("python-pywayland");
+        assert!(finished_reselected(&fresh, |r| mine.contains(r), true).is_none());
+    }
+
+    #[test]
+    fn a_selection_of_unfinished_packages_is_not_reported() {
+        let fresh = vec!["python-cffi".to_string()];
+        assert!(finished_reselected(&fresh, |_| false, false).is_none());
+        assert!(finished_reselected(&[], |_| true, false).is_none());
     }
 }
