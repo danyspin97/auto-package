@@ -9,7 +9,8 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
     let mut agent_turns = 0;
     for line in text.lines() {
         let run_level = line.starts_with("{\"event\":\"run_started\"")
-            || line.starts_with("{\"event\":\"run_finished\"");
+            || line.starts_with("{\"event\":\"run_finished\"")
+            || line.starts_with("{\"event\":\"host_allowed\"");
         if !run_level && !line.contains(&needle) {
             continue;
         }
@@ -33,6 +34,7 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
                 p.build = v["build"].as_str().map(str::to_string);
             }
             "run_finished" => p.run_finished = Some(v),
+            "host_allowed" => p.hosts_allowed.push(v),
             "target_selected" => p.selected.push(v),
             "step_started" => p.attempts.push(Attempt {
                 step: step.unwrap_or(0),

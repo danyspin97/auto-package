@@ -112,6 +112,7 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         finished: p.run_finished.as_ref().map(|v| label(&v["outcome"])),
         elapsed_ms: p.run_finished.as_ref().and_then(|v| v["elapsed"].as_u64()),
         unreadable_lines: p.bad_lines,
+        hosts_allowed: p.hosts_allowed.iter().map(host_allowed_line).collect(),
     };
     // Attach the artifact directories of the attempts.
     for a in &mut p.attempts {
@@ -175,6 +176,8 @@ pub(super) struct Parsed {
     pub(super) argv: Option<Vec<String>>,
     pub(super) build: Option<String>,
     pub(super) run_finished: Option<Value>,
+    /// `host_allowed` events of the run, in order.
+    pub(super) hosts_allowed: Vec<Value>,
     pub(super) selected: Vec<Value>,
     pub(super) attempts: Vec<Attempt>,
     pub(super) skipped: Vec<String>,
@@ -227,4 +230,14 @@ pub(super) fn label(v: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// A `host_allowed` event as the report shows it: `host (scope, from source)`.
+/// A log from before the event existed, or a field it lacks, reads as the
+/// defaults the event itself uses.
+fn host_allowed_line(v: &Value) -> String {
+    let host = crate::allowed_hosts::printable(v["host"].as_str().unwrap_or("?"));
+    let scope = v["scope"].as_str().unwrap_or("run");
+    let source = v["source"].as_str().unwrap_or("flag");
+    format!("{host} ({scope}, from {source})")
 }

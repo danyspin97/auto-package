@@ -46,6 +46,8 @@ pub struct RunInfo {
     pub finished: Option<String>,
     pub elapsed_ms: Option<u64>,
     pub unreadable_lines: usize,
+    /// The hosts the run allowed (`--allow-host` or the TUI), as the log says.
+    pub hosts_allowed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]

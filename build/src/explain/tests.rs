@@ -312,3 +312,30 @@ fn explain_names_the_build_that_wrote_the_run() {
     let ex = explain(&query(old_log.path())).unwrap();
     assert_eq!(ex.run_info.build, None);
 }
+
+#[test]
+fn the_hosts_a_run_allowed_are_listed_and_old_logs_list_none() {
+    let t = fixture(&[
+        r#"{"event":"host_allowed","host":"a.example.org","scope":"run","source":"flag"}"#,
+        r#"{"event":"host_allowed","host":"b.example.org","scope":"persistent","source":"tui"}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(
+        ex.run_info.hosts_allowed,
+        [
+            "a.example.org (run, from flag)",
+            "b.example.org (persistent, from tui)"
+        ]
+    );
+    let text = plain(&render(&ex, 100));
+    assert!(text.contains("hosts allowed"), "{text}");
+    assert!(
+        text.contains("b.example.org (persistent, from tui)"),
+        "{text}"
+    );
+    // A log from before the event existed reads as before: no line.
+    let old = fixture(&[]);
+    let ex = explain(&query(old.path())).unwrap();
+    assert!(ex.run_info.hosts_allowed.is_empty());
+    assert!(!plain(&render(&ex, 100)).contains("hosts allowed"));
+}
