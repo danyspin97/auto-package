@@ -246,6 +246,10 @@ pub(super) fn a_number_in_a_name_pins_only_when_the_version_starts_with_it() {
     assert_eq!(series_of("foo-2", "1.4"), None);
     assert_eq!(series_of("python-3to2", "1.1"), None);
     assert_eq!(series_of("fmt", "11.0"), None);
+    assert_eq!(series_of("wlroots-0_15", "0.15.1"), Some(vec![0, 15]));
+    assert_eq!(series_of("pipewire0_2", "0.2.7"), Some(vec![0, 2]));
+    assert_eq!(series_of("libfoo2", "2.5"), None);
+    assert_eq!(series_of("foo_2", "2.5"), None);
 }
 
 #[test]

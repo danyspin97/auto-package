@@ -220,21 +220,25 @@ pub(super) fn computed_prefix(version: &str) -> Option<String> {
     plain_version(known).then(|| known.to_string())
 }
 
-/// The series a package is pinned to by its name: `fmt-9` and `boost-1.85`
-/// name `[9]` and `[1, 85]`. The number must also start the packaged version,
-/// or it is part of the name (`foo-2` packaging 1.4) and pins nothing.
+/// The series a package is pinned to by its name: `fmt-9`, `boost-1.85` and
+/// `wlroots-0_15` name `[9]`, `[1, 85]` and `[0, 15]`. Without a dash the
+/// number needs an underscore (`pipewire0_2`), or a soname (`libfoo2`) would
+/// pin. The number must also start the packaged version, or it is part of the
+/// name (`foo-2` packaging 1.4) and pins nothing.
 pub(super) fn series_of(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
-    let (_, suffix) = rpm_name.rsplit_once('-')?;
-    if suffix.is_empty()
-        || !suffix
-            .split('.')
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-    {
+    let tail = rpm_name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '_');
+    let suffix = &rpm_name[tail.len()..];
+    let dashed = tail.ends_with('-');
+    if suffix.is_empty() || suffix.starts_with(['.', '_']) || suffix.ends_with(['.', '_']) {
         return None;
     }
-    let series: Vec<u64> = suffix.split('.').filter_map(|p| p.parse().ok()).collect();
+    if !dashed && !suffix.contains('_') {
+        return None;
+    }
+    let parts: Vec<&str> = suffix.split(['.', '_']).collect();
+    let series: Vec<u64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
     let packaged = version::leading_numbers(version);
-    (series.len() == suffix.split('.').count()
+    (series.len() == parts.len()
         && packaged.len() >= series.len()
         && packaged[..series.len()] == series[..])
         .then_some(series)
