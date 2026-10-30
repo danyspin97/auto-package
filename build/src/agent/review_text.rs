@@ -182,8 +182,8 @@ pub(super) fn post_build_review_prompt() -> &'static str {
              lines, `|| true` that hides errors); a workaround of a failed attempt that the \
              journal shows was a wrong guess and that the build does not need; a deselected \
              or skipped test without a comment naming the reason; a BuildRequires or Requires \
-             that nothing uses; `%files` entries that are too broad or listed twice; real \
-             rpmlint warnings that a spec change fixes.\n\
+             that nothing uses; `%files` entries listed twice (on a new spec, also one that \
+             is too broad); real rpmlint warnings that a spec change fixes.\n\
              \n\
              Do NOT remove anything that fixed a build failure unless the log proves it \
              unnecessary, do not reformat, reorder or rewrite working lines, do not touch \
