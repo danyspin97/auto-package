@@ -12,6 +12,9 @@ use ap_core::sink::{NULL_REPORTER, Reporter};
 mod capture;
 #[cfg(test)]
 mod capture_timeout_tests;
+mod logged;
+#[cfg(test)]
+mod logged_tests;
 #[cfg(test)]
 mod restore_spawn_tests;
 mod shutdown;
@@ -19,4 +22,5 @@ mod shutdown;
 mod write_log_tests;
 
 pub use capture::*;
+pub use logged::*;
 pub use shutdown::*;

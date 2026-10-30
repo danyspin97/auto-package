@@ -131,6 +131,10 @@ mod poll;
 mod sourceinfo_version_tests;
 pub(crate) use poll::*;
 mod build_once;
+mod local_build;
+pub use local_build::*;
+#[cfg(test)]
+mod local_build_tests;
 
 #[cfg(test)]
 mod package_listing_tests;

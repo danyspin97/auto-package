@@ -93,7 +93,7 @@ impl<'a> Emit<'a> {
         }
     }
 
-    fn started(&self, program: &str, argv: &[String], cwd: &Path, log: Option<&Path>) {
+    pub(super) fn started(&self, program: &str, argv: &[String], cwd: &Path, log: Option<&Path>) {
         self.reporter.report(&Event::Command {
             step: self.step,
             program: program.to_string(),
@@ -103,7 +103,7 @@ impl<'a> Emit<'a> {
         });
     }
 
-    fn done(&self, code: i32, elapsed: Duration, stdout_bytes: u64, stderr_bytes: u64) {
+    pub(super) fn done(&self, code: i32, elapsed: Duration, stdout_bytes: u64, stderr_bytes: u64) {
         self.reporter.report(&Event::CommandDone {
             step: self.step,
             code,
