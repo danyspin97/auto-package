@@ -113,3 +113,63 @@ fn the_service_starts_without_capabilities() {
         "CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\n"
     );
 }
+
+/// Probe, with the network: the jay `_service` in URL form through
+/// `run_services`, which runs the real `cargo_vendor` helper in the sandbox.
+/// The checkout is a directory named `jay` with a minimal `jay.spec`: the
+/// helper looks for `<directory>.spec` in the checkout, and an unnamed
+/// directory fails with `Specfile not found`. Ignored by default; run with
+/// `cargo test -p ap-build probe_cargo_vendor_url_form -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_cargo_vendor_url_form_in_the_sandbox() {
+    if let Some(why) = no_sandbox() {
+        panic!("cannot probe here: {why}");
+    }
+    let root = tempfile::tempdir().unwrap();
+    // The helper names its outputs after the checkout directory, so the spec
+    // file is `<directory>.spec`.
+    let checkout_buf = root.path().join("jay");
+    fs::create_dir(&checkout_buf).unwrap();
+    let checkout = checkout_buf.as_path();
+    fs::write(
+        checkout.join("jay.spec"),
+        "Name: jay\nVersion: 1.9.1\nRelease: 0\nSummary: probe\nLicense: GPL-3.0-only\n",
+    )
+    .unwrap();
+    let params = [
+        ("url", "https://github.com/mahkoh/jay"),
+        ("revision", "v1.9.1"),
+        ("compression", "zst"),
+        ("update", "true"),
+        ("versionrewriteregex", "^v?(.*)"),
+        ("versionrewritepattern", "$1"),
+        ("changesgenerate", "true"),
+        ("changesauthor", "probe"),
+        ("changesemail", "probe@example.org"),
+    ];
+    let services = [ServiceCall {
+        name: "cargo_vendor".to_string(),
+        params: params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    }];
+    let out = run_services(checkout, "jay", &services, Emit::quiet()).unwrap();
+    let mut names: Vec<String> = fs::read_dir(checkout)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    eprintln!(
+        "probe exit {}: {}\n{}",
+        out.code,
+        out.stderr,
+        names.join("\n")
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    for want in ["jay-1.9.1.tar.zst", "vendor.tar.zst"] {
+        assert!(names.iter().any(|n| n == want), "{names:?}");
+    }
+}
