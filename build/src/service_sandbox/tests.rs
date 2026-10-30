@@ -471,3 +471,67 @@ except OSError as e:
         "https://api.opensuse.org\n"
     );
 }
+
+/// Probe: what a service reaches through the sandbox proxy, with the network.
+/// Ignored by default; run with
+/// `cargo test -p ap-build probe_services_fetch_through_the_proxy -- --ignored --nocapture`.
+///
+/// Findings (cargo_vendor helper 7.2.2 with libgit2 1.9.7, git 2.56, cargo 1.96):
+/// the git CLI and cargo reach github.com and the crates.io hosts through the
+/// proxy, from the environment the sandbox sets. cargo_vendor's own clone
+/// (libroast, through libgit2) does not use the proxy: it resolves the host
+/// itself and fails with `failed to resolve address for github.com`.
+/// `https_proxy`, a `GIT_CONFIG_GLOBAL` file with `[http] proxy` and a
+/// `$HOME/.gitconfig` with `[http] proxy` made no difference.
+#[test]
+#[ignore]
+fn probe_services_fetch_through_the_proxy() {
+    if let Some(why) = no_sandbox() {
+        panic!("cannot probe here: {why}");
+    }
+    let root = tempfile::tempdir().unwrap();
+    let checkout = fs::canonicalize(root.path()).unwrap();
+    let scratch = checkout.join(".ap-service-probe");
+    for sub in ["tmp", "cache", "cargo", "npm", "go"] {
+        fs::create_dir_all(scratch.join(sub)).unwrap();
+    }
+    fs::create_dir_all(checkout.join("c/src")).unwrap();
+    fs::write(
+        checkout.join("c/Cargo.toml"),
+        "[package]\nname = \"c\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nitoa = \"1\"\n",
+    )
+    .unwrap();
+    fs::write(checkout.join("c/src/lib.rs"), "").unwrap();
+    let proxy = Proxy::start(crate::allowed_hosts::shared(), test_asker()).unwrap();
+    let run = |program: &[&str]| {
+        let p = Profile {
+            checkout: &checkout,
+            scratch: &scratch,
+            proxy_dir: proxy.dir(),
+            extra_env: &[],
+        };
+        let program: Vec<String> = program.iter().map(|s| s.to_string()).collect();
+        let args = bwrap_args(&p, &program).unwrap();
+        std::process::Command::new(ap_core::sandbox::bwrap_path().unwrap())
+            .env_clear()
+            .args(&args)
+            .output()
+            .unwrap()
+    };
+    let text = |out: &std::process::Output| {
+        format!(
+            "{}{}\nrefused: {:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            proxy.refusals()
+        )
+    };
+
+    let git = run(&["git", "ls-remote", "https://github.com/mahkoh/jay", "HEAD"]);
+    eprintln!("probe git ls-remote: {}", text(&git));
+    assert!(git.status.success(), "{}", text(&git));
+
+    let cargo = run(&["sh", "-c", "cd c && cargo fetch"]);
+    eprintln!("probe cargo fetch: {}", text(&cargo));
+    assert!(cargo.status.success(), "{}", text(&cargo));
+}
