@@ -246,6 +246,10 @@ pub(crate) fn cmd_build(
     // other packages keep running and their results are taken in the next pass.
     let (tx, rx) = std::sync::mpsc::channel::<(String, String, PipelineResult)>();
     let mut in_flight: Vec<String> = Vec::new();
+    // The requested root once this invocation finishes it. Another invocation
+    // in the same process, or a dependency, finishing the same name does not
+    // count: a forced root is still built here.
+    let mut finished_roots = FinishedRoots::default();
 
     // Resolve closure, select all buildable targets, build them in parallel,
     // then repeat until the entire closure is built (or an error occurs).
@@ -360,6 +364,7 @@ pub(crate) fn cmd_build(
                 rate_limited_counts: &mut rate_limited_counts,
                 give_ups: &mut give_ups,
                 permanently_failed: &mut permanently_failed,
+                finished_roots: &mut finished_roots,
                 max_target_retries,
             },
         )?;
@@ -403,6 +408,7 @@ pub(crate) fn cmd_build(
                 rate_limited_counts: &mut rate_limited_counts,
                 give_ups: &mut give_ups,
                 permanently_failed: &mut permanently_failed,
+                finished_roots: &mut finished_roots,
                 max_target_retries,
             },
             Spawned {

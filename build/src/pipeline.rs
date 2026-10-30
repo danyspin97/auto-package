@@ -209,6 +209,8 @@ mod resolvable_tests {
 }
 mod select;
 pub use select::*;
+mod closure_gate;
+use closure_gate::*;
 mod blocked;
 pub use blocked::*;
 mod slots;

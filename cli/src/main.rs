@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ap_build::pipeline::{FailureKind, PipelineConfig, PipelineResult, run_package, select_target};
+use ap_build::pipeline::{
+    FailureKind, FinishedRoots, PipelineConfig, PipelineResult, run_package, select_target,
+};
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SelectionReason};
 use ap_core::run::RunDir;
 use ap_core::sink::{FanoutReporter, HumanSink, JsonlSink, LogLevel, MemorySink, Reporter};

@@ -81,6 +81,40 @@ pub(super) fn version_conflicts(
     out
 }
 
+/// Whether the local workspace state records the node `n` (RPM name `rpm`) as
+/// built at its resolved version.
+fn built_in_state(config: &PipelineConfig, n: &ap_ecosystem::pip::Node, rpm: &str) -> bool {
+    let ws_name = ap_core::run::sanitize_name(rpm);
+    let state_path = config.state_root.join(ws_name).join("state.json");
+    match std::fs::read_to_string(&state_path) {
+        Ok(s) => match serde_json::from_str::<PkgState>(&s) {
+            // A dependency `--local` built here is available to a local
+            // build; OBS never has it, so a normal run does not count it.
+            Ok(st) => {
+                st.is_built(&n.version)
+                    || (osc::local_build().is_some() && st.is_built_locally(&n.version))
+            }
+            Err(e) => {
+                ap_core::diag!(
+                    "  {} is unreadable ({e}); treating {} as not built",
+                    state_path.display(),
+                    n.name
+                );
+                false
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            ap_core::diag!(
+                "  cannot read {} ({e}); treating {} as not built",
+                state_path.display(),
+                n.name
+            );
+            false
+        }
+    }
+}
+
 /// Resolve the dependency closure and return all currently buildable targets
 /// (the "frontier" — nodes whose declared deps in the closure are all resolved).
 ///
@@ -104,11 +138,13 @@ pub(super) fn version_conflicts(
 /// OBS and locally. Without this, `--force` is unenforceable from here —
 /// `run_package`'s own force check only fires if the package reaches it in the
 /// first place, and `select_target` would otherwise skip it before it ever
-/// does.
+/// does. Under `force` the root counts as built only once `finished_roots`
+/// (the caller's own invocation) has finished it.
 ///
 /// Returns `Ok(vec![])` when every package in the closure is already
 /// resolvable, or when nothing further can be built because everything left
 /// is blocked by a `permanently_failed` package.
+#[allow(clippy::too_many_arguments)]
 pub fn select_target(
     name: &str,
     explicit_target: Option<&str>,
@@ -117,6 +153,7 @@ pub fn select_target(
     config: &PipelineConfig,
     permanently_failed: &std::collections::HashSet<String>,
     force: bool,
+    finished_roots: &FinishedRoots,
     reporter: &dyn Reporter,
 ) -> Result<Vec<TargetInfo>, String> {
     reporter.report(&Event::ResolveStarted {
@@ -221,107 +258,34 @@ pub fn select_target(
     // "already in the distro, nothing to build" vs. "this project built it"
     // — can be reported as separate counts instead of one combined number
     // that made the distro's own contribution look like this run's work.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Resolution {
-        No,
-        /// Present in a linked/path project, or a system-tool alias
-        /// ([`SYSTEM_TOOL_ALIASES`]) — the distro already has it.
-        Distro,
-        /// Present in this project's own OBS listing, or already built in
-        /// the local workspace.
-        Built,
-    }
-
     let mut resolution: Vec<Resolution> = nodes
         .iter()
         .map(|n| {
-            // `--force` on the root is checked here, not only inside
-            // `run_package`: that never runs if `select_target` already skipped
-            // the package, and the run would then exit without building.
-            // Mark the user's own requested root as unresolved up front so it
-            // reaches the frontier; the rest of the closure still goes
-            // through the ordinary resolvability check below so a forced
-            // rebuild does not stampede every already-built dependency with
-            // it.
-            if force && n.is_requested {
-                return Resolution::No;
-            }
-            // Some PyPI packages exist purely to redistribute a binary that
-            // openSUSE already ships as its own identically-named system
-            // package (`ninja` is the case that prompted this: it's a
-            // pip-installable copy of the `ninja` build tool, pulled in by
-            // build backends like scikit-build-core/meson-python that just
-            // shell out to it). Packaging a `python-<name>` RPM for one of
-            // these would only duplicate the system package, so treat them
-            // as already resolved rather than ever selecting them as a
-            // build target — see `SYSTEM_TOOL_ALIASES`.
-            if is_system_tool_alias(&n.name) {
-                return Resolution::Distro;
-            }
             let rpm = osc::rpm_name(&n.name);
             let key = osc::fuzzy_key(&rpm);
-            if is_settled(&rpm) {
-                return Resolution::Built;
-            }
-            if let Some(real) = own_fuzzy
-                .get(&key)
-                .and_then(|spellings| preferred_own_spelling(&rpm, spellings))
-            {
-                // A package OBS built that its dependents cannot install (see
-                // `spec_with_published_defects_fixed`) is not resolved: it is
-                // selected again, repaired and rebuilt.
-                let spec = config
-                    .work_dir
-                    .join(&config.project)
-                    .join(real)
-                    .join(format!("{real}.spec"));
-                return if status_is_resolvable(build_statuses.get(real))
-                    && !spec_has_published_defects(&spec, &config.rpms_dir)
-                    && !wheel_policy_pending(&config.source_urls, &n.name, &spec)
-                {
-                    Resolution::Built
-                } else {
-                    Resolution::No
-                };
-            }
-            if linked_fuzzy.contains(&key) {
-                return Resolution::Distro;
-            }
-            // Check local workspace state.
-            let ws_name = ap_core::run::sanitize_name(&rpm);
-            let state_path = config.state_root.join(ws_name).join("state.json");
-            let built = match std::fs::read_to_string(&state_path) {
-                Ok(s) => match serde_json::from_str::<PkgState>(&s) {
-                    // A dependency `--local` built here is available to a local
-                    // build; OBS never has it, so a normal run does not count it.
-                    Ok(st) => {
-                        st.is_built(&n.version)
-                            || (osc::local_build().is_some() && st.is_built_locally(&n.version))
-                    }
-                    Err(e) => {
-                        ap_core::diag!(
-                            "  {} is unreadable ({e}); treating {} as not built",
-                            state_path.display(),
-                            n.name
-                        );
-                        false
-                    }
+            let facts = node_facts(n, force, finished_roots, is_settled(&rpm), &linked_fuzzy);
+            node_resolution(
+                &facts,
+                || {
+                    own_fuzzy
+                        .get(&key)
+                        .and_then(|spellings| preferred_own_spelling(&rpm, spellings))
+                        .map(|real| {
+                            // A package OBS built that its dependents cannot install (see
+                            // `spec_with_published_defects_fixed`) is not resolved: it is
+                            // selected again, repaired and rebuilt.
+                            let spec = config
+                                .work_dir
+                                .join(&config.project)
+                                .join(real)
+                                .join(format!("{real}.spec"));
+                            status_is_resolvable(build_statuses.get(real))
+                                && !spec_has_published_defects(&spec, &config.rpms_dir)
+                                && !wheel_policy_pending(&config.source_urls, &n.name, &spec)
+                        })
                 },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                Err(e) => {
-                    ap_core::diag!(
-                        "  cannot read {} ({e}); treating {} as not built",
-                        state_path.display(),
-                        n.name
-                    );
-                    false
-                }
-            };
-            if built {
-                Resolution::Built
-            } else {
-                Resolution::No
-            }
+                || built_in_state(config, n, &rpm),
+            )
         })
         .collect();
 
@@ -433,46 +397,7 @@ pub fn select_target(
         .enumerate()
         .map(|(i, n)| (normalize_pkg_name(&n.name), i))
         .collect();
-
-    // Collect the full frontier: nodes that are not yet resolvable but whose
-    // declared deps (within the closure) are all resolvable.
-    let mut frontier: Vec<TargetInfo> = Vec::new();
-    for (i, node) in nodes.iter().enumerate() {
-        if resolvable[i] {
-            continue;
-        }
-        // Given up on this one already — leave it (and anything that needs
-        // it) out of the frontier instead of re-selecting it forever.
-        if failed_keys.contains(&osc::fuzzy_key(&osc::rpm_name(&node.name))) {
-            continue;
-        }
-
-        let deps_satisfied = dep_names_from_requires_dist(&node.requires_dist)
-            .into_iter()
-            .all(|dep| {
-                name_to_idx
-                    .get(&dep)
-                    .map(|&j| resolvable[j])
-                    .unwrap_or(true) // not in closure → provided by system
-            });
-
-        if !deps_satisfied {
-            continue;
-        }
-
-        let reason = if i == root_idx {
-            SelectionReason::RequestedRoot
-        } else {
-            SelectionReason::FirstUnbuiltDependency
-        };
-
-        frontier.push(TargetInfo {
-            name: node.name.clone(),
-            version: node.version.clone(),
-            reason,
-            blocked_by: vec![],
-        });
-    }
+    let frontier = frontier_of(&nodes, &resolvable, root_idx, &failed_keys);
 
     if !permanently_failed.is_empty() {
         let edges: Vec<(String, String)> = blocked_dependents(&nodes, &resolvable, &failed_keys)

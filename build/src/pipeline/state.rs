@@ -36,6 +36,31 @@ pub(super) fn is_settled(rpm_name: &str) -> bool {
         .is_some_and(|s| s.contains(&osc::fuzzy_key(rpm_name)))
 }
 
+/// The requested root packages one build invocation has finished (built or
+/// already built), by `fuzzy_key`. Owned by that invocation: a package that
+/// another invocation, or a dependency closure, settled does not count here.
+#[derive(Default)]
+pub struct FinishedRoots(std::collections::HashSet<String>);
+
+impl FinishedRoots {
+    /// Notes the result of the run of `rpm_name` when it is the requested
+    /// root `root_rpm` and the run built it or found it built.
+    pub fn note(&mut self, root_rpm: &str, rpm_name: &str, result: &PipelineResult) {
+        if osc::fuzzy_key(root_rpm) == osc::fuzzy_key(rpm_name)
+            && matches!(
+                result,
+                PipelineResult::Built { .. } | PipelineResult::AlreadyBuilt { .. }
+            )
+        {
+            self.0.insert(osc::fuzzy_key(rpm_name));
+        }
+    }
+
+    pub fn contains(&self, rpm_name: &str) -> bool {
+        self.0.contains(&osc::fuzzy_key(rpm_name))
+    }
+}
+
 // ── durable package state ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]

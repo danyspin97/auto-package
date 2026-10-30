@@ -13,6 +13,8 @@ pub(super) struct Round<'a> {
     pub(super) rate_limited_counts: &'a mut std::collections::HashMap<String, usize>,
     pub(super) give_ups: &'a mut std::collections::BTreeMap<String, String>,
     pub(super) permanently_failed: &'a mut std::collections::HashSet<String>,
+    /// The requested root, once this invocation has finished it.
+    pub(super) finished_roots: &'a mut FinishedRoots,
     pub(super) max_target_retries: usize,
 }
 
@@ -53,6 +55,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
         rate_limited_counts,
         give_ups,
         permanently_failed,
+        finished_roots,
         max_target_retries,
     } = r;
     // Select the frontier and build it as a stream: a package starts as soon
@@ -86,6 +89,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
             &config,
             &permanently_failed,
             config.force,
+            finished_roots,
             reporter.as_ref(),
         )
         .map_err(|e| color_eyre::eyre::eyre!(e))
@@ -112,7 +116,6 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
         if fresh.is_empty() && in_flight.is_empty() {
             break;
         }
-
         for (t, rpm_name) in &fresh {
             if let Some(tc) = &tui_ctrl {
                 tc.note_origin(rpm_name, &t.name);
@@ -258,6 +261,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
             return Err(color_eyre::eyre::eyre!("run aborted"));
         }
         done_this_round.insert(rpm_name.clone());
+        finished_roots.note(&config.rpm_name, &rpm_name, &result);
 
         if !(Frontier {
             fail_counts: fail_counts,
