@@ -339,3 +339,68 @@ fn a_monorepo_yields_the_subproject_that_was_asked_for() {
     assert_eq!(info.project_name.as_deref(), Some("cuda-core"));
     assert_eq!(info.project_dir.as_deref(), Some("cuda_core"));
 }
+
+/// A meson project has no manifest auto-package classifies: its build file is
+/// `meson.build` at the top. The top-level directory is still read from the
+/// archive, which is what a carried-forward `%autosetup -n` needs.
+#[test]
+fn a_meson_tarball_gives_its_top_directory_and_no_build_system() {
+    let dir = tempfile::tempdir().unwrap();
+    let tarball = dir.path().join("cagebreak-3.2.1.tar.gz");
+    write_tar(
+        &tarball,
+        &[
+            (
+                "cagebreak-3.2.1/meson.build",
+                b"project('cagebreak', 'c')\n".as_slice(),
+            ),
+            (
+                "cagebreak-3.2.1/src/main.c",
+                b"int main(void) { return 0; }\n".as_slice(),
+            ),
+        ],
+    );
+    let info = inspect(&tarball).unwrap();
+    assert_eq!(info.top_level_dir.as_deref(), Some("cagebreak-3.2.1"));
+    assert!(
+        info.files
+            .iter()
+            .any(|f| f == "cagebreak-3.2.1/meson.build")
+    );
+    assert!(!info.python_packaging);
+    assert!(!info.cargo_manifest);
+    assert!(!info.cmake_at_root);
+    assert!(!info.autotools_at_root);
+    // Nothing declares a name for it: the requested name is kept.
+    assert_eq!(info.project_name, None);
+}
+
+/// The top-level directory is the first directory of the archive, whether it
+/// is named after the repository or after the repository and the version, and
+/// a `pax_global_header` entry in front of it does not count.
+#[test]
+fn a_forge_archive_gives_its_top_directory_after_a_pax_header() {
+    let dir = tempfile::tempdir().unwrap();
+    for top in ["cagebreak", "cagebreak-3.2.1"] {
+        let tarball = dir.path().join(format!("{top}.tar.gz"));
+        let meson = format!("{top}/meson.build");
+        {
+            let file = std::fs::File::create(&tarball).unwrap();
+            let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut ar = tar::Builder::new(enc);
+            let mut add = |name: &str, body: &[u8]| {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                ar.append_data(&mut header, name, body).unwrap();
+            };
+            add("pax_global_header", b"");
+            add(&meson, b"project('cagebreak', 'c')\n");
+            ar.into_inner().unwrap().finish().unwrap();
+        }
+        let info = inspect(&tarball).unwrap();
+        assert_eq!(info.top_level_dir.as_deref(), Some(top), "{top}");
+        assert!(info.files.iter().any(|f| *f == meson), "{top}");
+    }
+}
