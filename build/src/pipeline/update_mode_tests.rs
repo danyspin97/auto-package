@@ -249,3 +249,61 @@ mod inherited_checks {
         );
     }
 }
+
+mod tidy_on_update {
+    use crate::pipeline::update_mode::normalize_spec_text;
+
+    /// `%check` after `%files`: the order `move_check_before_files` puts right.
+    const CHECK_AFTER_FILES: &str = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool\n\
+        License: MIT\nSource0: foo-2.0.tar.gz\n\n%description\nA tool that does things.\n\n\
+        %prep\n%setup -q\n\n%build\n\n%install\n\n%files\n%{_bindir}/foo\n\n%check\nmake test\n\n\
+        %changelog\n";
+
+    /// A `Requires` written after `%python_subpackages`.
+    const SUBPACKAGE_REQUIRES: &str = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool\n\
+        License: MIT\n\n%description\nA tool that does things.\n\n%python_subpackages\n\
+        Requires: python-bar\n\n%prep\n%setup -q\n\n%build\n\n%install\n\n%files\n\
+        %{_bindir}/foo\n\n%changelog\n";
+
+    /// A pytest BuildRequires that a `%check` running an import does not use.
+    const UNUSED_PYTEST: &str = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool\n\
+        License: MIT\nSource0: foo-2.0.tar.gz\nBuildRequires: %{python_module pytest}\n\n\
+        %description\nA tool that does things.\n\n%prep\n%setup -q\n\n%build\n\n%install\n\n\
+        %check\n%python_expand $python -c 'import foo'\n\n%files\n%{_bindir}/foo\n\n\
+        %changelog\n";
+
+    #[test]
+    fn an_update_keeps_the_order_the_origin_chose() {
+        // Only the version macro changes (see the test below): the order stays.
+        let kept = normalize_spec_text(CHECK_AFTER_FILES, true);
+        assert_eq!(
+            kept,
+            CHECK_AFTER_FILES.replace("foo-2.0.tar.gz", "foo-%{version}.tar.gz")
+        );
+    }
+
+    #[test]
+    fn a_new_spec_still_gets_the_section_order() {
+        let moved = normalize_spec_text(CHECK_AFTER_FILES, false);
+        assert_ne!(moved, CHECK_AFTER_FILES);
+        let check = moved.find("\n%check").expect("a %check");
+        let files = moved.find("\n%files").expect("a %files");
+        assert!(check < files, "%check moved before %files:\n{moved}");
+    }
+
+    #[test]
+    fn an_update_fixes_a_requires_written_after_the_subpackages_it_belongs_to() {
+        // A dependency tag after `%python_subpackages` attaches to the wrong
+        // subpackage: an edit of this version is fixed on an update too.
+        let kept = normalize_spec_text(SUBPACKAGE_REQUIRES, true);
+        let tag = kept.find("Requires: python-bar").expect("the tag");
+        let sub = kept.find("%python_subpackages").expect("the subpackages");
+        assert!(tag < sub, "{kept}");
+    }
+
+    #[test]
+    fn an_update_drops_a_pytest_build_requires_its_check_does_not_use() {
+        let kept = normalize_spec_text(UNUSED_PYTEST, true);
+        assert!(!kept.contains("%{python_module pytest}"), "{kept}");
+    }
+}

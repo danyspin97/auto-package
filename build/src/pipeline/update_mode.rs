@@ -109,3 +109,63 @@ pub(super) struct UpdateMode {
     /// the gate meets again after each fix is reported once.
     pub(super) reported: BTreeSet<String>,
 }
+
+/// The deterministic normalisations of a spec in the validation round, in the
+/// order they are applied. On an update (`update`) a pass is kept when leaving
+/// it out would leave the build, the install or the package's metadata wrong, or
+/// would leave an edit this version makes wrong. The others are style, and an
+/// inherited recipe keeps them as the origin has them:
+/// - kept: `normalize_python_module_versions` (a name that does not exist),
+///   `fix_stray_dollar_macros` (a bare `$python_sitelib` outside its expansion),
+///   `fix_missing_alternatives_requires` (an install-time failure),
+///   `drop_unused_pytest_build_requires` (a BuildRequires an update adds that
+///   the check does not use), `parenthesize_conditional_dependencies` (OBS:
+///   `nothing provides if`), `normalize_runtime_python_module` (a runtime name of
+///   another flavor), `hoist_dependency_tags` (a Requires written after
+///   `%python_subpackages` lands on the wrong subpackage), `dedupe_changelog_header`
+///   (a second `%changelog` is not a changelog), `unwrap_python_expand_block` (a
+///   `#` rpm reads as a comment), `use_version_macro` (a literal version an
+///   update leaves stale).
+/// - skipped on an update: `collapse_dist_info_license_lines` (the form of the
+///   `%files` licence lines), `normalize_nvidia_license` (licence spelling, which
+///   rpmlint reports), `move_check_before_files` (section order),
+///   `add_noarch_to_pure_python` (the architecture the origin chose),
+///   `drop_unneeded_wheel_build_requires` (a build dependency that is not needed,
+///   only slower to build).
+pub(super) fn normalize_spec_text(current: &str, update: bool) -> String {
+    let fixed = crate::spec::normalize_python_module_versions(current);
+    let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
+    let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
+    let fixed = crate::spec::drop_unused_pytest_build_requires(&fixed);
+    let fixed = if update {
+        fixed
+    } else {
+        crate::spec::collapse_dist_info_license_lines(&fixed)
+    };
+    let fixed = crate::spec::parenthesize_conditional_dependencies(&fixed);
+    let fixed = crate::spec::normalize_runtime_python_module(&fixed);
+    let fixed = crate::spec::hoist_dependency_tags(&fixed);
+    let fixed = if update {
+        fixed
+    } else {
+        crate::spec::normalize_nvidia_license(&fixed)
+    };
+    let fixed = crate::spec::dedupe_changelog_header(&fixed);
+    let fixed = crate::spec_tidy::unwrap_python_expand_block(&fixed);
+    let fixed = if update {
+        fixed
+    } else {
+        crate::spec_tidy::move_check_before_files(&fixed)
+    };
+    let fixed = if update {
+        fixed
+    } else {
+        crate::spec_tidy::add_noarch_to_pure_python(&fixed)
+    };
+    let fixed = crate::spec_tidy::use_version_macro(&fixed);
+    if update {
+        fixed
+    } else {
+        crate::spec_tidy::drop_unneeded_wheel_build_requires(&fixed)
+    }
+}

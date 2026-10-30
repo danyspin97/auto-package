@@ -46,25 +46,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
     // outside `%python_expand`; `%python_install_alternative` without
     // its `Requires(post/postun): update-alternatives`).
     if let Ok(current) = std::fs::read_to_string(spec_path) {
-        let fixed = crate::spec::normalize_python_module_versions(&current);
-        let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
-        let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
-        let fixed = crate::spec::drop_unused_pytest_build_requires(&fixed);
-        let fixed = crate::spec::collapse_dist_info_license_lines(&fixed);
-        let fixed = crate::spec::parenthesize_conditional_dependencies(&fixed);
-        // Flavor-neutral runtime dependencies, before `%python_subpackages`,
-        // one spelling of the NVIDIA licence, one `%changelog` (conventions 65, 69).
-        let fixed = crate::spec::normalize_runtime_python_module(&fixed);
-        let fixed = crate::spec::hoist_dependency_tags(&fixed);
-        let fixed = crate::spec::normalize_nvidia_license(&fixed);
-        let fixed = crate::spec::dedupe_changelog_header(&fixed);
-        // Style: section order, a noarch tag, the version as a macro, and no
-        // build dependency a prebuilt wheel does not use (spec_tidy).
-        let fixed = crate::spec_tidy::unwrap_python_expand_block(&fixed);
-        let fixed = crate::spec_tidy::move_check_before_files(&fixed);
-        let fixed = crate::spec_tidy::add_noarch_to_pure_python(&fixed);
-        let fixed = crate::spec_tidy::use_version_macro(&fixed);
-        let fixed = crate::spec_tidy::drop_unneeded_wheel_build_requires(&fixed);
+        let fixed = normalize_spec_text(&current, st.update.is_some());
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
         let mut fixed = fixed;
