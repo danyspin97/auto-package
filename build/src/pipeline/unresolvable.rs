@@ -403,6 +403,7 @@ pub(super) fn unresolvable_deps_round(
     if !already_reviewed && !config.no_agent && st.spent_usd < config.budget_usd {
         let turn = agent_turn(
             TurnCtx {
+                carried: false,
                 label: "translate-deps",
                 task: crate::agent::Task::TranslateUnresolvableDeps,
                 event_task: ap_core::event::Task::TranslateUnresolvableDeps,

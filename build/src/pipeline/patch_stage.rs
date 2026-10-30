@@ -52,6 +52,7 @@ pub(super) fn patch_stage(
         &mut |ctx, st, attempt, context| {
             agent_turn(
                 TurnCtx {
+                    carried: false,
                     label: "refresh-patches",
                     task: crate::agent::Task::RefreshPatches,
                     event_task: ap_core::event::Task::FixAfterBuild {

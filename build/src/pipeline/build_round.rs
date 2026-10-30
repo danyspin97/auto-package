@@ -328,6 +328,7 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
     let snapshot = CheckoutSnapshot::take(checkout_dir);
     let turn = agent_turn(
         TurnCtx {
+            carried: false,
             label: "post-build-review",
             task: crate::agent::Task::PostBuildReview,
             event_task: ap_core::event::Task::PostBuildReview,

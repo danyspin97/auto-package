@@ -124,6 +124,7 @@ pub(super) fn request<'a>(
         session_id: None,
         checkout_dir: None,
         context: None,
+        carried: false,
         rpms_dir: None,
         sibling_dirs: &[],
         model_rotation: 0,
@@ -378,4 +379,60 @@ fn updates_never_remove_hygiene_by_the_conventions() {
         index_86.contains("only what the new release forces"),
         "{index_86}"
     );
+}
+
+const CARRIED: &str = "This spec is the package's existing recipe carried forward from 1.0 to 1.1: \
+     only `Version:` and the source changed.";
+
+/// A carried-forward spec is reviewed with the update checklist whatever its
+/// Context holds, so a note about the submodules does not change the checklist.
+#[test]
+fn a_carried_spec_is_reviewed_with_the_update_checklist() {
+    for is_python in [true, false] {
+        for context in [None, Some(CARRIED), Some("## Submodules: three are empty")] {
+            let ws = std::path::Path::new("/nonexistent-workspace");
+            let mut req = request(ws, &[]);
+            req.is_python = is_python;
+            req.carried = true;
+            req.context = context;
+            let prompt = build_turn_prompt(&req);
+
+            for want in [
+                "## Allowed edits",
+                "## Do not touch",
+                "`Group:`",
+                "`BuildRoot:`",
+                "`%defattr`",
+                "`%ldconfig_scriptlets`",
+                "The glob style of `%files`",
+                "`no_change`",
+            ] {
+                assert!(prompt.contains(want), "update prompt lacks {want:?}");
+            }
+            for banned in [
+                "Review the generated spec",
+                "# no upstream test suite",
+                "Write a real one now",
+                "CRITICAL BUGS FIRST",
+            ] {
+                assert!(!prompt.contains(banned), "update prompt has {banned:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_new_spec_keeps_the_full_checklist() {
+    let ws = std::path::Path::new("/nonexistent-workspace");
+    let python = build_turn_prompt(&request(ws, &[]));
+    assert!(python.contains("Review the generated spec before the first build."));
+    assert!(python.contains("CRITICAL BUGS FIRST"));
+    assert!(python.contains("**%description**"));
+    assert!(!python.contains("## Do not touch"));
+
+    let mut req = request(ws, &[]);
+    req.is_python = false;
+    let plain = build_turn_prompt(&req);
+    assert!(plain.contains("# no upstream test suite"));
+    assert!(!plain.contains("## Do not touch"));
 }

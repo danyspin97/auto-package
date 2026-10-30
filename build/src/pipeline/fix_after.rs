@@ -41,6 +41,7 @@ pub(super) fn fix_after_validation(
     let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
     let turn = agent_turn(
         TurnCtx {
+            carried: false,
             label: "fix-after-validation",
             task: crate::agent::Task::FixAfterValidation,
             event_task: ap_core::event::Task::FixAfterBuild {

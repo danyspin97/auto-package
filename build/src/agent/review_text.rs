@@ -1,6 +1,8 @@
 //! The task text of the two review turns: the pre-build review of a Python
 //! package and the post-build clean-up. Kept apart from build_prompt.rs.
 
+use super::*;
+
 /// The pre-build review of a Python package, before the first build.
 pub(super) fn review_prompt_python() -> &'static str {
     "Review the generated spec before the first build.\n\
@@ -187,4 +189,65 @@ pub(super) fn post_build_review_prompt() -> &'static str {
              unnecessary, do not reformat, reorder or rewrite working lines, do not touch \
              Version, sources or patches, and do not read the whole build log. If nothing \
              clearly improves the package, return `no_change` without investigating further."
+}
+
+/// The pre-build review task: an update of a carried-forward spec gets its
+/// short checklist, a new spec the full one for its language.
+pub(super) fn review_task(req: &TurnRequest<'_>) -> &'static str {
+    if req.carried {
+        review_prompt_update()
+    } else if req.is_python {
+        review_prompt_python()
+    } else {
+        review_prompt_non_python()
+    }
+}
+
+/// The pre-build review of a carried-forward spec: the maintainer's recipe
+/// with only `Version:` and the source changed. Lists what may be edited on
+/// this update and what must stay, and nothing else.
+pub(super) fn review_prompt_update() -> &'static str {
+    "Review the carried-forward spec before the first build. This is an UPDATE: the \
+     spec is the package's existing recipe, and the Context says what this run has \
+     changed in it. Its maintainer chose its form. The job is to let the new release \
+     build with the fewest edits, not to bring the spec to the shape of a new one.\n\
+     \n\
+     ## Allowed edits\n\
+     \n\
+     Only these, on this update:\n\
+     - `Version:`, the `Source` lines and `_service` for the new release. A `Source0:` \
+       extension that does not match the file in `sdist/` is fixed (`ls sdist/`).\n\
+     - Patches: one added, refreshed or dropped, each named in the changelog field.\n\
+     - BuildRequires and Requires that the new upstream build files demand: read \
+       `source/pyproject.toml`, `setup.cfg`, `setup.py`, `CMakeLists.txt`, \
+       `configure.ac`, `meson.build` or `Cargo.toml` and add or drop only what they \
+       now declare, spelled as the spec spells its neighbours.\n\
+     - `%files` entries for files that appeared or vanished in the new release, and \
+       a soname rename when upstream changes the soversion (convention 86).\n\
+     - The `-n` directory of `%setup` or `%autosetup`, when the new release unpacks \
+       to another directory name.\n\
+     - `License:`, when upstream changed the licence: the SPDX expression the new \
+       source states (convention 5).\n\
+     - Build or test flags the new version needs, and a `%check` skip that the new \
+       tests no longer need to keep.\n\
+     \n\
+     ## Do not touch\n\
+     \n\
+     Even where a convention or a packaging skill would write it differently:\n\
+     - `Group:`, `BuildRoot:`, `%clean`, `%defattr`, unless a build or rpmlint failure \
+       of this version forces the change (convention 90).\n\
+     - The form of a scriptlet (`%ldconfig_scriptlets` or a hand-written `%post`), \
+       except the name a soname rename forces (`%ldconfig_scriptlets -n lib<name><soversion>`, \
+       `%post -n lib...`).\n\
+     - The glob style of `%files`: do not narrow or widen a glob.\n\
+     - `Summary:`, `%description`, the copyright and licence header, and comments: \
+       do not reword one. Do not add a comment, except the reason a new skip or a \
+       dropped bound needs (conventions 11 and 75).\n\
+     - The spelling of a Requires that is already there (`python3dist(...)`, \
+       `%{python_module ...}`).\n\
+     - A `%license` or licence-file line that no build gate asks for.\n\
+     \n\
+     Anything that a failure of this version forces is fixed after the build, not \
+     here. If nothing in the allowed list applies, say so in one clause and return \
+     `no_change`."
 }

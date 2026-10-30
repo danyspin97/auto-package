@@ -69,6 +69,7 @@ pub(super) fn prefix_stage(
 
         let turn = agent_turn(
             TurnCtx {
+                carried: false,
                 label: "prefix",
                 task: crate::agent::Task::FixAfterBuild,
                 event_task: ap_core::event::Task::FixAfterBuild {

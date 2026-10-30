@@ -5,8 +5,7 @@ use super::*;
 
 pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     let task_desc = match req.task {
-        Task::Review if !req.is_python => review_prompt_non_python(),
-        Task::Review => review_prompt_python(),
+        Task::Review => review_task(req),
         Task::FixAfterBuild => {
             "Fix the spec after a failed `osc build`.\n\
              \n\

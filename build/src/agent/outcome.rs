@@ -345,6 +345,9 @@ pub struct TurnRequest<'a> {
     pub checkout_dir: Option<&'a std::path::Path>,
     /// Optional short note injected into the prompt just before the hint section.
     pub context: Option<&'a str>,
+    /// The spec is a recipe carried forward from an older version: its review
+    /// gets the short update checklist, whatever else the Context holds.
+    pub carried: bool,
     /// Where the RPMs this project built are kept. When set, the turn may list
     /// one's files with `rpm -qlp` (see [`rpm_inspection_tools`]).
     pub rpms_dir: Option<&'a std::path::Path>,

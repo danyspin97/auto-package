@@ -37,6 +37,7 @@ pub(super) fn fix_turn(
     let checkout_snapshot = CheckoutSnapshot::take(checkout_dir);
     let turn = agent_turn(
         TurnCtx {
+            carried: false,
             label: "fix-after-build",
             task,
             event_task: ap_core::event::Task::FixAfterBuild {

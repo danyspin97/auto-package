@@ -35,6 +35,8 @@ pub(super) struct TurnCtx<'a> {
     pub(super) resume: bool,
     /// Optional short note injected into the prompt before the hint section.
     pub(super) context: Option<&'a str>,
+    /// The spec is a carried-forward recipe (see `TurnRequest::carried`).
+    pub(super) carried: bool,
 }
 
 /// Sent in the fresh session after a turn that ended without calling
@@ -326,6 +328,7 @@ pub(super) fn agent_turn(
         },
         checkout_dir: ctx.checkout_dir,
         context: nudge.get().map(String::as_str).or(base_context.as_deref()),
+        carried: ctx.carried,
         rpms_dir: Some(&config.rpms_dir),
         sibling_dirs: &sibling_dirs,
         model_rotation: model_rotation.get(),

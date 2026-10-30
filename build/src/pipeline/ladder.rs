@@ -204,6 +204,7 @@ pub(super) fn resolve_blocked(
         &mut |ctx, st, site, label, attempt, context| {
             agent_turn(
                 TurnCtx {
+                    carried: false,
                     label,
                     task: site.task,
                     event_task: site.event_task.clone(),
