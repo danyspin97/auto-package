@@ -144,15 +144,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
 
             sync_quilt_series(&expanded, checkout_dir);
 
-            let build_time = source_made_at_build_time(checkout_dir);
-            let unmade = |names: Vec<String>| {
-                if build_time {
-                    without_build_time_archives(names)
-                } else {
-                    names
-                }
-            };
-            let mut missing = unmade(missing_source_files(&expanded, checkout_dir));
+            let mut missing = missing_at_checkout(&expanded, checkout_dir);
             // A Source that is a file of the unpacked source (a lock file for the
             // `node_modules` service) is copied in here: the agent cannot.
             if !missing.is_empty() {
@@ -163,7 +155,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                         "info: copied {} from the unpacked source into the checkout",
                         copied.join(", ")
                     );
-                    missing = unmade(missing_source_files(&expanded, checkout_dir));
+                    missing = missing_at_checkout(&expanded, checkout_dir);
                 }
             }
             // A `_service` (`download_files`, the one installed here) is how a Source

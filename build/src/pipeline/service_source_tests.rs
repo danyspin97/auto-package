@@ -5,7 +5,7 @@
 use super::*;
 use std::cell::Cell;
 
-const OBS_SCM: &str = "<services>\n  <service mode=\"disabled\" name=\"obs_scm\">\n    <param name=\"url\">https://github.com/hyprwm/hyprland-guiutils.git</param>\n    <param name=\"scm\">git</param>\n    <param name=\"revision\">main</param>\n    <param name=\"changesgenerate\">enable</param>\n    <param name=\"filename\">hyprland-guiutils</param>\n    <param name=\"versionformat\">@PARENT_TAG@+@TAG_OFFSET@</param>\n    <param name=\"versionrewrite-pattern\">v(.*)\\+0</param>\n    <param name=\"versionrewrite-replacement\">\\1</param>\n  </service>\n  <service mode=\"buildtime\" name=\"tar\"/>\n  <service mode=\"buildtime\" name=\"recompress\">\n    <param name=\"file\">*.tar</param>\n    <param name=\"compression\">xz</param>\n  </service>\n  <service mode=\"disabled\" name=\"set_version\"/>\n</services>\n";
+pub(super) const OBS_SCM: &str = "<services>\n  <service mode=\"disabled\" name=\"obs_scm\">\n    <param name=\"url\">https://github.com/hyprwm/hyprland-guiutils.git</param>\n    <param name=\"scm\">git</param>\n    <param name=\"revision\">main</param>\n    <param name=\"changesgenerate\">enable</param>\n    <param name=\"filename\">hyprland-guiutils</param>\n    <param name=\"versionformat\">@PARENT_TAG@+@TAG_OFFSET@</param>\n    <param name=\"versionrewrite-pattern\">v(.*)\\+0</param>\n    <param name=\"versionrewrite-replacement\">\\1</param>\n  </service>\n  <service mode=\"buildtime\" name=\"tar\"/>\n  <service mode=\"buildtime\" name=\"recompress\">\n    <param name=\"file\">*.tar</param>\n    <param name=\"compression\">xz</param>\n  </service>\n  <service mode=\"disabled\" name=\"set_version\"/>\n</services>\n";
 
 fn params(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -194,10 +194,7 @@ fn the_archive_obs_makes_is_not_a_missing_file() {
         "hyprland-guiutils-0.2.2.tar.xz".to_string(),
         "fix.patch".to_string(),
     ];
-    assert_eq!(
-        without_build_time_archives(names),
-        ["fix.patch".to_string()]
-    );
+    assert_eq!(still_missing(names, OBS_SCM), ["fix.patch".to_string()]);
 }
 
 #[test]

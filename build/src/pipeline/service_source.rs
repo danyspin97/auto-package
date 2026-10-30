@@ -100,20 +100,146 @@ pub(super) fn regex_replacement(osc: &str) -> String {
 /// OBS makes that source when the package is built: no archive is in the
 /// checkout and nothing is to run here.
 pub(super) fn source_made_at_build_time(checkout_dir: &Path) -> bool {
-    std::fs::read_to_string(checkout_dir.join("_service")).is_ok_and(|s| {
-        matches!(
-            source_service(&mask_xml_comments(&s)),
-            Some((_, SourceService::BuildTime))
-        )
-    })
+    std::fs::read_to_string(checkout_dir.join("_service"))
+        .is_ok_and(|s| service_makes_source_at_build_time(&s))
 }
 
-/// `sources` without the source archives: OBS makes those at build time when
-/// the source is an `obs_scm` one, so their absence is not a missing file.
-pub(super) fn without_build_time_archives(sources: Vec<String>) -> Vec<String> {
-    sources
+/// Whether the `_service` text `service` gives the source from an `obs_scm`
+/// service. An empty text (no `_service`) gives none.
+pub(super) fn service_makes_source_at_build_time(service: &str) -> bool {
+    matches!(
+        source_service(&mask_xml_comments(service)),
+        Some((_, SourceService::BuildTime))
+    )
+}
+
+/// The `_service` text of the checkout at `checkout_dir`; empty without one.
+pub(super) fn checkout_service(checkout_dir: &Path) -> String {
+    std::fs::read_to_string(checkout_dir.join("_service")).unwrap_or_default()
+}
+
+/// The sources the expanded spec names that are missing from the checkout and
+/// are not made at build time (see `still_missing`).
+pub(super) fn missing_at_checkout(expanded: &str, checkout_dir: &Path) -> Vec<String> {
+    still_missing(
+        missing_source_files(expanded, checkout_dir),
+        &checkout_service(checkout_dir),
+    )
+}
+
+/// The `missing` sources that the `_service` text `service` makes at build
+/// time, which are not missing: OBS runs the buildtime services when it builds
+/// the package. Only an `obs_scm` source is considered (see
+/// `made_at_build_time` for the names it can make). Anything else stays missing.
+pub(super) fn still_missing(missing: Vec<String>, service: &str) -> Vec<String> {
+    let masked = mask_xml_comments(service);
+    let Some((scm, SourceService::BuildTime)) = source_service(&masked) else {
+        return missing;
+    };
+    missing
         .into_iter()
-        .filter(|n| !is_archive_name(n))
+        .filter(|n| !made_at_build_time(n, service, &masked, scm))
+        .collect()
+}
+
+/// Whether OBS makes the archive `name` at build time, for the `obs_scm` source
+/// at `scm` (an offset in `masked`). The names are:
+/// - `<filename>-<version>.tar`, or `.tar.<c>` where `recompress` gives `c`,
+///   when a `tar` service is present. `filename` is the `filename` parameter,
+///   or the name TarSCM gives the checkout (see `default_filename_of`); the
+///   `<version>` is whatever the name carries.
+/// - `vendor.tar.<c>` from a buildtime `cargo_vendor` service (method
+///   `vendor`, compression `c`, default `zst`; `not` gives no suffix).
+fn made_at_build_time(name: &str, service: &str, masked: &str, scm: usize) -> bool {
+    let params = source_params(service, masked, scm);
+    let packed = !service_elements(masked, "tar").is_empty();
+    let mut suffixes: Vec<&str> = Vec::new();
+    if packed {
+        suffixes.push(".tar");
+        for at in service_elements(masked, "recompress") {
+            let params = source_params(service, masked, at);
+            suffixes.extend(param_value(&params, "compression").and_then(recompressed_suffix));
+        }
+    }
+    let archive = packed
+        && default_filename_of(&params).is_some_and(|stem| {
+            name.strip_prefix(stem.as_str())
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|rest| {
+                    suffixes.iter().any(|s| {
+                        rest.strip_suffix(s)
+                            .is_some_and(|v| !v.is_empty() && !v.contains('/'))
+                    })
+                })
+        });
+    archive
+        || service_elements(masked, "cargo_vendor")
+            .into_iter()
+            .any(|at| {
+                let params = source_params(service, masked, at);
+                crate::obs_xml::attr(open_tag(masked, at), "mode").as_deref() == Some("buildtime")
+                    && param_value(&params, "method").unwrap_or("vendor") == "vendor"
+                    && name
+                        == format!(
+                            "vendor.tar{}",
+                            vendor_suffix(param_value(&params, "compression").unwrap_or("zst"))
+                        )
+            })
+}
+
+/// The `filename` the `obs_scm` source gives its archives: its `filename`
+/// parameter when set, else the name TarSCM gives the checkout (the last part
+/// of the `url`, without the `scm` suffix).
+fn default_filename_of(params: &[(String, String)]) -> Option<String> {
+    param_value(params, "filename")
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let url = param_value(params, "url")?;
+            let scm = param_value(params, "scm").unwrap_or("git");
+            let path = url.split(['?', '#']).next()?.trim_end_matches('/');
+            let last = path.rsplit(['/', ':']).next()?;
+            let stem = last.strip_suffix(&format!(".{scm}")).unwrap_or(last);
+            (!stem.is_empty()).then(|| stem.to_string())
+        })
+}
+
+/// The archive suffix of a `recompress` compression (`xz`, `gz`, `bz2`, `zst`).
+fn recompressed_suffix(compression: &str) -> Option<&'static str> {
+    match compression {
+        "xz" => Some(".tar.xz"),
+        "gz" | "gzip" => Some(".tar.gz"),
+        "bz2" => Some(".tar.bz2"),
+        "zst" => Some(".tar.zst"),
+        _ => None,
+    }
+}
+
+/// The suffix of the `vendor.tar` that a `cargo_vendor` compression gives.
+fn vendor_suffix(compression: &str) -> &'static str {
+    match compression {
+        "gz" => ".gz",
+        "xz" => ".xz",
+        "bz2" => ".bz2",
+        "not" => "",
+        _ => ".zst",
+    }
+}
+
+/// The value of the parameter `name`, when the list has it.
+fn param_value<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// The offsets (in `masked`) of the `<service>` elements named `name`.
+fn service_elements(masked: &str, name: &str) -> Vec<usize> {
+    masked
+        .match_indices(&format!("name=\"{name}\""))
+        .map(|(at, _)| at)
+        .filter(|&at| open_tag(masked, at).starts_with("<service"))
         .collect()
 }
 

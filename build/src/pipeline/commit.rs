@@ -4,7 +4,6 @@
 use super::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::prompt_notes::*;
-use crate::pipeline::spec_edits::*;
 
 /// The commit step, except under `--local`: nothing goes to OBS from a build
 /// that runs on this machine, against the checkout as it is.
@@ -318,7 +317,7 @@ fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<Stri
 /// The sources and patches the expanded spec names that are not in the
 /// checkout, as the reason the commit is refused, or `Ok`.
 fn ensure_sources_present(ctx: &RunCtx, expanded: &str) -> Result<(), String> {
-    let missing = missing_source_files(expanded, &ctx.checkout_dir);
+    let missing = missing_at_checkout(expanded, &ctx.checkout_dir);
     if missing.is_empty() {
         return Ok(());
     }

@@ -298,6 +298,8 @@ pub use archive::*;
 mod gen_spec;
 use gen_spec::*;
 mod carry;
+#[cfg(test)]
+mod commit_gate_tests;
 mod service_source;
 #[cfg(test)]
 mod service_source_tests;
