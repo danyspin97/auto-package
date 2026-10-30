@@ -14,6 +14,7 @@ pub(crate) fn branch_for_patch(
     config: &PipelineConfig,
     own_listing: &std::collections::HashSet<String>,
     linked_listings: &[(String, std::sync::Arc<std::collections::HashSet<String>>)],
+    reporter: &dyn ap_core::sink::Reporter,
     emit: ap_build::proc::Emit<'_>,
 ) -> Result<PipelineConfig, String> {
     let rpm = ap_build::osc::rpm_name(dep);
@@ -74,7 +75,9 @@ pub(crate) fn branch_for_patch(
                 b.target_package
             ));
         }
-        Ok(_) => {}
+        // Branched or already there: the patch is made on the branch, which
+        // builds with the flags its origin has.
+        Ok(_) => copy_build_flags(reporter, project, &origin, &shipped, emit),
         Err(e) => {
             return Err(format!(
                 "cannot branch {origin}/{shipped} into {project}: {e}"

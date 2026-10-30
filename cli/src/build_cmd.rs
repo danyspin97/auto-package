@@ -3,11 +3,13 @@
 use crate::*;
 
 mod deps;
+mod flags;
 mod rows;
 mod summary;
 mod workers;
 
 pub(crate) use deps::*;
+pub(crate) use flags::*;
 pub(crate) use rows::*;
 pub(crate) use summary::*;
 pub(crate) use workers::*;

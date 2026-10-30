@@ -1,4 +1,5 @@
 use super::*;
+use crate::build_cmd::copy_build_flags;
 
 pub(super) fn visit_key(item: &Item) -> String {
     format!("{}/{}", item.origin, osc::fuzzy_key(&item.pkg))
@@ -94,6 +95,13 @@ pub(super) fn branch_item(
                 b.target_project,
                 b.target_package
             ));
+            copy_build_flags(
+                ctx.reporter.as_ref(),
+                &b.target_project,
+                &b.origin_project,
+                &item.pkg,
+                emit,
+            );
             item.origin = b.origin_project;
         }
         BranchResult::AlreadyThere if revision.is_some() => {
@@ -122,6 +130,29 @@ pub(super) fn branch_item(
                 }
                 Err(e) => ctx.warn(format!(
                     "could not rebase {branch}/{} onto its origin, building it as it is: {e}",
+                    item.pkg
+                )),
+            }
+            // The flags come from the project the branch is linked from, which
+            // is not always the plan's origin (a branch made from a devel
+            // project, or by a run with --follow-devel).
+            match osc::link_project(branch, &item.pkg, emit) {
+                Ok(Some(link)) => copy_build_flags(
+                    ctx.reporter.as_ref(),
+                    branch,
+                    &link,
+                    &item.pkg,
+                    emit,
+                ),
+                Ok(None) => copy_build_flags(
+                    ctx.reporter.as_ref(),
+                    branch,
+                    &item.origin,
+                    &item.pkg,
+                    emit,
+                ),
+                Err(e) => ctx.warn(format!(
+                    "could not read the link of {branch}/{}, so its build flags are not copied: {e}",
                     item.pkg
                 )),
             }

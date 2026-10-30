@@ -68,6 +68,26 @@ pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebase
     check_link(project, pkg, emit)
 }
 
+/// The project `project/pkg` is linked from (the `project` of its `_link`), or
+/// `None` when it is not a link.
+pub fn link_project(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Option<String>, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", pkg)?;
+    let path = format!("/source/{project}/{}/_link", enc(pkg));
+    let link = api_call(None, &path, None, emit)?;
+    if !link.success() {
+        if is_not_found(&link.stderr) {
+            return Ok(None);
+        }
+        return Err(Error::OscFailed {
+            cmd: format!("api {path}"),
+            code: link.code,
+            stderr: link.stderr,
+        });
+    }
+    Ok(crate::obs_xml::attr(&link.stdout, "project").filter(|p| !p.is_empty()))
+}
+
 /// Whether a package listing's `<linkinfo>` shows the link based on a revision
 /// of its origin other than the current one. Unknown counts as behind, so the
 /// rebase is still asked for.

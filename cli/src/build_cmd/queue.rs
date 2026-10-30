@@ -123,6 +123,7 @@ pub(super) fn drain_dep_queue(b: Build<'_>) -> color_eyre::Result<()> {
                 &config,
                 &own_listing,
                 &linked_listings,
+                reporter.as_ref(),
                 lookup_emit,
             ) {
                 Ok(dep_config) => {
