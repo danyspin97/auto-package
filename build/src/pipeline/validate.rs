@@ -173,7 +173,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     spec_path,
                     Emit::new(reporter, validate_step.id),
                 ) {
-                    Ok(()) => missing = missing_source_files(&expanded, checkout_dir),
+                    Ok(()) => missing = missing_at_checkout(&expanded, checkout_dir),
                     Err(e) => {
                         service_error = Some(if generated {
                             format!("a generated `download_files` service failed: {e}")
