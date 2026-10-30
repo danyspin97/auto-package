@@ -366,15 +366,47 @@ fn write_refreshed_patches(
 /// Whether the review turn runs for a package nobody asked to patch. A spec
 /// generated from a CUDA redistributable is never reviewed: it has no source to
 /// read, and the turn can only add a "no test suite" comment.
+///
+/// `checkout` holds the OBS status and whether OBS built exactly the spec on
+/// disk (see `CheckoutFacts::exact_success`). An update that OBS already built
+/// needs no edit. An update OBS rejected or failed is reviewed as the carried
+/// recipe it is. A package that is not an update is reviewed unless OBS built
+/// it with a failing result, which the build rounds handle.
 pub(super) fn review_turn_wanted(
     need_spec: bool,
-    build_log_nonempty: bool,
+    update: bool,
+    checkout: &CheckoutFacts,
     already_reviewed: bool,
     rpm_name: &str,
 ) -> bool {
-    (need_spec || !build_log_nonempty)
-        && !already_reviewed
-        && !crate::redist::is_redist_package(rpm_name)
+    if already_reviewed || crate::redist::is_redist_package(rpm_name) {
+        return false;
+    }
+    if need_spec {
+        return true;
+    }
+    if update {
+        return !checkout.exact_success();
+    }
+    !matches!(
+        checkout.obs_status,
+        Some(osc::BuildStatus::Failed | osc::BuildStatus::Unresolvable)
+    )
+}
+
+/// The context of the review turn: a patch request alone, else every note
+/// that applies (the empty submodules of a source archive, the carried recipe),
+/// so that one note does not hide another.
+pub(super) fn review_turn_context(
+    patch: Option<&str>,
+    submodules: Option<&str>,
+    carried: Option<&str>,
+) -> Option<String> {
+    if let Some(patch) = patch {
+        return Some(patch.to_string());
+    }
+    let notes: Vec<&str> = [submodules, carried].into_iter().flatten().collect();
+    (!notes.is_empty()).then(|| notes.join("\n\n"))
 }
 
 /// Directories under `<root>/third_party` (or `3rdparty`, `thirdparty`) that

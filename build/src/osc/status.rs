@@ -35,6 +35,23 @@ fn no_result_status() -> BuildStatus {
     BuildStatus::Unknown("no results".to_string())
 }
 
+/// [`get_build_status`] for a checkout that is about to be judged against the
+/// spec on disk: a built verdict counts only when the job history shows it was
+/// built from the revision now on the server, which is the revision a checkout
+/// holds. A verdict of an earlier revision reads as `Unknown`, as it does right
+/// after a commit.
+pub fn get_build_status_confirmed(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+) -> Result<BuildStatus, Error> {
+    match get_build_status_xml(project, pkg_name, repo, arch, true, None)? {
+        Some(status) => Ok(status),
+        None => Ok(no_result_status()),
+    }
+}
+
 /// [`get_build_status`] for a package whose sources were just committed: a
 /// built verdict only counts once the job history shows it came from the
 /// revision now on the server (see [`obs_status::Evidence::confirm`]), so the

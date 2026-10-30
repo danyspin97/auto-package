@@ -40,7 +40,7 @@ pub(super) fn review_stage(
     ctx: &RunCtx,
     st: &mut RunState,
     spec: &SpecInfo,
-    build_log_nonempty: bool,
+    checkout: &CheckoutFacts,
 ) -> Result<(), PipelineResult> {
     let RunCtx {
         config,
@@ -108,7 +108,13 @@ pub(super) fn review_stage(
     let run_turn = match patching {
         // A request is asked of a package that may have been reviewed before.
         Some(_) => true,
-        None => review_turn_wanted(need_spec, build_log_nonempty, already_reviewed, rpm_name),
+        None => review_turn_wanted(
+            need_spec,
+            st.update.is_some(),
+            checkout,
+            already_reviewed,
+            rpm_name,
+        ),
     };
     // A source archive without its git submodules cannot be built by any spec
     // edit: when the wheel exists, switch to it now instead of paying a turn
@@ -148,25 +154,6 @@ pub(super) fn review_stage(
         let submodule_context = (patching.is_none() && st.from_repo_archive)
             .then(|| empty_submodule_context(&ws.sdist_dir().join(&st.sdist_top_level)))
             .flatten();
-        // The notes that apply are joined, so that one does not hide another: a
-        // source archive without its submodules keeps the carried recipe's note.
-        let notes = [submodule_context.as_deref(), carry_context.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let turn_context = match patch_context.as_deref() {
-            Some(text) => Some(text.to_string()),
-            None if !notes.is_empty() => Some(notes),
-            None if !need_spec => Some(
-                "The build log is empty — OBS rejected the build during \
-                 dependency resolution before any compilation started. \
-                 The spec may reference a package that does not exist in \
-                 OBS yet, or the BuildRequires names may be wrong."
-                    .to_string(),
-            ),
-            None => None,
-        };
         let spec_before = std::fs::read_to_string(spec_path).unwrap_or_default();
         // Full-checkout snapshot taken BEFORE the agent runs so a reject /
         // blocked / no-change outcome can roll back every top-level
@@ -199,7 +186,12 @@ pub(super) fn review_stage(
                 checkout_dir: Some(checkout_dir),
                 from_repo_archive: st.from_repo_archive,
                 resume: false,
-                context: turn_context.as_deref(),
+                context: review_turn_context(
+                    patch_context.as_deref(),
+                    submodule_context.as_deref(),
+                    carry_context.as_deref(),
+                )
+                .as_deref(),
             },
             ctx.turn_env(),
             &mut st.spent_usd,

@@ -512,7 +512,7 @@ fn run_stages(
         update: None,
     };
 
-    let obs_status = checkout_stage(&ctx, &mut st)?;
+    let checkout = checkout_stage(&ctx, &mut st)?;
     // A package that builds only on other architectures ends `excluded` on OBS
     // after a whole update and review turn (lsvpd: ppc only, on x86_64).
     if let Ok(text) = std::fs::read_to_string(&ctx.spec_path)
@@ -538,8 +538,14 @@ fn run_stages(
         .metadata()
         .map(|m| m.len() > 0)
         .unwrap_or(false);
-    review_stage(&ctx, &mut st, &spec, build_log_nonempty)?;
-    prefix_stage(&ctx, &mut st, &spec, &obs_status, build_log_nonempty)?;
+    review_stage(&ctx, &mut st, &spec, &checkout)?;
+    prefix_stage(
+        &ctx,
+        &mut st,
+        &spec,
+        &checkout.obs_status,
+        build_log_nonempty,
+    )?;
 
     loop {
         st.step_attempts.round += 1;

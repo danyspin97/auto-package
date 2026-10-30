@@ -5,13 +5,46 @@ use crate::redist::tests::Fake;
 #[test]
 fn a_generated_redist_spec_is_not_reviewed() {
     let _on = TestMode::set(true);
-    assert!(!review_turn_wanted(true, false, false, "cuda-cudart"));
-    assert!(review_turn_wanted(true, false, false, "python-numpy"));
-    assert!(!review_turn_wanted(false, true, false, "python-numpy"));
-    assert!(!review_turn_wanted(true, false, true, "python-numpy"));
+    // (need_spec, update, checkout, already reviewed, package)
+    let none = CheckoutFacts {
+        obs_status: None,
+        local_changes: false,
+    };
+    let failed = CheckoutFacts {
+        obs_status: Some(osc::BuildStatus::Failed),
+        local_changes: false,
+    };
+    assert!(!review_turn_wanted(
+        true,
+        false,
+        &none,
+        false,
+        "cuda-cudart"
+    ));
+    assert!(review_turn_wanted(
+        true,
+        false,
+        &none,
+        false,
+        "python-numpy"
+    ));
+    assert!(!review_turn_wanted(
+        false,
+        false,
+        &failed,
+        false,
+        "python-numpy"
+    ));
+    assert!(!review_turn_wanted(
+        true,
+        false,
+        &none,
+        true,
+        "python-numpy"
+    ));
     drop(_on);
     let _off = TestMode::set(false);
-    assert!(review_turn_wanted(true, false, false, "cuda-cudart"));
+    assert!(review_turn_wanted(true, false, &none, false, "cuda-cudart"));
 }
 
 fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {

@@ -98,12 +98,30 @@ pub(super) fn checkout_paths(work_dir: &Path, project: &str, obs_name: &str) -> 
     (checkout_dir, spec_path)
 }
 
-/// Step: Checkout, then the OBS-already-built fast path. Returns the package's
-/// OBS build status for the later stages.
+/// What the checkout stage learned for the later stages.
+pub(super) struct CheckoutFacts {
+    /// The package's build status on OBS, `None` when OBS did not answer.
+    pub(super) obs_status: Option<osc::BuildStatus>,
+    /// Whether the checkout holds edits OBS does not have (an earlier run's
+    /// unfinished changes): then the OBS status is not for the spec on disk.
+    pub(super) local_changes: bool,
+}
+
+impl CheckoutFacts {
+    /// Whether OBS built exactly the spec on disk: its status is `succeeded`
+    /// for the revision the checkout holds, and the checkout has no edits of
+    /// its own (see [`osc::get_build_status_confirmed`]).
+    pub(super) fn exact_success(&self) -> bool {
+        self.obs_status == Some(osc::BuildStatus::Succeeded) && !self.local_changes
+    }
+}
+
+/// Step: Checkout, then the OBS-already-built fast path. Returns what the later
+/// stages need of the OBS build status and the checkout.
 pub(super) fn checkout_stage(
     ctx: &RunCtx,
     st: &mut RunState,
-) -> Result<Option<osc::BuildStatus>, PipelineResult> {
+) -> Result<CheckoutFacts, PipelineResult> {
     let RunCtx {
         config,
         pkg_run,
@@ -194,7 +212,12 @@ pub(super) fn checkout_stage(
         // Fetch this package's current OBS build status once; reused below both
         // to grab the build log on failure and to skip the rest of the
         // pipeline when it already succeeded and nothing would change.
-        let status = osc::get_build_status(&config.project, obs_name, &config.distro, &config.arch);
+        let status = osc::get_build_status_confirmed(
+            &config.project,
+            obs_name,
+            &config.distro,
+            &config.arch,
+        );
         // Without the status the build is handled as if OBS had not answered;
         // say so rather than discard the error.
         warn_if_err(
@@ -259,7 +282,10 @@ pub(super) fn checkout_stage(
             rpm_name: rpm_name.clone(),
         });
     }
-    Ok(obs_status)
+    Ok(CheckoutFacts {
+        obs_status,
+        local_changes: has_local_changes,
+    })
 }
 
 /// Whether local state records a failure although OBS now reports the same
