@@ -36,13 +36,18 @@ pub(super) fn render(
         render_run_log(f, state, run);
     }
     let feedback = render_detail(f, state, &visible, detail, table_state.selected(), browse);
-    let retryable = state.accepts_requests
-        && table_state
-            .selected()
-            .and_then(|i| visible.get(i))
-            .and_then(|name| state.packages.get(name.as_str()))
-            .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested);
-    render_footer(f, state, input, browse, footer, retryable, hint);
+    let hosts = ap_build::allowed_hosts::shared();
+    let selected_name = table_state
+        .selected()
+        .and_then(|i| visible.get(i))
+        .and_then(|name| state.packages.get_key_value(name.as_str()))
+        .map(|(name, p)| (name.as_str(), p));
+    let retry = selected_name
+        .filter(|_| state.accepts_requests)
+        .and_then(|(name, p)| modal::retry_label(name, p, &hosts));
+    let allowable =
+        selected_name.is_some_and(|(name, p)| !modal::pending_hosts(name, p, &hosts).is_empty());
+    render_footer(f, state, input, browse, footer, retry, allowable, hint);
     if let Some(m) = &browse.modal {
         modal::render_modal(f, state, m, area);
     }

@@ -12,6 +12,9 @@ pub struct RunScope {
 /// Handle used by the CLI to obtain reporters that feed the TUI.
 ///
 /// Cheap to clone; every clone shares the same channel to the render thread.
+/// The run's reporter, once [`TuiController::set_recorder`] gave it.
+pub type RecorderSlot = std::sync::Arc<Mutex<Option<std::sync::Arc<dyn Reporter + Send + Sync>>>>;
+
 #[derive(Clone)]
 pub struct TuiController {
     tx: SyncSender<Msg>,
@@ -47,6 +50,9 @@ pub struct TuiController {
     render: std::sync::Arc<Mutex<Option<JoinHandle<()>>>>,
     /// What reads diffs and makes submit requests (see [`TuiController::set_backend`]).
     backend: BackendSlot,
+    /// The run's reporter, for the events the TUI itself causes (see
+    /// [`TuiController::set_recorder`]).
+    recorder: RecorderSlot,
 }
 
 impl TuiController {
@@ -86,6 +92,8 @@ impl TuiController {
         let (ready_tx, ready_rx) = sync_channel::<io::Result<()>>(1);
         let backend: BackendSlot = std::sync::Arc::new(Mutex::new(None));
         let thread_backend = backend.clone();
+        let recorder: RecorderSlot = std::sync::Arc::new(Mutex::new(None));
+        let thread_recorder = recorder.clone();
         let render = std::thread::spawn(move || {
             let screen = match Screen::open() {
                 Ok(screen) => screen,
@@ -96,6 +104,7 @@ impl TuiController {
             };
             let _ = ready_tx.send(Ok(()));
             if let Err(e) = run(
+                thread_recorder,
                 screen,
                 rx,
                 add_tx,
@@ -139,7 +148,14 @@ impl TuiController {
             idle: std::sync::Arc::new((Mutex::new(()), Condvar::new())),
             render: std::sync::Arc::new(Mutex::new(Some(render))),
             backend,
+            recorder,
         })
+    }
+
+    /// The run's reporter. The TUI records what it causes through it, such as
+    /// a host the user allows, so the run's log has it.
+    pub fn set_recorder(&self, reporter: std::sync::Arc<dyn Reporter + Send + Sync>) {
+        *self.recorder.lock().unwrap_or_else(|p| p.into_inner()) = Some(reporter);
     }
 
     /// Let the TUI read the diff of a package against its origin and make

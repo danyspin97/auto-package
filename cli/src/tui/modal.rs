@@ -20,7 +20,9 @@ pub enum Modal {
     Diff(DiffView),
     Submit(SubmitModal),
     Explain(ExplainView),
+    AllowHost(allow_host::AllowHostModal),
 }
+mod allow_host;
 mod diff;
 mod explain_view;
 mod jobs;
@@ -30,6 +32,7 @@ mod submit;
 #[cfg(test)]
 mod tests;
 
+pub use allow_host::*;
 pub use diff::*;
 pub use explain_view::*;
 pub use jobs::*;

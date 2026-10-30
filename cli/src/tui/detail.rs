@@ -11,9 +11,8 @@ pub(super) fn render_detail(
     if browse.show_lists {
         return render_lists(f, state, area, browse);
     }
-    let pkg = selected
-        .and_then(|i| visible.get(i))
-        .and_then(|n| state.packages.get(n.as_str()));
+    let selected_name = selected.and_then(|i| visible.get(i)).map(|n| n.as_str());
+    let pkg = selected_name.and_then(|n| state.packages.get(n));
 
     // A failure reason gets its own strip above the logs; without one the
     // panes take the whole area, as before.
@@ -23,15 +22,31 @@ pub(super) fn render_detail(
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(4), Constraint::Min(0)])
                 .split(area);
-            let title = match pkg.step.as_ref() {
+            let mut title = match pkg.step.as_ref() {
                 Some(step) if step.round > 1 => {
                     format!("Failed at {} (round {})", step.kind.label(), step.round)
                 }
                 Some(step) => format!("Failed at {}", step.kind.label()),
                 None => "Failed".to_string(),
             };
+            // A refused host is named here with the keys that allow it.
+            let pending = crate::tui::modal::pending_hosts(
+                selected_name.unwrap_or_default(),
+                pkg,
+                &ap_build::allowed_hosts::shared(),
+            );
+            if !pending.is_empty() {
+                let names: Vec<String> = pending
+                    .iter()
+                    .map(|c| ap_build::allowed_hosts::printable(&c.host))
+                    .collect();
+                title.push_str(&format!(
+                    " \u{2502} refused {}: h allow host",
+                    names.join(", ")
+                ));
+            }
             f.render_widget(
-                Paragraph::new(reason.as_str())
+                Paragraph::new(ap_build::allowed_hosts::printable(reason))
                     .style(Style::default().fg(Color::Red))
                     .wrap(Wrap { trim: true })
                     .block(
@@ -322,7 +337,8 @@ pub(super) fn render_footer(
     input: Option<&str>,
     browse: &BrowseState,
     area: Rect,
-    retryable: bool,
+    retry: Option<&str>,
+    allowable: bool,
     hint: Option<&str>,
 ) {
     let prompt = match (input, browse.filter_input.as_deref()) {
@@ -394,12 +410,12 @@ pub(super) fn render_footer(
     } else {
         " │ d diff │ e explain"
     };
+    let allow = if allowable { " │ h allow host" } else { "" };
     let hints = format!(
-        "  {nav} │ Tab focus │ l lists{add}{diff}{} │ a {} succeeded │ {quit}",
-        if retryable {
-            " │ r retry (no space left)"
-        } else {
-            ""
+        "  {nav} │ Tab focus │ l lists{add}{diff}{allow}{} │ a {} succeeded │ {quit}",
+        match retry {
+            Some(why) => format!(" │ r retry ({why})"),
+            None => String::new(),
         },
         if state.show_all { "hide" } else { "show" }
     );

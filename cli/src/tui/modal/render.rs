@@ -8,7 +8,7 @@ pub(super) fn spinner(since: Instant) -> &'static str {
     FRAMES[(since.elapsed().as_millis() / 100 % 10) as usize]
 }
 
-fn centered(area: Rect, w_pct: u16, h_pct: u16) -> Rect {
+pub(super) fn centered(area: Rect, w_pct: u16, h_pct: u16) -> Rect {
     let w = area.width * w_pct / 100;
     let h = area.height * h_pct / 100;
     Rect {
@@ -24,6 +24,7 @@ pub fn render_modal(f: &mut Frame, state: &TuiState, modal: &Modal, area: Rect) 
         Modal::Diff(v) => render_diff(f, state, v, area),
         Modal::Submit(m) => render_submit(f, m, centered(area, 92, 86)),
         Modal::Explain(v) => render_explain(f, v, area),
+        Modal::AllowHost(m) => render_allow_host(f, m, centered(area, 90, 90)),
     }
 }
 

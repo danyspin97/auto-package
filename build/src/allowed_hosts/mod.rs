@@ -263,7 +263,7 @@ impl AllowedHosts {
 
     /// Add an entry read from a source (the file), without the check that
     /// [`Self::allow`] makes: a file may name a host the env already did.
-    pub(crate) fn push_loaded(&self, entry: Entry) {
+    pub fn push_loaded(&self, entry: Entry) {
         self.state
             .write()
             .unwrap_or_else(|p| p.into_inner())

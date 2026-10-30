@@ -6,6 +6,7 @@ use super::*;
 /// does NOT come back through here at all — `crate::handle_interrupt` does its
 /// own equivalent teardown and then ends the process on the spot.)
 pub(super) fn run(
+    recorder: RecorderSlot,
     mut screen: Screen,
     rx: Receiver<Msg>,
     add_tx: Option<Sender<AddRequest>>,
@@ -24,6 +25,7 @@ pub(super) fn run(
         scope,
         &settled,
         &backend,
+        &recorder,
     );
     let _ = screen.terminal.show_cursor();
     drop(screen);
@@ -133,10 +135,13 @@ fn event_loop(
     scope: RunScope,
     settled: &AtomicBool,
     backend_slot: &BackendSlot,
+    recorder: &RecorderSlot,
 ) -> io::Result<()> {
     let (job_tx, job_rx) = channel::<Job>();
     let mut state = TuiState::new(scope);
     state.accepts_requests = add_tx.is_some();
+    // The allowlist the proxy and the source checks read; the allow keys add to it.
+    let hosts = ap_build::allowed_hosts::shared();
     // `Some` while the "add package" prompt is open and capturing keys.
     let mut input: Option<String> = None;
     let mut table_state = TableState::default();
@@ -295,6 +300,13 @@ fn event_loop(
                             browse.modal = None;
                         }
                     }
+                    Some(Modal::AllowHost(m)) => {
+                        let action = modal::allow_host_key(m, key.code);
+                        modal::apply_allow_action(&mut state, m, action, &hosts, recorder);
+                        if m.is_finished() {
+                            browse.modal = None;
+                        }
+                    }
                     None => {}
                 }
                 continue;
@@ -372,6 +384,14 @@ fn event_loop(
                 KeyCode::Up | KeyCode::Char('k') if browse.focus == Focus::Table => {
                     select_prev(&mut selected, &state)
                 }
+                // `h` opens the prompt that allows the refused hosts of the
+                // selected package, while it has any still to allow. `a` and
+                // `A` always keep their meanings (show succeeded, submit all).
+                KeyCode::Char('h')
+                    if modal::allow_target(&state, selected.as_deref(), &hosts).is_some() =>
+                {
+                    modal::open_allow(&state, &mut browse.modal, selected.as_deref(), &hosts);
+                }
                 KeyCode::Char('a') => state.show_all = !state.show_all,
                 KeyCode::Char('d') => {
                     if let Some(row) = selected.as_deref() {
@@ -442,31 +462,10 @@ fn event_loop(
                 // prompt, as a retry of this row. Any other status is a
                 // no-op: there is nothing a disk cleanup would fix for a
                 // real spec defect.
+                // `r` retries a package that failed of "No space left on
+                // device" or was refused a host now allowed (see `retry_key`).
                 KeyCode::Char('r') => {
-                    if let Some(add_tx) = add_tx
-                        && let Some(name) = selected.as_ref()
-                        && state
-                            .packages
-                            .get(name.as_str())
-                            .is_some_and(|p| p.status == PkgStatus::NoSpace && !p.retry_requested)
-                    {
-                        if request_build(add_tx, work, AddRequest::Retry(name.clone())) {
-                            if let Some(p) = state.packages.get_mut(name.as_str()) {
-                                p.retry_requested = true;
-                            }
-                            state.add_global_log(
-                                LogLevel::Info,
-                                format!("Retrying {name} (no space left on device)"),
-                            );
-                        } else {
-                            state.add_global_log(
-                                LogLevel::Error,
-                                format!(
-                                    "Cannot retry {name}: the run is no longer accepting packages"
-                                ),
-                            );
-                        }
-                    }
+                    modal::retry_key(&mut state, add_tx, work, selected.as_deref(), &hosts)
                 }
                 // Event Log scrollback: pin to the live tail by default (0),
                 // step back through history on demand without losing new
