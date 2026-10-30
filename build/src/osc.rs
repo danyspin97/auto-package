@@ -61,6 +61,8 @@ mod changes;
 #[cfg(test)]
 mod spec_file_name_tests;
 pub use changes::*;
+mod update_notes;
+pub use update_notes::*;
 mod checkout;
 pub use checkout::*;
 
