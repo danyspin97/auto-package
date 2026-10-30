@@ -36,7 +36,10 @@ fn short_bullets_are_listed_as_they_are() {
         "v2",
         "## What's Changed\n* Add dark mode by @bob in https://github.com/o/r/pull/3\n- Fix **crash** on `exit`\n\n## New Contributors\n* @bob made their first contribution\n\n**Full Changelog**: https://github.com/o/r/compare/v1...v2",
     )];
-    assert_eq!(recap(&r, never), ["* Add dark mode", "* Fix crash on exit"]);
+    assert_eq!(
+        recap(None, &r, never),
+        ["* Add dark mode", "* Fix crash on exit"]
+    );
 }
 
 #[test]
@@ -57,10 +60,10 @@ fn many_bullets_or_prose_go_to_the_summary_and_fall_back_to_links() {
         rel("v1.5", "Mostly a rewrite of the core."),
     ];
     // A summary that answers is listed.
-    let got = recap(&r, |_| Some(vec!["Rewrite the core".into()]));
+    let got = recap(None, &r, |_| Some(vec!["Rewrite the core".into()]));
     assert_eq!(got, ["* Rewrite the core"]);
     // One that does not leaves the release pages.
-    let got = recap(&r, |_| None);
+    let got = recap(None, &r, |_| None);
     assert_eq!(
         got,
         [
@@ -82,11 +85,11 @@ fn at_most_five_links_are_listed() {
 #[test]
 fn releases_without_notes_say_so() {
     assert_eq!(
-        recap(&[rel("v2", "  \n")], never),
+        recap(None, &[rel("v2", "  \n")], never),
         ["* No upstream changelog found or provided"]
     );
     assert_eq!(
-        recap(&[], never),
+        recap(None, &[], never),
         ["* No upstream changelog found or provided"]
     );
 }
@@ -106,4 +109,105 @@ fn a_summary_keeps_only_clean_bullets() {
         parse_answer(&serde_json::json!({"result": "* a", "is_error": true}).to_string()).is_none()
     );
     assert!(parse_answer("not json").is_none());
+}
+
+mod changelog_file {
+    use super::super::changelog::*;
+
+    const NEWS: &str = "\
+Version 3.4.0 (2024-05-01)
+- Add a thing
+- Fix a bug in 3.3.0 handling
+
+Version 3.3.0 (2023-01-01)
+- Older change
+";
+
+    #[test]
+    fn the_section_runs_from_the_new_heading_to_the_old_one() {
+        let got = section_between(NEWS, "3.3.0", "3.4.0").unwrap();
+        assert!(got.starts_with("Version 3.4.0"), "{got}");
+        assert!(got.contains("Fix a bug in 3.3.0 handling"));
+        assert!(!got.contains("Older change"));
+    }
+
+    #[test]
+    fn a_bullet_that_names_a_version_is_not_its_heading() {
+        // The old version appears only inside a bullet: no heading, no section.
+        assert!(section_between(NEWS, "3.2.0", "3.4.0").is_none());
+        assert!(section_between("- fixed in 3.3.0\n", "3.3.0", "3.4.0").is_none());
+    }
+
+    #[test]
+    fn a_prefix_of_a_longer_version_is_not_the_heading() {
+        let text = "## 1.2.3\n- a\n## 1.2\n- b\n## 1.1\n- c\n";
+        assert_eq!(
+            section_between(text, "1.1", "1.2.3").unwrap(),
+            "## 1.2.3\n- a\n## 1.2\n- b"
+        );
+        assert!(section_between("## 11.2\n- a\n## 0.9\n", "0.9", "1.2").is_none());
+    }
+
+    #[test]
+    fn the_new_version_must_be_listed_above_the_old_one() {
+        assert!(section_between("## 3.3.0\n- a\n", "3.3.0", "3.4.0").is_none());
+        assert!(
+            section_between("## 3.4.0\n## 3.3.0\n", "3.3.0", "3.4.0")
+                .is_some_and(|s| s == "## 3.4.0")
+        );
+    }
+
+    #[test]
+    fn the_changelog_is_read_from_the_top_of_an_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("pkg-3.4.0");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("NEWS"), NEWS).unwrap();
+        std::fs::write(
+            src.join("sub").join("CHANGES"),
+            "## 3.4.0\n- nested\n## 3.3.0\n",
+        )
+        .unwrap();
+        let archive = dir.path().join("pkg-3.4.0.tar.gz");
+        let status = std::process::Command::new("tar")
+            .arg("czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(dir.path())
+            .arg("pkg-3.4.0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let got = section_of_archive(&archive, "3.3.0", "3.4.0").unwrap();
+        assert_eq!(got.file, "NEWS");
+        assert!(got.text.contains("Add a thing"));
+        assert!(section_of_archive(&archive, "9.9", "3.4.0").is_none());
+    }
+}
+
+#[test]
+fn the_changelog_of_the_sources_comes_before_the_releases() {
+    use super::changelog::Section;
+    let section = |text: &str| Section {
+        file: "NEWS".into(),
+        text: text.into(),
+    };
+    let r = [rel("v2", "- from the forge")];
+    assert_eq!(
+        recap(Some(section("## 2\n- from the file")), &r, never),
+        ["* from the file"]
+    );
+    // A file too long for bullets and not summarized: the releases speak next,
+    // then the file is named.
+    let long: String = (0..12).map(|i| format!("- c{i}\n")).collect();
+    assert_eq!(
+        recap(Some(section(&long)), &r, |_| None),
+        ["* from the forge"]
+    );
+    assert_eq!(
+        recap(Some(section(&long)), &[], |_| None),
+        ["* Too many changes to list, see NEWS in the sources"]
+    );
+    // No section: the releases, as before.
+    assert_eq!(recap(None, &r, never), ["* from the forge"]);
 }
