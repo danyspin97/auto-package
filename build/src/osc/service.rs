@@ -55,25 +55,77 @@ pub fn repair_wc(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Services a checkout's `_service` may name. The agent can edit the file, and
-/// a service runs arbitrary code on this machine (`refresh_obs_scm` etc. would
-/// too), so anything outside the set the pipeline and OBS packaging use is
-/// refused.
-const ALLOWED_SERVICES: &[&str] = &[
-    "tar_scm",
-    "obs_scm",
-    "recompress",
-    "set_version",
-    "cargo_vendor",
-    "node_modules",
-    "download_files",
-    "go_modules",
-    "format_spec_file",
+/// The services a checkout's `_service` may name, and the parameters each one
+/// takes. The agent can edit the file, and a service runs arbitrary code on
+/// this machine, so a service or a parameter not listed here is refused. A
+/// parameter is accepted only for the services listed with it: the helper of
+/// another service would reject it, or read it as another option (argparse
+/// takes an unambiguous prefix, so `--file` is `--filename` for tar_scm).
+///
+/// The lists are the helpers' own options (`--help`, their argument parsers,
+/// their `.service` files), less the parameters refused below. `node_modules`
+/// and `go_modules` have no helper installed here, so their lists are not
+/// checked; `run_services` refuses such a service before it runs. Every mode
+/// runs: `osc service ra` runs `buildtime` and `disabled` services too (osc's
+/// `serviceinfo.py` skips modes only for the other run commands), so a
+/// `_service` is checked and run in full.
+///
+/// Refused on purpose:
+/// - `outdir`, `changesoutfile` (cargo_vendor): the sandbox picks the output
+///   directory, and `changesoutfile` writes into the checkout itself, past
+///   the move of the outputs.
+/// - `set-name`, `set-version`, `tag` (cargo_vendor), `extension`,
+///   `extract-rename` (tar_scm, obs_scm): they feed output names or archive
+///   paths, which are not checked as paths (`tag` gives `vendor-<tag>.tar`).
+/// - `fromfile`, `maintainers-asc`, `import-cargo-config`: read a file whose
+///   path is not checked, so they could read outside the checkout.
+/// - `user`, `keyring-passphrase`: SCM credentials, read from `/etc/obs`.
+/// - `sslverify`, `sslvalidation`, `enforceipv4`, `locale`, `encoding`: change
+///   TLS checks, networking or the helper's environment; not needed here.
+/// - `i-accept-the-risk` (cargo_vendor): the RustSec ids cargo_vendor's audit
+///   (against the local advisory database) should ignore. Accepting a risk is
+///   the maintainer's call, not the agent's.
+/// - `update-crate`, `custom-root`: not needed here. `lockfile` and `strategy`
+///   are not options of cargo_vendor (clap rejects them).
+/// - services `cargo_audit`, `refresh_patches`, `roast_scm`: `cargo_audit` is a
+///   stripped binary with no usage text, and nothing shows it only reads the
+///   checkout. The other two are not installed here, so their parameters
+///   cannot be checked.
+///
+/// The regex parameters (`exclude-re`, `include-re`, `regex`) are not bounded
+/// in time, as `versionrewriteregex` is not: the 20 minute capture timeout
+/// bounds them.
+const SERVICE_PARAMS: &[(&str, &[&str])] = &[
+    ("tar_scm", TAR_SCM_PARAMS),
+    ("obs_scm", TAR_SCM_PARAMS),
+    ("cargo_vendor", CARGO_VENDOR_PARAMS),
+    (
+        "set_version",
+        &["revision", "file", "version", "basename", "regex"],
+    ),
+    ("recompress", &["compression", "file"]),
+    (
+        "download_files",
+        &["enforceupstream", "changesgenerate", "changesauthor"],
+    ),
+    ("format_spec_file", &["specfile"]),
+    (
+        "node_modules",
+        &[
+            "input",
+            "node-dir",
+            "omit-optional",
+            "legacy-container",
+            "cpio",
+            "output",
+            "source-offset",
+        ],
+    ),
+    ("go_modules", &[]),
 ];
 
-/// Parameters those services take. Notably absent are anything that names a
-/// command or an output directory.
-const ALLOWED_SERVICE_PARAMS: &[&str] = &[
+/// tar_scm's options; obs_scm is the same program.
+const TAR_SCM_PARAMS: &[&str] = &[
     "url",
     "scm",
     "revision",
@@ -86,48 +138,37 @@ const ALLOWED_SERVICE_PARAMS: &[&str] = &[
     "changesauthor",
     "subdir",
     "filename",
-    "file",
-    "compression",
-    "src",
-    "update",
-    "method",
-    "cargotoml",
-    "no-root-manifest",
     "version",
-    "basename",
     "without-version",
-    "protocol",
-    "host",
-    "path",
-    "archive",
-    "disablereview",
-    "strategy",
-    // tar_scm / obs_scm
     "exclude",
+    "exclude-re",
     "include",
+    "include-re",
     "extract",
     "submodules",
-    "depth",
     "history-depth",
     "parent-tag",
     "package-meta",
-    // cargo_vendor
+];
+
+/// cargo_vendor's options.
+const CARGO_VENDOR_PARAMS: &[&str] = &[
+    "url",
+    "src",
+    "revision",
+    "changesgenerate",
+    "changesauthor",
+    "changesemail",
+    "compression",
+    "method",
+    "cargotoml",
+    "no-root-manifest",
+    "update",
+    "exclude",
     "versioned-dirs",
     "respect-lockfile",
-    // node_modules
-    "input",
-    "node-dir",
-    "omit-optional",
-    "legacy-container",
-    "cpio",
-    "output",
-    "source-offset",
-    // download_files
-    "enforceupstream",
-    "enforcehash",
-    // set_version
-    "regex",
-    "parse-version",
+    "versionrewriteregex",
+    "versionrewritepattern",
 ];
 
 /// Params whose value is a path relative to the checkout.
@@ -136,8 +177,8 @@ const SERVICE_PATH_PARAMS: &[&str] = &[
     "filename",
     "file",
     "src",
+    "specfile",
     "cargotoml",
-    "archive",
     "exclude",
     "include",
     "extract",
@@ -152,18 +193,25 @@ const SERVICE_PATH_PARAMS: &[&str] = &[
 /// `file://` URL included, so a value with a `:` is checked as a URL.
 const SOURCE_PARAMS: &[&str] = &["src", "srcdir", "srctar"];
 
-/// Check one `<param>` against the allowlists. `value` is the decoded text,
-/// as osc will see it.
-fn validate_service_param(name: &str, value: &str) -> Result<(), String> {
+/// The parameters `service` takes; `None` for a service that is not allowed.
+fn service_params(service: &str) -> Option<&'static [&'static str]> {
+    SERVICE_PARAMS
+        .iter()
+        .find(|(s, _)| *s == service)
+        .map(|(_, params)| *params)
+}
+
+/// Check one `<param>` of `service` against the allowlists. `value` is the
+/// decoded text, as osc will see it.
+fn validate_service_param(service: &str, name: &str, value: &str) -> Result<(), String> {
     let value = value.trim();
-    if !ALLOWED_SERVICE_PARAMS.contains(&name) {
-        return Err(format!("param `{name}` is not allowed"));
+    if !service_params(service).unwrap_or_default().contains(&name) {
+        return Err(format!(
+            "param `{name}` is not allowed for service `{service}`"
+        ));
     }
     if name == "url" || (SOURCE_PARAMS.contains(&name) && value.contains(':')) {
         crate::service_sandbox::check_service_url(value)?;
-    }
-    if name == "protocol" && value != "https" {
-        return Err(format!("protocol `{value}` must be https"));
     }
     if name == "revision" && value.starts_with('-') {
         return Err(format!("revision `{value}` starts with `-`"));
@@ -235,7 +283,7 @@ pub(crate) fn parse_service_xml(
             match tag.as_str() {
                 "service" => {
                     let name = name.ok_or("a <service> without a name")?;
-                    if !ALLOWED_SERVICES.contains(&name.as_str()) {
+                    if service_params(&name).is_none() {
                         return Err(format!("service `{name}` is not allowed"));
                     }
                     services.push(crate::service_sandbox::ServiceCall {
@@ -245,8 +293,9 @@ pub(crate) fn parse_service_xml(
                 }
                 "param" => {
                     let name = name.ok_or("a <param> without a name")?;
+                    let service = services.last().map(|s| s.name.clone()).unwrap_or_default();
                     if empty {
-                        validate_service_param(&name, "")?;
+                        validate_service_param(&service, &name, "")?;
                         if let Some(s) = services.last_mut() {
                             s.params.push((name, String::new()));
                         }
@@ -266,7 +315,8 @@ pub(crate) fn parse_service_xml(
                 if depth.pop().as_deref() == Some("param")
                     && let Some((name, value)) = param.take()
                 {
-                    validate_service_param(&name, &value)?;
+                    let service = services.last().map(|s| s.name.clone()).unwrap_or_default();
+                    validate_service_param(&service, &name, &value)?;
                     if let Some(s) = services.last_mut() {
                         s.params.push((name, value.trim().to_string()));
                     }
