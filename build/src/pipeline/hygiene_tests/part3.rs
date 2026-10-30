@@ -187,6 +187,7 @@ fn a_failed_wheel_lookup_leaves_the_spec_to_the_review_turn() {
         relaxed_from_spec: None,
         post_review_done: false,
         post_review_revert: None,
+        rpmlint_shown: Default::default(),
     };
     let offline = |_: &PipelineConfig| Err("PyPI fetch failed: offline".to_string());
     let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &offline)

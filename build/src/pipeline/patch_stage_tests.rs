@@ -194,6 +194,7 @@ fn run_turns(
         relaxed_from_spec: None,
         post_review_done: false,
         post_review_revert: None,
+        rpmlint_shown: Default::default(),
     };
     let step_path = root.path().join("step");
     std::fs::create_dir_all(&step_path).unwrap();

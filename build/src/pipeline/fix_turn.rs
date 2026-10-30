@@ -10,13 +10,14 @@ use crate::pipeline::ladder::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 
-/// Run one fix turn as attempt `attempts` (counted by the caller) with the
-/// given hint and context, and apply what the agent did. `build_log` is the
-/// failed build's log when there is one.
+/// Run one fix turn as attempt `attempts` (counted by the caller) of `task`
+/// with the given hint and context, and apply what the agent did. `build_log`
+/// is the build's log when there is one.
 pub(super) fn fix_turn(
     ctx: &RunCtx,
     st: &mut RunState,
     attempts: usize,
+    task: crate::agent::Task,
     hint: Option<&crate::log::ExtractedLog>,
     context: Option<&str>,
     build_log: Option<&Path>,
@@ -37,7 +38,7 @@ pub(super) fn fix_turn(
     let turn = agent_turn(
         TurnCtx {
             label: "fix-after-build",
-            task: crate::agent::Task::FixAfterBuild,
+            task,
             event_task: ap_core::event::Task::FixAfterBuild {
                 attempt: attempts as u32,
                 max_attempts: config.max_attempts as u32,
@@ -122,7 +123,7 @@ pub(super) fn fix_turn(
             LadderSite {
                 build_log,
                 staged: &staged,
-                task: crate::agent::Task::FixAfterBuild,
+                task,
                 event_task: ap_core::event::Task::FixAfterBuild {
                     attempt: attempts as u32,
                     max_attempts: config.max_attempts as u32,

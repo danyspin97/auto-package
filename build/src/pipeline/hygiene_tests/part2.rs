@@ -264,6 +264,7 @@ fn a_missing_submodule_tree_switches_to_the_wheel_end_to_end_without_the_network
         relaxed_from_spec: None,
         post_review_done: false,
         post_review_revert: None,
+        rpmlint_shown: Default::default(),
     };
 
     let switched = switch_for_missing_submodules(&ctx, &mut st, &spec_path, &lookup)
@@ -490,6 +491,7 @@ pub(super) fn gate_case(
         relaxed_from_spec: None,
         post_review_done: false,
         post_review_revert: None,
+        rpmlint_shown: Default::default(),
     };
     let step = StepDir {
         path: root.path().join("step"),

@@ -199,6 +199,12 @@ pub struct PkgState {
     /// another version starts with none (see `run_package`).
     #[serde(default)]
     pub flags_version: Option<String>,
+    /// The rpmlint `E:` keys a fix turn was given, or the agent left, for the
+    /// package version `rpmlint_shown_version` (see `rpmlint_fix`).
+    #[serde(default)]
+    pub rpmlint_shown: Vec<String>,
+    #[serde(default)]
+    pub rpmlint_shown_version: Option<String>,
 }
 
 impl PkgState {
@@ -350,7 +356,7 @@ pub fn reconcile_with_obs(
             Ok(n) if n > 0 => {
                 let version = spec_version.unwrap_or_default();
                 // The rpmlint log of what was fetched, as a normal download does.
-                let lint = record_rpmlint_logs(rpms_dir, &obs, &version, &ws);
+                let lint = record_rpmlint_logs(rpms_dir, &obs, &version, &ws).warnings;
                 let saved = PkgState::update(&ws, |st| {
                     st.last_built_version = Some(version);
                     st.last_outcome = Some("success".to_string());

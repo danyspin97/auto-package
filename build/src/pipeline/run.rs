@@ -425,15 +425,28 @@ pub(super) struct RunState {
     pub(super) relaxed_from_spec: Option<String>,
     /// The post-build review ran (or was ruled out) for this run.
     pub(super) post_review_done: bool,
-    /// Set while the build of a post-build-review edit is pending: what to put
-    /// back when that build does not succeed.
+    /// Set while the build of an edit made after a green build (the post-build
+    /// review or an rpmlint fix turn) is pending: what to put back when that
+    /// build does not succeed.
     pub(super) post_review_revert: Option<PostReviewRevert>,
+    /// The rpmlint `E:` keys (see `rpmlint_fix::rpmlint_key`) of this package
+    /// version's green builds that a fix turn was given, or that the agent
+    /// left: a key in here is not asked about again.
+    pub(super) rpmlint_shown: std::collections::BTreeSet<String>,
 }
 
-/// The state a post-build review's edit is rolled back to.
+/// The state an edit made after a green build is rolled back to.
 pub(super) struct PostReviewRevert {
     pub(super) spec: String,
     pub(super) snapshot: CheckoutSnapshot,
+    pub(super) kind: RevertKind,
+}
+
+/// What the edit a [`PostReviewRevert`] undoes was made for.
+pub(super) enum RevertKind {
+    PostReview,
+    /// The rpmlint `E:` lines of the green build the fix turn was given.
+    Rpmlint(Vec<String>),
 }
 
 /// What `generate_spec_stage` learned about the package.
@@ -492,6 +505,7 @@ fn run_stages(
         relaxed_from_spec: None,
         post_review_done: false,
         post_review_revert: None,
+        rpmlint_shown: Default::default(),
     };
 
     let obs_status = checkout_stage(&ctx, &mut st)?;

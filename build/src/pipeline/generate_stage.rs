@@ -468,6 +468,7 @@ pub(super) fn resume_budget(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipel
     } else {
         0
     };
+    st.rpmlint_shown = load_rpmlint_shown(&prior, &config.version);
     st.spent_usd = if resuming_this_run {
         prior.cumulative_spent_usd
     } else {

@@ -410,7 +410,15 @@ pub(super) fn fix_after_build(
     };
     let context = context_owned.as_deref();
 
-    fix_turn(ctx, st, attempts, Some(&extract), context, Some(build_log))?;
+    fix_turn(
+        ctx,
+        st,
+        attempts,
+        crate::agent::Task::FixAfterBuild,
+        Some(&extract),
+        context,
+        Some(build_log),
+    )?;
     Ok(RoundEnd::Retry)
 }
 

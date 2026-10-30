@@ -243,6 +243,8 @@ mod fix_after;
 use fix_after::*;
 mod fix_turn;
 use fix_turn::*;
+mod rpmlint_fix;
+use rpmlint_fix::*;
 mod commit;
 mod validate;
 use commit::*;
@@ -318,6 +320,8 @@ pub use repo_search::*;
 #[cfg(test)]
 mod evidence_line_tests;
 
+#[cfg(test)]
+mod rpmlint_fix_tests;
 #[cfg(test)]
 mod version_conflict_tests;
 

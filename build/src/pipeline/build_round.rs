@@ -62,6 +62,11 @@ pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, P
                 build_step.finish(StepOutcome::Ok);
                 return Ok(end);
             }
+            let build_step = build_step.finish(StepOutcome::Ok);
+            let errors = record_rpmlint(config, obs_name, &ctx.ws, reporter);
+            if let Some(end) = rpmlint_fix_round(ctx, st, &build_step, &build_log, &errors) {
+                return Ok(end);
+            }
             Ok(RoundEnd::Finished(build_succeeded(ctx, st, build_step)))
         }
         Err(osc::Error::UnresolvableDeps {
@@ -93,19 +98,28 @@ pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, P
 /// Append the rpmlint result of the RPMs just downloaded for this package to
 /// `state/<pkg>/rpmlint.log`, one dated section per run of rpmlint, and warn
 /// about its errors. The log OBS publishes is overwritten with every build, so
-/// this file is the only record of earlier ones.
+/// this file is the only record of earlier ones. Returns the `E:` lines.
 pub(super) fn record_rpmlint(
     config: &PipelineConfig,
     obs_name: &str,
     ws: &Workspace,
     reporter: &dyn Reporter,
-) {
-    for message in record_rpmlint_logs(&config.rpms_dir, obs_name, &config.version, ws) {
+) -> Vec<String> {
+    let record = record_rpmlint_logs(&config.rpms_dir, obs_name, &config.version, ws);
+    for message in record.warnings {
         reporter.report(&Event::Warning {
             step: None,
             message,
         });
     }
+    record.errors
+}
+
+/// What [`record_rpmlint_logs`] found: the warnings to report, and the rpmlint
+/// `E:` lines of the RPMs (already without the rpmlintrc filters OBS applied).
+pub(super) struct RpmlintRecord {
+    pub(super) warnings: Vec<String>,
+    pub(super) errors: Vec<String>,
 }
 
 /// [`record_rpmlint`] without a reporter: returns the warnings instead. Also
@@ -117,11 +131,15 @@ pub(super) fn record_rpmlint_logs(
     obs_name: &str,
     version: &str,
     ws: &Workspace,
-) -> Vec<String> {
+) -> RpmlintRecord {
     let mut warnings = Vec::new();
+    let mut all_errors = Vec::new();
     let logs = osc::take_rpmlint_logs(rpms_dir, obs_name);
     if logs.is_empty() {
-        return warnings;
+        return RpmlintRecord {
+            warnings,
+            errors: all_errors,
+        };
     }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -143,6 +161,7 @@ pub(super) fn record_rpmlint_logs(
                     .collect::<Vec<_>>()
                     .join("; ")
             ));
+            all_errors.extend(errors);
         }
     }
     let path = ws.dir().join("rpmlint.log");
@@ -154,22 +173,23 @@ pub(super) fn record_rpmlint_logs(
     if let Err(e) = appended {
         warnings.push(format!("could not append to {}: {e}", path.display()));
     }
-    warnings
+    RpmlintRecord {
+        warnings,
+        errors: all_errors,
+    }
 }
 
-/// A successful OBS build: record it and report the package as built.
-fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -> PipelineResult {
+/// A successful OBS build with nothing left for the rpmlint round: record it
+/// and report the package as built.
+fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepDir) -> PipelineResult {
     let RunCtx {
         config,
         reporter,
         ws,
         rpm_name,
-        obs_name,
         ..
     } = ctx;
     let reporter = *reporter;
-    let build_step = build_step.finish(StepOutcome::Ok);
-    record_rpmlint(config, obs_name, ws, reporter);
     // A build that passes after tests failed in an earlier one: those tests are
     // flaky, and the notes keep that so nobody "fixes" them later.
     if let Some(probe) = crate::flaky::load_probe(ws.dir(), &config.run_id)
@@ -371,6 +391,7 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
             st.post_review_revert = Some(PostReviewRevert {
                 spec: good,
                 snapshot,
+                kind: RevertKind::PostReview,
             });
             Some(RoundEnd::Retry)
         }
@@ -384,9 +405,29 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
     }
 }
 
-/// The build after a post-build review's edit failed: put back the spec (and
-/// checkout files) that built, publish it again, and end the package as built.
-/// The RPMs of that build are still in the RPM directory.
+/// The warning that says an edit made after a green build was reverted, for
+/// the build of that edit failing with `why`.
+pub(super) fn revert_warning(rpm_name: &str, kind: &RevertKind, why: &str) -> String {
+    match kind {
+        RevertKind::PostReview => format!(
+            "{rpm_name}: the build after the post-build review failed ({}); reverting to the spec \
+             that built",
+            brief(why)
+        ),
+        RevertKind::Rpmlint(errors) => rpmlint_warning(
+            rpm_name,
+            &format!(
+                "the build after the rpmlint fix failed ({}); reverted to the spec that built",
+                brief(why)
+            ),
+            errors,
+        ),
+    }
+}
+
+/// The build after an edit made after a green build failed: put back the spec
+/// (and checkout files) that built, publish it again, and end the package as
+/// built. The RPMs of that build are still in the RPM directory.
 fn revert_post_review(
     ctx: &RunCtx,
     st: &mut RunState,
@@ -398,19 +439,19 @@ fn revert_post_review(
     let build_step = build_step.finish(StepOutcome::Failed);
     reporter.report(&Event::Warning {
         step: Some(build_step.id),
-        message: format!(
-            "{}: the build after the post-build review failed ({}); reverting to the spec \
-             that built",
-            ctx.rpm_name,
-            brief(why)
-        ),
+        message: revert_warning(&ctx.rpm_name, &revert.kind, why),
     });
     revert.snapshot.restore(reporter, Some(&build_step));
     restore_spec(&ctx.spec_path, &revert.spec, Some(&build_step), reporter);
-    append_notes(
-        ctx.ws.notes(),
-        "\n## Post-build review reverted\nThe build after the review's edit failed; the spec that built was restored.\n",
-    );
+    let note = match &revert.kind {
+        RevertKind::PostReview => {
+            "\n## Post-build review reverted\nThe build after the review's edit failed; the spec that built was restored.\n"
+        }
+        RevertKind::Rpmlint(_) => {
+            "\n## rpmlint fix reverted\nThe build after the rpmlint fix turn's edit failed; the spec that built was restored.\n"
+        }
+    };
+    append_notes(ctx.ws.notes(), note);
     commit_unless_local(ctx, st)?;
     record_built_state(ctx);
     osc::invalidate_project_packages_cache(&ctx.config.project);

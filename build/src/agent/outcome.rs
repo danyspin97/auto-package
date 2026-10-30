@@ -217,6 +217,9 @@ pub enum Task {
     Review,
     /// Fix the spec after a failed `osc build`.
     FixAfterBuild,
+    /// Fix the spec after a build that succeeded but whose rpmlint reported
+    /// `E:` lines (the lines are the Context).
+    RpmlintFix,
     /// Fix the spec after a failed `rpmspec --parse`.
     FixAfterValidation,
     /// Translate OBS's RPM-wrapped unresolvable dependency names (e.g.

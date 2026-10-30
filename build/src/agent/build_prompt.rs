@@ -197,6 +197,16 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              stale, and return `no_change` rather than reverting a plausible fix on the \
              strength of a stale log."
         }
+        Task::RpmlintFix => {
+            "Fix the spec after a SUCCESSFUL `osc build`. The RPMs built; rpmlint, which checks \
+             them after the build, reported `E:` errors for them, listed under \"Context\". \
+             Nothing failed to build, so the task is those lines.\n\
+             \n\
+             Fix the cause in the spec. A filter (an rpmlintrc entry) is only for what cannot be \
+             fixed, and it must name a warning this build's rpmlint output really reported, with \
+             a `# reason:` line. Your edit is built again; a build that fails puts the spec that \
+             built back, so do not break the build for one line."
+        }
         Task::FixAfterValidation => {
             "Fix the spec after it was rejected before any build.\n\
              \n\
