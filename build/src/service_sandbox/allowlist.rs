@@ -71,6 +71,15 @@ pub(super) fn check_service_url_in(
     hosts: &AllowedHosts,
     asker: &Asker,
 ) -> Result<(), String> {
+    service_url_host_in(url, hosts, asker).map(|_| ())
+}
+
+/// The normalized host of a service `url` that [`check_service_url`] allows.
+pub(super) fn service_url_host_in(
+    url: &str,
+    hosts: &AllowedHosts,
+    asker: &Asker,
+) -> Result<String, String> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!("url `{url}` contains whitespace"));
     }
@@ -91,7 +100,5 @@ pub(super) fn check_service_url_in(
     }
     let (host, port) =
         split_host_port(authority, Some(443)).map_err(|e| format!("url `{url}`: {e}"))?;
-    check_target(host, port, hosts, asker)
-        .map(|_| ())
-        .map_err(|e| format!("url `{url}`: {e}"))
+    check_target(host, port, hosts, asker).map_err(|e| format!("url `{url}`: {e}"))
 }

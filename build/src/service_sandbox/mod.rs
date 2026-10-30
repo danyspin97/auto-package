@@ -43,8 +43,12 @@ mod sandbox;
 mod tests;
 #[cfg(test)]
 mod tests_net;
+mod tunnel;
+#[cfg(test)]
+mod tunnel_tests;
 
 pub(crate) use allowlist::*;
 pub(crate) use proxy::*;
 pub(crate) use run::*;
 pub(crate) use sandbox::*;
+pub(crate) use tunnel::*;

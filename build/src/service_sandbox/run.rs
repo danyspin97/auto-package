@@ -93,24 +93,30 @@ pub(crate) fn run_services(
     let identity = changes_identity(&checkout);
     let cmd = format!("service ra in {}", checkout_dir.display());
     let bwrap = bwrap.to_string_lossy();
-    for s in services {
+    // Read at each service run, so a host allowed since the last run is
+    // mapped by this one.
+    let hosts = crate::allowed_hosts::shared();
+    for (index, s) in services.iter().enumerate() {
         // One proxy per service: each refusal it records names that service.
-        let proxy = Proxy::start(
-            crate::allowed_hosts::shared(),
-            Asker::service(package, &s.name),
-        )
-        .map_err(Error::Io)?;
-        let profile = Profile {
-            checkout: &checkout,
-            scratch: scratch.path(),
-            proxy_dir: proxy.dir(),
-            extra_env: &identity,
-        };
+        let asker = Asker::service(package, &s.name);
+        let proxy = Proxy::start(Arc::clone(&hosts), asker.clone()).map_err(Error::Io)?;
         let outdir = tempfile::Builder::new()
             .prefix(".")
             .suffix(&format!(".{}.service", s.name))
             .tempdir_in(&checkout)
             .map_err(Error::Io)?;
+        let names = source_hosts(&s.params, &hosts, &asker).map_err(Error::ServiceSandbox)?;
+        let map = bridge_addresses(&names, &hosts, &asker).map_err(Error::ServiceSandbox)?;
+        let hosts_file = proxy
+            .write_hosts(&format!("hosts-{index}"), &map)
+            .map_err(Error::Io)?;
+        let profile = Profile {
+            checkout: &checkout,
+            scratch: scratch.path(),
+            proxy_dir: proxy.dir(),
+            extra_env: &identity,
+            hosts_file: &hosts_file,
+        };
         let args =
             bwrap_args(&profile, &service_argv(s, outdir.path())).map_err(Error::ServiceSandbox)?;
         let out = proc::capture_with_timeout_env(

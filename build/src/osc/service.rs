@@ -205,7 +205,7 @@ const SERVICE_PATH_PARAMS: &[&str] = &[
 /// Params that name a source: a path in the checkout, or a URL. cargo_vendor
 /// treats a value that matches no path as a git URL and clones it, a
 /// `file://` URL included, so a value with a `:` is checked as a URL.
-const SOURCE_PARAMS: &[&str] = &["src", "srcdir", "srctar"];
+pub(crate) const SOURCE_PARAMS: &[&str] = &["src", "srcdir", "srctar"];
 
 /// The parameters `service` takes; `None` for a service that is not allowed.
 fn service_params(service: &str) -> Option<&'static [&'static str]> {

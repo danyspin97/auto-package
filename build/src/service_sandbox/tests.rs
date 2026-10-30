@@ -222,6 +222,7 @@ fn profile_args(env: &[(String, String)]) -> Vec<String> {
         scratch: Path::new("/work/proj/pkg/.ap-service-x"),
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: env,
+        hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
     };
     bwrap_args(
         &p,
@@ -321,6 +322,7 @@ fn extra_env_is_appended_and_relative_checkouts_are_refused() {
         scratch: Path::new("pkg/s"),
         proxy_dir: Path::new("/tmp/p"),
         extra_env: &[],
+        hosts_file: Path::new("/tmp/p/hosts"),
     };
     assert!(bwrap_args(&p, &[]).is_err());
 }
@@ -403,11 +405,13 @@ fn the_sandbox_isolates_home_bus_network_and_osc_metadata() {
     let scratch = checkout_path.join(".ap-service-t");
     fs::create_dir_all(scratch.join("tmp")).unwrap();
     let proxy = Proxy::start(Arc::new(AllowedHosts::empty()), test_asker()).unwrap();
+    let hosts = proxy.write_hosts("hosts", &[]).unwrap();
     let p = Profile {
         checkout: &checkout_path,
         scratch: &scratch,
         proxy_dir: proxy.dir(),
         extra_env: &[],
+        hosts_file: &hosts,
     };
     let real_home = std::env::var("HOME").unwrap_or_default();
     let probe = format!(
@@ -503,12 +507,14 @@ fn probe_services_fetch_through_the_proxy() {
     .unwrap();
     fs::write(checkout.join("c/src/lib.rs"), "").unwrap();
     let proxy = Proxy::start(crate::allowed_hosts::shared(), test_asker()).unwrap();
+    let hosts = proxy.write_hosts("hosts", &[]).unwrap();
     let run = |program: &[&str]| {
         let p = Profile {
             checkout: &checkout,
             scratch: &scratch,
             proxy_dir: proxy.dir(),
             extra_env: &[],
+            hosts_file: &hosts,
         };
         let program: Vec<String> = program.iter().map(|s| s.to_string()).collect();
         let args = bwrap_args(&p, &program).unwrap();

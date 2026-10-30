@@ -328,6 +328,7 @@ fn awww_helper_runs_through_the_sandbox_with_its_argv() {
         scratch: Path::new("/work/awww/.ap-service-x"),
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: &[],
+        hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
     };
     let args = bwrap_args(&p, &argv).unwrap();
     assert!(args.ends_with(&argv));

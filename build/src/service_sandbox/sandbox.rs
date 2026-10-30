@@ -10,6 +10,8 @@ pub(crate) struct Profile<'a> {
     pub proxy_dir: &'a Path,
     /// More variables (the changelog identity).
     pub extra_env: &'a [(String, String)],
+    /// The hosts file bound over the sandbox's `/etc/hosts`.
+    pub hosts_file: &'a Path,
 }
 
 pub(super) fn utf8(p: &Path) -> Result<&str, String> {
@@ -128,6 +130,8 @@ pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<Stri
         .map(String::from),
     );
     args.extend(dev_args());
+    let hosts = utf8(p.hosts_file)?;
+    args.extend(["--ro-bind", hosts, "/etc/hosts"].map(String::from));
     for (k, v) in sandbox_env(p)? {
         args.extend(["--setenv".to_string(), k, v]);
     }

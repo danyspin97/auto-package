@@ -28,6 +28,7 @@ fn the_sandbox_dev_has_only_the_device_nodes_it_needs() {
         scratch: Path::new("/work/proj/pkg/.ap-service-x"),
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: &[],
+        hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
     };
     let bwrap = bwrap_args(&p, &["true".to_string()]).unwrap();
     assert!(
@@ -47,11 +48,13 @@ pub(super) fn run_sandboxed(program: &[&str]) -> std::process::Output {
         fs::create_dir_all(scratch.join(sub)).unwrap();
     }
     let proxy = Proxy::start(Arc::new(AllowedHosts::empty()), test_asker()).unwrap();
+    let hosts = proxy.write_hosts("hosts", &[]).unwrap();
     let p = Profile {
         checkout: &checkout,
         scratch: &scratch,
         proxy_dir: proxy.dir(),
         extra_env: &[],
+        hosts_file: &hosts,
     };
     let program: Vec<String> = program.iter().map(|s| s.to_string()).collect();
     let args = bwrap_args(&p, &program).unwrap();

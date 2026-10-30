@@ -210,6 +210,15 @@ impl Proxy {
         self.dir.path()
     }
 
+    /// Write a hosts file for the sandbox into the socket directory, with
+    /// `map` (see [`bridge_addresses`]). It is bound over the sandbox's
+    /// `/etc/hosts`.
+    pub(crate) fn write_hosts(&self, name: &str, map: &[(String, String)]) -> io::Result<PathBuf> {
+        let path = self.dir.path().join(name);
+        fs::write(&path, hosts_file_text(map))?;
+        Ok(path)
+    }
+
     /// The requests refused so far, one line each.
     pub(crate) fn refusals(&self) -> Vec<String> {
         self.shared
