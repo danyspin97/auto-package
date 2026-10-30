@@ -85,3 +85,29 @@ fn the_sandbox_dev_works_for_programs() {
         "{stdout}"
     );
 }
+
+/// A service starts with no inheritable, permitted, effective or ambient
+/// capabilities, and with no_new_privs set, so it cannot regain what the
+/// bridge holds.
+#[test]
+fn the_service_starts_without_capabilities() {
+    if let Some(why) = no_sandbox() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let out = run_sandboxed(&[
+        "grep",
+        "-E",
+        "^(CapInh|CapPrm|CapEff|CapAmb|NoNewPrivs)",
+        "/proc/self/status",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\n"
+    );
+}

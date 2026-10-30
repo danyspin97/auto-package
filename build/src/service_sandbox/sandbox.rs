@@ -148,6 +148,17 @@ pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<Stri
         ]
         .map(String::from),
     );
+    // A service starts with no capabilities, whatever the bridge holds.
+    args.extend(
+        [
+            SETPRIV,
+            "--inh-caps=-all",
+            "--ambient-caps=-all",
+            "--no-new-privs",
+            "--",
+        ]
+        .map(String::from),
+    );
     args.extend(program.iter().cloned());
     Ok(args)
 }
@@ -195,6 +206,10 @@ pub(super) fn sandbox_ready() -> Result<&'static Path, Error> {
             "bwrap cannot create user namespaces here".to_string()
         }
         Some(_) if !Path::new(PYTHON).is_file() => format!("{PYTHON} is missing"),
+        // Without it a service would keep the bridge's capabilities.
+        Some(_) if !Path::new(SETPRIV).is_file() => {
+            format!("{SETPRIV} is missing (install util-linux)")
+        }
         Some(bwrap) => return Ok(bwrap),
     };
     Err(Error::ServiceSandbox(format!(
