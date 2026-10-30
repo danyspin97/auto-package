@@ -31,6 +31,43 @@ a table, with a detail pane for whichever package is selected:
 auto-package build <package-name> --project <obs-project> --tui
 ```
 
+### Allowing a website
+
+Services (the `_service` helpers run in the sandbox) and source fetches may
+contact only the hosts on the built-in list, `AUTO_PACKAGE_SOURCE_HOSTS`, the
+hosts in your `allowed-hosts` file and the hosts you allow for a run. A refusal
+names the host and how to allow it. Three ways, from the narrowest:
+
+- `--allow-host <HOST>` on `build`, `update` or `lint` (repeatable): this run
+  only.
+- `auto-package hosts allow <HOST> [--reason TEXT]`: permanently, written to
+  `$XDG_CONFIG_HOME/auto-package/allowed-hosts` (default
+  `~/.config/auto-package/allowed-hosts`, mode 0600 in a 0700 directory). Edit
+  the file by hand too: one host per line, `#` for comments and reasons.
+  `auto-package hosts list` shows every host, where it comes from and what it
+  covers;
+  `auto-package hosts remove <HOST>` removes one you allowed.
+- In the TUI, on a package that was refused a host: `h` opens a prompt that
+  lists up to four refused hosts, one per line, with the package and the
+  request that refused each one (for example `service cargo_vendor` or
+  `source lookup`). Nothing is allowed by one key. `Y` allows the hosts shown
+  for this run. `p` allows a host permanently: type its exact name and press
+  Enter, one host at a time. The prompt needs room for every line: if it says
+  the terminal is too small, enlarge it, since `Y` and `p` refuse while a host
+  would be cut off. Esc cancels; any other key does nothing. Then `r` retries
+  the package.
+
+A host is a plain name under a domain: no wildcard (`*.example.org` is not
+supported), no port, address, scheme or path, no single label (`com`) and no
+public suffix (`co.uk`). It covers its subdomains, for services and for source
+fetches alike. Allowing a host does not open other ports or private addresses.
+It is a security decision: the host receives the requests the tool makes for
+sources. Only you can allow a host. The prompt offers only hosts the tool itself
+refused for that package, and a host that a service asked for can be among
+them. A package's service decides which hosts it asks for, so read each host
+and its `refused for` line before you confirm; nothing is allowed until you
+press `Y` or type the name. The agent cannot read or write the file.
+
 ### TUI Controls
 
 - `↑`/`↓` or `j`/`k`: Select a package to view its detail pane
@@ -57,6 +94,7 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--work-dir`: Working directory for build artifacts (default: `ap-work`)
 - `--distro`: Repository to build for (default: the project's own, `openSUSE_Tumbleweed` first, then `openSUSE_Factory`, else the one that builds the architecture; a choice between several is printed)
 - `--arch`: Target architecture (default: `x86_64`)
+- `--allow-host <HOST>`: Allow this host for services and source fetches for this run only; repeatable. See [Allowing a website](#allowing-a-website)
 - `--tui`: Enable interactive TUI mode
 - `--log`: Log level when not using TUI: error, warn, info, debug, trace (default: `info`)
 - `--max-attempts`: Maximum AI fix attempts per package (default: 10)
@@ -448,6 +486,12 @@ tool assumes these may be hostile and limits what they can reach:
   proxy (`HTTPS_PROXY`) the proxy resolves the target, so only IP literals in
   the URL can be refused; a hostname that resolves to a private address is not
   caught.
+- **Allowed hosts**: the hosts services and source fetches may contact are the
+  built-in list, `AUTO_PACKAGE_SOURCE_HOSTS`, the user's `allowed-hosts` file
+  and `--allow-host` / the TUI for a run. Only the user adds to them, through a
+  command they type, the file, or a confirmed TUI key. The agent's tools may
+  not read or write the file, and a host is checked by the same rules whatever
+  its source.
 - **Upstream sources**: a repository found by search is not built without
   confirmation. Only a curated mapping, the repository PyPI records for the
   project, the upstream another distribution's spec records, or an NVIDIA-org

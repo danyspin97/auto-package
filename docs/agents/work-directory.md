@@ -69,8 +69,15 @@ FirstUnbuiltDependency, RequestedRoot), `step_started` / `step_finished`
 (`classification`, `log`), `missing_packages`, `extract_result`, `notes_usage`
 (cost of the notes turn), `warning`, `package_finished` (`outcome`: `Built`,
 `AlreadyBuilt`, `{"Failed":{"reason"}}`, `{"Blocked":{"reason"}}`,
-`{"MissingDeps":{"deps"}}`), plus noisy `command`, `command_done`, `progress`,
+`{"MissingDeps":{"deps"}}`), `host_allowed` (`host`, `scope`: `run` or
+`persistent`, `source`: `flag` for `--allow-host`, `tui` for the TUI's prompt; a run-level event with no `pkg`, written when the host is allowed, so a
+log can be read for every host a run was allowed to contact; absent in older
+logs), plus noisy `command`, `command_done`, `progress`,
 `agent_tool_use`. There are no timestamps: use `elapsed` and the run id.
+`hosts allow` and `hosts remove` run outside any run and write no event: the
+user's `allowed-hosts` file (its `# reason` comments) is their record.
+`auto-package explain` lists the `host_allowed` hosts of the run it reads.
+Recipe: `jq -c 'select(.event=="host_allowed")' "$R"`.
 A run with no `run_finished` was interrupted or is still going.
 
 Recipes (`R=$P/runs/<run>/run.jsonl`, `K=<pkg>`):
