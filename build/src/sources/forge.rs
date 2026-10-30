@@ -123,6 +123,9 @@ pub enum Refusal {
     NewPackage,
     /// `--regen` asks for a new spec in place of the recipe.
     Regen,
+    /// The recipe is what builds the package (a carried-forward recipe, or
+    /// the wheel route, which needs a spec built from source).
+    Recipe,
 }
 
 /// Why an update does not keep the recipe its checkout already holds, or
@@ -157,6 +160,10 @@ pub fn cannot_tell_message(archive: &str, why: Refusal) -> String {
         Refusal::Regen => {
             "meson, Go, Zig and plain Makefile projects are not supported with \
              --regen; drop --regen to keep the package's recipe instead"
+        }
+        Refusal::Recipe => {
+            "meson, Go, Zig and plain Makefile projects are built only from the \
+             package's own recipe"
         }
     };
     format!(

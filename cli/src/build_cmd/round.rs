@@ -174,19 +174,8 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     "--max-packages {max_packages} reached: no more packages are queued in this run"
                 ));
             }
-            // The root package is the one the update command builds; a
-            // dependency of it is an ordinary build.
-            let is_root = rpm_name == config.rpm_name;
-            let pkg_config = PipelineConfig {
-                pkg_name: target_info.name.clone(),
-                rpm_name: rpm_name.clone(),
-                version: target_info.version.clone(),
-                // The root package's findings are not a dependency's.
-                patch_request: None,
-                patch_condition: None,
-                update: config.update && is_root,
-                ..config.clone()
-            };
+            let pkg_config =
+                package_config(config, &target_info.name, &target_info.version, &rpm_name);
             let pkg_run = run_dir.pkg(&rpm_name);
             if let Err(e) = pkg_run.ensure() {
                 // Every row this round selected must settle: the failing one
@@ -320,4 +309,77 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
         batch_pending,
         batch_failures,
     })
+}
+
+/// The config one package of a round is built with. The root package, the
+/// one the update command builds, keeps the update and the unknown build
+/// system of the config; a dependency of it is an ordinary new build.
+pub(super) fn package_config(
+    config: &PipelineConfig,
+    pkg_name: &str,
+    version: &str,
+    rpm_name: &str,
+) -> PipelineConfig {
+    let is_root = rpm_name == config.rpm_name;
+    PipelineConfig {
+        pkg_name: pkg_name.to_string(),
+        rpm_name: rpm_name.to_string(),
+        version: version.to_string(),
+        // The root package's findings are not a dependency's.
+        patch_request: None,
+        patch_condition: None,
+        update: config.update && is_root,
+        unknown_build_system: config.unknown_build_system && is_root,
+        ..config.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The root of an update of an unknown build system, as `build_cmd` makes it.
+    fn root() -> PipelineConfig {
+        PipelineConfig {
+            pkg_name: "cagebreak".into(),
+            rpm_name: "cagebreak".into(),
+            version: "3.2.1".into(),
+            project: "p".into(),
+            work_dir: PathBuf::new(),
+            state_root: PathBuf::new(),
+            rpms_dir: PathBuf::new(),
+            distro: "openSUSE_Tumbleweed".into(),
+            arch: "x86_64".into(),
+            max_attempts: 1,
+            budget_usd: 1.0,
+            no_agent: true,
+            force: false,
+            regen: false,
+            update: true,
+            source_repo: Some("https://github.com/project-repo/cagebreak".into()),
+            subprojects: Vec::new(),
+            failed_deps: Vec::new(),
+            unknown_build_system: true,
+            unbuildable_deps: Vec::new(),
+            run_id: "test".into(),
+            source_urls: Default::default(),
+            python_flavors: Default::default(),
+            patch_request: None,
+            patch_condition: None,
+        }
+    }
+
+    #[test]
+    fn the_root_keeps_the_update_and_the_unknown_build_system() {
+        let pkg = package_config(&root(), "cagebreak", "3.2.1", "cagebreak");
+        assert!(pkg.update);
+        assert!(pkg.unknown_build_system);
+    }
+
+    #[test]
+    fn a_dependency_of_the_root_is_an_ordinary_new_build() {
+        let pkg = package_config(&root(), "libfoo", "1.0", "libfoo");
+        assert!(!pkg.update);
+        assert!(!pkg.unknown_build_system);
+    }
 }

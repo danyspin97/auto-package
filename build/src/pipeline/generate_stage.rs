@@ -12,6 +12,50 @@ use crate::pipeline::render::*;
 use crate::pipeline::rpm_deps::*;
 use crate::pipeline::tarball::*;
 
+/// What the generate stage knows about an archive whose build system is
+/// unknown. Its recipe is carried forward or the run fails: no spec is
+/// generated for it, since a spec would be a guess at its build.
+pub(super) struct UnknownBuild<'a> {
+    /// `PipelineConfig::unknown_build_system`. Nothing is gated without it.
+    pub unknown: bool,
+    /// The archive the failure names: the repository, else the package.
+    pub archive: &'a str,
+    pub version: &'a str,
+    /// The stage generates a spec in this run.
+    pub need_spec: bool,
+    /// The checkout had a spec before the stage ran.
+    pub spec_existed: bool,
+    /// `PipelineConfig::prefers_wheel`: the wheel is asked for.
+    pub wheel_route: bool,
+    /// The outcome of carrying the checkout's recipe forward, or `None` when
+    /// it was not tried.
+    pub carry: Option<Result<(), &'a str>>,
+}
+
+/// `Ok` when the stage may go on, else the failure to report.
+pub(super) fn unknown_build_gate(case: &UnknownBuild) -> Result<(), String> {
+    if !case.unknown || !case.need_spec {
+        return Ok(());
+    }
+    let fail = |reason: &str| {
+        format!(
+            "{}; {reason}",
+            crate::sources::cannot_tell_message(case.archive, crate::sources::Refusal::Recipe)
+        )
+    };
+    match case.carry {
+        Some(Ok(())) => Ok(()),
+        Some(Err(why)) => Err(fail(&format!(
+            "the existing recipe could not be carried forward to {} ({why})",
+            case.version
+        ))),
+        None if case.wheel_route && case.spec_existed => Err(fail(
+            "the wheel route is not available for an unknown build system",
+        )),
+        None => Err(fail("there is no recipe to carry forward")),
+    }
+}
+
 /// Step: GenerateSpec (if needed). Sets `sdist_top_level` and
 /// `from_repo_archive` on the state.
 pub(super) fn generate_spec_stage(
@@ -69,6 +113,17 @@ pub(super) fn generate_spec_stage(
             rpm_name.clone()
         );
 
+        let unknown_gate = |carry: Option<Result<(), &str>>| {
+            unknown_build_gate(&UnknownBuild {
+                unknown: config.unknown_build_system,
+                archive: config.source_repo.as_deref().unwrap_or(&config.pkg_name),
+                version: &config.version,
+                need_spec,
+                spec_existed: spec_existed_before_generation,
+                wheel_route: config.prefers_wheel(),
+                carry,
+            })
+        };
         let generated = if carry_forward {
             match carry_forward_spec(config, checkout_dir, spec_path, &step) {
                 Ok(res) => {
@@ -76,6 +131,10 @@ pub(super) fn generate_spec_stage(
                     Ok(res)
                 }
                 Err(why) => {
+                    if let Err(msg) = unknown_gate(Some(Err(&why))) {
+                        step.finish(StepOutcome::Failed);
+                        return Err(ctx.failed(msg));
+                    }
                     // A generated spec starts from scratch: it would drop what a
                     // maintained C/C++ recipe has (noarch, its Source URL, a
                     // multibuild, patches). That is only done when asked for
@@ -102,7 +161,13 @@ pub(super) fn generate_spec_stage(
                 }
             }
         } else {
-            generate_spec(config, checkout_dir, spec_path, &step)
+            match unknown_gate(None) {
+                Err(msg) => {
+                    step.finish(StepOutcome::Failed);
+                    return Err(ctx.failed(msg));
+                }
+                Ok(()) => generate_spec(config, checkout_dir, spec_path, &step),
+            }
         };
         match generated {
             Ok(res) => {

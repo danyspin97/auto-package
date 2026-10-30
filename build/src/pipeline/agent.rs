@@ -298,7 +298,7 @@ pub(super) fn agent_turn(
         // `build/src/sources.rs`) once the probe has decided the ecosystem,
         // so it is the single stable "this is a Python package" signal the
         // pipeline can hand the agent prompt.
-        is_python: config.rpm_name.starts_with("python-"),
+        is_python: config.rpm_name.starts_with("python-") && !config.unknown_build_system,
         task: ctx.task,
         attempt: ctx.attempt,
         max_attempts: config.max_attempts,

@@ -509,3 +509,14 @@ fn local_update_refuses_maintenance_before_it_runs() {
         assert!(summary.is_none());
     }
 }
+
+#[test]
+fn only_a_python_parent_with_a_known_build_system_is_looked_up_on_pypi_first() {
+    use crate::resolve::is_python_parent;
+    assert!(is_python_parent("python-foo", false, false));
+    // A C/C++ library, and anything whose build system is unknown, has no PyPI
+    // closure to walk: its dependencies go to the source repositories.
+    assert!(!is_python_parent("python-foo", true, false));
+    assert!(!is_python_parent("python-foo", false, true));
+    assert!(!is_python_parent("cagebreak", false, true));
+}

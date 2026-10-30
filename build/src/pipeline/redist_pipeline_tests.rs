@@ -78,6 +78,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         source_repo: None,
         subprojects: Vec::new(),
         failed_deps: Vec::new(),
+        unknown_build_system: false,
         unbuildable_deps: Vec::new(),
         run_id: "test".into(),
         source_urls: Default::default(),

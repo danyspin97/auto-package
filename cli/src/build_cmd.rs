@@ -100,7 +100,7 @@ pub(crate) fn cmd_build(
     ap_build::osc::try_list_project_packages(project, ap_build::proc::Emit::run(reporter.as_ref()))
         .map_err(|e| color_eyre::eyre::eyre!(e))?;
     let refusal = ap_build::sources::recipe_refusal(branch.is_some_and(|b| b.update), regen);
-    let (name, rpm_name, subprojects) =
+    let (name, rpm_name, subprojects, unknown_build_system) =
         resolve_names(name, &version, &source_repo, refusal, &reporter)?;
     // The run's key is the lowercase guess; the pipeline resolves the spelling
     // OBS lists the package under (`PkgState::obs_name`) in its own preflight.
@@ -151,6 +151,7 @@ pub(crate) fn cmd_build(
         // of it (see round.rs) is an ordinary build.
         update: branch.is_some_and(|b| b.update),
         failed_deps: Vec::new(),
+        unknown_build_system,
         unbuildable_deps: Vec::new(),
     };
 

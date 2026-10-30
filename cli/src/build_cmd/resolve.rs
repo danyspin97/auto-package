@@ -69,6 +69,28 @@ pub(super) fn resolve_version(
     })
 }
 
+/// The name, RPM name, subprojects and unknown-build-system flag a repository
+/// build is filed under, decided from its probe. A repository names itself:
+/// its own name wins over the guess. Not for a monorepo, where the requested
+/// name is the source package's, nor for an unknown build system, whose
+/// archive names nothing auto-package can read.
+pub(super) fn repo_names(
+    name: &str,
+    probe: &ap_build::sources::RepoProbe,
+) -> (String, String, Vec<(String, String)>, bool) {
+    let unknown = probe.ecosystem == ap_build::sources::Ecosystem::Unknown;
+    let effective_name = if probe.subprojects.len() > 1 || unknown {
+        name.to_string()
+    } else {
+        probe
+            .project_name
+            .clone()
+            .unwrap_or_else(|| name.to_string())
+    };
+    let rpm = probe.ecosystem.rpm_name(&effective_name);
+    (effective_name, rpm, probe.subprojects.clone(), unknown)
+}
+
 /// The name and RPM name a build is filed under, and the repository
 /// subprojects. A repository names itself: its own name wins over the guess.
 ///
@@ -81,32 +103,26 @@ pub(super) fn resolve_names(
     source_repo: &Option<String>,
     refusal: Option<ap_build::sources::Refusal>,
     reporter: &Arc<dyn Reporter + Send + Sync>,
-) -> color_eyre::Result<(String, String, Vec<(String, String)>)> {
+) -> color_eyre::Result<(String, String, Vec<(String, String)>, bool)> {
     Ok(match source_repo {
-        None => (name.to_string(), ap_build::osc::rpm_name(name), Vec::new()),
+        None => (
+            name.to_string(),
+            ap_build::osc::rpm_name(name),
+            Vec::new(),
+            false,
+        ),
         Some(repo) => {
             let probe = ap_build::sources::probe(repo, &version, name, refusal)
                 .map_err(|e| color_eyre::eyre::eyre!(e))?;
-            // For monorepos the user-provided name IS the source package name;
-            // the detected project_name is just one subproject and must not
-            // override it. Only apply the detected name for single-project repos.
-            let effective_name = if probe.subprojects.len() > 1 {
-                name.to_string()
-            } else {
-                let declared = probe
-                    .project_name
-                    .clone()
-                    .unwrap_or_else(|| name.to_string());
-                if !declared.eq_ignore_ascii_case(name) {
-                    reporter.report(&Event::Progress {
-                        step: None,
-                        message: format!(
-                            "{repo} calls itself '{declared}', not '{name}' — using that"
-                        ),
-                    });
-                }
-                declared
-            };
+            let (effective_name, rpm, subprojects, unknown) = repo_names(name, &probe);
+            if !effective_name.eq_ignore_ascii_case(name) {
+                reporter.report(&Event::Progress {
+                    step: None,
+                    message: format!(
+                        "{repo} calls itself '{effective_name}', not '{name}' — using that"
+                    ),
+                });
+            }
             if probe.subprojects.len() > 1 {
                 reporter.report(&Event::Progress {
                     step: None,
@@ -122,8 +138,7 @@ pub(super) fn resolve_names(
                     ),
                 });
             }
-            let rpm = probe.ecosystem.rpm_name(&effective_name);
-            (effective_name, rpm, probe.subprojects)
+            (effective_name, rpm, subprojects, unknown)
         }
     })
 }
@@ -189,4 +204,53 @@ pub(super) fn seed_stuck_deps(
         pending_deps.extend(already_stuck);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ap_build::sources::{Ecosystem, RepoProbe};
+
+    fn probe(ecosystem: Ecosystem, project_name: Option<&str>, subprojects: usize) -> RepoProbe {
+        RepoProbe {
+            ecosystem,
+            project_name: project_name.map(str::to_string),
+            project_dir: None,
+            subprojects: (0..subprojects)
+                .map(|i| (format!("dir{i}"), format!("sub{i}")))
+                .collect(),
+            archive_url: "https://example.org/a.tar.gz".into(),
+        }
+    }
+
+    #[test]
+    fn an_unknown_build_system_keeps_the_requested_name_and_sets_the_flag() {
+        // Even an archive that declares a name keeps the one asked for.
+        let (name, rpm, subprojects, unknown) =
+            repo_names("CageBreak", &probe(Ecosystem::Unknown, Some("Other"), 0));
+        assert_eq!(name, "CageBreak");
+        assert_eq!(rpm, "cagebreak");
+        assert!(subprojects.is_empty());
+        assert!(unknown);
+    }
+
+    #[test]
+    fn a_known_build_system_takes_the_declared_name() {
+        let (name, rpm, _, unknown) =
+            repo_names("cagebreak", &probe(Ecosystem::Python, Some("Other"), 0));
+        assert_eq!(name, "Other");
+        assert_eq!(rpm, "python-other");
+        assert!(!unknown);
+    }
+
+    #[test]
+    fn a_monorepo_keeps_the_requested_name() {
+        let (name, _, subprojects, unknown) = repo_names(
+            "cuda-python",
+            &probe(Ecosystem::Python, Some("cuda_core"), 2),
+        );
+        assert_eq!(name, "cuda-python");
+        assert_eq!(subprojects.len(), 2);
+        assert!(!unknown);
+    }
 }

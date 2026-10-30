@@ -4,6 +4,13 @@
 
 use super::*;
 
+/// Whether a dependency of a package is looked up on PyPI first. Only a Python
+/// parent's: a C/C++ library's dependency is not, and neither is anything of an
+/// unknown build system, which has no PyPI closure to walk.
+pub(super) fn is_python_parent(rpm_name: &str, native: bool, unknown_build_system: bool) -> bool {
+    rpm_name.starts_with("python-") && !native && !unknown_build_system
+}
+
 /// Whether a positional target is a repository URL rather than a package name.
 pub(super) fn looks_like_url(s: &str) -> bool {
     s.starts_with("https://") || s.starts_with("http://") || s.starts_with("git@")
@@ -151,7 +158,7 @@ pub(super) fn resolve_dependency_config(
     // A C/C++ library (reported as `lib<x>-devel`, `pkgconfig(x)`, a soname) is
     // never looked up on PyPI: a PyPI project that happens to share its name is
     // not it, and would be packaged as `python-<x>`.
-    let parent_is_python = config.rpm_name.starts_with("python-") && !native;
+    let parent_is_python = is_python_parent(&config.rpm_name, native, config.unknown_build_system);
 
     // `--nvidia-redist`: a CUDA component is NVIDIA's archive at the version of
     // NVIDIA's manifest, whatever PyPI says about the wheel or a repository
@@ -171,6 +178,7 @@ pub(super) fn resolve_dependency_config(
                     patch_request: None,
                     patch_condition: None,
                     update: false,
+                    unknown_build_system: false,
                     ..config.clone()
                 })
             }
@@ -209,6 +217,7 @@ pub(super) fn resolve_dependency_config(
                 patch_request: None,
                 patch_condition: None,
                 update: false,
+                unknown_build_system: false,
                 ..config.clone()
             });
         }
@@ -327,6 +336,7 @@ pub(super) fn resolve_dependency_config(
                 patch_request: None,
                 patch_condition: None,
                 update: false,
+                unknown_build_system: false,
                 ..config.clone()
             });
         }

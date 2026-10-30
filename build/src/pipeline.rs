@@ -103,6 +103,11 @@ pub struct PipelineConfig {
     pub patch_request: Option<String>,
     /// The machine-checkable part of `patch_request`, when the dependent gave one.
     pub patch_condition: Option<crate::ship_condition::FilesCondition>,
+    /// The release archive is built by a build system auto-package does not
+    /// know (meson, Go, Zig, a plain Makefile): see `sources::probe`. Only the
+    /// recipe the checkout holds can build it, so no spec is generated for it,
+    /// and it is not a Python package whatever its RPM name says.
+    pub unknown_build_system: bool,
 }
 mod state;
 pub use state::*;
@@ -373,6 +378,8 @@ mod wheel_policy_tests;
 
 #[cfg(test)]
 mod redist_pipeline_tests;
+#[cfg(test)]
+mod unknown_build_tests;
 
 #[cfg(test)]
 mod settled_tests;
