@@ -354,3 +354,28 @@ fn static_system_prompt_opens_with_the_priorities() {
         "the priorities must precede the conventions"
     );
 }
+
+/// An update keeps the maintainer's hygiene: the version update itself does not
+/// remove the obsolete constructs the recipe carries.
+#[test]
+fn updates_never_remove_hygiene_by_the_conventions() {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let all = flat(&all_conventions());
+    let system = flat(&static_system_prompt());
+    for text in [&all, &system] {
+        assert!(!text.contains("drop them in the same edit"), "{text}");
+        assert!(
+            !text.contains("Clean up obsolete spec constructs"),
+            "{text}"
+        );
+    }
+    assert!(all.contains(
+        "An existing spec keeps them on an update (convention 86), unless a build or rpmlint"
+    ));
+    assert!(all.contains("write no bullet for a cosmetic edit, and make none"));
+    let index_86 = CONVENTIONS_INDEX.lines().nth(85).unwrap();
+    assert!(
+        index_86.contains("only what the new release forces"),
+        "{index_86}"
+    );
+}

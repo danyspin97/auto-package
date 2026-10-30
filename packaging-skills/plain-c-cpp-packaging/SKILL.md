@@ -12,6 +12,10 @@ openSUSE specs (`fmt`, `zlib-ng`, `libuv` in Factory) — verify the exact macro
 spelling (grep `/usr/lib/rpm/macros.d`; the pipeline validates the spec after your turn) rather than assuming these examples
 generalize perfectly to this package.
 
+Applies to new specs; a carried-forward spec keeps its form unless the build
+fails on it. On a version update, only the changes the new release forces are
+made (convention 86).
+
 - **Shared library or not?** Grep `CMakeLists.txt` for
   `add_library(... SHARED ...)` (CMake defaults to `STATIC` unless
   `BUILD_SHARED_LIBS` is set) or `configure.ac` for `LT_INIT`/
@@ -45,7 +49,8 @@ generalize perfectly to this package.
   CMake module): it hides an ABI change from every dependent. In `%files`
   list the soname with its major and glob the rest
   (`%{_libdir}/lib<name>.so.<soversion>*`, e.g. `libfmt.so.12*`), not
-  `*.so.*`; define `%global sover <soversion>` yourself at the top if you want
+  `*.so.*` (applies to new specs; a carried-forward spec keeps its form unless
+  the build fails on it); define `%global sover <soversion>` yourself at the top if you want
   a macro for it (there is no predefined one).
 - **A header-only library is one noarch `-devel` package.** No runtime
   subpackage, no empty base package: `BuildArch: noarch`, `%files` for the
@@ -85,7 +90,8 @@ generalize perfectly to this package.
   confirm every non-system directory is claimed once. The build log's `check-filelist`
   and `File listed twice` lines are the authoritative list; read them
   before editing `%files`.
-- **`%ldconfig_scriptlets`**: every shared-library subpackage needs
+- **`%ldconfig_scriptlets`** (applies to new specs; a carried-forward spec
+  keeps its form unless the build fails on it): every shared-library subpackage needs
   `%ldconfig_scriptlets -n lib<name><soversion>` (expands to the
   `%post`/`%postun -p /sbin/ldconfig` pair) directly before its `%files`
   section. Do not hand-write the ldconfig calls — the macro is the current

@@ -83,11 +83,11 @@
 83. Merged into convention 76 — read convention 76 when several wheels unpack into one top-level dir
 84. Merged into convention 32 — read convention 32 when the build or sources mention CUDA, cuda.h, nvcc or libcudart
 85. Merged into convention 34 — read convention 34 when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
-86. [inline] Carried-forward recipe: change only what the release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
+86. [inline] Update of a carried-forward recipe: edit only what the new release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
 87. Merged into convention 7 — read convention 7 when the prompt lists flaky tests or a %check failure differs between two builds
 88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
 89. [inline] SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
-90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr; keep header, URL:, SPDX License: — read when a spec has Group:, BuildRoot:, %clean or %defattr, or no URL:
+90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr in a new spec; an update keeps them unless forced; keep header, URL:, SPDX License: — read when a spec has them or no URL:
 91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
 92. Merged into convention 77 — read convention 77 when you write or edit a _service file
 93. Merged into convention 77 — read convention 77 when the release page has a .asc, .sig or .sign next to the tarball
