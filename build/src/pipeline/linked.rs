@@ -58,25 +58,13 @@ pub(super) fn linked_bound_conflicts(
     if requires.is_empty() {
         return Vec::new();
     }
-    let paths = match osc::get_project_repo_paths(&config.project, emit) {
-        Ok(paths) => paths,
+    let linked = match osc::linked_project_listings(&config.project, &config.distro, emit) {
+        Ok(linked) => linked,
         Err(e) => {
             skipped(format!("could not list the linked projects ({e})"));
             return Vec::new();
         }
     };
-    let mut linked = Vec::new();
-    for (path_project, _repo) in paths {
-        match osc::try_list_project_packages(&path_project, emit) {
-            Ok(l) => linked.push((path_project, l)),
-            Err(e) => {
-                skipped(format!(
-                    "could not list the packages of {path_project} ({e})"
-                ));
-                return Vec::new();
-            }
-        }
-    }
     let none = Default::default();
     let no_statuses = std::collections::HashMap::new();
     names
@@ -174,11 +162,8 @@ pub(super) fn linked_package_spelling(
     dep: &str,
 ) -> Option<String> {
     let emit = Emit::new(ctx.reporter, step);
-    let mut linked = Vec::new();
-    for (path_project, _repo) in osc::get_project_repo_paths(&ctx.config.project, emit).ok()? {
-        let l = osc::try_list_project_packages(&path_project, emit).ok()?;
-        linked.push((path_project, l));
-    }
+    let linked =
+        osc::linked_project_listings(&ctx.config.project, &ctx.config.distro, emit).ok()?;
     let none = Default::default();
     let no_statuses = std::collections::HashMap::new();
     let crate::depclass::Availability::InLinked { pkg, .. } =
@@ -198,11 +183,8 @@ pub(super) fn linked_shipped_version(
     dep: &str,
 ) -> Option<String> {
     let emit = Emit::new(ctx.reporter, step);
-    let mut linked = Vec::new();
-    for (path_project, _repo) in osc::get_project_repo_paths(&ctx.config.project, emit).ok()? {
-        let l = osc::try_list_project_packages(&path_project, emit).ok()?;
-        linked.push((path_project, l));
-    }
+    let linked =
+        osc::linked_project_listings(&ctx.config.project, &ctx.config.distro, emit).ok()?;
     let none = Default::default();
     let no_statuses = std::collections::HashMap::new();
     let crate::depclass::Availability::InLinked { project, pkg } =

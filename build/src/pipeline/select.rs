@@ -168,18 +168,13 @@ pub fn select_target(
     // A failed lookup stops the resolve: an empty answer would make every
     // package look absent (and so get rebuilt) or present (and so be skipped).
     let obs_project = config.project.clone();
-    let (nodes, own_packages, linked_packages, build_statuses) = std::thread::scope(|scope| {
+    let (nodes, own_packages, linked_listings, build_statuses) = std::thread::scope(|scope| {
         let own_handle =
             scope.spawn(|| osc::try_list_project_packages(&obs_project, Emit::run(reporter)));
         let linked_handle = scope.spawn(|| {
-            let mut linked = std::collections::HashSet::new();
-            let paths = osc::get_project_repo_paths(&obs_project, Emit::run(reporter))
-                .map_err(|e| format!("could not read build paths of {obs_project}: {e}"))?;
-            for (path_project, _repo) in paths {
-                let listed = osc::try_list_project_packages(&path_project, Emit::run(reporter))?;
-                linked.extend(listed.iter().cloned());
-            }
-            Ok::<_, String>(linked)
+            osc::linked_project_listings(&obs_project, &config.distro, Emit::run(reporter)).map_err(|e| {
+                format!("could not read the build paths of {obs_project} or the packages they reach: {e}")
+            })
         });
         let statuses_handle = scope.spawn(|| {
             osc::get_project_build_statuses(&obs_project, &config.distro, &config.arch)
@@ -201,7 +196,7 @@ pub fn select_target(
     // The library packages require their release's filesystem package: queue it.
     crate::redist::add_filesystem_nodes(&mut nodes, &crate::redist::Network)?;
     let own_packages = own_packages??;
-    let linked_packages = linked_packages??;
+    let linked_listings = linked_listings??;
     let build_statuses = build_statuses??;
 
     let total = nodes.len();
@@ -251,8 +246,11 @@ pub fn select_target(
     for p in own_packages.iter() {
         own_fuzzy.entry(osc::fuzzy_key(p)).or_default().push(p);
     }
-    let linked_fuzzy: std::collections::HashSet<String> =
-        linked_packages.iter().map(|p| osc::fuzzy_key(p)).collect();
+    let linked_fuzzy: std::collections::HashSet<String> = linked_listings
+        .iter()
+        .flat_map(|(_, listing)| listing.iter())
+        .map(|p| osc::fuzzy_key(p))
+        .collect();
 
     // How a node came to be resolvable, so the two very different reasons —
     // "already in the distro, nothing to build" vs. "this project built it"
@@ -309,8 +307,7 @@ pub fn select_target(
             &nodes,
             &distro,
             &needs_build,
-            &linked_packages,
-            reporter,
+            &linked_listings,
         );
         for conflict in &plan.conflicts {
             // Every round derives the same plan: say each conflict once.

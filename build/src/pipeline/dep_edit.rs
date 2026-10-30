@@ -94,11 +94,7 @@ fn project_view(ctx: &RunCtx, step: ap_core::event::StepId) -> Option<ProjectVie
     let listing = osc::try_list_project_packages(&config.project, emit).ok()?;
     let statuses =
         osc::get_project_build_statuses(&config.project, &config.distro, &config.arch).ok()?;
-    let mut linked = Vec::new();
-    for (path_project, _repo) in osc::get_project_repo_paths(&config.project, emit).ok()? {
-        let l = osc::try_list_project_packages(&path_project, emit).ok()?;
-        linked.push((path_project, l));
-    }
+    let linked = osc::linked_project_listings(&config.project, &config.distro, emit).ok()?;
     Some(ProjectView {
         listing,
         statuses,

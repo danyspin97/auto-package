@@ -14,8 +14,7 @@ pub(super) fn distro_bound_plan(
     nodes: &[ap_ecosystem::pip::Node],
     distro: &[bool],
     needs_build: &[bool],
-    linked_packages: &std::collections::HashSet<String>,
-    reporter: &dyn Reporter,
+    linked: &[(String, std::sync::Arc<std::collections::HashSet<String>>)],
 ) -> distro_bounds::Plan {
     let candidates = distro_bounds::candidates(nodes, distro, needs_build);
     // The requested package, when the distro ships it: its version is checked
@@ -29,22 +28,21 @@ pub(super) fn distro_bound_plan(
     if to_fetch.is_empty() {
         return distro_bounds::Plan::default();
     }
-    let paths = match osc::get_project_repo_paths(project, Emit::run(reporter)) {
-        Ok(paths) => paths,
-        Err(e) => {
-            ap_core::diag!("  no distro version check: {e}");
-            return distro_bounds::Plan::default();
-        }
-    };
-    let by_key: std::collections::HashMap<String, &String> = linked_packages
+    // The linked projects nearest first, each by fuzzy key: the version is the
+    // first one that ships the package and has a source version for it.
+    let by_project: Vec<(&str, std::collections::HashMap<String, &String>)> = linked
         .iter()
-        .map(|p| (osc::fuzzy_key(p), p))
+        .map(|(path_project, listing)| {
+            let by_key = listing.iter().map(|p| (osc::fuzzy_key(p), p)).collect();
+            (path_project.as_str(), by_key)
+        })
         .collect();
     let lookup = |i: usize| -> Option<String> {
-        let real = by_key.get(&osc::fuzzy_key(&osc::rpm_name(&nodes[i].name)))?;
-        paths
-            .iter()
-            .find_map(|(path_project, _repo)| osc::source_version(path_project, real))
+        let key = osc::fuzzy_key(&osc::rpm_name(&nodes[i].name));
+        by_project.iter().find_map(|(path_project, by_key)| {
+            let real = by_key.get(&key)?;
+            osc::source_version(path_project, real)
+        })
     };
     let fetched = distro_bounds::fetch_parallel(&to_fetch, 8, lookup);
     // A node found only once an earlier conflict turned a distro node into one
