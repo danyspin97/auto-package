@@ -152,6 +152,8 @@ const TAR_SCM_PARAMS: &[&str] = &[
     "include-re",
     "extract",
     "submodules",
+    // argparse takes this unambiguous prefix of --submodules
+    "submodule",
     "history-depth",
     "parent-tag",
     "package-meta",
@@ -161,6 +163,9 @@ const TAR_SCM_PARAMS: &[&str] = &[
 const CARGO_VENDOR_PARAMS: &[&str] = &[
     "url",
     "src",
+    // aliases of --src in clap
+    "srcdir",
+    "srctar",
     "revision",
     "changesgenerate",
     "changesauthor",
@@ -171,6 +176,7 @@ const CARGO_VENDOR_PARAMS: &[&str] = &[
     "no-root-manifest",
     "update",
     "exclude",
+    "filter",
     "versioned-dirs",
     "respect-lockfile",
     "versionrewriteregex",
@@ -183,6 +189,8 @@ const SERVICE_PATH_PARAMS: &[&str] = &[
     "filename",
     "file",
     "src",
+    "srcdir",
+    "srctar",
     "specfile",
     "cargotoml",
     "exclude",

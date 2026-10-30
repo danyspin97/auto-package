@@ -118,6 +118,50 @@ fn the_tar_service_is_checked_in_every_mode() {
 }
 
 #[test]
+fn srcdir_srctar_submodule_filter_and_specfile_are_checked() {
+    let ok = [
+        ("cargo_vendor", "srcdir", "rustsec"),
+        ("cargo_vendor", "srctar", "mdbook-*.tar.gz"),
+        ("cargo_vendor", "srcdir", "https://github.com/o/r"),
+        ("cargo_vendor", "filter", "true"),
+        ("tar_scm", "submodule", "enable"),
+        ("obs_scm", "submodule", "enable"),
+        (
+            "format_spec_file",
+            "specfile",
+            "SwayNotificationCenter.spec",
+        ),
+    ];
+    let bad = [
+        ("cargo_vendor", "srcdir", "../x"),
+        ("cargo_vendor", "srctar", "/etc/x.tar"),
+        ("cargo_vendor", "srcdir", "file:///home/x/repo"),
+        ("cargo_vendor", "srctar", "http://host/x.tar"),
+        ("cargo_vendor", "submodule", "enable"),
+        ("format_spec_file", "specfile", "../x.spec"),
+        ("format_spec_file", "specfile", "/etc/x.spec"),
+    ];
+    for (service, param, value) in ok {
+        let xml = format!(
+            r#"<services><service name="{service}"><param name="{param}">{value}</param></service></services>"#
+        );
+        assert!(
+            validate_service_xml(xml.as_bytes()).is_ok(),
+            "{service} {param} {value}"
+        );
+    }
+    for (service, param, value) in bad {
+        let xml = format!(
+            r#"<services><service name="{service}"><param name="{param}">{value}</param></service></services>"#
+        );
+        assert!(
+            validate_service_xml(xml.as_bytes()).is_err(),
+            "{service} {param} {value}"
+        );
+    }
+}
+
+#[test]
 fn a_src_that_names_a_url_is_checked_like_a_url() {
     for src in [
         "file:///home/x/repo",
