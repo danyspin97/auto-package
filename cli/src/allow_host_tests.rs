@@ -281,3 +281,29 @@ fn a_source_refusal_of_a_service_only_host_is_listed_for_sources() {
         .unwrap();
     assert_eq!(refused_section(&hosts), "");
 }
+
+#[derive(Default)]
+struct Events(std::sync::Mutex<Vec<ap_core::event::Event>>);
+
+impl ap_core::sink::Reporter for Events {
+    fn report(&self, event: &ap_core::event::Event) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+#[test]
+fn allowed_hosts_and_problems_are_reported_once_the_run_has_a_reporter() {
+    use ap_core::event::Event;
+    let args = AllowHostArgs {
+        allow_host: vec![],
+        added: vec!["a.example.org".into()],
+        problems: vec!["AUTO_PACKAGE_SOURCE_HOSTS: `com` is a single label".into()],
+    };
+    let sink = Events::default();
+    args.record(&sink);
+    let got = sink.0.lock().unwrap();
+    assert!(
+        matches!(&got[..], [Event::HostAllowed { host, .. }, Event::Warning { .. }] if host == "a.example.org"),
+        "{got:?}"
+    );
+}

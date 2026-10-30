@@ -148,6 +148,9 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         Some(t) => t.tap(base_reporter.clone(), None),
         None => base_reporter.clone(),
     };
+    if let Some(t) = &tui_ctrl {
+        t.set_recorder(base_reporter.clone());
+    }
     install_interrupt_handler(tui_ctrl.is_some(), memory.clone())?;
 
     reporter.report(&Event::RunStarted {
@@ -156,6 +159,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         work_dir: work_dir.clone(),
         build: env!("AP_BUILD_REVISION").to_string(),
     });
+    a.allow_host.record(reporter.as_ref());
 
     let ctx = Ctx {
         work_dir,

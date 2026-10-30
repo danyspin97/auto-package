@@ -20,18 +20,25 @@ pub struct AllowHostArgs {
     /// suffix such as `co.uk`.
     #[arg(long = "allow-host", value_name = "HOST")]
     pub allow_host: Vec<String>,
+    /// The hosts [`Self::apply`] added, recorded once the run has started.
+    #[arg(skip)]
+    pub added: Vec<String>,
+    /// The problems found in the environment and the file, once applied.
+    #[arg(skip)]
+    pub problems: Vec<String>,
 }
 
 impl AllowHostArgs {
     /// Add the flags to the run's allowlist, before anything runs. A bad
     /// name stops the command.
-    pub fn apply(&self) -> color_eyre::Result<()> {
+    pub fn apply(&mut self) -> color_eyre::Result<()> {
         let hosts = shared();
         for raw in &self.allow_host {
             let host = normalize_user_host(raw).map_err(|e| eyre!("--allow-host {raw}: {e}"))?;
             match hosts.allow(&host, Origin::Run(Via::Flag), None) {
                 Ok(AllowOutcome::Added) => {
-                    eprintln!("note: {host} is allowed for this run (--allow-host)")
+                    eprintln!("note: {host} is allowed for this run (--allow-host)");
+                    self.added.push(host.clone());
                 }
                 Ok(AllowOutcome::AlreadyAllowed(origin)) => {
                     eprintln!("note: {host} is already allowed ({})", origin.label())
@@ -41,10 +48,29 @@ impl AllowHostArgs {
         }
         // A bad name in the environment or the user's file is said here, once,
         // so the run does not silently drop a host it was meant to allow.
-        for p in hosts.problems() {
+        self.problems = hosts.problems();
+        for p in &self.problems {
             eprintln!("warning: {p}");
         }
         Ok(())
+    }
+
+    /// Record the hosts added by [`Self::apply`] in the run's log. Called once
+    /// the run has its reporter.
+    pub fn record(&self, reporter: &dyn ap_core::sink::Reporter) {
+        for host in &self.added {
+            reporter.report(&ap_core::event::Event::HostAllowed {
+                host: host.clone(),
+                scope: ap_core::event::HostScope::Run,
+                source: ap_core::event::HostSource::Flag,
+            });
+        }
+        for message in &self.problems {
+            reporter.report(&ap_core::event::Event::Warning {
+                step: None,
+                message: message.clone(),
+            });
+        }
     }
 }
 

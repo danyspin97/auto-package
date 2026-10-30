@@ -31,7 +31,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             url,
             source_url,
             sweep,
-            allow_host,
+            mut allow_host,
         } => {
             allow_host.apply()?;
             // `--regen` means "start over": without this, an already-built
@@ -241,6 +241,9 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 Some(t) => t.tap(base_reporter.clone(), None),
                 None => base_reporter.clone(),
             };
+            if let Some(t) = &tui_ctrl {
+                t.set_recorder(base_reporter.clone());
+            }
 
             install_interrupt_handler(tui_ctrl.is_some(), memory.clone())?;
 
@@ -251,6 +254,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 work_dir: work_dir.clone(),
                 build: env!("AP_BUILD_REVISION").to_string(),
             });
+            allow_host.record(reporter.as_ref());
 
             // Fail fast if the OBS project has no `<repository>` entries — otherwise
             // every per-package `osc build` would fail downstream with "no
@@ -583,7 +587,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
         )?,
         Commands::Baseline { command } => baseline_command(command)?,
         Commands::EditBytes(args) => edit_bytes::run(&args)?,
-        Commands::Update(args) => {
+        Commands::Update(mut args) => {
             args.allow_host.apply()?;
             update_project::run(args, summary)?
         }
