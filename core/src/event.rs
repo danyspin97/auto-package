@@ -259,6 +259,24 @@ fn deserialize_duration<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Durati
     Ok(Duration::from_millis(ms))
 }
 
+/// How long an allowed host lasts (see [`Event::HostAllowed`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostScope {
+    #[default]
+    Run,
+    Persistent,
+}
+
+/// What allowed a host (see [`Event::HostAllowed`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostSource {
+    #[default]
+    Flag,
+    Tui,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -412,6 +430,16 @@ pub enum Event {
         step: Option<StepId>,
         message: String,
     },
+    /// A host was allowed for the services and source fetches of this tool.
+    /// `scope` is `run` (this process only) or `persistent` (also written to
+    /// the user's file); `source` is `flag` (`--allow-host`) or `tui`.
+    HostAllowed {
+        host: String,
+        #[serde(default)]
+        scope: HostScope,
+        #[serde(default)]
+        source: HostSource,
+    },
     Artifact {
         step: StepId,
         name: String,
@@ -422,4 +450,33 @@ pub enum Event {
         version: String,
         outcome: PackageOutcome,
     },
+}
+
+#[cfg(test)]
+mod host_allowed_tests {
+    use super::*;
+
+    #[test]
+    fn host_allowed_has_its_wire_form_and_defaults_when_fields_are_missing() {
+        let out = serde_json::to_string(&Event::HostAllowed {
+            host: "x.example.org".into(),
+            scope: HostScope::Persistent,
+            source: HostSource::Tui,
+        })
+        .unwrap();
+        assert_eq!(
+            out,
+            r#"{"event":"host_allowed","host":"x.example.org","scope":"persistent","source":"tui"}"#
+        );
+        let e: Event =
+            serde_json::from_str(r#"{"event":"host_allowed","host":"a.example.org"}"#).unwrap();
+        assert!(matches!(
+            e,
+            Event::HostAllowed {
+                ref host,
+                scope: HostScope::Run,
+                source: HostSource::Flag,
+            } if host == "a.example.org"
+        ));
+    }
 }

@@ -30,7 +30,8 @@ impl HumanSink {
             | Event::PackageFinished { .. }
             | Event::NotesUsage { .. }
             | Event::FailedTurnUsage { .. }
-            | Event::Progress { .. } => LogLevel::Info,
+            | Event::Progress { .. }
+            | Event::HostAllowed { .. } => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }
             | Event::ExtractResult { .. }
@@ -209,6 +210,21 @@ impl HumanSink {
             Event::Progress { message, .. } => Some(format!(
                 "     {}",
                 message.if_supports_color(Stderr, |t| t.dimmed()),
+            )),
+            Event::HostAllowed {
+                host,
+                scope,
+                source,
+            } => Some(format!(
+                "  host {host} allowed ({}, from {})",
+                match scope {
+                    HostScope::Run => "this run",
+                    HostScope::Persistent => "permanently",
+                },
+                match source {
+                    HostSource::Flag => "--allow-host",
+                    HostSource::Tui => "the TUI",
+                },
             )),
             Event::Warning { message, .. } => Some(format!(
                 "  {} {message}",

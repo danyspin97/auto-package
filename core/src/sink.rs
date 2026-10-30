@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use owo_colors::{OwoColorize, Stream::Stderr, Style};
 use serde::Serialize;
 
-use crate::event::{Event, PackageOutcome, RunOutcome, StepOutcome, Usage};
+use crate::event::{Event, HostScope, HostSource, PackageOutcome, RunOutcome, StepOutcome, Usage};
 
 /// Set while a full-screen UI (the TUI) owns the terminal. Any diagnostic
 /// output that isn't routed through a `Reporter` — ad hoc `eprintln!`s
