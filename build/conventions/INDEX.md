@@ -92,3 +92,4 @@
 92. Merged into convention 77 — read convention 77 when you write or edit a _service file
 93. Merged into convention 77 — read convention 77 when the release page has a .asc, .sig or .sign next to the tarball
 94. Merged into convention 14 — read convention 14 when the prompt lists patches that failed to apply or you are about to remove a Patch line
+95. Package named for a series (fmt-9, wlroots-0_15): stays on that series — read when the package name ends in a version number
