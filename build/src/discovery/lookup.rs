@@ -87,56 +87,6 @@ pub(super) fn reachable(url: &str) -> bool {
     crate::http::head(url).call().is_ok() || crate::http::get(url).call().is_ok()
 }
 
-/// Package indexes and release hosts the agent may name, besides the forges that
-/// `ap_ecosystem::forge` knows. Subdomains of an entry are accepted too.
-pub(crate) const TRUSTED_SOURCE_HOSTS: &[&str] = &[
-    "pypi.org",
-    "files.pythonhosted.org",
-    "crates.io",
-    "static.crates.io",
-    "rubygems.org",
-    "registry.npmjs.org",
-    "metacpan.org",
-    "hackage.haskell.org",
-    "ftp.gnu.org",
-    "download.gnu.org",
-    "download.savannah.gnu.org",
-    "sourceforge.net",
-    "downloads.sourceforge.net",
-    "kernel.org",
-    "download.kde.org",
-    "download.gnome.org",
-];
-
-/// Whether sources may be fetched from `host`: a fixed forge host, a trusted
-/// index or release host, or a host listed in `AUTO_PACKAGE_SOURCE_HOSTS`
-/// (comma separated, for a private mirror or a self-hosted forge such as
-/// `gitlab.gnome.org`). Self-hosted `gitlab.<x>` names are not trusted by
-/// themselves, since any host can be spelled that way.
-pub(super) fn host_allowed(host: &str) -> bool {
-    let host = host.to_ascii_lowercase();
-    if ap_ecosystem::forge::is_fixed_forge_host(&host) {
-        return true;
-    }
-    let extra = extra_source_hosts();
-    TRUSTED_SOURCE_HOSTS
-        .iter()
-        .copied()
-        .chain(extra.iter().map(String::as_str))
-        .any(|domain| host_is_under(&host, domain))
-}
-
-/// The hosts listed in `AUTO_PACKAGE_SOURCE_HOSTS` (comma separated),
-/// lowercased, without a trailing dot. Read by every source host check.
-pub(crate) fn extra_source_hosts() -> Vec<String> {
-    let extra = std::env::var("AUTO_PACKAGE_SOURCE_HOSTS").unwrap_or_default();
-    extra
-        .split(',')
-        .map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
-        .filter(|h| !h.is_empty())
-        .collect()
-}
-
 /// `host` is `domain` or one of its subdomains.
 pub(crate) fn host_is_under(host: &str, domain: &str) -> bool {
     host == domain || host.strip_suffix(domain).is_some_and(|h| h.ends_with('.'))
@@ -147,7 +97,7 @@ pub(crate) fn host_is_under(host: &str, domain: &str) -> bool {
 /// until it has been checked the same way a guessed candidate would be.
 ///
 /// Returns the URL to use (an index URL is normalised to end in `/`).
-pub fn validate_found_url(url: &str) -> Result<String, String> {
+pub fn validate_found_url(url: &str, package: &str) -> Result<String, String> {
     use crate::sources::{SourceKind, latest_release, source_kind};
     let url = url.trim();
     // https only: the agent's answer is fetched and packaged, and plain http
@@ -156,14 +106,15 @@ pub fn validate_found_url(url: &str) -> Result<String, String> {
         return Err(format!("{url} is not an https URL"));
     }
     // The agent can name any host it finds, and the answer is fetched, so the
-    // host must be one the pipeline already trusts to serve sources.
+    // host must be one the shared allowlist permits for source fetches.
     let host = crate::http::host_of(url).unwrap_or_default();
-    if !host_allowed(&host) {
-        return Err(format!(
-            "{url} is on {host}, which is not a known forge or package host; \
-             set AUTO_PACKAGE_SOURCE_HOSTS={host} to allow it"
-        ));
-    }
+    crate::allowed_hosts::shared()
+        .check_host(
+            &host,
+            crate::allowed_hosts::Use::Source,
+            &crate::allowed_hosts::Asker::source(package),
+        )
+        .map_err(|e| format!("{url}: {e}"))?;
     match source_kind(url) {
         SourceKind::Forge => {
             if !is_repository_url(url) {
@@ -242,7 +193,7 @@ pub(super) fn agent_prompt(name: &str, hints: &Hints) -> String {
 /// Bounded three ways: only when enabled, at most [`MAX_AGENT_LOOKUPS`] per
 /// process, and each lookup is capped by a small budget and a timeout. A
 /// name is only ever looked up once (negative results are cached too).
-pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
+pub fn agent_find_source(name: &str, package: &str, hints: &Hints) -> Option<String> {
     if !AGENT_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
@@ -305,7 +256,7 @@ pub fn agent_find_source(name: &str, hints: &Hints) -> Option<String> {
             ap_core::diag!("  agent lookup rate-limited on {model}; trying the next model");
             continue;
         }
-        found = interpret_agent_output(&out.stdout, out.code, &out.stderr);
+        found = interpret_agent_output(&out.stdout, out.code, &out.stderr, package);
         answered = true;
         break;
     }
@@ -337,7 +288,12 @@ pub(super) fn cache_agent_answer(key: &str, found: Option<String>) -> Option<Str
 /// Turn the agent CLI's `--output-format json` stdout into a validated URL,
 /// saying why whenever it cannot. Separate from the process spawn so each
 /// failure shape is testable.
-pub fn interpret_agent_output(stdout: &str, code: i32, stderr: &str) -> Option<String> {
+pub fn interpret_agent_output(
+    stdout: &str,
+    code: i32,
+    stderr: &str,
+    package: &str,
+) -> Option<String> {
     let head = |s: &str| s.chars().take(300).collect::<String>().replace('\n', " ");
     let Ok(v) = serde_json::from_str::<Value>(stdout) else {
         ap_core::diag!(
@@ -376,7 +332,7 @@ pub fn interpret_agent_output(stdout: &str, code: i32, stderr: &str) -> Option<S
         );
         return None;
     };
-    match validate_found_url(&url) {
+    match validate_found_url(&url, package) {
         Ok(u) => {
             ap_core::diag!(
                 "  ✓ agent found {u}{}",

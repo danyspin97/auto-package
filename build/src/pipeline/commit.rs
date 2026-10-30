@@ -378,12 +378,16 @@ pub(super) fn migrate_wheel_provenance(
 
 /// `osc service runs` (a git tag fetch, a crates.io vendoring), tried again
 /// when the network failed it.
-pub(super) fn run_service_with_retries(dir: &Path, emit: Emit<'_>) -> Result<(), osc::Error> {
+pub(super) fn run_service_with_retries(
+    dir: &Path,
+    package: &str,
+    emit: Emit<'_>,
+) -> Result<(), osc::Error> {
     retry_transient(
         SERVICE_ATTEMPTS,
         SERVICE_PAUSE,
         osc::Error::is_transient,
-        || osc::run_service(dir, emit),
+        || osc::run_service(dir, package, emit),
     )
 }
 

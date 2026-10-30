@@ -217,7 +217,12 @@ fn service_params(service: &str) -> Option<&'static [&'static str]> {
 
 /// Check one `<param>` of `service` against the allowlists. `value` is the
 /// decoded text, as osc will see it.
-fn validate_service_param(service: &str, name: &str, value: &str) -> Result<(), String> {
+fn validate_service_param(
+    package: &str,
+    service: &str,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
     let value = value.trim();
     if !service_params(service).unwrap_or_default().contains(&name) {
         return Err(format!(
@@ -225,7 +230,8 @@ fn validate_service_param(service: &str, name: &str, value: &str) -> Result<(), 
         ));
     }
     if name == "url" || (SOURCE_PARAMS.contains(&name) && value.contains(':')) {
-        crate::service_sandbox::check_service_url(value)?;
+        let asker = crate::allowed_hosts::Asker::service(package, service);
+        crate::service_sandbox::check_service_url(value, &asker)?;
     }
     if name == "revision" && value.starts_with('-') {
         return Err(format!("revision `{value}` starts with `-`"));
@@ -246,13 +252,14 @@ fn validate_service_param(service: &str, name: &str, value: &str) -> Result<(), 
 /// other than the five predefined ones is refused.
 #[cfg(test)]
 pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
-    parse_service_xml(xml).map(|_| ())
+    parse_service_xml(xml, "test-pkg").map(|_| ())
 }
 
 /// [`validate_service_xml`], returning the services in order with their
 /// decoded (trimmed) params: what is run is what was checked.
 pub(crate) fn parse_service_xml(
     xml: &[u8],
+    package: &str,
 ) -> Result<Vec<crate::service_sandbox::ServiceCall>, String> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
@@ -309,7 +316,7 @@ pub(crate) fn parse_service_xml(
                     let name = name.ok_or("a <param> without a name")?;
                     let service = services.last().map(|s| s.name.clone()).unwrap_or_default();
                     if empty {
-                        validate_service_param(&service, &name, "")?;
+                        validate_service_param(package, &service, &name, "")?;
                         if let Some(s) = services.last_mut() {
                             s.params.push((name, String::new()));
                         }
@@ -330,7 +337,7 @@ pub(crate) fn parse_service_xml(
                     && let Some((name, value)) = param.take()
                 {
                     let service = services.last().map(|s| s.name.clone()).unwrap_or_default();
-                    validate_service_param(&service, &name, &value)?;
+                    validate_service_param(package, &service, &name, &value)?;
                     if let Some(s) = services.last_mut() {
                         s.params.push((name, value.trim().to_string()));
                     }
@@ -392,10 +399,12 @@ pub(super) fn resets_block_timer(previous: &str) -> bool {
 /// or OBS credentials, its network limited to the source hosts (see
 /// [`crate::service_sandbox`]). Only `AUTO_PACKAGE_UNSAFE_SERVICE=1` runs the
 /// unsandboxed `osc service ra` instead.
-pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
+pub fn run_service(checkout_dir: &Path, package: &str, emit: Emit<'_>) -> Result<(), Error> {
     // Fail closed: only a missing file skips validation.
     let services = match fs::read(checkout_dir.join("_service")) {
-        Ok(xml) => parse_service_xml(&xml).map_err(|reason| Error::ServiceRejected { reason })?,
+        Ok(xml) => {
+            parse_service_xml(&xml, package).map_err(|reason| Error::ServiceRejected { reason })?
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
             return Err(Error::ServiceRejected {
@@ -404,7 +413,7 @@ pub fn run_service(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
         }
     };
     let out = if !crate::service_sandbox::unsafe_mode() {
-        crate::service_sandbox::run_services(checkout_dir, &services, emit)?
+        crate::service_sandbox::run_services(checkout_dir, package, &services, emit)?
     } else {
         proc::capture_with_timeout_env(
             "osc",

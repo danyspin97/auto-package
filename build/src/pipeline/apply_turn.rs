@@ -477,9 +477,12 @@ fn apply_turn_outcome_with(
     if matches!(
         &effect,
         Ok(TurnEffect::Edited | TurnEffect::SwitchedToWheel)
-    ) && let Err(e) =
-        run_service_keeping_version(checkout_dir, spec_path, Emit::new(reporter, step.id))
-    {
+    ) && let Err(e) = run_service_keeping_version(
+        checkout_dir,
+        &config.rpm_name,
+        spec_path,
+        Emit::new(reporter, step.id),
+    ) {
         reporter.report(&Event::Warning {
             step: Some(step.id),
             message: format!("osc service ra after {label} failed: {e}; proceeding anyway"),

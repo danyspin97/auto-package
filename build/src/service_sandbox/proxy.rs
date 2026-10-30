@@ -145,7 +145,10 @@ pub(super) fn status_text(status: u16) -> &'static str {
 
 /// What the proxy threads share.
 pub(super) struct Shared {
-    extra: Vec<String>,
+    /// Read for every request, so a host allowed during the run applies.
+    hosts: Arc<AllowedHosts>,
+    /// Who the requests are for: recorded with each refused host.
+    asker: Asker,
     refused: Mutex<Vec<String>>,
     /// Upstream connections, shut down when the proxy stops so no tunnel
     /// thread outlives the run.
@@ -162,15 +165,17 @@ pub(crate) struct Proxy {
 }
 
 impl Proxy {
-    /// Start serving; `extra` are the hosts allowed besides the fixed lists.
-    pub(crate) fn start(extra: Vec<String>) -> io::Result<Self> {
+    /// Start serving; `hosts` is the allowlist every request is checked against,
+    /// and `asker` names what the requests are for.
+    pub(crate) fn start(hosts: Arc<AllowedHosts>, asker: Asker) -> io::Result<Self> {
         let dir = tempfile::Builder::new()
             .prefix("ap-service-proxy-")
             .tempdir()?;
         let listener = UnixListener::bind(dir.path().join(SOCKET_NAME))?;
         let stop = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Shared {
-            extra,
+            hosts,
+            asker,
             refused: Mutex::new(Vec::new()),
             active: Mutex::new(Vec::new()),
         });
@@ -235,7 +240,7 @@ pub(super) fn handle(mut client: UnixStream, shared: &Shared) {
     let _ = client.set_read_timeout(Some(HEAD_TIMEOUT));
     let request = read_head(&mut client).and_then(|(head, rest)| {
         let (host, port) = parse_connect(&head)?;
-        let host = check_target(&host, port, &shared.extra)
+        let host = check_target(&host, port, &shared.hosts, &shared.asker)
             .map_err(|e| refuse(403, format!("{host}:{port}: {e}")))?;
         Ok((host, port, rest))
     });

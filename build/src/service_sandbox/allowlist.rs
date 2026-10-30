@@ -1,31 +1,4 @@
-use super::*;
-
-/// Hosts the services fetch from, besides the trusted source hosts of
-/// [`crate::discovery`], the fixed forges and `AUTO_PACKAGE_SOURCE_HOSTS`.
-/// Subdomains of an entry are accepted too, as there.
-pub(crate) const SERVICE_HOSTS: &[&str] = &[
-    "github.com",
-    "codeload.github.com",
-    "api.github.com",
-    "objects.githubusercontent.com",
-    // GitHub release downloads redirect here since 2025.
-    "release-assets.githubusercontent.com",
-    "gitlab.com",
-    "gitlab.freedesktop.org",
-    "gitlab.gnome.org",
-    "salsa.debian.org",
-    "bitbucket.org",
-    "sourceforge.net",
-    "downloads.sourceforge.net",
-    "pypi.org",
-    "files.pythonhosted.org",
-    "crates.io",
-    "static.crates.io",
-    "index.crates.io",
-    "registry.npmjs.org",
-    "proxy.golang.org",
-    "sum.golang.org",
-];
+use crate::allowed_hosts::{self, AllowedHosts, Asker, Use};
 
 /// The switch that runs services unsandboxed, as before the sandbox.
 pub(crate) const UNSAFE_ENV: &str = "AUTO_PACKAGE_UNSAFE_SERVICE";
@@ -52,65 +25,18 @@ pub(super) const OSC_VERSION: &str = "1.0.0";
 
 // ── the allowlist ───────────────────────────────────────────────────────────
 
-/// `raw` as a host name to compare: lowercase, without one trailing dot.
-/// IP literals, numeric forms a resolver may read as an address, non-ASCII
-/// (unencoded IDN) names and malformed labels are refused.
-pub(crate) fn normalize_host(raw: &str) -> Result<String, String> {
-    if !raw.is_ascii() {
-        return Err(format!("host `{raw}` is not ASCII"));
-    }
-    let lower = raw.to_ascii_lowercase();
-    let host = lower.strip_suffix('.').unwrap_or(&lower);
-    if host.starts_with('[') || host.parse::<IpAddr>().is_ok() {
-        return Err(format!("host `{raw}` is an IP address"));
-    }
-    if host.is_empty() || host.len() > 253 {
-        return Err(format!("host `{raw}` is not a valid name"));
-    }
-    for label in host.split('.') {
-        if label.is_empty()
-            || label.len() > 63
-            || label.starts_with('-')
-            || label.ends_with('-')
-            || !label
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            return Err(format!("host `{raw}` is not a valid name"));
-        }
-    }
-    // No real name ends in a numeric label (`2130706433`, `0x7f.1`).
-    let last = host.rsplit('.').next().unwrap_or("");
-    if last.bytes().all(|b| b.is_ascii_digit()) || last.starts_with("0x") {
-        return Err(format!("host `{raw}` is an IP address"));
-    }
-    Ok(host.to_string())
-}
-
-/// Whether the normalized `host` is a service host, a trusted source host, a
-/// fixed forge, or under one of `extra`.
-pub(crate) fn host_allowed_in(host: &str, extra: &[String]) -> bool {
-    SERVICE_HOSTS
-        .iter()
-        .chain(TRUSTED_SOURCE_HOSTS)
-        .chain(ap_ecosystem::forge::FIXED_FORGE_HOSTS)
-        .any(|d| host_is_under(host, d))
-        || extra.iter().any(|d| host_is_under(host, d))
-}
-
-/// Whether a service may connect to `host:port`: port 443 on an allowed host
-/// only. Returns the normalized host.
-pub(crate) fn check_target(host: &str, port: u16, extra: &[String]) -> Result<String, String> {
+/// Whether a service may connect to `host:port`: port 443 on a host the
+/// shared allowlist allows for services. Returns the normalized host.
+pub(crate) fn check_target(
+    host: &str,
+    port: u16,
+    hosts: &AllowedHosts,
+    asker: &Asker,
+) -> Result<String, String> {
     if port != 443 {
         return Err(format!("port {port} is not allowed, only 443"));
     }
-    let host = normalize_host(host)?;
-    if !host_allowed_in(&host, extra) {
-        return Err(format!(
-            "{host} is not an allowed source host; set AUTO_PACKAGE_SOURCE_HOSTS={host} to allow it"
-        ));
-    }
-    Ok(host)
+    hosts.check_host(host, Use::Service, asker)
 }
 
 /// `host[:port]` split; `default` is the port when none is given (`None`:
@@ -135,12 +61,16 @@ pub(super) fn split_host_port(
 }
 
 /// Check a `url` service parameter: https only, no user info, an allowed host
-/// on port 443.
-pub(crate) fn check_service_url(url: &str) -> Result<(), String> {
-    check_service_url_in(url, &extra_source_hosts())
+/// on port 443. A refused host is recorded for `asker`.
+pub(crate) fn check_service_url(url: &str, asker: &Asker) -> Result<(), String> {
+    check_service_url_in(url, &allowed_hosts::shared(), asker)
 }
 
-pub(super) fn check_service_url_in(url: &str, extra: &[String]) -> Result<(), String> {
+pub(super) fn check_service_url_in(
+    url: &str,
+    hosts: &AllowedHosts,
+    asker: &Asker,
+) -> Result<(), String> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!("url `{url}` contains whitespace"));
     }
@@ -161,7 +91,7 @@ pub(super) fn check_service_url_in(url: &str, extra: &[String]) -> Result<(), St
     }
     let (host, port) =
         split_host_port(authority, Some(443)).map_err(|e| format!("url `{url}`: {e}"))?;
-    check_target(host, port, extra)
+    check_target(host, port, hosts, asker)
         .map(|_| ())
         .map_err(|e| format!("url `{url}`: {e}"))
 }

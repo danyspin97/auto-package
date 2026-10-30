@@ -279,7 +279,7 @@ fn awww_and_jay_services_run_the_helpers_with_their_params() {
     use crate::service_sandbox::service_argv;
     use std::path::Path;
     let out = Path::new("/c/.x.cargo_vendor.service");
-    let awww = super::parse_service_xml(AWWW_SERVICE.as_bytes()).unwrap();
+    let awww = super::parse_service_xml(AWWW_SERVICE.as_bytes(), "test-pkg").unwrap();
     assert_eq!(awww.len(), 1);
     assert_eq!(
         service_argv(&awww[0], out),
@@ -305,7 +305,7 @@ fn awww_and_jay_services_run_the_helpers_with_their_params() {
             "/c/.x.cargo_vendor.service",
         ]
     );
-    let jay = super::parse_service_xml(JAY_SERVICE.as_bytes()).unwrap();
+    let jay = super::parse_service_xml(JAY_SERVICE.as_bytes(), "test-pkg").unwrap();
     let argv = service_argv(&jay[0], out);
     assert!(argv.windows(2).any(|w| w == ["--compression", "zst"]));
     assert!(
@@ -318,7 +318,7 @@ fn awww_and_jay_services_run_the_helpers_with_their_params() {
 fn awww_helper_runs_through_the_sandbox_with_its_argv() {
     use crate::service_sandbox::{Profile, bwrap_args, service_argv};
     use std::path::Path;
-    let services = super::parse_service_xml(AWWW_SERVICE.as_bytes()).unwrap();
+    let services = super::parse_service_xml(AWWW_SERVICE.as_bytes(), "test-pkg").unwrap();
     let argv = service_argv(
         &services[0],
         Path::new("/work/awww/.o.cargo_vendor.service"),
@@ -343,5 +343,5 @@ fn a_refused_param_in_an_otherwise_valid_service_refuses_the_file() {
         "</service>",
         r#"<param name="outdir">/etc</param></service>"#,
     );
-    assert!(super::parse_service_xml(xml.as_bytes()).is_err());
+    assert!(super::parse_service_xml(xml.as_bytes(), "test-pkg").is_err());
 }

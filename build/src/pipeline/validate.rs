@@ -152,6 +152,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
             if !missing.is_empty() && checkout_dir.join("_service").is_file() {
                 match run_service_keeping_version(
                     checkout_dir,
+                    &config.rpm_name,
                     spec_path,
                     Emit::new(reporter, validate_step.id),
                 ) {

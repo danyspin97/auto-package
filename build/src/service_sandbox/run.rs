@@ -59,6 +59,7 @@ pub(super) fn move_outputs(service: &str, outdir: &Path, checkout: &Path) -> Res
 /// service's output, with the proxy's refusals appended, or a success.
 pub(crate) fn run_services(
     checkout_dir: &Path,
+    package: &str,
     services: &[ServiceCall],
     emit: Emit<'_>,
 ) -> Result<Captured, Error> {
@@ -89,17 +90,22 @@ pub(crate) fn run_services(
     for sub in ["tmp", "cache", "cargo", "npm", "go"] {
         fs::create_dir_all(scratch.path().join(sub)).map_err(Error::Io)?;
     }
-    let proxy = Proxy::start(extra_source_hosts()).map_err(Error::Io)?;
     let identity = changes_identity(&checkout);
-    let profile = Profile {
-        checkout: &checkout,
-        scratch: scratch.path(),
-        proxy_dir: proxy.dir(),
-        extra_env: &identity,
-    };
     let cmd = format!("service ra in {}", checkout_dir.display());
     let bwrap = bwrap.to_string_lossy();
     for s in services {
+        // One proxy per service: each refusal it records names that service.
+        let proxy = Proxy::start(
+            crate::allowed_hosts::shared(),
+            Asker::service(package, &s.name),
+        )
+        .map_err(Error::Io)?;
+        let profile = Profile {
+            checkout: &checkout,
+            scratch: scratch.path(),
+            proxy_dir: proxy.dir(),
+            extra_env: &identity,
+        };
         let outdir = tempfile::Builder::new()
             .prefix(".")
             .suffix(&format!(".{}.service", s.name))

@@ -1,7 +1,11 @@
 use super::*;
 
-fn none() -> Vec<String> {
-    Vec::new()
+fn test_asker() -> crate::allowed_hosts::Asker {
+    crate::allowed_hosts::Asker::service("test-pkg", "test")
+}
+
+fn none() -> AllowedHosts {
+    AllowedHosts::empty()
 }
 
 #[test]
@@ -21,7 +25,7 @@ fn listed_hosts_and_their_subdomains_are_allowed() {
         "ftp.gnu.org",
         "codeberg.org",
     ] {
-        assert!(check_target(h, 443, &none()).is_ok(), "{h}");
+        assert!(check_target(h, 443, &none(), &test_asker()).is_ok(), "{h}");
     }
 }
 
@@ -51,26 +55,29 @@ fn other_hosts_ports_and_forms_are_refused() {
         ("xn--gthub-n4a.com", 443),
         ("github.xn--com-9o0a", 443),
     ] {
-        assert!(check_target(h, port, &none()).is_err(), "{h}:{port}");
+        assert!(
+            check_target(h, port, &none(), &test_asker()).is_err(),
+            "{h}:{port}"
+        );
     }
 }
 
 #[test]
 fn case_and_one_trailing_dot_are_normalized() {
     assert_eq!(
-        check_target("GitHub.COM.", 443, &none()).unwrap(),
+        check_target("GitHub.COM.", 443, &none(), &test_asker()).unwrap(),
         "github.com"
     );
-    assert!(check_target("github.com..", 443, &none()).is_err());
+    assert!(check_target("github.com..", 443, &none(), &test_asker()).is_err());
 }
 
 #[test]
 fn extra_hosts_extend_the_list() {
-    let extra = vec!["mirror.example.org".to_string()];
-    assert!(check_target("mirror.example.org", 443, &extra).is_ok());
-    assert!(check_target("a.mirror.example.org", 443, &extra).is_ok());
-    assert!(check_target("example.org", 443, &extra).is_err());
-    assert!(check_target("mirror.example.org", 80, &extra).is_err());
+    let extra = AllowedHosts::with_env("mirror.example.org");
+    assert!(check_target("mirror.example.org", 443, &extra, &test_asker()).is_ok());
+    assert!(check_target("a.mirror.example.org", 443, &extra, &test_asker()).is_ok());
+    assert!(check_target("example.org", 443, &extra, &test_asker()).is_err());
+    assert!(check_target("mirror.example.org", 80, &extra, &test_asker()).is_err());
 }
 
 #[test]
@@ -82,7 +89,10 @@ fn service_urls_must_be_https_on_an_allowed_host() {
         "https://crates.io",
         "https://gitlab.gnome.org/GNOME/x.git?x=1",
     ] {
-        assert!(check_service_url_in(ok, &none()).is_ok(), "{ok}");
+        assert!(
+            check_service_url_in(ok, &none(), &test_asker()).is_ok(),
+            "{ok}"
+        );
     }
     for (bad, says) in [
         ("file:///etc/passwd", "file://"),
@@ -93,15 +103,15 @@ fn service_urls_must_be_https_on_an_allowed_host() {
         ("https://user@github.com/o/r", "user info"),
         ("https://u:p@github.com/o/r", "user info"),
         ("https://github.com@evil.com/o/r", "user info"),
-        ("https://evil.com/o/r", "not an allowed"),
-        ("https://github.com.evil.com/o", "not an allowed"),
+        ("https://evil.com/o/r", "is not allowed"),
+        ("https://github.com.evil.com/o", "is not allowed"),
         ("https://github.com:22/o/r", "port"),
         ("https://127.0.0.1/x", "IP"),
         ("https://[::1]/x", "IP"),
         ("https://github.com/o r", "whitespace"),
         ("https://", "not a valid"),
     ] {
-        let err = check_service_url_in(bad, &none()).unwrap_err();
+        let err = check_service_url_in(bad, &none(), &test_asker()).unwrap_err();
         assert!(err.contains(says), "{bad}: {err}");
     }
 }
@@ -186,7 +196,11 @@ fn ask(proxy: &Proxy, request: &[u8]) -> String {
 fn the_proxy_refuses_without_touching_the_network() {
     // `localhost` is allowed here only to show that an allowed name that
     // resolves to a loopback address (from /etc/hosts) is still refused.
-    let proxy = Proxy::start(vec!["localhost".to_string()]).unwrap();
+    let hosts = AllowedHosts::empty();
+    hosts
+        .allow("localhost", crate::allowed_hosts::Origin::Env, None)
+        .unwrap();
+    let proxy = Proxy::start(Arc::new(hosts), test_asker()).unwrap();
     for (req, status) in [
         (&b"CONNECT evil.example:443 HTTP/1.1\r\n\r\n"[..], "403"),
         (b"CONNECT github.com:80 HTTP/1.1\r\n\r\n", "403"),
@@ -388,7 +402,7 @@ fn the_sandbox_isolates_home_bus_network_and_osc_metadata() {
     .unwrap();
     let scratch = checkout_path.join(".ap-service-t");
     fs::create_dir_all(scratch.join("tmp")).unwrap();
-    let proxy = Proxy::start(Vec::new()).unwrap();
+    let proxy = Proxy::start(Arc::new(AllowedHosts::empty()), test_asker()).unwrap();
     let p = Profile {
         checkout: &checkout_path,
         scratch: &scratch,

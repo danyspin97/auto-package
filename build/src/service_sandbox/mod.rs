@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::discovery::{TRUSTED_SOURCE_HOSTS, extra_source_hosts, host_is_under};
+use crate::allowed_hosts::{AllowedHosts, Asker};
 use crate::osc::Error;
 use crate::proc::{self, Captured, Emit};
 

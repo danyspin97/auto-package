@@ -7,7 +7,7 @@ fn normalize_is_pep_503() {
 
 #[test]
 fn found_url_must_be_https() {
-    let e = super::validate_found_url("http://github.com/o/r").unwrap_err();
+    let e = super::validate_found_url("http://github.com/o/r", "test-pkg").unwrap_err();
     assert!(e.contains("https"), "{e}");
 }
 
@@ -57,6 +57,10 @@ fn name_matching_ignores_case_and_separators() {
     assert_eq!(rank_name_matches(&h, "yaml-cpp"), ["u/y", "u/z"]);
 }
 
+fn host_allowed(host: &str) -> bool {
+    crate::allowed_hosts::AllowedHosts::empty().allows(host, crate::allowed_hosts::Use::Source)
+}
+
 #[test]
 fn source_hosts_are_matched_by_domain() {
     assert!(host_allowed("github.com"));
@@ -75,19 +79,18 @@ fn agent_urls_on_prefix_lookalike_hosts_are_not_trusted() {
     assert!(!host_allowed("gitlab.com.attacker.example"));
     assert!(!host_allowed("gitlab.example.org"));
     assert!(!host_allowed("evil-gitlab.com"));
-    let err = validate_found_url("https://gitlab.com.attacker.example/x/y").unwrap_err();
-    assert!(err.contains("not a known forge"), "{err}");
-    let err = validate_found_url("https://gitlab.example.org/x/y").unwrap_err();
-    assert!(err.contains("AUTO_PACKAGE_SOURCE_HOSTS"), "{err}");
+    let err =
+        validate_found_url("https://gitlab.com.attacker.example/x/y", "test-pkg").unwrap_err();
+    assert!(err.contains("is not allowed"), "{err}");
+    let err = validate_found_url("https://gitlab.example.org/x/y", "test-pkg").unwrap_err();
+    assert!(err.contains("is not allowed"), "{err}");
+    assert!(err.contains("--allow-host gitlab.example.org"), "{err}");
 }
 
 #[test]
 fn an_unknown_host_is_refused_before_any_request() {
-    let err = validate_found_url("https://example.com/pkg-1.0.tar.gz").unwrap_err();
-    assert!(
-        err.contains("AUTO_PACKAGE_SOURCE_HOSTS=example.com"),
-        "{err}"
-    );
+    let err = validate_found_url("https://example.com/pkg-1.0.tar.gz", "test-pkg").unwrap_err();
+    assert!(err.contains("--allow-host example.com"), "{err}");
 }
 
 #[test]
@@ -239,40 +242,50 @@ fn finding_skips_braces_in_prose_and_takes_the_last_answer() {
 
 #[test]
 fn validation_rejects_non_http_and_org_pages_without_network() {
-    assert!(validate_found_url("ftp://ftp.gnu.org/gnu/hello/").is_err());
-    assert!(validate_found_url("javascript:alert(1)").is_err());
-    assert!(validate_found_url("https://github.com/someorg").is_err());
-    assert!(validate_found_url("").is_err());
+    assert!(validate_found_url("ftp://ftp.gnu.org/gnu/hello/", "test-pkg").is_err());
+    assert!(validate_found_url("javascript:alert(1)", "test-pkg").is_err());
+    assert!(validate_found_url("https://github.com/someorg", "test-pkg").is_err());
+    assert!(validate_found_url("", "test-pkg").is_err());
 }
 
 #[test]
 fn agent_output_failure_shapes_all_yield_none_without_panicking() {
-    assert_eq!(interpret_agent_output("", 1, "boom"), None);
-    assert_eq!(interpret_agent_output("not json", 0, ""), None);
+    assert_eq!(interpret_agent_output("", 1, "boom", "test-pkg"), None);
+    assert_eq!(interpret_agent_output("not json", 0, "", "test-pkg"), None);
     assert_eq!(
         interpret_agent_output(
             r#"{"is_error":true,"subtype":"error_max_budget_usd","result":"x"}"#,
             1,
-            ""
+            "",
+            "test-pkg"
         ),
         None
     );
-    assert_eq!(interpret_agent_output(r#"{"foo":1}"#, 0, ""), None);
     assert_eq!(
-        interpret_agent_output(r#"{"result":"nothing here"}"#, 0, ""),
+        interpret_agent_output(r#"{"foo":1}"#, 0, "", "test-pkg"),
+        None
+    );
+    assert_eq!(
+        interpret_agent_output(r#"{"result":"nothing here"}"#, 0, "", "test-pkg"),
         None
     );
     assert_eq!(
         interpret_agent_output(
             r#"{"result":"{\"url\": null, \"reason\": \"unknown\"}"}"#,
             0,
-            ""
+            "",
+            "test-pkg"
         ),
         None
     );
     // A syntactically fine answer with an unusable URL is rejected.
     assert_eq!(
-        interpret_agent_output(r#"{"result":"{\"url\": \"ftp://x/y\"}"}"#, 0, ""),
+        interpret_agent_output(
+            r#"{"result":"{\"url\": \"ftp://x/y\"}"}"#,
+            0,
+            "",
+            "test-pkg"
+        ),
         None
     );
 }
@@ -291,7 +304,7 @@ fn rate_limit_replies_are_recognised() {
 fn agent_lookup_is_off_when_disabled() {
     set_agent_enabled(false);
     assert_eq!(
-        agent_find_source("anything-at-all", &Hints::default()),
+        agent_find_source("anything-at-all", "test-pkg", &Hints::default()),
         None
     );
     set_agent_enabled(true);

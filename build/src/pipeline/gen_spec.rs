@@ -177,7 +177,7 @@ pub(super) fn generate_spec(
                     // (confirmed to exist) candidate is safe to build from
                     // automatically — an unverified guess just burns an
                     // attempt on a 404. See `RepoCandidates`.
-                    let repos = find_source_repo_candidates(&config.pkg_name);
+                    let repos = find_source_repo_candidates(&config.pkg_name, &config.rpm_name);
                     match repos.verified.first() {
                         Some(url) => {
                             ap_core::diag!(

@@ -341,8 +341,12 @@ pub(super) fn osc_service_stage(
                     )
                 })
                 .and_then(|()| {
-                    run_service_with_retries(checkout_dir, Emit::new(reporter, step.id))
-                        .map_err(|e| (e.is_transient(), e.to_string()))
+                    run_service_with_retries(
+                        checkout_dir,
+                        &config.rpm_name,
+                        Emit::new(reporter, step.id),
+                    )
+                    .map_err(|e| (e.is_transient(), e.to_string()))
                 });
 
             if let Err((transient, reason)) = result {
@@ -433,8 +437,12 @@ pub(super) fn osc_service_stage(
                     )
                 })
                 .and_then(|()| {
-                    run_service_with_retries(checkout_dir, Emit::new(reporter, step.id))
-                        .map_err(|e| (e.is_transient(), e.to_string()))
+                    run_service_with_retries(
+                        checkout_dir,
+                        &config.rpm_name,
+                        Emit::new(reporter, step.id),
+                    )
+                    .map_err(|e| (e.is_transient(), e.to_string()))
                 });
 
             if let Err((transient, reason)) = result {

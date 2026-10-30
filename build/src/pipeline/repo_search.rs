@@ -28,7 +28,10 @@ pub struct RepoCandidates {
 /// back to it for a name that PyPI has no record of at all (not a Python
 /// package, or a Python package not published to PyPI) — see convention 27's
 /// "handle any package, not just PyPI" note.
-pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
+///
+/// `package` is the package the candidates are for (the name the TUI shows it
+/// under): a refused host is recorded for it, see [`crate::allowed_hosts::Asker`].
+pub fn find_source_repo_candidates(pkg_name: &str, package: &str) -> RepoCandidates {
     ap_core::diag!(
         "info: searching for source repository candidates for: {}",
         pkg_name
@@ -171,7 +174,7 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
         // (Savannah, ftp.gnu.org): if it lists real releases it is the
         // distro-confirmed upstream, ahead of anything a name search found.
         for dir in &distro.index_candidates {
-            if let Ok(url) = crate::discovery::validate_found_url(dir)
+            if let Ok(url) = crate::discovery::validate_found_url(dir, package)
                 && !verified_candidates.contains(&url)
             {
                 ap_core::diag!("  ✓ openSUSE's spec records release directory: {url}");
@@ -318,7 +321,7 @@ pub fn find_source_repo_candidates(pkg_name: &str) -> RepoCandidates {
                 .unwrap_or_default(),
             candidates: verified_candidates.clone(),
         };
-        if let Some(url) = crate::discovery::agent_find_source(pkg_name, &hints) {
+        if let Some(url) = crate::discovery::agent_find_source(pkg_name, package, &hints) {
             let recorded_sites: Vec<String> = distro_evidence
                 .iter()
                 .flat_map(|d| d.homepages.iter())

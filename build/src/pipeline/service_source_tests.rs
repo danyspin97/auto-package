@@ -217,7 +217,13 @@ fn an_obs_scm_checkout_runs_no_service_at_validation() {
     std::fs::write(&spec_path, "Version: 0.2.2\n").unwrap();
     // `osc` would refuse the `tar` service: nothing is run, so nothing fails.
     assert!(
-        keep_version::run_service_keeping_version(dir.path(), &spec_path, Emit::quiet()).is_ok()
+        keep_version::run_service_keeping_version(
+            dir.path(),
+            "test-pkg",
+            &spec_path,
+            Emit::quiet()
+        )
+        .is_ok()
     );
 }
 

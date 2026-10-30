@@ -11,6 +11,7 @@ use crate::pipeline::render::*;
 /// old tarball). The version is the pipeline's decision, so put it back.
 pub(super) fn run_service_keeping_version(
     checkout_dir: &Path,
+    package: &str,
     spec_path: &Path,
     emit: Emit<'_>,
 ) -> Result<(), osc::Error> {
@@ -20,7 +21,7 @@ pub(super) fn run_service_keeping_version(
         return Ok(());
     }
     let before = std::fs::read_to_string(spec_path).unwrap_or_default();
-    let result = osc::run_service(checkout_dir, emit);
+    let result = osc::run_service(checkout_dir, package, emit);
     if let Ok(after) = std::fs::read_to_string(spec_path)
         && let Some(fixed) = keep_version_line(&before, &after)
     {

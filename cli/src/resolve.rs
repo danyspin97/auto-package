@@ -241,7 +241,7 @@ pub(super) fn resolve_dependency_config(
     let mut releases: std::collections::HashMap<String, Result<String, String>> =
         std::collections::HashMap::new();
     for cand in &name_candidates {
-        let repos = ap_build::pipeline::find_source_repo_candidates(cand);
+        let repos = ap_build::pipeline::find_source_repo_candidates(cand, cand);
         let unknown: Vec<String> = repos
             .verified
             .iter()

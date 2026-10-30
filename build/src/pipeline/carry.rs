@@ -236,7 +236,7 @@ fn carry_forward_service_spec(
             .map_err(|e| format!("writing _service: {e}"))?;
         ap_core::fsx::write_atomic(spec_path, &bumped)
             .map_err(|e| format!("writing the spec: {e}"))?;
-        run_service_with_retries(checkout_dir, Emit::quiet())
+        run_service_with_retries(checkout_dir, &config.rpm_name, Emit::quiet())
             .map_err(|e| format!("running the _service: {e}"))?;
         // The service writes `Version:` from the tarball (`set_version`) when it
         // is enabled; the version asked for is what the spec must say.
