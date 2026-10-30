@@ -1,9 +1,12 @@
 # Plan: packages hosted in git (src.opensuse.org)
 
-Status: plan only, written 2026-10-30. Nothing here is implemented. The goal
-is full parity for packages whose sources live in git on src.opensuse.org:
-`update`, `lint` and `build` work on them, and `--submit` opens a pull
-request instead of an OBS submit request. OBS still builds them.
+Status: plan only, written 2026-10-30; the open questions are decided in
+section 9. Nothing here is implemented. The goal is full parity for
+packages whose sources live in git on src.opensuse.org: `update`, `lint`
+and `build` work on them, and `--submit` opens a pull request instead of an
+OBS submit request. OBS still builds them. The first scope is the devel
+organisations (section 9, decision 1); product branches in `pool` stay
+refused.
 
 Every claim about the workflow below is marked **[verified]** (checked on
 2026-10-30 against the public Gitea API, read-only `osc`, or the installed
@@ -234,29 +237,31 @@ build paths), names (`fuzzy_key`, `rpm_name`).
 | Read spec (sweep, audit) | `osc cat` | same; OBS may lag the git branch, so the plan step records `_scmsync.obsinfo`'s `commit:` and the checkout compares it with the branch head |
 | Origin of a package | the project | `_scmsync.obsinfo` `url:` gives `<owner>/<repo>`; the branch is the submodule's `branch =` in the project git's `.gitmodules`, else the repo's default branch (perl: `main`) |
 | Branch project | `home:<user>:branches:<P>` | the same name (`osc::default_branch_project`); an ordinary OBS project with build paths, no project `<scmsync>` |
-| Branch / fork | `osc branch` | (1) fork `<owner>/<repo>` into `--fork-org` (default: the Gitea user) unless a fork of it already exists there (`GET /repos/<org>/<repo>`, check `parent`); (2) push a work branch `auto-package/<target-branch>` at the target branch head; (3) write the branch project's package meta with `<scmsync>https://src.opensuse.org/<org>/<repo>#auto-package/<target-branch></scmsync>`. `osc fork` does (1)+(3) in one call: see open question 2 |
+| Branch / fork | `osc branch` | the tool's own steps, not `osc fork` (decision 2): (1) unless `GET /repos/<org>/<repo>` already shows a fork whose `parent` is `<owner>/<repo>`, fork it with `git-obs repo fork <owner>/<repo> --target-owner <org>`, where `<org>` is `--fork-org` (default: the user's own Gitea namespace); a repo of that name that is not such a fork stops the package; (2) push a work branch `auto-package/<target-branch>` at the target branch head; (3) `POST /source/<P>/<pkg>?cmd=fork&scmsync=https://src.opensuse.org/<org>/<repo>#auto-package/<target-branch>&target_project=<branch project>` through the `osc` chokepoint (the OBS half of `osc fork`, `osc/obs_api/package.py::cmd_fork`) |
 | Rebase | `osc rebase` / link merge | `git fetch` the target branch, `git rebase` the work branch onto it; a conflict is reported like `Rebased::Conflict` today, never resolved by hand |
 | Check out | `osc co` / `osc up` | `git clone` (anonymous https) of the fork into `<work>/<P>/<pkg>/`, git dir kept outside the tree (section 6), `git lfs pull`; reuse with `git fetch` + fast-forward |
 | Pristine | `.osc/sources/<f>` | `git show <base>:<f>`, where `<base>` is the target branch commit the work branch started from, kept as `refs/auto-package/base` |
 | Changelog | `osc vc` | `osc vc` works on any directory with a `.changes` file (**assumed**: to test); otherwise the same entry is written by the tool's own `.changes` writer |
-| Commit | `osc addremove` + `osc ci` | `git add`/`git rm` of exactly the plan's files, `git commit -m <commit_message>` |
-| Publish | (inside `osc ci`) | `git push <fork> HEAD:refs/heads/auto-package/<target-branch>` with `--force-with-lease` against the last pushed commit; refused for any remote that is not the run's fork |
-| Wait for sources | - | poll `osc cat <branch-project> <pkg> _scmsync.obsinfo` until `commit:` is the pushed id; if it does not move in N minutes, trigger a sync (see open question 3) |
+| Commit | `osc addremove` + `osc ci` | `git add`/`git rm` of exactly the plan's files; the work branch holds one commit on top of `<base>`: the first round commits, later rounds amend it (`git commit --amend -m <commit_message>`), decision 4 |
+| Publish | (inside `osc ci`) | `git push <fork> HEAD:refs/heads/auto-package/<target-branch>` with `--force-with-lease` against the last pushed commit; refused for any remote that is not the run's fork; a failed lease (someone else moved the branch) stops the package |
+| Wait for sources | - | poll `osc cat <branch-project> <pkg> _scmsync.obsinfo` until `commit:` is the pushed id, for at most 10 minutes; then one `POST /source/<branch-project>/<pkg>?cmd=runservice` and a second 10-minute wait; still stale: the package fails with "OBS did not sync the push", and nothing is built from stale sources (decision 3) |
 | Build, wait, results | `osc results`, log, binaries | unchanged, against the branch project |
 | Restore after failure | `osc ci` of the baseline | reset the work branch to the last good commit and push it to the fork (with lease); `pool` and the devel org are never written |
-| Revision pin | `srcmd5` | commit id: the PR is refused when the work branch head is not the commit OBS built |
+| Revision pin | `srcmd5` | commit id: the PR is refused when the work branch head is not the commit OBS built (the single-commit branch makes the built commit the PR head) |
 | Open requests | `/request?...` | `GET /repos/<owner>/<repo>/pulls?state=open`, filtered on head `<fork-org>:<branch>` |
-| Submit | `osc sr` | `git-obs pr create --source <org>/<repo>:<branch> --target <owner>/<repo>:<target-branch> --title ... --description ...` (or `POST /repos/<owner>/<repo>/pulls`); title `Update <pkg> to <version>`, body `sr_description` (the new `.changes` entry first, as pool PRs do) |
+| Submit | `osc sr` | `git-obs pr create --source <org>/<repo>:<branch> --target <owner>/<repo>:<target-branch> --title ... --description ...` `--allow-maintainer-edit`; title `Update <pkg> to <version>` (an update) or the commit message's first line (a lint or fix run), body `sr_description` (the new `.changes` entry first, as pool PRs do); never a direct API call, so the tool never holds the token |
 | Diff (TUI `d`) | `osc rdiff` | `git diff <base>..<head>` in the checkout |
-| `--in-place` | commit into the project | refused for git in this plan: pool takes no direct pushes, and `workflow-direct` devel orgs are a later decision |
+| `--in-place` | commit into the project | refused for git (decision 6): pool takes no direct pushes, and a push into a devel org's branch is an unreviewed write to a shared repo |
 | Maintenance (`--maintenance`, `--backport`) | incidents | refused for git; SLE 16 maintenance is PRs to `pool/<pkg>#leap-16.x` with `NoProjectGitPR`, a separate plan |
 | `build` of a new package | `ensure_package` | builds in an OBS project as today; when the package's distro origin is git, it is forked as above. A brand new package needs a new repo plus an `[ADD]` issue on the project git: printed for the user, never opened by the tool |
 
-The PR goes to the package repo the project tracks: `pool/<pkg>#leap-16.0`
-for `openSUSE:Backports:SLE-16.0`, `perl/<pkg>#main` for
+The PR goes to the package repo the project tracks: `perl/<pkg>#main` for
 `devel:languages:perl`. That is the same rule as today's submit request "to
 the project it was branched from"; forwarding to Factory stays the devel
-maintainers' job.
+maintainers' job. A project whose packages resolve to a `pool` repo
+(`openSUSE:Backports:SLE-16.0` -> `pool/<pkg>#leap-16.0`, Leap 16) is
+refused in this plan (decision 1); `pkgsrc::detect` tells the two apart by
+the origin repo's owner (`pool` or not).
 
 ## 5. Package files in a git checkout
 
@@ -306,13 +311,15 @@ maintainers' job.
   origin repo, and any branch not named `auto-package/...`. Without
   `--submit`, pushes to the fork happen (they are what OBS builds, like
   today's commits to the branch project) and the run summary says so.
-  `--dry-run` writes nothing, on either host.
-- **Token handling**: the tool never reads the token itself. Pushes and PRs
-  go through `git-obs` (or `git` with the user's ssh key / credential
-  helper), which read `~/.config/tea/config.yml`; Gitea reads use the
-  anonymous API. `--gitea-login` passes `-G`. If a direct API client is
-  later wanted, it reads the token from the same file and never logs it
-  (`core/src/redact.rs`).
+  `--dry-run` writes nothing, on either host. `push_target_allowed` also
+  refuses `pool` and the origin's owner as a push target outright, whatever
+  `--fork-org` says.
+- **Token handling**: the tool never reads the token itself. Forks
+  (`git-obs repo fork`), pushes and PRs (`git-obs pr create`) go through
+  `git-obs` (or `git` with the user's ssh key / credential helper), which
+  read `~/.config/tea/config.yml`; Gitea reads use the anonymous API.
+  `--gitea-login` passes `-G`. No direct authenticated API client is part
+  of this plan.
 - **Agent environment**: `agent/env.rs` adds `GIT_OBS_*`, `GITEA_*`,
   `TEA_*`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH`, `GIT_SSH_COMMAND`,
   `GIT_CONFIG_*`, `GIT_DIR`, `GIT_WORK_TREE` and `SSH_AUTH_SOCK` to the
@@ -338,7 +345,8 @@ on its own. Nothing before phase 4 writes to Gitea.
 1. **Detect and refuse.** `parse_project_info` reads `<scmsync>`;
    `pkgsrc::detect`; `update`, `lint` and `build` stop early on a git-hosted
    project or package with a message naming the project git, instead of
-   reaching `osc branch`/`osc ci`. Tests: meta fixtures of
+   reaching `osc branch`/`osc ci`. The refusal of `pool`-backed projects
+   (decision 1) stays after phase 7. Tests: meta fixtures of
    `openSUSE:Backports:SLE-16.0`, `devel:languages:perl` (project scmsync)
    and `perl-Moose` (package scmsync). Ships: safety on its own.
 2. **Working-copy seam, no behaviour change.** `WorkingCopy` and
@@ -358,35 +366,46 @@ on its own. Nothing before phase 4 writes to Gitea.
    `.git` file that must not run or redirect.
 5. **`PackageSource`, fork and push, behind `--source-backend git`.**
    `ObsSource` over today's code (the pipeline and `items.rs` switch to the
-   trait); `GitSource::branch`, `rebase`, `publish`, `wait_for_sources`,
-   restore. `update`/`lint` on a git-hosted project build in the branch
-   project without `--submit`. Tests: pure planners (scmsync package meta,
-   push refspec, `push_target_allowed`), a fake runner for the command
-   sequence, and one manual run on a package the user picks.
+   trait); `GitSource::branch` (`git-obs repo fork`, work branch, OBS
+   `cmd=fork`), `rebase`, `publish` (amend + push with lease),
+   `wait_for_sources` (bounded wait, one `runservice`), restore.
+   `update`/`lint` on a devel-org project build in the branch project
+   without `--submit`. Tests: pure planners (`cmd=fork` query, push
+   refspec, `push_target_allowed`, the wait/trigger/fail sequence), a fake
+   runner for the command sequence, and one manual run on a package the
+   user picks; that run also checks the three assumptions decisions 2 and 3
+   rest on (what `cmd=fork` creates, whether a fork push syncs by itself,
+   whether `runservice` re-syncs an scmsync package).
 6. **Pull requests.** `GitSource::open_requests`, `request`, `diff`;
    `prepare_request` and `SubmitBackend` through the trait; commit-id pin;
    TUI `S`/`A`/`d`. Tests: request planning, the open-PR filter, refusal
-   when the head moved, `git-obs pr create --dry-run` argument building.
+   when the head moved, `git-obs pr create --dry-run` argument building
+   (with `--allow-maintainer-edit`).
 7. **Default on, `build` parity, docs.** `--source-backend auto` becomes
-   the default; `build` forks git-origin packages; conventions, skills,
+   the default for devel-org projects; `build` forks git-origin packages
+   whose origin is a devel org; conventions, skills,
    agent tool lists, `docs/agents/work-directory.md` (git dirs, the work
    branch) and AGENTS.md updated; `explain` shows pushes and PRs.
 
-Later, not in this plan: `--in-place` for `workflow-direct` devel orgs,
-maintenance PRs for `leap-16.x`, multi-package PRs (`PR: pool/pkgA!2`
-lines, `git-obs pr --recursive`), new-package `[ADD]` issues.
+Later, not in this plan: product branches in `pool` (Backports SLE-16.0,
+Leap 16) together with maintenance PRs for `leap-16.x`, `--in-place` for
+`workflow-direct` devel orgs, multi-package PRs (`PR: pool/pkgA!2` lines,
+`git-obs pr --recursive`), new-package `[ADD]` issues.
 
 ## 8. Risks
 
 - **Sync lag and triggers.** If a fork has no webhook, OBS never sees the
-  push and the build waits forever; `wait_for_sources` needs a bounded wait
-  and a trigger whose API is not confirmed.
-- **`osc fork` vs own steps.** `osc fork` is the supported path but its
-  side effects (project repositories, branch name, an existing fork) are
-  not observed; doing the steps ourselves keeps them testable but may drift
-  from what the bots expect.
-- **History in PRs.** One commit per build round is noisy; squashing before
-  the PR changes the commit id, so the pin becomes "same tree as built".
+  push; the wait is bounded and fails the package (decision 3), but
+  whether `runservice` re-syncs an scmsync package is **[assumed]** until
+  the phase 5 run.
+- **Own fork steps drifting.** The tool does what `osc fork` does with its
+  own calls (decision 2); if OBS or `git-obs` change `cmd=fork` or the
+  fork layout, the tool must follow. What `cmd=fork` creates in the branch
+  project (repositories, build paths) is **[assumed]** until phase 5.
+- **Fork name clashes.** A Gitea owner holds one repo per name; a fork of
+  `perl/perl-Moose` and, later, one of `pool/perl-Moose` cannot both be
+  `<user>/perl-Moose`. Harmless while the scope is devel orgs only; the
+  product-branch plan has to settle it (`--new-repo-name`).
 - **LFS.** A missing `git-lfs`, quota or an upload failure leaves a pushed
   commit whose archives OBS cannot fetch.
 - **Stale reads.** The sweep reads OBS, which follows the project git with
@@ -397,21 +416,73 @@ lines, `git-obs pr --recursive`), new-package `[ADD]` issues.
 - **Two hosts in one run.** A dependency closure may mix OBS-hosted and
   git-hosted packages; the trait is per package, not per run.
 
-## 9. Open questions for the user
+## 9. Decisions
 
-1. **Scope of "git project".** Is the target the devel orgs (e.g.
-   `devel:languages:perl` -> `perl/<pkg>#main`), the product branches in
-   `pool` (`openSUSE:Backports:SLE-16.0`, Leap 16), or both? Factory is
-   still OBS and keeps the current path.
-2. **`osc fork` or our own fork steps?** `osc fork` matches what humans do;
-   own steps (Gitea fork API, branch, scmsync package meta) are testable and
-   idempotent. Which do you want, and in which Gitea org should forks live?
-3. **How should OBS be told about a push** when the fork has no webhook:
-   wait only, or trigger a sync (and with which call)?
-4. **PR shape**: one squashed commit per PR, or the round-by-round history?
-   Title format? `--allow-maintainer-edit` on (the maintenance workflow
-   requires it)?
-5. **Pushes without `--submit`**: are pushes to your own fork acceptable as
-   the equivalent of today's commits to the branch project?
-6. **`--in-place` on git**: refuse (this plan), or push directly where the
-   org runs `workflow-direct`?
+Decided 2026-10-30, choosing the conservative option where the repo rules
+(auto-package is the only thing that changes packages; nothing is pushed
+or submitted to a shared repo without `--submit`; the tool never reads a
+token) leave a choice.
+
+1. **Scope: devel organisations only.** A project with a project
+   `<scmsync>` whose packages resolve to a devel org's repos
+   (`devel:languages:perl` -> `perl/<pkg>#main`) gets the git workflow.
+   Product branches in `pool` (`openSUSE:Backports:SLE-16.0`, Leap 16) stay
+   refused with the phase 1 message. Factory stays on the OBS path.
+   *Why*: devel projects are what `update --project <devel> --submit`
+   serves today (submit to the project it was branched from); `pool`
+   product branches are the maintenance side (`NoProjectGitPR`, release
+   reviewers, the `--maintenance`/`--backport` territory), where a wrong PR
+   reaches product reviewers, and they need their own plan. Doing one
+   scope also avoids the fork name clash (section 8). *Open*: product
+   branches, in the later maintenance plan. Note: of the projects run so
+   far, `X11:Wayland` and `devel:languages:c_c++` have no `<scmsync>`
+   **[verified]**, so nothing changes for them.
+2. **Fork with the tool's own steps, not `osc fork`; forks live in the
+   user's own Gitea namespace.** The steps are the row "Branch / fork" in
+   section 4: `git-obs repo fork` (token stays in `git-obs`), a work branch
+   `auto-package/<target-branch>`, OBS `cmd=fork` into the run's branch
+   project. `--fork-org` overrides the namespace; `pool` and the origin's
+   owner are never accepted. *Why*: `osc fork` (osc 1.28.0,
+   `osc/commands/fork.py`) **[verified]** (a) ignores the scmsync branch
+   and uses the repo's default branch (lines 149-157, "temporary hack"),
+   (b) silently switches to the devel project unless `--no-devel-project`
+   (117-122), (c) clones into the current directory with the git dir
+   inside the worktree (193-216), against section 6, and (d) exits when
+   that directory exists (195-197), so it is not idempotent. Its two
+   remote calls are what the tool makes itself. The personal namespace is
+   the `git-obs repo fork` default and the equivalent of
+   `home:<user>:branches`. *Open*: what `cmd=fork` creates, checked in the
+   phase 5 run.
+3. **Sync: bounded wait, then one trigger, then fail.** Wait up to 10
+   minutes for `_scmsync.obsinfo` to show the pushed commit; then one
+   `POST /source/<branch-project>/<pkg>?cmd=runservice` (the call
+   `osc service remoterun` makes, `osc/core.py::runservice`), only ever on
+   the run's own branch project; another 10 minutes; then the package
+   fails with "OBS did not sync the push". *Why*: never build or submit
+   stale sources, never wait forever, and the trigger writes nothing a
+   commit to the branch project does not already write today. The
+   project-wide `POST /source?cmd=triggerscmsync` is the bridge's call and
+   is not used. *Open*: whether `runservice` re-syncs an scmsync package
+   is **[assumed]**; the phase 5 run checks it, and if it does not, the
+   trigger is dropped and only the bounded wait remains.
+4. **PR shape: one commit, the commit OBS built.** The work branch is
+   always one commit on `<base>`, amended each round and pushed with
+   lease, so the PR head is the built commit and the pin stays a commit id
+   (no squash at submit time). Title `Update <pkg> to <version>`, or the
+   commit message's first line for a lint or fix run; body
+   `sr_description`. `--allow-maintainer-edit` on. *Why*: one reviewable
+   change per PR, as pool PRs show; maintainers can fix the PR in place,
+   and a maintainer's push makes the next lease fail, which stops the
+   package instead of overwriting them. *Open*: nothing.
+5. **Pushes without `--submit`: yes, to the user's fork only.** They are
+   the equivalent of today's commits to `home:<user>:branches:<P>`: the
+   user's own namespace, needed for OBS to build. Only
+   `auto-package/*` branches of the run's fork, recorded in the run
+   summary and `run.jsonl`; `--dry-run` pushes nothing; no PR without
+   `--submit`. *Open*: nothing.
+6. **`--in-place` on git: refused.** *Why*: pool takes no direct pushes,
+   and pushing into a devel org's branch skips review on a repo others
+   consume. *Open*: `workflow-direct` orgs, later, if asked for.
+7. **No direct authenticated Gitea client.** Writes go through `git-obs`
+   and `git`; reads are anonymous. *Why*: the tool never reads a token.
+   *Open*: nothing.
