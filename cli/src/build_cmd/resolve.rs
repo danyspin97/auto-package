@@ -71,16 +71,21 @@ pub(super) fn resolve_version(
 
 /// The name and RPM name a build is filed under, and the repository
 /// subprojects. A repository names itself: its own name wins over the guess.
+///
+/// `refusal` is [`ap_build::sources::recipe_refusal`] for this build: an
+/// archive with no build system auto-package knows is accepted only when it
+/// is `None`.
 pub(super) fn resolve_names(
     name: &str,
     version: &str,
     source_repo: &Option<String>,
+    refusal: Option<ap_build::sources::Refusal>,
     reporter: &Arc<dyn Reporter + Send + Sync>,
 ) -> color_eyre::Result<(String, String, Vec<(String, String)>)> {
     Ok(match source_repo {
         None => (name.to_string(), ap_build::osc::rpm_name(name), Vec::new()),
         Some(repo) => {
-            let probe = ap_build::sources::probe(repo, &version, name)
+            let probe = ap_build::sources::probe(repo, &version, name, refusal)
                 .map_err(|e| color_eyre::eyre::eyre!(e))?;
             // For monorepos the user-provided name IS the source package name;
             // the detected project_name is just one subproject and must not

@@ -510,8 +510,8 @@ fn generate_from_repo(
         });
     }
 
-    Err(GenSpecError::Other(format!(
-        "{url} contains no pyproject.toml, setup.py, Cargo.toml, CMakeLists.txt \
-         or configure.ac, so auto-package cannot tell how to build it"
+    Err(GenSpecError::Other(crate::sources::cannot_tell_message(
+        &url,
+        crate::sources::Refusal::NewPackage,
     )))
 }

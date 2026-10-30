@@ -264,7 +264,13 @@ pub(super) fn resolve_dependency_config(
                     continue;
                 }
             };
-            let probe = match ap_build::sources::probe(repo_url, &version, cand) {
+            // A dependency is a new package: its recipe is never kept.
+            let probe = match ap_build::sources::probe(
+                repo_url,
+                &version,
+                cand,
+                Some(ap_build::sources::Refusal::NewPackage),
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     probe_failure_warnings.push(format!("{repo_url}: probe failed: {e}"));

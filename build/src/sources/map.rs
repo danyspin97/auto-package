@@ -126,6 +126,11 @@ pub enum Ecosystem {
     /// unprefixed RPM name, same as Rust — see the `plain-c-cpp-packaging`
     /// skill.
     PlainC,
+    /// An archive with no build system auto-package knows (meson, Go, Zig, a
+    /// plain Makefile). Only an update builds one, from the recipe its
+    /// checkout already holds: see [`probe`]. The RPM name is unprefixed, as
+    /// for [`Ecosystem::PlainC`].
+    Unknown,
 }
 
 impl Ecosystem {
@@ -133,7 +138,7 @@ impl Ecosystem {
     pub fn rpm_name(self, pkg: &str) -> String {
         match self {
             Ecosystem::Python => format!("python-{}", pkg.to_lowercase()),
-            Ecosystem::Rust | Ecosystem::PlainC => pkg.to_lowercase(),
+            Ecosystem::Rust | Ecosystem::PlainC | Ecosystem::Unknown => pkg.to_lowercase(),
         }
     }
 }

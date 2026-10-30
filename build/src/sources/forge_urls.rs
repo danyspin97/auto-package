@@ -472,3 +472,28 @@ pub(super) fn forge_tokens_go_to_exact_hosts_over_https_only() {
     assert_eq!(forge_auth_header("http://api.github.com/x"), None);
     assert_eq!(forge_auth_header("https://notgitlab.com/api/v4/x"), None);
 }
+
+#[test]
+pub(super) fn an_unknown_build_system_is_accepted_only_for_a_kept_recipe() {
+    let url = "https://github.com/project-repo/cagebreak/archive/refs/tags/3.2.1.tar.gz";
+    // An update of a package that has a spec keeps its recipe.
+    assert_eq!(recipe_refusal(true, false), None);
+    assert_eq!(
+        unclassified(url, recipe_refusal(true, false)),
+        Ok(Ecosystem::Unknown)
+    );
+    // A NEW package has no recipe to keep: the error, with the hint.
+    assert_eq!(recipe_refusal(false, false), Some(Refusal::NewPackage));
+    let err = unclassified(url, recipe_refusal(false, false)).unwrap_err();
+    assert!(err.starts_with(url), "{err}");
+    assert!(err.contains("cannot tell how to build it"), "{err}");
+    assert!(err.contains("NEW package"), "{err}");
+    // --regen asks for a new spec: the error says to drop it instead.
+    assert_eq!(recipe_refusal(true, true), Some(Refusal::Regen));
+    let err = unclassified(url, recipe_refusal(true, true)).unwrap_err();
+    assert!(err.starts_with(url), "{err}");
+    assert!(err.contains("with --regen"), "{err}");
+    assert!(err.contains("drop --regen"), "{err}");
+    assert!(!err.contains("NEW package"), "{err}");
+    assert_eq!(Ecosystem::Unknown.rpm_name("CageBreak"), "cagebreak");
+}

@@ -5,7 +5,16 @@ use super::*;
 ///
 /// One extra download buys both, and both have to be settled before the
 /// checkout is created — long before the spec is generated.
-pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, String> {
+///
+/// `refusal` is why the checkout's own recipe is not carried forward (see
+/// [`recipe_refusal`]). With none, an archive with no build system
+/// auto-package knows is [`Ecosystem::Unknown`] instead of an error.
+pub fn probe(
+    repo_url: &str,
+    version: &str,
+    want: &str,
+    refusal: Option<Refusal>,
+) -> Result<RepoProbe, String> {
     let candidates = archive_urls(repo_url, version);
     // Candidates that exist but could not be used, in order. A 404 is not one
     // of them: that URL is simply not this release's archive.
@@ -42,11 +51,7 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
         } else if native_root {
             Ecosystem::PlainC
         } else {
-            return Err(format!(
-                "{url} contains no pyproject.toml, setup.py, Cargo.toml, \
-                 CMakeLists.txt or configure.ac, so auto-package cannot tell \
-                 how to build it"
-            ));
+            unclassified(url, refusal)?
         };
 
         // Under the Python-hijack exception, `info.project_name` still
@@ -108,6 +113,56 @@ pub fn probe(repo_url: &str, version: &str, want: &str) -> Result<RepoProbe, Str
     };
 
     Err(error_msg)
+}
+
+/// Why an archive with no build system auto-package knows is refused, when
+/// the package's own recipe is not kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// A new package has no recipe of its own to keep.
+    NewPackage,
+    /// `--regen` asks for a new spec in place of the recipe.
+    Regen,
+}
+
+/// Why an update does not keep the recipe its checkout already holds, or
+/// `None` when it does: the package has one (an update of an existing
+/// package), and `--regen` has not asked for a new spec.
+pub fn recipe_refusal(update: bool, regen: bool) -> Option<Refusal> {
+    match (update, regen) {
+        (false, _) => Some(Refusal::NewPackage),
+        (true, true) => Some(Refusal::Regen),
+        (true, false) => None,
+    }
+}
+
+/// The build system of an archive that holds none of the known manifests:
+/// [`Ecosystem::Unknown`] when the recipe is kept, else the error.
+pub(crate) fn unclassified(url: &str, refusal: Option<Refusal>) -> Result<Ecosystem, String> {
+    match refusal {
+        None => Ok(Ecosystem::Unknown),
+        Some(why) => Err(cannot_tell_message(url, why)),
+    }
+}
+
+/// Why an archive with no known build system cannot be built, and what the
+/// user can do about it.
+pub fn cannot_tell_message(archive: &str, why: Refusal) -> String {
+    let hint = match why {
+        Refusal::NewPackage => {
+            "meson, Go, Zig and plain Makefile projects are not supported for a NEW \
+             package; an update of a package that already has a spec keeps its \
+             recipe instead"
+        }
+        Refusal::Regen => {
+            "meson, Go, Zig and plain Makefile projects are not supported with \
+             --regen; drop --regen to keep the package's recipe instead"
+        }
+    };
+    format!(
+        "{archive} contains no pyproject.toml, setup.py, Cargo.toml, CMakeLists.txt \
+         or configure.ac, so auto-package cannot tell how to build it. {hint}"
+    )
 }
 
 /// The host, project path and repository name in a forge URL.
