@@ -28,6 +28,8 @@ mod run;
 mod user_prompt;
 pub(crate) use user_prompt::*;
 mod build_prompt;
+mod review_text;
+use review_text::*;
 
 #[cfg(test)]
 mod tests;

@@ -7,10 +7,7 @@ const MAX_LINES: usize = 600;
 /// Files over the limit that are not split yet, relative to the repository
 /// root. The list can only shrink: an entry that is no longer over the limit
 /// fails the test, so remove it when its file is split.
-const ALLOWED: &[&str] = &[
-    // One function of about 700 lines; a pure move cannot make it shorter.
-    "build/src/agent/build_prompt.rs",
-];
+const ALLOWED: &[&str] = &[];
 
 /// Every `.rs` file under `dir`, skipping `target/` and dot directories
 /// (`.claude` holds agent worktrees, `.jj` and `.git` hold VCS data).
