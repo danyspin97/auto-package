@@ -68,9 +68,23 @@ pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebase
     check_link(project, pkg, emit)
 }
 
+/// The package `project/pkg` is linked from: the `project` and the `package` of
+/// its `_link`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkOrigin {
+    pub project: String,
+    pub package: String,
+}
+
 /// The project `project/pkg` is linked from (the `project` of its `_link`), or
 /// `None` when it is not a link.
 pub fn link_project(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Option<String>, Error> {
+    Ok(link_origin(project, pkg, emit)?.map(|origin| origin.project))
+}
+
+/// The origin `project/pkg` is linked from, or `None` when it is not a link. A
+/// `_link` that names no package is a link to `pkg` itself.
+pub fn link_origin(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Option<LinkOrigin>, Error> {
     check_obs_name("project", project)?;
     check_obs_name("package", pkg)?;
     let path = format!("/source/{project}/{}/_link", enc(pkg));
@@ -85,7 +99,51 @@ pub fn link_project(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Option<S
             stderr: link.stderr,
         });
     }
-    Ok(crate::obs_xml::attr(&link.stdout, "project").filter(|p| !p.is_empty()))
+    Ok(parse_link_origin(&link.stdout, pkg))
+}
+
+/// The origin a `_link` file names, `None` when it names no project.
+pub(super) fn parse_link_origin(xml: &str, pkg: &str) -> Option<LinkOrigin> {
+    let project = crate::obs_xml::attr(xml, "project").filter(|p| !p.is_empty())?;
+    let package = crate::obs_xml::attr(xml, "package")
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| pkg.to_string());
+    Some(LinkOrigin { project, package })
+}
+
+#[cfg(test)]
+mod link_origin_tests {
+    use super::*;
+
+    #[test]
+    fn a_link_names_its_origin_project_and_package() {
+        let xml = r#"<link project="Factory" package="hyprlang-src"/>"#;
+        assert_eq!(
+            parse_link_origin(xml, "hyprlang"),
+            Some(LinkOrigin {
+                project: "Factory".into(),
+                package: "hyprlang-src".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_link_without_a_package_points_at_the_same_name() {
+        let xml = r#"<link project="openSUSE:Factory"/>"#;
+        assert_eq!(
+            parse_link_origin(xml, "hyprlang"),
+            Some(LinkOrigin {
+                project: "openSUSE:Factory".into(),
+                package: "hyprlang".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_link_with_no_project_is_no_origin() {
+        assert_eq!(parse_link_origin(r#"<link package="x"/>"#, "x"), None);
+        assert_eq!(parse_link_origin(r#"<link project=""/>"#, "x"), None);
+    }
 }
 
 /// Whether a package listing's `<linkinfo>` shows the link based on a revision
