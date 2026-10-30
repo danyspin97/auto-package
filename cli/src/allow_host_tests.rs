@@ -3,7 +3,7 @@
 
 use super::allow_host::*;
 use super::*;
-use ap_build::allowed_hosts::{AllowedHosts, Origin, Via};
+use ap_build::allowed_hosts::{AllowedHosts, Origin, Use, Via};
 use clap::Parser;
 
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
@@ -233,4 +233,51 @@ fn the_list_shows_no_control_characters_from_a_reason() {
         .find(|l| l.starts_with("mirror.example.org"))
         .unwrap();
     assert!(!shown.chars().any(char::is_control), "{shown:?}");
+}
+
+#[test]
+fn the_run_summary_names_each_refused_host_once_with_the_hint() {
+    let hosts = AllowedHosts::empty();
+    assert_eq!(refused_section(&hosts), "");
+    for h in ["b.example.org", "a.example.org", "b.example.org"] {
+        let _ = hosts.check_host(
+            h,
+            ap_build::allowed_hosts::Use::Service,
+            &ap_build::allowed_hosts::Asker::service("cli-test", "test"),
+        );
+    }
+    let text = refused_section(&hosts);
+    assert!(text.contains("Hosts refused this run (2):"), "{text}");
+    assert_eq!(
+        text.matches("host a.example.org is not allowed").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("--allow-host b.example.org"), "{text}");
+    assert!(
+        text.contains("`auto-package hosts allow a.example.org`"),
+        "{text}"
+    );
+    // A host allowed since (from the TUI, say) is no longer listed.
+    hosts
+        .allow("a.example.org", Origin::Run(Via::Tui), None)
+        .unwrap();
+    assert!(refused_section(&hosts).contains("(1)"));
+}
+
+#[test]
+fn a_source_refusal_of_a_service_only_host_is_listed_for_sources() {
+    let hosts = AllowedHosts::empty();
+    let _ = hosts.check_host(
+        "proxy.golang.org",
+        Use::Source,
+        &ap_build::allowed_hosts::Asker::source("cli-test"),
+    );
+    let text = refused_section(&hosts);
+    assert!(text.contains("proxy.golang.org"), "{text}");
+    assert!(text.contains("(for source fetches)"), "{text}");
+    hosts
+        .allow("proxy.golang.org", Origin::Run(Via::Tui), None)
+        .unwrap();
+    assert_eq!(refused_section(&hosts), "");
 }

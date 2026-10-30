@@ -240,5 +240,8 @@ pub(crate) fn print_run_summary(
     for name in cached {
         let _ = writeln!(out, "  {name}");
     }
+    out.push_str(&crate::allow_host::refused_section(
+        &ap_build::allowed_hosts::shared(),
+    ));
     out
 }

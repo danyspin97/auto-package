@@ -7,7 +7,7 @@ use std::path::Path;
 use ap_build::allowed_hosts::file::{self, Added};
 use ap_build::allowed_hosts::{
     AllowOutcome, AllowedHosts, Origin, Use, Via, normalize_host, normalize_user_host, printable,
-    shared,
+    refusal_hint, shared,
 };
 use color_eyre::eyre::eyre;
 
@@ -154,6 +154,25 @@ pub fn allow_in(
             format!("{host} is already in {}; nothing changed\n", path.display())
         }
     })
+}
+
+/// The hosts refused during this run that are still not allowed for the use
+/// they were refused for, each with how to allow it. Empty when nothing was
+/// refused (or all were allowed since, from the TUI).
+pub fn refused_section(hosts: &AllowedHosts) -> String {
+    let still: Vec<(String, Use)> = hosts
+        .refused_hosts()
+        .into_iter()
+        .filter(|(h, use_)| !hosts.allows(h, *use_))
+        .collect();
+    if still.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\nHosts refused this run ({}):\n", still.len());
+    for (h, use_) in still {
+        out.push_str(&format!("  {}\n", refusal_hint(&h, use_)));
+    }
+    out
 }
 
 /// Remove `raw` from the file at `path`.
