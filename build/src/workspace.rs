@@ -23,10 +23,16 @@ pub const DEFAULT_MIN_FREE_BYTES: u64 = 3 * GIB;
 
 /// Free space a package needs on the work directory's filesystem before its
 /// heavy stages start, in bytes. 0 turns the guard off. Set once at startup
-/// from `--min-free-gb` through [`set_min_free_gb`]; the default is
-/// [`DEFAULT_MIN_FREE_BYTES`] in tests too. Tests of the waiting itself pass
-/// the minimum explicitly to [`await_disk_space_with`].
+/// from `--min-free-gb` through [`set_min_free_gb`]. Tests that reach the gate
+/// call [`disable_disk_gate_for_tests`] first.
 static MIN_FREE_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_MIN_FREE_BYTES);
+
+/// Turns the gate off for the rest of this test process. Without it, a test
+/// that runs a package waits on the free space of `/tmp`, up to ten minutes.
+#[cfg(test)]
+pub(crate) fn disable_disk_gate_for_tests() {
+    MIN_FREE_BYTES.store(0, Ordering::Relaxed);
+}
 
 /// How often, and for how long, a package waits for the disk to recover.
 const DISK_WAIT_INTERVAL: Duration = Duration::from_secs(30);

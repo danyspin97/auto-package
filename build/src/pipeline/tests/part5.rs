@@ -365,6 +365,7 @@ pub(super) fn assert_steps_balanced(events: &[Event]) {
 
 #[test]
 fn a_failed_checkout_still_finishes_its_step() {
+    crate::workspace::disable_disk_gate_for_tests();
     let tmp = tempfile::tempdir().unwrap();
     let work_dir = tmp.path().to_path_buf();
     // A space is not a valid OBS name, so `osc::ensure_package` refuses it
