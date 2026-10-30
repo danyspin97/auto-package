@@ -45,6 +45,25 @@ fn the_service_revision_moves_to_the_new_tag() {
 }
 
 #[test]
+fn a_cargo_vendor_service_with_a_url_fetches_the_source_too() {
+    let fetching = "<services><service mode=\"manual\" name=\"cargo_vendor\"><param name=\"url\">https://codeberg.org/o/r</param>\n  <param name=\"revision\">v0.12.0</param></service></services>";
+    assert_eq!(
+        with_service_revision(fetching, "v0.12.1").unwrap(),
+        fetching.replace("v0.12.0", "v0.12.1")
+    );
+    // Without a url it only vendors a tarball another service made.
+    let vendoring = "<services><service name=\"cargo_vendor\"><param name=\"src\">r</param><param name=\"revision\">x</param></service></services>";
+    assert!(with_service_revision(vendoring, "v1").is_none());
+    // tar_scm comes first when both are there.
+    let both = "<services><service name=\"tar_scm\"><param name=\"revision\">a</param></service><service name=\"cargo_vendor\"><param name=\"url\">u</param><param name=\"revision\">b</param></service></services>";
+    assert!(
+        with_service_revision(both, "c")
+            .unwrap()
+            .contains(">c</param></service><service")
+    );
+}
+
+#[test]
 fn the_commit_message_summarises_the_new_changelog_entry() {
     let sep = "-".repeat(67);
     let old = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Old\n");

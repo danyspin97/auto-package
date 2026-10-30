@@ -187,7 +187,7 @@ fn carry_forward_repo_spec(
 }
 
 /// [`carry_forward_repo_spec`] for a package whose source a `tar_scm` service
-/// fetches: the service's `revision` moves to the new tag, `osc service ra`
+/// (or a `cargo_vendor` one given a `url`) fetches: the service's `revision` moves to the new tag, `osc service ra`
 /// makes the tarball, and the old one goes. The spec keeps everything else.
 fn carry_forward_service_spec(
     config: &PipelineConfig,
@@ -200,9 +200,13 @@ fn carry_forward_service_spec(
     let service_path = checkout_dir.join("_service");
     let service =
         std::fs::read_to_string(&service_path).map_err(|e| format!("reading _service: {e}"))?;
-    // `obs_scm` makes an `.obscpio`, which nothing below handles: only `tar_scm`.
-    if !service.contains("tar_scm") {
-        return Err("the _service is not a tar_scm one, so the source cannot be moved".into());
+    // `obs_scm` makes an `.obscpio`, which nothing below handles: only `tar_scm`
+    // and `cargo_vendor` with a `url`, which fetches the source itself.
+    if service_revision_block(&service).is_none() {
+        return Err(
+            "the _service is not a tar_scm or url cargo_vendor one, so the source cannot be moved"
+                .into(),
+        );
     }
     let tag = crate::sources::tag_for_version(repo, &config.version)
         .ok_or_else(|| format!("{repo} lists no tag for {}", config.version))?;
@@ -282,11 +286,27 @@ fn tarballs_in(dir: &Path) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// `service` with the `revision` parameter of its `tar_scm` set to `tag`;
-/// `None` when it has none.
+/// Where the service that fetches the source starts in `service`: the `tar_scm`
+/// service, else a `cargo_vendor` one that has a `url` parameter (it fetches the
+/// source and vendors it in one go; without a `url` it only vendors).
+fn service_revision_block(service: &str) -> Option<usize> {
+    if let Some(at) = service.find("name=\"tar_scm\"") {
+        return Some(at);
+    }
+    let at = service.find("name=\"cargo_vendor\"")?;
+    let block_end = service[at..]
+        .find("</service>")
+        .map_or(service.len(), |i| at + i);
+    service[at..block_end]
+        .contains("<param name=\"url\">")
+        .then_some(at)
+}
+
+/// `service` with the `revision` parameter of the service that fetches the
+/// source set to `tag`; `None` when it has none.
 pub(super) fn with_service_revision(service: &str, tag: &str) -> Option<String> {
     let open = "<param name=\"revision\">";
-    let scm = service.find("name=\"tar_scm\"")?;
+    let scm = service_revision_block(service)?;
     let start = scm + service[scm..].find(open)? + open.len();
     let end = start + service[start..].find("</param>")?;
     Some(format!(
