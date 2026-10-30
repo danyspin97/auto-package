@@ -74,6 +74,10 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--jobs`: Maximum concurrent builds (default: 4; `--jobs 0` = unlimited)
 - A package built from a prebuilt wheel has its unpacked tree (`state/<pkg>/sdist`) deleted once it is Built; a later run unpacks the wheel again.
 - `--min-free-gb`: GiB that must be free on the work directory's disk before a package starts or downloads its RPMs; it waits up to 10 minutes, then fails with `No space left on device` (default: 3, 0 = off)
+- `--local`: Run the build step with `osc build` on this machine, against the checkout, instead of committing to OBS and waiting for its build; the fix loop works from the local build log as it does from the OBS one, and nothing is committed from the build step. `osc build` needs root: run as root, or allow `osc build` through sudo for your user without a password (`sudo -n -l osc build` must succeed; a sudo that wants a password, a missing osc or a missing build root stops the build with a message saying so). The build root needs many GB, so a build refuses to start with less than `--local-min-free-gib` (default: 10) free where the root is; `--local-root <DIR>` sets the root (osc's default: `/var/tmp/build-root`). Builds run one at a time, with no terminal: a credential prompt fails at once. A build that runs past 4 hours is stopped (SIGTERM, then SIGKILL to sudo's session); a root process of it may survive that, and the log keeps what it printed.
+  - Files `osc build` writes as root (in the checkout and under `rpms/`) stay root-owned; auto-package does not change their owner.
+  - A local build is recorded as `local-success` in the package state, never as a success: a later run without `--local` builds the package on OBS as usual, and the run summary, the TUI and the submit refusal say `built locally`. Its RPMs are kept in `rpms/local/`, apart from the RPMs OBS published, and the dependencies of later local builds are taken from there. `--cleanup` deletes `rpms/`, `rpms/local/` with it.
+  - On `update` it cannot be combined with `--submit` or `--maintenance`.
 - `--nvidia <wheel|redist>`: How the NVIDIA CUDA libraries are packaged: `wheel` repackages the `nvidia-*` PyPI wheels as `python-nvidia-*` (default), `redist` packages NVIDIA's redistributable archives as `cuda-<name>`. The choice is remembered in the work directory (`<project>-<arch>/nvidia-mode`), so a restart keeps it; passing the other value switches it with a warning. `--nvidia-redist` is shorthand for `--nvidia redist`.
 
 ### Updating a whole project
@@ -113,6 +117,7 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 - `--update-deps`: also branch and update dependencies that live in another
   project and have a newer release themselves (see below).
 - `--min-free-gb`: as for `build` (default: 3, 0 = off).
+- `--local`, `--local-root`, `--local-min-free-gib`: as for `build`; `--local` cannot be combined with `--submit` or `--maintenance`.
 - `--nvidia <wheel|redist>` / `--nvidia-redist`: as for `build` (default: `wheel`, or what the work directory last used).
 - `--submit`: create submit requests (see below). `--yes` skips the question.
 
