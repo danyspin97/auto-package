@@ -223,6 +223,7 @@ mod checkout;
 use checkout::*;
 mod generate_stage;
 mod patch_stage;
+mod sdist_stage;
 use patch_stage::*;
 mod patch_loop;
 use patch_loop::*;
