@@ -67,6 +67,34 @@ fn non_utf8_input_is_refused() {
 }
 
 #[test]
+fn a_src_that_names_a_url_is_checked_like_a_url() {
+    for src in [
+        "file:///home/x/repo",
+        "http://github.com/o/r",
+        "https://evil.example/o/r",
+        "ssh://github.com/o/r",
+        "git@github.com:o/r.git",
+    ] {
+        let xml = format!(
+            r#"<services><service name="cargo_vendor"><param name="src">{src}</param></service></services>"#
+        );
+        assert!(validate_service_xml(xml.as_bytes()).is_err(), "{src}");
+    }
+    for src in [
+        "https://github.com/o/r",
+        "rustsec",
+        "*.tar.gz",
+        "v0*",
+        "sub/dir",
+    ] {
+        let xml = format!(
+            r#"<services><service name="cargo_vendor"><param name="src">{src}</param></service></services>"#
+        );
+        assert!(validate_service_xml(xml.as_bytes()).is_ok(), "{src}");
+    }
+}
+
+#[test]
 fn decoded_values_are_what_is_checked() {
     let xml = r#"<services><service name="tar_scm"><param name="url">https://github.com/a&amp;b</param><param name="revision"><![CDATA[v1]]></param></service></services>"#;
     validate_service_xml(xml.as_bytes()).unwrap();

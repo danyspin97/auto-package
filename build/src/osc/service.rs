@@ -147,6 +147,11 @@ const SERVICE_PATH_PARAMS: &[&str] = &[
     "output",
 ];
 
+/// Params that name a source: a path in the checkout, or a URL. cargo_vendor
+/// treats a value that matches no path as a git URL and clones it, a
+/// `file://` URL included, so a value with a `:` is checked as a URL.
+const SOURCE_PARAMS: &[&str] = &["src", "srcdir", "srctar"];
+
 /// Check one `<param>` against the allowlists. `value` is the decoded text,
 /// as osc will see it.
 fn validate_service_param(name: &str, value: &str) -> Result<(), String> {
@@ -154,7 +159,7 @@ fn validate_service_param(name: &str, value: &str) -> Result<(), String> {
     if !ALLOWED_SERVICE_PARAMS.contains(&name) {
         return Err(format!("param `{name}` is not allowed"));
     }
-    if name == "url" {
+    if name == "url" || (SOURCE_PARAMS.contains(&name) && value.contains(':')) {
         crate::service_sandbox::check_service_url(value)?;
     }
     if name == "protocol" && value != "https" {
