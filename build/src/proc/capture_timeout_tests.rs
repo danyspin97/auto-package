@@ -70,9 +70,17 @@ fn kill_process_group_sigkills_a_child_started_in_its_own_group() {
 fn unreadable_output_is_an_error_not_an_empty_success() {
     // The child exits at once but a background descendant in another
     // session keeps both pipes open, so neither stream is ever known.
+    // The shell waits until the descendant has entered its new session
+    // (it writes a marker from there) before it exits: otherwise the
+    // group sweep after the exit can kill the descendant before its
+    // setsid, closing the pipes, and the output is then complete.
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("escaped");
+    let script = "setsid sh -c 'touch \"$1\"; exec sleep 8' sh \"$1\" & \
+                  until [ -e \"$1\" ]; do sleep 0.01; done; exit 0";
     let err = capture_with_timeout(
         "sh",
-        &["-c", "setsid sleep 8 & exit 0"],
+        &["-c", script, "sh", marker.to_str().unwrap()],
         Path::new("/"),
         quiet(),
         Duration::from_secs(20),
