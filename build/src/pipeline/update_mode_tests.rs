@@ -146,3 +146,24 @@ mod review_turn {
         assert_eq!(review_turn_context(None, None, None), None);
     }
 }
+
+mod post_build_review {
+    use crate::pipeline::build_round::post_review_ruled_out;
+
+    #[test]
+    fn an_update_is_not_reviewed_after_its_build() {
+        assert!(post_review_ruled_out(false, true, false, 10.0));
+    }
+
+    #[test]
+    fn a_new_package_keeps_its_post_build_review() {
+        assert!(!post_review_ruled_out(false, false, false, 10.0));
+    }
+
+    #[test]
+    fn the_review_still_stops_once_run_or_out_of_budget_or_without_agent() {
+        assert!(post_review_ruled_out(true, false, false, 10.0));
+        assert!(post_review_ruled_out(false, false, true, 10.0));
+        assert!(post_review_ruled_out(false, false, false, 0.0));
+    }
+}

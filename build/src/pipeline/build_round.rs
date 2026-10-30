@@ -265,6 +265,19 @@ pub(super) fn build_warnings_extract(log: &str) -> String {
         .join("\n")
 }
 
+/// Whether the post-build review is ruled out before any turn: it already ran,
+/// the run is an update (its recipe is the origin's, and a clean-up turn would
+/// rewrite what the maintainer chose), there is no agent, or the budget left is
+/// too small.
+pub(super) fn post_review_ruled_out(
+    already_done: bool,
+    update: bool,
+    no_agent: bool,
+    budget_left: f64,
+) -> bool {
+    already_done || update || no_agent || budget_left < POST_REVIEW_MIN_BUDGET_USD
+}
+
 /// One cheap clean-up turn on a spec that has just built, when the agent
 /// changed it on the way (a fix attempt or the pre-build review). `Some` is
 /// the round to run next: the turn edited the spec, so it is built again, and
@@ -282,10 +295,12 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         ..
     } = ctx;
     let reporter = *reporter;
-    if std::mem::replace(&mut st.post_review_done, true)
-        || config.no_agent
-        || config.budget_usd - st.spent_usd < POST_REVIEW_MIN_BUDGET_USD
-    {
+    if post_review_ruled_out(
+        std::mem::replace(&mut st.post_review_done, true),
+        st.update.is_some(),
+        config.no_agent,
+        config.budget_usd - st.spent_usd,
+    ) {
         return None;
     }
     let good = strip_and_rewrite(spec_path);
