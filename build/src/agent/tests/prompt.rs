@@ -293,6 +293,38 @@ fn convention_76_names_the_split_tree_symptom_and_the_fix() {
     }
 }
 
+/// python-cffi 16.0/16.1 failed `%check` with `command 'g++' failed` on a
+/// C-only package, and the spec had no compiler BuildRequires. The index must
+/// route that symptom to convention 10, and convention 10 must say cffi needs
+/// both gcc and gcc-c++.
+#[test]
+fn a_missing_compiler_routes_to_convention_10_and_cffi_needs_gcc_cxx() {
+    let line = CONVENTIONS_INDEX.lines().nth(9).unwrap();
+    assert!(line.starts_with("10. "), "index line 10 is {line:?}");
+    assert!(
+        line.contains("compiler") && line.contains("'g++'") && line.contains("'gcc'"),
+        "index line 10 lacks the compiler trigger: {line:?}"
+    );
+    let text = crate::conventions_table::CONVENTIONS[9].1;
+    assert!(text.starts_with("10. **Test failures"));
+    let at = text
+        .find("**Missing compiler**")
+        .expect("convention 10 has a missing-compiler paragraph");
+    let rest = &text[at..];
+    let para = &rest[..rest.find("For any other").unwrap_or(rest.len())];
+    for want in [
+        "cffi",
+        "`BuildRequires: gcc`",
+        "`BuildRequires: gcc-c++`",
+        "named in the error",
+    ] {
+        assert!(
+            para.contains(want),
+            "missing-compiler paragraph lacks {want:?}"
+        );
+    }
+}
+
 /// The priorities frame every convention, so they must come first, and
 /// must name both halves of the goal: time, and building AND working.
 #[test]

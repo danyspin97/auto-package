@@ -7,7 +7,7 @@
 7. %check with %pytest / %pytest_arch and its BuildRequires — read when adding or editing %check of a Python package
 8. Python flavors, %python_expand, %python_files, _multibuild — read when touching flavor macros, multibuild or python_subpackages
 9. Merged into convention 50 — read convention 50 when the spec or your edit has -j1, -j N, --jobs or -n N on make, cmake, ninja or pytest
-10. %check failure: missing dependency vs cannot run here — read when %check fails (ImportError, fixture not found, collect error)
+10. %check failure: missing dependency or compiler vs cannot run here — read when %check fails (ImportError, fixture not found, collect error, command 'g++'/'gcc' failed, No such file 'g++')
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
 12. Merged into convention 7 — read convention 7 when %check fails oddly on config
 13. Merged into convention 28 — read convention 28 when %prep/%build fails (no such file, name resolution)
