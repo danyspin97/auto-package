@@ -41,6 +41,7 @@ pub(super) fn review_stage(
     st: &mut RunState,
     spec: &SpecInfo,
     checkout: &CheckoutFacts,
+    build_log_nonempty: bool,
 ) -> Result<(), PipelineResult> {
     let RunCtx {
         config,
@@ -112,6 +113,7 @@ pub(super) fn review_stage(
             need_spec,
             st.update.is_some(),
             checkout,
+            build_log_nonempty,
             already_reviewed,
             rpm_name,
         ),

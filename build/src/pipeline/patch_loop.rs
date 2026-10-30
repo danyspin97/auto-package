@@ -370,12 +370,13 @@ fn write_refreshed_patches(
 /// `checkout` holds the OBS status and whether OBS built exactly the spec on
 /// disk (see `CheckoutFacts::exact_success`). An update that OBS already built
 /// needs no edit. An update OBS rejected or failed is reviewed as the carried
-/// recipe it is. A package that is not an update is reviewed unless OBS built
-/// it with a failing result, which the build rounds handle.
+/// recipe it is. A package that is not an update is reviewed unless `failed_log`
+/// says OBS failed it and its log is there for the pre-fix turn.
 pub(super) fn review_turn_wanted(
     need_spec: bool,
     update: bool,
     checkout: &CheckoutFacts,
+    failed_log: bool,
     already_reviewed: bool,
     rpm_name: &str,
 ) -> bool {
@@ -388,10 +389,9 @@ pub(super) fn review_turn_wanted(
     if update {
         return !checkout.exact_success();
     }
-    !matches!(
-        checkout.obs_status,
-        Some(osc::BuildStatus::Failed | osc::BuildStatus::Unresolvable)
-    )
+    // A failed build with its log is what the pre-fix turn works from; without
+    // one, nothing else would look at the spec before the first build.
+    !failed_log
 }
 
 /// The context of the review turn: a patch request alone, else every note

@@ -532,13 +532,14 @@ fn run_stages(
     // turn and the first commit.
     patch_stage(&ctx, &mut st, &spec)?;
 
-    let build_log_nonempty = ctx
-        .ws
-        .build_log()
-        .metadata()
-        .map(|m| m.len() > 0)
-        .unwrap_or(false);
-    review_stage(&ctx, &mut st, &spec, &checkout)?;
+    let build_log_nonempty = checkout.has_failed_build_log(
+        ctx.ws
+            .build_log()
+            .metadata()
+            .map(|m| m.len() > 0)
+            .unwrap_or(false),
+    );
+    review_stage(&ctx, &mut st, &spec, &checkout, build_log_nonempty)?;
     prefix_stage(
         &ctx,
         &mut st,

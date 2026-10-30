@@ -81,19 +81,25 @@ mod review_turn {
         // The checkout is already at the new version, the work dir is new, and OBS
         // succeeded on exactly that spec: no edit is wanted.
         let checkout = facts(Some(BuildStatus::Succeeded), false);
-        assert!(!review_turn_wanted(false, true, &checkout, false, PKG));
+        assert!(!review_turn_wanted(
+            false, true, &checkout, false, false, PKG
+        ));
     }
 
     #[test]
     fn an_update_that_obs_failed_is_reviewed_as_a_carried_recipe() {
         let checkout = facts(Some(BuildStatus::Failed), false);
-        assert!(review_turn_wanted(false, true, &checkout, false, PKG));
+        assert!(review_turn_wanted(
+            false, true, &checkout, false, false, PKG
+        ));
     }
 
     #[test]
     fn an_update_whose_checkout_holds_unbuilt_edits_is_reviewed_even_if_obs_succeeded() {
         let checkout = facts(Some(BuildStatus::Succeeded), true);
-        assert!(review_turn_wanted(false, true, &checkout, false, PKG));
+        assert!(review_turn_wanted(
+            false, true, &checkout, false, false, PKG
+        ));
     }
 
     #[test]
@@ -107,23 +113,40 @@ mod review_turn {
     #[test]
     fn a_new_spec_is_always_reviewed() {
         let checkout = facts(None, false);
-        assert!(review_turn_wanted(true, false, &checkout, false, PKG));
+        assert!(review_turn_wanted(
+            true, false, &checkout, false, false, PKG
+        ));
     }
 
     #[test]
     fn a_reviewed_spec_or_a_cuda_redistributable_is_not_reviewed_again() {
         let checkout = facts(None, false);
-        assert!(!review_turn_wanted(true, true, &checkout, true, PKG));
+        assert!(!review_turn_wanted(true, true, &checkout, false, true, PKG));
     }
 
     #[test]
-    fn a_package_that_is_not_an_update_keeps_the_rule_for_a_failing_build() {
+    fn a_failed_build_with_its_log_is_fixed_by_the_pre_fix_turn_not_reviewed() {
         let unresolvable = facts(Some(BuildStatus::Unresolvable), false);
-        assert!(!review_turn_wanted(false, false, &unresolvable, false, PKG));
+        assert!(!review_turn_wanted(
+            false,
+            false,
+            &unresolvable,
+            true,
+            false,
+            PKG
+        ));
+    }
+
+    #[test]
+    fn a_failed_build_without_a_log_is_still_reviewed() {
+        // OBS failed it, but there is no log for the pre-fix turn to work from.
+        let failed = facts(Some(BuildStatus::Failed), false);
+        assert!(review_turn_wanted(false, false, &failed, false, false, PKG));
         assert!(review_turn_wanted(
             false,
             false,
             &facts(None, false),
+            false,
             false,
             PKG
         ));
@@ -171,7 +194,6 @@ mod post_build_review {
 mod inherited_checks {
     use crate::pipeline::update_mode::{newly_reported, split_inherited, style_problems};
     use std::collections::BTreeSet;
-    use std::path::Path;
 
     /// A summary-only description and no `%license`, as an origin ships it.
     const SUMMARY_ONLY: &str = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool for things\n\
@@ -305,5 +327,30 @@ mod tidy_on_update {
     fn an_update_drops_a_pytest_build_requires_its_check_does_not_use() {
         let kept = normalize_spec_text(UNUSED_PYTEST, true);
         assert!(!kept.contains("%{python_module pytest}"), "{kept}");
+    }
+}
+
+mod failed_build_log {
+    use crate::osc::BuildStatus;
+    use crate::pipeline::checkout::CheckoutFacts;
+
+    fn facts(obs: Option<BuildStatus>) -> CheckoutFacts {
+        CheckoutFacts {
+            obs_status: obs,
+            local_changes: false,
+        }
+    }
+
+    #[test]
+    fn a_log_of_a_failed_or_rejected_build_on_obs_is_the_failed_log() {
+        assert!(facts(Some(BuildStatus::Failed)).has_failed_build_log(true));
+        assert!(facts(Some(BuildStatus::Unresolvable)).has_failed_build_log(true));
+    }
+
+    #[test]
+    fn a_log_left_by_an_earlier_build_is_not_one_when_obs_succeeded_or_answered_nothing() {
+        assert!(!facts(Some(BuildStatus::Succeeded)).has_failed_build_log(true));
+        assert!(!facts(None).has_failed_build_log(true));
+        assert!(!facts(Some(BuildStatus::Failed)).has_failed_build_log(false));
     }
 }

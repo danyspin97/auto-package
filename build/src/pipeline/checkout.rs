@@ -114,6 +114,18 @@ impl CheckoutFacts {
     pub(super) fn exact_success(&self) -> bool {
         self.obs_status == Some(osc::BuildStatus::Succeeded) && !self.local_changes
     }
+
+    /// Whether the build log in the work dir (`log_nonempty`) is the log of a
+    /// failed build of the package on OBS. OBS says which build failed: a log
+    /// left by an earlier build, with OBS reporting success or nothing, is not
+    /// one to fix.
+    pub(super) fn has_failed_build_log(&self, log_nonempty: bool) -> bool {
+        log_nonempty
+            && matches!(
+                self.obs_status,
+                Some(osc::BuildStatus::Failed | osc::BuildStatus::Unresolvable)
+            )
+    }
 }
 
 /// Step: Checkout, then the OBS-already-built fast path. Returns what the later
