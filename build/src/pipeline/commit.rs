@@ -6,6 +6,21 @@ use crate::pipeline::patch_check::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::spec_edits::*;
 
+/// The commit step, except under `--local`: nothing goes to OBS from a build
+/// that runs on this machine, against the checkout as it is.
+pub(super) fn commit_unless_local(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
+    commit_unless(osc::local_build().is_some(), || commit_step(ctx, st))
+}
+
+/// Run `commit` unless `local` is set. The gate is a parameter so a test can
+/// hold it without enabling `--local` for the whole process.
+pub(super) fn commit_unless(
+    local: bool,
+    commit: impl FnOnce() -> Result<(), PipelineResult>,
+) -> Result<(), PipelineResult> {
+    if local { Ok(()) } else { commit() }
+}
+
 /// Step: Commit.
 pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     let commit_step = begin_or_fail!(

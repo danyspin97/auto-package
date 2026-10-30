@@ -292,7 +292,12 @@ pub fn select_target(
             let state_path = config.state_root.join(ws_name).join("state.json");
             let built = match std::fs::read_to_string(&state_path) {
                 Ok(s) => match serde_json::from_str::<PkgState>(&s) {
-                    Ok(st) => st.is_built(&n.version),
+                    // A dependency `--local` built here is available to a local
+                    // build; OBS never has it, so a normal run does not count it.
+                    Ok(st) => {
+                        st.is_built(&n.version)
+                            || (osc::local_build().is_some() && st.is_built_locally(&n.version))
+                    }
                     Err(e) => {
                         ap_core::diag!(
                             "  {} is unreadable ({e}); treating {} as not built",

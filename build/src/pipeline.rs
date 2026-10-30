@@ -369,6 +369,11 @@ mod patch_stage_tests;
 #[cfg(test)]
 mod flag_survival_tests;
 
+mod repeat_log;
+
+#[cfg(test)]
+mod local_state_tests;
+
 #[cfg(test)]
 mod kept_baseline_tests {
     use super::hygiene_tests::config;

@@ -6,6 +6,11 @@ use crate::pipeline::blocked::*;
 use crate::pipeline::build_round::*;
 use crate::pipeline::slots::*;
 
+/// `last_outcome` of a package `--local` built on this machine. It is not a
+/// success: OBS never built it, so the readers that mean "OBS has it" (see
+/// [`PkgState::is_built`]) do not accept it.
+pub const LOCAL_SUCCESS: &str = "local-success";
+
 /// Packages the pipeline itself reported built (or already built) in this
 /// process, by `fuzzy_key`. The resolver reads OBS statuses, which can keep
 /// calling a package unbuilt for a reason it cannot fix by building it again (a
@@ -468,6 +473,26 @@ impl PkgState {
     pub fn is_built(&self, version: &str) -> bool {
         self.last_built_version.as_deref() == Some(version)
             && self.last_outcome.as_deref() == Some("success")
+    }
+
+    /// Does state.json record a local build (`--local`) of this version? Such a
+    /// build never reached OBS, so [`Self::is_built`] does not accept it. Only
+    /// a local run asks for it, to find a dependency built on this machine.
+    pub fn is_built_locally(&self, version: &str) -> bool {
+        self.last_built_version.as_deref() == Some(version)
+            && self.last_outcome.as_deref() == Some(LOCAL_SUCCESS)
+    }
+
+    /// Record that the current spec built: `success` when OBS built it,
+    /// [`LOCAL_SUCCESS`] when `--local` built it on this machine.
+    pub fn record_built(&mut self, version: &str, local: bool) {
+        self.last_built_version = Some(version.to_string());
+        self.last_outcome = Some(if local { LOCAL_SUCCESS } else { "success" }.to_string());
+        self.last_failure_reason = None;
+        // A ladder spent on an earlier spec no longer holds back this build,
+        // and a later rebuild of the same spec must not be refused for it.
+        self.ladder_spec_hash = None;
+        self.ladder_reason = None;
     }
 
     /// The ladder history of a failed resolution of exactly this spec content,

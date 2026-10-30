@@ -527,7 +527,7 @@ fn run_stages(
         if let Flow::Retry = validate_round(&ctx, &mut st)? {
             continue;
         }
-        commit_step(&ctx, &mut st)?;
+        commit_unless_local(&ctx, &mut st)?;
         // A build retried because a bound was to be relaxed, of a spec that is
         // byte-for-byte the one OBS just called unresolvable, can only say the
         // same again, and takes minutes to say it.

@@ -11,7 +11,8 @@ use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 use crate::pipeline::unresolvable::*;
 
-/// Step: Build (wait for OBS remote build, fetch log, download RPMs), then
+/// Step: Build (wait for OBS remote build, fetch log, download RPMs; with
+/// `--local`, `osc build` on this machine), then
 /// route its outcome: success finishes the package, unresolvable dependencies
 /// end it with `MissingDeps`, and an ordinary failure runs a fix turn.
 pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, PipelineResult> {
@@ -34,11 +35,13 @@ pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, P
     );
     let build_log = build_step.file("build.log");
 
-    let build_result = osc::obs_build(
+    let build_result = osc::build_package(
+        osc::local_build(),
         &config.project,
         obs_name,
         &config.distro,
         &config.arch,
+        &ctx.checkout_dir,
         &build_log,
         &config.rpms_dir,
         Emit::new(reporter, build_step.id),
@@ -200,7 +203,8 @@ fn build_succeeded(ctx: &RunCtx, st: &mut RunState, build_step: StepGuard<'_>) -
     }
 }
 
-/// Record in the package's state that its current spec built.
+/// Record in the package's state that its current spec built, on OBS or, under
+/// `--local`, on this machine (recorded apart, see [`LOCAL_SUCCESS`]).
 fn record_built_state(ctx: &RunCtx) {
     let RunCtx {
         config,
@@ -208,14 +212,9 @@ fn record_built_state(ctx: &RunCtx) {
         ws,
         ..
     } = ctx;
+    let local = osc::local_build().is_some();
     update_state(ws, *reporter, |state| {
-        state.last_built_version = Some(config.version.clone());
-        state.last_outcome = Some("success".to_string());
-        state.last_failure_reason = None;
-        // A ladder spent on an earlier spec no longer holds back this build,
-        // and a later rebuild of the same spec must not be refused for it.
-        state.ladder_spec_hash = None;
-        state.ladder_reason = None;
+        state.record_built(&config.version, local);
     });
 }
 
@@ -412,7 +411,7 @@ fn revert_post_review(
         ctx.ws.notes(),
         "\n## Post-build review reverted\nThe build after the review's edit failed; the spec that built was restored.\n",
     );
-    commit_step(ctx, st)?;
+    commit_unless_local(ctx, st)?;
     record_built_state(ctx);
     osc::invalidate_project_packages_cache(&ctx.config.project);
     Ok(RoundEnd::Finished(PipelineResult::Built {

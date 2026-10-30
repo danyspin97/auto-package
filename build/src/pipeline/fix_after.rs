@@ -9,6 +9,7 @@ use crate::pipeline::ladder::*;
 use crate::pipeline::logs::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
+use crate::pipeline::repeat_log::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 
@@ -209,27 +210,38 @@ pub(super) fn fix_after_build(
                     build_step.id,
                 ) =>
             {
-                let started = osc::rebuild(
-                    &config.project,
-                    obs_name,
-                    &config.distro,
-                    &config.arch,
-                    Emit::new(reporter, build_step.id),
-                );
+                let message = match flaky_retry(osc::local_build().is_some()) {
+                    // Under `--local` the retry is the next round's local build:
+                    // nothing is asked of OBS.
+                    FlakyRetry::LocalBuild => format!(
+                        "only {} test(s) failed: running one more local build of the same \
+                         sources to tell flaky tests from stable failures",
+                        ids.len()
+                    ),
+                    FlakyRetry::ObsRebuild => {
+                        match osc::rebuild(
+                            &config.project,
+                            obs_name,
+                            &config.distro,
+                            &config.arch,
+                            Emit::new(reporter, build_step.id),
+                        ) {
+                            Ok(_) => format!(
+                                "only {} test(s) failed: asked OBS for one more build of the \
+                                 same sources to tell flaky tests from stable failures",
+                                ids.len()
+                            ),
+                            Err(e) => format!(
+                                "only {} test(s) failed; the rebuild that would tell whether \
+                                 they are flaky could not be requested: {e}",
+                                ids.len()
+                            ),
+                        }
+                    }
+                };
                 reporter.report(&Event::Warning {
                     step: Some(build_step.id),
-                    message: match started {
-                        Ok(_) => format!(
-                            "only {} test(s) failed: asked OBS for one more build of the same \
-                             sources to tell flaky tests from stable failures",
-                            ids.len()
-                        ),
-                        Err(e) => format!(
-                            "only {} test(s) failed; the rebuild that would tell whether they \
-                             are flaky could not be requested: {e}",
-                            ids.len()
-                        ),
-                    },
+                    message,
                 });
                 return Ok(RoundEnd::Retry);
             }
@@ -254,41 +266,65 @@ pub(super) fn fix_after_build(
     let mut fresh_note: Option<String> = None;
     if digest.is_some() && previous == digest {
         st.identical_logs += 1;
-        if st.identical_logs > 1 {
-            return Err(ctx.failed(format!(
-                "OBS returned the same build log {} times for the same sources even after a \
-                 rebuild was requested; nothing the agent can change explains it; log: {}",
-                st.identical_logs + 1,
-                build_log.display()
-            )));
+        let local = osc::local_build().is_some();
+        match same_log_action(local, st.identical_logs) {
+            SameLogAction::Fail if local => {
+                return Err(ctx.failed(format!(
+                    "the local build gave the same log {} times for the same sources, so the \
+                     changes made since did not change its result; log: {}",
+                    st.identical_logs + 1,
+                    build_log.display()
+                )));
+            }
+            SameLogAction::Fail => {
+                return Err(ctx.failed(format!(
+                    "OBS returned the same build log {} times for the same sources even after a \
+                     rebuild was requested; nothing the agent can change explains it; log: {}",
+                    st.identical_logs + 1,
+                    build_log.display()
+                )));
+            }
+            // Under `--local` this log is the build that just ran, not a copy
+            // of an old one OBS may have handed back: nothing to ask for. The
+            // agent reads it as the result of its last change.
+            SameLogAction::Continue => {
+                fresh_note = Some(
+                    "This build.log is identical to the one the previous attempt saw: the local \
+                     build ran again on the same sources and failed the same way, so the last \
+                     change did not alter this failure."
+                        .to_string(),
+                );
+            }
+            SameLogAction::AskObsRebuild => {
+                let emit = Emit::new(reporter, build_step.id);
+                let started = osc::rebuild(
+                    &config.project,
+                    obs_name,
+                    &config.distro,
+                    &config.arch,
+                    emit,
+                );
+                reporter.report(&Event::Warning {
+                    step: Some(build_step.id),
+                    message: match &started {
+                        Ok(true) => "the build log is identical to the last attempt's: asked OBS for a rebuild".to_string(),
+                        Ok(false) => "the build log is identical to the last attempt's: asked OBS for a rebuild, \
+                                      but it had not started after 90 s".to_string(),
+                        Err(e) => format!("the build log is identical to the last attempt's, and the rebuild request failed: {e}"),
+                    },
+                });
+                st.attempts += 1;
+                persist_attempts(ws, &config.run_id, st.attempts);
+                if st.attempts > config.max_attempts {
+                    return Err(ctx.failed(format!(
+                        "attempt limit {} reached while OBS kept returning the same build log; log: {}",
+                        config.max_attempts,
+                        build_log.display()
+                    )));
+                }
+                return Ok(RoundEnd::Retry);
+            }
         }
-        let emit = Emit::new(reporter, build_step.id);
-        let started = osc::rebuild(
-            &config.project,
-            obs_name,
-            &config.distro,
-            &config.arch,
-            emit,
-        );
-        reporter.report(&Event::Warning {
-            step: Some(build_step.id),
-            message: match &started {
-                Ok(true) => "the build log is identical to the last attempt's: asked OBS for a rebuild".to_string(),
-                Ok(false) => "the build log is identical to the last attempt's: asked OBS for a rebuild, \
-                              but it had not started after 90 s".to_string(),
-                Err(e) => format!("the build log is identical to the last attempt's, and the rebuild request failed: {e}"),
-            },
-        });
-        st.attempts += 1;
-        persist_attempts(ws, &config.run_id, st.attempts);
-        if st.attempts > config.max_attempts {
-            return Err(ctx.failed(format!(
-                "attempt limit {} reached while OBS kept returning the same build log; log: {}",
-                config.max_attempts,
-                build_log.display()
-            )));
-        }
-        return Ok(RoundEnd::Retry);
     } else if digest.is_some() && previous.is_some() {
         st.identical_logs = 0;
         // Said as a fact, because the turns that called a new log stale were
