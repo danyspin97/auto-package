@@ -103,6 +103,21 @@ fn a_param_is_accepted_only_for_the_services_that_take_it() {
 }
 
 #[test]
+fn the_tar_service_is_checked_in_every_mode() {
+    // `osc service ra` runs buildtime services too, so this file is run here.
+    let xml = r#"<services><service mode="buildtime" name="tar"/></services>"#;
+    validate_service_xml(xml.as_bytes()).unwrap();
+    let xml = r#"<services><service mode="buildtime" name="tar"><param name="filename">pkg</param><param name="version">1.0</param></service></services>"#;
+    validate_service_xml(xml.as_bytes()).unwrap();
+    for p in ["obsinfo", "extension", "url"] {
+        let xml = format!(
+            r#"<services><service mode="buildtime" name="tar"><param name="{p}">x</param></service></services>"#
+        );
+        assert!(validate_service_xml(xml.as_bytes()).is_err(), "{p}");
+    }
+}
+
+#[test]
 fn a_src_that_names_a_url_is_checked_like_a_url() {
     for src in [
         "file:///home/x/repo",

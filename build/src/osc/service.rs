@@ -98,6 +98,12 @@ pub fn repair_wc(checkout_dir: &Path, emit: Emit<'_>) -> Result<(), Error> {
 const SERVICE_PARAMS: &[(&str, &[&str])] = &[
     ("tar_scm", TAR_SCM_PARAMS),
     ("obs_scm", TAR_SCM_PARAMS),
+    // tar is tar_scm run as `tar` (argv[0]): it packs the checkout's .obsinfo
+    // into a tarball. Its obsinfo and extension params are refused.
+    (
+        "tar",
+        &["version", "versionprefix", "filename", "package-meta"],
+    ),
     ("cargo_vendor", CARGO_VENDOR_PARAMS),
     (
         "set_version",
