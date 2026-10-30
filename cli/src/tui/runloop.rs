@@ -68,7 +68,10 @@ pub(super) fn run_is_done(state: &TuiState, work_left: usize) -> bool {
     state.packages.values().all(|p| {
         p.finished
             && !p.retry_requested
-            && matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt)
+            && matches!(
+                p.status,
+                PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt
+            )
     })
 }
 

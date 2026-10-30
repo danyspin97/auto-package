@@ -123,6 +123,11 @@ impl HumanSink {
                         "✓ built"
                             .if_supports_color(Stderr, |t| t.style(Style::new().green().bold()))
                     ),
+                    PackageOutcome::BuiltLocally => format!(
+                        "{}",
+                        "✓ built locally"
+                            .if_supports_color(Stderr, |t| t.style(Style::new().green().bold()))
+                    ),
                     PackageOutcome::AlreadyBuilt => format!(
                         "{}",
                         "✔ already built".if_supports_color(Stderr, |t| t.green())

@@ -4,6 +4,7 @@ mod build_cmd;
 mod cleanup;
 mod diffview;
 mod edit_bytes;
+mod local_opts;
 mod run_limits;
 mod tui;
 mod update_project;
@@ -112,6 +113,16 @@ enum Commands {
         /// bubblewrap is unusable. Same as AUTO_PACKAGE_UNSAFE_RESOLVE=1.
         #[arg(long, default_value_t = false)]
         unsafe_resolve: bool,
+
+        /// Build with `osc build` on this machine, against the checkout, instead
+        /// of committing to OBS and waiting for its build. Nothing is committed
+        /// from the build step. Needs osc, and root without a password (`sudo -n`)
+        /// or run as root.
+        #[arg(long, default_value_t = false)]
+        local: bool,
+
+        #[command(flatten)]
+        local_opts: local_opts::LocalOpts,
 
         /// Delete rebuildable caches (rpms/, sdist caches) before building. Keeps
         /// runs/, state/, ledger.json and osc checkouts; refuses when a checkout

@@ -190,6 +190,11 @@ pub fn open_submit(
                 LogLevel::Warn,
                 format!("{row}: a submit request is already being made"),
             );
+        } else if p.status == PkgStatus::BuiltLocally {
+            state.add_global_log(
+                LogLevel::Warn,
+                format!("{row}: not submitted, it was built locally and OBS has no build of it"),
+            );
         } else if !is_built(p) {
             state.add_global_log(
                 LogLevel::Warn,

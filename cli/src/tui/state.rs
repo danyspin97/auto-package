@@ -96,7 +96,7 @@ impl TuiState {
                 self.show_all
                     || !matches!(
                         self.packages[*name].status,
-                        PkgStatus::Succeeded | PkgStatus::AlreadyBuilt
+                        PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt
                     )
             })
             .collect()
@@ -231,6 +231,7 @@ impl TuiState {
                 };
                 state.status = match outcome {
                     PackageOutcome::Built => PkgStatus::Succeeded,
+                    PackageOutcome::BuiltLocally => PkgStatus::BuiltLocally,
                     PackageOutcome::AlreadyBuilt => PkgStatus::AlreadyBuilt,
                     PackageOutcome::MissingDeps { .. } => PkgStatus::MissingDeps,
                     PackageOutcome::Failed { disk_full, .. } => {
@@ -253,6 +254,7 @@ impl TuiState {
                         state.fail_reason = Some(reason.clone());
                     }
                     PackageOutcome::Built
+                    | PackageOutcome::BuiltLocally
                     | PackageOutcome::AlreadyBuilt
                     | PackageOutcome::MissingDeps { .. } => {
                         state.step = None;
@@ -261,6 +263,7 @@ impl TuiState {
                 }
                 let msg = match outcome {
                     PackageOutcome::Built => "built".to_string(),
+                    PackageOutcome::BuiltLocally => "built locally".to_string(),
                     PackageOutcome::AlreadyBuilt => "already built".to_string(),
                     PackageOutcome::MissingDeps { deps } => {
                         format!("needs: {}", deps.join(", "))

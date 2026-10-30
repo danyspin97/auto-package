@@ -163,6 +163,8 @@ pub enum MissingSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PackageOutcome {
     Built,
+    /// Built on this machine by `--local`: OBS has no build of it.
+    BuiltLocally,
     AlreadyBuilt,
     MissingDeps {
         deps: Vec<String>,

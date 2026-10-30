@@ -38,6 +38,9 @@ pub(super) enum PkgStatus {
     Queued,
     Running,
     Succeeded,
+    /// Built on this machine by `--local`: OBS has no build of it, so it is
+    /// not offered for a submit request.
+    BuiltLocally,
     AlreadyBuilt,
     MissingDeps,
     Failed,
@@ -58,6 +61,7 @@ impl PkgStatus {
             PkgStatus::Running => "running",
             PkgStatus::Between => "working",
             PkgStatus::Succeeded => "done",
+            PkgStatus::BuiltLocally => "built locally",
             PkgStatus::AlreadyBuilt => "cached",
             PkgStatus::MissingDeps => "blocked",
             PkgStatus::Failed => "failed",
@@ -73,7 +77,7 @@ impl PkgStatus {
             PkgStatus::Queued => "○",
             PkgStatus::Running => ["◐", "◓", "◑", "◒"][(tick % 4) as usize],
             PkgStatus::Between => "◌",
-            PkgStatus::Succeeded => "✓",
+            PkgStatus::Succeeded | PkgStatus::BuiltLocally => "✓",
             PkgStatus::AlreadyBuilt => "✔",
             PkgStatus::MissingDeps => "◇",
             PkgStatus::Failed | PkgStatus::NoSpace => "✗",
@@ -84,7 +88,9 @@ impl PkgStatus {
         match self {
             PkgStatus::Queued => Color::DarkGray,
             PkgStatus::Running | PkgStatus::Between => Color::Yellow,
-            PkgStatus::Succeeded | PkgStatus::AlreadyBuilt => Color::Green,
+            PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => {
+                Color::Green
+            }
             PkgStatus::MissingDeps => Color::Magenta,
             PkgStatus::Failed => Color::Red,
             PkgStatus::NoSpace => Color::LightRed,

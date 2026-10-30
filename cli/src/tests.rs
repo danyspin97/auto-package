@@ -430,3 +430,82 @@ fn the_package_name_comes_from_the_last_path_segment() {
         "thing"
     );
 }
+
+fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+    Cli::try_parse_from(args)
+}
+
+#[test]
+fn local_is_off_by_default_and_parses_on_build_and_update() {
+    let build = ["auto-package", "build", "httpx", "--project", "home:u"];
+    let update = ["auto-package", "update", "--project", "home:u"];
+    let local = |args: &[&str]| match parse(args).unwrap().command {
+        Commands::Build {
+            local, local_opts, ..
+        } => (local, local_opts.local_min_free_gib),
+        Commands::Update(a) => (a.local, a.local_opts.local_min_free_gib),
+        _ => panic!("not build or update"),
+    };
+    assert_eq!(local(&build), (false, 10));
+    assert_eq!(local(&update), (false, 10));
+    assert_eq!(local(&[&build[..], &["--local"]].concat()), (true, 10));
+    assert_eq!(
+        local(&[&update[..], &["--local", "--local-min-free-gib", "25"]].concat()),
+        (true, 25)
+    );
+}
+
+#[test]
+fn local_cannot_be_combined_with_submit() {
+    let update = [
+        "auto-package",
+        "update",
+        "--project",
+        "home:u",
+        "--local",
+        "--submit",
+    ];
+    let err = parse(&update).err().expect("must be refused");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    assert!(err.to_string().contains("--local") && err.to_string().contains("--submit"));
+}
+
+#[test]
+fn local_options_need_local() {
+    for cmd in ["build", "update"] {
+        let mut args = vec!["auto-package", cmd];
+        if cmd == "build" {
+            args.push("httpx");
+        }
+        args.extend(["--project", "home:u", "--local-root", "/big"]);
+        let err = parse(&args).err().expect("must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+}
+
+#[test]
+fn local_update_refuses_maintenance_before_it_runs() {
+    // Both refused before anything is read, written or built: the refusal is the
+    // first thing `update` does.
+    for extra in [
+        &["--maintenance", "SUSE:Maintenance:1"][..],
+        &["--maintenance-list"],
+    ] {
+        let args = [
+            &["auto-package", "update", "--project", "home:u", "--local"][..],
+            extra,
+        ]
+        .concat();
+        let Commands::Update(a) = parse(&args).unwrap().command else {
+            panic!("not update");
+        };
+        let mut summary = None;
+        let err = crate::update_project::run(a, &mut summary)
+            .expect_err("--local with maintenance must be refused");
+        assert!(
+            err.to_string().contains("--maintenance") && err.to_string().contains("--local"),
+            "{err}"
+        );
+        assert!(summary.is_none());
+    }
+}

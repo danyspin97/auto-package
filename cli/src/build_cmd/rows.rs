@@ -135,7 +135,9 @@ pub(crate) fn row_ends(finished: &[Event]) -> Vec<(String, bool)> {
                 pkg.clone(),
                 matches!(
                     outcome,
-                    PackageOutcome::Built | PackageOutcome::AlreadyBuilt
+                    PackageOutcome::Built
+                        | PackageOutcome::BuiltLocally
+                        | PackageOutcome::AlreadyBuilt
                 ),
             )),
             _ => None,

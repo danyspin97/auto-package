@@ -127,12 +127,23 @@ pub(crate) fn print_run_summary(
 
     let built: Vec<&String> = latest
         .iter()
-        .filter(|(_, (_, outcome))| matches!(outcome, PackageOutcome::Built))
+        .filter(|(_, (_, outcome))| {
+            matches!(
+                outcome,
+                PackageOutcome::Built | PackageOutcome::BuiltLocally
+            )
+        })
         .map(|(pkg, _)| pkg)
         .collect();
     let _ = writeln!(out, "\nBuilt this run ({}):", built.len());
     for pkg in &built {
-        let _ = writeln!(out, "  {pkg} {}", latest[*pkg].0);
+        // A local build is not on OBS: say so beside it, never as a plain build.
+        let local = if matches!(latest[*pkg].1, PackageOutcome::BuiltLocally) {
+            " (built locally, not on OBS)"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "  {pkg} {}{local}", latest[*pkg].0);
     }
 
     let mut queued: Vec<(&String, Vec<String>)> = latest
@@ -172,6 +183,7 @@ pub(crate) fn print_run_summary(
             matches!(
                 o,
                 PackageOutcome::Built
+                    | PackageOutcome::BuiltLocally
                     | PackageOutcome::AlreadyBuilt
                     | PackageOutcome::MissingDeps { .. }
                     | PackageOutcome::Failed { .. }

@@ -14,7 +14,12 @@ pub(super) fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     let built = state
         .packages
         .values()
-        .filter(|p| matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt))
+        .filter(|p| {
+            matches!(
+                p.status,
+                PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt
+            )
+        })
         .count();
     let elapsed = state.run_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
     let cost = state.total_cost_usd();

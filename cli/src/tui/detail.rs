@@ -248,7 +248,12 @@ pub(super) fn built_lines(state: &TuiState) -> Vec<String> {
         .order
         .iter()
         .filter_map(|n| state.packages.get(n.as_str()).map(|p| (n, p)))
-        .filter(|(_, p)| matches!(p.status, PkgStatus::Succeeded | PkgStatus::AlreadyBuilt))
+        .filter(|(_, p)| {
+            matches!(
+                p.status,
+                PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt
+            )
+        })
         .map(|(n, p)| format!("{n} {}", p.version_label()).trim_end().to_string())
         .collect()
 }

@@ -1,6 +1,12 @@
 use super::*;
 
 pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
+    if a.local && (a.maintenance.is_some() || a.maintenance_list) {
+        return Err(eyre!(
+            "--local builds on this machine: it cannot be combined with --maintenance, which sends the change to OBS"
+        ));
+    }
+    a.local_opts.apply(a.local)?;
     if a.maintenance.is_some() || a.maintenance_list {
         return run_maintenance(a, summary);
     }

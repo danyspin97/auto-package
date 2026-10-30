@@ -137,6 +137,16 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub unsafe_resolve: bool,
 
+    /// Build with `osc build` on this machine, against the checkout, instead of
+    /// committing to OBS and waiting for its build. Nothing is committed from
+    /// the build step, so it cannot be combined with `--submit`. Needs osc,
+    /// and root without a password (`sudo -n`) or run as root.
+    #[arg(long, default_value_t = false, conflicts_with = "submit")]
+    pub local: bool,
+
+    #[command(flatten)]
+    pub local_opts: crate::local_opts::LocalOpts,
+
     /// Maximum number of packages to build concurrently (0 = unlimited). Each
     /// build still runs its own dependency closure, so this bounds the
     /// top-level loop, not every spawned sub-build.

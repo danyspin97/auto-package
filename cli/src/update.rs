@@ -237,7 +237,14 @@ pub(super) fn built_locally(state_root: &Path, rpm_name: &str) -> Option<String>
         .find(|e| ap_build::osc::fuzzy_key(&e.file_name().to_string_lossy()) == wanted)?;
     let state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).ok()?).ok()?;
-    if state["last_outcome"].as_str() != Some("success") {
+    // A local build is available only to a local run: OBS never has it, so a
+    // normal run must not drop the dependency from its queue for it.
+    let accepted = match state["last_outcome"].as_str() {
+        Some("success") => true,
+        Some(ap_build::pipeline::LOCAL_SUCCESS) => ap_build::osc::local_build().is_some(),
+        _ => false,
+    };
+    if !accepted {
         return None;
     }
     state["last_built_version"].as_str().map(str::to_string)
@@ -246,6 +253,9 @@ pub(super) fn built_locally(state_root: &Path, rpm_name: &str) -> Option<String>
 /// The outcome a finished package reports, shared by every build path.
 pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
     match result {
+        PipelineResult::Built { .. } if ap_build::osc::local_build().is_some() => {
+            PackageOutcome::BuiltLocally
+        }
         PipelineResult::Built { .. } => PackageOutcome::Built,
         PipelineResult::AlreadyBuilt { .. } => PackageOutcome::AlreadyBuilt,
         PipelineResult::MissingDeps { deps, .. } => {

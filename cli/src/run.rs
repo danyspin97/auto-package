@@ -20,6 +20,8 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             agent_backend,
             no_agent,
             unsafe_resolve,
+            local,
+            local_opts,
             cleanup,
             jobs,
             limits,
@@ -43,6 +45,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
             }
             ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
+            local_opts.apply(local)?;
             limits.apply(&work_dir)?;
             ap_build::sources::set_scratch_dir(work_dir.join("cache"));
             ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
