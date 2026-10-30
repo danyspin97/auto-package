@@ -170,6 +170,7 @@ pub(super) fn resolve_dependency_config(
                     // The root package's findings are not a dependency's.
                     patch_request: None,
                     patch_condition: None,
+                    update: false,
                     ..config.clone()
                 })
             }
@@ -207,6 +208,7 @@ pub(super) fn resolve_dependency_config(
                 // The root package's findings are not a dependency's.
                 patch_request: None,
                 patch_condition: None,
+                update: false,
                 ..config.clone()
             });
         }
@@ -318,6 +320,7 @@ pub(super) fn resolve_dependency_config(
                 // The root package's findings are not a dependency's.
                 patch_request: None,
                 patch_condition: None,
+                update: false,
                 ..config.clone()
             });
         }

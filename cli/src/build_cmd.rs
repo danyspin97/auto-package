@@ -145,6 +145,9 @@ pub(crate) fn cmd_build(
         python_flavors,
         patch_request: branch.and_then(|b| b.improve.clone()),
         patch_condition: None,
+        // Only the package the update command builds is updated: a dependency
+        // of it (see round.rs) is an ordinary build.
+        update: branch.is_some_and(|b| b.update),
         failed_deps: Vec::new(),
         unbuildable_deps: Vec::new(),
     };

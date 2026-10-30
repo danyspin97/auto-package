@@ -348,6 +348,7 @@ fn run_case(
         post_review_done: false,
         post_review_revert: None,
         rpmlint_shown: Default::default(),
+        update: None,
     };
     let snapshot = CheckoutSnapshot::take(&checkout);
     let step = StepDir {

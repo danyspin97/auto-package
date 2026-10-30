@@ -11,6 +11,30 @@ use crate::pipeline::python_spec::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 
+/// The Context of a review of a recipe the update keeps. A recipe this run
+/// carried forward changed only in `Version:` and the source; one the checkout
+/// already held at the new version may carry an earlier run's edits.
+pub(super) fn carried_note(carried_now: bool, old: &str, version: &str) -> String {
+    if carried_now {
+        format!(
+            "This spec is the package's existing recipe carried forward from {old} to \
+             {version}: only `Version:` and the source changed. Check what the bump can \
+             break, and nothing else: BuildRequires and Requires changed in the new \
+             release's metadata, files added or removed in `%files`, and a `%check` skip \
+             that is no longer needed. Keep every other decision of the recipe. The \
+             patches were already checked with quilt against the new sources: leave them \
+             alone (a patch removal is accepted only when quilt reports the patch `can be \
+             reverse-applied`)."
+        )
+    } else {
+        format!(
+            "This spec is the package's existing recipe, which the checkout already holds at \
+             {version} (the origin ships {old}). An earlier run may have edited it: check \
+             the whole recipe against the new sources and keep the maintainer's decisions."
+        )
+    }
+}
+
 /// Step: Review (freshly generated specs, or existing spec with no prior build).
 pub(super) fn review_stage(
     ctx: &RunCtx,
@@ -95,19 +119,10 @@ pub(super) fn review_stage(
         run_turn = false;
     }
     if !config.no_agent && run_turn {
-        let carry_context = spec.carried_from.as_ref().map(|old| {
-            format!(
-                "This spec is the package's existing recipe carried forward from {old} to {}: \
-                 only `Version:` and the source changed. Check what the bump can break, and \
-                 nothing else: BuildRequires and Requires changed in the \
-                 new release's metadata, files added or removed in `%files`, and a `%check` \
-                 skip that is no longer needed. Keep every other decision of the recipe. \
-                 The patches were already checked with quilt against the new sources: leave \
-                 them alone (a patch removal is accepted only when quilt reports the patch \
-                 `can be reverse-applied`).",
-                config.version
-            )
-        });
+        let carry_context = spec
+            .carried_from
+            .as_ref()
+            .map(|old| carried_note(spec.need_spec, old, &config.version));
         let patch_context = patching.map(|problem| {
             let condition = config
                 .patch_condition

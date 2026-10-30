@@ -30,6 +30,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         no_agent: true,
         force: false,
         regen: false,
+        update: false,
         source_repo: None,
         subprojects: Vec::new(),
         failed_deps: Vec::new(),

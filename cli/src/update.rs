@@ -330,6 +330,7 @@ fn cmd_update(
             resolver: None,
             improve: None,
             from_version: None,
+            update: true,
         };
         let ap_build::update::Decision::Update {
             ecosystem,

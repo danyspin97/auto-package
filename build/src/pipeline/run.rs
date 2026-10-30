@@ -433,6 +433,9 @@ pub(super) struct RunState {
     /// version's green builds that a fix turn was given, or that the agent
     /// left: a key in here is not asked about again.
     pub(super) rpmlint_shown: std::collections::BTreeSet<String>,
+    /// Set when this run updates a package that already exists (see
+    /// `update_mode`): the checks against the origin apply to it.
+    pub(super) update: Option<UpdateMode>,
 }
 
 /// The state an edit made after a green build is rolled back to.
@@ -506,6 +509,7 @@ fn run_stages(
         post_review_done: false,
         post_review_revert: None,
         rpmlint_shown: Default::default(),
+        update: None,
     };
 
     let obs_status = checkout_stage(&ctx, &mut st)?;

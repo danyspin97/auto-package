@@ -51,6 +51,11 @@ pub struct PipelineConfig {
     pub force: bool,
     /// Regenerate spec from scratch.
     pub regen: bool,
+    /// This run is an `update` of the package: its recipe is kept, and the
+    /// update is checked against the origin it was branched from. Set for the
+    /// package the update command builds only, never for a dependency, a
+    /// `build`, or a `lint`.
+    pub update: bool,
     /// Build from this source repository instead of a PyPI sdist. Whether it
     /// holds a Rust crate or a Python project is decided by looking inside the
     /// release archive, not by which flag was used.
@@ -221,9 +226,15 @@ mod obs_names;
 use obs_names::*;
 mod checkout;
 use checkout::*;
+use update_mode::*;
 mod generate_stage;
+
+mod update_mode;
+
 mod patch_stage;
 mod sdist_stage;
+#[cfg(test)]
+mod update_mode_tests;
 use patch_stage::*;
 mod patch_loop;
 use patch_loop::*;

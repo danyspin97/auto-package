@@ -174,6 +174,9 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     "--max-packages {max_packages} reached: no more packages are queued in this run"
                 ));
             }
+            // The root package is the one the update command builds; a
+            // dependency of it is an ordinary build.
+            let is_root = rpm_name == config.rpm_name;
             let pkg_config = PipelineConfig {
                 pkg_name: target_info.name.clone(),
                 rpm_name: rpm_name.clone(),
@@ -181,6 +184,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                 // The root package's findings are not a dependency's.
                 patch_request: None,
                 patch_condition: None,
+                update: config.update && is_root,
                 ..config.clone()
             };
             let pkg_run = run_dir.pkg(&rpm_name);

@@ -376,6 +376,9 @@ fn build_item(
             .map(|job| job.problem(&item.pkg, &item.new_version))
             .or_else(|| improve_problem(item)),
         from_version: Some(item.old_version.clone()),
+        // A maintenance run (its code streams and backports) keeps its own
+        // recipe rules and is not an update of the package.
+        update: !a.improve && !a.maintenance_source && a.backport_job.is_none(),
     };
     let distro = crate::choose_distro(a.distro.as_deref(), branch, &a.arch);
     catch_panic(|| {

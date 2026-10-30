@@ -53,6 +53,11 @@ pub(super) fn generate_spec_stage(
         && !config.prefers_wheel()
         && !crate::redist::is_redist_package(&config.rpm_name);
     let mut carried_from: Option<String> = None;
+    // The origin of the package an update is measured against. A checkout
+    // already at the new version is still an update of its origin.
+    let origin = (config.update && spec_existed_before_generation)
+        .then(|| update_mode::origin_base(&config.project, obs_name, reporter))
+        .flatten();
 
     let (sdist_top_level, is_maturin, from_repo_archive, is_rust) = if need_spec {
         let step = begin_or_fail!(
@@ -254,6 +259,11 @@ pub(super) fn generate_spec_stage(
         // in the checkout dir (or fall back to a reasonable guess).
         let top = find_sdist_top_level(checkout_dir, &config.pkg_name, &config.version);
         step_attempts.skip(reporter, StepKind::GenerateSpec, SkipReason::SpecExists);
+        // The checkout already holds the recipe: an update from the origin keeps
+        // it, and is reviewed as the carried recipe it is.
+        if let Some(from) = origin.as_ref().filter(|o| o.version != config.version) {
+            carried_from = Some(from.version.clone());
+        }
         // A spec that cannot be read says nothing about Rust or maturin: the
         // read error is a transient failure, not a reason to build without
         // the Rust or maturin setup.
@@ -269,6 +279,7 @@ pub(super) fn generate_spec_stage(
     };
     st.sdist_top_level = sdist_top_level;
     st.from_repo_archive = from_repo_archive;
+    st.update = update_mode::update_mode(config.update, origin.as_ref(), carried_from.is_some());
     Ok(SpecInfo {
         need_spec,
         is_maturin,
