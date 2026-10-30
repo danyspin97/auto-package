@@ -124,21 +124,24 @@ pub fn get_project_meta(project: &str, emit: Emit<'_>) -> Result<Option<String>,
 pub fn set_project_meta(project: &str, xml: &str, emit: Emit<'_>) -> Result<(), Error> {
     check_obs_name("project", project)?;
     crate::osc::invalidate_repo_paths(project);
+    write_meta(&["meta", "prj", project], xml, emit)
+}
+
+/// Replace a meta document through `osc`: `args` names the meta (`meta prj P`
+/// or `meta pkg P PKG`), and `xml` is written to a private file that `-F`
+/// reads.
+pub(super) fn write_meta(args: &[&str], xml: &str, emit: Emit<'_>) -> Result<(), Error> {
     let mut file = tempfile::Builder::new()
-        .prefix("ap-prj-meta-")
+        .prefix("ap-meta-")
         .suffix(".xml")
         .tempfile_in(proc::private_dir()?)?;
     std::io::Write::write_all(&mut file, xml.as_bytes())?;
     let path = file.path().to_string_lossy().into_owned();
-    let cmd = format!("meta prj {project} -F");
-    let out = proc::capture_with_timeout(
-        "osc",
-        &["meta", "prj", project, "-F", &path],
-        &anywhere(),
-        emit,
-        OSC_QUERY_TIMEOUT,
-    )
-    .map_err(during(cmd.clone()))?;
+    let cmd = format!("{} -F", args.join(" "));
+    let mut argv: Vec<&str> = args.to_vec();
+    argv.extend(["-F", &path]);
+    let out = proc::capture_with_timeout("osc", &argv, &anywhere(), emit, OSC_QUERY_TIMEOUT)
+        .map_err(during(cmd.clone()))?;
     if !out.success() {
         return Err(Error::OscFailed {
             cmd,
