@@ -88,12 +88,18 @@ pub(super) fn patch_stage_with(
         return Ok(());
     }
     progress(format!("{rpm_name}: {}", report.summary()));
-    let hints = stale_patches(
-        &std::fs::read_to_string(spec_path).unwrap_or_default(),
-        checkout_dir,
-        &st.sdist_top_level,
-        &config.version,
-    );
+    // The top directory of an obs_scm source is a guess (nothing is unpacked), so
+    // no patch is judged stale by it.
+    let hints = if source_made_at_build_time(checkout_dir) {
+        Vec::new()
+    } else {
+        stale_patches(
+            &std::fs::read_to_string(spec_path).unwrap_or_default(),
+            checkout_dir,
+            &st.sdist_top_level,
+            &config.version,
+        )
+    };
     let mut rounds = 0usize;
     // What the last round must hear: why its edit was refused.
     let mut feedback: Option<String> = None;

@@ -228,7 +228,13 @@ pub(super) fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, St
     };
     let version = crate::spec::parse_header(spec).map(|h| h.version);
     let Some(tarball) = find_tarball(checkout, version.as_deref().unwrap_or_default()) else {
-        return Ok(PatchCheck::default());
+        // An obs_scm source is made by OBS at build time: nothing is unpacked to try them on.
+        let unchecked = source_made_at_build_time(checkout)
+            .then(|| "the patches were not checked: OBS makes the source at build time".into());
+        return Ok(PatchCheck {
+            unchecked,
+            ..PatchCheck::default()
+        });
     };
     let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
     // Unpack only what the patches touch: `patch` reads nothing else, and

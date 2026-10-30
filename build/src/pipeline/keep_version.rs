@@ -14,6 +14,11 @@ pub(super) fn run_service_keeping_version(
     spec_path: &Path,
     emit: Emit<'_>,
 ) -> Result<(), osc::Error> {
+    // An obs_scm source is made by OBS at build time, and `osc service ra` would refuse
+    // its `tar` service: nothing is run here, and the source is not missing for it.
+    if source_made_at_build_time(checkout_dir) {
+        return Ok(());
+    }
     let before = std::fs::read_to_string(spec_path).unwrap_or_default();
     let result = osc::run_service(checkout_dir, emit);
     if let Ok(after) = std::fs::read_to_string(spec_path)

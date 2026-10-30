@@ -64,6 +64,31 @@ fn a_cargo_vendor_service_with_a_url_fetches_the_source_too() {
 }
 
 #[test]
+fn an_obs_scm_service_revision_moves_to_the_new_tag() {
+    let svc = "<services>\n  <service mode=\"disabled\" name=\"obs_scm\">\n    <param name=\"url\">https://github.com/hyprwm/hyprland-guiutils.git</param>\n    <param name=\"scm\">git</param>\n    <param name=\"revision\">main</param>\n    <param name=\"filename\">hyprland-guiutils</param>\n  </service>\n  <service mode=\"buildtime\" name=\"tar\"/>\n  <service mode=\"disabled\" name=\"set_version\"/>\n</services>";
+    assert_eq!(
+        with_service_revision(svc, "v0.2.2").unwrap(),
+        svc.replace(">main</param>", ">v0.2.2</param>")
+    );
+    // An obs_scm service without a revision has nothing to move.
+    let no_revision = "<services><service mode=\"disabled\" name=\"obs_scm\"><param name=\"url\">u</param></service></services>";
+    assert!(with_service_revision(no_revision, "v1").is_none());
+    // A revision of another service after it is not the obs_scm one.
+    let other_after = "<services><service name=\"obs_scm\"><param name=\"url\">u</param></service><service name=\"download_files\"><param name=\"revision\">x</param></service></services>";
+    assert!(with_service_revision(other_after, "v1").is_none());
+    let self_closing = "<services><service name=\"obs_scm\"/><service name=\"tar\"><param name=\"revision\">r</param></service></services>";
+    assert!(with_service_revision(self_closing, "v1").is_none());
+}
+
+#[test]
+fn tar_scm_wins_over_an_obs_scm_service_in_the_same_file() {
+    let both = "<services><service name=\"obs_scm\"><param name=\"revision\">main</param></service><service name=\"tar_scm\"><param name=\"revision\">a</param></service></services>";
+    let moved = with_service_revision(both, "c").unwrap();
+    assert!(moved.contains("<param name=\"revision\">main</param>"));
+    assert!(moved.contains("<param name=\"revision\">c</param>"));
+}
+
+#[test]
 fn the_commit_message_summarises_the_new_changelog_entry() {
     let sep = "-".repeat(67);
     let old = format!("{sep}\nMon Jan  1 00:00:00 UTC 2024 - A <a@b.c>\n\n- Old\n");

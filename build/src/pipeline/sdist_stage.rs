@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::service_source::*;
 
 /// Step: FetchSdist, then the quilt `source/` symlink.
 pub(super) fn fetch_sdist_stage(
@@ -19,6 +20,17 @@ pub(super) fn fetch_sdist_stage(
     } = ctx;
     let reporter = *reporter;
     let step_attempts = &mut st.step_attempts;
+
+    // An obs_scm source is made by OBS when the package is built: the checkout has
+    // no tarball to unpack, and a missing one is not a failure.
+    if source_made_at_build_time(checkout_dir) {
+        step_attempts.skip(
+            reporter,
+            StepKind::FetchSdist,
+            SkipReason::Other("the source is made by OBS at build time".to_string()),
+        );
+        return Ok(());
+    }
 
     // A CUDA component is NVIDIA's binary archive: there is no source tree to
     // read, and unpacking it would copy hundreds of megabytes for nothing.

@@ -294,7 +294,11 @@ pub use archive::*;
 mod gen_spec;
 use gen_spec::*;
 mod carry;
+mod service_source;
+#[cfg(test)]
+mod service_source_tests;
 use carry::*;
+use service_source::*;
 mod prompt_notes;
 pub(crate) use prompt_notes::*;
 mod npm_vendor;

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::service_source::*;
 
 /// Bump the spec already in the checkout to `config.version` without
 /// regenerating it: set its `Version:`, fetch the new PyPI sdist in place of
@@ -186,9 +187,12 @@ fn carry_forward_repo_spec(
     })
 }
 
-/// [`carry_forward_repo_spec`] for a package whose source a `tar_scm` service
-/// (or a `cargo_vendor` one given a `url`) fetches: the service's `revision` moves to the new tag, `osc service ra`
-/// makes the tarball, and the old one goes. The spec keeps everything else.
+/// [`carry_forward_repo_spec`] for a package whose source a service supplies: a
+/// `tar_scm` service (or a `cargo_vendor` one given a `url`) fetches it, so the
+/// service's `revision` moves to the new tag, `osc service ra` makes the
+/// tarball, and the old one goes. An `obs_scm` service is made by OBS at build
+/// time: only its `revision` and the spec's `Version:` move, see
+/// [`carry_forward_obs_scm_spec`]. The spec keeps everything else.
 fn carry_forward_service_spec(
     config: &PipelineConfig,
     repo: &str,
@@ -200,18 +204,23 @@ fn carry_forward_service_spec(
     let service_path = checkout_dir.join("_service");
     let service =
         std::fs::read_to_string(&service_path).map_err(|e| format!("reading _service: {e}"))?;
-    // `obs_scm` makes an `.obscpio`, which nothing below handles: only `tar_scm`
-    // and `cargo_vendor` with a `url`, which fetches the source itself.
-    if service_revision_block(&service).is_none() {
-        return Err(
-            "the _service is not a tar_scm or url cargo_vendor one, so the source cannot be moved"
-                .into(),
-        );
+    let plan = plan_service_carry(&service, &config.version, || {
+        crate::sources::tag_for_version(repo, &config.version)
+            .ok_or_else(|| format!("{repo} lists no tag for {}", config.version))
+    })?;
+    if plan.kind == SourceService::BuildTime {
+        carry_forward_obs_scm_spec(&service_path, &service, &plan.moved, spec_path, &bumped)?;
+        write_or_warn(step.file("spec.generated"), &bumped);
+        return Ok(GenSpecResult {
+            // Nothing is extracted, so the top directory is a guess; nothing
+            // trusts it while `source_made_at_build_time` holds.
+            sdist_top_level: format!("{}-{}", config.pkg_name.to_lowercase(), config.version),
+            is_maturin: false,
+            is_rust: false,
+            from_repo_archive: false,
+        });
     }
-    let tag = crate::sources::tag_for_version(repo, &config.version)
-        .ok_or_else(|| format!("{repo} lists no tag for {}", config.version))?;
-    let moved = with_service_revision(&service, &tag)
-        .ok_or("the _service has no revision to move to the new tag")?;
+    let moved = plan.moved;
     let old_spec =
         std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
     let old_version = crate::spec::parse_header(&old_spec).map(|h| h.version);
@@ -271,51 +280,71 @@ fn carry_forward_service_spec(
     })
 }
 
-/// The tarballs (by file name) in `dir`.
+/// What the `_service` of a package whose source a service supplies becomes.
+pub(super) struct ServicePlan {
+    /// The `_service` with its source service's `revision` moved to the tag.
+    pub(super) moved: String,
+    pub(super) kind: SourceService,
+}
+
+/// Plans the move of `service` to `version`: which service supplies the source,
+/// and the `_service` with its `revision` set to the tag `tag_of` finds. Every
+/// refusal that needs no network comes before `tag_of` runs.
+pub(super) fn plan_service_carry(
+    service: &str,
+    version: &str,
+    tag_of: impl FnOnce() -> Result<String, String>,
+) -> Result<ServicePlan, String> {
+    let masked = mask_xml_comments(service);
+    let (scm, kind) = source_service(&masked).ok_or(
+        "the _service is not a tar_scm, obs_scm or url cargo_vendor one, so the source cannot be moved",
+    )?;
+    revision_span(&masked, scm).ok_or("the _service has no revision to move to the new tag")?;
+    if kind == SourceService::BuildTime {
+        refuse_manual_vendoring(&masked)?;
+    }
+    let tag = tag_of()?;
+    if kind == SourceService::BuildTime {
+        check_build_time_version(&source_params(service, &masked, scm), &tag, version)?;
+    }
+    let moved = with_service_revision(service, &tag)
+        .ok_or("the _service has no revision to move to the new tag")?;
+    Ok(ServicePlan { moved, kind })
+}
+
+/// Writes the moved `_service` and the spec with its `Version:` bumped, both or
+/// neither: a failed spec write puts `_service` back. Nothing is run or
+/// downloaded, since OBS makes the source when the package is built.
+pub(super) fn carry_forward_obs_scm_spec(
+    service_path: &Path,
+    service: &str,
+    moved: &str,
+    spec_path: &Path,
+    bumped: &str,
+) -> Result<(), String> {
+    ap_core::fsx::write_atomic(service_path, moved)
+        .map_err(|e| format!("writing _service: {e}"))?;
+    if let Err(e) = ap_core::fsx::write_atomic(spec_path, bumped) {
+        let _ = std::fs::write(service_path, service);
+        return Err(format!("writing the spec: {e}"));
+    }
+    Ok(())
+}
+
+/// Refuses an `obs_scm` source next to a vendoring service that OBS does not
+/// make at build time: its archive would stay the old one in the checkout and
+/// the package would build the new source with the old dependencies.
 fn tarballs_in(dir: &Path) -> std::collections::HashSet<String> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| {
-            [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar"]
-                .iter()
-                .any(|s| n.ends_with(s))
-        })
+        .filter(|n| is_archive_name(n))
         .collect()
 }
 
-/// Where the service that fetches the source starts in `service`: the `tar_scm`
-/// service, else a `cargo_vendor` one that has a `url` parameter (it fetches the
-/// source and vendors it in one go; without a `url` it only vendors).
-fn service_revision_block(service: &str) -> Option<usize> {
-    if let Some(at) = service.find("name=\"tar_scm\"") {
-        return Some(at);
-    }
-    let at = service.find("name=\"cargo_vendor\"")?;
-    let block_end = service[at..]
-        .find("</service>")
-        .map_or(service.len(), |i| at + i);
-    service[at..block_end]
-        .contains("<param name=\"url\">")
-        .then_some(at)
-}
-
-/// `service` with the `revision` parameter of the service that fetches the
-/// source set to `tag`; `None` when it has none.
-pub(super) fn with_service_revision(service: &str, tag: &str) -> Option<String> {
-    let open = "<param name=\"revision\">";
-    let scm = service_revision_block(service)?;
-    let start = scm + service[scm..].find(open)? + open.len();
-    let end = start + service[start..].find("</param>")?;
-    Some(format!(
-        "{}{}{}",
-        &service[..start],
-        crate::obs_xml::escape(tag),
-        &service[end..]
-    ))
-}
+/// How the service that supplies the source gets it.
 
 /// The PyPI JSON of this package's version.
 pub(super) fn release_json_for(config: &PipelineConfig) -> Result<String, GenSpecError> {

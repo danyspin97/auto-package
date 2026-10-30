@@ -1,0 +1,247 @@
+//! The XML of a `_service` that supplies a package's source: which service does it,
+//! where its revision is, and what `Version:` an `obs_scm` one gives a tag.
+
+use super::*;
+
+pub(super) fn refuse_manual_vendoring(masked: &str) -> Result<(), String> {
+    for name in ["cargo_vendor", "node_modules", "go_modules"] {
+        for (at, _) in masked.match_indices(&format!("name=\"{name}\"")) {
+            if crate::obs_xml::attr(open_tag(masked, at), "mode").as_deref() != Some("buildtime") {
+                return Err(format!(
+                    "the _service also has a `{name}` service that is not mode=\"buildtime\", \
+                     so its archive would stay the old one at build time; nothing was changed"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The start tag of the element whose attribute is at `at` in `masked`.
+pub(super) fn open_tag(masked: &str, at: usize) -> &str {
+    let start = masked[..at].rfind('<').unwrap_or(0);
+    let end = masked[start..]
+        .find('>')
+        .map_or(masked.len(), |i| start + i + 1);
+    &masked[start..end]
+}
+
+/// Refuses unless the tag gives `version` when OBS builds the package.
+pub(super) fn check_build_time_version(
+    params: &[(String, String)],
+    tag: &str,
+    version: &str,
+) -> Result<(), String> {
+    let got = build_time_version(params, tag)?;
+    if got == version {
+        return Ok(());
+    }
+    Err(format!(
+        "the tag `{tag}` gives Version `{got}` when OBS builds the package, not `{version}`, \
+         so the spec would name a version the source does not have; nothing was changed"
+    ))
+}
+
+/// The `Version` that an `obs_scm` service with these `params` gives the tag
+/// `tag`: `versionformat` (default `@PARENT_TAG@`) with the tag as the parent
+/// tag at offset 0, then `versionrewrite-pattern`. Without a rewrite the tag
+/// may carry a leading `v`, which is dropped. `Err` when the result cannot be
+/// worked out here.
+pub(super) fn build_time_version(params: &[(String, String)], tag: &str) -> Result<String, String> {
+    let param = |name: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
+    if param("versionprefix").is_some() {
+        return Err("the _service sets versionprefix, which cannot be followed here".into());
+    }
+    let format = param("versionformat").unwrap_or("@PARENT_TAG@");
+    let version = format
+        .replace("@PARENT_TAG@", tag)
+        .replace("@TAG@", tag)
+        .replace("@TAG_OFFSET@", "0");
+    if version.contains('@') {
+        return Err(format!(
+            "versionformat `{format}` uses a macro that cannot be expanded here"
+        ));
+    }
+    match param("versionrewrite-pattern") {
+        Some(pattern) => {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| format!("versionrewrite-pattern `{pattern}`: {e}"))?;
+            let replacement = regex_replacement(param("versionrewrite-replacement").unwrap_or(""));
+            Ok(re.replace_all(&version, replacement.as_str()).into_owned())
+        }
+        None => Ok(version.strip_prefix('v').unwrap_or(&version).to_string()),
+    }
+}
+
+/// An OBS rewrite replacement (`\1` for a group, `$` is literal) in the syntax
+/// of the `regex` crate (`${1}`).
+pub(super) fn regex_replacement(osc: &str) -> String {
+    let mut out = String::new();
+    let mut chars = osc.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' => out.push_str("$$"),
+            '\\' if chars.peek().is_some_and(|d| d.is_ascii_digit()) => {
+                let d = chars.next().unwrap_or('0');
+                out.push_str(&format!("${{{d}}}"));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Whether the checkout's `_service` gets the source from an `obs_scm` service.
+/// OBS makes that source when the package is built: no archive is in the
+/// checkout and nothing is to run here.
+pub(super) fn source_made_at_build_time(checkout_dir: &Path) -> bool {
+    std::fs::read_to_string(checkout_dir.join("_service")).is_ok_and(|s| {
+        matches!(
+            source_service(&mask_xml_comments(&s)),
+            Some((_, SourceService::BuildTime))
+        )
+    })
+}
+
+/// `sources` without the source archives: OBS makes those at build time when
+/// the source is an `obs_scm` one, so their absence is not a missing file.
+pub(super) fn without_build_time_archives(sources: Vec<String>) -> Vec<String> {
+    sources
+        .into_iter()
+        .filter(|n| !is_archive_name(n))
+        .collect()
+}
+
+/// Whether `name` ends like a source archive.
+pub(super) fn is_archive_name(name: &str) -> bool {
+    [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar"]
+        .iter()
+        .any(|s| name.ends_with(s))
+}
+
+/// The tarballs (by file name) in `dir`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SourceService {
+    /// `tar_scm`, or `cargo_vendor` with a `url`: the source is fetched here.
+    Fetched,
+    /// `obs_scm`: OBS makes the source at build time.
+    BuildTime,
+}
+
+/// `xml` with every XML comment blanked to spaces (newlines kept). The result
+/// has the same length, so an offset in it is the offset in `xml`, and a
+/// commented-out element is not read as a live one.
+pub(super) fn mask_xml_comments(xml: &str) -> String {
+    let mut out = xml.as_bytes().to_vec();
+    let mut from = 0;
+    while let Some(open) = xml[from..].find("<!--").map(|i| from + i) {
+        let end = xml[open + 4..]
+            .find("-->")
+            .map_or(xml.len(), |i| open + 4 + i + 3);
+        for b in &mut out[open..end] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+        from = end;
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Where the service that supplies the source starts in `masked` (the offset
+/// of its name, comments blanked) and how it gets the source. The `tar_scm`
+/// service comes first, then a `cargo_vendor` one that has a `url` parameter
+/// (it fetches the source and vendors it in one go; without a `url` it only
+/// vendors), then `obs_scm`.
+pub(super) fn source_service(masked: &str) -> Option<(usize, SourceService)> {
+    if let Some(at) = masked.find("name=\"tar_scm\"") {
+        return Some((at, SourceService::Fetched));
+    }
+    if let Some(at) = masked.find("name=\"cargo_vendor\"")
+        && service_block(masked, at).contains("<param name=\"url\">")
+    {
+        return Some((at, SourceService::Fetched));
+    }
+    masked
+        .find("name=\"obs_scm\"")
+        .map(|at| (at, SourceService::BuildTime))
+}
+
+/// The text of the `<service>` element whose name starts at `at`: up to its
+/// closing tag, or only its own tag when it is self-closing, so a parameter of
+/// the next service is never taken for its own.
+pub(super) fn service_block(service: &str, at: usize) -> &str {
+    let rest = &service[at..];
+    let tag_end = rest.find('>').map_or(rest.len(), |i| i + 1);
+    if rest[..tag_end].ends_with("/>") {
+        return &rest[..tag_end];
+    }
+    let end = rest.find("</service>").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// The `<param>`s of the source service at `scm`, by name, with their values
+/// decoded. Found in `masked`; the values are read from `service`, which has
+/// the same offsets.
+pub(super) fn source_params(service: &str, masked: &str, scm: usize) -> Vec<(String, String)> {
+    let end = scm + service_block(masked, scm).len();
+    let open = "<param name=\"";
+    let mut out = Vec::new();
+    let mut at = scm;
+    while let Some(p) = masked[at..end].find(open) {
+        let name_at = at + p + open.len();
+        let Some(quote) = masked[name_at..end].find('"') else {
+            break;
+        };
+        let name = masked[name_at..name_at + quote].to_string();
+        let tag_at = name_at + quote;
+        let Some(gt) = masked[tag_at..end].find('>') else {
+            break;
+        };
+        let value_at = tag_at + gt + 1;
+        if masked[tag_at..value_at].ends_with("/>") {
+            out.push((name, String::new()));
+            at = value_at;
+            continue;
+        }
+        let Some(close) = masked[value_at..end].find("</param>") else {
+            break;
+        };
+        let value_end = value_at + close;
+        out.push((
+            name,
+            crate::obs_xml::unescape(service[value_at..value_end].trim()),
+        ));
+        at = value_end;
+    }
+    out
+}
+
+/// Where the value of the `revision` parameter of the source service at `scm`
+/// starts and ends, in `masked`'s offsets.
+pub(super) fn revision_span(masked: &str, scm: usize) -> Option<(usize, usize)> {
+    let open = "<param name=\"revision\">";
+    let block = service_block(masked, scm);
+    let start = block.find(open)? + open.len();
+    let end = start + block[start..].find("</param>")?;
+    Some((scm + start, scm + end))
+}
+
+/// `service` with the `revision` parameter of the service that supplies the
+/// source set to `tag`; `None` when it has none.
+pub(super) fn with_service_revision(service: &str, tag: &str) -> Option<String> {
+    let masked = mask_xml_comments(service);
+    let (scm, _) = source_service(&masked)?;
+    let (start, end) = revision_span(&masked, scm)?;
+    Some(format!(
+        "{}{}{}",
+        &service[..start],
+        crate::obs_xml::escape(tag),
+        &service[end..]
+    ))
+}

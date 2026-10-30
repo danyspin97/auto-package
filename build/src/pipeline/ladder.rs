@@ -297,6 +297,7 @@ pub(super) fn resolve_blocked_with(
         // with the log lines as evidence (an import error is not that: it is a
         // dependency to fix).
         if (round == 1 || round == 3)
+            && !source_made_at_build_time(checkout_dir)
             && let Some(log_path) = site.build_log
             && let Some(log) = read_log_tail(log_path)
         {
