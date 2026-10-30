@@ -310,7 +310,7 @@ impl AllowedHosts {
             .clone()
     }
 
-    pub(crate) fn add_problem(&self, problem: String) {
+    pub fn add_problem(&self, problem: String) {
         self.state
             .write()
             .unwrap_or_else(|p| p.into_inner())

@@ -2,6 +2,9 @@ use super::*;
 
 #[derive(clap::Args, Clone)]
 pub struct UpdateProjectArgs {
+    #[command(flatten)]
+    pub allow_host: crate::allow_host::AllowHostArgs,
+
     /// OBS project to browse (e.g. Base:System): for packages with a newer
     /// upstream release, or with `lint` for quality problems. It is
     /// only read, unless `--in-place` is given.

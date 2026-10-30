@@ -188,6 +188,9 @@ enum Commands {
         /// versions.
         #[arg(long, default_value_t = false)]
         sweep: bool,
+
+        #[command(flatten)]
+        allow_host: allow_host::AllowHostArgs,
     },
 
     /// Update the packages of an OBS project that have a newer upstream
@@ -217,6 +220,16 @@ enum Commands {
     /// only prints the audit.
     #[command(mut_arg("source", |a| a.long("project").value_name("PROJECT")))]
     Lint(update_project::UpdateProjectArgs),
+
+    /// Show or change the hosts that services and source fetches may contact.
+    ///
+    /// Allowing a host is a security decision: the tool sends its requests for
+    /// sources there. Only this command, `--allow-host` and the TUI allow a
+    /// host; nothing a package or an agent says can.
+    Hosts {
+        #[command(subcommand)]
+        command: allow_host::HostsCommand,
+    },
 
     /// Print what auto-package has learned about a package: the build
     /// requirements, test changes and workarounds kept in its notes.
@@ -280,6 +293,9 @@ enum Commands {
         json: bool,
     },
 }
+mod allow_host;
+#[cfg(test)]
+mod allow_host_tests;
 mod baseline;
 use baseline::*;
 mod resolve;

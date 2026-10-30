@@ -31,7 +31,9 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             url,
             source_url,
             sweep,
+            allow_host,
         } => {
+            allow_host.apply()?;
             // `--regen` means "start over": without this, an already-built
             // package returned AlreadyBuilt (state.json / OBS-green fast paths,
             // `select_target`) before the regeneration ever ran, so `--regen`
@@ -542,7 +544,9 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 result?;
             }
         }
+        Commands::Hosts { command } => allow_host::hosts_command(&command)?,
         Commands::Lint(mut args) => {
+            args.allow_host.apply()?;
             args.improve = true;
             update_project::run(args, summary)?
         }
@@ -579,7 +583,10 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
         )?,
         Commands::Baseline { command } => baseline_command(command)?,
         Commands::EditBytes(args) => edit_bytes::run(&args)?,
-        Commands::Update(args) => update_project::run(args, summary)?,
+        Commands::Update(args) => {
+            args.allow_host.apply()?;
+            update_project::run(args, summary)?
+        }
     }
 
     Ok(())
