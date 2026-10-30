@@ -76,12 +76,7 @@ pub(super) fn drain_dep_queue(b: Build<'_>) -> color_eyre::Result<()> {
         let own_listing = ap_build::osc::try_list_project_packages(project, lookup_emit)
             .map_err(|e| color_eyre::eyre::eyre!(e))?;
         let own_statuses = ap_build::osc::get_project_build_statuses(project, distro, arch)?;
-        let mut linked_listings = Vec::new();
-        for (path_project, _repo) in ap_build::osc::get_project_repo_paths(project, lookup_emit)? {
-            let listing = ap_build::osc::try_list_project_packages(&path_project, lookup_emit)
-                .map_err(|e| color_eyre::eyre::eyre!(e))?;
-            linked_listings.push((path_project, listing));
-        }
+        let linked_listings = ap_build::osc::linked_project_listings(project, distro, lookup_emit)?;
         // What a dependency build runs as: its own thread, reported as soon
         // as it is done. Reporting in join order let a slower sibling hold
         // back every package finished after it, so their rows stayed on
