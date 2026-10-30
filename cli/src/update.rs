@@ -114,6 +114,7 @@ pub(super) fn update_in_place(
         run_id: run_dir.run_id.clone(),
         argv,
         work_dir: work_dir.clone(),
+        build: env!("AP_BUILD_REVISION").to_string(),
     });
 
     // Fail fast if the OBS project has no `<repository>` entries — otherwise

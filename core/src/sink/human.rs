@@ -44,12 +44,16 @@ impl HumanSink {
     fn format(&self, event: &Event) -> Option<String> {
         match event {
             Event::RunStarted {
-                run_id, work_dir, ..
+                run_id,
+                work_dir,
+                build,
+                ..
             } => Some(format!(
-                "{} · run {} · {}",
+                "{} · run {} · {} · build {}",
                 "auto-package".if_supports_color(Stderr, |t| t.bold()),
                 run_id.if_supports_color(Stderr, |t| t.dimmed()),
                 work_dir.display().if_supports_color(Stderr, |t| t.dimmed()),
+                crate::build_info::revision_label(build).if_supports_color(Stderr, |t| t.dimmed()),
             )),
             Event::RunFinished {
                 outcome,
@@ -383,5 +387,43 @@ impl Reporter for HumanSink {
         if let Some(msg) = self.format(event) {
             let _ = writeln!(std::io::stderr(), "{}", strip_controls(&msg, true));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::RunId;
+    use std::path::PathBuf;
+
+    fn banner(build: &str) -> String {
+        let event = Event::RunStarted {
+            run_id: RunId("20261030-101010-abcd-1-0".into()),
+            argv: vec!["auto-package".into()],
+            work_dir: PathBuf::from("/w"),
+            build: build.into(),
+        };
+        // The banner may carry colour codes when stderr is a terminal.
+        let text = HumanSink::new(LogLevel::Info).format(&event).unwrap();
+        let mut plain = String::new();
+        let mut in_code = false;
+        for c in text.chars() {
+            match c {
+                '\u{1b}' => in_code = true,
+                'm' if in_code => in_code = false,
+                _ if !in_code => plain.push(c),
+                _ => {}
+            }
+        }
+        plain
+    }
+
+    #[test]
+    fn the_run_banner_names_the_build_or_unknown() {
+        assert_eq!(
+            banner("3f2a9c1d8e7b"),
+            "auto-package · run 20261030-101010-abcd-1-0 · /w · build 3f2a9c1d8e7b"
+        );
+        assert!(banner("").ends_with("· build unknown"), "{}", banner(""));
     }
 }

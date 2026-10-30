@@ -108,6 +108,7 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
     }
     ex.run_info = RunInfo {
         command: p.argv.as_ref().map(|a| command_line(a)),
+        build: p.build.clone(),
         finished: p.run_finished.as_ref().map(|v| label(&v["outcome"])),
         elapsed_ms: p.run_finished.as_ref().and_then(|v| v["elapsed"].as_u64()),
         unreadable_lines: p.bad_lines,
@@ -172,6 +173,7 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
 #[derive(Default)]
 pub(super) struct Parsed {
     pub(super) argv: Option<Vec<String>>,
+    pub(super) build: Option<String>,
     pub(super) run_finished: Option<Value>,
     pub(super) selected: Vec<Value>,
     pub(super) attempts: Vec<Attempt>,

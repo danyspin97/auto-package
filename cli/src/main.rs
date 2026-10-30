@@ -19,7 +19,7 @@ use ap_build::pipeline::{
 use ap_core::event::{Event, PackageOutcome, RunOutcome, SelectionReason};
 use ap_core::run::RunDir;
 use ap_core::sink::{FanoutReporter, HumanSink, JsonlSink, LogLevel, MemorySink, Reporter};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use build_cmd::*;
 
@@ -297,7 +297,14 @@ const EXIT_AGENT_UNAVAILABLE: i32 = 2;
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    let cli = Cli::parse();
+    // The version line is built at run time (clap wants a 'static string, and
+    // this runs once), so it is set here rather than in the derive attribute.
+    let version: &'static str = Box::leak(
+        ap_core::build_info::version_line(env!("CARGO_PKG_VERSION"), env!("AP_BUILD_REVISION"))
+            .into_boxed_str(),
+    );
+    let matches = Cli::command().version(version).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     let mut summary: Option<String> = None;
     let result = run(cli, &mut summary);

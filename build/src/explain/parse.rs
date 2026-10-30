@@ -30,6 +30,7 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
                         .filter_map(|x| x.as_str().map(str::to_string))
                         .collect()
                 });
+                p.build = v["build"].as_str().map(str::to_string);
             }
             "run_finished" => p.run_finished = Some(v),
             "target_selected" => p.selected.push(v),

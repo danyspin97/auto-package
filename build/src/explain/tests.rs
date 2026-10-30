@@ -287,3 +287,28 @@ fn the_project_directory_is_resolved_like_the_other_commands() {
             .contains("several")
     );
 }
+
+/// A run records the build that wrote it, and a log from before the field
+/// has no build to show.
+#[test]
+fn explain_names_the_build_that_wrote_the_run() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path();
+    write(
+        &d.join("runs").join(RUN).join("run.jsonl"),
+        "{\"event\":\"run_started\",\"run_id\":\"R\",\"argv\":[\"auto-package\",\"update\"],\"work_dir\":\"/w\",\"build\":\"3f2a9c1d8e7b\"}\n\
+         {\"event\":\"target_selected\",\"pkg\":\"foo\",\"version\":\"2.0\",\"reason\":\"RequestedRoot\",\"blocked_by\":[],\"from_version\":\"1.0\"}\n",
+    );
+    let ex = explain(&query(d)).unwrap();
+    assert_eq!(ex.run_info.build.as_deref(), Some("3f2a9c1d8e7b"));
+    let text = plain(&render(&ex, 80));
+    assert!(
+        text.lines()
+            .any(|l| l.trim_start().starts_with("build") && l.contains("3f2a9c1d8e7b")),
+        "{text}"
+    );
+
+    let old_log = fixture(&[]);
+    let ex = explain(&query(old_log.path())).unwrap();
+    assert_eq!(ex.run_info.build, None);
+}

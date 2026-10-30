@@ -165,6 +165,9 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
     if let Some(c) = &ex.run_info.command {
         o.kv("command", Kind::Dim, c);
     }
+    if let Some(b) = &ex.run_info.build {
+        o.kv("build", Kind::Dim, b);
+    }
     if ex.run.is_some() {
         let (txt, kind) = match (&ex.run_info.finished, ex.run_info.elapsed_ms) {
             (Some(f), Some(ms)) => (format!("{f} after {}", fmt_ms(ms)), kind_of_outcome(f)),

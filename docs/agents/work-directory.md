@@ -56,7 +56,9 @@ cache of upstream versions). Inside one (call it `$P`):
 
 Every line has `event`; most have `pkg` (compact JSON, so `"pkg":"foo"` greps
 cleanly). Events of several packages are interleaved. Events seen:
-`run_started` (`argv`), `run_finished` (`outcome`, `elapsed` in ms),
+`run_started` (`argv`, `build`: the auto-package revision that wrote
+the run, `unknown` when none was embedded; absent in older logs),
+`run_finished` (`outcome`, `elapsed` in ms),
 `target_selected` (`version`, `from_version`, `reason`: ExplicitOverride,
 FirstUnbuiltDependency, RequestedRoot), `step_started` / `step_finished`
 (`step`, `kind`, `attempt`, `round`, `detail`; `outcome` Ok/Failed/Skipped,

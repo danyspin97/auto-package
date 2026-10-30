@@ -266,6 +266,10 @@ pub enum Event {
         run_id: RunId,
         argv: Vec<String>,
         work_dir: PathBuf,
+        /// The auto-package build that wrote this run (`build_info`); absent
+        /// in logs written before it was recorded.
+        #[serde(default)]
+        build: String,
     },
     RunFinished {
         outcome: RunOutcome,

@@ -39,6 +39,9 @@ pub struct Explanation {
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct RunInfo {
     pub command: Option<String>,
+    /// The auto-package build that wrote the run; `None` for logs from before
+    /// it was recorded.
+    pub build: Option<String>,
     /// `Success`, `Failed`, ...; `None` when the run wrote no `run_finished`.
     pub finished: Option<String>,
     pub elapsed_ms: Option<u64>,

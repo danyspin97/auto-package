@@ -154,6 +154,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         run_id: run_dir.run_id.clone(),
         argv: std::env::args().collect(),
         work_dir: work_dir.clone(),
+        build: env!("AP_BUILD_REVISION").to_string(),
     });
 
     let ctx = Ctx {
