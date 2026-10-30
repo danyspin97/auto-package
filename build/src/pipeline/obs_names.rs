@@ -152,18 +152,53 @@ pub(super) fn branch_from_linked(
         OwnName::Exact | OwnName::Variant(_) => return Ok(None),
         OwnName::Absent => {}
     }
-    let paths = match osc::get_project_repo_paths(&config.project, emit) {
-        Ok(paths) => paths,
+    // Every project the own project builds against, transitively, nearest
+    // first. A project that does not answer (see `lookup_failure`) is treated as
+    // not carrying the package, and the walk goes on.
+    let start = match osc::build_path_pairs(&config.project, &config.distro, emit) {
+        Ok(pairs) => pairs,
         Err(e) => lookup_failure(e.to_string(), e.is_transient(), false, emit)?,
     };
-    for (path_project, _repo) in paths {
-        let listing = match osc::list_project_packages(&path_project, emit) {
-            Ok(listing) => listing,
-            Err(e) => {
-                let reason = format!("could not list packages of {path_project}: {e}");
-                lookup_failure(reason, e.is_transient(), true, emit)?
-            }
-        };
+    let linked = osc::walk_path_pairs(
+        &config.project,
+        start,
+        osc::MAX_BUILD_PATH_DEPTH,
+        osc::MAX_BUILD_PATH_NODES,
+        |p, r, _, expand| {
+            let paths = if expand {
+                match osc::build_path_pairs(p, r, emit) {
+                    Ok(paths) => paths,
+                    Err(e) => match lookup_failure::<Option<Vec<osc::PathPair>>>(
+                        e.to_string(),
+                        e.is_transient(),
+                        true,
+                        emit,
+                    )? {
+                        Some(paths) => paths,
+                        None => return Ok(None),
+                    },
+                }
+            } else {
+                Vec::new()
+            };
+            let listing =
+                match osc::list_project_packages(p, emit) {
+                    Ok(listing) => listing,
+                    Err(e) => {
+                        let reason = format!("could not list packages of {p}: {e}");
+                        match lookup_failure::<
+                            Option<std::sync::Arc<std::collections::HashSet<String>>>,
+                        >(reason, e.is_transient(), true, emit)?
+                        {
+                            Some(listing) => listing,
+                            None => return Ok(None),
+                        }
+                    }
+                };
+            Ok(Some((listing, paths)))
+        },
+    )?;
+    for (path_project, _, listing) in linked {
         let Some(shipped) = linked_spelling(rpm_name, &listing) else {
             continue;
         };
