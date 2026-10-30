@@ -92,17 +92,15 @@ fn any_other_result_is_returned_without_a_retrigger() {
 
 #[test]
 fn getbinaries_is_retried_and_a_late_success_counts() {
-    let dir = tempfile::tempdir().unwrap();
     let mut calls = 0;
     let r = fetch_with_retries(
         "p",
         "python-x",
         "r",
         "x86_64",
-        dir.path(),
-        emit_quiet(),
         4,
         Duration::ZERO,
+        || Ok(()),
         || {
             calls += 1;
             if calls < 3 {
@@ -122,17 +120,15 @@ fn getbinaries_is_retried_and_a_late_success_counts() {
 
 #[test]
 fn getbinaries_gives_up_after_its_attempts() {
-    let dir = tempfile::tempdir().unwrap();
     let mut calls = 0;
     let r = fetch_with_retries(
         "p",
         "python-x",
         "r",
         "x86_64",
-        dir.path(),
-        emit_quiet(),
         4,
         Duration::ZERO,
+        || Ok(()),
         || {
             calls += 1;
             Err(Error::OscFailed {

@@ -198,24 +198,22 @@ const GETBINARIES_ATTEMPTS: u32 = 4;
 
 const GETBINARIES_PAUSE: Duration = Duration::from_secs(20);
 
-/// One package's `getbinaries`, `get` injected: retried up to `attempts` times,
-/// and each try waits for free disk space first (a full disk fails the try with
-/// code 28 without running `get`).
+/// One package's `getbinaries`, `get` and the `disk` gate injected: retried up
+/// to `attempts` times, and each try first runs `disk` (a full disk fails the
+/// try with code 28 without running `get`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fetch_with_retries(
     project: &str,
     name: &str,
     repo: &str,
     arch: &str,
-    rpms_dir: &Path,
-    emit: Emit<'_>,
     attempts: u32,
     pause: Duration,
+    mut disk: impl FnMut() -> Result<(), String>,
     mut get: impl FnMut() -> Result<(), Error>,
 ) -> Result<(), Error> {
     retry(attempts, pause, || {
-        if let Err(stderr) = crate::workspace::await_disk_space(rpms_dir, emit.reporter, emit.step)
-        {
+        if let Err(stderr) = disk() {
             return Err(Error::OscFailed {
                 cmd: format!("getbinaries {project} {name} {repo} {arch}"),
                 code: 28,
@@ -253,10 +251,9 @@ pub fn download_built_rpms(
             name,
             repo,
             arch,
-            rpms_dir,
-            emit,
             GETBINARIES_ATTEMPTS,
             GETBINARIES_PAUSE,
+            || crate::workspace::await_disk_space(rpms_dir, emit.reporter, emit.step),
             || get_binaries(project, name, repo, arch, rpms_dir, emit),
         )?;
         stash_rpmlint_log(rpms_dir, name);
