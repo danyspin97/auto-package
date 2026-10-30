@@ -256,3 +256,65 @@ fn translate_turn_reads_no_local_file() {
     );
     assert!(!tools.contains("Read") && !tools.contains("Edit") && !tools.contains("Write"));
 }
+
+#[test]
+fn the_turn_cannot_read_or_write_the_allowed_hosts_file() {
+    // What this checks: the rules the host file adds for the Read, Edit and
+    // Write tools, for the file and for everything under its directory, as the
+    // tool names a path. `..` spellings the tool does not normalize, and Grep
+    // and Glob are not checked here: whether these rules cover them is not
+    // settled, so this is best effort, not a guarantee.
+    let dir = std::path::PathBuf::from("/home/u/.config/auto-package");
+    let other = std::path::PathBuf::from("/home/u/dotfiles");
+    let rules = host_file_denied_tools(&[dir.clone(), other.clone()]);
+    for (d, tool) in [
+        (&dir, "Read"),
+        (&dir, "Edit"),
+        (&dir, "Write"),
+        (&other, "Read"),
+    ] {
+        let p = permission_path(d);
+        for rule in [format!("{tool}({p})"), format!("{tool}({p}/**)")] {
+            assert!(rules.contains(&rule), "missing {rule}: {rules:?}");
+        }
+    }
+    assert!(host_file_denied_tools(&[]).is_empty());
+    // The turn's deny list carries the same rule for the real config directory.
+    // Without HOME or XDG_CONFIG_HOME there is no such directory and this part
+    // is not checked.
+    if let Some(config) = crate::allowed_hosts::file::config_dir() {
+        let denied = turn_denied_tools(std::path::Path::new("/srv/ws"), None);
+        assert!(
+            denied.contains(&format!("Read({})", permission_path(&config))),
+            "{denied}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_host_file_also_denies_the_directory_it_points_to() {
+    let root = tempfile::tempdir().unwrap();
+    let dotfiles = root.path().join("dotfiles");
+    std::fs::create_dir(&dotfiles).unwrap();
+    let real = dotfiles.join("allowed-hosts");
+    std::fs::write(&real, "").unwrap();
+    let config = root.path().join("auto-package");
+    std::fs::create_dir(&config).unwrap();
+    let link = config.join("allowed-hosts");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let dirs = host_file_dirs(Some(&link));
+    assert_eq!(
+        dirs,
+        [config.clone(), std::fs::canonicalize(&dotfiles).unwrap()]
+    );
+    // A file that is not a link adds nothing new.
+    assert_eq!(
+        host_file_dirs(Some(&config.join("other-hosts"))),
+        [config.clone()]
+    );
+    assert!(host_file_dirs(None).is_empty());
+    let rules = host_file_denied_tools(&dirs);
+    let p = permission_path(&std::fs::canonicalize(&dotfiles).unwrap());
+    assert!(rules.contains(&format!("Write({p}/**)")), "{rules:?}");
+}

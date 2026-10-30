@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use crate::discovery::host_is_under;
 
 mod builtin;
+pub mod file;
 #[cfg(test)]
 mod proxy_tests;
 #[cfg(test)]
@@ -260,6 +261,16 @@ impl AllowedHosts {
         Ok(AllowOutcome::Added)
     }
 
+    /// Add an entry read from a source (the file), without the check that
+    /// [`Self::allow`] makes: a file may name a host the env already did.
+    pub(crate) fn push_loaded(&self, entry: Entry) {
+        self.state
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .push(entry);
+    }
+
     /// Record a host refused during this process, for `use_` and `asker`.
     pub fn note_refused(&self, host: &str, use_: Use, asker: &Asker) {
         self.state
@@ -308,6 +319,19 @@ impl AllowedHosts {
     }
 }
 
+/// `text` with control characters (an ANSI escape, a line break) removed, and
+/// tabs and line breaks turned into spaces, so it cannot change how a line is
+/// shown.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// The message for a valid host that is not allowed. The wording is matched
 /// by [`refused_hosts_in`]; change both together.
 pub fn refusal_hint(host: &str, use_: Use) -> String {
@@ -339,14 +363,27 @@ pub fn refused_hosts_in(text: &str) -> Vec<String> {
     out
 }
 
+/// The built-in hosts, then the env, then the user's file, with their
+/// problems. A missing file is no problem.
+pub fn load_default() -> AllowedHosts {
+    let hosts =
+        AllowedHosts::with_env(&std::env::var("AUTO_PACKAGE_SOURCE_HOSTS").unwrap_or_default());
+    if let Some(path) = file::config_file() {
+        let loaded = file::load(&path);
+        for problem in loaded.problems {
+            hosts.add_problem(format!("{}: {problem}", path.display()));
+        }
+        for entry in loaded.entries {
+            hosts.push_loaded(entry);
+        }
+    }
+    hosts
+}
+
 static SHARED: OnceLock<Arc<AllowedHosts>> = OnceLock::new();
 
-/// The process-wide list: built on first use from the environment (and, once
-/// it exists, the user's file). Every consumer reads this one.
+/// The process-wide list, built on first use by [`load_default`]. Every
+/// consumer reads this one.
 pub fn shared() -> Arc<AllowedHosts> {
-    Arc::clone(SHARED.get_or_init(|| {
-        Arc::new(AllowedHosts::with_env(
-            &std::env::var("AUTO_PACKAGE_SOURCE_HOSTS").unwrap_or_default(),
-        ))
-    }))
+    Arc::clone(SHARED.get_or_init(|| Arc::new(load_default())))
 }

@@ -228,11 +228,50 @@ pub(super) fn turn_denied_tools(
     denied.extend(quilt_denied_tools(workspace));
     denied.extend(patch_denied_tools(workspace));
     denied.extend(read_tool_denied_tools());
+    denied.extend(host_file_denied_tools(&host_file_dirs(
+        crate::allowed_hosts::file::config_file().as_deref(),
+    )));
     denied.extend(edit_bytes_denies(
         workspace,
         edit_bytes_command().as_deref(),
     ));
     denied.join(",")
+}
+
+/// The directories the host file's deny rules cover: the config directory, and
+/// the directory of the file a symlink in it points to, when that differs. A
+/// link to a file elsewhere would otherwise leave the file itself open.
+pub(super) fn host_file_dirs(config_file: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let Some(file) = config_file else {
+        return Vec::new();
+    };
+    let Some(config) = file.parent() else {
+        return Vec::new();
+    };
+    let mut dirs = vec![config.to_path_buf()];
+    let target_dir = crate::allowed_hosts::file::resolve_target(file)
+        .parent()
+        .map(std::path::Path::to_path_buf);
+    if let Some(dir) = target_dir.filter(|d| d != config) {
+        dirs.push(dir);
+    }
+    dirs
+}
+
+/// The user's allowed-hosts file lives in the config directory, outside every
+/// checkout and workspace. A turn must not read it (it would learn what the
+/// user allowed) or write it (a line there would allow a host). Each of `dirs`
+/// is denied as a whole directory, for the Read, Edit and Write tools.
+pub(super) fn host_file_denied_tools(dirs: &[std::path::PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        let p = permission_path(dir);
+        for tool in ["Read", "Edit", "Write"] {
+            out.push(format!("{tool}({p})"));
+            out.push(format!("{tool}({p}/**)"));
+        }
+    }
+    out
 }
 
 /// Denies for the read-only Bash grants that take a path or a name and print

@@ -1,4 +1,5 @@
 use super::*;
+use std::path::{Path, PathBuf};
 
 fn test_asker() -> Asker {
     Asker::service("test-pkg", "test")
@@ -314,4 +315,262 @@ fn a_host_built_in_for_services_only_can_be_allowed_for_sources() {
         h.allow("github.com", Origin::Run(Via::Flag), None),
         Ok(AllowOutcome::AlreadyAllowed(Origin::Builtin))
     );
+}
+
+// ── the user's file ──────────────────────────────────────────────────────────
+
+use super::file::{self, Added};
+
+#[test]
+fn the_file_takes_comments_reasons_and_one_host_per_line() {
+    let text = "# a comment\n\n   # indented comment\n\
+                mirror.example.org  # our package mirror\n\
+                Other.Example.NET.\n\
+                bare.example.com\n";
+    let parsed = file::parse(text);
+    assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+    let got: Vec<(&str, Option<&str>)> = parsed
+        .entries
+        .iter()
+        .map(|e| (e.host.as_str(), e.reason.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("mirror.example.org", Some("our package mirror")),
+            ("other.example.net", None),
+            ("bare.example.com", None),
+        ]
+    );
+    assert!(parsed.entries.iter().all(|e| e.origin == Origin::File));
+}
+
+#[test]
+fn malformed_lines_are_reported_with_their_number_and_ignored() {
+    let text = "good.example.org\n\
+                https://bad.example.org\n\
+                two hosts.example.org\n\
+                10.0.0.1 # an address\n\
+                *.wild.example.org\n\
+                ok2.example.org:443\n\
+                good.example.org # again\n";
+    let parsed = file::parse(text);
+    let hosts: Vec<&str> = parsed.entries.iter().map(|e| e.host.as_str()).collect();
+    assert_eq!(hosts, ["good.example.org"], "a repeat keeps the first line");
+    let lines: Vec<&str> = parsed
+        .problems
+        .iter()
+        .map(|p| p.split(':').next().unwrap())
+        .collect();
+    assert_eq!(lines, ["line 2", "line 3", "line 4", "line 5", "line 6"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_file_and_its_directory_are_private_and_round_trip() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("auto-package");
+    let path = dir.join(file::FILE_NAME);
+    assert!(file::load(&path).entries.is_empty());
+    assert_eq!(
+        file::add_host(&path, "mirror.example.org", Some("mirror\nwith a newline")).unwrap(),
+        Added::New
+    );
+    assert_eq!(
+        file::add_host(&path, "MIRROR.example.org.", None).unwrap(),
+        Added::AlreadyPresent
+    );
+    assert_eq!(
+        file::add_host(&path, "10.0.0.1", None)
+            .unwrap_err()
+            .contains("IP address"),
+        true
+    );
+    file::add_host(&path, "second.example.org", None).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text,
+        "mirror.example.org  # mirror with a newline\nsecond.example.org\n"
+    );
+    let loaded = file::load(&path);
+    assert!(loaded.problems.is_empty());
+    assert_eq!(loaded.entries.len(), 2);
+    assert_eq!(
+        loaded.entries[0].reason.as_deref(),
+        Some("mirror with a newline")
+    );
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&dir), 0o700);
+    // The atomic write leaves no temporary file behind; the lock file stays.
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, [file::FILE_NAME, file::LOCK_NAME]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_list_is_written_through_and_stays_a_link() {
+    let root = tempfile::tempdir().unwrap();
+    let real_dir = root.path().join("dotfiles");
+    std::fs::create_dir(&real_dir).unwrap();
+    let real = real_dir.join(file::FILE_NAME);
+    std::fs::write(&real, "keep.example.org\n").unwrap();
+    let dir = root.path().join("auto-package");
+    std::fs::create_dir(&dir).unwrap();
+    let link = dir.join(file::FILE_NAME);
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    file::add_host(&link, "new.example.org", None).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&real).unwrap(),
+        "keep.example.org\nnew.example.org\n"
+    );
+    assert!(file::remove_host(&link, "keep.example.org").unwrap());
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "new.example.org\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_to_another_directory_changes_neither_that_directory_nor_gets_a_lock() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let real_dir = root.path().join("dotfiles");
+    std::fs::create_dir(&real_dir).unwrap();
+    std::fs::set_permissions(&real_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let real = real_dir.join(file::FILE_NAME);
+    std::fs::write(&real, "keep.example.org\n").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let dir = root.path().join("auto-package");
+    std::fs::create_dir(&dir).unwrap();
+    let link = dir.join(file::FILE_NAME);
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    file::add_host(&link, "new.example.org", None).unwrap();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode(&real_dir),
+        0o755,
+        "the target's directory is not chmodded"
+    );
+    assert_eq!(mode(&real), 0o640, "an existing target keeps its mode");
+    assert!(
+        !real_dir.join(file::LOCK_NAME).exists(),
+        "no lock next to the target"
+    );
+    assert!(
+        dir.join(file::LOCK_NAME).exists(),
+        "the lock is next to the link"
+    );
+    assert_eq!(mode(&dir), 0o700);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_is_written_to_its_target_as_a_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let real_dir = root.path().join("dotfiles");
+    std::fs::create_dir(&real_dir).unwrap();
+    let real = real_dir.join(file::FILE_NAME);
+    let dir = root.path().join("auto-package");
+    std::fs::create_dir(&dir).unwrap();
+    let link = dir.join(file::FILE_NAME);
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(
+        file::add_host(&link, "new.example.org", None),
+        Ok(file::Added::New)
+    );
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "new.example.org\n");
+    let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_to_a_directory_fails_without_changing_the_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let other = root.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = root.path().join("auto-package");
+    std::fs::create_dir(&dir).unwrap();
+    let link = dir.join(file::FILE_NAME);
+    std::os::unix::fs::symlink(&other, &link).unwrap();
+    assert!(file::add_host(&link, "new.example.org", None).is_err());
+    let mode = std::fs::metadata(&other).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755);
+    assert!(!other.join(file::LOCK_NAME).exists());
+}
+
+#[test]
+fn control_characters_are_not_kept_in_a_reason_or_a_line() {
+    let parsed = file::parse("mirror.example.org  # \x1b[31mred\x1b[0m\tnote\n");
+    assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+    let reason = parsed.entries[0].reason.clone().unwrap();
+    assert!(!reason.chars().any(char::is_control), "{reason:?}");
+    assert!(reason.contains("note"), "{reason:?}");
+}
+
+#[test]
+fn a_file_line_gets_the_user_name_rule() {
+    let parsed = file::parse("com\nco.uk\nok.example.org\n");
+    let hosts: Vec<&str> = parsed.entries.iter().map(|e| e.host.as_str()).collect();
+    assert_eq!(hosts, ["ok.example.org"]);
+    assert_eq!(parsed.problems.len(), 2, "{:?}", parsed.problems);
+}
+
+#[test]
+fn removing_a_host_keeps_the_other_lines() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("allowed-hosts");
+    std::fs::write(&path, "# keep me\na.example.org  # one\nb.example.org\n").unwrap();
+    assert!(file::remove_host(&path, "A.example.org").unwrap());
+    assert!(!file::remove_host(&path, "a.example.org").unwrap());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# keep me\nb.example.org\n"
+    );
+    // Removing from a missing file changes nothing and creates nothing.
+    let missing = root.path().join("nope");
+    assert!(!file::remove_host(&missing, "a.example.org").unwrap());
+    assert!(!missing.exists());
+}
+
+#[test]
+fn the_config_directory_follows_xdg_then_home() {
+    use std::ffi::OsString;
+    let s = |v: &str| Some(OsString::from(v));
+    assert_eq!(
+        file::config_dir_in(s("/x/cfg"), s("/home/u")),
+        Some(PathBuf::from("/x/cfg/auto-package"))
+    );
+    // A relative XDG_CONFIG_HOME is ignored, as the spec says.
+    assert_eq!(
+        file::config_dir_in(s("rel"), s("/home/u")),
+        Some(PathBuf::from("/home/u/.config/auto-package"))
+    );
+    assert_eq!(file::config_dir_in(None, None), None);
+    assert_eq!(file::config_dir_in(None, s("")), None);
 }
