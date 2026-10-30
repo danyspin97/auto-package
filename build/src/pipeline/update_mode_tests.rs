@@ -167,3 +167,85 @@ mod post_build_review {
         assert!(post_review_ruled_out(false, false, false, 0.0));
     }
 }
+
+mod inherited_checks {
+    use crate::pipeline::update_mode::{newly_reported, split_inherited, style_problems};
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// A summary-only description and no `%license`, as an origin ships it.
+    const SUMMARY_ONLY: &str = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool for things\n\
+        License: MIT\n\n%description\nA tool for things\n\n%build\n\n%files\n%{_bindir}/foo\n\n\
+        %changelog\n";
+
+    /// The same recipe with a sentence of description and a `%license`.
+    const DESCRIBED: &str = "Name: foo\nVersion: 1.0\nRelease: 0\nSummary: A tool for things\n\
+        License: MIT\n\n%description\nA tool for things. It runs the jobs of a build.\n\n\
+        %build\n\n%files\n%license LICENSE\n%{_bindir}/foo\n\n%changelog\n";
+
+    fn source_with_licence() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("LICENSE"), "MIT\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_inherited_summary_only_description_without_license_is_left_on_an_update() {
+        let src = source_with_licence();
+        let found = style_problems(SUMMARY_ONLY, src.path());
+        assert_eq!(
+            found.len(),
+            2,
+            "the description and the %license: {found:?}"
+        );
+        let origin = style_problems(SUMMARY_ONLY, src.path());
+        let (introduced, inherited) = split_inherited(found, &origin);
+        assert!(introduced.is_empty());
+        assert_eq!(inherited.len(), 2);
+    }
+
+    #[test]
+    fn the_same_problems_fail_a_new_spec() {
+        let src = source_with_licence();
+        let found = style_problems(SUMMARY_ONLY, src.path());
+        let (introduced, inherited) = split_inherited(found.clone(), &[]);
+        assert_eq!(introduced, found);
+        assert!(inherited.is_empty());
+    }
+
+    #[test]
+    fn a_problem_this_version_introduces_is_still_fixed_on_an_update() {
+        let src = source_with_licence();
+        let origin = style_problems(DESCRIBED, src.path());
+        assert!(origin.is_empty(), "the origin is clean: {origin:?}");
+        let found = style_problems(SUMMARY_ONLY, src.path());
+        let (introduced, inherited) = split_inherited(found, &origin);
+        assert_eq!(introduced.len(), 2);
+        assert!(inherited.is_empty());
+    }
+
+    #[test]
+    fn an_emoji_the_origin_does_not_have_is_introduced_even_if_it_has_another() {
+        let src = source_with_licence();
+        let origin = DESCRIBED.replace("a build.", &format!("a build {}", '\u{1F680}'));
+        let new = DESCRIBED.replace("a build.", &format!("a build {}", '\u{1F389}'));
+        let origin_problems = style_problems(&origin, src.path());
+        assert_eq!(origin_problems.len(), 1, "{origin_problems:?}");
+        let (introduced, inherited) =
+            split_inherited(style_problems(&new, src.path()), &origin_problems);
+        assert_eq!(introduced.len(), 1, "{introduced:?}");
+        assert!(inherited.is_empty());
+    }
+
+    #[test]
+    fn an_inherited_problem_is_reported_once_per_run() {
+        let mut reported = BTreeSet::new();
+        let first = newly_reported(&mut reported, vec!["a".into(), "b".into()]);
+        assert_eq!(first, vec!["a".to_string(), "b".to_string()]);
+        assert!(newly_reported(&mut reported, vec!["a".into()]).is_empty());
+        assert_eq!(
+            newly_reported(&mut reported, vec!["c".into()]),
+            vec!["c".to_string()]
+        );
+    }
+}

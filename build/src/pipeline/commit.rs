@@ -239,13 +239,12 @@ pub(super) fn spec_text_now(spec_path: &Path) -> String {
 }
 
 /// A `%files` without `%license` while the unpacked source ships a licence file
-/// (`LICENSE*`, `COPYING*`, or one under a `.dist-info/licenses`).
-pub(super) fn missing_license_entry(ws: &Workspace, spec_path: &Path) -> Option<String> {
-    let spec = spec_text_now(spec_path);
-    if crate::spec::has_license_file_entry(&spec) {
+/// (`LICENSE*`, `COPYING*`, or one under a `.dist-info/licenses`), for a spec
+/// text, against the unpacked `source`.
+pub(super) fn missing_license_problem(spec: &str, source: &Path) -> Option<String> {
+    if crate::spec::has_license_file_entry(spec) {
         return None;
     }
-    let source = ws.dir().join("source");
     let names: Vec<String> = std::fs::read_dir(&source)
         .ok()?
         .flatten()

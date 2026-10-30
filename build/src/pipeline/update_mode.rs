@@ -4,6 +4,9 @@
 //! previous run already bumped says nothing about what the update changes.
 
 use super::*;
+use crate::pipeline::commit::missing_license_problem;
+use std::collections::BTreeSet;
+use std::path::Path;
 
 /// What the package's origin says about an update of it.
 pub(super) struct OriginBase {
@@ -60,7 +63,41 @@ pub(super) fn update_mode(
 ) -> Option<UpdateMode> {
     (update && kept).then(|| UpdateMode {
         origin_spec: origin.and_then(|o| o.spec.clone()),
+        reported: BTreeSet::new(),
     })
+}
+
+/// The style problems a reviewer sends a spec back for at once: an emoji, a
+/// description that only repeats the Summary, and a `%files` with no `%license`
+/// although the unpacked `source` ships a licence file (conventions 66, 69).
+pub(super) fn style_problems(spec: &str, source: &Path) -> Vec<String> {
+    let mut problems = crate::spec::description_problems(spec);
+    problems.extend(missing_license_problem(spec, source));
+    problems
+}
+
+/// The problems of a spec that an update leaves to the origin: those the origin's
+/// spec has too (`origin`). The rest are introduced by this version and are for
+/// the gate to fix, as they would be for a new package. Returns
+/// `(introduced, inherited)`.
+pub(super) fn split_inherited(
+    problems: Vec<String>,
+    origin: &[String],
+) -> (Vec<String>, Vec<String>) {
+    problems.into_iter().partition(|p| !origin.contains(p))
+}
+
+/// The inherited problems of `inherited` that this run has not reported yet;
+/// they are recorded in `reported`, so a problem the gate meets again is not
+/// reported twice.
+pub(super) fn newly_reported(
+    reported: &mut BTreeSet<String>,
+    inherited: Vec<String>,
+) -> Vec<String> {
+    inherited
+        .into_iter()
+        .filter(|p| reported.insert(p.clone()))
+        .collect()
 }
 
 /// An update of a package that already exists.
@@ -68,4 +105,7 @@ pub(super) struct UpdateMode {
     /// The origin's spec text: what a problem must already be in to be
     /// inherited rather than introduced by this update.
     pub(super) origin_spec: Option<String>,
+    /// The inherited problems already reported in this run, so that a problem
+    /// the gate meets again after each fix is reported once.
+    pub(super) reported: BTreeSet<String>,
 }

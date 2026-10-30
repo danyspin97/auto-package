@@ -307,9 +307,27 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
             // What a reviewer sends back at once: an emoji, a description that
             // only repeats the Summary, a `%files` with no `%license` although
             // the source ships a licence file (convention 66, 69).
-            let mut style = crate::spec::description_problems(&spec_text_now(spec_path));
-            if let Some(why) = missing_license_entry(ws, spec_path) {
-                style.push(why);
+            let source = ws.dir().join("source");
+            let mut style = style_problems(&spec_text_now(spec_path), &source);
+            // On an update, a problem the origin's spec has too was inherited:
+            // it is reported, not fixed here (see `update_mode::split_inherited`).
+            if let Some(update) = st.update.as_mut() {
+                let origin = update
+                    .origin_spec
+                    .as_deref()
+                    .map_or_else(Vec::new, |o| style_problems(o, &source));
+                let (introduced, inherited) = split_inherited(std::mem::take(&mut style), &origin);
+                // The gate runs again after each fix: each problem is said once per run.
+                for problem in newly_reported(&mut update.reported, inherited) {
+                    reporter.report(&Event::Warning {
+                        step: Some(validate_step.id),
+                        message: format!(
+                            "{rpm_name}: {problem}; the origin's spec has the same problem, \
+                             so this update leaves it as it is"
+                        ),
+                    });
+                }
+                style = introduced;
             }
             style.extend(crate::spec::check_quality_problems(&spec_text_now(
                 spec_path,

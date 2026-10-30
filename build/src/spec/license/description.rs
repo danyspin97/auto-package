@@ -3,6 +3,7 @@
 //! the description and changelog header.
 
 use super::*;
+use std::collections::BTreeSet;
 
 /// Index of the last line of the first paragraph of the `%description` body: the
 /// line before the blank line or the next section header that ends it. With no
@@ -220,8 +221,14 @@ pub fn description_problems(spec: &str) -> Vec<String> {
     let body = spec.split("\n%changelog").next().unwrap_or(spec);
     let is_emoji =
         |c: char| matches!(c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF | 0x1F000..=0x1F2FF);
-    if body.chars().any(is_emoji) {
-        problems.push("the spec contains an emoji (Summary, description or a comment)".to_string());
+    // Each emoji is its own problem, named by its code point: an update whose
+    // origin has one emoji does not inherit a different one.
+    let emojis: BTreeSet<char> = body.chars().filter(|c| is_emoji(*c)).collect();
+    for emoji in emojis {
+        problems.push(format!(
+            "the spec contains the emoji {emoji} (U+{:04X}) in its Summary, description or a comment",
+            emoji as u32
+        ));
     }
     let summary = tag_value(body, "Summary:").map(|s| s.trim().to_string());
     let mut description = String::new();
