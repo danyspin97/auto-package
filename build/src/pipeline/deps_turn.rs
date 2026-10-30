@@ -235,6 +235,7 @@ pub(super) fn missing_deps_from_turn(
     let (named, skipped) = crate::depclass::triage_all(&outcome.unresolvable_packages, &|c| {
         osc::available_to_project(
             &ctx.config.project,
+            &ctx.config.distro,
             &ctx.config.arch,
             c,
             Emit::new(ctx.reporter, step),

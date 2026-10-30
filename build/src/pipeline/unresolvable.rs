@@ -136,14 +136,20 @@ pub(super) fn unresolvable_deps_round(
         let mut found: Vec<(String, String)> = Vec::new();
         for dep in &unresolvable_deps {
             if osc::is_rpm_capability(dep)
-                || osc::project_ships_binary(&config.project, &config.arch, dep, emit)
-                    != Some(false)
+                || osc::project_ships_binary(
+                    &config.project,
+                    &config.distro,
+                    &config.arch,
+                    dep,
+                    emit,
+                ) != Some(false)
             {
                 continue;
             }
             let from = osc::strip_rpm_prefix(dep).to_string();
-            let Some(to) = osc::published_respelling(&config.project, &config.arch, dep, emit)
-                .or_else(|| linked_package_spelling(ctx, build_step.id, &from))
+            let Some(to) =
+                osc::published_respelling(&config.project, &config.distro, &config.arch, dep, emit)
+                    .or_else(|| linked_package_spelling(ctx, build_step.id, &from))
             else {
                 continue;
             };
@@ -199,10 +205,18 @@ pub(super) fn unresolvable_deps_round(
                 return true;
             }
             let emit = Emit::new(reporter, build_step.id);
-            if osc::project_ships_binary(&config.project, &config.arch, dep, emit) != Some(false) {
+            if osc::project_ships_binary(&config.project, &config.distro, &config.arch, dep, emit)
+                != Some(false)
+            {
                 return true;
             }
-            let similar = osc::similar_published_binaries(&config.project, &config.arch, dep, emit);
+            let similar = osc::similar_published_binaries(
+                &config.project,
+                &config.distro,
+                &config.arch,
+                dep,
+                emit,
+            );
             if similar.is_empty() {
                 return true;
             }

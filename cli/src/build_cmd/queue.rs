@@ -179,7 +179,7 @@ pub(super) fn drain_dep_queue(b: Build<'_>) -> color_eyre::Result<()> {
         let mut native_keys: std::collections::HashSet<String> = Default::default();
         for raw in batch {
             match ap_build::depclass::triage(&raw, &|c| {
-                ap_build::osc::available_to_project(project, arch, c, lookup_emit)
+                ap_build::osc::available_to_project(project, distro, arch, c, lookup_emit)
             }) {
                 ap_build::depclass::Triage::Build { name, kind } => {
                     if kind == ap_build::depclass::PackageKind::Native
@@ -209,11 +209,13 @@ pub(super) fn drain_dep_queue(b: Build<'_>) -> color_eyre::Result<()> {
             if !native_keys.contains(&ap_build::osc::fuzzy_key(dep)) {
                 return true;
             }
-            if ap_build::osc::project_ships_binary(project, arch, dep, lookup_emit) != Some(false) {
+            if ap_build::osc::project_ships_binary(project, distro, arch, dep, lookup_emit)
+                != Some(false)
+            {
                 return true;
             }
             let similar =
-                ap_build::osc::similar_published_binaries(project, arch, dep, lookup_emit);
+                ap_build::osc::similar_published_binaries(project, distro, arch, dep, lookup_emit);
             if similar.is_empty() {
                 return true;
             }

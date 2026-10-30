@@ -81,19 +81,19 @@ pub(super) fn insert_published_if_current(expr: String, generation: u64, names: 
     }
 }
 
-/// The names of binaries the projects `project` builds against publish for
-/// `arch` that match `name`. `None` when the search could not be made (no
-/// answer is not "nothing published").
+/// The names of binaries the projects `repository` of `project` builds against
+/// publish for `arch` that match `name`. `None` when the search could not be
+/// made (no answer is not "nothing published").
 pub(super) fn published_binaries(
     project: &str,
+    repository: &str,
     arch: &str,
     name: &str,
     by: NameMatch,
     emit: Emit<'_>,
 ) -> Option<Vec<String>> {
     let generation = published_binaries_generation();
-    let paths = get_project_repo_paths(project, emit).ok()?;
-    let mut projects: Vec<String> = paths.into_iter().map(|(p, _)| p).collect();
+    let mut projects = linked_project_names(project, repository, emit).ok()?;
     projects.sort();
     projects.dedup();
     if projects.is_empty() {
@@ -122,11 +122,18 @@ pub(super) fn published_binaries(
 /// exactly `name` for `arch`. This is what a build there can install, which the
 /// host's own repositories (Packman, a different snapshot) are not. `None`
 /// when the search failed.
-pub fn project_ships_binary(project: &str, arch: &str, name: &str, emit: Emit<'_>) -> Option<bool> {
+pub fn project_ships_binary(
+    project: &str,
+    repository: &str,
+    arch: &str,
+    name: &str,
+    emit: Emit<'_>,
+) -> Option<bool> {
     if name.trim().is_empty() || name.contains('\'') {
         return Some(false);
     }
-    published_binaries(project, arch, name, NameMatch::Exactly, emit).map(|n| !n.is_empty())
+    published_binaries(project, repository, arch, name, NameMatch::Exactly, emit)
+        .map(|n| !n.is_empty())
 }
 
 /// Whether `name` is something the projects `project` builds against provide.
@@ -134,11 +141,17 @@ pub fn project_ships_binary(project: &str, arch: &str, name: &str, emit: Emit<'_
 /// build there can install; the host's repositories (Packman's ffmpeg, another
 /// snapshot) say nothing about it. A capability (a soname, `pkgconfig(x)`) is
 /// not a binary name, so the host answers it, as does a failed search.
-pub fn available_to_project(project: &str, arch: &str, name: &str, emit: Emit<'_>) -> bool {
+pub fn available_to_project(
+    project: &str,
+    repository: &str,
+    arch: &str,
+    name: &str,
+    emit: Emit<'_>,
+) -> bool {
     if is_rpm_capability(name) {
         return distro_provides(name);
     }
-    match project_ships_binary(project, arch, name, emit) {
+    match project_ships_binary(project, repository, arch, name, emit) {
         Some(shipped) => shipped,
         None => distro_provides(name),
     }
@@ -150,6 +163,7 @@ pub fn available_to_project(project: &str, arch: &str, name: &str, emit: Emit<'_
 /// the search failed. `name` itself and debug packages are left out.
 pub fn similar_published_binaries(
     project: &str,
+    repository: &str,
     arch: &str,
     name: &str,
     emit: Emit<'_>,
@@ -161,7 +175,8 @@ pub fn similar_published_binaries(
         return Vec::new();
     }
     let mut found: Vec<String> =
-        published_binaries(project, arch, stem, NameMatch::Containing, emit).unwrap_or_default();
+        published_binaries(project, repository, arch, stem, NameMatch::Containing, emit)
+            .unwrap_or_default();
     found.retain(|n| {
         n != name && !n.ends_with("-debuginfo") && !n.ends_with("-debugsource") && n.contains(stem)
     });
@@ -179,6 +194,7 @@ pub fn similar_published_binaries(
 /// way. The answer is the bare name, without the `python313-` prefix.
 pub fn published_respelling(
     project: &str,
+    repository: &str,
     arch: &str,
     name: &str,
     emit: Emit<'_>,
@@ -210,8 +226,14 @@ pub fn published_respelling(
     let mut published: Vec<String> = Vec::new();
     let mut answered = false;
     for variant in &cased {
-        if let Some(names) = published_binaries(project, arch, variant, NameMatch::Containing, emit)
-        {
+        if let Some(names) = published_binaries(
+            project,
+            repository,
+            arch,
+            variant,
+            NameMatch::Containing,
+            emit,
+        ) {
             answered = true;
             published.extend(names);
         }
