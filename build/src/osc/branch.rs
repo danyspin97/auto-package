@@ -16,10 +16,14 @@ mod rebase;
 pub use rebase::*;
 mod project_meta;
 pub use project_meta::*;
+mod package_flags;
+pub use package_flags::*;
 mod published;
 pub use published::*;
 mod submit;
 pub use submit::*;
 
+#[cfg(test)]
+mod package_flags_tests;
 #[cfg(test)]
 mod tests;
