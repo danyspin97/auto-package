@@ -36,6 +36,7 @@ pub(super) fn tag_archive_urls_follow_the_forge_layout() {
 pub(super) fn gh_api_only_takes_the_requests_this_crate_makes() {
     for ok in [
         "repos/o/r/releases/latest",
+        "repos/o/r/releases?per_page=30",
         "repos/o/r/tags?per_page=100",
         "search/repositories?q=foo%20bar&sort=stars&order=desc",
     ] {

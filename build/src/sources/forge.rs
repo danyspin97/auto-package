@@ -148,13 +148,13 @@ pub(super) fn owner_repo(repo_url: &str) -> Result<(String, String, String), Str
 }
 
 /// Whether `path` (after `https://api.github.com/`) is one of the requests this
-/// crate makes: a repository's latest release or tags, or a repository search.
+/// crate makes: a repository's releases or tags, or a repository search.
 pub(super) fn gh_api_path_ok(path: &str) -> bool {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
         regex::Regex::new(
-            r"^(?:repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:releases/latest|tags)|search/repositories)(?:\?[A-Za-z0-9%_=&.+~-]*)?$",
+            r"^(?:repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:releases(?:/latest)?|tags)|search/repositories)(?:\?[A-Za-z0-9%_=&.+~-]*)?$",
         )
         .unwrap()
     })

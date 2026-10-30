@@ -30,10 +30,12 @@ mod helpers;
 mod index_tests;
 mod kind;
 mod map;
+mod release_list;
 mod releases;
 
 pub use archive::*;
 pub use forge::*;
 pub use kind::*;
 pub use map::*;
+pub use release_list::*;
 pub use releases::*;
