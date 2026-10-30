@@ -1,6 +1,6 @@
 use super::*;
 
-fn test_asker() -> crate::allowed_hosts::Asker {
+pub(super) fn test_asker() -> crate::allowed_hosts::Asker {
     crate::allowed_hosts::Asker::service("test-pkg", "test")
 }
 
@@ -376,7 +376,7 @@ fn outputs_are_moved_and_links_refused() {
 }
 
 /// Why the bwrap test cannot run here, if it cannot.
-fn no_sandbox() -> Option<&'static str> {
+pub(super) fn no_sandbox() -> Option<&'static str> {
     if !ap_core::sandbox::bwrap_works() {
         return Some("bwrap is missing or user namespaces are disabled");
     }

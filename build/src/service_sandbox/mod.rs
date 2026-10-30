@@ -41,6 +41,8 @@ mod run;
 mod sandbox;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_net;
 
 pub(crate) use allowlist::*;
 pub(crate) use proxy::*;

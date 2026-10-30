@@ -58,6 +58,27 @@ pub(crate) fn sandbox_env(p: &Profile<'_>) -> Result<Vec<(String, String)>, Stri
     Ok(env)
 }
 
+/// `/dev` for the sandbox: the device nodes bubblewrap's `--dev` makes, bound
+/// from the host, and no pseudo-terminals. `--dev` itself makes a privileged
+/// bind (the TLS bridge's port 443) fail even with `CAP_NET_BIND_SERVICE`.
+pub(super) fn dev_args() -> Vec<String> {
+    let mut args = vec!["--tmpfs".to_string(), "/dev".to_string()];
+    for node in ["null", "zero", "full", "random", "urandom", "tty"] {
+        let path = format!("/dev/{node}");
+        args.extend(["--dev-bind-try".to_string(), path.clone(), path]);
+    }
+    for (src, dest) in [
+        ("/proc/self/fd", "/dev/fd"),
+        ("/proc/self/fd/0", "/dev/stdin"),
+        ("/proc/self/fd/1", "/dev/stdout"),
+        ("/proc/self/fd/2", "/dev/stderr"),
+    ] {
+        args.extend(["--symlink".to_string(), src.into(), dest.into()]);
+    }
+    args.extend(["--tmpfs".to_string(), "/dev/shm".to_string()]);
+    args
+}
+
 /// The `bwrap` arguments that run `program` in the sandbox `p` describes.
 pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<String>, String> {
     let checkout = utf8(p.checkout)?;
@@ -85,8 +106,6 @@ pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<Stri
             "/etc/obs",
             "--proc",
             "/proc",
-            "--dev",
-            "/dev",
             "--tmpfs",
             "/tmp",
             "--dir",
@@ -108,6 +127,7 @@ pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<Stri
         ]
         .map(String::from),
     );
+    args.extend(dev_args());
     for (k, v) in sandbox_env(p)? {
         args.extend(["--setenv".to_string(), k, v]);
     }
