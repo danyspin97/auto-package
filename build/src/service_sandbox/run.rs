@@ -116,6 +116,7 @@ pub(crate) fn run_services(
             proxy_dir: proxy.dir(),
             extra_env: &identity,
             hosts_file: &hosts_file,
+            tunnels: &map,
         };
         let args =
             bwrap_args(&profile, &service_argv(s, outdir.path())).map_err(Error::ServiceSandbox)?;

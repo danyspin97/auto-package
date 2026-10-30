@@ -12,6 +12,9 @@ pub(crate) struct Profile<'a> {
     pub extra_env: &'a [(String, String)],
     /// The hosts file bound over the sandbox's `/etc/hosts`.
     pub hosts_file: &'a Path,
+    /// The address each mapped host name is reached at, as in `hosts_file`
+    /// (see `bridge_addresses`): the bridge listens on port 443 for them.
+    pub tunnels: &'a [(String, String)],
 }
 
 pub(super) fn utf8(p: &Path) -> Result<&str, String> {
@@ -95,6 +98,10 @@ pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<Stri
         "--new-session",
         "--cap-drop",
         "ALL",
+        // The bridge binds port 443 in the sandbox's network namespace. The
+        // services start without it: see the `setpriv` below.
+        "--cap-add",
+        "CAP_NET_BIND_SERVICE",
     ]
     .map(String::from)
     .into();
@@ -148,6 +155,8 @@ pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<Stri
         ]
         .map(String::from),
     );
+    args.extend(p.tunnels.iter().map(|(ip, name)| format!("{ip}={name}")));
+    args.push("--".to_string());
     // A service starts with no capabilities, whatever the bridge holds.
     args.extend(
         [

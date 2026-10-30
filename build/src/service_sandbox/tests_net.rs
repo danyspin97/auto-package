@@ -29,6 +29,7 @@ fn the_sandbox_dev_has_only_the_device_nodes_it_needs() {
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: &[],
         hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
+        tunnels: &[],
     };
     let bwrap = bwrap_args(&p, &["true".to_string()]).unwrap();
     assert!(
@@ -55,6 +56,7 @@ pub(super) fn run_sandboxed(program: &[&str]) -> std::process::Output {
         proxy_dir: proxy.dir(),
         extra_env: &[],
         hosts_file: &hosts,
+        tunnels: &[],
     };
     let program: Vec<String> = program.iter().map(|s| s.to_string()).collect();
     let args = bwrap_args(&p, &program).unwrap();

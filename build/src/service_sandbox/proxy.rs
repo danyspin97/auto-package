@@ -308,15 +308,32 @@ pub(super) fn tunnel(client: UnixStream, upstream: TcpStream, early: &[u8]) {
 
 // ── the sandbox ─────────────────────────────────────────────────────────────
 
-/// Inside the sandbox: listen on the loopback port, hand each connection to
-/// the proxy's unix socket, and run the command. The network namespace has no
-/// other interface, so this is the only way out.
+/// Inside the sandbox: hand each connection to the proxy's unix socket, and
+/// run the command. The network namespace has no other interface, so this is
+/// the only way out. Two listeners:
+///
+/// - the loopback port, where a client sends its own `CONNECT` (the proxy
+///   variables point there), passed through as it is;
+/// - port 443 on every address of the sandbox. A connection to a mapped
+///   address (see `bridge_addresses`) is sent as `CONNECT <name>:443`, and the
+///   bytes are passed through as they are, with no TLS termination: the client
+///   checks the server's certificate itself. A connection to any other address
+///   is sent as `CONNECT <address>:443`, which the proxy refuses and logs.
+///
+/// Arguments: the socket path, the port, one `address=name` per mapped host,
+/// `--`, and the command.
 pub(super) const BRIDGE: &str = r#"import socket, subprocess, sys, threading
-path, port, cmd = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
-lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-lst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-lst.bind(("127.0.0.1", port))
-lst.listen(128)
+args = sys.argv[1:]
+path, port = args[0], int(args[1])
+sep = args.index("--")
+names = dict(a.split("=", 1) for a in args[2:sep])
+cmd = args[sep + 1:]
+def listen(host, p):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((host, p))
+    s.listen(128)
+    return s
 def pump(src, dst):
     try:
         while True:
@@ -330,23 +347,56 @@ def pump(src, dst):
         dst.shutdown(socket.SHUT_WR)
     except OSError:
         pass
-def serve(conn):
+def open_proxy():
     up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        up.connect(path)
-    except OSError:
-        conn.close()
-        return
+    up.connect(path)
+    return up
+def relay(conn, up):
     t = threading.Thread(target=pump, args=(up, conn), daemon=True)
     t.start()
     pump(conn, up)
     t.join()
     conn.close()
     up.close()
-def accept():
+def serve(conn):
+    try:
+        up = open_proxy()
+    except OSError:
+        conn.close()
+        return
+    relay(conn, up)
+def serve_tls(conn):
+    ip = conn.getsockname()[0]
+    target = names.get(ip, ip)
+    try:
+        up = open_proxy()
+        up.sendall(f"CONNECT {target}:443 HTTP/1.1\r\nHost: {target}:443\r\n\r\n".encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            data = up.recv(1024)
+            if not data:
+                break
+            head += data
+    except OSError:
+        conn.close()
+        return
+    if b"\r\n\r\n" not in head or head.split(b" ")[1:2] != [b"200"]:
+        up.close()
+        conn.close()
+        return
+    _, _, rest = head.partition(b"\r\n\r\n")
+    try:
+        conn.sendall(rest)
+    except OSError:
+        up.close()
+        conn.close()
+        return
+    relay(conn, up)
+def accept(lst, handler):
     while True:
         conn, _ = lst.accept()
-        threading.Thread(target=serve, args=(conn,), daemon=True).start()
-threading.Thread(target=accept, daemon=True).start()
+        threading.Thread(target=handler, args=(conn,), daemon=True).start()
+threading.Thread(target=accept, args=(listen("127.0.0.1", port), serve), daemon=True).start()
+threading.Thread(target=accept, args=(listen("0.0.0.0", 443), serve_tls), daemon=True).start()
 sys.exit(subprocess.call(cmd))
 "#;

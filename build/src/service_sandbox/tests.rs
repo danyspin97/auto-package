@@ -223,6 +223,7 @@ fn profile_args(env: &[(String, String)]) -> Vec<String> {
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: env,
         hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
+        tunnels: &[],
     };
     bwrap_args(
         &p,
@@ -323,6 +324,7 @@ fn extra_env_is_appended_and_relative_checkouts_are_refused() {
         proxy_dir: Path::new("/tmp/p"),
         extra_env: &[],
         hosts_file: Path::new("/tmp/p/hosts"),
+        tunnels: &[],
     };
     assert!(bwrap_args(&p, &[]).is_err());
 }
@@ -412,6 +414,7 @@ fn the_sandbox_isolates_home_bus_network_and_osc_metadata() {
         proxy_dir: proxy.dir(),
         extra_env: &[],
         hosts_file: &hosts,
+        tunnels: &[],
     };
     let real_home = std::env::var("HOME").unwrap_or_default();
     let probe = format!(
@@ -515,6 +518,7 @@ fn probe_services_fetch_through_the_proxy() {
             proxy_dir: proxy.dir(),
             extra_env: &[],
             hosts_file: &hosts,
+            tunnels: &[],
         };
         let program: Vec<String> = program.iter().map(|s| s.to_string()).collect();
         let args = bwrap_args(&p, &program).unwrap();

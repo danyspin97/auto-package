@@ -142,3 +142,144 @@ fn the_sandbox_has_an_address_for_each_mapped_host_and_no_more() {
     );
     assert!(bridge_addresses(&names(251), &allowed, &asker()).is_err());
 }
+
+/// Run `program` in the sandbox with the hosts file and the tunnels of `map`;
+/// the outcome, and the proxy's refusals.
+fn run_mapped(map: &[(String, String)], program: &[&str]) -> (std::process::Output, Vec<String>) {
+    let root = tempfile::tempdir().unwrap();
+    let checkout = fs::canonicalize(root.path()).unwrap();
+    let scratch = checkout.join(".ap-service-t");
+    for sub in ["tmp", "cache", "cargo", "npm", "go"] {
+        fs::create_dir_all(scratch.join(sub)).unwrap();
+    }
+    let proxy = Proxy::start(Arc::new(AllowedHosts::empty()), asker()).unwrap();
+    let hosts = proxy.write_hosts("hosts", map).unwrap();
+    let p = Profile {
+        checkout: &checkout,
+        scratch: &scratch,
+        proxy_dir: proxy.dir(),
+        extra_env: &[],
+        hosts_file: &hosts,
+        tunnels: map,
+    };
+    let program: Vec<String> = program.iter().map(|s| s.to_string()).collect();
+    let args = bwrap_args(&p, &program).unwrap();
+    let out = std::process::Command::new(ap_core::sandbox::bwrap_path().unwrap())
+        .env_clear()
+        .args(&args)
+        .output()
+        .unwrap();
+    (out, proxy.refusals())
+}
+
+/// The sandbox reads the mapped hosts file as its `/etc/hosts`.
+#[test]
+fn the_sandbox_reads_the_mapped_hosts_file() {
+    if let Some(why) = super::tests::no_sandbox() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let map = bridge_addresses(
+        &["github.com".to_string()],
+        &AllowedHosts::empty(),
+        &asker(),
+    )
+    .unwrap();
+    let (out, _) = run_mapped(&map, &["cat", "/etc/hosts"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "127.0.0.1 localhost\n::1 localhost\n127.0.0.2 github.com\n"
+    );
+}
+
+/// `localhost` resolves in the sandbox, as it does on the host.
+#[test]
+fn localhost_resolves_in_the_sandbox() {
+    if let Some(why) = super::tests::no_sandbox() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let script = "import socket; print(socket.gethostbyname('localhost'))";
+    let (out, _) = run_mapped(&[], &[PYTHON, "-I", "-c", script]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "127.0.0.1\n");
+}
+
+/// A client that connects to a mapped name on 443 reaches the proxy as a
+/// `CONNECT` for that name. The name does not resolve, so the proxy refuses it
+/// with the name in the refusal, with or without the network.
+#[test]
+fn a_mapped_name_reaches_the_proxy_as_connect_on_443() {
+    if let Some(why) = super::tests::no_sandbox() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let map = bridge_addresses(
+        &["nonexistent.github.com".to_string()],
+        &AllowedHosts::empty(),
+        &asker(),
+    )
+    .unwrap();
+    let script = "import socket; s = socket.create_connection(('nonexistent.github.com', 443), timeout=60); print(repr(s.recv(1)))";
+    let (out, refused) = run_mapped(&map, &[PYTHON, "-I", "-c", script]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "b''\n");
+    assert!(
+        refused
+            .iter()
+            .any(|r| r.contains("nonexistent.github.com:443")),
+        "{refused:?}"
+    );
+}
+
+/// A connection to an address with no mapped name is refused by the proxy,
+/// and the refusal names the address.
+#[test]
+fn an_unmapped_address_is_refused_and_logged() {
+    if let Some(why) = super::tests::no_sandbox() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let script = "import socket; s = socket.create_connection(('127.0.0.9', 443), timeout=60); print(repr(s.recv(1)))";
+    let (out, refused) = run_mapped(&[], &[PYTHON, "-I", "-c", script]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "b''\n");
+    assert!(
+        refused.iter().any(|r| r.contains("127.0.0.9:443")),
+        "{refused:?}"
+    );
+}
+
+/// A name with no mapping does not resolve in the sandbox.
+#[test]
+fn an_unmapped_name_does_not_resolve() {
+    if let Some(why) = super::tests::no_sandbox() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let script = "import socket\ntry:\n    socket.getaddrinfo('example.org', 443)\n    print('resolved')\nexcept socket.gaierror:\n    print('refused')";
+    let (out, _) = run_mapped(&[], &[PYTHON, "-I", "-c", script]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "refused\n");
+}
