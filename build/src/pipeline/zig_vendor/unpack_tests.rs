@@ -571,9 +571,20 @@ fn a_truncated_or_corrupt_zip_is_refused() {
 }
 
 #[test]
-fn an_entry_expanding_more_than_deflate_can_is_refused() {
-    // Deflate expands at most about 1032 to 1, so 1 MiB from 10 bytes is not
-    // a real deflate stream of a file.
-    assert!(!zip_archive::ratio_ok(1 << 20, 10));
-    assert!(zip_archive::ratio_ok(10 << 20, (10 << 20) / 1032));
+fn a_zip_that_unpacks_past_the_total_limit_is_refused_by_name() {
+    // A highly compressible entry: a few hundred bytes of zip for 64 KiB.
+    static BIG: [u8; 64 << 10] = [b'a'; 64 << 10];
+    let bytes = raw_zip(&[("p/", K::Dir), ("p/big", K::File(&BIG))]);
+    let (_dir, result) = run(
+        &bytes,
+        Format::Zip,
+        Limits {
+            max_bytes: 1 << 10,
+            ..LIMITS
+        },
+    );
+    let err = result.unwrap_err();
+    assert!(err.contains("more than 1024 bytes of files"), "{err}");
+    let (_dir, result) = run(&bytes, Format::Zip, LIMITS);
+    result.unwrap();
 }

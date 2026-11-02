@@ -1,11 +1,10 @@
 //! Reads a `.zip` dependency archive with the rules of the tar reader in the
-//! parent module: the same names, root and limits. Zig 0.15.2 differs from
-//! tar in two ways, which this reader follows. A symlink entry is written as
-//! a regular file holding its target, since zig hashes it so (its hash counts
-//! the target's bytes as a file). And an entry may not expand more than
-//! deflate can, which is what a zip bomb does: that is a limit of this reader.
-//! The archive is seekable, so it is first copied to a temporary file in the
-//! work directory.
+//! parent module: the same names, root and limits, the limits being the total
+//! unpacked size and the entry count. Zig 0.15.2 differs from tar in one way,
+//! which this reader follows: a symlink entry is written as a regular file
+//! holding its target, since zig hashes it so (its hash counts the target's
+//! bytes as a file). The archive is seekable, so it is first copied to a
+//! temporary file in the work directory.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -16,18 +15,6 @@ const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
-
-/// The most a deflate stream expands: about 1032 bytes for each byte of input.
-const MAX_RATIO: u64 = 1032;
-/// Bytes a tiny entry may expand by, beyond `MAX_RATIO` times its size.
-const RATIO_SLACK: u64 = 1024;
-
-/// Whether an entry of `size` bytes can come from `compressed` bytes.
-pub(in crate::pipeline::zig_vendor) fn ratio_ok(size: u64, compressed: u64) -> bool {
-    size <= compressed
-        .saturating_mul(MAX_RATIO)
-        .saturating_add(RATIO_SLACK)
-}
 
 /// Write every entry of the zip archive `src` under `dest`. A zip archive has
 /// no links, so the result has none either.
@@ -70,12 +57,6 @@ pub(super) fn write_entries(src: impl Read, dest: &Path, limits: Limits) -> Resu
             ensure_dirs(dest, &rel)?;
         } else if kind == S_IFREG || kind == S_IFLNK || kind == 0 {
             let size = entry.size();
-            if !ratio_ok(size, entry.compressed_size()) {
-                return Err(format!(
-                    "{} expands far more than deflate can, which is a zip bomb",
-                    rel.display()
-                ));
-            }
             bytes = bytes.saturating_add(size);
             if bytes > limits.max_bytes {
                 return Err(format!("more than {} bytes of files", limits.max_bytes));

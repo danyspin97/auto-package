@@ -119,10 +119,11 @@ pub(super) struct Limits {
     pub(super) max_depth: usize,
 }
 
-/// The limits for a real dependency. A large dependency is a few megabytes.
+/// The limits for a dependency: 1 GiB of unpacked files and 100,000 entries,
+/// set high so that real dependencies pass. A refusal names the limit.
 pub(super) const LIMITS: Limits = Limits {
-    max_bytes: 512 << 20,
-    max_entries: 50_000,
+    max_bytes: 1 << 30,
+    max_entries: 100_000,
     max_depth: 32,
 };
 
