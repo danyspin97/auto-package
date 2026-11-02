@@ -35,7 +35,7 @@ pub(super) enum ApiFailure {
 
 /// The HTTP status in an `osc` error message, in either wording `osc`
 /// versions use (`HTTP Error 503: ...`, `503 Server Error: ...`).
-pub(super) fn http_status(stderr: &str) -> Option<u16> {
+pub fn http_status(stderr: &str) -> Option<u16> {
     let digits = |s: &str| {
         let n: String = s.chars().take_while(char::is_ascii_digit).collect();
         (n.len() == 3).then(|| n.parse().ok()).flatten()

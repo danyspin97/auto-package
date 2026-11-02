@@ -80,16 +80,37 @@ pub(super) fn is_safe_file_arg(name: &str) -> bool {
 }
 
 pub fn cat_file(project: &str, pkg: &str, filename: &str, emit: Emit<'_>) -> Option<String> {
-    if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) || !is_safe_file_arg(filename) {
-        return None;
+    cat_file_checked(project, pkg, filename, emit).ok()
+}
+
+/// [`cat_file`] with the reason it failed: osc's own error text, or that osc
+/// could not be run at all.
+pub fn cat_file_checked(
+    project: &str,
+    pkg: &str,
+    filename: &str,
+    emit: Emit<'_>,
+) -> Result<String, String> {
+    if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) {
+        return Err(format!("{project}/{pkg} is not a valid OBS name"));
     }
-    let out = osc_query(
+    if !is_safe_file_arg(filename) {
+        return Err(format!("{filename} is not a valid file name"));
+    }
+    let Some(out) = osc_query(
         &["cat", project, pkg, filename],
         emit,
         &format!("cat {project}/{pkg} {filename}"),
-    )?;
+    ) else {
+        return Err("osc cat could not be run".into());
+    };
     if !out.success() {
-        return None;
+        let said = out.stderr.trim();
+        return Err(if said.is_empty() {
+            format!("osc cat exited with code {}", out.code)
+        } else {
+            said.to_string()
+        });
     }
-    Some(out.stdout)
+    Ok(out.stdout)
 }

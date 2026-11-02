@@ -107,6 +107,7 @@ mod baseline_tests;
 mod status;
 pub use status::*;
 mod query;
+pub use query::http_status;
 use query::*;
 mod build_retry;
 pub use build_retry::*;

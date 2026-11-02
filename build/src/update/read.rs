@@ -43,7 +43,7 @@ pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Stri
     read_spec(
         pkg,
         &|| osc::list_package_files_checked(project, pkg, emit),
-        &|file| osc::cat_file(project, pkg, file, emit),
+        &|file| osc::cat_file_checked(project, pkg, file, emit),
         // An update project keeps a released package's sources in its newest
         // incident copy (`pkg.NNNNN`), the plain one empty.
         &|| {
@@ -64,17 +64,22 @@ pub(super) fn read_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(5 * u64::from(attempt - 1))
 }
 
-/// Why a failed `osc ls` of `pkg` will fail again, as the reason to report, or
-/// `None` when the failure may pass. `osc_says` is osc's error text.
+/// Why a failed `osc ls` or `osc cat` of `pkg` will fail again, as the reason
+/// to report, or `None` when the failure may pass. `osc_says` is osc's error
+/// text.
 ///
 /// Permanent: a `_link` that cannot be expanded (its target is missing or the
-/// link conflicts; only the maintainer can fix it), and a 404 that OBS gives
-/// for a package or project that is not there (`unknown_package`,
-/// `unknown_project`). A bare 400 or 404 is not: a backend that is failing
-/// answers the same way, so it is retried like any other failure.
+/// link conflicts; only the maintainer can fix it), a name OBS cannot hold, a
+/// 401 or 403 (the credentials do not change within a run), and a 404 that OBS
+/// gives for a package or project that is not there (`unknown_package`,
+/// `unknown_project`). A bare 400 or 404 is not: a failing backend answers the
+/// same way. A 404 for a listed file is judged by [`read_spec`].
 pub(super) fn permanent_listing_failure(pkg: &str, osc_says: &str) -> Option<String> {
     if osc::text_is_transient(osc_says) {
         return None;
+    }
+    if osc_says.contains("is not a valid OBS name") {
+        return Some(format!("{pkg} is not a valid OBS name; not retried"));
     }
     let first = osc_says
         .lines()
@@ -99,6 +104,11 @@ pub(super) fn permanent_listing_failure(pkg: &str, osc_says: &str) -> Option<Str
             "the _link of {pkg} cannot be expanded ({detail}); the maintainer must relink or unlink it"
         ));
     }
+    if let Some(status @ (401 | 403)) = osc::http_status(osc_says) {
+        return Some(format!(
+            "OBS refused access to {pkg} (HTTP {status}): the package may be read-protected or your credentials may not allow it; not retried"
+        ));
+    }
     let lower = osc_says.to_lowercase();
     let missing = lower.contains("unknown_package") || lower.contains("unknown_project");
     if osc_says.contains("HTTP Error 404") && missing {
@@ -116,11 +126,12 @@ pub(super) fn permanent_listing_failure(pkg: &str, osc_says: &str) -> Option<Str
 pub(super) fn read_spec(
     pkg: &str,
     list: &dyn Fn() -> Result<Vec<String>, String>,
-    cat: &dyn Fn(&str) -> Option<String>,
+    cat: &dyn Fn(&str) -> Result<String, String>,
     incident: &dyn Fn() -> Option<Result<String, ReadError>>,
     pause: &dyn Fn(std::time::Duration) -> bool,
 ) -> Result<String, ReadError> {
     let mut why = String::from("no attempt was made");
+    let mut cat_404s = 0;
     for attempt in 1..=READ_ATTEMPTS {
         if attempt > 1 && !pause(read_backoff(attempt)) {
             return Err(ReadError::Failed("interrupted".into()));
@@ -148,8 +159,34 @@ pub(super) fn read_spec(
             return Err(ReadError::NoSpec);
         };
         match cat(&picked) {
-            Some(spec) => return Ok(spec),
-            None => why = format!("reading {picked} (osc cat) failed"),
+            Ok(spec) => return Ok(spec),
+            Err(osc_says) => {
+                let first = osc_says.lines().map(str::trim).find(|l| !l.is_empty());
+                if osc_says.contains("HTTP Error 404") {
+                    // A listed file that answers 404 is gone, or OBS erred once:
+                    // a second 404 ends the read, and so does a listing that no
+                    // longer names the file.
+                    cat_404s += 1;
+                    let gone = matches!(list(), Ok(files) if !files.contains(&picked));
+                    if gone || cat_404s > 1 {
+                        return Err(ReadError::Failed(format!(
+                            "{picked} of {pkg} answers 404 ({}): {}",
+                            if gone {
+                                "no longer listed"
+                            } else {
+                                "again after a retry"
+                            },
+                            first.unwrap_or("no output")
+                        )));
+                    }
+                } else if let Some(reason) = permanent_listing_failure(pkg, &osc_says) {
+                    return Err(ReadError::Failed(reason));
+                }
+                why = format!(
+                    "reading {picked} (osc cat) failed: {}",
+                    first.unwrap_or("no output")
+                );
+            }
         }
     }
     Err(ReadError::Failed(format!(

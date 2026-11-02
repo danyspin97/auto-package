@@ -29,14 +29,18 @@ mod reading {
                     .ok_or_else(|| "osc ls could not be run".to_string())
             })
             .collect();
-        run_with(&list, cat, incident, go_on)
+        let cat: Vec<Result<&str, &str>> = cat
+            .iter()
+            .map(|c| c.ok_or("osc cat could not be run"))
+            .collect();
+        run_with(&list, &cat, incident, go_on)
     }
 
-    /// [`run`] with osc's listing answers as they are: the file list, or the
-    /// text of osc's error.
+    /// [`run`] with osc's answers as they are: the file list or the text of
+    /// osc's error, and the text of a file or the text of osc's error.
     fn run_with(
         list: &[Result<Vec<String>, String>],
-        cat: &[Option<&str>],
+        cat: &[Result<&str, &str>],
         incident: Option<Result<String, ReadError>>,
         go_on: bool,
     ) -> (Result<String, ReadError>, Run) {
@@ -53,7 +57,11 @@ mod reading {
         let out = read_spec(
             "pkg",
             &|| list[nth(&r.lists, list.len())].clone(),
-            &|_| cat[nth(&r.cats, cat.len())].map(str::to_string),
+            &|_| {
+                cat[nth(&r.cats, cat.len())]
+                    .map(str::to_string)
+                    .map_err(str::to_string)
+            },
             &|| incident.clone(),
             &|d| {
                 r.waits.borrow_mut().push(d);
@@ -135,7 +143,7 @@ mod reading {
     fn a_broken_link_is_not_retried_and_names_its_target() {
         let (out, r) = run_with(
             &[Err(BROKEN_LINK.to_string()), Ok(files(&["stacktile.spec"]))],
-            &[Some("Name: stacktile")],
+            &[Ok("Name: stacktile")],
             None,
             true,
         );
@@ -154,7 +162,7 @@ mod reading {
             &[Err(
                 "HTTP Error 404: Not Found\nunknown_package: no such package".to_string(),
             )],
-            &[None],
+            &[Err("unused")],
             None,
             true,
         );
@@ -172,10 +180,54 @@ mod reading {
             "HTTP Error 400: Bad Request",
             "osc: package 'pkg' does not exist",
         ] {
-            let (out, r) = run_with(&[Err(said.to_string())], &[None], None, true);
+            let (out, r) = run_with(&[Err(said.to_string())], &[Err("unused")], None, true);
             assert!(matches!(out, Err(ReadError::Failed(_))), "{said}: {out:?}");
             assert_eq!(r.lists.get(), 3, "{said}");
         }
+    }
+
+    #[test]
+    fn a_404_for_a_listed_file_is_retried_once_then_refused() {
+        let (out, r) = run_with(
+            &[Ok(files(&["pkg.spec"]))],
+            &[Err("HTTP Error 404: Not Found")],
+            None,
+            true,
+        );
+        let Err(ReadError::Failed(why)) = out else {
+            panic!("expected a failed read, got {out:?}");
+        };
+        assert!(why.contains("again after a retry"), "{why}");
+        assert_eq!(r.cats.get(), 2);
+        assert_eq!(r.waits.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_listed_file_that_disappears_is_not_retried() {
+        let (out, r) = run_with(
+            &[Ok(files(&["pkg.spec"])), Ok(files(&["other.spec"]))],
+            &[Err("HTTP Error 404: Not Found")],
+            None,
+            true,
+        );
+        let Err(ReadError::Failed(why)) = out else {
+            panic!("expected a failed read, got {out:?}");
+        };
+        assert!(why.contains("no longer listed"), "{why}");
+        assert_eq!((r.lists.get(), r.cats.get()), (2, 1));
+        assert!(r.waits.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_bare_400_on_a_listed_file_is_retried() {
+        let (out, r) = run_with(
+            &[Ok(files(&["pkg.spec"]))],
+            &[Err("HTTP Error 400: Bad Request")],
+            None,
+            true,
+        );
+        assert!(out.is_err(), "{out:?}");
+        assert_eq!(r.cats.get(), 3);
     }
 
     #[test]
@@ -186,12 +238,59 @@ mod reading {
                 Err("HTTP Error 503: Service Unavailable".to_string()),
                 Ok(files(&["pkg.spec"])),
             ],
-            &[Some("Name: pkg")],
+            &[Ok("Name: pkg")],
             None,
             true,
         );
         assert_eq!(out.as_deref(), Ok("Name: pkg"));
         assert_eq!(r.lists.get(), 3);
+    }
+
+    #[test]
+    fn a_timed_out_read_of_a_listed_file_is_still_retried() {
+        let (out, r) = run_with(
+            &[Ok(files(&["pkg.spec"]))],
+            &[Err("Connection timed out"), Ok("Name: pkg")],
+            None,
+            true,
+        );
+        assert_eq!(out.as_deref(), Ok("Name: pkg"));
+        assert_eq!(r.cats.get(), 2);
+    }
+
+    #[test]
+    fn an_invalid_name_is_not_retried() {
+        let (out, r) = run_with(
+            &[Err(
+                "X11:Wayland/bad name is not a valid OBS name".to_string()
+            )],
+            &[Err("unused")],
+            None,
+            true,
+        );
+        let Err(ReadError::Failed(why)) = out else {
+            panic!("expected a failed read, got {out:?}");
+        };
+        assert!(why.contains("not a valid OBS name"), "{why}");
+        assert_eq!(r.lists.get(), 1);
+    }
+
+    #[test]
+    fn a_refused_credential_is_not_retried_and_says_so() {
+        for status in ["401: Unauthorized", "403: Forbidden"] {
+            let (out, r) = run_with(
+                &[Err(format!("HTTP Error {status}"))],
+                &[Err("unused")],
+                None,
+                true,
+            );
+            let Err(ReadError::Failed(why)) = out else {
+                panic!("expected a failed read, got {out:?}");
+            };
+            assert!(why.contains("read-protected"), "{why}");
+            assert_eq!(r.lists.get(), 1);
+            assert!(r.waits.borrow().is_empty());
+        }
     }
 
     #[test]
