@@ -468,9 +468,11 @@ tool assumes these may be hostile and limits what they can reach:
   `osc status`/`osc vc`, `ls`, `quilt` and the read-only
   `zypper search`/`what-provides` queries, and fetch PyPI metadata. It has no
   shell `rm` or general web access (the dependency-name lookup turn may search
-  the web, but can touch no local file). Credential variables are removed from
-  its environment, except the Anthropic credentials the CLI itself needs.
-  Those remain visible to its commands. The environment is an allowlist
+  the web, but can touch no local file). It cannot write the osc and git
+  metadata of its checkout (`.osc`, `.git`) with Edit, Write or NotebookEdit,
+  nor name it in a quilt command spelled out in full. Credential variables are
+  removed from its environment, except the Anthropic credentials the CLI itself
+  needs. Those remain visible to its commands. The environment is an allowlist
   (PATH, locale, proxy and CA settings, `ANTHROPIC_*`, `CLAUDE_*`), so
   `AWS_*`, `GOOGLE_*` and other Bedrock/Vertex variables are dropped. To use
   those backends, name the variables to hand over in
