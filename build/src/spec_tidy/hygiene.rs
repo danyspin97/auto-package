@@ -14,6 +14,19 @@ pub enum Pass {
     BuildRoot,
     Clean,
     InstallRm,
+    Defattr,
+}
+
+/// The `%defattr` of a `%files` list that only says the default: root owns
+/// the files and rpm sets the modes from the build.
+const DEFAULT_DEFATTR: &[&str] = &["%defattr(-,root,root)", "%defattr(-,root,root,-)"];
+
+/// Whether `line` sets a file mode of its own: a `%defattr` that is not one of
+/// the default forms, or an `%attr`. The default `%defattr` after one of these
+/// changes the modes of the files that follow, so it is kept.
+fn sets_mode(line: &str) -> bool {
+    (line.trim_start().starts_with("%defattr(") && !DEFAULT_DEFATTR.contains(&line.trim_end()))
+        || line.contains("%attr(")
 }
 
 /// The lines that only remove the build root, which rpm does before `%install`.
@@ -118,6 +131,9 @@ pub fn constructs(spec: &str) -> Vec<Construct> {
     // A `%define` or `%global` continued by a trailing backslash: its lines
     // are macro text, so an `%if` in them opens no block.
     let mut in_macro = false;
+    let mut section = "";
+    // Whether the current section has set a file mode (see `sets_mode`).
+    let mut mode_set = false;
     for (i, &line) in lines.iter().enumerate() {
         let word = first_word(line);
         let continued = line.trim_end().ends_with('\\');
@@ -145,6 +161,8 @@ pub fn constructs(spec: &str) -> Vec<Construct> {
         }
         if is_header(line) {
             in_preamble = word == "%package";
+            section = word;
+            mode_set = false;
             if depth == 0 {
                 match word {
                     "%clean" => out.extend(clean_construct(&lines, i)),
@@ -154,7 +172,30 @@ pub fn constructs(spec: &str) -> Vec<Construct> {
             }
             continue;
         }
-        if depth != 0 || !in_preamble {
+        // A mode set in a conditional may apply, so it counts as well.
+        if section == "%files" && sets_mode(line) {
+            mode_set = true;
+        }
+        if depth != 0 {
+            continue;
+        }
+        if section == "%files" && DEFAULT_DEFATTR.contains(&line.trim_end()) {
+            if !mode_set {
+                out.push(Construct {
+                    pass: Pass::Defattr,
+                    line: i + 1,
+                    what: "the default `%defattr` of a `%files` list".to_string(),
+                    fix: format!("delete the line `{}`", line.trim()),
+                    edits: vec![LineEdit {
+                        start: i,
+                        end: i + 1,
+                        with: Vec::new(),
+                    }],
+                });
+            }
+            continue;
+        }
+        if !in_preamble {
             continue;
         }
         let trimmed = line.trim_start();
@@ -278,6 +319,12 @@ pub fn drop_clean_sections(spec: &str) -> Option<String> {
 /// The `rm -rf %{buildroot}` that starts `%install`, dropped.
 pub fn drop_install_buildroot_rm(spec: &str) -> Option<String> {
     apply(spec, Pass::InstallRm)
+}
+
+/// The default `%defattr(-,root,root)` lines of `%files`, dropped. Other
+/// modes are kept: they say something the default does not.
+pub fn drop_default_defattr(spec: &str) -> Option<String> {
+    apply(spec, Pass::Defattr)
 }
 
 #[cfg(test)]

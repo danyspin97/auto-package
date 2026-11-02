@@ -227,3 +227,76 @@ fn the_removals_are_idempotent_and_do_not_touch_each_other() {
     assert_eq!(drop_install_buildroot_rm(&twice), None);
     assert_eq!(drop_clean_sections(&twice), None);
 }
+
+#[test]
+fn the_default_defattr_of_every_files_list_goes() {
+    let spec = "%files\n%defattr(-,root,root)\n/a\n\n%files -n libx\n\
+                %defattr(-,root,root,-)\n/lib/x.so\n%changelog\n";
+    assert_eq!(
+        drop_default_defattr(spec).unwrap(),
+        "%files\n/a\n\n%files -n libx\n/lib/x.so\n%changelog\n"
+    );
+    assert_eq!(
+        drop_default_defattr(&drop_default_defattr(spec).unwrap()),
+        None
+    );
+}
+
+#[test]
+fn a_defattr_with_other_modes_stays() {
+    for line in [
+        "%defattr(-,root,root,0755)",
+        "%defattr(0644,root,root,0755)",
+        "%defattr(-,root,nobody,-)",
+        "%defattr(-,root,root) # why",
+    ] {
+        let spec = format!("%files\n{line}\n/a\n");
+        assert_eq!(drop_default_defattr(&spec), None, "{line}");
+    }
+}
+
+#[test]
+fn a_defattr_outside_files_or_in_a_conditional_stays() {
+    let outside = "%prep\n%defattr(-,root,root)\n%install\n%defattr(-,root,root)\n";
+    assert_eq!(drop_default_defattr(outside), None);
+    let cond = "%files\n%if 0%{?a}\n%defattr(-,root,root)\n%endif\n/a\n";
+    assert_eq!(drop_default_defattr(cond), None);
+}
+
+#[test]
+fn a_default_defattr_after_a_mode_set_in_the_same_files_list_stays() {
+    let spec = "%files\n%defattr(0755,root,root,-)\n/opt/d/a\n%defattr(-,root,root,-)\n/opt/d/b\n";
+    assert_eq!(drop_default_defattr(spec), None);
+    let attr = "%files\n%attr(0755,root,root) /a\n%defattr(-,root,root)\n/b\n";
+    assert_eq!(drop_default_defattr(attr), None);
+    let cond =
+        "%files\n%if 0%{?a}\n%defattr(0755,root,root,-)\n%endif\n%defattr(-,root,root,-)\n/b\n";
+    assert_eq!(drop_default_defattr(cond), None);
+}
+
+#[test]
+fn a_mode_set_applies_to_its_own_files_list_only() {
+    let spec = "%files\n%defattr(0755,root,root,-)\n/a\n\n\
+                %files -n libx\n%defattr(-,root,root,-)\n/lib/x.so\n%changelog\n";
+    assert_eq!(
+        drop_default_defattr(spec).unwrap(),
+        "%files\n%defattr(0755,root,root,-)\n/a\n\n%files -n libx\n/lib/x.so\n%changelog\n"
+    );
+    let attr = "%files\n%attr(0755,root,root) /a\n%files -n libx\n%defattr(-,root,root)\n/b\n";
+    assert_eq!(
+        drop_default_defattr(attr).unwrap(),
+        "%files\n%attr(0755,root,root) /a\n%files -n libx\n/b\n"
+    );
+}
+
+#[test]
+fn only_default_forms_after_default_forms_all_go() {
+    let spec = "%files\n%defattr(-,root,root)\n/a\n%defattr(-,root,root,-)\n/b\n";
+    assert_eq!(drop_default_defattr(spec).unwrap(), "%files\n/a\n/b\n");
+}
+
+#[test]
+fn a_trigger_script_with_a_defattr_text_is_not_in_the_files_list() {
+    let spec = "%files\n/a\n%triggerin -- x\n%defattr(-,root,root)\necho\n%changelog\n";
+    assert_eq!(drop_default_defattr(spec), None);
+}
