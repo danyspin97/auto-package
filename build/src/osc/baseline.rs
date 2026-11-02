@@ -35,6 +35,23 @@ pub fn save_baseline(checkout_dir: &Path, dir: &Path) -> std::io::Result<()> {
     )
 }
 
+/// What OBS held for `name` when the run started, as the baseline kept in
+/// `baseline` has it (see [`save_baseline`]). This is what the run changed: a
+/// commit of the run moves `.osc/sources` on to what it sent. With no baseline
+/// kept yet (a first fetch, `--local`), osc's copy in `.osc/sources`, which is
+/// still that copy then. Empty when there is none.
+pub fn run_start_copy(
+    checkout_dir: &Path,
+    baseline: Option<&Path>,
+    name: &std::ffi::OsStr,
+) -> String {
+    match baseline.filter(|dir| dir.is_dir()) {
+        Some(dir) => fs::read_to_string(dir.join("files").join(name)),
+        None => fs::read_to_string(checkout_dir.join(".osc").join("sources").join(name)),
+    }
+    .unwrap_or_default()
+}
+
 /// Note in `dir` the files a commit is about to send to OBS, before it is made:
 /// an attempt that fails half way may still have written them.
 pub fn note_attempt(dir: &Path, files: &[String]) -> std::io::Result<()> {

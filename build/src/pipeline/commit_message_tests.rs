@@ -39,10 +39,34 @@ fn the_message_is_one_line() {
         changes("- A first\r\n  continued line\n- Second\n"),
     )
     .unwrap();
-    let message = commit_message(dir.path());
+    let baseline = tempfile::tempdir().unwrap();
+    let message = commit_message(dir.path(), baseline.path());
     assert!(message.starts_with("auto-package: "), "{message}");
     assert!(
         !message.contains('\n') && !message.contains('\r'),
         "{message:?}"
     );
+}
+
+#[test]
+fn the_summary_is_of_what_the_run_changed_not_of_what_obs_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = changes("- Fixed the thing\n");
+    std::fs::write(dir.path().join("pkg.changes"), &entry).unwrap();
+    // An earlier round of this run committed the entry: OBS holds it now, but
+    // the baseline kept at the run start does not.
+    std::fs::create_dir_all(dir.path().join(".osc/sources")).unwrap();
+    std::fs::write(dir.path().join(".osc/sources/pkg.changes"), &entry).unwrap();
+    let baseline = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(baseline.path().join("files")).unwrap();
+    std::fs::write(
+        baseline.path().join("files/pkg.changes"),
+        changes("- Old\n"),
+    )
+    .unwrap();
+    let message = commit_message(dir.path(), baseline.path());
+    assert_eq!(message, "auto-package: Fixed the thing", "{message}");
+    // Once the run-start copy holds the entry too, the run did not change it.
+    std::fs::write(baseline.path().join("files/pkg.changes"), &entry).unwrap();
+    assert_eq!(commit_message(dir.path(), baseline.path()), "auto-package");
 }

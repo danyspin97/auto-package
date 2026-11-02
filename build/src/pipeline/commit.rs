@@ -151,7 +151,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     if let Err(e) = osc::commit(
         &ctx.checkout_dir,
-        &commit_message(&ctx.checkout_dir),
+        &commit_message(&ctx.checkout_dir, &baseline),
         &files,
         Some(&commit_step.file("osc-ci.log")),
         Emit::new(ctx.reporter, commit_step.id),
@@ -163,8 +163,9 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
 }
 
 /// The `osc ci` message: "auto-package", and when the newest `.changes`
-/// entry is not on OBS yet, a one-line summary of what it says.
-pub(super) fn commit_message(checkout_dir: &Path) -> String {
+/// entry is not in the OBS baseline of the run (`baseline`) yet, a one-line
+/// summary of what it says.
+pub(super) fn commit_message(checkout_dir: &Path, baseline: &Path) -> String {
     const BASE: &str = "auto-package";
     let Some(file) = osc::newest_changes_file(checkout_dir) else {
         return BASE.to_string();
@@ -172,9 +173,7 @@ pub(super) fn commit_message(checkout_dir: &Path) -> String {
     let working = std::fs::read_to_string(&file).unwrap_or_default();
     let pristine = file
         .file_name()
-        .and_then(|n| {
-            std::fs::read_to_string(checkout_dir.join(".osc").join("sources").join(n)).ok()
-        })
+        .map(|n| osc::run_start_copy(checkout_dir, Some(baseline), n))
         .unwrap_or_default();
     match changes_summary(&working, &pristine) {
         Some(summary) => one_line(&format!("{BASE}: {summary}")),
@@ -406,13 +405,14 @@ pub(super) fn migrate_wheel_provenance(
 pub(super) fn run_service_with_retries(
     dir: &Path,
     package: &str,
+    baseline: Option<&Path>,
     emit: Emit<'_>,
 ) -> Result<(), osc::Error> {
     retry_transient(
         SERVICE_ATTEMPTS,
         SERVICE_PAUSE,
         osc::Error::is_transient,
-        || osc::run_service(dir, package, emit),
+        || osc::run_service(dir, package, baseline, emit),
     )
 }
 

@@ -13,6 +13,7 @@ pub(super) fn run_service_keeping_version(
     checkout_dir: &Path,
     package: &str,
     spec_path: &Path,
+    baseline: Option<&Path>,
     emit: Emit<'_>,
 ) -> Result<(), osc::Error> {
     // An obs_scm source is made by OBS at build time, and `osc service ra` would refuse
@@ -21,7 +22,7 @@ pub(super) fn run_service_keeping_version(
         return Ok(());
     }
     let before = std::fs::read_to_string(spec_path).unwrap_or_default();
-    let result = osc::run_service(checkout_dir, package, emit);
+    let result = osc::run_service(checkout_dir, package, baseline, emit);
     if let Ok(after) = std::fs::read_to_string(spec_path)
         && let Some(fixed) = keep_version_line(&before, &after)
     {

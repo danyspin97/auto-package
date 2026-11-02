@@ -515,6 +515,7 @@ fn an_obs_scm_checkout_runs_no_service_at_validation() {
             dir.path(),
             "test-pkg",
             &spec_path,
+            None,
             Emit::quiet()
         )
         .is_ok()

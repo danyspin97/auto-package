@@ -155,6 +155,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     checkout_dir,
                     &config.rpm_name,
                     spec_path,
+                    obs_baseline_dir(config).ok().as_deref(),
                     Emit::new(reporter, validate_step.id),
                 ) {
                     Ok(()) => missing = missing_at_checkout(&expanded, checkout_dir),

@@ -485,6 +485,7 @@ fn apply_turn_outcome_with(
         checkout_dir,
         &config.rpm_name,
         spec_path,
+        obs_baseline_dir(config).ok().as_deref(),
         Emit::new(reporter, step.id),
     ) {
         reporter.report(&Event::Warning {

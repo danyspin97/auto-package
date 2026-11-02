@@ -429,7 +429,14 @@ pub(super) fn resets_block_timer(previous: &str) -> bool {
 /// or OBS credentials, its network limited to the source hosts (see
 /// [`crate::service_sandbox`]). Only `AUTO_PACKAGE_UNSAFE_SERVICE=1` runs the
 /// unsandboxed `osc service ra` instead.
-pub fn run_service(checkout_dir: &Path, package: &str, emit: Emit<'_>) -> Result<(), Error> {
+///
+/// `baseline` is the OBS baseline the run kept, see [`run_start_copy`].
+pub fn run_service(
+    checkout_dir: &Path,
+    package: &str,
+    baseline: Option<&Path>,
+    emit: Emit<'_>,
+) -> Result<(), Error> {
     // Fail closed: only a missing file skips validation.
     let services = match fs::read(checkout_dir.join("_service")) {
         Ok(xml) => {
@@ -483,15 +490,16 @@ pub fn run_service(checkout_dir: &Path, package: &str, emit: Emit<'_>) -> Result
             stderr,
         });
     }
-    collapse_generated_changes(checkout_dir);
+    collapse_generated_changes(checkout_dir, baseline);
     Ok(())
 }
 
 /// A `tar_scm` service with `changesgenerate` writes one entry listing every
 /// upstream commit since the last release (a hundred bullets for a package
 /// that was a few releases behind). That entry is cut down to `- Update to
-/// <version>`, which is all a packaging changelog needs to say.
-fn collapse_generated_changes(checkout_dir: &Path) {
+/// <version>`, which is all a packaging changelog needs to say. What the entry
+/// is compared with is what OBS held when the run started (`baseline`).
+pub(super) fn collapse_generated_changes(checkout_dir: &Path, baseline: Option<&Path>) {
     let Ok(rd) = fs::read_dir(checkout_dir) else {
         return;
     };
@@ -503,8 +511,7 @@ fn collapse_generated_changes(checkout_dir: &Path) {
         let Some(name) = file.file_name() else {
             continue;
         };
-        let pristine = fs::read_to_string(checkout_dir.join(".osc").join("sources").join(name))
-            .unwrap_or_default();
+        let pristine = run_start_copy(checkout_dir, baseline, name);
         if let Ok(working) = fs::read_to_string(&file)
             && let Some(collapsed) = collapsed_generated_entry(&working, &pristine)
         {

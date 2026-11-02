@@ -419,6 +419,7 @@ pub(super) fn osc_service_stage(
                     run_service_with_retries(
                         checkout_dir,
                         &config.rpm_name,
+                        obs_baseline_dir(config).ok().as_deref(),
                         Emit::new(reporter, step.id),
                     )
                     .map_err(|e| (e.is_transient(), e.to_string()))
@@ -515,6 +516,7 @@ pub(super) fn osc_service_stage(
                     run_service_with_retries(
                         checkout_dir,
                         &config.rpm_name,
+                        obs_baseline_dir(config).ok().as_deref(),
                         Emit::new(reporter, step.id),
                     )
                     .map_err(|e| (e.is_transient(), e.to_string()))
