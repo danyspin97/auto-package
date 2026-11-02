@@ -286,6 +286,23 @@ pub enum HostSource {
     Tui,
 }
 
+/// One result of an [`Event::ArchCheck`]. `state` is the summary's label
+/// (`succeeded`, `failed`, `still building`, ...).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchCheckResult {
+    pub repo: String,
+    pub arch: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The same result fails in the origin project too.
+    #[serde(default)]
+    pub origin_fails: bool,
+    /// The saved build log of a failure, when it was fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -446,6 +463,13 @@ pub enum Event {
         pkg: String,
         reason: String,
     },
+    /// The other-architecture check of an updated package: one entry per
+    /// checked `(repo, arch)`, the failing ones with their detail.
+    ArchCheck {
+        package: String,
+        #[serde(default)]
+        results: Vec<ArchCheckResult>,
+    },
     /// A host was allowed for the services and source fetches of this tool.
     /// `scope` is `run` (this process only) or `persistent` (also written to
     /// the user's file); `source` is `flag` (`--allow-host`) or `tui`.
@@ -494,5 +518,34 @@ mod host_allowed_tests {
                 source: HostSource::Flag,
             } if host == "a.example.org"
         ));
+    }
+}
+
+#[cfg(test)]
+mod arch_check_tests {
+    use super::*;
+
+    #[test]
+    fn arch_check_has_its_wire_form_and_old_logs_still_parse() {
+        let e = Event::ArchCheck {
+            package: "foo".into(),
+            results: vec![ArchCheckResult {
+                repo: "ports".into(),
+                arch: "s390x".into(),
+                state: "failed".into(),
+                detail: None,
+                origin_fails: false,
+                log: None,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"event":"arch_check","package":"foo","results":[{"repo":"ports","arch":"s390x","state":"failed","origin_fails":false}]}"#
+        );
+        let old: Event = serde_json::from_str(r#"{"event":"arch_check","package":"foo"}"#).unwrap();
+        assert!(matches!(old, Event::ArchCheck { ref results, .. } if results.is_empty()));
+        let bare: ArchCheckResult =
+            serde_json::from_str(r#"{"repo":"ports","arch":"s390x","state":"succeeded"}"#).unwrap();
+        assert!(!bare.origin_fails && bare.detail.is_none() && bare.log.is_none());
     }
 }

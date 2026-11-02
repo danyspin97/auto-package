@@ -39,7 +39,8 @@ impl HumanSink {
             | Event::AgentPrompt { .. }
             | Event::AgentReply { .. }
             | Event::AgentToolUse { .. }
-            | Event::Artifact { .. } => LogLevel::Debug,
+            | Event::Artifact { .. }
+            | Event::ArchCheck { .. } => LogLevel::Debug,
         }
     }
 
