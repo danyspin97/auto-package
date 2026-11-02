@@ -283,7 +283,7 @@ fn refusal(
             .unwrap_or("unknown");
         return Some(match rc {
             // 9: the key is not on the keyring.
-            "9" => not_in_keyring(archive, fpr, keyring),
+            "9" => not_in_keyring(archive, sig, fpr, keyring),
             // 4: an algorithm this gpg does not implement.
             "4" => format!(
                 "gpg does not support the signature algorithm of key {fpr}, so the new {archive} \
@@ -298,7 +298,7 @@ fn refusal(
     if let Some(key) = line("NO_PUBKEY") {
         // NO_PUBKEY has only the key id.
         let id = key.split_whitespace().nth(2).unwrap_or("unknown");
-        return Some(not_in_keyring(archive, id, keyring));
+        return Some(not_in_keyring(archive, sig, id, keyring));
     }
     if line("BADSIG").is_some() {
         return Some(format!(
@@ -314,12 +314,26 @@ fn refusal(
     ))
 }
 
-fn not_in_keyring(archive: &str, key: &str, keyring: &str) -> String {
-    format!(
-        "the new {archive} is signed with key {key}, which is not in {keyring}; a maintainer \
-         must verify the key and add it (the tool never trusts a key by itself). Nothing was \
-         sent to OBS"
-    )
+/// The refusal for a signature by a key the keyring lacks. `key` is the full
+/// fingerprint when gpg has it, else only the key ID: then the text says the
+/// 40-digit fingerprint has to be looked up before the key can be checked.
+fn not_in_keyring(archive: &str, sig: &str, key: &str, keyring: &str) -> String {
+    let full = key.len() == 40 && key.chars().all(|c| c.is_ascii_hexdigit());
+    if full {
+        format!(
+            "the new {archive} is signed with key {key} (the issuer fingerprint of {sig}), which \
+             is not in {keyring}; a maintainer must verify the full fingerprint on a second \
+             channel and add the key (the tool never trusts a key by itself). Nothing was sent \
+             to OBS"
+        )
+    } else {
+        format!(
+            "the new {archive} is signed with key ID {key} (named by {sig}), which is not in \
+             {keyring}; the signature gives no full fingerprint, so a maintainer must look the \
+             40-digit fingerprint up on the upstream's site, verify it and add the key (the tool \
+             never trusts a key by itself). Nothing was sent to OBS"
+        )
+    }
 }
 
 /// The archive a signature file names: its name without the signature suffix
