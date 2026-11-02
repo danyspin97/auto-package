@@ -87,7 +87,21 @@ pub fn get_overall_build_status(
     repo: &str,
     arch: &str,
 ) -> Result<(BuildStatus, Option<String>), Error> {
-    const MAX_WAIT: Duration = Duration::from_secs(1800);
+    get_overall_build_status_within(project, pkg_name, repo, arch, OVERALL_MAX_WAIT)
+}
+
+/// How long [`get_overall_build_status`] waits for the other architectures.
+pub const OVERALL_MAX_WAIT: Duration = Duration::from_secs(1800);
+
+/// [`get_overall_build_status`] with the wait bounded by `max_wait`: zero reads
+/// the results once, for a caller that has already waited for them.
+pub fn get_overall_build_status_within(
+    project: &str,
+    pkg_name: &str,
+    repo: &str,
+    arch: &str,
+    max_wait: Duration,
+) -> Result<(BuildStatus, Option<String>), Error> {
     let own = get_build_status(project, pkg_name, repo, arch)?;
     if !own.is_success() {
         return Ok((own, Some(format!("{repo}/{arch}"))));
@@ -118,7 +132,7 @@ pub fn get_overall_build_status(
             overall.0,
             BuildStatus::Scheduled | BuildStatus::Blocked | BuildStatus::Building
         ) || overall.0 == BuildStatus::Unknown("finished".to_string());
-        if !active || start.elapsed() >= MAX_WAIT || crate::proc::shutting_down() {
+        if !active || start.elapsed() >= max_wait || crate::proc::shutting_down() {
             return Ok(overall);
         }
         unchanged = if last.as_ref() == Some(&overall) {

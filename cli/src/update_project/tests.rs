@@ -112,6 +112,8 @@ fn the_tui_refuses_a_flagged_request_under_yes_before_asking_obs() {
         arch: "x86_64".into(),
         state_root: root.path().to_path_buf(),
         yes,
+        allow_arch: false,
+        arch_checked: Default::default(),
         reporter: Arc::new(ap_core::sink::MemorySink::new()),
         items: Default::default(),
         created: Default::default(),
@@ -156,6 +158,8 @@ fn the_tui_backend_only_knows_the_packages_it_was_given() {
         arch: "x86_64".into(),
         state_root: PathBuf::from("/nonexistent-state-root"),
         yes: false,
+        allow_arch: false,
+        arch_checked: Default::default(),
         reporter: Arc::new(ap_core::sink::MemorySink::new()),
         items: Default::default(),
         created: Default::default(),
@@ -381,4 +385,33 @@ fn branch_call_owns_only_packages_missing_before_it() {
     assert!(!created_by_branch(&before, "foo"));
     let unknown: Result<Arc<HashSet<String>>, String> = Err("no listing".to_string());
     assert!(!created_by_branch(&unknown, "bar"));
+}
+
+#[test]
+fn the_arches_flag_is_validated_and_the_rows_become_events() {
+    use super::arch;
+    use ap_build::arch_check::{ArchRow, ArchState};
+    let mut a = args(&[]);
+    assert_eq!(arch::wanted_arches(&a).unwrap(), None);
+    a.arches = vec!["s390x".into(), "s390x".into(), "ppc64le".into()];
+    assert_eq!(
+        arch::wanted_arches(&a).unwrap(),
+        Some(vec!["s390x".to_string(), "ppc64le".to_string()])
+    );
+    a.arches = vec!["mips".into()];
+    assert!(arch::wanted_arches(&a).unwrap_err().contains("mips"));
+    let row = ArchRow {
+        pkg: "p".into(),
+        repo: "ports".into(),
+        arch: "s390x".into(),
+        state: ArchState::Failed {
+            detail: Some("boom".into()),
+        },
+        baseline_fails: true,
+        log: Some("/w/p.log".into()),
+    };
+    let ev = arch::event_result(&row);
+    assert_eq!(ev.state, "failed");
+    assert_eq!(ev.detail.as_deref(), Some("boom"));
+    assert!(ev.origin_fails);
 }

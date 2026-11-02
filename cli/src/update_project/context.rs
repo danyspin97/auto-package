@@ -26,7 +26,13 @@ pub(super) struct Ctx<'a> {
     pub(super) sem: Option<Semaphore>,
     /// Reads diffs and makes submit requests for the TUI (see [`SubmitBackend`]).
     pub(super) backend: Option<Arc<SubmitBackend>>,
+    /// The packages whose other-architecture check ran in this run: their
+    /// results were already awaited, so a submit does not wait for them again.
+    pub(super) arch_checked: ArchChecked,
 }
+
+/// The packages the arch check ran for, shared with the TUI's submit backend.
+pub(super) type ArchChecked = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
 
 impl Ctx<'_> {
     pub(super) fn say(&self, message: impl Into<String>) {

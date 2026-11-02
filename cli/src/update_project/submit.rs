@@ -12,6 +12,10 @@ pub(super) struct SubmitBackend {
     pub(super) state_root: PathBuf,
     /// `--yes` was given: a request for a change that needs a review is refused.
     pub(super) yes: bool,
+    /// `--allow-arch-failures` was given (see `prepare_request`).
+    pub(super) allow_arch: bool,
+    /// The packages whose other-architecture check ran (see [`ArchChecked`]).
+    pub(super) arch_checked: ArchChecked,
     pub(super) reporter: Arc<dyn Reporter + Send + Sync>,
     pub(super) items: std::sync::Mutex<std::collections::HashMap<String, Item>>,
     /// `pkg: SR #id` for each request made from the TUI, for the run summary.
@@ -49,11 +53,20 @@ impl SubmitBackend {
             &self.state_root,
             &item,
             &ItemOutcome::Updated,
+            self.allow_arch,
+            self.arch_checked_for(&item.pkg),
             self.reporter.as_ref(),
         ) {
             Ok(sr) => Ok((item, sr)),
             Err(outcome) => Err(submit_failure(outcome)),
         }
+    }
+
+    fn arch_checked_for(&self, pkg: &str) -> bool {
+        self.arch_checked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(pkg)
     }
 
     pub(super) fn created_lines(&self) -> Vec<String> {
@@ -169,6 +182,11 @@ pub(super) fn submit_requests(
             &ctx.state_root,
             &r.item,
             &r.outcome,
+            a.allow_arch_failures,
+            ctx.arch_checked
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&r.item.pkg),
             ctx.reporter.as_ref(),
         ) {
             Ok(sr) => pending.push((idx, sr)),

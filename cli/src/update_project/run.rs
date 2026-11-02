@@ -164,6 +164,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     });
     a.allow_host.record(reporter.as_ref());
 
+    let arch_checked: ArchChecked = Default::default();
     let ctx = Ctx {
         work_dir,
         state_root,
@@ -176,6 +177,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         tui_ctrl,
         sem: make_semaphore(a.jobs),
         backend: None,
+        arch_checked: arch_checked.clone(),
     };
     // A dry run builds nothing, so there is nothing to diff or submit.
     let ctx = match (&ctx.tui_ctrl, a.dry_run) {
@@ -186,6 +188,8 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 arch: a.arch.clone(),
                 state_root: ctx.state_root.clone(),
                 yes: a.yes,
+                allow_arch: a.allow_arch_failures,
+                arch_checked: arch_checked.clone(),
                 reporter: reporter.clone(),
                 items: Default::default(),
                 created: Default::default(),

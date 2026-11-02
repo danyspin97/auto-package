@@ -1,4 +1,5 @@
 use super::*;
+use ap_build::arch_check::GateVerdict;
 
 /// The submit request for `item`, after every check that decides whether one
 /// may be made: the update succeeded, the package built in the branch project
@@ -12,6 +13,8 @@ pub(super) fn prepare_request(
     state_root: &Path,
     item: &Item,
     outcome: &ItemOutcome,
+    allow_arch: bool,
+    arch_waited: bool,
     reporter: &(dyn Reporter + Send + Sync),
 ) -> Result<osc::SubmitRequest, SrOutcome> {
     let emit = Emit::run(reporter);
@@ -46,19 +49,23 @@ pub(super) fn prepare_request(
     } else {
         None
     };
-    let build = updated
+    let primary_repo = crate::choose_distro(distro, branch, arch);
+    // The other architectures were awaited by the arch check when it ran: then
+    // their results are read once, not waited for again.
+    let overall_wait = if arch_waited {
+        std::time::Duration::ZERO
+    } else {
+        osc::OVERALL_MAX_WAIT
+    };
+    let overall = updated
         .then(|| {
-            osc::get_overall_build_status(
+            osc::get_overall_build_status_within(
                 branch,
                 &item.pkg,
-                &crate::choose_distro(distro, branch, arch),
+                &primary_repo,
                 arch,
+                overall_wait,
             )
-            // Name the repository/arch that blocks, not just its status.
-            .map(|(status, at)| match (&status, at) {
-                (osc::BuildStatus::Succeeded, _) | (_, None) => status,
-                (_, Some(at)) => osc::BuildStatus::Unknown(format!("{status} on {at}")),
-            })
             .map_err(|e| {
                 warn(format!(
                     "could not read the build status of {}: {e}",
@@ -68,6 +75,37 @@ pub(super) fn prepare_request(
             .ok()
         })
         .flatten();
+    let build = match overall {
+        // A failure on another architecture is judged by the arch gate: the
+        // origin's own failures do not count, and `--allow-arch-failures` lets
+        // the rest through.
+        Some((status, _)) if is_arch_failure(&status) => {
+            let primary = (primary_repo.as_str(), arch);
+            match arch_gate(branch, &item.origin, &item.pkg, primary, allow_arch, emit) {
+                Ok(GateVerdict::Pass { notes }) => {
+                    notes.into_iter().for_each(&say);
+                    Some(osc::BuildStatus::Succeeded)
+                }
+                Ok(GateVerdict::Refuse(why)) => {
+                    say(format!("no request for {}: {why}", item.pkg));
+                    return Err(SrOutcome::NotEligible(why));
+                }
+                Err(e) => {
+                    warn(format!(
+                        "could not read the arch results of {}: {e}",
+                        item.pkg
+                    ));
+                    None
+                }
+            }
+        }
+        // Name the repository/arch that blocks, not just its status.
+        Some((status, at)) => Some(match (&status, at) {
+            (osc::BuildStatus::Succeeded, _) | (_, None) => status,
+            (_, Some(at)) => osc::BuildStatus::Unknown(format!("{status} on {at}")),
+        }),
+        None => None,
+    };
     let spec_version = updated
         .then(|| update::spec_for_package(branch, &item.pkg, emit).ok())
         .flatten()
@@ -146,4 +184,29 @@ pub(super) fn rdiff(
             if why.is_empty() { "no output" } else { why }
         ))
     }
+}
+
+/// Whether a blocking overall status is a failure on some architecture.
+fn is_arch_failure(status: &osc::BuildStatus) -> bool {
+    matches!(
+        status,
+        osc::BuildStatus::Failed | osc::BuildStatus::Unresolvable | osc::BuildStatus::Broken
+    )
+}
+
+/// The arch gate of a submit: the verdict on `pkg`'s results in the branch,
+/// each compared with its baseline in the origin (see `gate_inputs`).
+fn arch_gate(
+    branch: &str,
+    origin: &str,
+    pkg: &str,
+    primary: (&str, &str),
+    allow: bool,
+    emit: Emit<'_>,
+) -> Result<GateVerdict, String> {
+    let obs = ap_build::arch_check::LiveArchObs { emit };
+    let rows = ap_build::arch_check::gate_inputs(&obs, branch, origin, pkg)?;
+    Ok(ap_build::arch_check::gate_verdict(
+        pkg, primary, &rows, allow,
+    ))
 }

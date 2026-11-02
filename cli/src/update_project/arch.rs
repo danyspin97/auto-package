@@ -84,6 +84,14 @@ pub(super) fn check_item(
             return;
         }
     };
+    // Only a check of every branch arch lets the submit skip the wait: a narrowed
+    // one leaves the others unawaited (see `prepare_request`).
+    if out.covered {
+        ctx.arch_checked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(item.pkg.clone());
+    }
     for note in &out.notes {
         ctx.say(format!("{}: {note}", item.pkg));
     }
@@ -107,7 +115,7 @@ pub(super) fn check_item(
 }
 
 /// One row as the run log records it.
-fn event_result(row: &ArchRow) -> ArchCheckResult {
+pub(super) fn event_result(row: &ArchRow) -> ArchCheckResult {
     ArchCheckResult {
         repo: row.repo.clone(),
         arch: row.arch.clone(),

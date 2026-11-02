@@ -43,6 +43,9 @@ pub struct CheckOutcome {
     pub rows: Vec<ArchRow>,
     pub added: Vec<ArchAddition>,
     pub notes: Vec<String>,
+    /// Every architecture of the branch, but the primary, was checked and
+    /// waited for. Only then is the package's build status the whole story.
+    pub covered: bool,
 }
 
 type Key = (String, String);
@@ -95,11 +98,18 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
         .into_iter()
         .filter(|(r, a)| (r.as_str(), a.as_str()) != req.primary)
         .collect();
+    let covered = branch.repositories.iter().all(|repo| {
+        repo.arches.iter().all(|arch| {
+            (repo.name.as_str(), arch.as_str()) == req.primary
+                || keys.iter().any(|(r, a)| *r == repo.name && a == arch)
+        })
+    });
     if keys.is_empty() {
         return Ok(CheckOutcome {
             rows: Vec::new(),
             added,
             notes,
+            covered,
         });
     }
 
@@ -107,7 +117,12 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
     notes.extend(waited);
     let rows = fetch_failure_details(obs, req, rows);
     let rows = mark_origin_failures(obs, req, rows, &mut notes);
-    Ok(CheckOutcome { rows, added, notes })
+    Ok(CheckOutcome {
+        rows,
+        added,
+        notes,
+        covered,
+    })
 }
 
 /// Poll the branch's results for `keys` until none is pending or the bound
@@ -263,4 +278,74 @@ fn mark_origin_failures<O: ArchObs + ?Sized>(
         row.baseline_fails = classify(&status, None).is_failure();
     }
     rows
+}
+
+/// Every result of `pkg` in `project` with its state, one per `(repo, arch)`,
+/// read the way [`wait_and_classify`] reads them: the package's own entries
+/// and its flavors' decide together, so a failing flavor is a failure.
+pub fn read_results<O: ArchObs + ?Sized>(
+    obs: &O,
+    project: &str,
+    pkg: &str,
+) -> Result<Vec<(Key, ArchState)>, String> {
+    let entries = obs.results(project, pkg)?;
+    let mut keys: Vec<Key> = entries
+        .iter()
+        .filter(|e| e.pkg == pkg || e.pkg.starts_with(&format!("{pkg}:")))
+        .map(|e| (e.repo.clone(), e.arch.clone()))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Ok(keys
+        .into_iter()
+        .map(|key| {
+            let state = match deciding_entry(&entries, pkg, &key) {
+                Some(e) => classify(&resolve_lenient(e), e.details.as_deref()),
+                None => ArchState::Pending("no result yet".to_string()),
+            };
+            (key, state)
+        })
+        .collect())
+}
+
+/// The rows the submit gate decides on for `pkg`: each result of the branch
+/// with the state of the same `(repo, arch)` in the origin, read only when
+/// the branch has a failure (the baseline of a failure is what it is judged
+/// against). A result the origin does not report is pending, not failing.
+pub fn gate_inputs<O: ArchObs + ?Sized>(
+    obs: &O,
+    branch: &str,
+    origin: &str,
+    pkg: &str,
+) -> Result<Vec<GateRow>, String> {
+    let branch_states = read_results(obs, branch, pkg)?;
+    let origin_states = if branch_states.iter().any(|(_, s)| s.is_failure()) {
+        Some(read_results(obs, origin, pkg)?)
+    } else {
+        None
+    };
+    Ok(branch_states
+        .into_iter()
+        .map(|((repo, arch), state)| {
+            let baseline = origin_states.as_ref().and_then(|theirs| {
+                state.is_failure().then(|| {
+                    let found = theirs
+                        .iter()
+                        .find(|(k, _)| k.0 == repo && k.1 == arch)
+                        .map(|(_, s)| s.clone())
+                        .unwrap_or_else(|| ArchState::Pending("no result yet".to_string()));
+                    Baseline {
+                        project: origin.to_string(),
+                        state: found,
+                    }
+                })
+            });
+            GateRow {
+                repo,
+                arch,
+                state,
+                baseline,
+            }
+        })
+        .collect())
 }
