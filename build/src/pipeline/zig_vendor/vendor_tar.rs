@@ -1,9 +1,9 @@
 //! Writes a package's vendor archive: zig's global package cache with each
-//! dependency in the layout its zig version reads, as a `vendor.tar.zst` (or
-//! `.tar.gz`) with the cache directory as its only top-level directory. The
-//! output depends only on the dependencies' files and links, their executable
-//! bits and their hashes: not on file times, owners, the order they were given
-//! in, or the host.
+//! dependency in the layout its zig version reads, as a `vendor.tar.zst`,
+//! `.tar.gz` or `.tar.xz` with the cache directory as its only top-level
+//! directory. The output depends only on the dependencies' files and links,
+//! their executable bits and their hashes: not on file times, owners, the
+//! order they were given in, or the host.
 //!
 //! The archive is written as it is built: each file is copied from its place
 //! in the tree, and each packed `.tar.gz` is first built in a scratch file,
@@ -60,11 +60,13 @@ enum Body {
 
 type Entries = BTreeMap<String, Body>;
 
-/// The compression of the vendor archive. It is the one the old archive had.
+/// The compression of the vendor archive: the one its file name names. The
+/// name is never changed to suit the writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Compression {
     Zst,
     Gz,
+    Xz,
 }
 
 /// Write the vendor archive for `deps` in `layout` to `out`, with `root` (a
@@ -123,8 +125,23 @@ pub(super) fn write_vendor_tar(
             enc.finish()
                 .map_err(|e| format!("finishing the gzip stream: {e}"))?;
         }
+        Compression::Xz => {
+            let enc = lzma_rust2::XzWriter::new(out, xz_options())
+                .map_err(|e| format!("starting the xz stream: {e}"))?;
+            let enc = write_tar(&entries, &sorted, scratch, enc)?;
+            enc.finish()
+                .map_err(|e| format!("finishing the xz stream: {e}"))?;
+        }
     }
     Ok(())
+}
+
+/// The xz settings of every vendor archive: preset 6, CRC64, one block. They
+/// are fixed, so the same entries always give the same bytes.
+fn xz_options() -> lzma_rust2::XzOptions {
+    let mut options = lzma_rust2::XzOptions::with_preset(6);
+    options.set_check_sum_type(lzma_rust2::CheckType::Crc64);
+    options
 }
 
 /// `entries` as a tar stream into `w`, which is handed back unfinished.

@@ -222,6 +222,29 @@ fn the_layout_follows_the_zig_version() {
 }
 
 #[test]
+fn the_xz_archive_holds_the_same_entries_and_is_reproducible() {
+    let (_dir, dep) = pixman_dep();
+    let zst = outer(&vendor_tar_zst(std::slice::from_ref(&dep), Layout::Packed).unwrap());
+    let xz = |dep: &Dep| {
+        vendor_tar(
+            std::slice::from_ref(dep),
+            Layout::Packed,
+            "vendor",
+            Compression::Xz,
+        )
+        .unwrap()
+    };
+    let first = xz(&dep);
+    let (_dir2, again) = pixman_dep();
+    assert_eq!(first, xz(&again), "the same input gives the same bytes");
+    let read = read_tar(lzma_rust2::XzReader::new(&first[..], false));
+    let paths = |v: &[Got]| -> Vec<(String, Vec<u8>)> {
+        v.iter().map(|e| (e.path.clone(), e.data.clone())).collect()
+    };
+    assert_eq!(paths(&read), paths(&zst));
+}
+
+#[test]
 fn the_packed_archive_hashes_back_to_its_declared_hash() {
     let (_dir, dep) = pixman_dep();
     let bytes = vendor_tar_zst(&[dep], Layout::Packed).unwrap();

@@ -111,13 +111,13 @@ fn spec(requires: &str, vendor_name: &str, build_opts: &str) -> String {
     )
 }
 
-/// The entries of a `vendor.tar.zst` or `.tar.gz` file, by path.
+/// The entries of a `vendor.tar.zst`, `.tar.gz` or `.tar.xz` file, by path.
 fn entries(path: &Path) -> Vec<(String, bool)> {
     let bytes = std::fs::read(path).unwrap();
-    let reader: Box<dyn Read> = if path.extension().is_some_and(|e| e == "zst") {
-        Box::new(zstd::stream::read::Decoder::new(bytes.as_slice()).unwrap())
-    } else {
-        Box::new(flate2::read::GzDecoder::new(bytes.as_slice()))
+    let reader: Box<dyn Read> = match path.extension().and_then(|e| e.to_str()) {
+        Some("zst") => Box::new(zstd::stream::read::Decoder::new(bytes.as_slice()).unwrap()),
+        Some("xz") => Box::new(lzma_rust2::XzReader::new(bytes.as_slice(), false)),
+        _ => Box::new(flate2::read::GzDecoder::new(bytes.as_slice())),
     };
     let mut ar = tar::Archive::new(reader);
     ar.entries()
@@ -381,7 +381,7 @@ fn a_zig_requirement_without_a_version_is_refused_before_any_request() {
 }
 
 #[test]
-fn an_xz_vendor_archive_is_refused_as_an_unsupported_form() {
+fn an_xz_vendor_archive_stays_xz_and_is_read_back_as_xz() {
     let src0 = source0(PIXMAN_HASH, PIXMAN_URL);
     let spec = spec(
         "zig >= 0.16.0",
@@ -390,7 +390,7 @@ fn an_xz_vendor_archive_is_refused_as_an_unsupported_form() {
     );
     let dir = checkout(&spec, &src0, "vendor.tar.xz");
     let work = tempfile::tempdir().unwrap();
-    let err = refresh_checkout(
+    let got = refresh_checkout(
         dir.path(),
         &spec,
         "pkg",
@@ -398,11 +398,53 @@ fn an_xz_vendor_archive_is_refused_as_an_unsupported_form() {
         &NullReporter,
         work.path(),
     )
-    .unwrap_err();
-    assert!(err.contains("xz"), "{err}");
+    .unwrap()
+    .unwrap();
+    assert_eq!(got.file, "vendor.tar.xz");
+    assert!(got.changed);
+    let names = entries(&dir.path().join("vendor.tar.xz"));
+    assert!(
+        names
+            .iter()
+            .any(|(p, _)| p == &format!("vendor/p/{PIXMAN_HASH}.tar.gz"))
+    );
+}
+
+#[test]
+fn a_second_refresh_of_an_xz_source_writes_the_same_bytes() {
+    let src0 = source0(PIXMAN_HASH, PIXMAN_URL);
+    let spec = spec(
+        "zig >= 0.16.0",
+        "vendor.tar.xz",
+        "--global-cache-dir vendor/",
+    );
+    let dir = checkout(&spec, &src0, "vendor.tar.xz");
+    let work = tempfile::tempdir().unwrap();
+    refresh_checkout(
+        dir.path(),
+        &spec,
+        "pkg",
+        &Fake::new(),
+        &NullReporter,
+        work.path(),
+    )
+    .unwrap();
+    let first = std::fs::read(dir.path().join("vendor.tar.xz")).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let got = refresh_checkout(
+        dir.path(),
+        &spec,
+        "pkg",
+        &Fake::new(),
+        &NullReporter,
+        work.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!got.changed);
     assert_eq!(
         std::fs::read(dir.path().join("vendor.tar.xz")).unwrap(),
-        OLD
+        first
     );
 }
 

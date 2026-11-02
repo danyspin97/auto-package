@@ -153,10 +153,10 @@ fn a_dependency_off_the_allowlist_ends_the_package_with_its_reason() {
 }
 
 #[test]
-fn an_xz_archive_ends_the_package_before_any_request() {
+fn an_xz_archive_is_refreshed_like_the_others_and_stops_at_the_allowlist() {
     let src0 = source0("https://evil.example.net/other.tar.gz");
     let xz = SPEC.replace("vendor.tar.zst", "vendor.tar.xz");
     let (_root, result) = run_stage(&xz, &src0, true);
     let why = reason(result);
-    assert!(why.contains("xz"), "{why}");
+    assert!(why.contains("evil.example.net"), "{why}");
 }

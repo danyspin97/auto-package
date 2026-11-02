@@ -66,11 +66,6 @@ pub(super) fn plan(spec: &str) -> Result<Option<Plan>, String> {
             roots.join(", ")
         ));
     }
-    let Some(compression) = compression else {
-        return Err(format!(
-            "{file} is compressed with xz, which the vendor step does not write (zst or gz)"
-        ));
-    };
     let Some(layout) = zig_layout(&requirements)? else {
         return Ok(None);
     };
@@ -158,15 +153,14 @@ fn zig_layout(requirements: &[Requirement]) -> Result<Option<Layout>, String> {
 }
 
 /// The URL-less `vendor.tar.{zst,gz,xz}` source of the spec: its name and its
-/// compression (`None` for xz). `None` when there is no such source, or more
-/// than one.
-fn vendor_source(spec: &str) -> Option<(String, Option<Compression>)> {
+/// compression. `None` when there is no such source, or more than one.
+fn vendor_source(spec: &str) -> Option<(String, Compression)> {
     let macros = spec_macros(spec);
     let expand = |v: &str| {
         let once = expand_simple_defines(v, &macros);
         expand_simple_defines(&once, &macros)
     };
-    let mut found: Vec<(String, Option<Compression>)> = Vec::new();
+    let mut found: Vec<(String, Compression)> = Vec::new();
     for line in spec.lines() {
         let Some(source) = parse_source_line(line, &["source"], expand) else {
             continue;
@@ -175,9 +169,9 @@ fn vendor_source(spec: &str) -> Option<(String, Option<Compression>)> {
             continue;
         }
         let compression = match source.url.as_str() {
-            "vendor.tar.zst" => Some(Compression::Zst),
-            "vendor.tar.gz" => Some(Compression::Gz),
-            "vendor.tar.xz" => None,
+            "vendor.tar.zst" => Compression::Zst,
+            "vendor.tar.gz" => Compression::Gz,
+            "vendor.tar.xz" => Compression::Xz,
             _ => continue,
         };
         found.push((source.url.clone(), compression));
