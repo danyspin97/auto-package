@@ -5,21 +5,25 @@
 //! allowlist, checks its content hash and writes the archive.
 
 mod fetch;
+mod hash;
+mod tree;
+mod unpack;
+mod vendor_tar;
+mod zon;
+
 #[cfg(test)]
 mod fetch_archive_tests;
 #[cfg(test)]
 mod fetch_tests;
-mod hash;
 #[cfg(test)]
 mod hash_tests;
-mod tree;
 #[cfg(test)]
 mod tree_tests;
-mod unpack;
 #[cfg(test)]
 mod unpack_meta_tests;
 #[cfg(test)]
 mod unpack_tests;
-mod zon;
+#[cfg(test)]
+mod vendor_tar_tests;
 #[cfg(test)]
 mod zon_tests;
