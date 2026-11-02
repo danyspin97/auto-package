@@ -32,6 +32,7 @@ mod kind;
 mod map;
 mod release_list;
 mod releases;
+mod sourcehut;
 
 pub use archive::*;
 pub use forge::*;
@@ -39,3 +40,4 @@ pub use kind::*;
 pub use map::*;
 pub use release_list::*;
 pub use releases::*;
+pub(crate) use sourcehut::is_sourcehut_host;

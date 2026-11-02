@@ -201,7 +201,13 @@ pub(super) fn owner_repo(repo_url: &str) -> Result<(String, String, String), Str
         .host
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
-    if !host_ok || !forge.project_path.split('/').all(name_ok) {
+    // A SourceHut owner is `~user`: the `~` is allowed in front of the owner only.
+    let sourcehut = crate::sources::is_sourcehut_host(&forge.host);
+    let segment_ok = |(i, s): (usize, &str)| match s.strip_prefix('~') {
+        Some(owner) if i == 0 && sourcehut => !owner.is_empty() && name_ok(owner),
+        _ => name_ok(s),
+    };
+    if !host_ok || !forge.project_path.split('/').enumerate().all(segment_ok) {
         return Err(format!(
             "{repo_url} does not name a forge owner and repository"
         ));
