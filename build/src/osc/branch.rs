@@ -27,6 +27,10 @@ pub use provides::*;
 mod provides_tests;
 mod submit;
 pub use submit::*;
+mod delete_request;
+pub use delete_request::*;
+#[cfg(test)]
+mod delete_request_tests;
 
 #[cfg(test)]
 mod package_enable_tests;
