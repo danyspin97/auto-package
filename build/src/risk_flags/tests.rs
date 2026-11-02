@@ -534,3 +534,27 @@ fn an_update_with_no_upstream_notes_is_a_risk_until_notes_are_found() {
     assert!(st.risk_flags.is_empty());
     assert_eq!(st.risk_flags_run_id.as_deref(), Some("r4"));
 }
+
+fn versioned(version: &str) -> String {
+    SPEC.replace("Version: 1.0", &format!("Version: {version}"))
+}
+
+#[test]
+fn a_jump_of_three_minor_series_is_flagged_by_its_series() {
+    let found = flags(&versioned("3.4.13"), &versioned("3.9.7"));
+    assert!(found.contains(&RiskFlag::LargeJump {
+        from: "3.4".into(),
+        to: "3.9".into()
+    }));
+    assert_eq!(
+        found[0].line(),
+        "RISK: large jump 3.4 -> 3.9, needs a review"
+    );
+}
+
+#[test]
+fn a_jump_of_two_minor_series_or_a_new_major_is_not_flagged() {
+    assert!(flags(&versioned("3.4.13"), &versioned("3.6.0")).is_empty());
+    assert!(flags(&versioned("3.4.13"), &versioned("4.0.0")).is_empty());
+    assert!(flags(&versioned("3.4.13"), &versioned("3.4.14")).is_empty());
+}

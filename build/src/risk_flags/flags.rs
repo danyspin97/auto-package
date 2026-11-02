@@ -29,6 +29,9 @@ pub enum RiskFlag {
     /// The update has no upstream notes (none in the source archive, none on
     /// the forge): its `.changes` entry says only `Update to <version>`.
     NoUpstreamNotes { version: String },
+    /// A version that moves three or more minor series in the same major
+    /// (`3.4.13` to `3.9.7`, `3.4` to `3.9`): a person checks what changed.
+    LargeJump { from: String, to: String },
 }
 
 impl RiskFlag {
@@ -57,6 +60,9 @@ impl RiskFlag {
             RiskFlag::NoUpstreamNotes { version } => format!(
                 "RISK: no upstream changes listed for {version}; read the sources for what changed"
             ),
+            RiskFlag::LargeJump { from, to } => {
+                format!("RISK: large jump {from} -> {to}, needs a review")
+            }
         };
         one_line(&text)
     }

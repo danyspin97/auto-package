@@ -226,6 +226,16 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
         }
     }
 
+    // A version that moves three or more minor series in the same major.
+    let version_of = |spec: &Option<String>| {
+        crate::spec::parse_header(spec.as_deref().unwrap_or("")).map(|h| h.version)
+    };
+    if let (Some(old), Some(new)) = (version_of(&base.spec), version_of(&fin.spec))
+        && let Some((from, to)) = large_jump(&old, &new)
+    {
+        push(RiskFlag::LargeJump { from, to });
+    }
+
     // Source hosts: every host the final files name that the baseline does not.
     let base_hosts = hosts(base);
     for host in hosts(fin) {
@@ -268,6 +278,19 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
         }
     }
     out
+}
+
+/// The series a version moves from and to, as `3.4` and `3.9`, when both share
+/// a major and the minor moves on by three series or more.
+pub(super) fn large_jump(old: &str, new: &str) -> Option<(String, String)> {
+    let old = crate::version::leading_numbers(old);
+    let new = crate::version::leading_numbers(new);
+    match (old.as_slice(), new.as_slice()) {
+        ([major, from, ..], [new_major, to, ..]) if major == new_major && *to >= from + 3 => {
+            Some((format!("{major}.{from}"), format!("{new_major}.{to}")))
+        }
+        _ => None,
+    }
 }
 
 /// The changed lines of a patch above which it needs a person's review.
