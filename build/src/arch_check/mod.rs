@@ -18,6 +18,7 @@ mod gate;
 mod gate_tests;
 mod meta;
 mod obs;
+mod ports;
 mod summary;
 #[cfg(test)]
 mod tests;
@@ -29,6 +30,7 @@ pub use classify::*;
 pub use gate::*;
 pub use meta::*;
 pub use obs::*;
+pub use ports::*;
 pub use summary::*;
 pub use wait::*;
 

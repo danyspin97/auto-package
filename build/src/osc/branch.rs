@@ -18,6 +18,7 @@ mod project_meta;
 pub use project_meta::*;
 mod package_flags;
 pub use package_flags::*;
+pub(crate) use package_flags::{child_indent, layout, open_tags};
 mod published;
 pub use published::*;
 mod provides;

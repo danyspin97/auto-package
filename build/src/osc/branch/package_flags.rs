@@ -25,21 +25,21 @@ pub const FLAG_KINDS: [&str; 4] = ["build", "publish", "debuginfo", "useforbuild
 /// One element directly under the root of a meta document, by byte range
 /// (end exclusive, past the closing tag).
 #[derive(Debug)]
-struct Child {
-    name: String,
-    start: usize,
-    end: usize,
+pub(crate) struct Child {
+    pub(crate) name: String,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 
 /// The root element of a meta document and its direct children.
 #[derive(Debug, Default)]
-struct Layout {
-    root: String,
-    children: Vec<Child>,
+pub(crate) struct Layout {
+    pub(crate) root: String,
+    pub(crate) children: Vec<Child>,
     /// Where the first child starts, for its indentation.
     first_child: Option<usize>,
     /// Where the root's closing tag starts; `None` for an empty root element.
-    close_at: Option<usize>,
+    pub(crate) close_at: Option<usize>,
 }
 
 fn tag_name(e: &BytesStart) -> Result<String, String> {
@@ -47,7 +47,7 @@ fn tag_name(e: &BytesStart) -> Result<String, String> {
 }
 
 /// The element structure of a meta document, or why it is not well formed.
-fn layout(xml: &str) -> Result<Layout, String> {
+pub(crate) fn layout(xml: &str) -> Result<Layout, String> {
     let mut reader = Reader::from_str(xml);
     let mut out = Layout::default();
     let mut depth = 0usize;
@@ -210,9 +210,31 @@ fn open_token(e: &BytesStart) -> Result<String, String> {
     Ok(format!("<{name} {}>", attrs.join(" ")))
 }
 
+/// The start tags (`<name ...>` or `<name .../>`) of every element called `name`
+/// in `xml`, as written, found by parsing: a comment is not an element.
+pub(crate) fn open_tags(xml: &str, name: &str) -> Result<Vec<String>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut out = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader
+            .read_event()
+            .map_err(|e| format!("malformed XML: {e}"))?
+        {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == name => {
+                let after = reader.buffer_position() as usize;
+                out.push(xml[before..after].to_string());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// The indentation of the first child of the root, or two spaces when there
 /// is none or it does not start its line.
-fn child_indent(xml: &str, layout: &Layout) -> String {
+pub(crate) fn child_indent(xml: &str, layout: &Layout) -> String {
     let Some(at) = layout.first_child else {
         return "  ".into();
     };

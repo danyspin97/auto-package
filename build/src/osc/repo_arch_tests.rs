@@ -80,3 +80,23 @@ fn a_meta_without_repositories_is_not_judged_here() {
     let info = parse_project_info("<project name=\"p\"/>");
     assert!(check_repo_arch(&info, "p", "r", "a").is_ok());
 }
+
+#[test]
+fn a_port_repository_is_never_chosen_for_x86_64() {
+    let text = format!(
+        "{META}\n<project name=\"home:u:p\">\n  <repository name=\"openSUSE_Tumbleweed\"><arch>x86_64</arch></repository>\n  <repository name=\"openSUSE_Factory_zSystems\"><arch>s390x</arch></repository>\n</project>"
+    );
+    let info = parse_project_info(&text.replace(META, ""));
+    assert_eq!(
+        default_repository(&info, "x86_64"),
+        Some(("openSUSE_Tumbleweed".to_string(), Vec::new()))
+    );
+    assert_eq!(
+        pick_repository(&info, "openSUSE_Factory_zSystems", "x86_64").as_deref(),
+        Ok("openSUSE_Tumbleweed")
+    );
+    assert_eq!(
+        default_repository(&info, "s390x").map(|(name, _)| name),
+        Some("openSUSE_Factory_zSystems".to_string())
+    );
+}
