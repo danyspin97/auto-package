@@ -7,6 +7,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::classify::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::logs::*;
+use crate::pipeline::network_fetch::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::repeat_log::*;
@@ -180,6 +181,17 @@ pub(super) fn fix_after_build(
             st.spent_usd,
         );
         return Err(ctx.failed(format!("build failed; log: {}", build_log.display())));
+    }
+
+    // A build that fetches its dependencies fails the same way on every try, and
+    // no edit of the spec changes that: the package ends here, with no fix turn
+    // and no rebuild.
+    let log_text = std::fs::read_to_string(build_log).unwrap_or_default();
+    if let Some(evidence) = network_fetch_failure(&log_text) {
+        return Err(ctx.failed(format!(
+            "{NETWORK_FETCH_REASON}: {evidence}; log: {}",
+            build_log.display()
+        )));
     }
 
     // The agent can only act on what the log says. The same log twice is OBS
