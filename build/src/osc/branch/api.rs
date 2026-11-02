@@ -13,6 +13,17 @@ pub(super) fn api_call(
     data: Option<&str>,
     emit: Emit<'_>,
 ) -> Result<Captured, Error> {
+    api_call_within(method, path, data, emit, Duration::from_secs(120))
+}
+
+/// [`api_call`] with the time it may take given as `timeout`.
+pub(super) fn api_call_within(
+    method: Option<&str>,
+    path: &str,
+    data: Option<&str>,
+    emit: Emit<'_>,
+    timeout: Duration,
+) -> Result<Captured, Error> {
     let mut args: Vec<String> = vec!["api".into()];
     if let Some(m) = method {
         args.extend(["-X".into(), m.into()]);
@@ -21,13 +32,22 @@ pub(super) fn api_call(
         args.extend(["-d".into(), d.into()]);
     }
     args.push(path.into());
-    proc::capture_with_timeout("osc", &args, &anywhere(), emit, Duration::from_secs(120))
+    proc::capture_with_timeout("osc", &args, &anywhere(), emit, timeout)
         .map_err(during(format!("api {path}")))
 }
 
 /// `GET path` through `osc api`, with a failure reported as an error.
 pub(super) fn api_get(path: &str, emit: Emit<'_>) -> Result<String, Error> {
-    let out = api_call(None, path, None, emit)?;
+    api_get_within(path, emit, Duration::from_secs(120))
+}
+
+/// [`api_get`] given at most `timeout`.
+pub(super) fn api_get_within(
+    path: &str,
+    emit: Emit<'_>,
+    timeout: Duration,
+) -> Result<String, Error> {
+    let out = api_call_within(None, path, None, emit, timeout)?;
     if !out.success() {
         return Err(Error::OscFailed {
             cmd: format!("api {path}"),

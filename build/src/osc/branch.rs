@@ -20,6 +20,10 @@ mod package_flags;
 pub use package_flags::*;
 mod published;
 pub use published::*;
+mod provides;
+pub use provides::*;
+#[cfg(test)]
+mod provides_tests;
 mod submit;
 pub use submit::*;
 
