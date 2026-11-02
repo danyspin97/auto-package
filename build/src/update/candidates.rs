@@ -68,6 +68,9 @@ pub enum SkipReason {
     NoSpec,
     /// OBS could not be asked or did not answer, after the retries.
     ReadFailed(String),
+    /// The package is a `_link` whose target OBS no longer has: only the
+    /// maintainer can decide what happens to it. The text says why.
+    NeedsMaintainer(String),
     SpecHeaderMissing,
     NoSourceLine,
     /// No ecosystem matched the `Source:` line.
@@ -133,6 +136,7 @@ impl std::fmt::Display for SkipReason {
         match self {
             SkipReason::NoSpec => write!(f, "the package has no spec file"),
             SkipReason::ReadFailed(why) => write!(f, "the spec could not be read: {why}"),
+            SkipReason::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
             SkipReason::NotAnRpmVersion { latest } => write!(
                 f,
                 "upstream's newest release ({latest}) is not a valid RPM Version"

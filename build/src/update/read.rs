@@ -8,6 +8,9 @@ pub enum ReadError {
     /// OBS could not be asked or did not answer (also: the run was
     /// interrupted); the text says which step failed.
     Failed(String),
+    /// The package is a `_link` whose target is gone: the text is the report
+    /// for the maintainer (see `osc::broken_link_report`).
+    NeedsMaintainer(String),
 }
 
 impl std::fmt::Display for ReadError {
@@ -15,6 +18,7 @@ impl std::fmt::Display for ReadError {
         match self {
             ReadError::NoSpec => write!(f, "the package has no spec file"),
             ReadError::Failed(why) => write!(f, "the spec could not be read: {why}"),
+            ReadError::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
         }
     }
 }
@@ -26,6 +30,7 @@ impl From<ReadError> for SkipReason {
         match e {
             ReadError::NoSpec => SkipReason::NoSpec,
             ReadError::Failed(why) => SkipReason::ReadFailed(why),
+            ReadError::NeedsMaintainer(why) => SkipReason::NeedsMaintainer(why),
         }
     }
 }
@@ -55,6 +60,24 @@ pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Stri
             !crate::proc::shutting_down()
         },
     )
+    .map_err(|e| match e {
+        // The report names the link's target and the request that deleted it,
+        // read from OBS here; the plain reason stays when that cannot be read.
+        ReadError::NeedsMaintainer(fallback) => {
+            ReadError::NeedsMaintainer(osc::broken_link_report(project, pkg, &fallback, emit))
+        }
+        other => other,
+    })
+}
+
+/// The error a permanent failure of an osc read is: a `_link` that cannot be
+/// expanded goes to the maintainer, the rest is a failed read.
+fn permanent_error(osc_says: &str, reason: String) -> ReadError {
+    if osc_says.contains("cannot be expanded") {
+        ReadError::NeedsMaintainer(reason)
+    } else {
+        ReadError::Failed(reason)
+    }
 }
 
 /// How often a read is tried, and the wait before attempt `n` (2, 3, ...).
@@ -140,7 +163,7 @@ pub(super) fn read_spec(
             Ok(files) => files,
             Err(osc_says) => {
                 if let Some(reason) = permanent_listing_failure(pkg, &osc_says) {
-                    return Err(ReadError::Failed(reason));
+                    return Err(permanent_error(&osc_says, reason));
                 }
                 let first = osc_says.lines().map(str::trim).find(|l| !l.is_empty());
                 why = format!(
@@ -180,7 +203,7 @@ pub(super) fn read_spec(
                         )));
                     }
                 } else if let Some(reason) = permanent_listing_failure(pkg, &osc_says) {
-                    return Err(ReadError::Failed(reason));
+                    return Err(permanent_error(&osc_says, reason));
                 }
                 why = format!(
                     "reading {picked} (osc cat) failed: {}",

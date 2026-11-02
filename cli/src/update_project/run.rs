@@ -237,6 +237,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 &report.results,
                 &report.paths,
                 &report.requirements,
+                &report.maintainer,
                 a.submit
             ),
             up::arch_section(&report.arch),

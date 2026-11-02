@@ -251,6 +251,7 @@ pub fn summary_text(
     results: &[ItemResult],
     paths: &[PathAddition],
     missing: &[MissingRequirement],
+    maintainer: &[String],
     submit: bool,
 ) -> String {
     use std::fmt::Write as _;
@@ -299,6 +300,7 @@ pub fn summary_text(
             })
             .collect(),
     );
+    section(&mut out, "needs the maintainer", maintainer.to_vec());
     section(
         &mut out,
         "requirements no provider satisfies",

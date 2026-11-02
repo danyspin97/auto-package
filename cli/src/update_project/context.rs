@@ -10,6 +10,8 @@ pub(super) struct Report {
     pub(super) requirements: Vec<MissingRequirement>,
     /// The other-architecture results of the updated packages.
     pub(super) arch: Vec<ap_build::arch_check::ArchRow>,
+    /// Packages stopped for the maintainer, with the reason (not a failure).
+    pub(super) maintainer: Vec<String>,
 }
 
 /// What the build needs from `run`'s setup.

@@ -304,6 +304,7 @@ pub(super) fn cmd_update_project(
                 return Err(eyre!("{e}"));
             }
         };
+        report.maintainer.extend(plan.maintainer.iter().cloned());
         if plan.total() == 0 {
             ctx.say(format!("no matching packages in {}", a.source));
             return Ok(());

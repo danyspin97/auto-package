@@ -12,6 +12,9 @@ pub(super) struct PlanReport {
     n_found_only: usize,
     pub(super) n_uptodate: usize,
     n_skipped: usize,
+    /// The packages stopped for the maintainer (a `_link` whose target is
+    /// gone), each with its reason.
+    pub(super) maintainer: Vec<String>,
 }
 
 impl PlanReport {
@@ -20,7 +23,10 @@ impl PlanReport {
         c: &ap_build::update::Candidate,
         reporter: &(dyn Reporter + Send + Sync),
     ) {
-        use ap_build::update::Decision;
+        use ap_build::update::{Decision, SkipReason};
+        if let Decision::Skipped(SkipReason::NeedsMaintainer(why)) = &c.decision {
+            self.maintainer.push(why.clone());
+        }
         let eco_tag = |e: &ap_build::update::Ecosystem| e.tag();
         let line = match &c.decision {
             Decision::Update {

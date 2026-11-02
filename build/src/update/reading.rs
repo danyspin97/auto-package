@@ -140,15 +140,15 @@ mod reading {
          Use \"osc repairlink\" to fix merge conflicts.\n";
 
     #[test]
-    fn a_broken_link_is_not_retried_and_names_its_target() {
+    fn a_broken_link_is_not_retried_and_goes_to_the_maintainer() {
         let (out, r) = run_with(
             &[Err(BROKEN_LINK.to_string()), Ok(files(&["stacktile.spec"]))],
             &[Ok("Name: stacktile")],
             None,
             true,
         );
-        let Err(ReadError::Failed(why)) = out else {
-            panic!("expected a failed read, got {out:?}");
+        let Err(ReadError::NeedsMaintainer(why)) = out else {
+            panic!("expected a read that needs the maintainer, got {out:?}");
         };
         assert!(why.contains("openSUSE:Factory/stacktile"), "{why}");
         assert!(why.contains("relink or unlink"), "{why}");

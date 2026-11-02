@@ -304,7 +304,7 @@ fn a_failed_submit_request_fails_the_run() {
     ];
     assert!(any_failed(&failed_sr));
     assert_eq!(failure_lines(&failed_sr), ["2 submit request(s) failed"]);
-    let text = summary_text("home:u:b", &failed_sr, &[], &[], true);
+    let text = summary_text("home:u:b", &failed_sr, &[], &[], &[], true);
     assert!(text.contains("2 submit request(s) failed\n"), "{text}");
     assert!(text.contains("  a -> Base:System: failed: boom"), "{text}");
 
@@ -338,7 +338,7 @@ fn a_failed_submit_request_fails_the_run() {
     ];
     assert!(!any_failed(&quiet));
     assert!(failure_lines(&quiet).is_empty());
-    assert!(!summary_text("home:u:b", &quiet, &[], &[], true).contains("failed\n"));
+    assert!(!summary_text("home:u:b", &quiet, &[], &[], &[], true).contains("failed\n"));
 }
 
 #[test]
@@ -374,7 +374,14 @@ fn the_summary_counts_every_outcome_and_a_failure_fails_the_run() {
     assert!(any_failed(&results));
     assert!(!any_failed(&results[..1]));
     assert_eq!(failure_lines(&results), ["1 package(s) failed to update"]);
-    let text = summary_text("home:u:b", &results, &[path("r", "devel:x")], &[], true);
+    let text = summary_text(
+        "home:u:b",
+        &results,
+        &[path("r", "devel:x")],
+        &[],
+        &[],
+        true,
+    );
     for needle in [
         "branch project: home:u:b",
         "updated (2):",
@@ -392,5 +399,25 @@ fn the_summary_counts_every_outcome_and_a_failure_fails_the_run() {
     ] {
         assert!(text.contains(needle), "{needle:?} missing from:\n{text}");
     }
-    assert!(!summary_text("b", &results, &[], &[], false).contains("submit requests"));
+    assert!(!summary_text("b", &results, &[], &[], &[], false).contains("submit requests"));
+}
+
+#[test]
+fn a_broken_link_is_listed_under_needs_the_maintainer_and_is_no_failure() {
+    let reason = "X11:Wayland/stacktile links to openSUSE:Factory/stacktile, deleted from \
+                  openSUSE:Factory by request #1347021 (2026-04-17)."
+        .to_string();
+    let text = summary_text(
+        "home:u:b",
+        &[],
+        &[],
+        &[],
+        std::slice::from_ref(&reason),
+        false,
+    );
+    assert!(
+        text.contains(&format!("needs the maintainer (1):\n  {reason}\n")),
+        "{text}"
+    );
+    assert!(text.contains("failed (0):"), "{text}");
 }
