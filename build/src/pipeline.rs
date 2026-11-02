@@ -362,10 +362,13 @@ use service_source::*;
 mod prompt_notes;
 pub(crate) use prompt_notes::*;
 mod npm_vendor;
+// Unused until the pipeline hook calls it.
 mod python_spec;
 mod render;
 mod wheel_spec;
 mod wheel_switch;
+#[allow(dead_code)]
+mod zig_vendor;
 use render::*;
 mod classify;
 mod tarball;
