@@ -1,7 +1,7 @@
 use super::build_round::{record_rpmlint_logs, revert_warning};
 use super::rpmlint_fix::{
-    RpmlintAsk, RpmlintGate, RpmlintTurn, load_rpmlint_shown, persist_rpmlint_shown,
-    rpmlint_after_turn, rpmlint_ask, rpmlint_key,
+    RpmlintAsk, RpmlintGate, RpmlintTurn, errors_not_in_origin, load_rpmlint_shown,
+    persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_key,
 };
 use super::*;
 use crate::pipeline::apply_turn::TurnEffect;
@@ -222,5 +222,33 @@ fn the_stashed_rpmlint_log_gives_its_error_lines_not_its_warnings() {
         record_rpmlint_logs(&rpms, "python-cffi", "2.0", &ws)
             .errors
             .is_empty()
+    );
+}
+
+#[test]
+fn an_error_the_origin_build_reports_too_is_not_asked_of_the_update() {
+    // cracklib: the origin's own log has the same `no-binary` line.
+    let origin_log = "[32s] cracklib-dict-small.x86_64: E: no-binary\n\
+         [33s] cracklib.x86_64: W: spelling-error x\n\
+         [34s] cracklib.x86_64: E: old-rule /usr/lib/x3\n";
+    let origin = crate::osc::rpmlint_errors(origin_log);
+    let build = lines(&[
+        "cracklib-dict-small.x86_64: E: no-binary",
+        "cracklib.x86_64: E: old-rule /usr/lib/x7",
+        "cracklib.x86_64: E: new-rule /usr/lib/y",
+    ]);
+    // Only the line the origin does not have is left to ask about.
+    assert_eq!(
+        errors_not_in_origin(&build, &origin),
+        lines(&["cracklib.x86_64: E: new-rule /usr/lib/y"])
+    );
+    // No origin lines: every line is asked, as before.
+    assert_eq!(errors_not_in_origin(&build, &[]), build);
+    // All of them in the origin: nothing is asked, so the build stands.
+    let all_known = errors_not_in_origin(&build[..1], &origin);
+    assert!(all_known.is_empty());
+    assert_eq!(
+        rpmlint_ask(&open_gate(), &all_known, &BTreeSet::new()),
+        RpmlintAsk::Build
     );
 }

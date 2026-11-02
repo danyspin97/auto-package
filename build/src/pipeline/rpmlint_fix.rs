@@ -135,6 +135,65 @@ pub(super) fn rpmlint_key(line: &str) -> String {
     format!("{rule} {}", blur_digits(&subject))
 }
 
+/// The lines of `errors` that the origin's own build does not report either,
+/// by [`rpmlint_key`]. A line the origin already has is the origin's defect:
+/// an update does not fix it, so it does not start a turn.
+pub(super) fn errors_not_in_origin(errors: &[String], origin: &[String]) -> Vec<String> {
+    let known: BTreeSet<String> = origin.iter().map(|e| rpmlint_key(e)).collect();
+    errors
+        .iter()
+        .filter(|e| !known.contains(&rpmlint_key(e)))
+        .cloned()
+        .collect()
+}
+
+/// The `E:` lines of the origin's latest build log for the same repository
+/// and arch. Empty when the package is not a link, or the log cannot be read:
+/// then no line is excused and the turn is asked as before.
+fn origin_rpmlint_errors(config: &PipelineConfig, obs_name: &str) -> Vec<String> {
+    let origin = match osc::link_origin(&config.project, obs_name, Emit::quiet()) {
+        Ok(Some(origin)) => origin,
+        _ => return Vec::new(),
+    };
+    osc::fetch_build_log_tail(
+        &origin.project,
+        &origin.package,
+        &config.distro,
+        &config.arch,
+    )
+    .map(|log| osc::rpmlint_errors(&log))
+    .unwrap_or_default()
+}
+
+/// `errors` without the lines the origin's build reports too. The origin is
+/// asked only when there is a line to excuse and a turn could be asked.
+fn errors_to_ask(ctx: &RunCtx, build_step: &StepDir, errors: &[String]) -> Vec<String> {
+    let config = ctx.config;
+    if errors.is_empty() || config.no_agent || osc::local_build().is_some() {
+        return errors.to_vec();
+    }
+    let origin = origin_rpmlint_errors(config, &ctx.obs_name);
+    let fresh = errors_not_in_origin(errors, &origin);
+    if fresh.len() < errors.len() {
+        let excused: Vec<String> = errors
+            .iter()
+            .filter(|e| !fresh.contains(e))
+            .cloned()
+            .collect();
+        ctx.reporter.report(&Event::Progress {
+            step: Some(build_step.id),
+            message: format!(
+                "{}: {} rpmlint error(s) the origin's build reports too, not asked of the \
+                 update: {}",
+                ctx.rpm_name,
+                excused.len(),
+                excused.join("; ")
+            ),
+        });
+    }
+    fresh
+}
+
 /// `text` with every run of digits replaced by `#`.
 fn blur_digits(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -185,8 +244,9 @@ pub(super) fn rpmlint_fix_round(
     st: &mut RunState,
     build_step: &StepDir,
     build_log: &Path,
-    errors: &[String],
+    all_errors: &[String],
 ) -> Option<RoundEnd> {
+    let errors = &errors_to_ask(ctx, build_step, all_errors);
     let RunCtx {
         config,
         reporter,
