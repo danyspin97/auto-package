@@ -120,8 +120,9 @@ pub fn forced_line(pkg: &str, old: &str, new: &str, revision: Option<&str>) -> S
 }
 
 /// A check that `version` of the package exists where `ecosystem` says its
-/// source lives: `(ecosystem, packaged version, version)`.
-pub type Verify<'a> = &'a dyn Fn(&Ecosystem, &str, &str) -> Result<(), String>;
+/// source lives: `(ecosystem, packaged version, version)`. `Ok` carries the
+/// forge's tag for the version when the forge lists one (`v2.9.0-1`).
+pub type Verify<'a> = &'a dyn Fn(&Ecosystem, &str, &str) -> Result<Option<String>, String>;
 
 /// Decide the plan for `rpm_name` when the target is forced to `to_version`:
 /// the first place the spec's source points at that has the version decides.
@@ -151,7 +152,10 @@ pub fn classify_forced(
             continue;
         }
         match verify(&ecosystem, &header.version, to_version) {
-            Ok(()) => {
+            Ok(tag) => {
+                // A dashed tag (`v2.9.0-1`) travels with the decision, as plan
+                // carries it, so the spec editor can write the tag into the spec.
+                let upstream_tag = tag.filter(|t| t.contains('-'));
                 let decision = if header.version == to_version {
                     Decision::UpToDate {
                         ecosystem,
@@ -162,7 +166,7 @@ pub fn classify_forced(
                         ecosystem,
                         old_version: header.version,
                         new_version: to_version.to_string(),
-                        upstream_tag: None,
+                        upstream_tag,
                     }
                 };
                 return Candidate {
@@ -187,16 +191,20 @@ pub fn classify_forced(
 /// The real check for [`classify_forced`], through the paths the build
 /// fetches by: PyPI's JSON for the release, the forge's tag list, and a HEAD
 /// request for the spec's source URL with the version swapped in.
-pub fn verify_upstream(ecosystem: &Ecosystem, old: &str, version: &str) -> Result<(), String> {
+pub fn verify_upstream(
+    ecosystem: &Ecosystem,
+    old: &str,
+    version: &str,
+) -> Result<Option<String>, String> {
     match ecosystem {
         Ecosystem::Pypi { pypi_name } => match crate::pipeline::fetch_pypi_json(pypi_name, version)
         {
-            Ok(Some(_)) => Ok(()),
+            Ok(Some(_)) => Ok(None),
             Ok(None) => Err(format!("PyPI has no release {version} of {pypi_name}")),
             Err(e) => Err(e),
         },
         Ecosystem::GitRepo { url } => crate::sources::tag_for_version(url, version)
-            .map(|_| ())
+            .map(Some)
             .ok_or_else(|| {
                 format!("{url} lists no tag for version {version} (or its API did not answer)")
             }),
@@ -210,7 +218,7 @@ pub fn verify_upstream(ecosystem: &Ecosystem, old: &str, version: &str) -> Resul
             }
             crate::http::head(&expanded)
                 .call()
-                .map(|_| ())
+                .map(|_| None)
                 .map_err(|e| format!("{expanded}: {e}"))
         }
         Ecosystem::Repology { .. } => Err("Repology names no source to fetch".to_string()),
@@ -412,7 +420,7 @@ Source:         https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{v
         let spec = |_: &str| Ok(SPEC.to_string());
         let verify = move |_: &Ecosystem, _: &str, v: &str| {
             if has.contains(&v) {
-                Ok(())
+                Ok(None)
             } else {
                 Err(format!("PyPI has no release {v} of attrs"))
             }
@@ -472,7 +480,7 @@ Source:         https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{v
     #[test]
     fn a_source_nothing_can_fetch_is_skipped() {
         let spec = |_: &str| Ok("Name: x\nVersion: 1\n".to_string());
-        let verify = |_: &Ecosystem, _: &str, _: &str| Ok(());
+        let verify = |_: &Ecosystem, _: &str, _: &str| Ok(None);
         let c = classify_forced("x", &spec, &verify, None, "2");
         assert!(matches!(
             c.decision,
@@ -490,7 +498,7 @@ Source:         https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{v
         // A fake tag list of the repository.
         let tags = ["0.5.0", "0.6.0"];
         let verify = |eco: &Ecosystem, _: &str, v: &str| match eco {
-            Ecosystem::GitRepo { url } if url == REPO && tags.contains(&v) => Ok(()),
+            Ecosystem::GitRepo { url } if url == REPO && tags.contains(&v) => Ok(None),
             _ => Err(format!("no tag {v}")),
         };
         let c = classify_forced("ashell", &spec, &verify, Some(REPO.into()), "0.6.0");
@@ -515,5 +523,37 @@ Source:         https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{v
             c.decision,
             Decision::Skipped(SkipReason::VersionNotFound { .. })
         ));
+    }
+
+    /// A forced version that a dashed tag of the forge carries (`2.9.0.1` is the
+    /// tag `v2.9.0-1`) is an update that carries that tag, for the spec editor.
+    #[test]
+    fn a_forced_version_carries_the_dashed_tag_it_is_found_under() {
+        const REPO: &str = "https://github.com/CuarzoSoftware/Louvre";
+        let spec = |_: &str| {
+            Ok("Name: liblouvre\nVersion: 2.8.0.1\n\
+                Source: https://github.com/CuarzoSoftware/Louvre/archive/refs/tags/v%{version}.tar.gz\n"
+                .to_string())
+        };
+        // The forge's tags; a version is found under the tag that maps to it.
+        let tags = ["v2.8.0-1", "v2.9.0-1"];
+        let verify = |eco: &Ecosystem, _: &str, v: &str| match eco {
+            Ecosystem::GitRepo { url } if url == REPO => tags
+                .iter()
+                .find(|t| crate::upstream::rpm_version_for_tag(t).as_deref() == Ok(v))
+                .map(|t| Some(t.to_string()))
+                .ok_or_else(|| format!("no tag {v}")),
+            _ => Err(format!("no tag {v}")),
+        };
+        let c = classify_forced("liblouvre", &spec, &verify, None, "2.9.0.1");
+        assert_eq!(
+            c.decision,
+            Decision::Update {
+                ecosystem: Ecosystem::GitRepo { url: REPO.into() },
+                old_version: "2.8.0.1".into(),
+                new_version: "2.9.0.1".into(),
+                upstream_tag: Some("v2.9.0-1".into()),
+            }
+        );
     }
 }

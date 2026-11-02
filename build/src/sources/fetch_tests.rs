@@ -32,6 +32,51 @@ pub(super) fn tag_archive_urls_follow_the_forge_layout() {
     );
 }
 
+/// A dashed tag is found by the RPM version it is packaged under (`v2.9.0-1`
+/// as `2.9.0.1`), and its archive is the tag's own, not the RPM version's.
+#[test]
+pub(super) fn a_dashed_tag_is_found_by_its_rpm_version() {
+    let louvre = ["v2.8.0-1", "v2.9.0-1"].map(String::from);
+    assert_eq!(
+        find_matching_tag(&louvre, "2.9.0.1", "Louvre").as_deref(),
+        Some("v2.9.0-1")
+    );
+    let srm = ["v0.8.0-1", "v0.8.0-2"].map(String::from);
+    assert_eq!(
+        find_matching_tag(&srm, "0.8.0.2", "SRM").as_deref(),
+        Some("v0.8.0-2")
+    );
+    assert_eq!(find_matching_tag(&srm, "0.8.0.3", "SRM"), None);
+    let tag = find_matching_tag(&srm, "0.8.0.2", "SRM").unwrap();
+    assert_eq!(
+        tag_archive_url_for("https://github.com/CuarzoSoftware/SRM", "SRM", false, &tag),
+        "https://github.com/CuarzoSoftware/SRM/archive/refs/tags/v0.8.0-2.tar.gz"
+    );
+}
+
+/// An exact tag beats a dashed tag that maps to the same version, and two that
+/// map to one version give the same tag in either order.
+#[test]
+pub(super) fn an_exact_tag_is_preferred_to_a_mapped_one() {
+    for tags in [["v1.0.0-1", "v1.0.0.1"], ["v1.0.0.1", "v1.0.0-1"]] {
+        let tags = tags.map(String::from);
+        assert_eq!(
+            find_matching_tag(&tags, "1.0.0.1", "Louvre").as_deref(),
+            Some("v1.0.0.1")
+        );
+    }
+    for tags in [
+        ["v1.0.0-1", "release-1.0.0-1"],
+        ["release-1.0.0-1", "v1.0.0-1"],
+    ] {
+        let tags = tags.map(String::from);
+        assert_eq!(
+            find_matching_tag(&tags, "1.0.0.1", "Louvre").as_deref(),
+            Some("release-1.0.0-1")
+        );
+    }
+}
+
 #[test]
 pub(super) fn gh_api_only_takes_the_requests_this_crate_makes() {
     for ok in [

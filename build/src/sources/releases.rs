@@ -404,14 +404,23 @@ pub(super) fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
 
 /// Find the best matching tag for a given version.
 ///
-/// First tries exact match, then tries common patterns, then returns None.
+/// First tries an exact match, then a tag that maps to the version (a dashed
+/// tag is packaged under the RPM version it maps to: `v2.9.0-1` is `2.9.0.1`),
+/// then tries common patterns, then returns None. Of the tags that map to the
+/// version, the smallest name is taken, whatever order the forge lists them in.
 pub(super) fn find_matching_tag(tags: &[String], version: &str, repo: &str) -> Option<String> {
-    // Try exact matches first
-    for tag in tags {
-        let normalized = version_from_tag(tag, repo);
-        if normalized == version {
-            return Some(tag.clone());
-        }
+    if let Some(tag) = tags
+        .iter()
+        .find(|tag| version_from_tag(tag, repo) == version)
+    {
+        return Some(tag.clone());
+    }
+    let mapped = tags
+        .iter()
+        .filter(|tag| crate::upstream::rpm_version_for_tag(tag).as_deref() == Ok(version))
+        .min();
+    if let Some(tag) = mapped {
+        return Some(tag.clone());
     }
 
     // Try pattern matching (v-prefix, repo-prefix, etc.)
