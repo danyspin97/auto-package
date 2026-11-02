@@ -150,6 +150,22 @@ fn a_real_archive_is_fetched_and_its_hash_checked() {
     assert_eq!(fake.calls(), [PIXMAN_URL]);
 }
 
+/// `pkg-1.0.tar.xz` made for zig 0.15.2 (`xz` of its `pkg-1.0.tar`), and the
+/// hash `zig fetch` printed for it.
+const ZIG_XZ: &[u8] = include_bytes!("testdata/zig-pkg-1.0.tar.xz");
+const ZIG_XZ_HASH: &str = "pkg-1.0.0-adtcAfUAAAARpu0Ax6vS6MvAqbJnxLZEHdqaM4anw0Eo";
+const ZIG_XZ_URL: &str = "https://codeberg.org/x/pkg/archive/v1.0.tar.xz";
+
+#[test]
+fn a_tar_xz_dependency_is_fetched_and_its_zig_hash_checked() {
+    let fake = Fake::new(vec![(ZIG_XZ_URL, Route::Body(ZIG_XZ.to_vec()))]);
+    let m = root(&dep("pkg", ZIG_XZ_URL, ZIG_XZ_HASH));
+    let (_dir, result) = fetch(&fake, &m);
+    let deps = result.unwrap();
+    assert_eq!(deps[0].declared, ZIG_XZ_HASH);
+    assert_eq!(fake.calls(), [ZIG_XZ_URL]);
+}
+
 #[test]
 fn a_git_url_is_fetched_as_its_forge_archive_of_that_commit() {
     let git = format!("git+https://codeberg.org/ifreund/zig-pixman#{HEX40}");
@@ -366,7 +382,7 @@ fn git_urls_that_are_not_pinned_or_not_forges_are_refused() {
         format!("git+https://git.sr.ht/o/r#{c}"),
         format!("https://example.org/a.tar.gz?x=1"),
         "http://codeberg.org/o/r/archive/v1.tar.gz".to_string(),
-        "https://codeberg.org/o/r/archive/v1.tar.xz".to_string(),
+        "https://codeberg.org/o/r/archive/v1.tar.bz2".to_string(),
         "https://codeberg.org/o/r/archive/v1".to_string(),
     ];
     for url in refused {

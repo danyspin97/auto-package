@@ -244,9 +244,38 @@ fn an_empty_archive_is_refused() {
 }
 
 #[test]
-fn only_tar_gz_and_tar_zst_are_read() {
+fn a_tar_xz_archive_unpacks_like_a_zig_made_one() {
+    // `pkg-1.0.tar.xz` as zig 0.15.2 reads it: top directory `pkg-1.0/`.
+    let bytes = include_bytes!("testdata/zig-pkg-1.0.tar.xz");
+    let (dir, result) = run(&bytes[..], Format::TarXz, LIMITS);
+    result.unwrap();
+    let out = dir.path().join("out");
+    assert_eq!(std::fs::read(out.join("hello.txt")).unwrap(), b"hello\n");
+    assert!(out.join("build.zig.zon").is_file());
+}
+
+#[test]
+fn a_second_xz_stream_is_not_read_as_zig_does_not() {
+    let bytes = include_bytes!("testdata/two-xz-streams.tar.xz");
+    let (_dir, result) = run(&bytes[..], Format::TarXz, LIMITS);
+    assert!(result.is_err(), "the second stream must not be read");
+}
+
+#[test]
+fn a_corrupt_xz_archive_is_refused() {
+    let mut bytes = include_bytes!("testdata/zig-pkg-1.0.tar.xz").to_vec();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xff;
+    let (_dir, result) = run(&bytes, Format::TarXz, LIMITS);
+    assert!(result.is_err());
+}
+
+#[test]
+fn only_the_formats_zig_reads_are_read() {
     assert_eq!(Format::of_url("https://x/a-1.0.tar.gz"), Ok(Format::TarGz));
     assert_eq!(Format::of_url("https://x/a.tgz"), Ok(Format::TarGz));
+    assert_eq!(Format::of_url("https://x/a.tar.xz"), Ok(Format::TarXz));
+    assert_eq!(Format::of_url("https://x/a.txz"), Ok(Format::TarXz));
     assert_eq!(Format::of_url("https://x/a.tar.zst"), Ok(Format::TarZst));
     assert_eq!(Format::of_url("https://x/a.tzst"), Ok(Format::TarZst));
     assert!(
@@ -254,7 +283,6 @@ fn only_tar_gz_and_tar_zst_are_read() {
             .unwrap_err()
             .contains("zip")
     );
-    assert!(Format::of_url("https://x/a.tar.xz").is_err());
     assert!(Format::of_url("https://x/a.tar.bz2").is_err());
     assert!(Format::of_url("https://x/archive").is_err());
 }

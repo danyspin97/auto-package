@@ -13,11 +13,12 @@ use std::path::{Component, Path, PathBuf};
 
 mod guard;
 
-/// The compressions a dependency archive may use. `.zip`, `.tar.xz` and
-/// `.tar.bz2` are refused, so their decoders are not parsed here.
+/// The compressions a dependency archive may use. `.zip`, `.tar.bz2` and the
+/// rest are refused, so their decoders are not parsed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Format {
     TarGz,
+    TarXz,
     TarZst,
 }
 
@@ -27,6 +28,8 @@ impl Format {
         let path = url.rsplit('/').next().unwrap_or(url);
         if path.ends_with(".tar.gz") || path.ends_with(".tgz") {
             Ok(Format::TarGz)
+        } else if path.ends_with(".tar.xz") || path.ends_with(".txz") {
+            Ok(Format::TarXz)
         } else if path.ends_with(".tar.zst") || path.ends_with(".tzst") {
             Ok(Format::TarZst)
         } else if path.ends_with(".zip") {
@@ -35,7 +38,7 @@ impl Format {
             ))
         } else {
             Err(format!(
-                "`{url}` is not a .tar.gz or .tar.zst archive (the only formats zig_vendor reads)"
+                "`{url}` is not a .tar.gz, .tar.xz or .tar.zst archive (the only formats zig_vendor reads)"
             ))
         }
     }
@@ -76,6 +79,9 @@ pub(super) fn unpack(
     std::fs::create_dir_all(dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
     let stream: Box<dyn Read> = match format {
         Format::TarGz => Box::new(flate2::read::GzDecoder::new(src)),
+        // Zig reads one xz stream and stops at its end, so a second stream
+        // makes the archive truncated, as it does for zig.
+        Format::TarXz => Box::new(lzma_rust2::XzReader::new(src, false)),
         Format::TarZst => Box::new(
             zstd::stream::read::Decoder::new(src)
                 .map_err(|e| format!("reading the zstd stream: {e}"))?,
