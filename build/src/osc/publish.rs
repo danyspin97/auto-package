@@ -55,7 +55,12 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
             plan.skipped.push(name);
             continue;
         }
-        if is_publishable(&name, &spec_text, &series, &sources) {
+        let recipe = if name == "_multibuild" {
+            fs::read_to_string(checkout_dir.join(&name)).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if is_publishable(&name, &spec_text, &recipe, &series, &sources) {
             plan.files.push(name);
         } else {
             plan.skipped.push(name);
@@ -150,40 +155,6 @@ pub(super) fn matches_source_name(pattern: &str, name: &str) -> bool {
     remaining.ends_with(last) && remaining.len() >= last.len()
 }
 
-/// Whether `name` is a build-recipe file (`_multibuild`, `_constraints`) that the
-/// spec has no use for. `_multibuild` declares flavors, which only a spec that
-/// reads `%flavor` builds differently. `_constraints` asks OBS for build
-/// resources: a pure-Python (`BuildArch: noarch`) spec that does not mention
-/// constraints or `%limit_build` compiles nothing that needs them, so one
-/// inherited from a Factory recipe of another shape is a leftover. A spec that
-/// builds native code keeps it: the agent writes it without touching the spec.
-pub(super) fn recipe_file_unused(name: &str, spec_text: &str) -> bool {
-    match name {
-        "_multibuild" => !["%{flavor}", "%flavor", "%{?flavor", "%{!?flavor"]
-            .iter()
-            .any(|m| spec_text.contains(m)),
-        "_constraints" => {
-            // Only the main package's own `BuildArch:` counts: a `noarch`
-            // subpackage (mariadb's `-test`, a `-doc`) says nothing about
-            // the build that `_constraints` sizes.
-            let noarch = spec_text
-                .lines()
-                .take_while(|l| {
-                    let l = l.trim_start();
-                    !(l.starts_with("%package") || l.starts_with("%description"))
-                })
-                .any(|l| {
-                    let l = l.trim();
-                    l.get(..9)
-                        .is_some_and(|p| p.eq_ignore_ascii_case("buildarch"))
-                        && l.ends_with("noarch")
-                });
-            noarch && !spec_text.contains("constraints") && !spec_text.contains("%limit_build")
-        }
-        _ => false,
-    }
-}
-
 /// The `project`/`package` a checkout's `_link` points at (`osc branch` makes
 /// one), when it has one.
 pub(super) fn link_target(checkout_dir: &Path) -> Option<(String, String)> {
@@ -214,10 +185,11 @@ pub fn restore_dropped_recipe_files(checkout_dir: &Path, emit: Emit<'_>) -> Vec<
     }
     let mut restored = Vec::new();
     for name in ["_constraints", "_multibuild"] {
-        if checkout_dir.join(name).exists() || recipe_file_unused(name, &spec_text) {
+        if checkout_dir.join(name).exists() {
             continue;
         }
         if let Some(text) = cat_file(&project, &package, name, emit)
+            && !recipe_file_unused(name, &spec_text, &text)
             && fs::write(checkout_dir.join(name), text).is_ok()
         {
             restored.push(name.to_string());
@@ -246,19 +218,29 @@ pub fn drop_unused_recipe_files(checkout_dir: &Path) -> Vec<String> {
         .into_iter()
         .filter(|name| {
             checkout_dir.join(name).is_file()
-                && recipe_file_unused(name, &spec_text)
+                && recipe_file_unused(
+                    name,
+                    &spec_text,
+                    &fs::read_to_string(checkout_dir.join(name)).unwrap_or_default(),
+                )
                 && fs::remove_file(checkout_dir.join(name)).is_ok()
         })
         .map(str::to_string)
         .collect()
 }
 
-fn is_publishable(name: &str, spec_text: &str, series: &[String], sources: &[String]) -> bool {
+fn is_publishable(
+    name: &str,
+    spec_text: &str,
+    recipe: &str,
+    series: &[String],
+    sources: &[String],
+) -> bool {
     // `_multibuild` declares flavors that only a spec which reads `%flavor` builds
     // differently. One left behind when a source recipe is swapped for a wheel
     // repackage (python-torch: `standard` and `openmpi4`) makes OBS build the same
     // spec once per flavor, so it goes, and is removed from OBS with the commit.
-    if recipe_file_unused(name, spec_text) {
+    if recipe_file_unused(name, spec_text, recipe) {
         return false;
     }
     // A wheel repackage compiles nothing and fetches no source tree: the

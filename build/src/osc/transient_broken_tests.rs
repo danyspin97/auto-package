@@ -251,9 +251,9 @@ fn a_generated_commit_list_collapses_to_the_update_line() {
 #[test]
 fn a_noarch_subpackage_does_not_make_constraints_unused() {
     let spec = "Name: m\nVersion: 1\nBuildRequires: gcc\n%description\nx\n%package test\nBuildArch: noarch\n";
-    assert!(!recipe_file_unused("_constraints", spec));
+    assert!(!recipe_file_unused("_constraints", spec, ""));
     let noarch = "Name: m\nBuildArch: noarch\n%description\nx\n";
-    assert!(recipe_file_unused("_constraints", noarch));
+    assert!(recipe_file_unused("_constraints", noarch, ""));
 }
 
 #[test]

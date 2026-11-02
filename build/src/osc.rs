@@ -106,7 +106,11 @@ mod ci_retry;
 mod ci_retry_tests;
 mod publish;
 pub use publish::*;
+mod recipe_files;
+use recipe_files::recipe_file_unused;
 mod baseline;
+#[cfg(test)]
+mod recipe_files_tests;
 pub use baseline::*;
 
 #[cfg(test)]
