@@ -105,6 +105,21 @@ pub(super) fn scriptlet_bodies(lines: &[&str]) -> BTreeMap<String, Vec<String>> 
     out
 }
 
+/// What identifies a scriptlet across a subpackage rename: its header without
+/// the `-n <subpackage>` pair, and its body.
+fn scriptlet_key(header: &str, body: &[String]) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut words = header.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "-n" {
+            words.next();
+        } else {
+            kept.push(word);
+        }
+    }
+    format!("{}\n{}", kept.join(" "), body.join("\n"))
+}
+
 /// The files of the source archive `tarball` holds, without its top directory
 /// (`foo-1.0/setup.py` is `setup.py`), which is how a patch names them. Empty
 /// when there is no archive or it cannot be listed.
@@ -133,20 +148,39 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
         }
     };
 
-    // Scriptlets: a header the baseline does not have is a new scriptlet; a
-    // body changed under a header it has is a changed one.
+    // Scriptlets: a header the baseline does not have is a new scriptlet,
+    // unless the change also removes a baseline scriptlet with the same key
+    // (a renamed subpackage, `%post -n libX1` to `%post -n libX2`, keeps its
+    // scriptlet); a body changed under a header the baseline has is a changed
+    // one.
     let base_headers = headers(&base_spec);
     let fin_headers = headers(&fin_spec);
+    let base_bodies = scriptlet_bodies(&base_spec);
+    let fin_bodies = scriptlet_bodies(&fin_spec);
+    let mut removed: Vec<String> = base_headers
+        .iter()
+        .filter(|h| !fin_headers.contains(h))
+        .map(|h| scriptlet_key(h, &base_bodies.get(h).cloned().unwrap_or_default()))
+        .collect();
     for i in extra(
         &fin_headers.iter().map(String::as_str).collect::<Vec<_>>(),
         &base_headers.iter().map(String::as_str).collect::<Vec<_>>(),
     ) {
-        push(RiskFlag::NewScriptlet {
-            header: fin_headers[i].clone(),
-        });
+        let header = &fin_headers[i];
+        let body = fin_bodies.get(header).cloned().unwrap_or_default();
+        match removed
+            .iter()
+            .position(|k| *k == scriptlet_key(header, &body))
+        {
+            Some(p) => {
+                removed.remove(p);
+            }
+            None => push(RiskFlag::NewScriptlet {
+                header: header.clone(),
+            }),
+        }
     }
-    let base_bodies = scriptlet_bodies(&base_spec);
-    for (header, body) in scriptlet_bodies(&fin_spec) {
+    for (header, body) in fin_bodies {
         if base_bodies.get(&header).is_some_and(|old| *old != body) {
             push(RiskFlag::ChangedScriptlet { header });
         }

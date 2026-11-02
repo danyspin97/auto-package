@@ -51,6 +51,52 @@ fn a_changed_body_under_an_existing_scriptlet_is_not_a_new_one() {
 }
 
 #[test]
+fn a_renamed_subpackage_keeps_its_scriptlet_and_is_not_a_new_one() {
+    let base = with(
+        "%install\n",
+        "%post -n libfoo1_5_6 -p /sbin/ldconfig\n%install\n",
+    );
+    let fin = with(
+        "%install\n",
+        "%post -n libfoo2 -p /sbin/ldconfig\n%install\n",
+    );
+    assert!(flags(&base, &fin).is_empty());
+}
+
+#[test]
+fn a_renamed_subpackage_with_a_new_body_is_flagged() {
+    let base = with(
+        "%install\n",
+        "%post -n libfoo1 -p /sbin/ldconfig\n%install\n",
+    );
+    let fin = with("%install\n", "%post -n libfoo2\necho hi\n%install\n");
+    assert_eq!(
+        flags(&base, &fin),
+        vec![RiskFlag::NewScriptlet {
+            header: "%post -n libfoo2".into()
+        }]
+    );
+}
+
+#[test]
+fn a_copy_of_a_scriptlet_for_a_new_subpackage_is_flagged() {
+    let base = with(
+        "%install\n",
+        "%post -n libfoo1 -p /sbin/ldconfig\n%install\n",
+    );
+    let fin = with(
+        "%install\n",
+        "%post -n libfoo1 -p /sbin/ldconfig\n%post -n libfoo2 -p /sbin/ldconfig\n%install\n",
+    );
+    assert_eq!(
+        flags(&base, &fin),
+        vec![RiskFlag::NewScriptlet {
+            header: "%post -n libfoo2 -p /sbin/ldconfig".into()
+        }]
+    );
+}
+
+#[test]
 fn a_scriptlet_named_in_a_comment_is_not_one() {
     let fin = with("%install\n", "# %post is not used here\n%install\n");
     assert!(flags(SPEC, &fin).is_empty());
