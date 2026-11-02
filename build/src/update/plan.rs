@@ -118,20 +118,17 @@ where
         );
     }
     if let Some(known) = computed_prefix(&header.version) {
-        // Repology's newest is numbered by whichever distribution it came from
-        // (ca-certificates "15-GA" against the spec's snapshot "2+git…"), so it
-        // is not taken as a release of a version the spec only half names.
-        let decision = if newer_than_known(&latest, &known)
-            && !matches!(ecosystem, Ecosystem::Repology { .. })
-        {
-            Decision::Update {
-                ecosystem,
-                old_version: header.version,
-                new_version: latest,
-                upstream_tag: upstream_tag.clone(),
-            }
-        } else if older_than_known(&latest, &known) {
-            // Upstream is behind what the spec already names, whatever the
+        // Only the upstream base the spec shows is compared (`5.3` of
+        // `5.3.%(…)`). A newer base is for a maintainer: the script that
+        // computes the patch level is not run, so nothing is updated here.
+        let decision = if newer_than_known(&latest, &known) {
+            Decision::Skipped(SkipReason::PatchLevelScript {
+                packaged: header.version,
+                known,
+                latest,
+            })
+        } else if older_than_known(&latest, &known) || same_as_known(&latest, &known) {
+            // Upstream is at or behind the base the spec names, whatever the
             // macro adds.
             Decision::UpToDate {
                 ecosystem,
@@ -295,6 +292,12 @@ pub(super) fn newer_than_known(latest: &str, known: &str) -> bool {
 /// Whether `latest` is behind `known` in the components both have.
 pub(super) fn older_than_known(latest: &str, known: &str) -> bool {
     version::cmp_common_prefix(latest, known) == Some(std::cmp::Ordering::Less)
+}
+
+/// Whether `latest` has every component `known` has, and they are equal.
+pub(super) fn same_as_known(latest: &str, known: &str) -> bool {
+    version::leading_numbers(latest).len() >= version::leading_numbers(known).len()
+        && version::cmp_common_prefix(latest, known) == Some(std::cmp::Ordering::Equal)
 }
 
 /// A version that starts like a release number (`2.3.1`, `v1.0-rc2`, `20240101`)

@@ -50,6 +50,8 @@ pub use snapshot::cached_release_date;
 mod snapshot_tests;
 pub use suse::project_has_service;
 #[cfg(test)]
+mod script_version_tests;
+#[cfg(test)]
 mod suse_tests;
 #[cfg(test)]
 mod versions;

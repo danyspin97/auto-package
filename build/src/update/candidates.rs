@@ -119,6 +119,13 @@ pub enum SkipReason {
         known: String,
         latest: String,
     },
+    /// The packaged `Version:` is computed by a script and upstream has a newer
+    /// base than the one the spec shows: a maintainer decides the patch level.
+    PatchLevelScript {
+        packaged: String,
+        known: String,
+        latest: String,
+    },
     /// The package is one series of a project that ships several side by side
     /// (`fmt-9` stays on 9.x), and the newest release is of another series.
     OtherSeries {
@@ -227,6 +234,15 @@ impl std::fmt::Display for SkipReason {
                 f,
                 "packaged from a repository snapshot ({packaged}), which a release \
                  ({latest}) cannot say is current or not"
+            ),
+            SkipReason::PatchLevelScript {
+                packaged,
+                known,
+                latest,
+            } => write!(
+                f,
+                "needs a maintainer: patch-level script (the version {packaged} is computed \
+                 by a script; upstream's newest {latest} is past the {known} it shows)"
             ),
             SkipReason::ComputedVersion {
                 packaged,
