@@ -64,7 +64,7 @@ fn merged_conventions_point_to_a_topic_file() {
             "stub {n} points at another stub, {target}"
         );
     }
-    assert!((25..=50).contains(&topics), "{topics} topic files");
+    assert!((25..=55).contains(&topics), "{topics} topic files");
 }
 
 /// A build log can contain a fence and then text that reads like an

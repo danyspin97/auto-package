@@ -108,3 +108,5 @@
 108. SysV init scripts (deprecated, never add) — read when a package has an init script, /etc/init.d, insserv or a request to add a daemon init script
 109. General rules: no prebuilt binaries or bundled libs, .desktop, logrotate, udev, donations — read when the tarball holds a binary or bundled lib, or the spec adds a .desktop or udev rule
 110. License coverage of subpackages and Legal-Review-Notice — read when a subpackage has its own License, a subpackage lacks %license, or a tarball file is left out of the package
+111. Upstream patch header, type-1 comment, .changes line — read when adding or changing a PatchN: or a patch file, its Upstream: header, or a .changes patch entry (Add/Backport/Rebase/Drop)
+112. X11:XOrg and X11:Wayland patch format (Patch-Mainline, tagged file names) — read when the package uses X11 patch names such as N_, u_, T_, or Patch-Mainline headers
