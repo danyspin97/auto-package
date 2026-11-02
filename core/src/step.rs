@@ -55,6 +55,14 @@ pub static STEPS: &[StepSpec] = &[
         keeps_disk_flag: false,
     },
     StepSpec {
+        kind: StepKind::ZigVendor,
+        label: "Refreshing zig vendor archive",
+        dir: "zig-vendor",
+        conditional: true,
+        retryable: false,
+        keeps_disk_flag: false,
+    },
+    StepSpec {
         kind: StepKind::ValidateSpec,
         label: "Validating spec",
         dir: "validate",
@@ -116,6 +124,7 @@ impl StepKind {
             StepKind::OscService => "osc_service",
             StepKind::GenerateSpec => "generate_spec",
             StepKind::FetchSdist => "fetch_sdist",
+            StepKind::ZigVendor => "zig_vendor",
             StepKind::ValidateSpec => "validate_spec",
             StepKind::Commit => "commit",
             StepKind::Build => "build",

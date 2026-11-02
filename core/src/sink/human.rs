@@ -32,7 +32,8 @@ impl HumanSink {
             | Event::NotesUsage { .. }
             | Event::FailedTurnUsage { .. }
             | Event::Progress { .. }
-            | Event::HostAllowed { .. } => LogLevel::Info,
+            | Event::HostAllowed { .. }
+            | Event::ZigVendor { .. } => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }
             | Event::ExtractResult { .. }
@@ -232,6 +233,21 @@ impl HumanSink {
                     HostSource::Flag => "--allow-host",
                     HostSource::Tui => "the TUI",
                 },
+            )),
+            Event::ZigVendor {
+                file,
+                changed,
+                deps,
+                ..
+            } => Some(format!(
+                "  zig vendor {file}: {} {}, {}",
+                deps.len(),
+                if deps.len() == 1 {
+                    "dependency"
+                } else {
+                    "dependencies"
+                },
+                if *changed { "rewritten" } else { "unchanged" },
             )),
             Event::Warning { message, .. } => Some(format!(
                 "  {} {message}",

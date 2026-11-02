@@ -46,6 +46,7 @@ pub enum StepKind {
     OscService,
     GenerateSpec,
     FetchSdist,
+    ZigVendor,
     ValidateSpec,
     Commit,
     Build,
@@ -490,6 +491,27 @@ pub enum Event {
         version: String,
         outcome: PackageOutcome,
     },
+    /// The zig vendor archive of a package was rebuilt from the `build.zig.zon`
+    /// of its new source. `changed` is false when the archive was already that.
+    /// `deps` are the dependencies it holds, in the order they are written.
+    ZigVendor {
+        step: StepId,
+        pkg: String,
+        file: String,
+        changed: bool,
+        deps: Vec<ZigDep>,
+    },
+}
+
+/// One dependency a zig vendor archive holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZigDep {
+    /// The name the manifest gives the dependency.
+    pub name: String,
+    /// The URL the manifest gives it.
+    pub url: String,
+    /// The hash the manifest declares, `name-version-<digest>`.
+    pub hash: String,
 }
 
 #[cfg(test)]
