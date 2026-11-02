@@ -38,6 +38,8 @@ mod lookup_macro_tests;
 #[cfg(test)]
 mod lookups;
 mod plan;
+mod series;
+use series::*;
 mod read;
 #[cfg(test)]
 mod reading;

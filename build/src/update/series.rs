@@ -1,0 +1,173 @@
+//! The series a package is pinned to by its name, and the held-back check that
+//! keeps a candidate outside that series.
+
+use super::*;
+use std::collections::HashSet;
+
+/// The series a package is pinned to by its name: `fmt-9`, `boost-1.85` and
+/// `wlroots-0_15` name `[9]`, `[1, 85]` and `[0, 15]`. Without a dash the
+/// number needs an underscore (`pipewire0_2`), or a soname (`libfoo2`) would
+/// pin. The number must also start the packaged version, or it is part of the
+/// name (`foo-2` packaging 1.4) and pins nothing. A dashed run of digits with
+/// no dot is a major and a minor: `mariadb-55` is `[5, 5]` and `mariadb-100`
+/// is `[10, 0]`.
+pub(super) fn series_of(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
+    let tail = rpm_name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '_');
+    let suffix = &rpm_name[tail.len()..];
+    let dashed = tail.ends_with('-');
+    if suffix.is_empty() || suffix.starts_with(['.', '_']) || suffix.ends_with(['.', '_']) {
+        return None;
+    }
+    if !dashed && !suffix.contains('_') {
+        return None;
+    }
+    let parts: Vec<&str> = suffix.split(['.', '_']).collect();
+    let series: Vec<u64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
+    if series.len() != parts.len() {
+        return None;
+    }
+    let packaged = version::leading_numbers(version);
+    if packaged.starts_with(&series) {
+        return Some(series);
+    }
+    if dashed && parts.len() == 1 {
+        return major_minor_splits(suffix).find(|s| packaged.starts_with(s));
+    }
+    None
+}
+
+/// The ways a run of digits reads as a major and a minor with no separator:
+/// `55` is `[5, 5]`, `100` is `[1, 0]` and `[10, 0]`. A zero-padded part
+/// (`100` as `[1, 00]`) is not a number of a series.
+fn major_minor_splits(digits: &str) -> impl Iterator<Item = Vec<u64>> + '_ {
+    let padded = |p: &str| p.len() > 1 && p.starts_with('0');
+    (1..digits.len()).filter_map(move |k| {
+        let (major, minor) = digits.split_at(k);
+        if padded(major) || padded(minor) {
+            return None;
+        }
+        Some(vec![major.parse().ok()?, minor.parse().ok()?])
+    })
+}
+
+/// What a pin to the major compares: `[major]`, or `[0, minor]` for 0.x, where
+/// every minor is a series of its own (`0.15.2` is `[0, 15]`).
+pub(super) fn major_key(version: &str) -> Vec<u64> {
+    let numbers = version::leading_numbers(version);
+    match numbers.as_slice() {
+        [0, minor, ..] => vec![0, *minor],
+        [major, ..] => vec![*major],
+        [] => Vec::new(),
+    }
+}
+
+/// The major and minor of a version, which is how a sibling's series is told
+/// apart from another (`3.4` and `3.9` are different series of zookeeper).
+pub(super) fn series_pair(version: &str) -> Vec<u64> {
+    version::leading_numbers(version)
+        .into_iter()
+        .take(2)
+        .collect()
+}
+
+/// The name a package keeps across its series: `influxdb2` and `influxdb` share
+/// `influxdb`, `mariadb-55` shares `mariadb`. A name without a number at its
+/// end is its own base (`zookeeper-kit` is not `zookeeper`).
+pub(super) fn upstream_base(rpm_name: &str) -> &str {
+    let base = rpm_name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '_');
+    base.strip_suffix('-').unwrap_or(base)
+}
+
+/// The project's other packages with the same base as `rpm_name`, read from
+/// their specs: `(name, packaged version)`. A sibling whose spec cannot be read
+/// says nothing and is left out. Flavors (`boost:base`) are not packages of
+/// their own.
+fn sibling_versions<SpecLookup>(
+    rpm_name: &str,
+    project: &HashSet<String>,
+    fetch_spec: &SpecLookup,
+) -> Vec<(String, String)>
+where
+    SpecLookup: Fn(&str) -> Result<String, ReadError>,
+{
+    let base = upstream_base(rpm_name);
+    if base.is_empty() {
+        return Vec::new();
+    }
+    project
+        .iter()
+        .filter(|s| s.as_str() != rpm_name && !s.contains(':') && upstream_base(s) == base)
+        .filter_map(|s| {
+            let header = spec::parse_header(&fetch_spec(s).ok()?)?;
+            Some((s.clone(), header.version))
+        })
+        .collect()
+}
+
+/// Whether `rpm_name` is the spec's `name` with a series after it: `mariadb-55`
+/// for `mariadb`, `mariadb-100` too, `wlroots-0_16` for `wlroots`. Any other
+/// difference (`python-foo` for `foo`, `foo-kit`, a rename) is not a series.
+pub(super) fn is_series_copy_of(rpm_name: &str, name: &str) -> bool {
+    if name.is_empty() || name.contains('%') {
+        return false;
+    }
+    let Some(rest) = rpm_name.strip_prefix(name) else {
+        return false;
+    };
+    let rest = rest.strip_prefix('-').unwrap_or(rest);
+    rest.starts_with(|c: char| c.is_ascii_digit())
+        && rest
+            .split('_')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Why a `latest` newer than the packaged version is not taken, when it is not:
+/// a package on a series (`fmt-9`, `mariadb-55`), or one pinned to its major
+/// because its name is an old series of its spec's Name (`mariadb-55`) or a
+/// sibling is on a newer series.
+pub(super) fn held_back<SpecLookup>(
+    rpm_name: &str,
+    header: &spec::Header,
+    latest: &str,
+    fetch_spec: &SpecLookup,
+    project: &HashSet<String>,
+) -> Option<SkipReason>
+where
+    SpecLookup: Fn(&str) -> Result<String, ReadError>,
+{
+    let packaged = header.version.as_str();
+    let other_series = |series: String| SkipReason::OtherSeries {
+        series,
+        packaged: packaged.to_string(),
+        latest: latest.to_string(),
+    };
+    if let Some(series) = series_of(rpm_name, packaged) {
+        return (!in_series(latest, &series)).then(|| {
+            other_series(
+                series
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            )
+        });
+    }
+    let own = major_key(packaged);
+    if own.is_empty() {
+        return None;
+    }
+    let own_pair = series_pair(packaged);
+    let related = sibling_versions(rpm_name, project, fetch_spec);
+    let series_copy = is_series_copy_of(rpm_name, &header.name);
+    let newer_sibling = related.iter().any(|(_, v)| series_pair(v) > own_pair);
+    if series_copy || newer_sibling {
+        return (major_key(latest) != own)
+            .then(|| other_series(own.iter().map(u64::to_string).collect::<Vec<_>>().join(".")));
+    }
+    None
+}
+
+/// Whether `version` belongs to `series`: it starts with the same numbers.
+pub(super) fn in_series(version: &str, series: &[u64]) -> bool {
+    version::leading_numbers(version).starts_with(series)
+}

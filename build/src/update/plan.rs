@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 /// Fetch and classify one package. Pure given the injected lookups —
 /// factored out of [`plan`] so it is directly testable without talking to
@@ -7,6 +8,21 @@ pub fn classify<SpecLookup>(
     rpm_name: &str,
     fetch_spec: &SpecLookup,
     lookups: &Lookups<'_>,
+) -> Candidate
+where
+    SpecLookup: Fn(&str) -> Result<String, ReadError>,
+{
+    classify_in_project(rpm_name, fetch_spec, lookups, &HashSet::new())
+}
+
+/// [`classify`] for a package of a project: `project` lists every package of
+/// it, so a package can be held to its major by a sibling that is on a newer
+/// series (`influxdb` beside `influxdb2`).
+pub fn classify_in_project<SpecLookup>(
+    rpm_name: &str,
+    fetch_spec: &SpecLookup,
+    lookups: &Lookups<'_>,
+    project: &HashSet<String>,
 ) -> Candidate
 where
     SpecLookup: Fn(&str) -> Result<String, ReadError>,
@@ -151,25 +167,17 @@ where
         _ => Scheme::Generic,
     };
     let decision = match compare_versions(&latest, tag_version, scheme) {
-        pypi::VersionCompare::Newer => match series_of(rpm_name, &header.version) {
-            Some(series) if !in_series(&latest, &series) => {
-                Decision::Skipped(SkipReason::OtherSeries {
-                    series: series
-                        .iter()
-                        .map(u64::to_string)
-                        .collect::<Vec<_>>()
-                        .join("."),
-                    packaged: header.version,
-                    latest,
-                })
+        pypi::VersionCompare::Newer => {
+            match held_back(rpm_name, &header, &latest, fetch_spec, project) {
+                Some(reason) => Decision::Skipped(reason),
+                None => Decision::Update {
+                    ecosystem,
+                    old_version: header.version,
+                    new_version: latest,
+                    upstream_tag,
+                },
             }
-            _ => Decision::Update {
-                ecosystem,
-                old_version: header.version,
-                new_version: latest,
-                upstream_tag,
-            },
-        },
+        }
         pypi::VersionCompare::NotNewer => Decision::UpToDate {
             ecosystem,
             version: header.version,
@@ -252,35 +260,6 @@ pub(super) fn computed_prefix(version: &str) -> Option<String> {
     let start = version.find("%(").or_else(|| version.find('%'))?;
     let known = version[..start].trim_end_matches(['.', '-', '_', '+']);
     plain_version(known).then(|| known.to_string())
-}
-
-/// The series a package is pinned to by its name: `fmt-9`, `boost-1.85` and
-/// `wlroots-0_15` name `[9]`, `[1, 85]` and `[0, 15]`. Without a dash the
-/// number needs an underscore (`pipewire0_2`), or a soname (`libfoo2`) would
-/// pin. The number must also start the packaged version, or it is part of the
-/// name (`foo-2` packaging 1.4) and pins nothing.
-pub(super) fn series_of(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
-    let tail = rpm_name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '_');
-    let suffix = &rpm_name[tail.len()..];
-    let dashed = tail.ends_with('-');
-    if suffix.is_empty() || suffix.starts_with(['.', '_']) || suffix.ends_with(['.', '_']) {
-        return None;
-    }
-    if !dashed && !suffix.contains('_') {
-        return None;
-    }
-    let parts: Vec<&str> = suffix.split(['.', '_']).collect();
-    let series: Vec<u64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
-    let packaged = version::leading_numbers(version);
-    (series.len() == parts.len()
-        && packaged.len() >= series.len()
-        && packaged[..series.len()] == series[..])
-        .then_some(series)
-}
-
-/// Whether `version` belongs to `series`: it starts with the same numbers.
-pub(super) fn in_series(version: &str, series: &[u64]) -> bool {
-    version::leading_numbers(version).starts_with(series)
 }
 
 /// Whether `latest` is ahead of `known` in the components `known` has.
@@ -423,13 +402,14 @@ pub fn plan_each(
         fetch_release_date: &fetch_release_date,
     };
 
+    let packages: HashSet<String> = sources.iter().cloned().collect();
     let total = names.len();
     for (i, n) in names.iter().enumerate() {
         emit.reporter.report(&Event::Progress {
             step: emit.step,
             message: format!("checking {n} ({}/{total})", i + 1),
         });
-        if !on(classify(n, &fetch_spec, &lookups)) {
+        if !on(classify_in_project(n, &fetch_spec, &lookups, &packages)) {
             break;
         }
     }
@@ -477,3 +457,7 @@ pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Result<String, 
         None => spec_for_package(project, pkg, emit),
     }
 }
+
+#[cfg(test)]
+#[path = "plan_tests.rs"]
+mod tests;
