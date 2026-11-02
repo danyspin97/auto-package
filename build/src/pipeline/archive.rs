@@ -315,6 +315,7 @@ pub(super) fn claim_run(st: &mut PkgState, run_id: &str) {
     if st.cumulative_spent_run_id.as_deref() != Some(run_id) {
         st.cumulative_spent_usd = 0.0;
         st.cumulative_attempts = 0;
+        st.cumulative_build_rounds = 0;
     }
     st.cumulative_spent_run_id = Some(run_id.to_string());
 }

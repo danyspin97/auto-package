@@ -422,6 +422,8 @@ pub(super) struct RunState {
     /// [`failure_shape`]) and how many builds in a row failed with it.
     pub(super) last_failure_shape: Option<String>,
     pub(super) same_shape_failures: usize,
+    /// The fix-after-build rounds this package has been given (see `build_rounds`).
+    pub(super) build_rounds: crate::pipeline::build_rounds::BuildRounds,
     /// SHA-256 of the spec an unresolvable build was retried for after a
     /// bound was relaxed: the retry is only worth a build when the spec
     /// then differs from this.
@@ -507,6 +509,7 @@ fn run_stages(
         last_log_digest: None,
         identical_logs: 0,
         same_shape_failures: 0,
+        build_rounds: Default::default(),
         last_failure_shape: None,
         relaxed_from_spec: None,
         post_review_done: false,

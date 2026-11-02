@@ -192,6 +192,7 @@ fn run_turns(
         last_log_digest: None,
         identical_logs: 0,
         same_shape_failures: 0,
+        build_rounds: Default::default(),
         last_failure_shape: None,
         relaxed_from_spec: None,
         post_review_done: false,

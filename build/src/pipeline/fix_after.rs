@@ -423,6 +423,16 @@ pub(super) fn fix_after_build(
     };
     let context = context_owned.as_deref();
 
+    // Each fix turn is one round of this loop. The same error lines coming back
+    // or the round cap end the package before another turn is paid for.
+    if let Err(reason) = st.build_rounds.next_round(&extract.error_lines) {
+        return Err(ctx.failed_as(
+            FailureKind::Exhausted,
+            format!("{reason}; log: {}", build_log.display()),
+        ));
+    }
+    persist_build_rounds(ws, &config.run_id, st.build_rounds.given);
+
     fix_turn(
         ctx,
         st,

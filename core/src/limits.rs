@@ -11,6 +11,10 @@ pub const DEFAULT_MAX_TOTAL_USD: f64 = 50.0;
 pub const DEFAULT_MAX_PACKAGES: usize = 25;
 /// Default for `--jobs`.
 pub const DEFAULT_JOBS: usize = 4;
+/// Default for the fix-after-build rounds a package gets: one fix turn per failed build.
+pub const DEFAULT_FIX_BUILD_ROUNDS: usize = 6;
+/// Failed builds in a row with the same error lines before the package ends.
+pub const SAME_BUILD_ERRORS_LIMIT: usize = 3;
 /// Default OBS requests per second (`AUTO_PACKAGE_OBS_RPS` overrides it).
 pub const DEFAULT_OBS_RPS: f64 = 5.0;
 /// OBS requests allowed back to back before the rate applies.

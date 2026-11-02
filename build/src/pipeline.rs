@@ -275,6 +275,7 @@ mod dep_edit;
 use dep_edit::*;
 mod linked;
 use linked::*;
+mod build_rounds;
 mod fix_after;
 use fix_after::*;
 mod fix_turn;
@@ -451,6 +452,9 @@ mod hygiene_tests;
 
 #[cfg(test)]
 mod ladder_tests;
+
+#[cfg(test)]
+mod build_rounds_tests;
 
 #[cfg(test)]
 mod rpm_query_tests;

@@ -139,6 +139,10 @@ pub struct PkgState {
     /// attempt numbers already written by the earlier call.
     #[serde(default)]
     pub cumulative_attempts: usize,
+    /// Fix-after-build rounds given in the `cumulative_spent_run_id` run, scoped
+    /// like `cumulative_attempts` (see `build_rounds::BuildRounds`).
+    #[serde(default)]
+    pub cumulative_build_rounds: usize,
     /// Sorted+deduped OBS-reported unresolvable-dependency set for which the
     /// one-off `TranslateUnresolvableDeps` agent turn already ran. Prevents
     /// paying for another lookup if this exact package resurfaces with the

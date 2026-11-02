@@ -116,6 +116,18 @@ pub(super) fn persist_attempts(ws: &Workspace, run_id: &str, attempts: usize) {
     }
 }
 
+/// Persist the fix-after-build rounds given, after each one, so a package that
+/// comes back in the same CLI run keeps its round cap (see `BuildRounds`).
+pub(super) fn persist_build_rounds(ws: &Workspace, run_id: &str, given: usize) {
+    let saved = PkgState::update(ws, |st| {
+        claim_run(st, run_id);
+        st.cumulative_build_rounds = given;
+    });
+    if let Err(e) = saved {
+        ap_core::diag!("  cannot save the fix-after-build rounds: {e}");
+    }
+}
+
 /// Write an artifact or spec copy, warning with the path when it fails so the
 /// run does not go on as if the file had been written.
 pub(super) fn write_or_warn(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
