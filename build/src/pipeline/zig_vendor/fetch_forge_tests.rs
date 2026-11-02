@@ -1,5 +1,4 @@
 use super::fetch_tests::{Fake, HEX40, Route, dep, fetch, root};
-use super::tree::Item;
 
 /// The `build.zig.zon` of the escaping-links fixture, byte for byte as zig
 /// 0.15.2 was given it.
@@ -45,19 +44,12 @@ fn escaping_links_archive() -> Vec<u8> {
 }
 
 #[test]
-fn links_that_leave_the_tree_hash_as_zig_hashes_them_and_are_not_written() {
+fn links_that_leave_the_tree_are_refused_for_a_forge_archive() {
     let fake = Fake::new(vec![(ESCAPE_URL, Route::Body(escaping_links_archive()))]);
     let m = root(&dep("pkg", ESCAPE_URL, ESCAPE_HASH));
     let (_dir, result) = fetch(&fake, &m);
-    let deps = result.unwrap();
-    assert_eq!(deps[0].declared, ESCAPE_HASH);
-    assert!(deps[0].root.join("a.zig").is_file());
-    assert!(std::fs::symlink_metadata(deps[0].root.join("sub/evil")).is_err());
-    assert!(std::fs::symlink_metadata(deps[0].root.join("abs")).is_err());
-    assert!(deps[0].items.iter().any(|i| matches!(
-        i,
-        Item::Link { rel, target } if rel == "sub/evil" && target == b"../../../../../../etc/passwd"
-    )));
+    let err = result.unwrap_err();
+    assert!(err.msg.contains("outside the tree"), "{err}");
 }
 
 #[test]
@@ -94,7 +86,9 @@ fn each_forge_archive_is_read_as_the_content_type_it_is_served_with() {
             Route::Typed(content_type, escaping_links_archive()),
         )]);
         let (_dir, result) = fetch(&fake, &root(&dep("pkg", &git, ESCAPE_HASH)));
-        assert_eq!(result.unwrap()[0].declared, ESCAPE_HASH, "{git}");
+        // The archive is read in its format, then refused for its links.
+        let err = result.unwrap_err();
+        assert!(err.msg.contains("outside the tree"), "{git}: {err}");
         assert_eq!(fake.calls(), [archive_url]);
     }
 }

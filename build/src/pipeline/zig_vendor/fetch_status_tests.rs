@@ -10,6 +10,7 @@ use super::fetch::{
     Dep, Fetch, RATE_LIMIT_PAUSE, Refusal, Request, Response, fetch_vendor, rate_limited,
     status_refusal,
 };
+use super::fetch_git::NoGit;
 use super::fetch_tests::{Quiet, dep, root};
 use crate::pipeline::FailureKind;
 
@@ -57,6 +58,7 @@ fn run(fetch: &dyn Fetch) -> Result<Vec<Dep>, Refusal> {
     let req = Request {
         package: "pkg",
         fetch,
+        git: &NoGit,
         work: dir.path(),
         limits: super::unpack::LIMITS,
         reporter: &Quiet,

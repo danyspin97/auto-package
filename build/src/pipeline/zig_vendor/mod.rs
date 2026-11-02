@@ -5,6 +5,8 @@
 //! allowlist, checks its content hash and writes the archive.
 
 mod fetch;
+mod fetch_git;
+mod fetch_source;
 mod hash;
 mod plan;
 mod refresh;
@@ -21,6 +23,12 @@ pub(in crate::pipeline) use refresh::{applies, refresh_from_network};
 mod fetch_archive_tests;
 #[cfg(test)]
 mod fetch_forge_tests;
+#[cfg(test)]
+mod fetch_git_check_tests;
+#[cfg(test)]
+mod fetch_git_tests;
+#[cfg(test)]
+mod fetch_source_tests;
 #[cfg(test)]
 mod fetch_status_tests;
 #[cfg(test)]

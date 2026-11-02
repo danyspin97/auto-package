@@ -166,16 +166,16 @@ fn a_single_top_level_link_is_not_taken_as_the_root() {
 }
 
 #[test]
-fn a_link_out_of_a_single_top_directory_is_recorded_not_written() {
+fn a_link_out_of_a_single_top_directory_is_refused() {
+    // Under the root `p` the link is `a/l`, and `../../x` leaves it.
     let bytes = tar_gz(&[
         ("p/", K::Dir),
         ("p/a/", K::Dir),
         ("p/a/l", K::Link("../../x")),
     ]);
-    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
-    let links = result.unwrap();
-    assert_eq!(target_of(&links, "a/l"), "../../x");
-    assert!(std::fs::symlink_metadata(dir.path().join("out/a/l")).is_err());
+    let (_dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    let err = result.unwrap_err();
+    assert!(err.contains("outside the tree"), "{err}");
 }
 
 #[test]
@@ -192,13 +192,12 @@ fn a_link_out_of_the_top_is_kept_when_the_top_is_not_the_root() {
 }
 
 #[test]
-fn links_that_leave_the_tree_are_recorded_and_never_written() {
+fn links_that_leave_the_tree_are_refused() {
     for target in ["../../etc/passwd", "/etc/passwd", "../x"] {
-        let bytes = tar_gz(&[("p/", K::Dir), ("p/l", K::Link(target))]);
-        let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
-        let links = result.unwrap();
-        assert_eq!(target_of(&links, "l"), target);
-        assert!(std::fs::symlink_metadata(dir.path().join("out/l")).is_err());
+        expect_refused(
+            &[("p/", K::Dir), ("p/l", K::Link(target))],
+            "outside the tree",
+        );
     }
     expect_refused(&[("p/", K::Dir), ("p/l", K::Link(""))], "no link target");
 }

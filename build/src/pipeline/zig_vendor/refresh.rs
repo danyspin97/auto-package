@@ -8,6 +8,7 @@ use std::path::Path;
 use ap_core::sink::Reporter;
 
 use super::fetch::{Fetch, HttpFetch, RETRY_PAUSE, Refusal, Request, fetch_vendor};
+use super::fetch_git::{GitRun, NoGit};
 use super::plan::{plan, source0_file};
 use super::unpack::{Format, LIMITS, unpack};
 use super::vendor_tar::write_vendor_tar;
@@ -42,7 +43,7 @@ pub(in crate::pipeline) fn refresh_from_network(
     reporter: &dyn Reporter,
     work: &Path,
 ) -> Result<Option<Refreshed>, Refusal> {
-    refresh_checkout(checkout, spec, package, &HttpFetch, reporter, work)
+    refresh_with(checkout, spec, package, &HttpFetch, &NoGit, reporter, work)
 }
 
 /// Whether [`refresh_from_network`] applies to `spec`. `Err` when the spec is
@@ -51,14 +52,28 @@ pub(in crate::pipeline) fn applies(spec: &str) -> Result<bool, String> {
     plan(spec).map(|p| p.is_some())
 }
 
-/// Refresh the vendor archive of the spec in `checkout`. `Ok(None)` when the
-/// spec is not one to refresh (see [`plan`]). `work` is a fresh directory the
-/// archives unpack into. Nothing is written when any check fails.
+/// [`refresh_with`] where no dependency may need git.
+#[cfg(test)]
 pub(super) fn refresh_checkout(
     checkout: &Path,
     spec: &str,
     package: &str,
     fetch: &dyn Fetch,
+    reporter: &dyn Reporter,
+    work: &Path,
+) -> Result<Option<Refreshed>, Refusal> {
+    refresh_with(checkout, spec, package, fetch, &NoGit, reporter, work)
+}
+
+/// Refresh the vendor archive of the spec in `checkout`. `Ok(None)` when the
+/// spec is not one to refresh (see [`plan`]). `work` is a fresh directory the
+/// archives unpack into. Nothing is written when any check fails.
+pub(super) fn refresh_with(
+    checkout: &Path,
+    spec: &str,
+    package: &str,
+    fetch: &dyn Fetch,
+    git: &dyn GitRun,
     reporter: &dyn Reporter,
     work: &Path,
 ) -> Result<Option<Refreshed>, Refusal> {
@@ -85,6 +100,7 @@ pub(super) fn refresh_checkout(
     let req = Request {
         package,
         fetch,
+        git,
         work: &deps_dir,
         limits: LIMITS,
         reporter,

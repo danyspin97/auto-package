@@ -1,4 +1,5 @@
 use super::fetch::*;
+use super::fetch_git::NoGit;
 use super::hash::PackageHash;
 use super::zon;
 use crate::pipeline::FailureKind;
@@ -174,6 +175,7 @@ pub(super) fn fetch(
     let req = Request {
         package: "pkg",
         fetch: fake,
+        git: &NoGit,
         work: dir.path(),
         limits: super::unpack::LIMITS,
         reporter: &Quiet,
@@ -534,59 +536,6 @@ fn an_archive_without_a_manifest_is_refused() {
     let fake = Fake::new(vec![(url, Route::Body(no_zon))]);
     let (_dir, result) = fetch(&fake, &root(&dep("pk", url, PIXMAN_HASH)));
     assert!(result.unwrap_err().msg.contains("no build.zig.zon"));
-}
-
-#[test]
-fn forge_git_urls_map_to_their_commit_archive() {
-    let c = HEX40;
-    let cases = [
-        (
-            format!("git+https://codeberg.org/ifreund/zig-wlroots#{c}"),
-            format!("https://codeberg.org/ifreund/zig-wlroots/archive/{c}.tar.gz"),
-        ),
-        (
-            format!("git+https://codeberg.org/ifreund/translate-c?ref=0.16.x#{c}"),
-            format!("https://codeberg.org/ifreund/translate-c/archive/{c}.tar.gz"),
-        ),
-        (
-            format!("git+https://github.com/o/r#{c}"),
-            format!("https://codeload.github.com/o/r/tar.gz/{c}"),
-        ),
-        (
-            format!("git+https://gitlab.com/o/r#{c}"),
-            format!("https://gitlab.com/o/r/-/archive/{c}/r-{c}.tar.gz"),
-        ),
-        (
-            format!("git+https://git.sr.ht/~o/r#{c}"),
-            format!("https://git.sr.ht/~o/r/archive/{c}.tar.gz"),
-        ),
-    ];
-    for (git, want) in cases {
-        assert_eq!(archive_url(&git).unwrap().0, want, "{git}");
-    }
-}
-
-#[test]
-fn git_urls_that_are_not_pinned_or_not_forges_are_refused() {
-    let c = HEX40;
-    let refused = [
-        format!("git+https://example.org/o/r#{c}"),
-        format!("git+https://codeberg.org/o/r"),
-        "git+https://codeberg.org/o/r#v0.3.0".to_string(),
-        format!("git+https://codeberg.org/o/r#{}", &c[..12]),
-        format!("git+https://codeberg.org/o/r?depth=1#{c}"),
-        format!("git+https://codeberg.org/o/r?ref=a&x=1#{c}"),
-        format!("git+https://codeberg.org/o/../x#{c}"),
-        format!("git+https://codeberg.org/o/r/extra#{c}"),
-        format!("git+https://codeberg.org/o r#{c}"),
-        format!("git+http://codeberg.org/o/r#{c}"),
-        format!("git+ssh://codeberg.org/o/r#{c}"),
-        format!("git+https://git.sr.ht/o/r#{c}"),
-        "http://codeberg.org/o/r/archive/v1.tar.gz".to_string(),
-    ];
-    for url in refused {
-        assert!(archive_url(&url).is_err(), "{url} should be refused");
-    }
 }
 
 #[test]

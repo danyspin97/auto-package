@@ -5,8 +5,9 @@
 //!
 //! Symbolic links are never created on disk. Their targets are kept as they
 //! are, as zig keeps them for hashing, and returned to the caller, which hashes
-//! and archives them from this list. So a link that points outside the tree,
-//! or at an absolute path, is recorded and does no harm here.
+//! and archives them from this list. A link whose target is absolute, empty, or
+//! leaves the tree once joined to the link's directory is refused
+//! ([`link_stays_inside`]).
 //!
 //! The root is chosen as zig chooses it: when every entry is under one name
 //! and that name is a directory, the root is that directory, and its name is
@@ -170,6 +171,17 @@ pub(super) fn unpack(
             .collect(),
         None => links,
     };
+    // Checked against the root, not the archive's top level: a link may not
+    // climb above the tree that is kept.
+    for (rel, target) in &links {
+        if !link_stays_inside(rel, target) {
+            return Err(format!(
+                "{} links to {}, outside the tree, which zig_vendor refuses",
+                rel.display(),
+                target.display()
+            ));
+        }
+    }
     match top {
         Some(name) => std::fs::rename(stage_dir.join(&name), dest)
             .map_err(|e| format!("moving the root into {}: {e}", dest.display()))?,
@@ -382,6 +394,34 @@ fn refuse_through_link(links: &HashSet<PathBuf>, rel: &Path) -> Result<(), Strin
 
 fn parent_of(rel: &Path) -> &Path {
     rel.parent().unwrap_or(Path::new(""))
+}
+
+/// Whether a link at `rel` with `target` stays inside the tree: the target is
+/// relative, and joined to the link's directory it never climbs above the top.
+/// `..` is taken as written, not resolved through other links.
+pub(super) fn link_stays_inside(rel: &Path, target: &Path) -> bool {
+    if target.as_os_str().is_empty() {
+        return false;
+    }
+    let mut at: Vec<&std::ffi::OsStr> = Vec::new();
+    for c in parent_of(rel).components() {
+        if let Component::Normal(name) = c {
+            at.push(name);
+        }
+    }
+    for c in target.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if at.pop().is_none() {
+                    return false;
+                }
+            }
+            Component::Normal(name) => at.push(name),
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
 }
 
 /// Create the directories of `rel` under `dest`. A component that is already
