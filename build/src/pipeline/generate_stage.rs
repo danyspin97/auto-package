@@ -10,6 +10,7 @@ use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::rpm_deps::*;
+use crate::pipeline::sibling_specs;
 use crate::pipeline::tarball::*;
 
 /// What the generate stage knows about an archive whose build system is
@@ -124,6 +125,20 @@ pub(super) fn generate_spec_stage(
                 carry,
             })
         };
+        // The other specs of the package move with the main one; they are put
+        // back if the update fails below (see `SiblingBump`).
+        let mut sibling_bump = match (version_bump, old_version.as_deref()) {
+            (true, Some(old)) => Some(sibling_specs::SiblingBump::apply(
+                checkout_dir,
+                spec_path,
+                old,
+                &config.version,
+                &config.rpm_name,
+                reporter,
+                step.id,
+            )),
+            _ => None,
+        };
         let generated = if carry_forward {
             match carry_forward_spec(config, checkout_dir, spec_path, &step, reporter) {
                 Ok(res) => {
@@ -171,6 +186,9 @@ pub(super) fn generate_spec_stage(
         };
         match generated {
             Ok(res) => {
+                if let Some(bump) = sibling_bump.take() {
+                    bump.keep();
+                }
                 let step = step.finish(StepOutcome::Ok);
                 // "Initial packaging" is only true for a package that had no
                 // spec before this run generated one — a version bump or

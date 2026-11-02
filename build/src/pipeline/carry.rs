@@ -3,6 +3,7 @@
 use super::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::service_source::*;
+use crate::pipeline::sibling_specs::*;
 
 /// Bump the spec already in the checkout to `config.version` without
 /// regenerating it: set its `Version:`, fetch the new PyPI sdist in place of
@@ -47,7 +48,11 @@ pub(super) fn carry_forward_spec(
         checkout_dir,
         &old_version,
         &tarball,
-        &crate::spec::expanded_sources(&bumped),
+        &[
+            crate::spec::expanded_sources(&bumped),
+            sibling_spec_sources(checkout_dir, spec_path),
+        ]
+        .concat(),
     );
 
     let top = info
@@ -234,6 +239,12 @@ fn carry_forward_repo_spec(
     // Only a source whose address changes with the version is fetched again;
     // the others (a keyring, a rpmlintrc) stay as they are.
     let old_sources = crate::spec::expanded_sources(&old);
+    // An old file a sibling spec of the package still names stays.
+    let kept_by_all = [
+        sources.clone(),
+        sibling_spec_sources(checkout_dir, spec_path),
+    ]
+    .concat();
     // Every source fetched again, in spec order: the first one that is an
     // archive gives the top directory (a changed `.asc` signature does not).
     let mut fetched: Vec<PathBuf> = Vec::new();
@@ -251,7 +262,7 @@ fn carry_forward_repo_spec(
         // spec is named that: sources can be reordered or shifted, and the
         // file at this index may be one a later new source just needs.
         if let Some(old_file) = old_sources.get(i).map(|o| &o.file)
-            && is_superseded_source_file(old_file, &sources)
+            && is_superseded_source_file(old_file, &kept_by_all)
         {
             superseded.push(old_file.clone());
         }
@@ -326,6 +337,10 @@ fn carry_forward_service_spec(
     }
     let moved = plan.moved;
     let before: std::collections::HashSet<String> = tarballs_in(checkout_dir);
+    let sibling_files: Vec<String> = sibling_spec_sources(checkout_dir, spec_path)
+        .into_iter()
+        .map(|s| s.file)
+        .collect();
     // Both files go back as they were when anything below fails: a half-moved
     // checkout would be taken for a finished one by the next run.
     let restore = || {
@@ -363,6 +378,7 @@ fn carry_forward_service_spec(
             if old.contains(&old_version)
                 && !old.contains(&config.version)
                 && made.file_name().is_none_or(|n| n.to_string_lossy() != old)
+                && !sibling_files.contains(&old)
             {
                 let _ = std::fs::remove_file(checkout_dir.join(&old));
             }

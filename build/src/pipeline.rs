@@ -316,6 +316,9 @@ mod ladder;
 pub use ladder::*;
 mod logs;
 mod sibling;
+mod sibling_specs;
+#[cfg(test)]
+mod sibling_specs_tests;
 mod spec_edits;
 use spec_edits::*;
 mod snapshot;
