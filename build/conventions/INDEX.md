@@ -101,3 +101,6 @@
 101. Lua modules (lua<ver>-<module>) — read when the package is a Lua module, has a rockspec, or needs the luajit headers via LUA_INCLUDE
 102. Common Lisp libraries (cl-<lib>) — read when the source has an .asd system file or the package is a cl- library
 103. NPM / nodejs: vendored node_modules, legacy nodejs macros — read when npm or node runs in the build, package-lock.json is in the sdist, or you consider %nodejs_install
+104. RPM scriptlets ($1 table, -p, ldconfig, texinfo, gconf) — read when writing or fixing %pre/%post/%preun/%postun, a -p interpreter, or an upgrade fails in a scriptlet
+105. Users and groups via sysusers.d (system-user-<name>) — read when a package creates a system user or group, or Provides user(...) or group(...)
+106. XML catalog entries (catalog.d, update-xml-catalog) — read when a package ships XML schemas, DTDs or a catalog, or uses xmlcatalog
