@@ -30,6 +30,7 @@ use crate::spec::BuildRequire;
 mod capability;
 #[cfg(test)]
 mod capability_tests;
+mod flags;
 mod judge;
 mod obs;
 mod resolver;
@@ -37,6 +38,7 @@ mod resolver;
 mod tests;
 
 pub use capability::*;
+pub use flags::*;
 pub use judge::*;
 pub use obs::*;
 pub use resolver::*;
