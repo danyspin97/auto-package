@@ -155,6 +155,7 @@ pub(crate) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
         regen: false,
         update: false,
         source_repo: None,
+        upstream_tag: None,
         subprojects: Vec::new(),
         failed_deps: Vec::new(),
         unknown_build_system: false,

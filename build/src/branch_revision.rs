@@ -161,6 +161,7 @@ pub fn classify_forced(
                         ecosystem,
                         old_version: header.version,
                         new_version: to_version.to_string(),
+                        upstream_tag: None,
                     }
                 };
                 return Candidate {

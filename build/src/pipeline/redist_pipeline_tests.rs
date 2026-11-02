@@ -76,6 +76,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         regen: false,
         update: false,
         source_repo: None,
+        upstream_tag: None,
         subprojects: Vec::new(),
         failed_deps: Vec::new(),
         unknown_build_system: false,

@@ -106,6 +106,7 @@ Source:         https://files.pythonhosted.org/packages/source/p/pytorch/pytorch
             },
             old_version: "2.4.0".into(),
             new_version: "2.5.0".into(),
+            upstream_tag: None,
         },
         "expected the define-resolved 2.4.0 to compare against 2.5.0"
     );

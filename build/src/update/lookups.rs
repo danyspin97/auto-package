@@ -14,6 +14,7 @@ pub(super) fn flags_a_newer_upstream_release_for_update() {
             },
             old_version: "26.1.0".into(),
             new_version: "27.0.0".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -52,6 +53,7 @@ pub(super) fn wheel_only_source_resolves_through_pypi() {
             },
             old_version: "13.1.1.3".into(),
             new_version: "13.2.0.0".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -109,6 +111,7 @@ pub(super) fn bare_tarball_template_resolves_through_pypi_speculatively() {
             },
             old_version: "2.4.0".into(),
             new_version: "2.5.0".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -125,6 +128,7 @@ pub(super) fn github_source_resolves_through_the_git_forge_api() {
             },
             old_version: "14.1.0".into(),
             new_version: "14.2.0".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -210,6 +214,7 @@ Source:         https://download.savannah.nongnu.org/releases/acl/%{name}-%{vers
             },
             old_version: "2.3.1".into(),
             new_version: "2.3.2".into(),
+            upstream_tag: None,
         }
     );
     assert!(matches!(&c.decision, Decision::Update { ecosystem, .. } if ecosystem.can_build()));
@@ -273,6 +278,7 @@ pub(super) fn a_package_without_a_source_line_is_asked_of_repology() {
             },
             old_version: "1.42".into(),
             new_version: "1.43".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -361,6 +367,7 @@ pub(super) fn a_rubygem_package_is_asked_of_rubygems_when_repology_has_no_newest
             },
             old_version: "6.1.0".into(),
             new_version: "6.1.1".into(),
+            upstream_tag: None,
         }
     );
     assert_eq!(
@@ -432,6 +439,7 @@ pub(super) fn a_perl_package_is_asked_of_metacpan_when_repology_has_no_newest() 
             },
             old_version: "0.5".into(),
             new_version: "0.6".into(),
+            upstream_tag: None,
         }
     );
     assert_eq!(
@@ -500,6 +508,7 @@ pub(super) fn a_c_library_is_not_guessed_on_pypi_by_its_tarball_name() {
             },
             old_version: "26.4.22".into(),
             new_version: "26.4.23".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -516,6 +525,7 @@ pub(super) fn a_python_package_is_guessed_on_pypi_by_its_tarball_name() {
             },
             old_version: "2.4.0".into(),
             new_version: "2.5.0".into(),
+            upstream_tag: None,
         }
     );
 }

@@ -63,7 +63,11 @@ pub enum Decision {
     Update {
         ecosystem: Ecosystem,
         old_version: String,
+        /// The RPM version to build: the upstream tag's, for a dashed tag.
         new_version: String,
+        /// The upstream tag `new_version` stands for, when it is not the
+        /// version as it is written (`v2.9.0-1` for `2.9.0.1`).
+        upstream_tag: Option<String>,
     },
     UpToDate {
         ecosystem: Ecosystem,
@@ -156,8 +160,9 @@ impl std::fmt::Display for SkipReason {
             SkipReason::NotAnRpmVersion { latest } => write!(
                 f,
                 "upstream's newest release ({latest}) is not a valid RPM Version: an RPM \
-                 Version cannot hold a '-'. A maintainer must choose the version to package \
-                 and run update with --to-version (no '-', spaces or slashes)"
+                 Version cannot hold a '-', so the package needs a maintainer. A maintainer \
+                 must choose the version to package and run update with --to-version (no \
+                 '-', spaces or slashes)"
             ),
             SkipReason::Prerelease { packaged, latest } => write!(
                 f,

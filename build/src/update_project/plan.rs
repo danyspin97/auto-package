@@ -10,6 +10,8 @@ pub struct Item {
     pub ecosystem: Ecosystem,
     pub old_version: String,
     pub new_version: String,
+    /// The upstream tag `new_version` stands for, for a dashed tag.
+    pub upstream_tag: Option<String>,
     /// The package this one was pulled in for (`--update-deps`).
     pub dependency_of: Option<String>,
     /// What `lint` found wrong with the package, one line each.
@@ -39,6 +41,7 @@ pub fn items_from_plan(origin: &str, candidates: &[Candidate], exclude: &[String
             ecosystem,
             old_version,
             new_version,
+            upstream_tag,
         } = &c.decision
         else {
             continue;
@@ -56,6 +59,7 @@ pub fn items_from_plan(origin: &str, candidates: &[Candidate], exclude: &[String
             ecosystem: ecosystem.clone(),
             old_version: old_version.clone(),
             new_version: new_version.clone(),
+            upstream_tag: upstream_tag.clone(),
             dependency_of: None,
             findings: Vec::new(),
         });

@@ -357,6 +357,7 @@ mod tests {
             regen: false,
             update: true,
             source_repo: Some("https://github.com/project-repo/cagebreak".into()),
+            upstream_tag: None,
             subprojects: Vec::new(),
             failed_deps: Vec::new(),
             unknown_build_system: true,

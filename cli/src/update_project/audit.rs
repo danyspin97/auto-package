@@ -102,6 +102,7 @@ impl Audit {
                                     ecosystem,
                                     old_version: version.clone(),
                                     new_version: version,
+                                    upstream_tag: None,
                                     dependency_of: None,
                                     findings: findings
                                         .iter()

@@ -33,6 +33,7 @@ impl PlanReport {
                 ecosystem,
                 old_version,
                 new_version,
+                ..
             } => {
                 let note = if ecosystem.can_build() {
                     self.n_update += 1;
@@ -150,6 +151,7 @@ impl Sweep {
                 ecosystem,
                 old_version,
                 new_version,
+                ..
             } = &c.decision
                 && ecosystem.can_build()
             {

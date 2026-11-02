@@ -58,6 +58,7 @@ fn the_plan_counts_each_kind_of_package_as_it_is_added() {
             ecosystem: eco(),
             old_version: "1".into(),
             new_version: "2".into(),
+            upstream_tag: None,
         },
         Decision::UpToDate {
             ecosystem: eco(),

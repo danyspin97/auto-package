@@ -60,6 +60,9 @@ pub struct PipelineConfig {
     /// holds a Rust crate or a Python project is decided by looking inside the
     /// release archive, not by which flag was used.
     pub source_repo: Option<String>,
+    /// The upstream tag `version` stands for, when it is a dashed tag mapped to
+    /// an RPM version (`v2.9.0-1` for `2.9.0.1`), for the spec editor.
+    pub upstream_tag: Option<String>,
     /// Sibling projects inside a monorepo source, as `(directory, name)`.
     /// Discovered when the spec is generated and shown to the agent, which
     /// decides how many of them to package.

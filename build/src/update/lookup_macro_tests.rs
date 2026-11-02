@@ -34,6 +34,7 @@ pub(super) fn an_undefined_conditional_macro_in_the_name_is_empty() {
             },
             old_version: "0.9.0.g33".into(),
             new_version: "0.9.1".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -72,6 +73,7 @@ pub(super) fn a_forge_url_with_a_define_is_looked_up_expanded() {
             },
             old_version: "3.10.4".into(),
             new_version: "3.10.5".into(),
+            upstream_tag: None,
         }
     );
 }

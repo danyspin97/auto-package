@@ -141,6 +141,7 @@ pub(crate) fn cmd_build(
         force,
         regen,
         source_repo: source_repo.clone(),
+        upstream_tag: branch.and_then(|b| b.upstream_tag.clone()),
         subprojects,
         run_id: run_dir.run_id.clone().0,
         source_urls,

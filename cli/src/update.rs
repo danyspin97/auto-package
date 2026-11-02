@@ -351,12 +351,14 @@ fn cmd_update(
             resolver: None,
             improve: None,
             from_version: None,
+            upstream_tag: None,
             update: true,
         };
         let ap_build::update::Decision::Update {
             ecosystem,
             old_version,
             new_version,
+            upstream_tag,
         } = c.decision
         else {
             continue;
@@ -400,6 +402,7 @@ fn cmd_update(
         // package in the project.
         let existing = update_project::BranchBuild {
             from_version: Some(old_version),
+            upstream_tag,
             ..existing
         };
         let r = cmd_build(

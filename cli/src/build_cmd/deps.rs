@@ -41,6 +41,7 @@ pub(crate) fn branch_for_patch(
             rpm_name: real.to_lowercase(),
             version,
             source_repo: None,
+            upstream_tag: None,
             subprojects: Vec::new(),
             force: true,
             regen: false,
@@ -98,6 +99,7 @@ pub(crate) fn branch_for_patch(
         rpm_name: real.to_lowercase(),
         version,
         source_repo: None,
+        upstream_tag: None,
         subprojects: Vec::new(),
         // The branch builds green unchanged; the patch must still be made.
         force: true,
@@ -264,6 +266,7 @@ pub(crate) fn update_config_for_outdated(
         rpm_name: real.to_lowercase(),
         version: newest,
         source_repo,
+        upstream_tag: None,
         subprojects: Vec::new(),
         force: true,
         regen: false,

@@ -11,6 +11,7 @@ fn an_improvement_request_lists_the_findings_not_a_version_bump() {
         },
         old_version: "1.0".into(),
         new_version: "1.0".into(),
+        upstream_tag: None,
         dependency_of: None,
         findings: vec!["no-check: the spec has no %check".into()],
     };
@@ -31,6 +32,7 @@ fn update(name: &str, old: &str, new: &str) -> Candidate {
             },
             old_version: old.into(),
             new_version: new.into(),
+            upstream_tag: None,
         },
     }
 }
@@ -44,6 +46,7 @@ fn item(pkg: &str) -> Item {
         },
         old_version: "1".into(),
         new_version: "2".into(),
+        upstream_tag: None,
         dependency_of: None,
         findings: Vec::new(),
     }

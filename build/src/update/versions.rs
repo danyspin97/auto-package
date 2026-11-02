@@ -301,6 +301,7 @@ pub(super) fn an_obs_scm_source_is_looked_up_in_its_service_repository() {
             },
             old_version: "0.5.0".into(),
             new_version: "0.6.0".into(),
+            upstream_tag: None,
         }
     );
 }
@@ -382,6 +383,104 @@ pub(super) fn only_a_live_obs_scm_git_service_names_the_repository() {
                 ecosystem: Ecosystem::GitRepo { .. },
                 ..
             }
+        ),
+        "{:?}",
+        c.decision
+    );
+}
+
+/// A dashed tag is compared as the RPM version it maps to, and the tag travels
+/// with the decision.
+#[test]
+pub(super) fn a_dashed_tag_is_compared_as_its_rpm_version() {
+    let spec = |version: &str| {
+        format!(
+            "Name: cuarzo-srm\nVersion: {version}\n\
+             Source: https://github.com/CuarzoSoftware/SRM/archive/refs/tags/v%{{version}}.tar.gz\n"
+        )
+    };
+    let update = |version: &str, latest: &'static str| {
+        classify(
+            "cuarzo-srm",
+            &|_: &str| Ok(spec(version)),
+            &only_repo(latest),
+        )
+        .decision
+    };
+    assert_eq!(
+        update("0.8.0", "v0.8.0-2"),
+        Decision::Update {
+            ecosystem: Ecosystem::GitRepo {
+                url: "https://github.com/CuarzoSoftware/SRM".into(),
+            },
+            old_version: "0.8.0".into(),
+            new_version: "0.8.0.2".into(),
+            upstream_tag: Some("v0.8.0-2".into()),
+        }
+    );
+    assert!(matches!(
+        update("0.8.0.1", "v0.8.0-2"),
+        Decision::Update { ref new_version, .. } if new_version == "0.8.0.2"
+    ));
+    assert!(matches!(
+        update("0.8.0.2", "v0.8.0-1"),
+        Decision::UpToDate { .. }
+    ));
+    // A pre-release tag is no update of a stable release.
+    assert!(matches!(
+        update("0.1.0", "0.1.0-alpha"),
+        Decision::Skipped(SkipReason::Prerelease { .. })
+    ));
+    // A dash that means neither is still refused, and says so.
+    let Decision::Skipped(reason) = update("1.0.0", "1.0-prefix") else {
+        panic!("a tag with an unknown dash must be skipped");
+    };
+    assert!(matches!(reason, SkipReason::NotAnRpmVersion { .. }));
+    assert!(
+        reason.to_string().contains("needs a maintainer"),
+        "{reason}"
+    );
+}
+
+/// A forge's dashed tag is carried as the tag it is, prefix and all, so a
+/// define that holds it can keep its `v`.
+#[test]
+pub(super) fn a_forge_tag_is_carried_with_its_prefix() {
+    let spec = "Name: liblouvre\nVersion: 1.0.0.1\n%define sillyver v1.0.0-1\n\
+                Source: https://github.com/CuarzoSoftware/Louvre/archive/refs/tags/%{sillyver}.tar.gz\n";
+    let c = classify(
+        "liblouvre",
+        &|_: &str| Ok(spec.to_string()),
+        &only_repo("v1.0.0-2"),
+    );
+    assert_eq!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::GitRepo {
+                url: "https://github.com/CuarzoSoftware/Louvre".into(),
+            },
+            old_version: "1.0.0.1".into(),
+            new_version: "1.0.0.2".into(),
+            upstream_tag: Some("v1.0.0-2".into()),
+        }
+    );
+}
+
+/// Repology answers with a distro's numbering: its `1.5-1` is a revision of
+/// 1.5, not the RPM version `1.5.1`, so it is refused rather than mapped.
+#[test]
+pub(super) fn a_dash_from_repology_is_refused_not_mapped() {
+    let spec = "Name: ripgrep-x\nVersion: 1.5.1\nSource: ripgrep-x-%{version}.tar.gz\n";
+    let repology = |_: &str| Ok("1.5-1".to_string());
+    let lookups = Lookups {
+        fetch_repology_latest: &repology,
+        ..unused_lookups()
+    };
+    let c = classify("ripgrep-x", &|_: &str| Ok(spec.to_string()), &lookups);
+    assert!(
+        matches!(
+            c.decision,
+            Decision::Skipped(SkipReason::NotAnRpmVersion { ref latest }) if latest == "1.5-1"
         ),
         "{:?}",
         c.decision

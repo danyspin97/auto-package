@@ -72,6 +72,9 @@ where
         );
     };
 
+    // The tag as the forge lists it (`v2.9.0-1`): version_part takes its
+    // prefix off, and the spec needs the tag as it is.
+    let found_tag = latest.clone();
     let latest = version_part(&latest);
     // A release suffix that only says "this is the release" is not part of it.
     let latest = ["-stable", "-release", "-final", "-src", "-source"]
@@ -89,9 +92,18 @@ where
             },
         );
     }
-    if latest.contains('-') && !header.version.contains('-') {
-        return skipped(rpm_name, SkipReason::NotAnRpmVersion { latest });
-    }
+    // A dashed tag (`v2.9.0-1`) of a forge is compared as the RPM version it
+    // maps to; the tag itself travels with the decision for the spec editor.
+    // Repology and the indexes answer with versions, not tags: a dash there is
+    // a distro revision (`1.5-1`) or a scheme nobody has mapped, so it is refused.
+    let (latest, upstream_tag) = if latest.contains('-') && !header.version.contains('-') {
+        match crate::upstream::rpm_version_for_tag(&latest) {
+            Ok(rpm) if matches!(ecosystem, Ecosystem::GitRepo { .. }) => (rpm, Some(found_tag)),
+            _ => return skipped(rpm_name, SkipReason::NotAnRpmVersion { latest }),
+        }
+    } else {
+        (latest, None)
+    };
     if version::is_snapshot(&header.version) {
         return skipped(
             rpm_name,
@@ -112,6 +124,7 @@ where
                 ecosystem,
                 old_version: header.version,
                 new_version: latest,
+                upstream_tag: upstream_tag.clone(),
             }
         } else if older_than_known(&latest, &known) {
             // Upstream is behind what the spec already names, whatever the
@@ -153,6 +166,7 @@ where
                 ecosystem,
                 old_version: header.version,
                 new_version: latest,
+                upstream_tag,
             },
         },
         pypi::VersionCompare::NotNewer => Decision::UpToDate {

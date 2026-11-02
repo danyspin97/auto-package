@@ -288,6 +288,9 @@ pub struct BranchBuild {
     pub improve: Option<String>,
     /// `update`: the version the package is at, shown beside the new one.
     pub from_version: Option<String>,
+    /// `update`: the upstream tag the new version stands for, when it is not
+    /// the version as written (`v2.9.0-1` for `2.9.0.1`).
+    pub upstream_tag: Option<String>,
     /// The package is brought to a new upstream version: its recipe is kept
     /// and the update is checked against its origin. Not for `lint`, a
     /// maintenance run or a backport.

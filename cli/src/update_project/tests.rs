@@ -33,6 +33,7 @@ fn pkg_item(pkg: &str) -> Item {
         },
         old_version: "1".into(),
         new_version: "2".into(),
+        upstream_tag: None,
         dependency_of: None,
         findings: Vec::new(),
     }
@@ -279,6 +280,7 @@ fn a_backport_item_keeps_the_packaged_version() {
         ecosystem: eco.clone(),
         old_version: "8.6.0".into(),
         new_version: "8.11.0".into(),
+        upstream_tag: None,
     })
     .unwrap();
     assert_eq!(
@@ -350,6 +352,7 @@ fn the_agent_is_told_the_findings_and_to_keep_the_version() {
         },
         old_version: "1.0".into(),
         new_version: "1.0".into(),
+        upstream_tag: None,
         dependency_of: None,
         findings: Vec::new(),
     };

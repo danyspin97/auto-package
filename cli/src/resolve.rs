@@ -173,6 +173,7 @@ pub(super) fn resolve_dependency_config(
                     rpm_name,
                     version,
                     source_repo: None,
+                    upstream_tag: None,
                     subprojects: Vec::new(),
                     // The root package's findings are not a dependency's.
                     patch_request: None,
@@ -212,6 +213,7 @@ pub(super) fn resolve_dependency_config(
                 // A PyPI-resolved dependency never comes from a repository, even
                 // if the parent package the agent found it from did.
                 source_repo: None,
+                upstream_tag: None,
                 subprojects: Vec::new(),
                 // The root package's findings are not a dependency's.
                 patch_request: None,
@@ -331,6 +333,7 @@ pub(super) fn resolve_dependency_config(
                 rpm_name: dep_rpm,
                 version,
                 source_repo: Some(repo_url.clone()),
+                upstream_tag: None,
                 subprojects: probe.subprojects,
                 // The root package's findings are not a dependency's.
                 patch_request: None,
