@@ -28,19 +28,7 @@ where
         pypi::pypi_name_from_source_url(source).is_none()
             && pypi::pypi_name_and_version_from_wheel_filename(source).is_none()
     };
-    // Only a spec that names neither a repository nor a URL to download from is
-    // read for its `_service`: that is what an obs_scm source looks like, and
-    // the other packages save an OBS read.
-    let downloads_from_url = header
-        .expanded_source
-        .as_deref()
-        .is_some_and(|s| s.starts_with("http://") || s.starts_with("https://"));
-    let service_git = match declared_upstream(&header) {
-        DeclaredUpstream::Unknown if !downloads_from_url => (lookups.fetch_service)(rpm_name)
-            .as_deref()
-            .and_then(service_git_url),
-        _ => None,
-    };
+    let service_git = obs_scm_repo(&header, rpm_name, lookups.fetch_service);
     let mut found = None;
     for ecosystem in ecosystems(&header, service_git) {
         match lookup(&ecosystem, lookups) {
@@ -181,6 +169,27 @@ where
     Candidate {
         rpm_name: rpm_name.to_string(),
         decision,
+    }
+}
+
+/// The forge repository an obs_scm package is built from, read from its
+/// `_service`. Only a spec that names no repository and downloads from no URL
+/// is read for it: that is what an obs_scm source looks like, and the other
+/// packages save an OBS read. `None` otherwise.
+pub(crate) fn obs_scm_repo(
+    header: &spec::Header,
+    rpm_name: &str,
+    fetch_service: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let downloads_from_url = header
+        .expanded_source
+        .as_deref()
+        .is_some_and(|s| s.starts_with("http://") || s.starts_with("https://"));
+    match declared_upstream(header) {
+        DeclaredUpstream::Unknown if !downloads_from_url => {
+            fetch_service(rpm_name).as_deref().and_then(service_git_url)
+        }
+        _ => None,
     }
 }
 

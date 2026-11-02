@@ -131,6 +131,7 @@ pub fn classify_forced(
     rpm_name: &str,
     fetch_spec: &dyn Fn(&str) -> Result<String, ReadError>,
     verify: Verify<'_>,
+    service_git: Option<String>,
     to_version: &str,
 ) -> Candidate {
     let skipped = |reason| Candidate {
@@ -145,7 +146,7 @@ pub fn classify_forced(
         return skipped(SkipReason::SpecHeaderMissing);
     };
     let mut failures: Vec<String> = Vec::new();
-    for ecosystem in update::ecosystems(&header, None) {
+    for ecosystem in update::ecosystems(&header, service_git) {
         if !ecosystem.can_build() {
             continue;
         }
@@ -277,8 +278,21 @@ pub fn plan_one(
     // Fails early when the revision does not exist.
     let spec = spec_at(project, &pkg, revision, emit)?;
     let fetch = |_: &str| spec.clone();
+    // The `_service` of the package as it is at `revision` (else the newest): an
+    // obs_scm source is built from the repository it names.
+    let fetch_service = |name: &str| match revision {
+        Some(rev) => osc::cat_file_at_revision(project, name, "_service", rev, emit),
+        None => osc::cat_file(project, name, "_service", emit),
+    };
     let candidate = match to_version {
-        Some(v) => classify_forced(&pkg, &fetch, &verify_upstream, v),
+        Some(v) => {
+            let service_git = spec
+                .as_deref()
+                .ok()
+                .and_then(spec::parse_header)
+                .and_then(|h| update::obs_scm_repo(&h, &pkg, &fetch_service));
+            classify_forced(&pkg, &fetch, &verify_upstream, service_git, v)
+        }
         None => {
             // The ordinary lookup of the newest release, as the sweep does it.
             use crate::upstream_cache::lookup;
@@ -308,8 +322,8 @@ pub fn plan_one(
                     crate::upstream_cpan::latest_on_metacpan(d)
                 })
             };
-            // The spec at `revision` is read, its `_service` is not: an obs_scm
-            // source is looked up through Repology only.
+            // An obs_scm source is looked up in the repository its `_service`
+            // names, then the release listing, then Repology.
             let lookups = update::Lookups {
                 fetch_pypi_latest: &pypi,
                 fetch_repo_latest: &repo,
@@ -317,7 +331,7 @@ pub fn plan_one(
                 fetch_repology_latest: &repology,
                 fetch_gem_latest: &gem,
                 fetch_cpan_latest: &cpan,
-                fetch_service: &|_| None,
+                fetch_service: &fetch_service,
             };
             update::classify(&pkg, &fetch, &lookups)
         }
@@ -403,7 +417,7 @@ Source:         https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{v
                 Err(format!("PyPI has no release {v} of attrs"))
             }
         };
-        classify_forced("python-attrs", &spec, &verify, to)
+        classify_forced("python-attrs", &spec, &verify, None, to)
     }
 
     #[test]
@@ -459,7 +473,44 @@ Source:         https://files.pythonhosted.org/packages/source/a/attrs/attrs-%{v
     fn a_source_nothing_can_fetch_is_skipped() {
         let spec = |_: &str| Ok("Name: x\nVersion: 1\n".to_string());
         let verify = |_: &Ecosystem, _: &str, _: &str| Ok(());
-        let c = classify_forced("x", &spec, &verify, "2");
+        let c = classify_forced("x", &spec, &verify, None, "2");
+        assert!(matches!(
+            c.decision,
+            Decision::Skipped(SkipReason::VersionNotFound { .. })
+        ));
+    }
+
+    /// An obs_scm package names no repository in its spec: a forced version is
+    /// looked for in the repository its `_service` names, as the sweep does.
+    #[test]
+    fn a_forced_version_of_an_obs_scm_package_is_looked_for_in_its_service_repo() {
+        const REPO: &str = "https://github.com/MastroHD/ashell";
+        let spec =
+            |_: &str| Ok("Name: ashell\nVersion: 0.5.0\nSource: ashell.tar.gz\n".to_string());
+        // A fake tag list of the repository.
+        let tags = ["0.5.0", "0.6.0"];
+        let verify = |eco: &Ecosystem, _: &str, v: &str| match eco {
+            Ecosystem::GitRepo { url } if url == REPO && tags.contains(&v) => Ok(()),
+            _ => Err(format!("no tag {v}")),
+        };
+        let c = classify_forced("ashell", &spec, &verify, Some(REPO.into()), "0.6.0");
+        assert_eq!(
+            c.decision,
+            Decision::Update {
+                ecosystem: Ecosystem::GitRepo { url: REPO.into() },
+                old_version: "0.5.0".into(),
+                new_version: "0.6.0".into(),
+                upstream_tag: None,
+            }
+        );
+        // Without the `_service` there is no repository to look in.
+        let c = classify_forced("ashell", &spec, &verify, None, "0.6.0");
+        assert!(matches!(
+            c.decision,
+            Decision::Skipped(SkipReason::VersionNotFound { .. })
+        ));
+        // A tag the repository does not list is not found.
+        let c = classify_forced("ashell", &spec, &verify, Some(REPO.into()), "9.9");
         assert!(matches!(
             c.decision,
             Decision::Skipped(SkipReason::VersionNotFound { .. })
