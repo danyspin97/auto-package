@@ -328,6 +328,9 @@ use snapshot::*;
 mod rejection;
 use rejection::*;
 mod apply_turn;
+mod build_switch;
+#[cfg(test)]
+mod build_switch_tests;
 mod network_fetch;
 #[cfg(test)]
 mod network_fetch_tests;

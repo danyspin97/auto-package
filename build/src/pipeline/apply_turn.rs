@@ -2,10 +2,10 @@
 
 use super::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::build_switch::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::npm_vendor::*;
-use crate::pipeline::patch_rules::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::render::*;
@@ -191,8 +191,10 @@ fn apply_turn_outcome_with(
             // already in the new sources; never because it does not apply.
             let unproven =
                 unproven_patch_removals(config, checkout_dir, spec_path, before, snapshot);
-            // A new patch must be named by the bullet.
-            let bullet_source = turn_bullet_source(outcome);
+            // A new patch must be named by the bullet; a build system switch
+            // needs evidence and gets its own bullet (`build_switch`).
+            let switch = switch_of_edit(spec_path, before);
+            let bullet_source = with_switch_bullet(turn_bullet_source(outcome), switch);
             let changed = if !unproven.is_empty() {
                 let why = reject_unproven_removal(
                     spec_path,
@@ -209,7 +211,9 @@ fn apply_turn_outcome_with(
                     **slot = Some(why);
                 }
                 false
-            } else if let Some(why) = reject_unnamed_patches(
+            } else if let Some(why) = reject_unchecked_edit(
+                switch,
+                outcome,
                 spec_path,
                 before,
                 snapshot,
