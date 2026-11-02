@@ -143,7 +143,7 @@ fn fetch_one(
     let root = req.work.join(format!("dep-{index}"));
     let mut current = archive.clone();
     let mut hops = 0;
-    loop {
+    let links = loop {
         check_url(req, name, &current)?;
         match req
             .fetch
@@ -153,9 +153,8 @@ fn fetch_one(
             Response::Body { content_type, body } => {
                 let format = Format::resolve(content_type.as_deref(), by_url)
                     .map_err(|e| format!("zig dep {name}: {current}: {e}"))?;
-                unpack(body, format, &root, req.limits)
+                break unpack(body, format, &root, req.limits)
                     .map_err(|e| format!("zig dep {name}: {e}"))?;
-                break;
             }
             Response::Redirect(location) => {
                 hops += 1;
@@ -169,11 +168,11 @@ fn fetch_one(
                 current = without_fragment(&target).to_string();
             }
         }
-    }
+    };
     let text = std::fs::read_to_string(root.join("build.zig.zon"))
         .map_err(|_| format!("zig dep {name}: the archive has no build.zig.zon"))?;
     let manifest = zon::parse(&text).map_err(|e| format!("zig dep {name}: {e}"))?;
-    let items = included_items(&root, manifest.paths.as_deref())
+    let items = included_items(&root, &links, manifest.paths.as_deref())
         .map_err(|e| format!("zig dep {name}: {e}"))?;
     let computed = match form {
         Declared::Current { name_version, .. } => {

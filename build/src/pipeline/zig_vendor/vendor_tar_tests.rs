@@ -25,6 +25,7 @@ fn a_file_gets_the_same_bytes_as_memory() {
 use super::zon::Manifest;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 const PIXMAN: &[u8] = include_bytes!("testdata/pixman-0.3.0.tar.gz");
 const PIXMAN_HASH: &str = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX";
@@ -91,10 +92,10 @@ fn inner(entries: &[Got], declared: &str) -> Vec<Got> {
 fn pixman_dep() -> (tempfile::TempDir, Dep) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("pixman");
-    unpack(PIXMAN, Format::TarGz, &root, LIMITS).unwrap();
+    let links = unpack(PIXMAN, Format::TarGz, &root, LIMITS).unwrap();
     let text = std::fs::read_to_string(root.join("build.zig.zon")).unwrap();
     let manifest = super::zon::parse(&text).unwrap();
-    let items = included_items(&root, manifest.paths.as_deref()).unwrap();
+    let items = included_items(&root, &links, manifest.paths.as_deref()).unwrap();
     let dep = Dep {
         name: "pixman".into(),
         declared: PIXMAN_HASH.into(),
@@ -122,12 +123,11 @@ fn synthetic(
         std::fs::write(&at, data).unwrap();
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(*mode)).unwrap();
     }
-    for (rel, target) in links {
-        let at = root.join(rel);
-        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(target, &at).unwrap();
-    }
-    let items = included_items(&root, None).unwrap();
+    let links: Vec<(PathBuf, PathBuf)> = links
+        .iter()
+        .map(|(rel, target)| (PathBuf::from(rel), PathBuf::from(target)))
+        .collect();
+    let items = included_items(&root, &links, None).unwrap();
     let dep = Dep {
         name: "x".into(),
         declared: declared.into(),
@@ -217,7 +217,7 @@ fn the_packed_archive_hashes_back_to_its_declared_hash() {
         .unpack(back.path())
         .unwrap();
     let tree = back.path().join(PIXMAN_HASH);
-    let items = included_items(&tree, None).unwrap();
+    let items = included_items(&tree, &[], None).unwrap();
     let (_, digest) = split_declared(PIXMAN_HASH).unwrap();
     assert_eq!(package_hash(&items, PIXMAN_ID).unwrap(), digest);
 }

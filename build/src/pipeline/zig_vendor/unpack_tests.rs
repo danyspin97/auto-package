@@ -45,11 +45,22 @@ fn tar_gz(entries: &[(&str, K)]) -> Vec<u8> {
 }
 
 /// Unpack `bytes` into a fresh `out` under a temp dir, with `limits`.
-fn run(bytes: &[u8], format: Format, limits: Limits) -> (tempfile::TempDir, Result<(), String>) {
+fn run(
+    bytes: &[u8],
+    format: Format,
+    limits: Limits,
+) -> (tempfile::TempDir, Result<Vec<Link>, String>) {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out");
     let result = unpack(bytes, format, &dest, limits);
     (dir, result)
+}
+
+/// The target a link of `links` has at `rel`, as a string.
+fn target_of(links: &[Link], rel: &str) -> String {
+    let found = links.iter().find(|(r, _)| r == Path::new(rel));
+    let (_, target) = found.unwrap_or_else(|| panic!("no link at {rel}: {links:?}"));
+    target.display().to_string()
 }
 
 fn expect_refused(entries: &[(&str, K)], needle: &str) {
@@ -69,17 +80,12 @@ fn files_dirs_and_links_are_written_under_the_top_directory() {
         ("pkg-1.0/d2/link", K::Link("../src/main.zig")),
     ]);
     let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
-    result.unwrap();
+    let links = result.unwrap();
     let out = dir.path().join("out");
     assert_eq!(std::fs::read(out.join("src/main.zig")).unwrap(), b"x");
-    assert_eq!(
-        std::fs::read_link(out.join("link")).unwrap(),
-        Path::new("src/main.zig")
-    );
-    assert_eq!(
-        std::fs::read_link(out.join("d2/link")).unwrap(),
-        Path::new("../src/main.zig")
-    );
+    assert_eq!(target_of(&links, "link"), "src/main.zig");
+    assert_eq!(target_of(&links, "d2/link"), "../src/main.zig");
+    assert!(std::fs::symlink_metadata(out.join("link")).is_err());
     assert!(!out.join("pkg-1.0").exists());
 }
 
@@ -153,25 +159,23 @@ fn a_single_top_level_link_is_not_taken_as_the_root() {
         ("top", K::Link("real")),
     ]);
     let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
-    result.unwrap();
+    let links = result.unwrap();
     let out = dir.path().join("out");
     assert_eq!(std::fs::read(out.join("real/a")).unwrap(), b"a");
-    assert_eq!(
-        std::fs::read_link(out.join("top")).unwrap(),
-        Path::new("real")
-    );
+    assert_eq!(target_of(&links, "top"), "real");
 }
 
 #[test]
-fn a_link_out_of_a_single_top_directory_is_refused() {
-    expect_refused(
-        &[
-            ("p/", K::Dir),
-            ("p/a/", K::Dir),
-            ("p/a/l", K::Link("../../x")),
-        ],
-        "outside the tree",
-    );
+fn a_link_out_of_a_single_top_directory_is_recorded_not_written() {
+    let bytes = tar_gz(&[
+        ("p/", K::Dir),
+        ("p/a/", K::Dir),
+        ("p/a/l", K::Link("../../x")),
+    ]);
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    let links = result.unwrap();
+    assert_eq!(target_of(&links, "a/l"), "../../x");
+    assert!(std::fs::symlink_metadata(dir.path().join("out/a/l")).is_err());
 }
 
 #[test]
@@ -182,40 +186,58 @@ fn a_link_out_of_the_top_is_kept_when_the_top_is_not_the_root() {
         ("p/a/l", K::Link("../../x")),
         ("README", K::File(b"r")),
     ]);
-    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
-    result.unwrap();
-    assert_eq!(
-        std::fs::read_link(dir.path().join("out/p/a/l")).unwrap(),
-        Path::new("../../x")
-    );
+    let (_dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    let links = result.unwrap();
+    assert_eq!(target_of(&links, "p/a/l"), "../../x");
 }
 
 #[test]
-fn links_that_leave_the_tree_are_refused() {
-    expect_refused(
-        &[("p/", K::Dir), ("p/l", K::Link("../../etc/passwd"))],
-        "outside the tree",
-    );
-    expect_refused(
-        &[("p/", K::Dir), ("p/l", K::Link("/etc/passwd"))],
-        "outside the tree",
-    );
-    expect_refused(
-        &[("p/", K::Dir), ("p/l", K::Link("../x"))],
-        "outside the tree",
-    );
+fn links_that_leave_the_tree_are_recorded_and_never_written() {
+    for target in ["../../etc/passwd", "/etc/passwd", "../x"] {
+        let bytes = tar_gz(&[("p/", K::Dir), ("p/l", K::Link(target))]);
+        let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+        let links = result.unwrap();
+        assert_eq!(target_of(&links, "l"), target);
+        assert!(std::fs::symlink_metadata(dir.path().join("out/l")).is_err());
+    }
     expect_refused(&[("p/", K::Dir), ("p/l", K::Link(""))], "no link target");
 }
 
 #[test]
-fn a_link_through_an_earlier_link_is_refused() {
+fn a_link_through_an_earlier_link_is_recorded_as_zig_records_it() {
+    let bytes = tar_gz(&[
+        ("p/", K::Dir),
+        ("p/a", K::Link("b")),
+        ("p/c", K::Link("a/../x")),
+    ]);
+    let (_dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    let links = result.unwrap();
+    assert_eq!(target_of(&links, "a"), "b");
+    assert_eq!(target_of(&links, "c"), "a/../x");
+}
+
+#[test]
+fn a_link_written_over_another_entry_is_refused() {
+    expect_refused(
+        &[("p/", K::Dir), ("p/a", K::Link("b")), ("p/a", K::Link("c"))],
+        "written twice",
+    );
     expect_refused(
         &[
             ("p/", K::Dir),
-            ("p/a", K::Link("b")),
-            ("p/c", K::Link("a/../x")),
+            ("p/f", K::File(b"x")),
+            ("p/f", K::Link("x")),
         ],
-        "outside the tree",
+        "written twice",
+    );
+    expect_refused(
+        &[
+            ("p/", K::Dir),
+            ("p/d/", K::Dir),
+            ("p/d/f", K::File(b"x")),
+            ("p/d", K::Link("e")),
+        ],
+        "written twice",
     );
 }
 

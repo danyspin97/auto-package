@@ -1,6 +1,7 @@
 //! The entries of an unpacked dependency that its `.paths` filter keeps, and the
 //! zig hash over them. Links are read, never followed.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use super::hash::PackageHash;
@@ -64,15 +65,29 @@ pub(super) fn path_kept(paths: Option<&[String]>, rel: &str) -> bool {
     })
 }
 
-/// Every regular file and link under `root` that `paths` keeps, sorted by
-/// path. Directories are walked, not listed. A special file is an error: the
-/// unpacker never writes one.
-pub(super) fn included_items(root: &Path, paths: Option<&[String]>) -> Result<Vec<Item>, String> {
+/// Every regular file under `root`, and every link of `links` (the links the
+/// unpacker kept in memory), that `paths` keeps, sorted by path. Directories
+/// are walked, not listed. A link on disk, or a special file, is an error: the
+/// unpacker writes neither.
+pub(super) fn included_items(
+    root: &Path,
+    links: &[(PathBuf, PathBuf)],
+    paths: Option<&[String]>,
+) -> Result<Vec<Item>, String> {
     if let Some(paths) = paths {
         check_paths(paths)?;
     }
     let mut out = Vec::new();
     walk(root, root, paths, &mut out)?;
+    for (link, target) in links {
+        let rel = rel_string(link)?;
+        if path_kept(paths, &rel) {
+            out.push(Item::Link {
+                rel,
+                target: target.as_os_str().as_bytes().to_vec(),
+            });
+        }
+    }
     out.sort_by(|a, b| a.rel().as_bytes().cmp(b.rel().as_bytes()));
     Ok(out)
 }
@@ -99,17 +114,15 @@ fn walk(
             walk(root, &abs, paths, out)?;
             continue;
         }
+        if kind.is_symlink() {
+            return Err(format!(
+                "{rel} is a link on disk, which unpacking never writes"
+            ));
+        }
         if !path_kept(paths, &rel) {
             continue;
         }
-        if kind.is_symlink() {
-            let target =
-                std::fs::read_link(&abs).map_err(|e| format!("reading {}: {e}", abs.display()))?;
-            out.push(Item::Link {
-                rel,
-                target: std::os::unix::ffi::OsStrExt::as_bytes(target.as_os_str()).to_vec(),
-            });
-        } else if kind.is_file() {
+        if kind.is_file() {
             use std::os::unix::fs::PermissionsExt;
             let exec = meta.permissions().mode() & 0o111 != 0;
             out.push(Item::File { rel, abs, exec });
@@ -125,6 +138,11 @@ fn rel_of(root: &Path, abs: &Path) -> Result<String, String> {
     let rel = abs
         .strip_prefix(root)
         .map_err(|_| "a path left the tree".to_string())?;
+    rel_string(rel)
+}
+
+/// A relative path as a string with `/` separators.
+fn rel_string(rel: &Path) -> Result<String, String> {
     let mut parts = Vec::new();
     for c in rel.components() {
         match c {

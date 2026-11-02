@@ -1,7 +1,12 @@
 //! Unpacks a dependency archive into a directory, and refuses what the
-//! vendoring step must not write: absolute or climbing paths, links that leave
-//! the tree or pass through another link, hard links, devices and fifos, and
-//! anything over the limits.
+//! vendoring step must not write: absolute or climbing paths, entries that
+//! pass through a link, hard links, devices and fifos, and anything over the
+//! limits.
+//!
+//! Symbolic links are never created on disk. Their targets are kept as they
+//! are, as zig keeps them for hashing, and returned to the caller, which hashes
+//! and archives them from this list. So a link that points outside the tree,
+//! or at an absolute path, is recorded and does no harm here.
 //!
 //! The root is chosen as zig chooses it: when every entry is under one name
 //! and that name is a directory, the root is that directory, and its name is
@@ -9,11 +14,11 @@
 //! level or a second top-level directory is kept as it is. An archive whose
 //! entries are all under `./` is refused, as zig 0.15.2 cannot unpack it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 mod guard;
@@ -98,6 +103,10 @@ impl Format {
     }
 }
 
+/// A symbolic link of an unpacked archive: its path relative to the root, and
+/// its target exactly as the archive gave it.
+pub(super) type Link = (PathBuf, PathBuf);
+
 /// What an unpack may write. Checked while the archive is read, so a bomb
 /// stops at the limit, not after it has filled the disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,17 +129,17 @@ pub(super) const LIMITS: Limits = Limits {
 /// Bytes a tar header and its padding may take per entry, beyond the content.
 const PER_ENTRY_OVERHEAD: u64 = 1536;
 
-/// Unpack `src` into `dest`, which must not exist yet.
+/// Unpack `src` into `dest`, which must not exist yet. Returns the links of the
+/// archive, relative to the root that was chosen.
 ///
 /// The entries are written into a staging directory first, since whether the
-/// archive has a single root directory is known only at its end. Links are
-/// checked again then, against the root that was chosen.
+/// archive has a single root directory is known only at its end.
 pub(super) fn unpack(
     src: impl Read,
     format: Format,
     dest: &Path,
     limits: Limits,
-) -> Result<(), String> {
+) -> Result<Vec<Link>, String> {
     let stage = stage_of(dest);
     if dest.exists() || stage.exists() {
         return Err(format!("{} already exists", dest.display()));
@@ -143,16 +152,26 @@ pub(super) fn unpack(
         write_entries(src, format, &stage, limits)?
     };
     let top = single_top_dir(&stage, &roots)?;
-    check_links(&links, top.is_some())?;
+    let links = match &top {
+        Some(name) => links
+            .into_iter()
+            .map(|(rel, target)| {
+                let inner = rel.strip_prefix(name).unwrap_or(&rel).to_path_buf();
+                (inner, target)
+            })
+            .collect(),
+        None => links,
+    };
     match top {
         Some(name) => {
             std::fs::rename(stage.join(&name), dest)
                 .map_err(|e| format!("moving the root into {}: {e}", dest.display()))?;
-            std::fs::remove_dir(&stage).map_err(|e| format!("removing {}: {e}", stage.display()))
+            std::fs::remove_dir(&stage).map_err(|e| format!("removing {}: {e}", stage.display()))?
         }
         None => std::fs::rename(&stage, dest)
-            .map_err(|e| format!("moving {} into place: {e}", dest.display())),
+            .map_err(|e| format!("moving {} into place: {e}", dest.display()))?,
     }
+    Ok(links)
 }
 
 /// The most bytes an archive's stream may hold, decompressed: the content
@@ -214,14 +233,15 @@ fn raw_root(path: &Path) -> Option<OsString> {
 }
 
 /// Write every entry of the archive under `dest`, with the archive's own
-/// top-level names. Returns each link written, as `(link, target)`, and the
-/// root name of every entry, as [`single_top_dir`] reads them.
+/// top-level names. Links are not written: each is returned, as `(link,
+/// target)`, and an entry may not pass through one. Every entry's root name is
+/// returned too, for [`single_top_dir`].
 fn write_entries(
     src: impl Read,
     format: Format,
     dest: &Path,
     limits: Limits,
-) -> Result<(Vec<(PathBuf, PathBuf)>, BTreeSet<OsString>), String> {
+) -> Result<(Vec<Link>, BTreeSet<OsString>), String> {
     let stream: Box<dyn Read> = match format {
         Format::Tar => Box::new(src),
         Format::TarGz => Box::new(flate2::read::GzDecoder::new(src)),
@@ -235,7 +255,8 @@ fn write_entries(
         Format::Zip => unreachable!("unpack reads zip archives with zip_archive"),
     };
     let mut ar = tar::Archive::new(guard::MetaGuard::new(stream).take(stream_cap(limits)));
-    let mut links = Vec::new();
+    let mut links: Vec<Link> = Vec::new();
+    let mut link_set: HashSet<PathBuf> = HashSet::new();
     let mut roots = BTreeSet::new();
     let mut bytes: u64 = 0;
     let entries = ar
@@ -275,8 +296,10 @@ fn write_entries(
             ));
         }
         if kind.is_dir() {
+            refuse_through_link(&link_set, &rel)?;
             ensure_dirs(dest, &rel)?;
         } else if kind.is_file() {
+            refuse_through_link(&link_set, &rel)?;
             let size = entry.size();
             bytes = bytes.saturating_add(size);
             if bytes > limits.max_bytes {
@@ -290,10 +313,18 @@ fn write_entries(
                 .map_err(|e| format!("a link target is not readable: {e}"))?
                 .ok_or_else(|| format!("{} has no link target", rel.display()))?
                 .into_owned();
-            check_link(dest, &rel, &target)?;
+            if target.as_os_str().is_empty() {
+                return Err(format!("{} has no link target", rel.display()));
+            }
+            refuse_through_link(&link_set, parent_of(&rel))?;
+            if link_set.contains(&rel) || std::fs::symlink_metadata(dest.join(&rel)).is_ok() {
+                return Err(format!(
+                    "{} is written twice: as a link and as a file or directory",
+                    rel.display()
+                ));
+            }
             ensure_dirs(dest, parent_of(&rel))?;
-            symlink(&target, dest.join(&rel))
-                .map_err(|e| format!("creating the link {}: {e}", rel.display()))?;
+            link_set.insert(rel.clone());
             links.push((rel, target));
         } else if kind.is_hard_link() {
             return Err(format!(
@@ -328,42 +359,20 @@ fn entry_path(path: &Path) -> Result<PathBuf, String> {
     Ok(rel)
 }
 
-/// Refuse a link that leaves the root. With a single top-level directory the
-/// root is that directory, so `..` may not climb above it.
-fn check_links(links: &[(PathBuf, PathBuf)], under_top: bool) -> Result<(), String> {
-    let floor = usize::from(under_top);
-    for (rel, target) in links {
-        if leaves(rel, target, floor) {
+/// Refuse an entry whose path is a link, or passes through one, in the archive.
+/// Links are not on disk, so `ensure_dirs` cannot see them.
+fn refuse_through_link(links: &HashSet<PathBuf>, rel: &Path) -> Result<(), String> {
+    let mut at = PathBuf::new();
+    for c in rel.components() {
+        at.push(c);
+        if links.contains(&at) {
             return Err(format!(
-                "the link {} points outside the tree",
+                "{} is or passes through a link in the archive, which zig_vendor refuses",
                 rel.display()
             ));
         }
     }
     Ok(())
-}
-
-/// Whether the link `target` at `rel` climbs above its first `floor`
-/// components. The check is lexical, from the link's own directory.
-fn leaves(rel: &Path, target: &Path, floor: usize) -> bool {
-    if target.as_os_str().is_empty() || target.has_root() {
-        return true;
-    }
-    let mut depth = parent_of(rel).components().count();
-    for c in target.components() {
-        match c {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if depth <= floor {
-                    return true;
-                }
-                depth -= 1;
-            }
-            _ => return true,
-        }
-    }
-    false
 }
 
 fn parent_of(rel: &Path) -> &Path {
@@ -411,51 +420,4 @@ fn write_file(dest: &Path, rel: &Path, input: &mut impl Read, mode: u32) -> Resu
     let perm = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
     std::fs::set_permissions(&at, std::fs::Permissions::from_mode(perm))
         .map_err(|e| format!("setting the mode of {}: {e}", rel.display()))
-}
-
-/// Refuse a link whose target leaves the tree, or passes through a link that
-/// is already on disk. The check is lexical from the link's directory, so
-/// `..` pops only real directories of the tree.
-fn check_link(dest: &Path, rel: &Path, target: &Path) -> Result<(), String> {
-    let escape = || format!("the link {} points outside the tree", rel.display());
-    if target.as_os_str().is_empty() || target.has_root() {
-        return Err(escape());
-    }
-    let mut dirs: Vec<&std::ffi::OsStr> = Vec::new();
-    for c in parent_of(rel).components() {
-        match c {
-            Component::Normal(p) => dirs.push(p),
-            _ => return Err(escape()),
-        }
-    }
-    let parts: Vec<Component<'_>> = target.components().collect();
-    for (i, c) in parts.iter().enumerate() {
-        match c {
-            Component::Normal(p) => {
-                let last = i + 1 == parts.len();
-                if !last && on_disk_link(dest, &dirs, p) {
-                    return Err(escape());
-                }
-                dirs.push(p);
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if dirs.pop().is_none() {
-                    return Err(escape());
-                }
-            }
-            _ => return Err(escape()),
-        }
-    }
-    Ok(())
-}
-
-/// Whether `name` under the directories `dirs` is a link on disk.
-fn on_disk_link(dest: &Path, dirs: &[&std::ffi::OsStr], name: &std::ffi::OsStr) -> bool {
-    let mut at = dest.to_path_buf();
-    for d in dirs {
-        at.push(d);
-    }
-    at.push(name);
-    std::fs::symlink_metadata(at).is_ok_and(|m| m.file_type().is_symlink())
 }

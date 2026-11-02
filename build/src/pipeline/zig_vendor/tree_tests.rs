@@ -1,5 +1,5 @@
 use super::tree::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A tree under a temp dir, with `files` as `(path, content)`.
 fn tree(files: &[(&str, &[u8])]) -> tempfile::TempDir {
@@ -32,7 +32,7 @@ fn zig_tree(paths: &str) -> tempfile::TempDir {
 
 fn hash_of(dir: &Path, paths: Option<&[&str]>) -> String {
     let paths: Option<Vec<String>> = paths.map(|p| p.iter().map(|s| s.to_string()).collect());
-    let items = included_items(dir, paths.as_deref()).unwrap();
+    let items = included_items(dir, &[], paths.as_deref()).unwrap();
     package_hash(&items, 0xc4bb_a334).unwrap()
 }
 
@@ -99,9 +99,10 @@ fn a_link_is_read_and_not_followed() {
         ),
         ("d/x", b"q\n"),
     ]);
-    std::os::unix::fs::symlink("d/x", dir.path().join("ln2")).unwrap();
+    let links = vec![(PathBuf::from("ln2"), PathBuf::from("d/x"))];
     let items = included_items(
         dir.path(),
+        &links,
         Some(&[
             "d".to_string(),
             "build.zig.zon".to_string(),
@@ -122,6 +123,14 @@ fn a_link_is_read_and_not_followed() {
 }
 
 #[test]
+fn a_link_on_disk_is_refused_since_unpacking_never_writes_one() {
+    let dir = tree(&[("d/x", b"q\n")]);
+    std::os::unix::fs::symlink("d/x", dir.path().join("ln2")).unwrap();
+    let err = included_items(dir.path(), &[], None).unwrap_err();
+    assert!(err.contains("ln2 is a link on disk"), "{err}");
+}
+
+#[test]
 fn an_executable_bit_is_reported_but_not_hashed() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tree(&[("run.sh", b"#!/bin/sh\n"), ("data", b"d")]);
@@ -130,7 +139,7 @@ fn an_executable_bit_is_reported_but_not_hashed() {
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
-    let items = included_items(dir.path(), None).unwrap();
+    let items = included_items(dir.path(), &[], None).unwrap();
     let exec = |rel: &str| {
         items.iter().find_map(|i| match i {
             Item::File { rel: r, exec, .. } if r == rel => Some(*exec),
@@ -144,8 +153,8 @@ fn an_executable_bit_is_reported_but_not_hashed() {
 #[test]
 fn unsafe_paths_entries_are_refused() {
     let dir = zig_tree("\"\"");
-    assert!(included_items(dir.path(), Some(&["/etc".to_string()])).is_err());
-    assert!(included_items(dir.path(), Some(&["../x".to_string()])).is_err());
+    assert!(included_items(dir.path(), &[], Some(&["/etc".to_string()])).is_err());
+    assert!(included_items(dir.path(), &[], Some(&["../x".to_string()])).is_err());
 }
 
 #[test]
