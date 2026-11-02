@@ -144,7 +144,11 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // after it, and the symbolic links it made are checked too, whatever the
     // turn returned: a turn that changed either outside the rules is rejected
     // and undone (see `integrity`).
-    let guard = super::integrity::TurnGuard::begin(req.workspace, req.checkout_dir);
+    let guard = super::integrity::TurnGuard::begin(
+        req.workspace,
+        req.checkout_dir,
+        !super::owned_files::may_edit_service(req.task),
+    );
     let result = turn_inner(req);
     let result = match guard.settle() {
         None => result,

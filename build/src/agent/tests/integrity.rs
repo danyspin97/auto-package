@@ -22,7 +22,7 @@ fn checkout() -> tempfile::TempDir {
 
 /// Run `during` as a turn on `dir` and return what the check says.
 fn turn_with(dir: &std::path::Path, during: impl FnOnce(&std::path::Path)) -> Option<String> {
-    let guard = crate::agent::integrity::MetadataGuard::begin(Some(dir));
+    let guard = crate::agent::integrity::MetadataGuard::begin(Some(dir), false);
     during(dir);
     guard.settle()
 }
@@ -42,7 +42,7 @@ fn an_unchanged_checkout_passes() {
 
 #[test]
 fn no_checkout_means_nothing_is_checked() {
-    let guard = crate::agent::integrity::MetadataGuard::begin(None);
+    let guard = crate::agent::integrity::MetadataGuard::begin(None, false);
     assert_eq!(guard.settle(), None);
 }
 
@@ -222,5 +222,29 @@ fn a_large_osc_source_change_is_reported_as_not_put_back() {
     assert!(
         detail.contains("could not restore .osc/sources/big.tar"),
         "{detail}"
+    );
+}
+
+#[test]
+fn a_service_a_turn_may_not_edit_is_put_back_and_the_turn_rejected() {
+    let dir = checkout();
+    let service = dir.path().join("_service");
+    std::fs::write(&service, "<services/>\n").unwrap();
+    let guard = crate::agent::integrity::MetadataGuard::begin(Some(dir.path()), true);
+    std::fs::write(&service, "<services><service name=\"x\"/></services>\n").unwrap();
+    let detail = guard.settle().expect("a changed _service is a change");
+    assert!(detail.contains("modified _service"), "{detail}");
+    assert_eq!(std::fs::read(&service).unwrap(), b"<services/>\n");
+}
+
+#[test]
+fn a_service_a_turn_may_edit_is_not_checked_by_the_guard() {
+    let dir = checkout();
+    std::fs::write(dir.path().join("_service"), "<services/>\n").unwrap();
+    assert_eq!(
+        turn_with(dir.path(), |d| {
+            std::fs::write(d.join("_service"), "<services/>\n<x/>\n").unwrap();
+        }),
+        None
     );
 }

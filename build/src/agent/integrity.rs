@@ -53,6 +53,11 @@ struct Saved {
 /// The metadata tree, keyed by path relative to the checkout.
 type Tree = BTreeMap<PathBuf, Saved>;
 
+/// The checkout's `_service`, a file in its root. Only a turn that may not edit it
+/// is checked for it (see `owned_files::service_denied_tools`): a turn that may
+/// edit it is checked by the acceptance gate instead.
+const SERVICE_FILE: &str = "_service";
+
 /// A file under `.git/objects`. Only a large one (a pack) is compared by length
 /// alone; see [`file_kind`].
 fn is_object_file(rel: &Path) -> bool {
@@ -60,11 +65,20 @@ fn is_object_file(rel: &Path) -> bool {
 }
 
 /// The metadata of `checkout`, walked without following links. With `keep`,
-/// the bytes of the files under [`KEEP_CAP`] are kept for a restore.
-fn scan(checkout: &Path, keep: bool) -> Tree {
+/// the bytes of the files under [`KEEP_CAP`] are kept for a restore. With
+/// `service`, the checkout's `_service` is walked too.
+fn scan(checkout: &Path, keep: bool, service: bool) -> Tree {
     let mut tree = Tree::new();
     for dir in CHECKOUT_METADATA_DIRS {
         scan_into(&checkout.join(dir), Path::new(dir), keep, &mut tree);
+    }
+    if service {
+        scan_into(
+            &checkout.join(SERVICE_FILE),
+            Path::new(SERVICE_FILE),
+            keep,
+            &mut tree,
+        );
     }
     tree
 }
@@ -291,25 +305,32 @@ fn put_back(path: &Path, saved: &Saved) -> Result<(), String> {
 /// The copy taken when a turn starts, and the check when it ends.
 pub(super) struct MetadataGuard {
     checkout: Option<PathBuf>,
+    /// Whether the checkout's `_service` is checked too.
+    service: bool,
     before: Tree,
 }
 
 impl MetadataGuard {
-    /// Copy the metadata of the turn's checkout, if it has one.
-    pub(super) fn begin(checkout: Option<&Path>) -> Self {
+    /// Copy the metadata of the turn's checkout, if it has one. With `service`,
+    /// the checkout's `_service` is copied and checked too.
+    pub(super) fn begin(checkout: Option<&Path>, service: bool) -> Self {
         let checkout = checkout.map(Path::to_path_buf);
         let before = checkout
             .as_deref()
-            .map(|c| scan(c, true))
+            .map(|c| scan(c, true, service))
             .unwrap_or_default();
-        Self { checkout, before }
+        Self {
+            checkout,
+            service,
+            before,
+        }
     }
 
     /// Compare the metadata with the copy and put it back when it changed.
     /// Returns what changed when the turn must be rejected, `None` otherwise.
     pub(super) fn settle(self) -> Option<String> {
         let checkout = self.checkout?;
-        let after = scan(&checkout, false);
+        let after = scan(&checkout, false, self.service);
         let changed = changes(&self.before, &after);
         if changed.is_empty() {
             return None;
@@ -344,10 +365,12 @@ pub(super) struct TurnGuard {
 }
 
 impl TurnGuard {
-    pub(super) fn begin(workspace: &Path, checkout: Option<&Path>) -> Self {
+    /// Copy what the turn may change; `service` also checks the checkout's
+    /// `_service` (see [`MetadataGuard::begin`]).
+    pub(super) fn begin(workspace: &Path, checkout: Option<&Path>, service: bool) -> Self {
         Self {
             parts: Some((
-                MetadataGuard::begin(checkout),
+                MetadataGuard::begin(checkout, service),
                 LinkGuard::begin(workspace, checkout),
             )),
         }

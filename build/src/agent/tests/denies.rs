@@ -545,3 +545,20 @@ fn write_roots_refuse_dot_dot_spellings_of_the_metadata() {
         );
     }
 }
+
+#[test]
+fn a_turn_that_may_not_edit_the_service_is_denied_it_and_others_are_not() {
+    let co = std::path::Path::new("/srv/ws/checkout");
+    let denied = crate::agent::owned_files::service_denied_tools(Task::RefreshPatches, Some(co));
+    let p = crate::agent::response::permission_path(co);
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        assert!(
+            denied.contains(&format!("{tool}({p}/_service)")),
+            "{denied:?}"
+        );
+    }
+    assert!(
+        crate::agent::owned_files::service_denied_tools(Task::FixAfterBuild, Some(co)).is_empty()
+    );
+    assert!(crate::agent::owned_files::service_denied_tools(Task::RefreshPatches, None).is_empty());
+}

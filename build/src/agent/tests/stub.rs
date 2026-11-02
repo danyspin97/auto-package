@@ -311,3 +311,83 @@ fn a_turn_that_rewrites_the_checkouts_apiurl_is_rejected_and_the_file_put_back()
     assert!(e.usage().is_some(), "the turn's cost is still charged");
     assert_eq!(std::fs::read(&apiurl).unwrap(), b"https://api.example\n");
 }
+
+/// A stub whose turn runs `script` and then answers `response`.
+fn answering_after(script: &str, response: &serde_json::Value) -> Stub {
+    let event = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": response.to_string(),
+        "total_cost_usd": 0.01,
+        "num_turns": 1,
+        "session_id": "sess-3",
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    });
+    Stub::new(
+        &format!("{script}\ncat \"$d/payload\""),
+        &format!("{event}\n"),
+    )
+}
+
+/// A turn of `task` on a checkout whose `_service` is a well-formed one, where the
+/// stub rewrites that `_service`. Returns what the turn returned, the `_service`
+/// afterwards and the arguments the CLI was given.
+fn service_turn(task: Task) -> (Result<TurnOutcome, Error>, Vec<u8>, String) {
+    let co = tempfile::tempdir().unwrap();
+    let service = co.path().join("_service");
+    std::fs::write(&service, "<services/>\n").unwrap();
+    let script = format!(
+        "printf '<services><service name=\"x\"/></services>\\n' > '{}'",
+        service.display()
+    );
+    let stub = answering_after(&script, &answer("edited"));
+    let ws = tempfile::tempdir().unwrap();
+    let mut req = request(ws.path(), &[]);
+    req.task = task;
+    req.checkout_dir = Some(co.path());
+    TURN_TEST_OVERRIDES.with(|o| {
+        o.borrow_mut().program = Some(stub.dir.path().join("claude-stub"));
+    });
+    let result = turn(req);
+    TURN_TEST_OVERRIDES.with(|o| *o.borrow_mut() = TurnTestOverrides::default());
+    let args = stub.recorded("args.txt");
+    (result, std::fs::read(&service).unwrap(), args)
+}
+
+#[test]
+fn a_turn_that_may_edit_the_service_keeps_its_change_to_it() {
+    for task in [Task::Review, Task::FixAfterBuild, Task::PatchDependency] {
+        let (result, service, args) = service_turn(task);
+        assert!(result.is_ok(), "{task:?}: {:?}", result.err());
+        assert_eq!(
+            service, b"<services><service name=\"x\"/></services>\n",
+            "{task:?}"
+        );
+        assert!(
+            !args.contains("_service)"),
+            "{task:?} is not denied it: {args}"
+        );
+    }
+}
+
+#[test]
+fn a_turn_that_may_not_edit_the_service_is_denied_it_and_its_change_is_tampered() {
+    for task in [Task::RefreshPatches, Task::TranslateUnresolvableDeps] {
+        let (result, service, args) = service_turn(task);
+        let Err(e) = result else {
+            panic!("{task:?}: a change to the _service was accepted");
+        };
+        assert!(matches!(e, Error::Tampered { .. }), "{task:?}: {e}");
+        assert!(e.to_string().contains("_service"), "{task:?}: {e}");
+        assert!(
+            e.usage().is_some(),
+            "{task:?}: the turn's cost is still charged"
+        );
+        assert_eq!(service, b"<services/>\n", "{task:?}: put back");
+        assert!(
+            args.contains("_service)"),
+            "{task:?}: denied in the CLI: {args}"
+        );
+    }
+}

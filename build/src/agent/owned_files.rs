@@ -4,6 +4,7 @@
 //! baseline is what a failed run puts back on OBS (`obs-baseline`, see
 //! `pipeline::baseline`). Its `checkout` and `files` steer that restore.
 
+use super::outcome::Task;
 use super::response::permission_path;
 
 /// Names in the workspace the turn may not write. `sdist.stamp` records which
@@ -34,4 +35,24 @@ pub(super) fn denied_tools(workspace: &std::path::Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether a turn of `task` may write the checkout's `_service`. The `_service`
+/// is the source recipe of the package, which a rebase of its patches does not
+/// change, and a read-only translation writes nothing.
+pub(super) fn may_edit_service(task: Task) -> bool {
+    !matches!(task, Task::RefreshPatches | Task::TranslateUnresolvableDeps)
+}
+
+/// Denies Edit, Write and NotebookEdit on the checkout's `_service` for a turn
+/// that may not edit it (see [`may_edit_service`]). Empty for a turn that may.
+pub(super) fn service_denied_tools(task: Task, checkout: Option<&std::path::Path>) -> Vec<String> {
+    let Some(checkout) = checkout.filter(|_| !may_edit_service(task)) else {
+        return Vec::new();
+    };
+    let p = permission_path(checkout);
+    ["Edit", "Write", "NotebookEdit"]
+        .into_iter()
+        .map(|tool| format!("{tool}({p}/_service)"))
+        .collect()
 }

@@ -34,7 +34,7 @@ impl Trees {
 
     /// Run `during` as a turn and return what the check rejected it for.
     fn turn(&self, during: impl FnOnce(&Trees)) -> Option<String> {
-        let guard = TurnGuard::begin(&self.ws(), Some(&self.co()));
+        let guard = TurnGuard::begin(&self.ws(), Some(&self.co()), false);
         during(self);
         guard.settle()
     }
@@ -181,7 +181,7 @@ fn a_chain_of_links_fanning_out_is_refused_in_bounded_time() {
 fn a_turn_that_unwinds_is_still_undone() {
     let t = Trees::new();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = TurnGuard::begin(&t.ws(), Some(&t.co()));
+        let _guard = TurnGuard::begin(&t.ws(), Some(&t.co()), false);
         std::fs::write(t.co().join(".osc/_apiurl"), "http://evil\n").unwrap();
         link("../../co/.osc/_apiurl", &t.ws().join("source/lnk"));
         panic!("the turn died");

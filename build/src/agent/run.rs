@@ -12,7 +12,12 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         allowed_tools.push_str(&rpm_inspection_tools(req.rpms_dir));
         allowed_tools.push_str(&sibling_read_tools(req.sibling_dirs));
     }
-    let denied_tools = turn_denied_tools(req.workspace, req.checkout_dir);
+    let mut denied_tools = turn_denied_tools(req.workspace, req.checkout_dir);
+    let service = super::owned_files::service_denied_tools(req.task, req.checkout_dir);
+    if !service.is_empty() {
+        denied_tools.push(',');
+        denied_tools.push_str(&service.join(","));
+    }
 
     // Escalate with the attempt number: the first 2 attempts go to Haiku 5.5
     // (cheapest), the next 3 to Sonnet 5.5, and everything from attempt 6 on —
