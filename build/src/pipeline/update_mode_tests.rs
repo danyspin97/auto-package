@@ -328,6 +328,36 @@ mod tidy_on_update {
         let kept = normalize_spec_text(UNUSED_PYTEST, true);
         assert!(!kept.contains("%{python_module pytest}"), "{kept}");
     }
+
+    /// The obsolete constructs `lint` removes from an existing spec, all in one.
+    const OBSOLETE: &str = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool\n\
+        License: MIT\nGroup: Development/Tools\nBuildRoot: %{_tmppath}/%{name}\n\
+        Source0: foo-2.0.tar.gz\n\n%description\nA tool that does things.\n\n\
+        %prep\n%setup -q\n\n%build\n\n%install\nrm -rf %{buildroot}\nmake install\n\n\
+        %post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n\n\
+        %files\n%defattr(-,root,root)\n%{_bindir}/foo\n\n\
+        %clean\nrm -rf %{buildroot}\n\n%changelog\n";
+
+    #[test]
+    fn an_update_leaves_the_obsolete_constructs_for_lint() {
+        // The hygiene passes of `lint` are not in the update's normalisation:
+        // an update keeps the maintainer's recipe (convention 86).
+        let kept = normalize_spec_text(OBSOLETE, true);
+        for construct in [
+            "Group: Development/Tools",
+            "BuildRoot: %{_tmppath}/%{name}",
+            "rm -rf %{buildroot}\nmake install",
+            "%post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig",
+            "%defattr(-,root,root)",
+            "%clean\nrm -rf %{buildroot}",
+        ] {
+            assert!(kept.contains(construct), "{construct} was removed:\n{kept}");
+        }
+        assert_eq!(
+            kept,
+            OBSOLETE.replace("foo-2.0.tar.gz", "foo-%{version}.tar.gz")
+        );
+    }
 }
 
 mod failed_build_log {
