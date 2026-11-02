@@ -112,3 +112,4 @@
 112. Merged into convention 111 — read convention 111 when the package uses X11 patch names such as N_, u_, T_ or Patch-Mainline headers
 113. Standalone Cargo crates: workspaces, _service parameters, vendored crate patches — read when a Cargo.toml package needs a workspace, update=false, update-crate, or a vendored crate patched
 114. C/C++ system-library shims: check every consumer in the same turn — read when a C/C++ build fails in a header, namespace or include path that a system-library shim or patch provides
+115. Build system switch (autotools to meson or CMake): explicit options and BuildRequires — read when %configure or %make_build becomes %meson or %cmake, or the reverse
