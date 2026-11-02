@@ -352,3 +352,19 @@ fn the_other_arch_results_that_are_not_green_are_listed() {
     let ex = explain(&query(old.path())).unwrap();
     assert!(ex.run_info.arch_checks.is_empty());
 }
+
+#[test]
+fn a_port_result_that_fails_in_factory_too_says_so() {
+    let t = fixture(&[
+        r#"{"event":"arch_check","package":"foo","results":[{"repo":"openSUSE_Factory_zSystems","arch":"s390x","state":"not testable","detail":"nothing provides libwlroots-0_20","origin_fails":false},{"repo":"openSUSE_Factory_PowerPC","arch":"ppc64le","state":"failed","origin_fails":true},{"repo":"ports","arch":"aarch64","state":"failed","origin_fails":true}]}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(
+        ex.run_info.arch_checks,
+        [
+            "openSUSE_Factory_zSystems/s390x: not testable (nothing provides libwlroots-0_20)",
+            "openSUSE_Factory_PowerPC/ppc64le: failed [also fails in Factory]",
+            "ports/aarch64: failed [also fails in the origin]",
+        ]
+    );
+}

@@ -254,7 +254,13 @@ fn arch_check_lines(v: &Value) -> Vec<String> {
                 line.push_str(&format!(" ({d})"));
             }
             if r["origin_fails"].as_bool() == Some(true) {
-                line.push_str(" [also fails in the origin]");
+                // A port's baseline is Factory, any other result's the origin.
+                let who = if crate::arch_check::is_port_repo(r["repo"].as_str().unwrap_or("")) {
+                    "Factory"
+                } else {
+                    "the origin"
+                };
+                line.push_str(&format!(" [also fails in {who}]"));
             }
             line
         })

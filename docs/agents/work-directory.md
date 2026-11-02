@@ -75,13 +75,20 @@ log can be read for every host a run was allowed to contact; absent in older
 logs), plus noisy `command`, `command_done`, `progress`,
 `agent_tool_use`. There are no timestamps: use `elapsed` and the run id.
 `arch_check` (`package`, `results`: one `{repo, arch, state}` per checked
-result of an updated package, with `detail` (the first error line or the
-missing names), `origin_fails` and `log` when set; `state` is `succeeded`,
-`failed`, `unresolvable`, `broken`, `excluded` or `still ...` for a result
-still scheduled, blocked or building at the bound; written by `update` after
-the package built, absent with `--no-arch-check` or `--local`, and absent
-from older logs). Its failures are also in the summary's `Other architectures`
-section and in a `warning`.
+result of an updated package, with `detail` (the first error line, the
+missing names, or `nothing provides ...` for a port), `origin_fails` and `log`
+when set; `origin_fails` means the baseline fails too: the origin, or Factory
+for a port repository (`openSUSE_Factory_zSystems`, `openSUSE_Factory_PowerPC`,
+`openSUSE_Factory_RISCV`); `state` is `succeeded`, `failed`, `failed (no Factory
+baseline)` (a port failure Factory has no result of, which blocks), `unresolvable`,
+`broken`, `excluded`, `not testable` (a port that cannot resolve its build
+dependencies, never a failure), `not final (...)` (a port still going at the
+bound, never blocking) or `still ...` for any other result still scheduled,
+blocked or building at the bound; written by `update` after the package built,
+absent with `--no-arch-check` or `--local`, and absent from older logs). A
+result's state is a label: a log that predates a label reads as before. Its
+failures are also in the summary's `Other architectures` section and in a
+`warning`.
 `hosts allow` and `hosts remove` run outside any run and write no event: the
 user's `allowed-hosts` file (its `# reason` comments) is their record.
 `auto-package explain` lists the `host_allowed` hosts of the run it reads.
