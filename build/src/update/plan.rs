@@ -357,18 +357,12 @@ pub fn plan_each(
 ) -> Result<(), String> {
     // A failed listing is an error: treating it as "no packages" would make
     // `update` report success for a project it never looked at.
-    let packages = osc::try_list_project_packages(project, emit)?;
-    // A multibuild flavor (`boost:base`) is part of its source package, which is
-    // listed too and has the spec; the flavor has none of its own.
-    let mut names: Vec<String> = packages
-        .iter()
-        .filter(|n| wanted(n))
-        .filter(|n| {
-            n.split_once(':')
-                .is_none_or(|(base, _)| !packages.iter().any(|p| p == base))
-        })
-        .cloned()
-        .collect();
+    // The candidates are the source packages OBS lists, never a multibuild flavor
+    // (`boost:base`, `rpm:python-rpm`): a flavor is built as part of its source,
+    // and a second spec of a package is a file of it.
+    let sources = osc::list_source_package_names(project, emit)
+        .map_err(|e| format!("could not list packages of {project}: {e}"))?;
+    let mut names: Vec<String> = sources.iter().filter(|n| wanted(n)).cloned().collect();
     names.sort();
 
     // Enumerate the package's files instead of guessing `<pkg>.spec`.

@@ -76,3 +76,15 @@ fn obs_name_is_stable_when_several_spellings_match() {
     let listing = parse_package_listing("python-Foo\npython-foo\n");
     assert_eq!(obs_name(&listing, "python-FOO"), "python-Foo");
 }
+
+#[test]
+fn only_source_packages_are_update_candidates() {
+    // `rpm:python-rpm` (a second spec of rpm) and `file:python-magic` are not
+    // packages of their own; `util-linux:python` is the same kind of entry.
+    let names = parse_source_names(
+        "rpm\nrpm:python-rpm\nrpm:rpm-plugin-imaevmsign\nfile\nfile:python-magic\nutil-linux:python\n",
+    );
+    let mut names: Vec<String> = names.into_iter().collect();
+    names.sort();
+    assert_eq!(names, ["file", "rpm"]);
+}

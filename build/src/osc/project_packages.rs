@@ -146,6 +146,32 @@ pub(super) fn fetch_project_packages(
     project: &str,
     emit: Emit<'_>,
 ) -> Result<std::collections::HashSet<String>, Error> {
+    Ok(parse_package_listing(&osc_ls(project, emit)?))
+}
+
+/// The source packages of `project` (`osc ls`, without the `<source>:<flavor>`
+/// entries). A second spec of a package (`rpm:python-rpm`, a `_multibuild`
+/// `<package>`) is a file of its container, not a package OBS builds, so it is
+/// not an update candidate.
+pub fn list_source_package_names(
+    project: &str,
+    emit: Emit<'_>,
+) -> Result<std::collections::HashSet<String>, Error> {
+    Ok(parse_source_names(&osc_ls(project, emit)?))
+}
+
+/// The names of `osc ls` output that are source packages (no `:flavor`).
+pub(super) fn parse_source_names(stdout: &str) -> std::collections::HashSet<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && !n.contains(':'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The raw `osc ls <project>` output.
+fn osc_ls(project: &str, emit: Emit<'_>) -> Result<String, Error> {
     if !is_valid_obs_name(project) {
         return Err(Error::NotActionable(format!(
             "refusing to use project {project:?}: not a valid OBS name"
@@ -167,7 +193,7 @@ pub(super) fn fetch_project_packages(
             stderr: out.stderr.trim().to_string(),
         });
     }
-    Ok(parse_package_listing(&out.stdout))
+    Ok(out.stdout)
 }
 
 /// Package names from `osc ls <project>`, in the spelling OBS stores them
