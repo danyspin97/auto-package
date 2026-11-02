@@ -1,0 +1,28 @@
+//! The OBS calls the arch check makes, behind a trait so that its logic runs
+//! against fixtures. [`LiveArchObs`] makes them with `osc`.
+
+use crate::osc::{get_project_meta, set_project_meta};
+use crate::proc::Emit;
+
+/// What the arch check asks of OBS about the projects it reads and writes.
+pub trait ArchObs {
+    /// The meta XML of a project, `None` when the project does not exist.
+    fn project_meta(&self, project: &str) -> Result<Option<String>, String>;
+    /// Replace the meta XML of a project.
+    fn set_project_meta(&self, project: &str, xml: &str) -> Result<(), String>;
+}
+
+/// [`ArchObs`] over `osc`.
+pub struct LiveArchObs<'a> {
+    pub emit: Emit<'a>,
+}
+
+impl ArchObs for LiveArchObs<'_> {
+    fn project_meta(&self, project: &str) -> Result<Option<String>, String> {
+        get_project_meta(project, self.emit).map_err(|e| e.to_string())
+    }
+
+    fn set_project_meta(&self, project: &str, xml: &str) -> Result<(), String> {
+        set_project_meta(project, xml, self.emit).map_err(|e| e.to_string())
+    }
+}

@@ -26,35 +26,105 @@ pub struct ProjectInfo {
     pub repositories: Vec<RepoDef>,
 }
 
-/// Byte ranges `(start, end)` of every `<repository>` element in `xml`, end
-/// exclusive and past the closing tag.
-pub(super) fn repository_spans(xml: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    let mut from = 0;
-    while let Some(rel) = xml[from..].find("<repository") {
-        let start = from + rel;
-        let after = start + "<repository".len();
-        // `<repositoryfoo` is some other element: only whitespace after the
-        // name makes it this one.
-        if !xml[after..].starts_with(|c: char| c.is_whitespace()) {
-            from = after;
-            continue;
-        }
-        let Some(open_end) = xml[start..].find('>').map(|i| start + i + 1) else {
-            break;
-        };
-        let end = if xml[..open_end].ends_with("/>") {
-            open_end
-        } else {
-            match xml[open_end..].find("</repository>") {
-                Some(i) => open_end + i + "</repository>".len(),
-                None => break,
-            }
-        };
-        spans.push((start, end));
-        from = end;
+/// One `<repository>` element of a project meta, by byte range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoElement {
+    pub name: String,
+    /// The element's byte range, end exclusive, past the closing tag.
+    pub start: usize,
+    pub end: usize,
+    /// Where its start tag ends (`end` too when it is self-closing).
+    pub open_end: usize,
+    pub self_closing: bool,
+    /// The architectures it lists, in order.
+    pub arches: Vec<String>,
+    /// The byte range of its last `<arch>` element.
+    pub last_arch: Option<(usize, usize)>,
+    /// Where its closing tag starts; `None` when it is self-closing.
+    pub close_at: Option<usize>,
+}
+
+fn repo_element(xml: &str, before: usize, after: usize, self_closing: bool) -> RepoElement {
+    let open = &xml[before..after];
+    RepoElement {
+        name: crate::obs_xml::attr(open, "name").unwrap_or_default(),
+        start: before,
+        end: after,
+        open_end: after,
+        self_closing,
+        arches: Vec::new(),
+        last_arch: None,
+        close_at: None,
     }
-    spans
+}
+
+/// The `<repository>` elements that are direct children of the root of `xml`,
+/// found by parsing it: a comment or text that looks like one is not an
+/// element. A document that is not well formed is an error.
+pub fn repository_elements(xml: &str) -> Result<Vec<RepoElement>, String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(xml);
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    // The repository element still open (its children are at depth 2).
+    let mut open: Option<RepoElement> = None;
+    // Where the text of the `<arch>` element being read starts, and the element.
+    let mut arch_text: Option<(usize, usize)> = None;
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader
+            .read_event()
+            .map_err(|e| format!("malformed XML: {e}"))?;
+        let after = reader.buffer_position() as usize;
+        match event {
+            Event::Start(e) => {
+                match (depth, e.name().as_ref()) {
+                    (1, "repository") => open = Some(repo_element(xml, before, after, false)),
+                    (2, "arch") if open.is_some() => arch_text = Some((before, after)),
+                    _ => {}
+                }
+                depth += 1;
+            }
+            Event::Empty(e) => match (depth, e.name().as_ref()) {
+                (1, "repository") => out.push(repo_element(xml, before, after, true)),
+                (2, "arch") => {
+                    if let Some(r) = open.as_mut() {
+                        r.last_arch = Some((before, after));
+                    }
+                }
+                _ => {}
+            },
+            Event::End(e) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or("a closing tag with nothing open")?;
+                match (depth, e.name().as_ref()) {
+                    (2, "arch") => {
+                        if let (Some((_, text_at)), Some(r)) = (arch_text.take(), open.as_mut()) {
+                            let text = xml[text_at..before].trim();
+                            r.arches.push(crate::obs_xml::unescape(text));
+                            r.last_arch = Some((text_at - "<arch>".len(), after));
+                        }
+                    }
+                    (1, "repository") => {
+                        if let Some(mut r) = open.take() {
+                            r.close_at = Some(before);
+                            r.end = after;
+                            out.push(r);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err("the document is not complete".into());
+    }
+    Ok(out)
 }
 
 /// Parsing half of the project-meta read, split out so it is testable
@@ -69,23 +139,14 @@ pub fn parse_project_info(xml: &str) -> ProjectInfo {
         .find("<lock>")
         .and_then(|i| xml[i..].find("</lock>").map(|e| &xml[i..i + e]))
         .is_some_and(|block| block.contains("<enable"));
-    let repositories = repository_spans(xml)
+    let repositories = repository_elements(xml)
+        .unwrap_or_default()
         .into_iter()
-        .filter_map(|(s, e)| {
-            let block = &xml[s..e];
-            let open = &block[..block.find('>')? + 1];
-            let name = crate::obs_xml::attr(open, "name")?;
-            let arches = block
-                .split("<arch>")
-                .skip(1)
-                .filter_map(|c| c.split("</arch>").next())
-                .map(|a| crate::obs_xml::unescape(a.trim()))
-                .collect();
-            Some(RepoDef {
-                name,
-                paths: parse_project_repo_paths(block),
-                arches,
-            })
+        .filter(|r| !r.name.is_empty())
+        .map(|r| RepoDef {
+            paths: parse_project_repo_paths(&xml[r.start..r.end]),
+            name: r.name,
+            arches: r.arches,
         })
         .collect();
     ProjectInfo {
@@ -132,6 +193,11 @@ pub fn set_project_meta(project: &str, xml: &str, emit: Emit<'_>) -> Result<(), 
 /// held, so two such edits never interleave and lose one another's change.
 /// Read the meta again inside the guard, not before it.
 pub(super) static PROJECT_META_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn project_meta_lock_is_free() -> bool {
+    PROJECT_META_LOCK.try_lock().is_ok()
+}
 
 /// Hold the project-meta lock until the guard is dropped.
 pub fn lock_project_meta() -> std::sync::MutexGuard<'static, ()> {
@@ -204,13 +270,10 @@ pub fn add_paths_to_meta(
     let mut xml = xml.to_string();
     let mut made = Vec::new();
     for add in additions {
-        let (start, end) = repository_spans(&xml)
+        let (start, end) = repository_elements(&xml)?
             .into_iter()
-            .find(|&(s, _)| {
-                let open_end = xml[s..].find('>').map_or(xml.len(), |i| s + i + 1);
-                crate::obs_xml::attr(&xml[s..open_end], "name").as_deref()
-                    == Some(add.repository.as_str())
-            })
+            .find(|r| r.name == add.repository)
+            .map(|r| (r.start, r.end))
             .ok_or_else(|| format!("the project meta has no repository {}", add.repository))?;
         let block = &xml[start..end];
         if parse_project_repo_paths(block)

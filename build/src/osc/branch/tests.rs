@@ -507,7 +507,7 @@ fn a_request_to_another_target_is_not_a_duplicate() {
 #[test]
 fn the_project_meta_lock_is_exclusive_while_held() {
     let guard = lock_project_meta();
-    assert!(PROJECT_META_LOCK.try_lock().is_err());
+    assert!(!project_meta_lock_is_free());
     drop(guard);
-    assert!(PROJECT_META_LOCK.try_lock().is_ok());
+    assert!(project_meta_lock_is_free());
 }

@@ -212,7 +212,12 @@ pub fn with_local_blocking(xml: &str) -> Option<String> {
     let mut out = xml.to_string();
     let mut changed = false;
     // Back to front, so earlier offsets stay valid.
-    for (start, _) in repository_spans(xml).into_iter().rev() {
+    for start in repository_elements(xml)
+        .ok()?
+        .into_iter()
+        .map(|r| r.start)
+        .rev()
+    {
         let open_end = out[start..].find('>').map_or(out.len(), |i| start + i);
         if crate::obs_xml::attr(&out[start..open_end], "block").is_some() {
             continue;

@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod allowed_hosts;
+pub mod arch_check;
 pub mod backport;
 pub mod branch_revision;
 pub mod byte_edit;
