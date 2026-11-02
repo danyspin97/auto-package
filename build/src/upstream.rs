@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 use crate::sources::{archive_name_version, fetch_index, index_dir, is_any_archive, last_segment};
 use crate::version::{is_prerelease, sort_cmp as version_cmp};
 
+mod tags;
+pub use tags::rpm_version_for_tag;
+
 const USER_AGENT: &str = "auto-package";
 
 /// Repology asks for at most one request a second.
