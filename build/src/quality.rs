@@ -59,12 +59,35 @@ pub struct Finding {
 /// passes in the order the pipeline applies them. `ldconfig_macro` says whether the
 /// target defines `%ldconfig_scriptlets` (see `hygiene::ldconfig_macro_defined`).
 pub fn tidy(spec: &str, ldconfig_macro: bool) -> String {
-    let spec = spec_tidy::hygiene::drop_obsolete_constructs(spec, ldconfig_macro);
-    let spec = spec_tidy::unwrap_python_expand_block(&spec);
+    style(&spec_tidy::hygiene::drop_obsolete_constructs(
+        spec,
+        ldconfig_macro,
+    ))
+}
+
+/// The style passes of [`tidy`].
+fn style(spec: &str) -> String {
+    let spec = spec_tidy::unwrap_python_expand_block(spec);
     let spec = spec_tidy::move_check_before_files(&spec);
     let spec = spec_tidy::add_noarch_to_pure_python(&spec);
     let spec = spec_tidy::use_version_macro(&spec);
     spec_tidy::drop_unneeded_wheel_build_requires(&spec)
+}
+
+/// The changelog bullet of the commit that [`tidy`] makes of `spec`: the
+/// style fixes as lint has always named them, the obsolete constructs, or
+/// both in one bullet. Empty when `tidy` changes nothing.
+pub fn tidy_bullet(spec: &str, ldconfig_macro: bool) -> &'static str {
+    let hygiene = spec_tidy::hygiene::drop_obsolete_constructs(spec, ldconfig_macro);
+    let style_fixed = style(&hygiene) != hygiene;
+    match (hygiene != spec, style_fixed) {
+        (true, true) => {
+            "Tidy the spec: section order, noarch, %{version}; clean up obsolete spec constructs"
+        }
+        (true, false) => "Clean up obsolete spec constructs",
+        (false, true) => "Tidy the spec: section order, noarch, %{version}",
+        (false, false) => "",
+    }
 }
 
 type StylePass = fn(&str) -> String;
@@ -443,5 +466,27 @@ mod tests {
         assert!(tidy(spec, true).contains("%ldconfig_scriptlets"));
         assert!(spec_tidy::hygiene::ldconfig_left(spec, false));
         assert!(!spec_tidy::hygiene::ldconfig_left(spec, true));
+    }
+
+    #[test]
+    fn the_changelog_bullet_names_what_tidy_changed() {
+        assert_eq!(
+            tidy_bullet(LEGACY, true),
+            "Clean up obsolete spec constructs"
+        );
+        assert_eq!(tidy_bullet(VMA, true), "Clean up obsolete spec constructs");
+        let style =
+            "Name: x\nVersion: 1\n\n%install\ntrue\n\n%files\n/a\n\n%check\ntrue\n\n%changelog\n";
+        assert_eq!(
+            tidy_bullet(style, true),
+            "Tidy the spec: section order, noarch, %{version}"
+        );
+        let both = style.replace("Name: x\n", "Name: x\nGroup: Other\n");
+        assert_eq!(
+            tidy_bullet(&both, true),
+            "Tidy the spec: section order, noarch, %{version}; clean up obsolete spec constructs"
+        );
+        assert_eq!(tidy_bullet(&tidy(&both, true), true), "");
+        assert_eq!(tidy_bullet("Name: x\nVersion: 1\n%changelog\n", true), "");
     }
 }

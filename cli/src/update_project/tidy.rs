@@ -27,6 +27,7 @@ pub(super) fn tidy_item(
         ctx.say(format!("{}: already tidy in {branch}", item.pkg));
         return Ok(());
     }
+    let bullet = quality::tidy_bullet(&before, ldconfig);
     // Kept so that a failure after the write leaves the reused checkout as it was.
     let changes = format!("{}.changes", item.pkg);
     let changes_path = dir.join(&changes);
@@ -49,12 +50,7 @@ pub(super) fn tidy_item(
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
     let committed = (|| -> Result<(), String> {
-        osc::add_changes_entry(
-            &dir,
-            "Tidy the spec: section order, noarch, %{version}",
-            emit,
-        )
-        .map_err(|e| e.to_string())?;
+        osc::add_changes_entry(&dir, bullet, emit).map_err(|e| e.to_string())?;
         let mut commit_files = vec![spec_name.clone()];
         if changes_path.exists() {
             commit_files.push(changes.clone());
