@@ -226,6 +226,7 @@ pub(super) fn turn_denied_tools(
     }
     if let Some(checkout) = checkout {
         denied.extend(metadata_denied_tools(checkout));
+        denied.extend(series_denied_tools(checkout));
     }
     denied.extend(rpm_denied_tools());
     denied.extend(quilt_denied_tools(workspace));
@@ -256,6 +257,24 @@ fn metadata_denied_tools(checkout: &std::path::Path) -> Vec<String> {
         for dir in [".osc", ".git"] {
             out.push(format!("{tool}({p}/{dir})"));
             out.push(format!("{tool}({p}/{dir}/**)"));
+        }
+    }
+    out
+}
+
+/// The quilt series files of the checkout: `series`, which quilt uses in
+/// every turn, and [`REFRESH_SERIES`], which the pipeline writes for a refresh
+/// turn. A series line names the file a patch command writes, and
+/// `quilt refresh` writes the top patch to that name in the checkout, so a
+/// hand-written `.osc/_apiurl` line would let a later refresh overwrite the
+/// metadata. The turn runs quilt, which edits these files itself, so denying
+/// the Edit and Write tools on them costs nothing.
+fn series_denied_tools(checkout: &std::path::Path) -> Vec<String> {
+    let p = permission_path(checkout);
+    let mut out = Vec::new();
+    for tool in ["Edit", "Write"] {
+        for name in ["series", REFRESH_SERIES] {
+            out.push(format!("{tool}({p}/{name})"));
         }
     }
     out

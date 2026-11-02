@@ -371,3 +371,23 @@ fn checkout_metadata_denies_follow_the_canonical_checkout_path() {
         "{denied}"
     );
 }
+
+#[test]
+fn checkout_quilt_series_files_are_denied_for_edit_and_write() {
+    // A series line names the file the next `quilt refresh` writes into the
+    // checkout, so the series files are not the turn's to edit. Quilt itself
+    // (not the Edit tool) maintains them.
+    let ws = std::path::Path::new("/srv/ws");
+    let co = std::path::Path::new("/srv/ws/checkout");
+    let denied = turn_denied_tools(ws, Some(co));
+    let list: Vec<&str> = denied.split(',').collect();
+    for tool in ["Edit", "Write"] {
+        for name in ["series", crate::agent::REFRESH_SERIES] {
+            let rule = format!("{tool}(//srv/ws/checkout/{name})");
+            assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+        }
+    }
+    // Patch files next to them stay editable.
+    let tools = turn_allowed_tools(Task::PatchDependency, ws, Some(co));
+    assert!(tools.contains("Edit(//srv/ws/checkout/**)"), "{tools}");
+}
