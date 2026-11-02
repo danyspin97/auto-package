@@ -153,6 +153,26 @@ fn carry_forward_repo_spec(
     let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
     let mut bumped =
         crate::spec::set_version_and_tag(&old, &config.version, config.upstream_tag.as_deref())?;
+    // The source now names the tag by a define the version does not spell:
+    // say so in the changes, beside the version bump's own entry.
+    if let Some(tag) = config.upstream_tag.as_deref()
+        && !old.contains("upstream_version")
+        && bumped.contains("%define upstream_version")
+    {
+        warn_if_err(
+            reporter,
+            "adding the .changes entry for the upstream tag",
+            osc::add_changes_entry(
+                checkout_dir,
+                &format!(
+                    "Build the source from the upstream tag {tag}: {} is its version \
+                     with the revision after a dot",
+                    config.version
+                ),
+                Emit::new(reporter, step.id),
+            ),
+        );
+    }
     if crate::spec::expanded_sources(&bumped).is_empty() {
         // The source has no web address: a `_service` fetches it, or the
         // tarball was committed by hand.
