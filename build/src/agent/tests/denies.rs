@@ -391,3 +391,88 @@ fn checkout_quilt_series_files_are_denied_for_edit_and_write() {
     let tools = turn_allowed_tools(Task::PatchDependency, ws, Some(co));
     assert!(tools.contains("Edit(//srv/ws/checkout/**)"), "{tools}");
 }
+
+#[test]
+fn quilt_commands_cannot_name_the_checkout_metadata() {
+    // quilt writes the patch named in a command or in `series` into the
+    // checkout, so a name under `.osc` or `.git` is refused in every quilt form
+    // the turn is granted, and so is a quote (it hides a name from the
+    // patterns). Names that only contain the letters stay allowed.
+    let ws = std::path::Path::new("/srv/ws");
+    let co = std::path::Path::new("/srv/ws/checkout");
+    let tools = turn_allowed_tools(Task::RefreshPatches, ws, Some(co));
+    let denied = turn_denied_tools(ws, Some(co));
+    for prefix in ["quilt", "cd source && quilt", "cd /srv/ws/source && quilt"] {
+        for command in [
+            format!("{prefix} new .osc/_apiurl"),
+            format!("{prefix} new .osc"),
+            format!("{prefix} new ./.osc/_apiurl"),
+            format!("{prefix} refresh .git/config"),
+            format!("{prefix} add -p1 x a/.git"),
+            format!("{prefix} new .git"),
+            format!("{prefix} new x.patch .osc/y"),
+            format!("{prefix} new .o\"\"sc/_apiurl"),
+            format!("{prefix} new .o''sc/_apiurl"),
+            format!("{prefix} new \".osc/_apiurl\""),
+            // A name attached to a short option, which the word patterns with
+            // a space before the name do not see.
+            format!("{prefix} refresh -z.osc/newfile"),
+            format!("{prefix} refresh -z.git/hooks/post-update"),
+            format!("{prefix} add -p1.osc"),
+            format!("{prefix} new x.git"),
+        ] {
+            assert!(
+                !command_allowed(&tools, &denied, &command),
+                "{command:?} is allowed"
+            );
+        }
+        for command in [
+            format!("{prefix} new 0001-fix.patch"),
+            format!("{prefix} new fix-.github.patch"),
+            format!("{prefix} add .gitignore"),
+            format!("{prefix} new .osc.patch"),
+            format!("{prefix} add path/to/file.py"),
+            format!("{prefix} refresh -p ab --no-timestamps --no-index"),
+        ] {
+            assert!(
+                command_allowed(&tools, &denied, &command),
+                "{command:?} is refused"
+            );
+        }
+    }
+}
+
+#[test]
+fn metadata_names_in_the_quilt_roots_are_write_denied() {
+    // quilt runs in the workspace or in `source/`, and a glob there expands to
+    // an existing `.osc` or `.git`, so the turn may not create either name in
+    // those two directories (see `source_metadata_denied_tools`). Other dot
+    // names stay writable, `.gitignore` and `.github` among them.
+    let ws = std::path::Path::new("/srv/ws");
+    let denied = turn_denied_tools(ws, Some(std::path::Path::new("/srv/ws/checkout")));
+    let list: Vec<&str> = denied.split(',').collect();
+    for root in ["//srv/ws", "//srv/ws/source"] {
+        for tool in ["Edit", "Write", "NotebookEdit"] {
+            for rule in [
+                format!("{tool}({root}/.osc)"),
+                format!("{tool}({root}/.osc/**)"),
+                format!("{tool}({root}/.git)"),
+                format!("{tool}({root}/.git/**)"),
+            ] {
+                assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+            }
+        }
+    }
+    for path in [
+        "//srv/ws/source/.gitignore",
+        "//srv/ws/source/.github/ci.yml",
+    ] {
+        let rule_hits = list.iter().any(|rule| {
+            rule.strip_prefix("Write")
+                .and_then(|r| r.strip_prefix('('))
+                .and_then(|r| r.strip_suffix(')'))
+                .is_some_and(|pat| glob_matches(pat, path))
+        });
+        assert!(!rule_hits, "{path} is write-denied");
+    }
+}

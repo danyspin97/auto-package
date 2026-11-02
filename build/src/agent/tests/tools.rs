@@ -319,6 +319,11 @@ fn dangerous_variants_of_the_granted_commands_stay_refused() {
         "quilt refresh -p ab --no-index `id`",
         "quilt refresh -p ab --no-index f?.patch",
         "ls -la ..",
+        // `import` and `rename` are not granted: `import -P .o*/_apiurl` names
+        // a patch by glob, and no prompt uses either subcommand.
+        "quilt import -P .o*/_apiurl evil.txt",
+        "cd source && quilt import -P .g*/config evil.txt",
+        "quilt rename x.patch y.patch",
         // Chaining, redirection and pipes.
         "cd source && quilt pop -a; rm -rf x",
         "cd source && quilt pop -a && rm -rf x",
@@ -380,7 +385,6 @@ fn the_refresh_commands_are_allowed_and_dangerous_forms_are_not() {
         "quilt series",
         "quilt top",
         "quilt files",
-        "quilt import fix.patch",
         "quilt grep foo",
         "cd /srv/ws/source && quilt push -f",
         "cd source && patch -p1 --dry-run --fuzz=0 -f -i fix.patch",

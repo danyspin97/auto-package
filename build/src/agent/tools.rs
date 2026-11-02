@@ -15,18 +15,18 @@ const CHECKOUT_TOOLS: &str = concat!(
 
 /// The quilt subcommands a turn may run to make and rebase patches. Not
 /// granted: `edit` (starts `$EDITOR`), `setup` (runs the spec's `%prep`),
-/// `mail`, `shell` and `init`; the options that run a program or source a file
-/// (`--diff=`, `--quiltrc`, `header -e`) are denied in [`quilt_denied_tools`].
-const QUILT_SUBCOMMANDS: [&str; 23] = [
+/// `mail`, `shell` and `init`; `import` and `rename` (no prompt uses them, and
+/// `import` copies a file to any patch name, `.o*` included); the options that
+/// run a program or source a file (`--diff=`, `--quiltrc`, `header -e`) are
+/// denied in [`quilt_denied_tools`].
+const QUILT_SUBCOMMANDS: [&str; 21] = [
     "push",
     "pop",
     "refresh",
     "new",
     "add",
     "remove",
-    "rename",
     "delete",
-    "import",
     "header",
     "diff",
     "patches",
@@ -224,6 +224,7 @@ pub(super) fn turn_denied_tools(
             denied.push(format!("{tool}({p}/*.changes)"));
         }
     }
+    denied.extend(source_metadata_denied_tools(workspace));
     if let Some(checkout) = checkout {
         denied.extend(metadata_denied_tools(checkout));
         denied.extend(series_denied_tools(checkout));
@@ -242,21 +243,47 @@ pub(super) fn turn_denied_tools(
     denied.join(",")
 }
 
-/// The version-control metadata of the checkout: osc's `.osc` (`_apiurl` names
-/// the API server, with the user's credentials, and `_files` the tracked names)
-/// and git's `.git` (a `gitdir:` file, or a config with `core.fsmonitor` or
-/// `diff.external`, runs code when git runs in the checkout). The turn reads
-/// them (the grants of [`turn_allowed_tools`] cover the checkout) but must not
-/// write them: a rewritten file would redirect the pipeline's next `osc` or
-/// `git` call. Denied for Edit, Write and NotebookEdit, the directory and
-/// everything under it, anchored to the checkout path the grants use.
+/// The version-control metadata directories of a checkout: osc's `.osc`
+/// (`_apiurl` names the API server, with the user's credentials, and `_files`
+/// the tracked names) and git's `.git` (a `gitdir:` file, or a config with
+/// `core.fsmonitor` or `diff.external`, runs code when git runs in the
+/// checkout).
+const CHECKOUT_METADATA_DIRS: [&str; 2] = [".osc", ".git"];
+
+/// The version-control metadata of the checkout. The turn reads it (the grants
+/// of [`turn_allowed_tools`] cover the checkout) but must not write it: a
+/// rewritten file would redirect the pipeline's next `osc` or `git` call.
+/// Denied for Edit, Write and NotebookEdit, the directory and everything under
+/// it, anchored to the checkout path the grants use.
 fn metadata_denied_tools(checkout: &std::path::Path) -> Vec<String> {
     let p = permission_path(checkout);
     let mut out = Vec::new();
     for tool in ["Edit", "Write", "NotebookEdit"] {
-        for dir in [".osc", ".git"] {
+        for dir in CHECKOUT_METADATA_DIRS {
             out.push(format!("{tool}({p}/{dir})"));
             out.push(format!("{tool}({p}/{dir}/**)"));
+        }
+    }
+    out
+}
+
+/// The metadata names in the directories a quilt command runs in: the workspace
+/// (bare `quilt`) and `source/` (`cd source && quilt`). quilt expands a glob in
+/// its arguments in that directory, so `.o*/_apiurl` becomes `.osc/_apiurl`
+/// when `.osc` exists there, and `quilt new` then writes the checkout's `.osc`.
+/// The turn may not create `.osc` or `.git` there with Write, Edit or
+/// NotebookEdit. A patch the turn applies can still create one, and then the
+/// glob expands: what such a glob reaches is undone by the integrity check of
+/// the checkout's metadata.
+fn source_metadata_denied_tools(workspace: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for root in [workspace.to_path_buf(), workspace.join("source")] {
+        let p = permission_path(&root);
+        for tool in ["Edit", "Write", "NotebookEdit"] {
+            for dir in CHECKOUT_METADATA_DIRS {
+                out.push(format!("{tool}({p}/{dir})"));
+                out.push(format!("{tool}({p}/{dir}/**)"));
+            }
         }
     }
     out
@@ -396,6 +423,16 @@ fn read_tool_denied_tools() -> Vec<String> {
 /// leading `/` (`""/abs`) are denied too. Each rule is written for every
 /// prefix of [`source_prefixes`], since the grant matches them as separate
 /// prefixes. `--diff=UTILITY` runs a program and `header -e` an editor.
+///
+/// The checkout's own metadata is refused by name too. quilt takes the patch
+/// files from the checkout (`QUILT_PATCHES`), so a patch named `.osc/_apiurl`
+/// (`quilt new`, `quilt add` with the top patch, `quilt refresh`) makes
+/// `quilt refresh` write into `.osc`, though the Edit and Write denies keep the
+/// turn from writing it directly. A word that names `.osc` or `.git`, as a
+/// whole, as a path element (`./.osc`, `.osc/x`, `a/.git`) or attached to an
+/// option (`-z.osc/x`), is refused: see [`metadata_word_patterns`]. Quotes are refused as a whole in a quilt command
+/// (no documented form uses them), because `.o""sc` is `.osc` to the shell and
+/// no pattern sees it.
 fn quilt_denied_tools(workspace: &std::path::Path) -> Vec<String> {
     let mut out: Vec<String> = source_prefixes(workspace)
         .iter()
@@ -405,8 +442,32 @@ fn quilt_denied_tools(workspace: &std::path::Path) -> Vec<String> {
                 .map(move |pat| format!("Bash({p}quilt {pat})"))
         })
         .collect();
+    for p in source_prefixes(workspace) {
+        for pat in metadata_word_patterns()
+            .iter()
+            .map(String::as_str)
+            .chain(["*\"*", "*'*"])
+        {
+            out.push(format!("Bash({p}quilt {pat})"));
+        }
+    }
     out.extend(path_and_metachar_denies(workspace, "quilt"));
     out
+}
+
+/// The Bash patterns for a checkout-metadata name in a quilt command: `.osc` or
+/// `.git` followed by the end of the word, a `/` or a space. The name is matched
+/// wherever it sits, so a short option with the name attached (`-z.osc/x`), a
+/// path element (`a/.git/hooks`) and a bare name are all refused. A name that
+/// goes on with other text (`.osc.patch`, `.github`, `.gitignore`) is not
+/// matched. The glob forms (`.o*`) cannot be named here: `*` is a wildcard in
+/// these rules, not a character, so they are not refused here. The write denies
+/// of [`source_metadata_denied_tools`] and the integrity check cover them.
+fn metadata_word_patterns() -> Vec<String> {
+    CHECKOUT_METADATA_DIRS
+        .iter()
+        .flat_map(|dir| [format!("*{dir}"), format!("*{dir}/*"), format!("*{dir} *")])
+        .collect()
 }
 
 /// Denies that win over the `patch *--dry-run*` grant: no absolute or
