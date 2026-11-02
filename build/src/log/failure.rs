@@ -30,6 +30,10 @@ const TAIL_FRAMES: usize = 4;
 /// `+ ` xtrace lines to keep before a shell error — enough to show what ran.
 const XTRACE_CONTEXT: usize = 8;
 
+/// Lines to keep before the first C/C++ diagnostic: the `In file included
+/// from` lines that name the chain of headers leading to it.
+const DIAGNOSTIC_CONTEXT: usize = 8;
+
 /// Indented continuation lines to keep after a bare `error:`/`warning:` line —
 /// enough to show a file list like `Installed (but unpackaged) file(s)
 /// found:` actually names, which rpm always puts on the lines *after* the
@@ -45,6 +49,9 @@ pub enum Genre {
     /// A shell diagnostic from the generated rpm script: command not found,
     /// non-zero exit, and friends.
     ShellError,
+    /// A C or C++ compiler diagnostic: `file.cpp:10:10: fatal error: ...`,
+    /// or `error:` with a location.
+    CCppCompile,
     /// A post-build check: filelist, install test, unowned directories,
     /// scriptlet failures. Happens *after* a successful `rpmbuild`.
     PostBuildCheck,
@@ -58,6 +65,7 @@ impl Genre {
         match self {
             Genre::PythonTraceback => "python-traceback",
             Genre::ShellError => "shell-error",
+            Genre::CCppCompile => "c-cpp-compile",
             Genre::PostBuildCheck => "post-build-check",
             Genre::Unknown => "unknown",
         }
@@ -95,6 +103,13 @@ static PY_FRAME: LazyLock<Regex> =
 /// `/var/tmp/rpm-tmp.Ru643O: line 33: CHOOSE:: command not found`
 static SHELL_ERROR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\S+: line \d+: .+$").expect("static"));
+
+/// A gcc or clang diagnostic with a location (`x.cpp:10:10: fatal error:`,
+/// `x.c:3: error:`), or a `fatal error:` about a missing header.
+static CCPP_DIAGNOSTIC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\S+:\d+(?::\d+)?: (?:fatal )?error: |fatal error: \S+: No such file")
+        .expect("static pattern")
+});
 
 /// Post-build complaints that carry no rpm error vocabulary at all.
 static POST_BUILD_PROBLEM: LazyLock<Regex> = LazyLock::new(|| {
@@ -277,6 +292,17 @@ fn quote(
         let from = err.saturating_sub(XTRACE_CONTEXT);
         let kept: Vec<&str> = region[from..=err].to_vec();
         return finish(kept, from, Genre::ShellError, phase, located_by);
+    }
+
+    // The first diagnostic, not the last: a compiler's later errors are often
+    // consequences of the one that stopped the file. The window runs from it
+    // forward, so the cap in `finish` cannot cut it off.
+    if let Some(first) = region.iter().position(|l| CCPP_DIAGNOSTIC.is_match(l)) {
+        let from = first.saturating_sub(DIAGNOSTIC_CONTEXT);
+        let end = region.len().min(from + MAX_EXCERPT_LINES);
+        let kept: Vec<&str> = region[from..end].to_vec();
+        let elided = from + (region.len() - end);
+        return finish(kept, elided, Genre::CCppCompile, phase, located_by);
     }
 
     // Nothing shaped like a traceback or shell error: drop the chatter and

@@ -41,6 +41,39 @@ fn shell_error_keeps_the_command_that_ran() {
     assert!(f.excerpt.contains("command not found"));
 }
 
+/// duckdb 2.0.0 (run 1, build 011): a missing header in a C++ compile. Not
+/// a shell error, not a traceback: the genre must say it is a C/C++ compile.
+#[test]
+fn a_cpp_missing_header_is_a_compile_failure() {
+    let f = run(&[
+        "Executing(%build): /usr/bin/bash -e /var/tmp/rpm-tmp.K2CoLj",
+        "[ 40%] Building CXX object src/CMakeFiles/duckdb.dir/a.cpp.o",
+        "In file included from /home/abuild/rpmbuild/BUILD/duckdb-2.0.0-build/duckdb-2.0.0/src/a.cpp:1:",
+        "/home/abuild/rpmbuild/BUILD/duckdb-2.0.0-build/duckdb-2.0.0/build/from_variant.cpp:10:10: fatal error: yyjson_memory.hpp: No such file or directory",
+        "   10 | #include \"yyjson_memory.hpp\"",
+        "make[2]: *** [CMakeFiles/duckdb.dir/build.make:79: a.o] Error 1",
+        "error: Bad exit status from /var/tmp/rpm-tmp.K2CoLj (%build)",
+    ]);
+    assert_eq!(f.genre, Genre::CCppCompile);
+    assert_eq!(f.genre.as_str(), "c-cpp-compile");
+    assert_eq!(f.phase, Phase::Section("%build".into()));
+    assert!(f.excerpt.contains("fatal error: yyjson_memory.hpp"));
+}
+
+/// A gcc `error:` with a location, and the first of several: the later
+/// one is a consequence, so the excerpt starts at the first.
+#[test]
+fn the_first_compiler_error_is_quoted() {
+    let f = run(&[
+        "Executing(%build): /usr/bin/bash -e /var/tmp/rpm-tmp.Q",
+        "/home/abuild/rpmbuild/BUILD/pkg-1.0-build/pkg-1.0/src/x.cc:3:5: error: 'foo' was not declared in this scope",
+        "/home/abuild/rpmbuild/BUILD/pkg-1.0-build/pkg-1.0/src/y.cc:9:1: error: expected ';'",
+        "error: Bad exit status from /var/tmp/rpm-tmp.Q (%build)",
+    ]);
+    assert_eq!(f.genre, Genre::CCppCompile);
+    assert!(f.excerpt.contains("src/x.cc:3:5: error"));
+}
+
 /// Iteration 3: no `error:` line, no `Bad exit status`, diagnosis in
 /// post-build. The case a naive anchor misses entirely.
 #[test]

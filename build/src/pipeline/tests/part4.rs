@@ -207,12 +207,10 @@ fn spend_from_an_earlier_run_does_not_count_against_this_one() {
 }
 
 /// Real shape from `triton`/`python-hf-xet`/`python-torchcodec`: a plain
-/// GCC compiler diagnostic in `%build` is neither a Python traceback nor
-/// a `script: line N:` shell error, so its genre is `Unknown` — but the
+/// GCC compiler diagnostic in `%build` has the C/C++ compile genre, and the
 /// phase is unambiguous (`error: Bad exit status from ... (%build)`
-/// names it), and this used to get thrown away by switching on genre
-/// instead of phase, reporting `Unclassified` for a perfectly ordinary
-/// `%build` failure.
+/// names it). Classification must follow the phase, not the genre, so this
+/// is a `%build` failure, not `Unclassified`.
 #[test]
 fn a_compiler_error_in_build_is_build_failed_not_unclassified() {
     let raw = "\
@@ -226,8 +224,8 @@ fn a_compiler_error_in_build_is_build_failed_not_unclassified() {
     let extracted = crate::log::extract(raw, &mapper);
     assert_eq!(
         extracted.failure.as_ref().map(|f| f.genre),
-        Some(crate::log::Genre::Unknown),
-        "fixture must reproduce the Unknown-genre shape this test guards against"
+        Some(crate::log::Genre::CCppCompile),
+        "fixture must reproduce the compile-error shape this test guards against"
     );
     match classify_failure(&extracted) {
         ap_core::event::BuildFailure::BuildFailed => {}
