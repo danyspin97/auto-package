@@ -48,6 +48,9 @@ pub struct RunInfo {
     pub unreadable_lines: usize,
     /// The hosts the run allowed (`--allow-host` or the TUI), as the log says.
     pub hosts_allowed: Vec<String>,
+    /// The other-architecture results of the package that were not succeeded,
+    /// as the `arch_check` event of the run says them.
+    pub arch_checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]

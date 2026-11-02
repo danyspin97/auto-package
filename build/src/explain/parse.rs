@@ -11,14 +11,17 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
         let run_level = line.starts_with("{\"event\":\"run_started\"")
             || line.starts_with("{\"event\":\"run_finished\"")
             || line.starts_with("{\"event\":\"host_allowed\"");
-        if !run_level && !line.contains(&needle) {
+        let arch_check = line.starts_with("{\"event\":\"arch_check\"");
+        if !run_level && !arch_check && !line.contains(&needle) {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             p.bad_lines += 1;
             continue;
         };
-        if !run_level && v["pkg"].as_str() != Some(pkg) {
+        // `arch_check` names its package in `package`, the others in `pkg`.
+        let owner = v["pkg"].as_str().or(v["package"].as_str());
+        if !run_level && owner != Some(pkg) {
             continue;
         }
         let step = v["step"].as_u64();
@@ -35,6 +38,7 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
             }
             "run_finished" => p.run_finished = Some(v),
             "host_allowed" => p.hosts_allowed.push(v),
+            "arch_check" => p.arch_checks.push(v),
             "target_selected" => p.selected.push(v),
             "step_started" => p.attempts.push(Attempt {
                 step: step.unwrap_or(0),

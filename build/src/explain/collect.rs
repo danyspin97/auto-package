@@ -113,6 +113,7 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         elapsed_ms: p.run_finished.as_ref().and_then(|v| v["elapsed"].as_u64()),
         unreadable_lines: p.bad_lines,
         hosts_allowed: p.hosts_allowed.iter().map(host_allowed_line).collect(),
+        arch_checks: p.arch_checks.iter().flat_map(arch_check_lines).collect(),
     };
     // Attach the artifact directories of the attempts.
     for a in &mut p.attempts {
@@ -178,6 +179,8 @@ pub(super) struct Parsed {
     pub(super) run_finished: Option<Value>,
     /// `host_allowed` events of the run, in order.
     pub(super) hosts_allowed: Vec<Value>,
+    /// `arch_check` events of the package, in order.
+    pub(super) arch_checks: Vec<Value>,
     pub(super) selected: Vec<Value>,
     pub(super) attempts: Vec<Attempt>,
     pub(super) skipped: Vec<String>,
@@ -230,6 +233,32 @@ pub(super) fn label(v: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// The results of an `arch_check` event that are not succeeded, one line each:
+/// `repo/arch: state (detail)`. A log from before the event reads as none.
+fn arch_check_lines(v: &Value) -> Vec<String> {
+    v["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["state"].as_str() != Some("succeeded"))
+        .map(|r| {
+            let state = r["state"].as_str().unwrap_or("?");
+            let mut line = format!(
+                "{}/{}: {state}",
+                r["repo"].as_str().unwrap_or("?"),
+                r["arch"].as_str().unwrap_or("?")
+            );
+            if let Some(d) = r["detail"].as_str() {
+                line.push_str(&format!(" ({d})"));
+            }
+            if r["origin_fails"].as_bool() == Some(true) {
+                line.push_str(" [also fails in the origin]");
+            }
+            line
+        })
+        .collect()
 }
 
 /// A `host_allowed` event as the report shows it: `host (scope, from source)`.

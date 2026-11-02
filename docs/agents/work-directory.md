@@ -74,10 +74,19 @@ FirstUnbuiltDependency, RequestedRoot), `step_started` / `step_finished`
 log can be read for every host a run was allowed to contact; absent in older
 logs), plus noisy `command`, `command_done`, `progress`,
 `agent_tool_use`. There are no timestamps: use `elapsed` and the run id.
+`arch_check` (`package`, `results`: one `{repo, arch, state}` per checked
+result of an updated package, with `detail` (the first error line or the
+missing names), `origin_fails` and `log` when set; `state` is `succeeded`,
+`failed`, `unresolvable`, `broken`, `excluded` or `still ...` for a result
+still scheduled, blocked or building at the bound; written by `update` after
+the package built, absent with `--no-arch-check` or `--local`, and absent
+from older logs). Its failures are also in the summary's `Other architectures`
+section and in a `warning`.
 `hosts allow` and `hosts remove` run outside any run and write no event: the
 user's `allowed-hosts` file (its `# reason` comments) is their record.
 `auto-package explain` lists the `host_allowed` hosts of the run it reads.
 Recipe: `jq -c 'select(.event=="host_allowed")' "$R"`.
+Recipe: `jq -c 'select(.event=="arch_check")' "$R"`.
 A run with no `run_finished` was interrupted or is still going.
 
 Recipes (`R=$P/runs/<run>/run.jsonl`, `K=<pkg>`):

@@ -339,3 +339,16 @@ fn the_hosts_a_run_allowed_are_listed_and_old_logs_list_none() {
     assert!(ex.run_info.hosts_allowed.is_empty());
     assert!(!plain(&render(&ex, 100)).contains("hosts allowed"));
 }
+
+#[test]
+fn the_other_arch_results_that_are_not_green_are_listed() {
+    let t = fixture(&[
+        r#"{"event":"arch_check","package":"foo","results":[{"repo":"ports","arch":"s390x","state":"failed","detail":"boom","origin_fails":false},{"repo":"ports","arch":"aarch64","state":"succeeded","origin_fails":false}]}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(ex.run_info.arch_checks, ["ports/s390x: failed (boom)"]);
+    assert!(plain(&render(&ex, 100)).contains("other arches"));
+    let old = fixture(&[]);
+    let ex = explain(&query(old.path())).unwrap();
+    assert!(ex.run_info.arch_checks.is_empty());
+}
