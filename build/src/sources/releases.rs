@@ -234,6 +234,12 @@ pub fn latest_release(repo_url: &str) -> Result<String, String> {
         kind => return latest_release_non_forge(repo_url, kind),
     }
     let (host, project_path, repo_name) = owner_repo(repo_url)?;
+    if is_sourcehut_host(&host) {
+        // SourceHut has no releases API without a token: the newest tag is the release.
+        let tags = get_repo_tags(repo_url)?;
+        return newest_version(&tags, &repo_name)
+            .ok_or_else(|| format!("{repo_url} has no tag that is a version"));
+    }
     let endpoints = release_endpoints(&host, &project_path);
 
     let mut last_err = None;
@@ -374,6 +380,9 @@ pub(super) fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
     let (host, project_path, _repo_name) = owner_repo(repo_url)?;
+    if is_sourcehut_host(&host) {
+        return ls_remote_tags(&format!("https://{host}/{project_path}"));
+    }
 
     let json = get_json(&tag_list_url(&host, &project_path))?;
 
@@ -533,6 +542,8 @@ pub(super) fn tag_archive_url_for(base: &str, repo: &str, is_gitlab: bool, tag: 
         .join("/");
     if is_gitlab {
         format!("{base}/-/archive/{tag}/{repo}-{tag}.tar.gz")
+    } else if crate::http::host_of(base).is_some_and(|h| is_sourcehut_host(&h)) {
+        format!("{base}/archive/{tag}.tar.gz")
     } else {
         format!("{base}/archive/refs/tags/{tag}.tar.gz")
     }

@@ -40,4 +40,4 @@ pub use kind::*;
 pub use map::*;
 pub use release_list::*;
 pub use releases::*;
-pub(crate) use sourcehut::is_sourcehut_host;
+pub(crate) use sourcehut::{is_sourcehut_host, ls_remote_tags, newest_version};

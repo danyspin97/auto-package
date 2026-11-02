@@ -122,7 +122,7 @@ pub const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// Cap on what one captured stream keeps. A chatty child is still drained
 /// (so it never blocks on a full pipe) but only the last this-many bytes are
 /// kept: a failing build's cause is at the end of its log.
-pub(super) const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A directory only this process can use, for scratch files and as the working
 /// directory of helpers that read configuration from the directory they start
