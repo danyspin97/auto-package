@@ -62,6 +62,96 @@ fn an_old_source_file_is_kept_when_a_new_source_still_names_it() {
 }
 
 #[test]
+fn a_literal_tag_archive_moves_to_the_new_tag() {
+    let old = "Name: unordered_dense\nVersion: 4.8.1\nSource0: https://github.com/martinus/unordered_dense/archive/refs/tags/v4.8.1.tar.gz\nSource1: https://example.org/keys/ud.asc\n%description\nx\n";
+    let archive = |v: &str| match v {
+        "4.8.1" => Some(
+            "https://github.com/martinus/unordered_dense/archive/refs/tags/v4.8.1.tar.gz"
+                .to_string(),
+        ),
+        "5.3.3" => Some(
+            "https://github.com/martinus/unordered_dense/archive/refs/tags/v5.3.3.tar.gz"
+                .to_string(),
+        ),
+        _ => None,
+    };
+    let bumped = crate::spec::set_version(old, "5.3.3").unwrap();
+    let moved = move_literal_tag_archives("4.8.1", &bumped, "5.3.3", archive).unwrap();
+    let sources = crate::spec::expanded_sources(&moved);
+    assert_eq!(
+        sources[0].url,
+        "https://github.com/martinus/unordered_dense/archive/refs/tags/v5.3.3.tar.gz"
+    );
+    assert_eq!(sources[0].file, "v5.3.3.tar.gz");
+    assert_eq!(sources[1].url, "https://example.org/keys/ud.asc");
+    // A tag the repository does not list is refused, not left at the old archive.
+    let err = move_literal_tag_archives("4.8.1", &bumped, "6.0.0", archive).unwrap_err();
+    assert!(err.contains("6.0.0"), "{err}");
+    // Nothing names the old version: the spec is left as it is.
+    assert_eq!(
+        move_literal_tag_archives("9.9.9", &bumped, "5.3.3", archive).unwrap(),
+        bumped
+    );
+}
+
+#[test]
+fn a_literal_tag_archive_moves_only_on_its_own_source_line() {
+    // The old address is in a comment, and the `.asc` address starts with the
+    // old archive's address too: neither is the source that moves.
+    let url = |v: &str| format!("https://github.com/o/ud/archive/refs/tags/v{v}.tar.gz");
+    let old = format!(
+        "Name: ud\nVersion: 4.8.1\n# the old one is {}\nSource0: {}.asc\nSource1: {}#/ud-%{{version}}.tar.gz\n%description\nx\n",
+        url("4.8.1"),
+        url("4.8.1"),
+        url("4.8.1"),
+    );
+    let bumped = crate::spec::set_version(&old, "5.3.3").unwrap();
+    let calls = std::cell::Cell::new(0);
+    let archive = |v: &str| {
+        calls.set(calls.get() + 1);
+        match v {
+            "4.8.1" => Some(url("4.8.1")),
+            "5.3.3" => Some(url("5.3.3")),
+            _ => None,
+        }
+    };
+    let moved = move_literal_tag_archives("4.8.1", &bumped, "5.3.3", archive).unwrap();
+    assert!(
+        moved.contains(&format!("# the old one is {}\n", url("4.8.1"))),
+        "{moved}"
+    );
+    assert!(
+        moved.contains(&format!("Source0: {}.asc\n", url("4.8.1"))),
+        "{moved}"
+    );
+    assert!(
+        moved.contains(&format!(
+            "Source1: {}#/ud-%{{version}}.tar.gz\n",
+            url("5.3.3")
+        )),
+        "{moved}"
+    );
+    let sources = crate::spec::expanded_sources(&moved);
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[1].url, url("5.3.3"));
+    assert_eq!(sources[1].file, "ud-5.3.3.tar.gz");
+    // Each version's archive is asked for once, not once per candidate.
+    assert!(calls.get() <= 2, "asked {} times", calls.get());
+}
+
+#[test]
+fn a_literal_tag_archive_written_with_a_macro_is_refused() {
+    let old = "Name: ud\nVersion: 4.8.1\nSource0: https://example.org/%{name}/refs/v4.8.1.tar.gz\n%description\nx\n";
+    let archive = |v: &str| match v {
+        "4.8.1" => Some("https://example.org/ud/refs/v4.8.1.tar.gz".to_string()),
+        "5.3.3" => Some("https://example.org/ud/refs/v5.3.3.tar.gz".to_string()),
+        _ => None,
+    };
+    let err = move_literal_tag_archives("4.8.1", old, "5.3.3", archive).unwrap_err();
+    assert!(err.contains("macro"), "{err}");
+}
+
+#[test]
 fn the_pipelines_own_wheel_switch_gives_a_reason_the_gate_accepts() {
     let root = tempfile::tempdir().unwrap();
     for d in ["pybind11", "XNNPACK"] {

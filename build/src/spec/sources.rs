@@ -74,6 +74,15 @@ pub fn parse_source_line(
 /// Every `SourceN:` of the spec that is a web address, with `%{name}`,
 /// `%{version}`, `%{url}` and the spec's simple defines expanded.
 pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
+    expanded_source_lines(spec)
+        .into_iter()
+        .map(|(_, source)| source)
+        .collect()
+}
+
+/// [`expanded_sources`], each with the index (in `spec.lines()`) of the line
+/// that declares it.
+pub fn expanded_source_lines(spec: &str) -> Vec<(usize, SourceEntry)> {
     let Some(header) = parse_header(spec) else {
         return Vec::new();
     };
@@ -89,7 +98,7 @@ pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
         expand_simple_defines(&once, &macros)
     };
     let mut out = Vec::new();
-    for line in spec.lines() {
+    for (at, line) in spec.lines().enumerate() {
         let Some(source) = parse_source_line(line, &["source"], expand) else {
             continue;
         };
@@ -102,10 +111,13 @@ pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
         if file.is_empty() {
             continue;
         }
-        out.push(SourceEntry {
-            file: file.to_string(),
-            url: source.url,
-        });
+        out.push((
+            at,
+            SourceEntry {
+                file: file.to_string(),
+                url: source.url,
+            },
+        ));
     }
     out
 }

@@ -70,6 +70,65 @@ pub(super) fn carry_forward_spec(
     })
 }
 
+/// Moves the sources whose address names the old version's tag literally (no
+/// macro for the version) to the archive of the new version's tag, given by
+/// `archive_of`. Such an address is the same after the version change, so
+/// nothing would be fetched for it. Only the `SourceN:` line that declares such
+/// a source is rewritten, and `archive_of` is asked once for each version.
+/// `Err` when the new tag has no archive or the address is written with a
+/// macro, which the line does not hold.
+pub(super) fn move_literal_tag_archives(
+    old_version: &str,
+    spec: &str,
+    new_version: &str,
+    archive_of: impl Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    if old_version.is_empty() {
+        return Ok(spec.to_string());
+    }
+    let named_old: Vec<(usize, String)> = crate::spec::expanded_source_lines(spec)
+        .into_iter()
+        .filter(|(_, source)| source.url.contains(old_version))
+        .map(|(at, source)| (at, source.url))
+        .collect();
+    if named_old.is_empty() {
+        return Ok(spec.to_string());
+    }
+    let old_archive = archive_of(old_version);
+    let moving: Vec<(usize, String)> = named_old
+        .into_iter()
+        .filter(|(_, url)| old_archive.as_deref() == Some(url.as_str()))
+        .collect();
+    if moving.is_empty() {
+        return Ok(spec.to_string());
+    }
+    let new_url = archive_of(new_version).ok_or_else(|| {
+        format!("the repository lists no tag for {new_version}, so there is no archive to fetch")
+    })?;
+    let mut lines: Vec<String> = spec.split_inclusive('\n').map(str::to_string).collect();
+    for (at, url) in moving {
+        lines[at] = replace_source_address(&lines[at], &url, &new_url)?;
+    }
+    Ok(lines.concat())
+}
+
+/// `line`, a `SourceN:` line that declares the literal address `old`, with that
+/// address replaced by `new`. Only the value of the line is changed, so a
+/// comment or another address that contains `old` is left alone. `Err` when the
+/// line writes the address with a macro, so the text does not hold `old`.
+fn replace_source_address(line: &str, old: &str, new: &str) -> Result<String, String> {
+    let literal = crate::spec::parse_source_line(line, &["source"], str::to_string)
+        .is_some_and(|source| source.url == old);
+    let Some((head, value)) = line.split_once(':').filter(|_| literal) else {
+        return Err(format!(
+            "the address {old} cannot be rewritten in `{}`, which writes it with a macro",
+            line.trim()
+        ));
+    };
+    // The address is the first thing in the value, so the first match is it.
+    Ok(format!("{head}:{}", value.replacen(old, new, 1)))
+}
+
 /// Whether the old source file `old_file` may be removed after a new spec
 /// replaces it: only when no source of `new` is named that file.
 pub(super) fn is_superseded_source_file(old_file: &str, new: &[crate::spec::SourceEntry]) -> bool {
@@ -139,6 +198,14 @@ fn carry_forward_repo_spec(
             &format!("{url}#/%{{name}}-%{{version}}.tar.gz"),
         )
         .ok_or("the spec has no Source: line")?;
+    }
+    if let (Some(repo), Some(old_version)) = (
+        config.source_repo.as_deref(),
+        crate::spec::parse_header(&old).map(|h| h.version),
+    ) {
+        bumped = move_literal_tag_archives(&old_version, &bumped, &config.version, |v| {
+            crate::sources::tag_archive_url(repo, v)
+        })?;
     }
     let sources = crate::spec::expanded_sources(&bumped);
     if sources.is_empty() {
