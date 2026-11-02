@@ -3,6 +3,7 @@ mod denies;
 mod edit_bytes;
 mod errors;
 mod integrity;
+mod links;
 mod prompt;
 mod scrub;
 mod stub;

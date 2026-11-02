@@ -9,6 +9,7 @@
 //! The copy is taken per turn, not once per run: osc calls the pipeline makes
 //! between turns change the metadata, and they are the pipeline's to make.
 
+use super::links::LinkGuard;
 use super::tools::CHECKOUT_METADATA_DIRS;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -332,4 +333,56 @@ impl MetadataGuard {
         }
         Some(detail)
     }
+}
+
+/// Both checks of one turn: the metadata copy, and the symbolic links the turn
+/// created in the trees it works in (see [`LinkGuard`]). Settled by
+/// [`TurnGuard::settle`]; a guard dropped without that (a panic in the turn)
+/// settles itself, so the checkout is put back on every exit.
+pub(super) struct TurnGuard {
+    parts: Option<(MetadataGuard, LinkGuard)>,
+}
+
+impl TurnGuard {
+    pub(super) fn begin(workspace: &Path, checkout: Option<&Path>) -> Self {
+        Self {
+            parts: Some((
+                MetadataGuard::begin(checkout),
+                LinkGuard::begin(workspace, checkout),
+            )),
+        }
+    }
+
+    /// Undo what the turn changed outside the rules and return what it was
+    /// rejected for, `None` when nothing needed undoing.
+    pub(super) fn settle(mut self) -> Option<String> {
+        self.parts.take().and_then(settle_parts)
+    }
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        // Only reached without `settle`: the turn unwound. Its rejection has
+        // no caller to return to, so it is reported here.
+        if let Some(parts) = self.parts.take()
+            && let Some(detail) = settle_parts(parts)
+        {
+            ap_core::diag!("warning: a turn that unwound was undone: {detail}");
+        }
+    }
+}
+
+fn settle_parts((metadata, links): (MetadataGuard, LinkGuard)) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(detail) = metadata.settle() {
+        parts.push(detail);
+    }
+    let undone = links.settle();
+    if !undone.is_empty() {
+        parts.push(format!(
+            "left a symlink that leaves the tree ({})",
+            undone.join(", ")
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }

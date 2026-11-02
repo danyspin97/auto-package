@@ -141,9 +141,10 @@ pub(crate) fn model_for_attempt(attempt: usize, rotation: usize) -> &'static str
 /// is parsed from the final `result` event in the stream.
 pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // The checkout's osc and git metadata is copied before the turn and checked
-    // after it, whatever the turn returned: a turn that changed it is rejected
-    // and the metadata is put back (see `integrity`).
-    let guard = super::integrity::MetadataGuard::begin(req.checkout_dir);
+    // after it, and the symbolic links it made are checked too, whatever the
+    // turn returned: a turn that changed either outside the rules is rejected
+    // and undone (see `integrity`).
+    let guard = super::integrity::TurnGuard::begin(req.workspace, req.checkout_dir);
     let result = turn_inner(req);
     let result = match guard.settle() {
         None => result,

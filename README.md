@@ -472,9 +472,11 @@ tool assumes these may be hostile and limits what they can reach:
   metadata of its checkout (`.osc`, `.git`) with Edit, Write or NotebookEdit,
   nor name it in a quilt command spelled out in full. The metadata is copied
   before each turn and compared after it: a change (a glob the shell expands,
-  a patch that creates a file) is undone and the turn rejected. Credential
-  variables are removed from its environment, except the Anthropic credentials
-  the CLI itself needs. Those remain visible to its commands. The environment is an allowlist
+  a patch that creates a file) is undone and the turn rejected. A symbolic
+  link the turn makes that leads into that metadata, into the checkout root,
+  or out of the workspace's `source/` and the checkout, is removed the same way. Credential variables are removed from
+  its environment, except the Anthropic credentials the CLI itself needs. Those
+  remain visible to its commands. The environment is an allowlist
   (PATH, locale, proxy and CA settings, `ANTHROPIC_*`, `CLAUDE_*`), so
   `AWS_*`, `GOOGLE_*` and other Bedrock/Vertex variables are dropped. To use
   those backends, name the variables to hand over in
