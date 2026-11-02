@@ -28,8 +28,9 @@ fn quilt_missing() -> bool {
 }
 
 /// The check a test runs instead of quilt: a patch file holding `clean`
-/// applies, one holding `FUZZ` applies with fuzz and one holding `OFFSET` with
-/// an offset (both refresh to `clean` in `Refresh::Offset`), one holding
+/// applies, one holding `FUZZ` applies with fuzz (refreshes to `clean` in
+/// `Refresh::Offset`), one holding `OFFSET` applies with an offset (left as it
+/// is), one holding
 /// `UPSTREAM` is already applied, anything else fails.
 fn fake_check(ctx: &RunCtx, refresh: Refresh) -> CheckReport {
     let spec = std::fs::read_to_string(&ctx.spec_path).unwrap();
@@ -51,7 +52,7 @@ fn fake_check(ctx: &RunCtx, refresh: Refresh) -> CheckReport {
                         fuzz: false,
                         output: "Hunk #1 succeeded at 5 (offset 2 lines).".into(),
                     },
-                    (refresh == Refresh::Offset).then(|| b"clean\n".to_vec()),
+                    None,
                 )
             } else if body.contains("UPSTREAM") {
                 (

@@ -277,9 +277,11 @@ pub(super) fn patch_stage_with(
     write_refresh_bullets(ctx, step_id, &refreshed);
     for p in &report.patches {
         match &p.status {
-            PatchStatus::AppliesWithOffsetOrFuzz { .. } if !refreshed.contains(&p.name) => {
+            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: true, .. }
+                if !refreshed.contains(&p.name) =>
+            {
                 lines.push(format!(
-                    "- {}: applies with an offset or fuzz and quilt could not refresh it; left as it is",
+                    "- {}: applies with fuzz and quilt could not refresh it; left as it is",
                     p.name
                 ))
             }

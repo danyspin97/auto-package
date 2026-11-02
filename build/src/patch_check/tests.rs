@@ -375,3 +375,34 @@ fn real_quilt_classifies_good_fuzzy_and_bad_patches() {
         before
     );
 }
+
+#[test]
+fn real_quilt_leaves_an_offset_only_patch_byte_identical() {
+    if !quilt_available() {
+        eprintln!("quilt is not installed; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tar = tarball(dir.path(), &[("f.txt", "a\nb\nc\nd\ne\nf\ng\nh\n")]);
+    // The hunk says line 4, the text is at line 1: quilt applies it with an
+    // offset and no fuzz.
+    let offset = "--- a/f.txt\n+++ b/f.txt\n@@ -4,3 +4,3 @@\n a\n-b\n+B\n c\n";
+    std::fs::write(dir.path().join("off.patch"), offset).unwrap();
+    let spec = "Name: foo\nVersion: 1.0\nPatch0: off.patch\n%prep\n%autosetup -p1\n";
+    let report = check(spec, dir.path(), Some(&tar), Refresh::Offset);
+    assert_eq!(report.not_run, None, "{report:?}");
+    let p = &report.patches[0];
+    assert!(
+        matches!(
+            p.status,
+            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: false, .. }
+        ),
+        "{p:?}"
+    );
+    assert_eq!(p.refreshed, None, "an offset alone is never refreshed");
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("off.patch")).unwrap(),
+        offset
+    );
+}

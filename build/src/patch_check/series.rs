@@ -37,8 +37,9 @@ pub enum Planned {
 pub enum PatchStatus {
     /// `quilt push` applied it with no offset and no fuzz.
     Applies,
-    /// It applied, but with an offset or fuzz: `quilt refresh` makes it exact
-    /// (a fuzzy patch fails rpm's `%autosetup`, which runs with `--fuzz=0`).
+    /// It applied with an offset, or with fuzz. An offset alone is left as it
+    /// is: rpm's `%autosetup` applies it too. Fuzz fails rpm's `--fuzz=0`, so
+    /// `quilt refresh` makes that patch exact.
     AppliesWithOffsetOrFuzz { fuzz: bool, output: String },
     /// It does not apply: quilt's output and the rejected hunks. Never a
     /// reason to remove the patch: it is rebased.
@@ -88,10 +89,14 @@ impl CheckReport {
             .filter(|p| matches!(p.status, PatchStatus::Fails { .. }))
     }
 
+    /// The patches that applied with fuzz: the ones a refresh makes exact.
     pub fn to_refresh(&self) -> impl Iterator<Item = &PatchResult> {
-        self.patches
-            .iter()
-            .filter(|p| matches!(p.status, PatchStatus::AppliesWithOffsetOrFuzz { .. }))
+        self.patches.iter().filter(|p| {
+            matches!(
+                p.status,
+                PatchStatus::AppliesWithOffsetOrFuzz { fuzz: true, .. }
+            )
+        })
     }
 
     pub fn already_applied(&self) -> impl Iterator<Item = &PatchResult> {
@@ -127,8 +132,14 @@ impl CheckReport {
         }
         let count =
             |f: fn(&PatchStatus) -> bool| self.patches.iter().filter(|p| f(&p.status)).count();
-        let clean = count(|s| matches!(s, PatchStatus::Applies));
-        let refresh = count(|s| matches!(s, PatchStatus::AppliesWithOffsetOrFuzz { .. }));
+        let clean = count(|s| {
+            matches!(
+                s,
+                PatchStatus::Applies | PatchStatus::AppliesWithOffsetOrFuzz { fuzz: false, .. }
+            )
+        });
+        let refresh =
+            count(|s| matches!(s, PatchStatus::AppliesWithOffsetOrFuzz { fuzz: true, .. }));
         let failing = count(|s| matches!(s, PatchStatus::Fails { .. }));
         let upstream = count(|s| matches!(s, PatchStatus::AlreadyApplied { .. }));
         let skipped: Vec<String> = self
@@ -153,13 +164,14 @@ impl CheckReport {
     }
 }
 
-/// Whether the check rewrites patches that applied with an offset or fuzz with
-/// `quilt refresh`, and returns them.
+/// Whether the check rewrites patches that applied with fuzz with `quilt
+/// refresh`, and returns them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
     No,
-    /// Refresh each patch that applied with an offset or with fuzz: quilt makes
-    /// it exact, and rpm's `%autosetup` (`--fuzz=0`) applies only exact patches.
+    /// Refresh each patch that applied with fuzz: quilt makes it exact, and
+    /// rpm's `%autosetup` (`--fuzz=0`) applies only exact patches. A patch
+    /// that applied with an offset alone is left byte-identical.
     Offset,
 }
 

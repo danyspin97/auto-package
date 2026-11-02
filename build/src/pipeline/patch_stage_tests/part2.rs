@@ -52,7 +52,7 @@ fn without_the_agent_failing_patches_are_kept_and_fuzzy_ones_refreshed() {
 }
 
 #[test]
-fn offset_patches_are_refreshed_before_any_turn_and_only_rejects_reach_the_agent() {
+fn fuzzy_patches_are_refreshed_before_any_turn_and_offset_only_ones_are_left() {
     let case = run(
         &[
             ("b.patch", "old"),
@@ -76,15 +76,24 @@ fn offset_patches_are_refreshed_before_any_turn_and_only_rejects_reach_the_agent
         "{}",
         case.contexts[0]
     );
-    for name in ["c.patch", "d.patch"] {
-        assert_eq!(
-            std::fs::read_to_string(case.checkout.join(name)).unwrap(),
-            "clean\n"
-        );
-        assert_eq!(bullets(&case.changes, &format!("Refresh {name}")), 1);
-    }
+    assert_eq!(
+        std::fs::read_to_string(case.checkout.join("d.patch")).unwrap(),
+        "clean\n"
+    );
+    assert_eq!(bullets(&case.changes, "Refresh d.patch"), 1);
+    // An offset alone is applied by rpm too: left byte-identical, no refresh.
+    assert_eq!(
+        std::fs::read_to_string(case.checkout.join("c.patch")).unwrap(),
+        "OFFSET"
+    );
+    assert_eq!(bullets(&case.changes, "Refresh c.patch"), 0);
     assert!(
-        case.notes.contains("c.patch: refreshed by the pipeline"),
+        !case.notes.contains("c.patch"),
+        "an offset alone is not a note: {}",
+        case.notes
+    );
+    assert!(
+        case.notes.contains("d.patch: refreshed by the pipeline"),
         "{}",
         case.notes
     );

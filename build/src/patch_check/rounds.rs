@@ -92,15 +92,15 @@ pub fn agent_report(
                 "\n- {}{level}: applies cleanly; leave it.\n",
                 p.name
             )),
-            PatchStatus::AppliesWithOffsetOrFuzz { fuzz, output } => text.push_str(&format!(
-                "\n- {}{level}: applies with {}: refresh it.\n{}",
+            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: true, output } => text.push_str(&format!(
+                "\n- {}{level}: applies with fuzz (rpm applies patches with --fuzz=0, so \
+                     it FAILS the build): refresh it.\n{}",
                 p.name,
-                if *fuzz {
-                    "fuzz (rpm applies patches with --fuzz=0, so it FAILS the build)"
-                } else {
-                    "an offset"
-                },
                 crate::agent::fenced_data(output)
+            )),
+            PatchStatus::AppliesWithOffsetOrFuzz { fuzz: false, .. } => text.push_str(&format!(
+                "\n- {}{level}: applies with an offset: leave it.\n",
+                p.name
             )),
             PatchStatus::Fails { output, rejects } => {
                 text.push_str(&format!(

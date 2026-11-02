@@ -162,7 +162,7 @@ pub(super) fn run_check(
                     fuzz,
                     output: truncate(&output, OUTPUT_LIMIT),
                 });
-                if refresh == Refresh::Offset {
+                if refresh == Refresh::Offset && fuzz {
                     let level = if e.level == 0 { "0" } else { "ab" };
                     let args = ["refresh", "-p", level, "--no-timestamps", "--no-index"];
                     if quilt.run(&args).is_ok_and(|(ok, _)| ok) {
