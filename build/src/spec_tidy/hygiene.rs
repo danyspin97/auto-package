@@ -12,6 +12,73 @@ use super::{first_word, is_section};
 pub enum Pass {
     Group,
     BuildRoot,
+    Clean,
+    InstallRm,
+}
+
+/// The lines that only remove the build root, which rpm does before `%install`.
+const BUILDROOT_RM: &[&str] = &["rm -rf %{buildroot}", "rm -rf $RPM_BUILD_ROOT"];
+
+fn is_buildroot_rm(line: &str) -> bool {
+    BUILDROOT_RM.contains(&line.trim_end())
+}
+
+/// The index of the first header after `i`, or the end of the spec.
+fn body_end(lines: &[&str], i: usize) -> usize {
+    lines[i + 1..]
+        .iter()
+        .position(|l| is_header(l))
+        .map_or(lines.len(), |p| i + 1 + p)
+}
+
+/// A `%clean` section whose body is only blank lines and the build root
+/// removal: rpm does that itself, so the whole section goes.
+fn clean_construct(lines: &[&str], i: usize) -> Option<Construct> {
+    let end = body_end(lines, i);
+    let body = &lines[i + 1..end];
+    if !body
+        .iter()
+        .all(|l| l.trim().is_empty() || is_buildroot_rm(l))
+    {
+        return None;
+    }
+    let what = if body.iter().any(|l| is_buildroot_rm(l)) {
+        "a `%clean` section that only removes the build root"
+    } else {
+        "an empty `%clean` section"
+    };
+    let fix = if end == i + 1 {
+        "delete the line `%clean`".to_string()
+    } else {
+        format!("delete the section, lines {}-{end}", i + 1)
+    };
+    Some(Construct {
+        pass: Pass::Clean,
+        line: i + 1,
+        what: what.to_string(),
+        fix,
+        edits: vec![LineEdit {
+            start: i,
+            end,
+            with: Vec::new(),
+        }],
+    })
+}
+
+/// A `rm -rf %{buildroot}` that is the first line of `%install`.
+fn install_construct(lines: &[&str], i: usize) -> Option<Construct> {
+    let rm = lines.get(i + 1).filter(|l| is_buildroot_rm(l))?;
+    Some(Construct {
+        pass: Pass::InstallRm,
+        line: i + 2,
+        what: "the build root removal as the first line of `%install`".to_string(),
+        fix: format!("delete the line `{}`", rm.trim()),
+        edits: vec![LineEdit {
+            start: i + 1,
+            end: i + 2,
+            with: Vec::new(),
+        }],
+    })
 }
 
 /// Lines `start..end` (0-based, `end` exclusive) replaced by `with`.
@@ -78,6 +145,13 @@ pub fn constructs(spec: &str) -> Vec<Construct> {
         }
         if is_header(line) {
             in_preamble = word == "%package";
+            if depth == 0 {
+                match word {
+                    "%clean" => out.extend(clean_construct(&lines, i)),
+                    "%install" => out.extend(install_construct(&lines, i)),
+                    _ => {}
+                }
+            }
             continue;
         }
         if depth != 0 || !in_preamble {
@@ -193,6 +267,17 @@ pub fn drop_group_tags(spec: &str) -> Option<String> {
 /// The `BuildRoot:` tags of the preamble, which rpm ignores, dropped.
 pub fn drop_buildroot_tags(spec: &str) -> Option<String> {
     apply(spec, Pass::BuildRoot)
+}
+
+/// The `%clean` sections that only remove the build root, and an empty
+/// `%clean` header, dropped. A `%clean` with other commands stays.
+pub fn drop_clean_sections(spec: &str) -> Option<String> {
+    apply(spec, Pass::Clean)
+}
+
+/// The `rm -rf %{buildroot}` that starts `%install`, dropped.
+pub fn drop_install_buildroot_rm(spec: &str) -> Option<String> {
+    apply(spec, Pass::InstallRm)
 }
 
 #[cfg(test)]
@@ -317,5 +402,114 @@ mod tests {
     fn a_crlf_spec_without_a_construct_is_none_and_a_missing_final_newline_stays_missing() {
         assert_eq!(drop_group_tags("Name: x\r\nSummary: s\r\n"), None);
         assert_eq!(drop_group_tags("Name: x\r\nGroup: y").unwrap(), "Name: x");
+    }
+
+    #[test]
+    fn a_clean_that_only_removes_the_build_root_goes_with_its_separator() {
+        let spec = "%install\nmake\n\n%clean\nrm -rf %{buildroot}\n\n%files\n/a\n";
+        assert_eq!(
+            drop_clean_sections(spec).unwrap(),
+            "%install\nmake\n\n%files\n/a\n"
+        );
+        let env = "%install\nmake\n%clean\nrm -rf $RPM_BUILD_ROOT\n\n%files\n/a\n";
+        assert_eq!(
+            drop_clean_sections(env).unwrap(),
+            "%install\nmake\n\n%files\n/a\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_clean_header_goes_even_with_nothing_after_it() {
+        assert_eq!(
+            drop_clean_sections("%install\nmake\n%clean\n\n%files\n/a\n").unwrap(),
+            "%install\nmake\n\n%files\n/a\n"
+        );
+        assert_eq!(
+            drop_clean_sections("%install\nmake\n\n%clean\n").unwrap(),
+            "%install\nmake\n"
+        );
+        assert_eq!(
+            drop_clean_sections("%install\nmake\n%clean\n%changelog\n- x\n").unwrap(),
+            "%install\nmake\n%changelog\n- x\n"
+        );
+    }
+
+    #[test]
+    fn a_clean_at_the_end_of_the_file_keeps_no_trailing_blank() {
+        assert_eq!(
+            drop_clean_sections("%install\nmake\n\n%clean\nrm -rf %{buildroot}\n").unwrap(),
+            "%install\nmake\n"
+        );
+    }
+
+    #[test]
+    fn a_clean_with_other_commands_a_comment_or_a_conditional_stays() {
+        for body in [
+            "rm -rf %{buildroot}\necho done\n",
+            "# keep the tree\nrm -rf %{buildroot}\n",
+            "%if 0%{?a}\nrm -rf %{buildroot}\n%endif\n",
+            "rm -rf %{buildroot}/cache\n",
+            "rm -rf %{buildroot} # all\n",
+            "rm -fr %{buildroot}\n",
+        ] {
+            let spec = format!("%install\nmake\n%clean\n{body}%files\n/a\n");
+            assert_eq!(drop_clean_sections(&spec), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn a_clean_inside_a_conditional_is_left() {
+        let spec = "%if 0%{?a}\n%clean\nrm -rf %{buildroot}\n%endif\n%files\n/a\n";
+        assert_eq!(drop_clean_sections(spec), None);
+    }
+
+    #[test]
+    fn a_trigger_ends_a_clean_section_and_its_body_is_not_part_of_it() {
+        let spec = "%install\nmake\n%clean\nrm -rf %{buildroot}\n%triggerin -- x\necho\n";
+        assert_eq!(
+            drop_clean_sections(spec).unwrap(),
+            "%install\nmake\n%triggerin -- x\necho\n"
+        );
+    }
+
+    #[test]
+    fn the_build_root_removal_that_starts_install_goes() {
+        let spec = "%install\nrm -rf %{buildroot}\nmake install\n%files\n/a\n";
+        assert_eq!(
+            drop_install_buildroot_rm(spec).unwrap(),
+            "%install\nmake install\n%files\n/a\n"
+        );
+        let env = "%install\nrm -rf $RPM_BUILD_ROOT\n%cmake_install\n";
+        assert_eq!(
+            drop_install_buildroot_rm(env).unwrap(),
+            "%install\n%cmake_install\n"
+        );
+    }
+
+    #[test]
+    fn a_build_root_removal_that_is_not_the_first_line_stays() {
+        for spec in [
+            "%install\n\nrm -rf %{buildroot}\nmake\n",
+            "%install\nmake\nrm -rf %{buildroot}\n",
+            "%install\nrm -rf %{buildroot}/x\n",
+            "%install\n%if 0%{?a}\nrm -rf %{buildroot}\n%endif\n",
+        ] {
+            assert_eq!(drop_install_buildroot_rm(spec), None, "{spec}");
+        }
+    }
+
+    #[test]
+    fn the_removals_are_idempotent_and_do_not_touch_each_other() {
+        let spec =
+            "%install\nrm -rf %{buildroot}\nmake\n\n%clean\nrm -rf %{buildroot}\n\n%files\n/a\n";
+        let once = drop_install_buildroot_rm(spec).unwrap();
+        assert_eq!(
+            drop_clean_sections(spec).unwrap(),
+            "%install\nrm -rf %{buildroot}\nmake\n\n%files\n/a\n"
+        );
+        let twice = drop_clean_sections(&once).unwrap();
+        assert_eq!(twice, "%install\nmake\n\n%files\n/a\n");
+        assert_eq!(drop_install_buildroot_rm(&twice), None);
+        assert_eq!(drop_clean_sections(&twice), None);
     }
 }

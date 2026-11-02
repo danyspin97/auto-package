@@ -27,6 +27,22 @@ const SECTION_HEADERS: &[&str] = &[
     "%verifyscript",
     "%generate_buildrequires",
     "%ldconfig_scriptlets",
+    "%preuntrans",
+    "%postuntrans",
+    "%trigger",
+    "%triggerprein",
+    "%triggerin",
+    "%triggerun",
+    "%triggerpostun",
+    "%filetrigger",
+    "%filetriggerin",
+    "%filetriggerun",
+    "%filetriggerpostun",
+    "%transfiletrigger",
+    "%transfiletriggerin",
+    "%transfiletriggerun",
+    "%transfiletriggerpostun",
+    "%sepolicy",
 ];
 
 /// Headers whose section is a scriptlet or the file list: `%check` belongs
