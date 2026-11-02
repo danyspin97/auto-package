@@ -108,6 +108,11 @@ pub fn source_kind(url: &str) -> SourceKind {
 /// `(name, version)` from a release tarball filename: `foo-1.2.3.tar.gz` →
 /// `("foo", "1.2.3")`. The split is at the last `-` or `_` that is followed
 /// by a digit, so `foo-bar-2.0.tar.gz` → `("foo-bar", "2.0")`.
+///
+/// A trailing pure-digit part after a dotted version is a release counter of
+/// the distribution, not a version of its own: `dmraid-1.0.0.rc16-3.tar.bz2`
+/// is `("dmraid", "1.0.0.rc16-3")` and `mawk-1.3.4-20260302.tgz` is
+/// `("mawk", "1.3.4-20260302")`.
 pub fn archive_name_version(file: &str) -> Option<(String, String)> {
     let lower = file.to_ascii_lowercase();
     let ext = GZIP_EXTS
@@ -115,15 +120,32 @@ pub fn archive_name_version(file: &str) -> Option<(String, String)> {
         .chain(OTHER_ARCHIVE_EXTS)
         .find(|e| lower.ends_with(**e))?;
     let stem = &file[..file.len() - ext.len()];
-    let idx = stem
-        .char_indices()
+    let idx = last_version_separator(stem)?;
+    let (name, version) = (&stem[..idx], &stem[idx + 1..]);
+    if version.bytes().all(|b| b.is_ascii_digit())
+        && let Some(cut) = dotted_version_separator(&stem[..idx])
+    {
+        return Some((stem[..cut].to_string(), stem[cut + 1..].to_string()));
+    }
+    (!name.is_empty()).then(|| (name.to_string(), version.to_string()))
+}
+
+/// The byte index of the last `-` or `_` that is followed by a digit.
+fn last_version_separator(stem: &str) -> Option<usize> {
+    stem.char_indices()
         .rev()
         .find(|&(i, c)| {
             (c == '-' || c == '_') && stem[i + 1..].starts_with(|d: char| d.is_ascii_digit())
-        })?
-        .0;
-    let (name, version) = (&stem[..idx], &stem[idx + 1..]);
-    (!name.is_empty()).then(|| (name.to_string(), version.to_string()))
+        })
+        .map(|(i, _)| i)
+}
+
+/// For `pre`, the part of a file name before its release counter: the last
+/// `-` or `_` before a digit run that holds a `.` (`-1.0.0.rc16` in
+/// `dmraid-1.0.0.rc16`). `None` when there is no such part or no name before it.
+fn dotted_version_separator(pre: &str) -> Option<usize> {
+    let j = last_version_separator(pre)?;
+    (j > 0 && pre[j + 1..].contains('.')).then_some(j)
 }
 
 /// Link targets of an HTML directory listing, reduced to their last path

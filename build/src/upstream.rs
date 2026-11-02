@@ -418,6 +418,27 @@ mod tests {
     }
 
     #[test]
+    fn a_counted_release_lists_under_its_project_name() {
+        let dmraid: Vec<String> = [
+            "dmraid-1.0.0.rc15.tar.bz2",
+            "dmraid-1.0.0.rc16-2.tar.bz2",
+            "dmraid-1.0.0.rc16-3.tar.bz2",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            newest_for(&dmraid, "dmraid").as_deref(),
+            Some("1.0.0.rc16-3")
+        );
+        let mawk: Vec<String> = ["mawk-1.3.4-20250101.tgz", "mawk-1.3.4-20260302.tgz"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(newest_for(&mawk, "mawk").as_deref(), Some("1.3.4-20260302"));
+    }
+
+    #[test]
     fn rss_titles_are_unwrapped() {
         let rss = "<rss><channel><title>Files</title><item><title><![CDATA[/a/acpi-2.3.tar.gz]]></title></item></channel></rss>";
         assert_eq!(rss_titles(rss), ["Files", "/a/acpi-2.3.tar.gz"]);

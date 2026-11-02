@@ -257,3 +257,34 @@ pub(super) fn release_versions_drop_source_markers_and_reject_builds() {
     );
     assert_eq!(release_version("latest"), None);
 }
+
+#[test]
+pub(super) fn a_release_counter_after_a_dotted_version_is_not_the_version() {
+    // dmraid: the spec's `%{src_version}` is `1.0.0.rc16-3`; `-3` is the counter.
+    assert_eq!(
+        archive_name_version("dmraid-1.0.0.rc16-3.tar.bz2"),
+        Some(("dmraid".into(), "1.0.0.rc16-3".into()))
+    );
+    // mawk and dialog: `<upver>-<date>` composites from the spec macros.
+    assert_eq!(
+        archive_name_version("mawk-1.3.4-20260302.tgz"),
+        Some(("mawk".into(), "1.3.4-20260302".into()))
+    );
+    assert_eq!(
+        archive_name_version("dialog-1.3-20260721.tgz"),
+        Some(("dialog".into(), "1.3-20260721".into()))
+    );
+    // A counter after a name with no dotted version keeps the old split.
+    assert_eq!(
+        archive_name_version("foo-1-2.tar.gz"),
+        Some(("foo-1".into(), "2".into()))
+    );
+    assert_eq!(
+        archive_name_version("1.2.3-4.tar.gz"),
+        Some(("1.2.3".into(), "4".into()))
+    );
+    assert_eq!(
+        archive_name_version("hello-2.12.tar.gz"),
+        Some(("hello".into(), "2.12".into()))
+    );
+}
