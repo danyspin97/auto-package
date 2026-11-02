@@ -6,6 +6,7 @@ use crate::pipeline::licence::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
+use crate::pipeline::source_guard::*;
 
 /// How many times the same validation error rejected an edit of one spec, in
 /// this process. A fourth identical turn would be re-prompting for the same
@@ -299,6 +300,20 @@ pub(super) fn accept_or_restore_reasoned(
                  The edit was rolled back.\n"
             ),
         );
+        return Err(problem);
+    }
+
+    // A source declared again (already in the spec, or twice in this edit) is a
+    // loop, not a change: the edit is rolled back before it reaches a build.
+    if let Some(problem) = reject_repeated_sources(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+    ) {
         return Err(problem);
     }
 

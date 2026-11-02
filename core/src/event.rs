@@ -149,6 +149,10 @@ pub enum SpecRejection {
     Placeholders {
         lines: Vec<String>,
     },
+    /// The edit declared these sources again (the source loop guard).
+    RepeatedSource {
+        urls: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

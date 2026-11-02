@@ -311,6 +311,9 @@ use snapshot::*;
 mod rejection;
 use rejection::*;
 mod apply_turn;
+mod source_guard;
+#[cfg(test)]
+mod source_guard_tests;
 use apply_turn::*;
 mod keep_version;
 mod licence;
