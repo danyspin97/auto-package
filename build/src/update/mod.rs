@@ -37,9 +37,8 @@ mod helpers;
 mod lookup_macro_tests;
 #[cfg(test)]
 mod lookups;
+mod pins;
 mod plan;
-mod series;
-use series::*;
 mod read;
 #[cfg(test)]
 mod reading;
@@ -59,5 +58,6 @@ mod suse_tests;
 mod versions;
 
 pub use candidates::*;
+use pins::*;
 pub use plan::*;
 pub use read::*;
