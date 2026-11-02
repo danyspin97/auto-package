@@ -52,12 +52,35 @@ fn the_example_gives_the_tag_without_its_v_and_offset() {
         build_time_version(&example_params(), "v0.2.2").unwrap(),
         "0.2.2"
     );
-    assert!(check_build_time_version(&example_params(), "v0.2.2", "0.2.2").is_ok());
+    assert_eq!(
+        check_build_time_version(&example_params(), "v0.2.2", "0.2.2"),
+        Ok(None)
+    );
     let wrong = check_build_time_version(&example_params(), "v0.2.2", "0.2.3").unwrap_err();
     assert!(
         wrong.contains("`0.2.2`") && wrong.contains("`0.2.3`"),
         "{wrong}"
     );
+}
+
+#[test]
+fn the_aquamarine_service_gives_its_tag_without_the_v() {
+    // The `_service` of aquamarine as OBS has it: no replacement parameter.
+    let svc = "<!-- vim: set ft=xml ts=4 sw=4 noet: -->\n<services>\n\t<service name=\"obs_scm\" mode=\"manual\">\n\t\t<param name=\"url\">https://github.com/hyprwm/aquamarine.git</param>\n\t\t<param name=\"scm\">git</param>\n\t\t<param name=\"versionformat\">@PARENT_TAG@</param>\n\t\t<param name=\"versionrewrite-pattern\">v(.*)</param>\n\t\t<param name=\"revision\">@PARENT_TAG@</param>\n\t</service>\n\t<service name=\"tar\" mode=\"manual\" />\n\t<service name=\"recompress\" mode=\"manual\">\n\t\t<param name=\"file\">*.tar</param>\n\t\t<param name=\"compression\">xz</param>\n\t</service>\n\t<service name=\"set_version\" mode=\"manual\" />\n</services>\n";
+    let masked = mask_xml_comments(svc);
+    let (scm, kind) = source_service(&masked).unwrap();
+    assert_eq!(kind, SourceService::BuildTime);
+    let params = source_params(svc, &masked, scm);
+    assert_eq!(build_time_version(&params, "v0.16.0").unwrap(), "0.16.0");
+    assert_eq!(
+        check_build_time_version(&params, "v0.16.0", "0.16.0"),
+        Ok(None)
+    );
+    // The placeholder revision stays: the build takes the newest tag.
+    assert_eq!(with_service_revision(svc, "v0.16.0").unwrap(), svc);
+    let plan = plan_service_carry(svc, "0.16.0", || Ok("v0.16.0".into())).unwrap();
+    assert_eq!(plan.moved, svc);
+    assert!(plan.unchecked.is_none());
 }
 
 #[test]
@@ -72,26 +95,128 @@ fn a_rewrite_that_does_not_give_the_version_is_refused() {
 }
 
 #[test]
-fn without_a_rewrite_only_a_leading_v_is_dropped() {
-    assert_eq!(build_time_version(&[], "v0.2.2").unwrap(), "0.2.2");
-    assert_eq!(build_time_version(&[], "0.2.2").unwrap(), "0.2.2");
+fn the_replacement_defaults_to_the_first_group() {
+    let no_replacement = params(&[
+        ("versionformat", "@PARENT_TAG@"),
+        ("versionrewrite-pattern", "v(.*)"),
+    ]);
+    assert_eq!(build_time_version(&no_replacement, "v1.2").unwrap(), "1.2");
+    assert_eq!(
+        check_build_time_version(&no_replacement, "v1.2", "1.2"),
+        Ok(None)
+    );
+}
+
+#[test]
+fn an_empty_version_is_unchecked_never_refused() {
+    let empty = params(&[
+        ("versionformat", "@PARENT_TAG@"),
+        ("versionrewrite-pattern", "v(.*)"),
+        ("versionrewrite-replacement", ""),
+    ]);
+    assert_eq!(build_time_version(&empty, "v1.2").unwrap(), "");
+    let note = check_build_time_version(&empty, "v1.2", "1.2")
+        .unwrap()
+        .unwrap();
+    assert!(note.contains("empty"), "{note}");
+}
+
+#[test]
+fn without_a_pattern_the_tag_keeps_its_v_as_obs_does() {
+    let plain = params(&[("versionformat", "@PARENT_TAG@")]);
+    assert_eq!(build_time_version(&plain, "v0.2.2").unwrap(), "v0.2.2");
+    assert!(check_build_time_version(&plain, "v0.2.2", "0.2.2").is_err());
+    assert_eq!(
+        check_build_time_version(&plain, "v0.2.2", "v0.2.2"),
+        Ok(None)
+    );
+    assert_eq!(
+        build_time_version(&params(&[("versionformat", "1-2:3")]), "v1").unwrap(),
+        "123"
+    );
+}
+
+#[test]
+fn a_plus_zero_offset_is_kept_without_a_rewrite() {
     let plus_zero = params(&[("versionformat", "@PARENT_TAG@+@TAG_OFFSET@")]);
     assert!(check_build_time_version(&plus_zero, "v0.2.2", "0.2.2").is_err());
 }
 
 #[test]
-fn a_macro_or_prefix_this_cannot_follow_is_refused() {
-    let commit = params(&[("versionformat", "@PARENT_TAG@.@CI_SHORT_HASH@")]);
-    assert!(build_time_version(&commit, "v1").is_err());
-    let prefix = params(&[("versionprefix", "v")]);
-    assert!(build_time_version(&prefix, "v1").is_err());
+fn a_version_this_cannot_work_out_is_unchecked() {
+    // The default format is the commit time; git codes and unknown macros too.
+    for p in [
+        params(&[]),
+        params(&[("versionformat", "%cd")]),
+        params(&[("versionformat", "@PARENT_TAG@.@CI_SHORT_HASH@")]),
+        params(&[("versionformat", "@TAG@")]),
+        params(&[("versionformat", "@PARENT_TAG@"), ("version", "_none_")]),
+        params(&[("versionformat", "@PARENT_TAG@"), ("scm", "hg")]),
+    ] {
+        assert!(build_time_version(&p, "v1").is_err(), "{p:?}");
+        assert!(matches!(
+            check_build_time_version(&p, "v1", "1"),
+            Ok(Some(_))
+        ));
+    }
     let bad = params(&[("versionrewrite-pattern", "(")]);
     assert!(build_time_version(&bad, "v1").is_err());
 }
 
 #[test]
+fn an_explicit_version_and_a_prefix_are_followed() {
+    assert_eq!(
+        build_time_version(&params(&[("version", "1.4")]), "v9").unwrap(),
+        "1.4"
+    );
+    let prefixed = params(&[
+        ("versionformat", "@PARENT_TAG@"),
+        ("versionprefix", "2"),
+        ("versionrewrite-pattern", "v(.*)"),
+    ]);
+    assert_eq!(build_time_version(&prefixed, "v1.2").unwrap(), "2.1.2");
+}
+
+#[test]
 fn osc_group_references_become_regex_groups() {
-    assert_eq!(regex_replacement("\\1-$x"), "${1}-$$x");
+    assert_eq!(regex_replacement("\\1-$x").unwrap(), "${1}-$$x");
+    assert_eq!(regex_replacement("\\9").unwrap(), "${9}");
+}
+
+#[test]
+fn a_replacement_escape_other_than_a_group_is_unchecked() {
+    // Python's re.sub: \g<1>, \10 (group 10), \0 (octal) and \n are not
+    // groups here; a trailing backslash is not a template either.
+    for osc in ["\\g<1>", "\\10", "\\0", "\\n", "\\\\", "x\\"] {
+        assert!(regex_replacement(osc).is_err(), "{osc}");
+        let p = params(&[
+            ("versionformat", "@PARENT_TAG@"),
+            ("versionrewrite-pattern", "v(.*)"),
+            ("versionrewrite-replacement", osc),
+        ]);
+        assert!(build_time_version(&p, "v1.2").is_err(), "{osc}");
+        assert!(
+            matches!(check_build_time_version(&p, "v1.2", "1.2"), Ok(Some(_))),
+            "{osc}"
+        );
+    }
+}
+
+#[test]
+fn a_parent_tag_or_match_tag_makes_the_version_unchecked() {
+    // OBS takes @PARENT_TAG@ from these, not from the tag the revision names.
+    for (name, value) in [("parent-tag", "v0.1"), ("match-tag", "v*")] {
+        let mut p = example_params();
+        p.push((name.to_string(), value.to_string()));
+        assert!(
+            matches!(check_build_time_version(&p, "v0.2.2", "0.2.2"), Ok(Some(_))),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        build_time_version(&example_params(), "v0.2.2").unwrap(),
+        "0.2.2"
+    );
 }
 
 #[test]
@@ -240,4 +365,36 @@ fn a_url_cargo_vendor_fetches_and_a_buildtime_one_does_not_block_obs_scm() {
     );
     assert!(refuse_manual_vendoring(&mask_xml_comments(&buildtime)).is_ok());
     assert!(plan_service_carry(&buildtime, "0.2.2", || Ok("v0.2.2".into())).is_ok());
+}
+
+#[test]
+fn an_unchecked_version_is_a_warning_and_a_summary_record() {
+    // The warning is what the run shows; the record is what its summary lists.
+    use ap_core::event::StepId;
+    use ap_core::sink::Reporter;
+    #[derive(Default)]
+    struct Recorded(std::sync::Mutex<Vec<Event>>);
+    impl Reporter for Recorded {
+        fn report(&self, event: &Event) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+    let rec = Recorded::default();
+    let memory = ap_core::sink::MemorySink::new();
+    let why = "the tag `v1` gives an empty Version at build time";
+    report_version_unchecked(&rec, StepId(3), "hyprland-guiutils", why);
+    for event in rec.0.lock().unwrap().iter() {
+        memory.report(event);
+    }
+    let events = rec.0.lock().unwrap();
+    assert!(matches!(
+        &events[0],
+        Event::Warning { step: Some(StepId(3)), message }
+            if message == &format!("hyprland-guiutils: {why}")
+    ));
+    assert_eq!(memory.version_unchecked().len(), 1);
+    assert!(matches!(
+        &memory.version_unchecked()[0],
+        Event::VersionUnchecked { pkg, reason } if pkg == "hyprland-guiutils" && reason == why
+    ));
 }

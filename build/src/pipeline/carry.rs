@@ -14,11 +14,12 @@ pub(super) fn carry_forward_spec(
     checkout_dir: &Path,
     spec_path: &Path,
     step: &StepDir,
+    reporter: &dyn Reporter,
 ) -> Result<GenSpecResult, String> {
     use ap_ecosystem::{pypi, sdist};
 
     if config.source_repo.is_some() {
-        return carry_forward_repo_spec(config, checkout_dir, spec_path, step);
+        return carry_forward_repo_spec(config, checkout_dir, spec_path, step, reporter);
     }
     let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
     let old_version = crate::spec::parse_header(&old)
@@ -88,6 +89,7 @@ fn carry_forward_repo_spec(
     checkout_dir: &Path,
     spec_path: &Path,
     step: &StepDir,
+    reporter: &dyn Reporter,
 ) -> Result<GenSpecResult, String> {
     let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
     let mut bumped = crate::spec::set_version(&old, &config.version)
@@ -100,7 +102,15 @@ fn carry_forward_repo_spec(
             .as_deref()
             .ok_or("the spec's sources have no web address to download from")?;
         if checkout_dir.join("_service").is_file() {
-            return carry_forward_service_spec(config, repo, checkout_dir, spec_path, step, bumped);
+            return carry_forward_service_spec(
+                config,
+                repo,
+                checkout_dir,
+                spec_path,
+                step,
+                bumped,
+                reporter,
+            );
         }
         if bumped
             .lines()
@@ -200,6 +210,7 @@ fn carry_forward_service_spec(
     spec_path: &Path,
     step: &StepDir,
     bumped: String,
+    reporter: &dyn Reporter,
 ) -> Result<GenSpecResult, String> {
     let service_path = checkout_dir.join("_service");
     let service =
@@ -208,6 +219,9 @@ fn carry_forward_service_spec(
         crate::sources::tag_for_version(repo, &config.version)
             .ok_or_else(|| format!("{repo} lists no tag for {}", config.version))
     })?;
+    if let Some(why) = &plan.unchecked {
+        report_version_unchecked(reporter, step.id, &config.rpm_name, why);
+    }
     if plan.kind == SourceService::BuildTime {
         carry_forward_obs_scm_spec(&service_path, &service, &plan.moved, spec_path, &bumped)?;
         write_or_warn(step.file("spec.generated"), &bumped);
@@ -280,11 +294,31 @@ fn carry_forward_service_spec(
     })
 }
 
+/// Says that the `Version:` of `pkg` could not be checked against its tag: a
+/// warning where the run reports it, and a record the run summary lists.
+pub(super) fn report_version_unchecked(
+    reporter: &dyn Reporter,
+    step: ap_core::event::StepId,
+    pkg: &str,
+    why: &str,
+) {
+    reporter.report(&Event::Warning {
+        step: Some(step),
+        message: format!("{pkg}: {why}"),
+    });
+    reporter.report(&Event::VersionUnchecked {
+        pkg: pkg.to_string(),
+        reason: why.to_string(),
+    });
+}
+
 /// What the `_service` of a package whose source a service supplies becomes.
 pub(super) struct ServicePlan {
     /// The `_service` with its source service's `revision` moved to the tag.
     pub(super) moved: String,
     pub(super) kind: SourceService,
+    /// Why the `Version` the tag gives could not be checked, when it could not.
+    pub(super) unchecked: Option<String>,
 }
 
 /// Plans the move of `service` to `version`: which service supplies the source,
@@ -304,12 +338,18 @@ pub(super) fn plan_service_carry(
         refuse_manual_vendoring(&masked)?;
     }
     let tag = tag_of()?;
-    if kind == SourceService::BuildTime {
-        check_build_time_version(&source_params(service, &masked, scm), &tag, version)?;
-    }
+    let unchecked = if kind == SourceService::BuildTime {
+        check_build_time_version(&source_params(service, &masked, scm), &tag, version)?
+    } else {
+        None
+    };
     let moved = with_service_revision(service, &tag)
         .ok_or("the _service has no revision to move to the new tag")?;
-    Ok(ServicePlan { moved, kind })
+    Ok(ServicePlan {
+        moved,
+        kind,
+        unchecked,
+    })
 }
 
 /// Writes the moved `_service` and the spec with its `Version:` bumped, both or

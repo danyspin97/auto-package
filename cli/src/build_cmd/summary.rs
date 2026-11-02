@@ -220,6 +220,21 @@ pub(crate) fn print_run_summary(
         }
     }
 
+    // A spec's Version: that could not be checked against its tag: OBS may
+    // build the package under another version.
+    let mut unchecked: std::collections::BTreeMap<String, String> = Default::default();
+    for ev in memory.version_unchecked() {
+        if let Event::VersionUnchecked { pkg, reason } = ev {
+            unchecked.insert(pkg, reason);
+        }
+    }
+    if !unchecked.is_empty() {
+        let _ = writeln!(out, "\nVersion not checked ({}):", unchecked.len());
+        for (pkg, reason) in &unchecked {
+            let _ = writeln!(out, "  {pkg}: {reason}");
+        }
+    }
+
     // OBS reports names in lower case, and this run's packages are already in
     // the built list above, so they are not repeated here.
     let statuses = ap_build::osc::get_project_build_statuses(project, distro, arch)

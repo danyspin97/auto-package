@@ -11,6 +11,7 @@ pub struct MemorySink {
 pub(super) struct MemoryState {
     usage: Usage,
     finished: Vec<Event>,
+    unchecked: Vec<Event>,
 }
 
 impl MemorySink {
@@ -33,6 +34,11 @@ impl MemorySink {
     pub fn finished(&self) -> Vec<Event> {
         self.lock().finished.clone()
     }
+
+    /// The `VersionUnchecked` events so far, in order.
+    pub fn version_unchecked(&self) -> Vec<Event> {
+        self.lock().unchecked.clone()
+    }
 }
 
 impl Default for MemorySink {
@@ -53,6 +59,7 @@ impl Reporter for MemorySink {
                 st.usage.cost_usd += usage.cost_usd;
             }
             Event::PackageFinished { .. } => self.lock().finished.push(event.clone()),
+            Event::VersionUnchecked { .. } => self.lock().unchecked.push(event.clone()),
             _ => {}
         }
     }

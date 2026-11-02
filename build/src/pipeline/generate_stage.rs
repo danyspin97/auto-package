@@ -125,7 +125,7 @@ pub(super) fn generate_spec_stage(
             })
         };
         let generated = if carry_forward {
-            match carry_forward_spec(config, checkout_dir, spec_path, &step) {
+            match carry_forward_spec(config, checkout_dir, spec_path, &step, reporter) {
                 Ok(res) => {
                     carried_from = old_version.clone();
                     Ok(res)

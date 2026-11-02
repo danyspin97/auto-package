@@ -26,15 +26,30 @@ pub(super) fn open_tag(masked: &str, at: usize) -> &str {
     &masked[start..end]
 }
 
-/// Refuses unless the tag gives `version` when OBS builds the package.
+/// Refuses unless the tag gives `version` when OBS builds the package. `Ok(Some(why))`
+/// when that cannot be worked out here: the update is accepted with `why` as its
+/// note, since an empty or unknown version must not refuse it.
 pub(super) fn check_build_time_version(
     params: &[(String, String)],
     tag: &str,
     version: &str,
-) -> Result<(), String> {
-    let got = build_time_version(params, tag)?;
+) -> Result<Option<String>, String> {
+    let got = match build_time_version(params, tag) {
+        Ok(got) if !got.is_empty() => got,
+        Ok(_) => {
+            return Ok(Some(format!(
+                "the tag `{tag}` gives an empty Version at build time, so the spec's Version was not checked"
+            )));
+        }
+        Err(why) => {
+            return Ok(Some(format!(
+                "the Version the tag `{tag}` gives at build time cannot be worked out here ({why}), \
+                 so the spec's Version was not checked"
+            )));
+        }
+    };
     if got == version {
-        return Ok(());
+        return Ok(None);
     }
     Err(format!(
         "the tag `{tag}` gives Version `{got}` when OBS builds the package, not `{version}`, \
@@ -43,57 +58,106 @@ pub(super) fn check_build_time_version(
 }
 
 /// The `Version` that an `obs_scm` service with these `params` gives the tag
-/// `tag`: `versionformat` (default `@PARENT_TAG@`) with the tag as the parent
-/// tag at offset 0, then `versionrewrite-pattern`. Without a rewrite the tag
-/// may carry a leading `v`, which is dropped. `Err` when the result cannot be
-/// worked out here.
+/// `tag` when OBS builds it (TarSCM's `get_version`): the `versionformat` with
+/// `@PARENT_TAG@` the tag and `@TAG_OFFSET@` 0 (the tag is the revision), then
+/// `versionrewrite-pattern` with `versionrewrite-replacement` (`\1` by default),
+/// or without a pattern the `-` and `:` removed; then `versionprefix` as
+/// `prefix.version`. `version` other than `_auto_` is used as it is unless a
+/// `versionformat` is set. `Err` when the result cannot be worked out here.
 pub(super) fn build_time_version(params: &[(String, String)], tag: &str) -> Result<String, String> {
-    let param = |name: &str| {
-        params
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
+    let param = |name: &str| param_value(params, name);
+    let nonempty = |name: &str| param(name).filter(|v| !v.is_empty());
+    if param("scm").is_some_and(|scm| scm != "git") {
+        return Err("only a git source is worked out here".into());
+    }
+    let version = match param("version") {
+        Some("_none_") => {
+            return Err("the _service sets version to _none_, which keeps the spec's".into());
+        }
+        Some(given) if given != "_auto_" && nonempty("versionformat").is_none() => {
+            given.to_string()
+        }
+        _ => {
+            // OBS takes the parent tag from these, not from the revision: the
+            // version they give is not the one this tag gives.
+            if param("parent-tag").is_some() || param("match-tag").is_some() {
+                return Err(
+                    "parent-tag or match-tag is set, which picks the tag @PARENT_TAG@ and \
+                     @TAG_OFFSET@ expand to"
+                        .into(),
+                );
+            }
+            detected_version(nonempty("versionformat"), tag)?
+        }
     };
-    if param("versionprefix").is_some() {
-        return Err("the _service sets versionprefix, which cannot be followed here".into());
-    }
-    let format = param("versionformat").unwrap_or("@PARENT_TAG@");
-    let version = format
-        .replace("@PARENT_TAG@", tag)
-        .replace("@TAG@", tag)
-        .replace("@TAG_OFFSET@", "0");
-    if version.contains('@') {
-        return Err(format!(
-            "versionformat `{format}` uses a macro that cannot be expanded here"
-        ));
-    }
-    match param("versionrewrite-pattern") {
+    let version = match nonempty("versionrewrite-pattern") {
         Some(pattern) => {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| format!("versionrewrite-pattern `{pattern}`: {e}"))?;
-            let replacement = regex_replacement(param("versionrewrite-replacement").unwrap_or(""));
-            Ok(re.replace_all(&version, replacement.as_str()).into_owned())
+            let replacement =
+                regex_replacement(param("versionrewrite-replacement").unwrap_or("\\1"))?;
+            re.replace_all(&version, replacement.as_str()).into_owned()
         }
-        None => Ok(version.strip_prefix('v').unwrap_or(&version).to_string()),
-    }
+        None => version.replace(['-', ':'], ""),
+    };
+    Ok(match nonempty("versionprefix") {
+        Some(prefix) => format!("{prefix}.{version}"),
+        None => version,
+    })
 }
 
-/// An OBS rewrite replacement (`\1` for a group, `$` is literal) in the syntax
-/// of the `regex` crate (`${1}`).
-pub(super) fn regex_replacement(osc: &str) -> String {
+/// The version `versionformat` gives the tag, before any rewrite. Without a
+/// format OBS uses the commit time, and git format codes (`%ct`) are not
+/// expanded here.
+fn detected_version(format: Option<&str>, tag: &str) -> Result<String, String> {
+    let Some(format) = format else {
+        return Err("the default versionformat is the commit time".into());
+    };
+    if format.contains('%') {
+        return Err(format!("versionformat `{format}` has git format codes"));
+    }
+    let version = format
+        .replace("@PARENT_TAG@", tag)
+        .replace("@TAG_OFFSET@", "0");
+    if version.contains('@') {
+        return Err(format!(
+            "versionformat `{format}` has a macro that is not known"
+        ));
+    }
+    Ok(version)
+}
+
+/// Whether a `revision` value is a placeholder (`@PARENT_TAG@`) that OBS expands
+/// when it builds the package, not a tag name.
+fn is_placeholder(revision: &str) -> bool {
+    let v = revision.trim();
+    v.len() > 2 && v.starts_with('@') && v.ends_with('@')
+}
+
+/// An OBS rewrite replacement in the syntax of the `regex` crate (`${1}`).
+/// OBS expands it as Python's `re.sub` does: `\<digit>` (1 to 9) is a group and
+/// `$` is literal. Any other escape (`\g<1>`, `\10`, `\0`, `\n`, `\\`) is
+/// `Err`: it is not worked out here.
+pub(super) fn regex_replacement(osc: &str) -> Result<String, String> {
+    let unsupported = |escape: &str| {
+        format!("the replacement `{osc}` has the escape {escape}, which is not worked out here")
+    };
     let mut out = String::new();
     let mut chars = osc.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '$' => out.push_str("$$"),
-            '\\' if chars.peek().is_some_and(|d| d.is_ascii_digit()) => {
-                let d = chars.next().unwrap_or('0');
-                out.push_str(&format!("${{{d}}}"));
-            }
+            '\\' => match chars.next() {
+                Some(d @ '1'..='9') if !chars.peek().is_some_and(|n| n.is_ascii_digit()) => {
+                    out.push_str(&format!("${{{d}}}"));
+                }
+                Some(d) => return Err(unsupported(&format!("\\{d}"))),
+                None => return Err(unsupported("at the end")),
+            },
             c => out.push(c),
         }
     }
-    out
+    Ok(out)
 }
 
 /// Whether the checkout's `_service` gets the source from an `obs_scm` service.
@@ -359,11 +423,17 @@ pub(super) fn revision_span(masked: &str, scm: usize) -> Option<(usize, usize)> 
 }
 
 /// `service` with the `revision` parameter of the service that supplies the
-/// source set to `tag`; `None` when it has none.
+/// source set to `tag`; `None` when it has none. A placeholder revision
+/// (`@PARENT_TAG@`) is kept as it is.
 pub(super) fn with_service_revision(service: &str, tag: &str) -> Option<String> {
     let masked = mask_xml_comments(service);
     let (scm, _) = source_service(&masked)?;
     let (start, end) = revision_span(&masked, scm)?;
+    if is_placeholder(&service[start..end]) {
+        // OBS expands the placeholder to the newest tag when it builds the
+        // package; moving it to one tag would pin the source to that tag.
+        return Some(service.to_string());
+    }
     Some(format!(
         "{}{}{}",
         &service[..start],

@@ -430,6 +430,13 @@ pub enum Event {
         step: Option<StepId>,
         message: String,
     },
+    /// The `Version:` of a package could not be checked against the version its
+    /// tag gives when OBS builds it (a `Warning` says why). The run summary
+    /// lists these; nothing else reads them.
+    VersionUnchecked {
+        pkg: String,
+        reason: String,
+    },
     /// A host was allowed for the services and source fetches of this tool.
     /// `scope` is `run` (this process only) or `persistent` (also written to
     /// the user's file); `source` is `flag` (`--allow-host`) or `tui`.
