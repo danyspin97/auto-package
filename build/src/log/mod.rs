@@ -211,6 +211,7 @@ pub fn extract(raw: &str, mapper: &PathMapper) -> ExtractedLog {
     // Normalise once. Every anchor below assumes the osc prefix is gone —
     // that is the bug this module exists to not have.
     let lines: Vec<&str> = raw.lines().map(strip_timestamp).collect();
+    mapper.scan_log(&lines);
 
     let spans = phase::segment(&lines);
     let located = failure::locate(&lines, &spans, mapper);
@@ -442,5 +443,18 @@ mod tests {
         );
         assert!(e.format_suspect);
         assert!(!extracted().format_suspect);
+    }
+
+    /// A C++ compile failure has no traceback, so the root must be seen in the
+    /// compiler's own paths, or the caller would warn that it never matched.
+    #[test]
+    fn a_compile_log_reports_the_sdist_root_as_matched() {
+        let raw = "[    1s] Executing(%build): /usr/bin/bash -e /var/tmp/rpm-tmp.a\n\
+[    2s] /home/abuild/rpmbuild/BUILD/duckdb-2.0.0-build/duckdb-2.0.0/src/a.cpp:1:1: fatal error: x.hpp: No such file or directory\n\
+[    3s] error: Bad exit status from /var/tmp/rpm-tmp.a (%build)\n";
+        let mapper = PathMapper::with_sdist_root("duckdb-2.0.0");
+        let e = extract(raw, &mapper);
+        assert!(mapper.did_match_root());
+        assert_eq!(e.failure.map(|f| f.genre), Some(Genre::CCppCompile));
     }
 }

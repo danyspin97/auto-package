@@ -65,6 +65,10 @@ static SYSTEM_SITE: LazyLock<Regex> = LazyLock::new(|| {
 static ANY_SITE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/(?:site|dist)-packages/(?<rest>.*)$").expect("static pattern"));
 
+/// An absolute path under a `BUILD/` directory, as a build log prints it.
+static BUILD_PATH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/BUILD/\S+").expect("static pattern"));
+
 /// Maps absolute build-log paths back to sdist-relative ones.
 ///
 /// The sdist root directory name (`glances-4.3.0`) comes from the pre-build
@@ -113,6 +117,20 @@ impl PathMapper {
     /// was the bare package name rather than the versioned directory name.
     pub fn did_match_root(&self) -> bool {
         self.matched.load(Ordering::Relaxed)
+    }
+
+    /// Classifies every `BUILD/` path a log mentions, not only the Python
+    /// frames, so that [`Self::did_match_root`] says whether the sdist root
+    /// occurs anywhere in the log.
+    pub fn scan_log(&self, lines: &[&str]) {
+        if self.sdist_root.is_none() {
+            return;
+        }
+        for line in lines {
+            for found in BUILD_PATH.find_iter(line) {
+                self.classify(found.as_str());
+            }
+        }
     }
 
     /// The sdist root name this mapper was configured with, if any.
@@ -344,6 +362,25 @@ mod tests {
         assert!(!m.did_match_root());
         m.classify(SDIST_FRAME);
         assert!(m.did_match_root());
+    }
+
+    /// A compiler log has no Python frame, so only the scan of the whole log
+    /// can see that the root occurs in it.
+    #[test]
+    fn a_compiler_log_matches_the_root_through_the_scan() {
+        let m = mapper();
+        m.scan_log(&[
+            "/home/abuild/rpmbuild/BUILD/python-glances-4.3.0-build/glances-4.3.0/src/a.cpp:1:1: error: x",
+            "/home/abuild/rpmbuild/BUILD/python-glances-4.3.0-build/BUILDROOT/usr/lib/a.o",
+        ]);
+        assert!(m.did_match_root());
+    }
+
+    #[test]
+    fn the_scan_does_nothing_without_a_root() {
+        let m = PathMapper::default();
+        m.scan_log(&["/home/abuild/rpmbuild/BUILD/glances-4.3.0-build/glances-4.3.0/a.cpp"]);
+        assert!(!m.did_match_root());
     }
 
     #[test]
