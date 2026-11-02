@@ -104,3 +104,5 @@
 104. RPM scriptlets ($1 table, -p, ldconfig, texinfo, gconf) — read when writing or fixing %pre/%post/%preun/%postun, a -p interpreter, or an upgrade fails in a scriptlet
 105. Users and groups via sysusers.d (system-user-<name>) — read when a package creates a system user or group, or Provides user(...) or group(...)
 106. XML catalog entries (catalog.d, update-xml-catalog) — read when a package ships XML schemas, DTDs or a catalog, or uses xmlcatalog
+107. Several versions of one command: update-alternatives (not Python) — read when a package installs a command that other versions also provide, or uses /etc/alternatives
+108. SysV init scripts (deprecated, never add) — read when a package has an init script, /etc/init.d, insserv or a request to add a daemon init script
