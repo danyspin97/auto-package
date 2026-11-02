@@ -129,17 +129,24 @@ pub(super) fn dep(name: &str, url: &str, hash: &str) -> String {
     format!(".{name} = .{{ .url = \"{url}\", .hash = \"{hash}\" }},")
 }
 
+struct Quiet;
+impl ap_core::sink::Reporter for Quiet {
+    fn report(&self, _: &ap_core::event::Event) {}
+}
+
 /// Fetch `root` with `fake`, unpacking under a fresh temp dir.
 pub(super) fn fetch(
     fake: &Fake,
     package_root: &zon::Manifest,
 ) -> (tempfile::TempDir, Result<Vec<Dep>, String>) {
+    crate::workspace::disable_disk_gate_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let req = Request {
         package: "pkg",
         fetch: fake,
         work: dir.path(),
         limits: super::unpack::LIMITS,
+        reporter: &Quiet,
     };
     let result = fetch_vendor(&req, package_root);
     (dir, result)

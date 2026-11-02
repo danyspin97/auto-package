@@ -17,6 +17,7 @@ use super::unpack::{Format, Limits, unpack};
 use super::zon::{self, Dependency, Manifest};
 use crate::allowed_hosts::Asker;
 use crate::service_sandbox::check_service_url;
+use ap_core::sink::Reporter;
 
 /// Redirects followed for one archive.
 pub(super) const MAX_REDIRECTS: usize = 5;
@@ -97,9 +98,12 @@ pub(super) struct Request<'a> {
     /// The package being vendored, for the allowlist refusal record.
     pub(super) package: &'a str,
     pub(super) fetch: &'a dyn Fetch,
-    /// A fresh directory: each archive unpacks into its own subdirectory.
+    /// A fresh directory under the package's work directory: each archive
+    /// unpacks into its own subdirectory. The caller removes it.
     pub(super) work: &'a Path,
     pub(super) limits: Limits,
+    /// Where the disk-space wait reports, before each archive is downloaded.
+    pub(super) reporter: &'a dyn Reporter,
 }
 
 /// Fetch every URL dependency of `root`, and of each one, checking each hash.
@@ -141,6 +145,8 @@ fn fetch_one(
     let form = parse_declared(declared).map_err(|e| format!("zig dep {name}: {e}"))?;
     let (archive, by_url) = archive_url(url).map_err(|e| format!("zig dep {name}: {e}"))?;
     let root = req.work.join(format!("dep-{index}"));
+    crate::workspace::await_disk_space(req.work, req.reporter, None)
+        .map_err(|e| format!("zig dep {name}: {e}"))?;
     let mut current = archive.clone();
     let mut hops = 0;
     let links = loop {
