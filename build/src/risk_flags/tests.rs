@@ -510,3 +510,27 @@ fn a_patch_changing_more_than_the_review_size_is_flagged_for_review() {
         .starts_with("RISK: fix-build.patch changes 201 lines")
     );
 }
+
+#[test]
+fn an_update_with_no_upstream_notes_is_a_risk_until_notes_are_found() {
+    let mut st = PkgState::default();
+    settle_no_upstream_notes(&mut st, "r1", "5.4", true);
+    settle_no_upstream_notes(&mut st, "r2", "5.4", true);
+    assert_eq!(
+        st.risk_flags,
+        vec![RiskFlag::NoUpstreamNotes {
+            version: "5.4".into()
+        }]
+    );
+    let line = st.risk_flags[0].line();
+    assert_eq!(
+        line,
+        "RISK: no upstream changes listed for 5.4; read the sources for what changed"
+    );
+    // A later commit that finds nothing new keeps it; one that finds notes clears it.
+    settle(&mut st, "r3", vec![]);
+    assert_eq!(st.risk_flags.len(), 1);
+    settle_no_upstream_notes(&mut st, "r4", "5.4", false);
+    assert!(st.risk_flags.is_empty());
+    assert_eq!(st.risk_flags_run_id.as_deref(), Some("r4"));
+}

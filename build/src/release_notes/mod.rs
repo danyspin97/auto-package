@@ -20,16 +20,18 @@ use render::Notes;
 
 /// Writes the recap of updating from `old` to `new` under the `Update to`
 /// bullet of the newest `.changes` entry in `checkout_dir`, reading the new
-/// source archive from there when the checkout holds it.
+/// source archive from there when the checkout holds it. Returns `true` when
+/// no upstream notes were found: the bullet then stays alone.
 pub fn add_recap(
     checkout_dir: &std::path::Path,
     repo_url: Option<&str>,
     old: Option<&str>,
     new: &str,
-) -> Result<(), crate::osc::Error> {
+) -> Result<bool, crate::osc::Error> {
     let archive = archive_in(checkout_dir, new);
     let lines = update_notes(repo_url, archive.as_deref(), old, new);
-    crate::osc::set_update_notes(checkout_dir, new, &lines)
+    crate::osc::set_update_notes(checkout_dir, new, &lines)?;
+    Ok(lines.is_empty())
 }
 
 /// The source archive of `version` in `dir`: a tarball whose name carries the
@@ -58,7 +60,7 @@ fn archive_in(dir: &std::path::Path, version: &str) -> Option<std::path::PathBuf
 /// The recap lines (`* item`, continuation lines indented) for updating a
 /// package from `old` to `new`. The changelog file in the new source archive
 /// is read first; the notes of the releases on the forge of `repo_url` are the
-/// fallback. Never empty: a package whose notes cannot be found says so.
+/// fallback. Empty when neither has notes: the recap then says nothing.
 pub fn update_notes(
     repo_url: Option<&str>,
     archive: Option<&std::path::Path>,
@@ -124,7 +126,7 @@ fn recap(
             Some(b) => render::bullet_lines(&b),
             None => render::link_lines(releases),
         },
-        Notes::None => too_long.unwrap_or_else(render::no_notes_line),
+        Notes::None => too_long.unwrap_or_default(),
     }
 }
 

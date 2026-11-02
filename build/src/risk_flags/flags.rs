@@ -26,6 +26,9 @@ pub enum RiskFlag {
     /// A patch that was added or changed and changes more lines than
     /// [`REVIEW_PATCH_LINES`]: it needs a person's review before it is submitted.
     LargePatch { patch: String, lines: usize },
+    /// The update has no upstream notes (none in the source archive, none on
+    /// the forge): its `.changes` entry says only `Update to <version>`.
+    NoUpstreamNotes { version: String },
 }
 
 impl RiskFlag {
@@ -51,6 +54,9 @@ impl RiskFlag {
             RiskFlag::LargePatch { patch, lines } => format!(
                 "RISK: {patch} changes {lines} lines (over {REVIEW_PATCH_LINES}), needs a review"
             ),
+            RiskFlag::NoUpstreamNotes { version } => format!(
+                "RISK: no upstream changes listed for {version}; read the sources for what changed"
+            ),
         };
         one_line(&text)
     }
@@ -64,6 +70,19 @@ pub fn settle(st: &mut PkgState, run_id: &str, found: Vec<RiskFlag>) {
         if !st.risk_flags.contains(&risk) {
             st.risk_flags.push(risk);
         }
+    }
+    st.risk_flags_run_id = Some(run_id.to_string());
+}
+
+/// Records (`missing`) or clears the no-upstream-notes risk of an update to
+/// `version`, as the recap of its `.changes` entry found no notes or some.
+pub fn settle_no_upstream_notes(st: &mut PkgState, run_id: &str, version: &str, missing: bool) {
+    st.risk_flags
+        .retain(|r| !matches!(r, RiskFlag::NoUpstreamNotes { .. }));
+    if missing {
+        st.risk_flags.push(RiskFlag::NoUpstreamNotes {
+            version: version.to_string(),
+        });
     }
     st.risk_flags_run_id = Some(run_id.to_string());
 }

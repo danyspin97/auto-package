@@ -144,11 +144,6 @@ pub(super) fn link_lines(releases: &[RepoRelease]) -> Vec<String> {
     lines
 }
 
-/// The line recorded when no release has notes to recap.
-pub(super) fn no_notes_line() -> Vec<String> {
-    vec!["* No upstream changelog found or provided".to_string()]
-}
-
 /// The line for a changelog file too long to list and not summarized.
 pub(super) fn file_line(file: &str) -> Vec<String> {
     vec![format!(

@@ -250,6 +250,7 @@ mod checkout;
 use checkout::*;
 use update_mode::*;
 mod generate_stage;
+mod recap_entry;
 
 mod update_mode;
 

@@ -83,15 +83,10 @@ fn at_most_five_links_are_listed() {
 }
 
 #[test]
-fn releases_without_notes_say_so() {
-    assert_eq!(
-        recap(None, &[rel("v2", "  \n")], never),
-        ["* No upstream changelog found or provided"]
-    );
-    assert_eq!(
-        recap(None, &[], never),
-        ["* No upstream changelog found or provided"]
-    );
+fn releases_without_notes_add_no_line() {
+    // No filler: the entry keeps only its `Update to` bullet.
+    assert!(recap(None, &[rel("v2", "  \n")], never).is_empty());
+    assert!(recap(None, &[], never).is_empty());
 }
 
 #[test]

@@ -8,6 +8,7 @@ use crate::pipeline::commit::*;
 use crate::pipeline::gen_spec::*;
 use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::recap_entry::*;
 use crate::pipeline::render::*;
 use crate::pipeline::rpm_deps::*;
 use crate::pipeline::sibling_specs;
@@ -222,16 +223,7 @@ pub(super) fn generate_spec_stage(
                             Emit::new(reporter, step.id),
                         ),
                     );
-                    warn_if_err(
-                        reporter,
-                        "adding the upstream recap to the update .changes entry",
-                        crate::release_notes::add_recap(
-                            checkout_dir,
-                            config.source_repo.as_deref(),
-                            old_version.as_deref(),
-                            &config.version,
-                        ),
-                    );
+                    add_update_recap(ctx, old_version.as_deref());
                 }
                 // Link spec.generated into the workspace so the review agent can compare.
                 #[cfg(unix)]
