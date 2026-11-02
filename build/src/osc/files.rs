@@ -35,6 +35,13 @@ pub fn list_package_files_checked(
     };
     if !out.success() {
         let said = out.stderr.trim();
+        // A link whose target is missing, marked `missingok`, is not broken: its
+        // own files are what there is (`?expand=0`), and they may hold no spec.
+        if said.contains("cannot be expanded")
+            && let Some(files) = unexpanded_listing_if_missing_ok(project, pkg, emit)
+        {
+            return Ok(files);
+        }
         return Err(if said.is_empty() {
             format!("osc ls exited with code {}", out.code)
         } else {
@@ -113,4 +120,37 @@ pub fn cat_file_checked(
         });
     }
     Ok(out.stdout)
+}
+
+/// The files of `pkg` as its own `?expand=0` listing gives them, when its `_link`
+/// is `missingok="true"`; `None` otherwise or when OBS cannot say.
+fn unexpanded_listing_if_missing_ok(
+    project: &str,
+    pkg: &str,
+    emit: Emit<'_>,
+) -> Option<Vec<String>> {
+    let link = osc_query(
+        &["api", &format!("/source/{project}/{pkg}/_link")],
+        emit,
+        &format!("api {project}/{pkg}/_link"),
+    )?;
+    if !link.success() || !link.stdout.contains("missingok=\"true\"") {
+        return None;
+    }
+    let listing = osc_query(
+        &["api", &format!("/source/{project}/{pkg}?expand=0")],
+        emit,
+        &format!("api {project}/{pkg}?expand=0"),
+    )?;
+    if !listing.success() {
+        return None;
+    }
+    Some(
+        listing
+            .stdout
+            .split("<entry ")
+            .skip(1)
+            .filter_map(|chunk| crate::obs_xml::attr(chunk, "name"))
+            .collect(),
+    )
 }
