@@ -7,6 +7,11 @@
 //! a branch repository. The OBS reads and the orchestration live in the CLI.
 
 mod arches;
+mod check;
+#[cfg(test)]
+mod check_fake;
+#[cfg(test)]
+mod check_tests;
 mod classify;
 mod gate;
 #[cfg(test)]
@@ -19,6 +24,7 @@ mod tests;
 mod wait;
 
 pub use arches::*;
+pub use check::*;
 pub use classify::*;
 pub use gate::*;
 pub use meta::*;

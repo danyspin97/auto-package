@@ -401,3 +401,24 @@ pub(super) fn project_statuses_from_xml(
         .map(|e| (e.pkg.clone(), obs_status::resolve_lenient(&e)))
         .collect())
 }
+
+/// Every result of `pkg_name` in `project` (all repositories, architectures
+/// and multibuild flavors), as the `_result` document gives them. Used by the
+/// other-architecture check, which reads the branch and the origin the same way.
+pub fn get_package_results(
+    project: &str,
+    pkg_name: &str,
+) -> Result<Vec<obs_status::ResultEntry>, String> {
+    check_obs_name("project", project).map_err(|e| e.to_string())?;
+    check_obs_name("pkg_name", pkg_name).map_err(|e| e.to_string())?;
+    let path = format!(
+        "/build/{}/_result?package={}&multibuild=1",
+        enc(project),
+        enc(pkg_name)
+    );
+    let xml = osc_api_checked(&path).map_err(|e| match e {
+        ApiFailure::Http(code, msg) => format!("{path}: HTTP {code}: {msg}"),
+        ApiFailure::Other(msg) => msg,
+    })?;
+    obs_status::try_parse_results(&xml).map_err(|e| e.to_string())
+}

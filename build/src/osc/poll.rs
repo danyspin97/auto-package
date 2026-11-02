@@ -119,3 +119,9 @@ pub(crate) fn sleep_interruptible(total: Duration) {
         std::thread::sleep(left.min(Duration::from_secs(1)));
     }
 }
+
+/// How long to pause before the next poll of a result that keeps its state,
+/// with the same schedule and jitter as the wait for the primary build.
+pub fn poll_pause(unchanged_polls: u32) -> Duration {
+    poll_delay(unchanged_polls, 0, jitter())
+}

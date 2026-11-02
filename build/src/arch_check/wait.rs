@@ -22,7 +22,7 @@ pub fn wait_settled<K: Clone + PartialEq>(
         let now = poll()?;
         let pending = now.iter().any(|(_, s)| !s.is_terminal());
         let left = bound.saturating_sub(elapsed());
-        if !pending || left.is_zero() {
+        if !pending || left.is_zero() || crate::proc::shutting_down() {
             return Ok(now);
         }
         unchanged = if last.as_ref() == Some(&now) {

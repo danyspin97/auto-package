@@ -178,6 +178,25 @@ impl ArchObs for FakeMeta {
         *self.xml.borrow_mut() = xml.to_string();
         Ok(())
     }
+
+    fn results(
+        &self,
+        _project: &str,
+        _pkg: &str,
+    ) -> Result<Vec<crate::obs_status::ResultEntry>, String> {
+        Err("the meta fake has no results".to_string())
+    }
+
+    fn buildlog(
+        &self,
+        _project: &str,
+        _pkg: &str,
+        _repo: &str,
+        _arch: &str,
+        _path: &std::path::Path,
+    ) -> Result<(), String> {
+        Err("the meta fake has no logs".to_string())
+    }
 }
 
 #[test]
@@ -459,5 +478,33 @@ mod rows {
     fn an_all_green_check_has_no_section() {
         let rows = vec![row("p", "ports", "s390x", ArchState::Succeeded, false)];
         assert!(section_lines(&rows).is_empty());
+    }
+}
+
+mod status_lookup {
+    use super::super::check::status_of;
+    use super::super::*;
+    use crate::obs_status::ResultEntry;
+    use crate::osc::BuildStatus;
+
+    fn entry(repo: &str, arch: &str, code: &str) -> ResultEntry {
+        ResultEntry {
+            repo: repo.into(),
+            arch: arch.into(),
+            dirty: false,
+            pkg: "p".into(),
+            code: code.into(),
+            details: None,
+        }
+    }
+
+    #[test]
+    fn a_result_not_reported_yet_is_pending_not_absent() {
+        let entries = vec![entry("ports", "s390x", "succeeded")];
+        let key = ("ports".to_string(), "ppc64le".to_string());
+        assert!(!status_of(&entries, "p", &key).is_terminal());
+        let key = ("ports".to_string(), "s390x".to_string());
+        assert_eq!(status_of(&entries, "p", &key), BuildStatus::Succeeded);
+        assert!(!status_of(&entries, "other", &key).is_terminal());
     }
 }
