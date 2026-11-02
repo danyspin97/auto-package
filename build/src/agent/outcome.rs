@@ -291,6 +291,17 @@ pub(super) fn refresh_patches_task() -> &'static str {
      its `%patchN` line if any, and its file (`cd source && quilt delete -r <name>`). \
      The pipeline checks that proof and rolls back a removal without it.\n\
      \n\
+     A rebased patch keeps its header as it is (`Subject:`, `Description:`, and \
+     `Upstream:` with a URL or `not yet reported`) and the `# PATCH-...` comment above \
+     its `Patch:` line. Name each rebased patch in `changelog` as `Rebase <name>: <why>` \
+     and each removed one as `Drop <name>: <reason>`. A rebase never deletes a test, adds \
+     `|| true`, or switches off a build step to get past a failing hunk.\n\
+     \n\
+     A patch this turn adds as new (a `Patch:` line the spec did not have) needs the same \
+     header, the `# PATCH-FIX-...` or `# PATCH-FEATURE-...` comment above its `Patch:` \
+     line, and source-only changes; name it in `changelog` as `Add <name>: <why>`. The \
+     pipeline refuses the round otherwise and tells you why.\n\
+     \n\
      A command the sandbox refuses is a bug in the tool: name the exact command in \
      `reasoning`, and never skip a check because of it. Change nothing else in the \
      spec. Answer with `patches`, which this turn must give: a non-empty list with one \
