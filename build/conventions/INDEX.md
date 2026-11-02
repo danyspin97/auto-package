@@ -106,3 +106,5 @@
 106. XML catalog entries (catalog.d, update-xml-catalog) — read when a package ships XML schemas, DTDs or a catalog, or uses xmlcatalog
 107. Several versions of one command: update-alternatives (not Python) — read when a package installs a command that other versions also provide, or uses /etc/alternatives
 108. SysV init scripts (deprecated, never add) — read when a package has an init script, /etc/init.d, insserv or a request to add a daemon init script
+109. General rules: no prebuilt binaries or bundled libs, .desktop, logrotate, udev, donations — read when the tarball holds a binary or bundled lib, or the spec adds a .desktop or udev rule
+110. License coverage of subpackages and Legal-Review-Notice — read when a subpackage has its own License, a subpackage lacks %license, or a tarball file is left out of the package
