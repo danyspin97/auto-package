@@ -116,7 +116,7 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
     let (rows, waited) = wait_and_classify(obs, req, &keys)?;
     notes.extend(waited);
     let rows = fetch_failure_details(obs, req, rows);
-    let rows = mark_origin_failures(obs, req, rows, &mut notes);
+    let rows = judge_baselines(obs, req, rows, &mut notes);
     Ok(CheckOutcome {
         rows,
         added,
@@ -172,7 +172,7 @@ fn wait_and_classify<O: ArchObs + ?Sized>(
                 pkg,
                 repo: key.0.clone(),
                 arch: key.1.clone(),
-                state: classify(&status, details.as_deref()),
+                state: state_in(&key.0, &status, details.as_deref()),
                 baseline_fails: false,
                 log: None,
             }
@@ -254,28 +254,65 @@ fn fetch_failure_details<O: ArchObs + ?Sized>(
         .collect()
 }
 
-/// Mark each failure the origin project has too. Its results are read once; a
-/// read that fails marks nothing, and says so in the notes.
-fn mark_origin_failures<O: ArchObs + ?Sized>(
+/// The project a failure is compared with: the origin, or for a port repository
+/// the port project.
+fn baseline_project(origin: &str, repo: &str) -> String {
+    port_for_repo(repo).map_or_else(|| origin.to_string(), |p| p.project.to_string())
+}
+
+/// The state a baseline reports for `key`: `None` when it has no result of the
+/// package there, or excludes it.
+pub(super) fn baseline_state(entries: &[ResultEntry], pkg: &str, key: &Key) -> Option<ArchState> {
+    deciding_entry(entries, pkg, key)
+        .map(|e| classify(&resolve_lenient(e), e.details.as_deref()))
+        .filter(|s| *s != ArchState::Ignored)
+}
+
+/// Read each failure's baseline, once per project: the origin for an ordinary
+/// failure, the port project for a port's, judged by [`judge_port`]. A baseline
+/// OBS has no package for is no result; one that cannot be read marks nothing,
+/// and says so in the notes.
+fn judge_baselines<O: ArchObs + ?Sized>(
     obs: &O,
     req: &CheckRequest<'_>,
     mut rows: Vec<ArchRow>,
     notes: &mut Vec<String>,
 ) -> Vec<ArchRow> {
-    if !rows.iter().any(|r| r.state.is_failure()) {
-        return rows;
-    }
-    let origin = match obs.results(req.origin, req.pkg) {
-        Ok(entries) => entries,
-        Err(e) => {
-            notes.push(format!("the origin's results could not be read: {e}"));
-            return rows;
-        }
-    };
+    let mut projects: Vec<String> = rows
+        .iter()
+        .filter(|r| r.state.is_failure())
+        .map(|r| baseline_project(req.origin, &r.repo))
+        .collect();
+    projects.sort();
+    projects.dedup();
+    let reads: Vec<(String, Result<Option<Vec<ResultEntry>>, String>)> = projects
+        .into_iter()
+        .map(|p| {
+            let read = obs.results_if_present(&p, req.pkg);
+            (p, read)
+        })
+        .collect();
     for row in rows.iter_mut().filter(|r| r.state.is_failure()) {
-        let key = (row.repo.clone(), row.arch.clone());
-        let status = status_of(&origin, req.pkg, &key);
-        row.baseline_fails = classify(&status, None).is_failure();
+        let project = baseline_project(req.origin, &row.repo);
+        let entries: &[ResultEntry] = match reads.iter().find(|(p, _)| *p == project) {
+            Some((_, Ok(Some(entries)))) => entries,
+            // A project or package OBS does not have is no result to compare with.
+            Some((_, Ok(None))) => &[],
+            Some((_, Err(e))) => {
+                notes.push(format!("the results of {project} could not be read: {e}"));
+                continue;
+            }
+            None => continue,
+        };
+        let key = baseline_key(&row.repo, &row.arch);
+        let base = baseline_state(entries, req.pkg, &key);
+        if is_port_repo(&row.repo) {
+            let (state, shared) = judge_port(row.state.clone(), base.as_ref());
+            row.state = state;
+            row.baseline_fails = shared;
+        } else {
+            row.baseline_fails = base.is_some_and(|s| s.is_failure());
+        }
     }
     rows
 }
@@ -300,7 +337,7 @@ pub fn read_results<O: ArchObs + ?Sized>(
         .into_iter()
         .map(|key| {
             let state = match deciding_entry(&entries, pkg, &key) {
-                Some(e) => classify(&resolve_lenient(e), e.details.as_deref()),
+                Some(e) => state_in(&key.0, &resolve_lenient(e), e.details.as_deref()),
                 None => ArchState::Pending("no result yet".to_string()),
             };
             (key, state)
@@ -308,44 +345,53 @@ pub fn read_results<O: ArchObs + ?Sized>(
         .collect())
 }
 
-/// The rows the submit gate decides on for `pkg`: each result of the branch
-/// with the state of the same `(repo, arch)` in the origin, read only when
-/// the branch has a failure (the baseline of a failure is what it is judged
-/// against). A result the origin does not report is pending, not failing.
+/// The rows the submit gate decides on for `pkg`: each result of the branch.
+/// A failure carries its baseline: the origin's result for the same `(repo,
+/// arch)`, or for a port the port project's, which also judges the port's
+/// failure (see [`judge_port`]). A baseline is read only for a failure.
 pub fn gate_inputs<O: ArchObs + ?Sized>(
     obs: &O,
     branch: &str,
     origin: &str,
     pkg: &str,
 ) -> Result<Vec<GateRow>, String> {
-    let branch_states = read_results(obs, branch, pkg)?;
-    let origin_states = if branch_states.iter().any(|(_, s)| s.is_failure()) {
-        Some(read_results(obs, origin, pkg)?)
-    } else {
-        None
-    };
-    Ok(branch_states
+    let mut rows: Vec<GateRow> = read_results(obs, branch, pkg)?
         .into_iter()
-        .map(|((repo, arch), state)| {
-            let baseline = origin_states.as_ref().and_then(|theirs| {
-                state.is_failure().then(|| {
-                    let found = theirs
-                        .iter()
-                        .find(|(k, _)| k.0 == repo && k.1 == arch)
-                        .map(|(_, s)| s.clone())
-                        .unwrap_or_else(|| ArchState::Pending("no result yet".to_string()));
-                    Baseline {
-                        project: origin.to_string(),
-                        state: found,
-                    }
-                })
-            });
-            GateRow {
-                repo,
-                arch,
-                state,
-                baseline,
-            }
+        .map(|((repo, arch), state)| GateRow {
+            repo,
+            arch,
+            state,
+            baseline: None,
         })
-        .collect())
+        .collect();
+    let mut projects: Vec<String> = rows
+        .iter()
+        .filter(|r| r.state.is_failure())
+        .map(|r| baseline_project(origin, &r.repo))
+        .collect();
+    projects.sort();
+    projects.dedup();
+    let mut reads = Vec::new();
+    for project in projects {
+        // A baseline OBS has no package for is no result, not a failed gate.
+        let entries = obs.results_if_present(&project, pkg)?.unwrap_or_default();
+        reads.push((project, entries));
+    }
+    for row in rows.iter_mut().filter(|r| r.state.is_failure()) {
+        let project = baseline_project(origin, &row.repo);
+        let entries: &[ResultEntry] = reads
+            .iter()
+            .find(|(p, _)| *p == project)
+            .map_or(&[], |(_, e)| e.as_slice());
+        let key = baseline_key(&row.repo, &row.arch);
+        let base = baseline_state(entries, pkg, &key);
+        if is_port_repo(&row.repo) {
+            row.state = judge_port(row.state.clone(), base.as_ref()).0;
+        }
+        row.baseline = Some(Baseline {
+            project,
+            state: base,
+        });
+    }
+    Ok(rows)
 }

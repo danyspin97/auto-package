@@ -158,6 +158,8 @@ pub(super) fn overall_status(
     let statuses: Vec<(BuildStatus, String)> = entries
         .iter()
         .filter(|e| e.pkg == pkg_name || e.pkg.starts_with(&flavor_prefix))
+        // A port is judged by the arch check, not by the package's own status.
+        .filter(|e| !crate::arch_check::is_port_repo(&e.repo))
         .map(|e| {
             (
                 obs_status::resolve_lenient(e),
@@ -423,6 +425,21 @@ pub fn get_package_results(
     project: &str,
     pkg_name: &str,
 ) -> Result<Vec<obs_status::ResultEntry>, String> {
+    get_package_results_if_present(project, pkg_name)?.ok_or_else(|| {
+        format!(
+            "/build/{}/_result?package={}: HTTP 404: no such project or package",
+            enc(project),
+            enc(pkg_name)
+        )
+    })
+}
+
+/// [`get_package_results`], but `None` when OBS answers 404: the project or the
+/// package is not there, which a baseline may well be.
+pub fn get_package_results_if_present(
+    project: &str,
+    pkg_name: &str,
+) -> Result<Option<Vec<obs_status::ResultEntry>>, String> {
     check_obs_name("project", project).map_err(|e| e.to_string())?;
     check_obs_name("pkg_name", pkg_name).map_err(|e| e.to_string())?;
     let path = format!(
@@ -430,9 +447,13 @@ pub fn get_package_results(
         enc(project),
         enc(pkg_name)
     );
-    let xml = osc_api_checked(&path).map_err(|e| match e {
-        ApiFailure::Http(code, msg) => format!("{path}: HTTP {code}: {msg}"),
-        ApiFailure::Other(msg) => msg,
-    })?;
-    obs_status::try_parse_results(&xml).map_err(|e| e.to_string())
+    let xml = match osc_api_checked(&path) {
+        Ok(xml) => xml,
+        Err(ApiFailure::Http(404, _)) => return Ok(None),
+        Err(ApiFailure::Http(code, msg)) => return Err(format!("{path}: HTTP {code}: {msg}")),
+        Err(ApiFailure::Other(msg)) => return Err(msg),
+    };
+    obs_status::try_parse_results(&xml)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }

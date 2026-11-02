@@ -93,3 +93,12 @@ fn nothing_built_is_not_a_success() {
     assert!(!overall(xml).is_success());
     assert!(!overall("<resultlist/>").is_success());
 }
+
+#[test]
+fn a_port_result_is_left_to_the_arch_check() {
+    let xml = r#"<resultlist>
+  <result repository="standard" arch="x86_64"><status package="foo" code="succeeded"/></result>
+  <result repository="openSUSE_Factory_zSystems" arch="s390x"><status package="foo" code="failed"/></result>
+</resultlist>"#;
+    assert_eq!(overall(xml), BuildStatus::Succeeded);
+}

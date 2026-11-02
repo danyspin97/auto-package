@@ -179,6 +179,51 @@ fn a_check_covers_the_branch_only_when_it_checks_every_arch_of_it() {
 }
 
 #[test]
+fn a_baseline_the_origin_has_no_package_for_is_no_result() {
+    let fake = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let say = |_: String| {};
+    with_branch_s390x(&fake);
+    set_results(
+        &fake,
+        BRANCH,
+        vec![entry("p", "standard", "s390x", "failed")],
+    );
+    set_absent(&fake, ORIGIN);
+    let out = check_other_arches(&fake, &request(dir.path(), &say, false, false)).unwrap();
+    assert!(!out.rows[0].baseline_fails);
+    assert!(out.rows[0].blocks_submit());
+    assert!(
+        !out.notes.iter().any(|n| n.contains("could not be read")),
+        "{:?}",
+        out.notes
+    );
+}
+
+#[test]
+fn the_gate_reads_a_missing_baseline_as_no_result_and_refuses() {
+    let fake = fixture();
+    with_branch_s390x(&fake);
+    set_results(
+        &fake,
+        BRANCH,
+        vec![
+            entry("p", "standard", "x86_64", "succeeded"),
+            entry("p", "standard", "s390x", "failed"),
+        ],
+    );
+    set_absent(&fake, ORIGIN);
+    let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p").unwrap();
+    let failing = rows.iter().find(|r| r.arch == "s390x").unwrap();
+    assert!(failing.baseline.as_ref().unwrap().state.is_none());
+    let verdict = gate_verdict("p", ("standard", "x86_64"), &rows, false, true);
+    assert!(
+        matches!(&verdict, GateVerdict::Refuse(why) if why.contains("s390x")),
+        "{verdict:?}"
+    );
+}
+
+#[test]
 fn an_unreadable_origin_marks_nothing_and_says_so() {
     let fake = fixture();
     let dir = tempfile::tempdir().unwrap();
@@ -226,7 +271,7 @@ mod gate_reads {
 
     fn gate(fake: &FakeObs, allow: bool) -> GateVerdict {
         let rows = gate_inputs(fake, BRANCH, ORIGIN, "p").unwrap();
-        gate_verdict("p", PRIMARY, &rows, allow)
+        gate_verdict("p", PRIMARY, &rows, allow, true)
     }
 
     #[test]

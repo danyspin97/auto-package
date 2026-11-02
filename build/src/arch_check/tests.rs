@@ -187,6 +187,14 @@ impl ArchObs for FakeMeta {
         Err("the meta fake has no results".to_string())
     }
 
+    fn results_if_present(
+        &self,
+        _project: &str,
+        _pkg: &str,
+    ) -> Result<Option<Vec<crate::obs_status::ResultEntry>>, String> {
+        Err("the meta fake has no results".to_string())
+    }
+
     fn buildlog(
         &self,
         _project: &str,
@@ -506,5 +514,65 @@ mod status_lookup {
         let key = ("ports".to_string(), "s390x".to_string());
         assert_eq!(status_of(&entries, "p", &key), BuildStatus::Succeeded);
         assert!(!status_of(&entries, "other", &key).is_terminal());
+    }
+}
+
+mod port_lines {
+    use super::super::*;
+
+    fn row(pkg: &str, repo: &str, arch: &str, state: ArchState, baseline_fails: bool) -> ArchRow {
+        ArchRow {
+            pkg: pkg.to_string(),
+            repo: repo.to_string(),
+            arch: arch.to_string(),
+            state,
+            baseline_fails,
+            log: None,
+        }
+    }
+
+    fn failed(detail: &str) -> ArchState {
+        ArchState::Failed {
+            detail: Some(detail.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_port_result_says_what_it_is_and_what_to_do() {
+        let port = "openSUSE_Factory_zSystems";
+        let mut not_testable = row(
+            "p",
+            port,
+            "s390x",
+            ArchState::NotTestable {
+                detail: Some("nothing provides libwlroots-0_20".into()),
+            },
+            false,
+        );
+        not_testable.log = None;
+        let not_final = row(
+            "p",
+            "openSUSE_Factory_RISCV",
+            "riscv64",
+            ArchState::NotFinal("building".into()),
+            false,
+        );
+        let no_base = row(
+            "p",
+            "openSUSE_Factory_PowerPC",
+            "ppc64le",
+            ArchState::NoBaseline { detail: None },
+            false,
+        );
+        let also = row("p", port, "ppc64le", failed("boom"), true);
+        assert_eq!(
+            section_lines(&[not_testable, not_final, no_base, also]),
+            vec![
+                "p not testable on s390x: nothing provides libwlroots-0_20",
+                "p openSUSE_Factory_RISCV/riscv64: not final (building) (results on riscv64 can take hours: re-run `auto-package update` later to refresh)",
+                "p openSUSE_Factory_PowerPC/ppc64le: failed (no Factory baseline)",
+                "p openSUSE_Factory_zSystems/ppc64le: failed: boom (also fails in Factory)",
+            ]
+        );
     }
 }

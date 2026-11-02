@@ -79,9 +79,19 @@ pub(super) fn prepare_request(
         // A failure on another architecture is judged by the arch gate: the
         // origin's own failures do not count, and `--allow-arch-failures` lets
         // the rest through.
-        Some((status, _)) if is_arch_failure(&status) => {
+        // Also on success: a port result that fails is not in the status.
+        Some((status, _)) if is_arch_failure(&status) || status.is_success() => {
             let primary = (primary_repo.as_str(), arch);
-            match arch_gate(branch, &item.origin, &item.pkg, primary, allow_arch, emit) {
+            let failed = is_arch_failure(&status);
+            match arch_gate(
+                branch,
+                &item.origin,
+                &item.pkg,
+                primary,
+                allow_arch,
+                failed,
+                emit,
+            ) {
                 Ok(GateVerdict::Pass { notes }) => {
                     notes.into_iter().for_each(&say);
                     Some(osc::BuildStatus::Succeeded)
@@ -195,18 +205,20 @@ fn is_arch_failure(status: &osc::BuildStatus) -> bool {
 }
 
 /// The arch gate of a submit: the verdict on `pkg`'s results in the branch,
-/// each compared with its baseline in the origin (see `gate_inputs`).
+/// each failure compared with its baseline (see `gate_inputs`). `failed` is
+/// whether the overall build status is a failure.
 fn arch_gate(
     branch: &str,
     origin: &str,
     pkg: &str,
     primary: (&str, &str),
     allow: bool,
+    failed: bool,
     emit: Emit<'_>,
 ) -> Result<GateVerdict, String> {
     let obs = ap_build::arch_check::LiveArchObs { emit };
     let rows = ap_build::arch_check::gate_inputs(&obs, branch, origin, pkg)?;
     Ok(ap_build::arch_check::gate_verdict(
-        pkg, primary, &rows, allow,
+        pkg, primary, &rows, allow, failed,
     ))
 }

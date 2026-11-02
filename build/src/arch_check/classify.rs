@@ -21,6 +21,20 @@ pub enum ArchState {
     Ignored,
     /// Still scheduled, blocked or building (or not reported yet).
     Pending(String),
+    /// A port result that cannot be built: its dependencies are missing on
+    /// the port (`detail` names them), or the port cannot build it at all. Not
+    /// a failure of the update.
+    NotTestable {
+        detail: Option<String>,
+    },
+    /// A port result that failed while Factory has no result of the package to
+    /// compare with, so the failure cannot be told from the update's.
+    NoBaseline {
+        detail: Option<String>,
+    },
+    /// A port result that is still going, or whose Factory baseline is: it may
+    /// still change, and does not block a submit.
+    NotFinal(String),
 }
 
 impl ArchState {
@@ -28,7 +42,10 @@ impl ArchState {
     pub fn is_failure(&self) -> bool {
         matches!(
             self,
-            ArchState::Failed { .. } | ArchState::Unresolvable { .. } | ArchState::Broken
+            ArchState::Failed { .. }
+                | ArchState::Unresolvable { .. }
+                | ArchState::Broken
+                | ArchState::NoBaseline { .. }
         )
     }
 
@@ -37,10 +54,13 @@ impl ArchState {
         matches!(self, ArchState::Pending(_))
     }
 
-    /// The detail a failure or an unresolvable result carries, if any.
+    /// The detail a failure, an unresolvable or a port result carries, if any.
     pub fn detail(&self) -> Option<&str> {
         match self {
-            ArchState::Failed { detail } | ArchState::Unresolvable { detail } => detail.as_deref(),
+            ArchState::Failed { detail }
+            | ArchState::Unresolvable { detail }
+            | ArchState::NotTestable { detail }
+            | ArchState::NoBaseline { detail } => detail.as_deref(),
             _ => None,
         }
     }
@@ -54,6 +74,9 @@ impl ArchState {
             ArchState::Broken => "broken".to_string(),
             ArchState::Ignored => "excluded".to_string(),
             ArchState::Pending(what) => format!("still {what}"),
+            ArchState::NotTestable { .. } => "not testable".to_string(),
+            ArchState::NoBaseline { .. } => "failed (no Factory baseline)".to_string(),
+            ArchState::NotFinal(what) => format!("not final ({what})"),
         }
     }
 }

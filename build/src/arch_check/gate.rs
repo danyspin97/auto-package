@@ -3,9 +3,9 @@
 
 use super::{ArchState, blocks_submit};
 
-/// One result of the package, with the state of its baseline: the same
+/// One result of the package. A failure carries its baseline: the same
 /// `(repo, arch)` in the origin project, or in the port project for a port
-/// repository. `baseline` is `None` when it was not read.
+/// repository. `baseline` is `None` for a result that is not a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateRow {
     pub repo: String,
@@ -14,11 +14,12 @@ pub struct GateRow {
     pub baseline: Option<Baseline>,
 }
 
-/// The state of a result in the project it is compared with.
+/// The state of a failure in the project it is compared with; `state` is
+/// `None` when that project has no result of the package for the arch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Baseline {
     pub project: String,
-    pub state: ArchState,
+    pub state: Option<ArchState>,
 }
 
 /// What the gate decides for a package.
@@ -30,16 +31,18 @@ pub enum GateVerdict {
     Refuse(String),
 }
 
-/// Decide the gate for `pkg`, whose overall build status is a failure. `primary`
-/// is the `(repo, arch)` the package was built for: it must have succeeded.
-/// A result still pending refuses (the gate does not wait). A failure its
-/// baseline has too is not counted; any other failure refuses unless `allow`
-/// (`--allow-arch-failures`). A status that no result explains refuses.
+/// Decide the gate for `pkg`. `primary` is the `(repo, arch)` the package was
+/// built for: it must have succeeded. A result still pending refuses (the gate
+/// does not wait). A failure its baseline has too is not counted; any other
+/// failure refuses unless `allow` (`--allow-arch-failures`). When the overall
+/// build status is a failure (`overall_failed`), a status no result explains
+/// refuses. Port results that are not testable or not final do not block.
 pub fn gate_verdict(
     pkg: &str,
     primary: (&str, &str),
     rows: &[GateRow],
     allow: bool,
+    overall_failed: bool,
 ) -> GateVerdict {
     let name = |r: &GateRow| format!("{}/{}", r.repo, r.arch);
     let is_primary = |r: &GateRow| (r.repo.as_str(), r.arch.as_str()) == primary;
@@ -76,12 +79,17 @@ pub fn gate_verdict(
         .filter(|r| r.state.is_failure())
         .copied()
         .collect();
-    let baseline_fails = |r: &GateRow| r.baseline.as_ref().is_some_and(|b| b.state.is_failure());
+    let baseline_fails = |r: &GateRow| {
+        r.baseline
+            .as_ref()
+            .and_then(|b| b.state.as_ref())
+            .is_some_and(ArchState::is_failure)
+    };
     let (blocking, shared): (Vec<&GateRow>, Vec<&GateRow>) = failing
         .iter()
         .copied()
         .partition(|r| blocks_submit(&r.state, baseline_fails(r)));
-    if failing.is_empty() {
+    if overall_failed && failing.is_empty() {
         return GateVerdict::Refuse(format!(
             "its build status is a failure, but no result of {pkg} fails"
         ));

@@ -3,7 +3,7 @@
 //! assert what was asked of OBS and in what order.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -19,6 +19,8 @@ pub(super) const BRANCH: &str = "home:u:branches:openSUSE:Factory";
 pub(super) struct FakeObs {
     pub(super) metas: RefCell<HashMap<String, String>>,
     pub(super) results: RefCell<HashMap<String, Vec<ResultEntry>>>,
+    /// Projects OBS answers 404 for: `results_if_present` is `None` for them.
+    pub(super) absent: RefCell<HashSet<String>>,
     /// Log text per `(pkg, repo, arch)`; a missing one cannot be fetched.
     pub(super) logs: RefCell<HashMap<(String, String, String), String>>,
     pub(super) events: RefCell<Vec<String>>,
@@ -65,6 +67,18 @@ impl ArchObs for FakeObs {
             .get(project)
             .cloned()
             .ok_or_else(|| format!("{project}: no results"))
+    }
+
+    fn results_if_present(
+        &self,
+        project: &str,
+        pkg: &str,
+    ) -> Result<Option<Vec<ResultEntry>>, String> {
+        if self.absent.borrow().contains(project) {
+            self.log(format!("results:{project}:{pkg}"));
+            return Ok(None);
+        }
+        self.results(project, pkg).map(Some)
     }
 
     fn buildlog(
@@ -129,6 +143,11 @@ pub(super) fn with_branch_s390x(fake: &FakeObs) {
 
 pub(super) fn set_results(fake: &FakeObs, project: &str, entries: Vec<ResultEntry>) {
     fake.results.borrow_mut().insert(project.into(), entries);
+}
+
+/// OBS answers 404 for `project`: it has no such project or package.
+pub(super) fn set_absent(fake: &FakeObs, project: &str) {
+    fake.absent.borrow_mut().insert(project.into());
 }
 
 pub(super) fn request<'a>(

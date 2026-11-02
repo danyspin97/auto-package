@@ -13,7 +13,7 @@ fn row(repo: &str, arch: &str, state: ArchState, baseline: Option<ArchState>) ->
         state,
         baseline: baseline.map(|state| Baseline {
             project: "origin".to_string(),
-            state,
+            state: Some(state),
         }),
     }
 }
@@ -29,7 +29,7 @@ fn a_primary_that_does_not_build_refuses_even_when_allowed() {
     let rows = vec![row("standard", "x86_64", failed(), Some(failed()))];
     for allow in [false, true] {
         assert!(matches!(
-            gate_verdict("p", PRIMARY, &rows, allow),
+            gate_verdict("p", PRIMARY, &rows, allow, true),
             GateVerdict::Refuse(_)
         ));
     }
@@ -47,7 +47,7 @@ fn a_pending_arch_refuses_even_when_allowed() {
         ),
         row("ports", "ppc64le", failed(), Some(failed())),
     ];
-    let GateVerdict::Refuse(why) = gate_verdict("p", PRIMARY, &rows, true) else {
+    let GateVerdict::Refuse(why) = gate_verdict("p", PRIMARY, &rows, true, true) else {
         panic!("a pending arch must refuse");
     };
     assert!(why.contains("ports/s390x"), "{why}");
@@ -56,7 +56,7 @@ fn a_pending_arch_refuses_even_when_allowed() {
 #[test]
 fn a_failure_the_baseline_shares_passes_with_a_note() {
     let rows = vec![primary(), row("ports", "s390x", failed(), Some(failed()))];
-    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false) else {
+    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, true) else {
         panic!("a shared failure must pass");
     };
     assert_eq!(notes.len(), 1);
@@ -73,13 +73,13 @@ fn a_failure_the_baseline_does_not_share_refuses_unless_allowed() {
         row("ports", "s390x", failed(), Some(ArchState::Succeeded)),
         row("ports", "ppc64le", failed(), Some(failed())),
     ];
-    let GateVerdict::Refuse(why) = gate_verdict("p", PRIMARY, &rows, false) else {
+    let GateVerdict::Refuse(why) = gate_verdict("p", PRIMARY, &rows, false, true) else {
         panic!("an unshared failure must refuse");
     };
     assert!(why.contains("ports/s390x"), "{why}");
     assert!(why.contains("--allow-arch-failures"), "{why}");
     assert!(matches!(
-        gate_verdict("p", PRIMARY, &rows, true),
+        gate_verdict("p", PRIMARY, &rows, true, true),
         GateVerdict::Pass { .. }
     ));
 }
@@ -88,7 +88,7 @@ fn a_failure_the_baseline_does_not_share_refuses_unless_allowed() {
 fn a_failure_status_that_no_result_explains_refuses() {
     let rows = vec![primary(), row("ports", "s390x", ArchState::Succeeded, None)];
     assert!(matches!(
-        gate_verdict("p", PRIMARY, &rows, true),
+        gate_verdict("p", PRIMARY, &rows, true, true),
         GateVerdict::Refuse(_)
     ));
 }

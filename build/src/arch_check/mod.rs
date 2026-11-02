@@ -11,6 +11,8 @@ mod check;
 #[cfg(test)]
 mod check_fake;
 #[cfg(test)]
+mod check_port_tests;
+#[cfg(test)]
 mod check_tests;
 mod classify;
 mod gate;

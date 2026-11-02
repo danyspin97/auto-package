@@ -4,7 +4,8 @@
 //! and a project-level disable, so that a package builds there only once it
 //! enables the repository in its own build flags.
 
-use crate::osc::{child_indent, layout, open_tags};
+use super::{ArchState, classify, missing_from_details};
+use crate::osc::{BuildStatus, child_indent, layout, open_tags};
 
 /// One port: the repository a branch adds, the project it paths to, and the
 /// architecture it builds.
@@ -46,6 +47,15 @@ pub fn port_for_repo(repo: &str) -> Option<&'static Port> {
 /// Whether `repo` is the repository of a port.
 pub fn is_port_repo(repo: &str) -> bool {
     port_for_repo(repo).is_some()
+}
+
+/// The baseline of a port's result: the repository of Factory's port project
+/// that the result is compared with.
+pub fn baseline_key(repo: &str, arch: &str) -> (String, String) {
+    match port_for_repo(repo) {
+        Some(_) => (PORT_BUILD_REPO.to_string(), arch.to_string()),
+        None => (repo.to_string(), arch.to_string()),
+    }
 }
 
 /// The ports whose architecture is in `wanted` (every port when `None`).
@@ -136,4 +146,51 @@ fn line_indent(xml: &str, pos: usize) -> &str {
     let line_start = xml[..pos].rfind('\n').map_or(0, |i| i + 1);
     let line = &xml[line_start..pos];
     &line[..line.len() - line.trim_start().len()]
+}
+
+/// The state of a result in `repo`: a port's is judged as a port's (see
+/// [`classify_port`]), any other as an ordinary one.
+pub fn state_in(repo: &str, status: &BuildStatus, details: Option<&str>) -> ArchState {
+    if is_port_repo(repo) {
+        classify_port(status, details)
+    } else {
+        classify(status, details)
+    }
+}
+
+/// The state of a port's result. A dependency missing on the port makes it not
+/// testable, as does a broken result; a result still going is not final. A
+/// failure is left for [`judge_port`] to judge against Factory.
+pub fn classify_port(status: &BuildStatus, details: Option<&str>) -> ArchState {
+    match classify(status, details) {
+        ArchState::Unresolvable { .. } => {
+            let names = missing_from_details(details.unwrap_or(""));
+            ArchState::NotTestable {
+                detail: (!names.is_empty())
+                    .then(|| format!("nothing provides {}", names.join(", "))),
+            }
+        }
+        ArchState::Broken => ArchState::NotTestable {
+            detail: Some("broken".to_string()),
+        },
+        ArchState::Pending(what) => ArchState::NotFinal(what),
+        other => other,
+    }
+}
+
+/// A port's failure judged against Factory's result for the same arch:
+/// `baseline` is that result's state, `None` when Factory has no result of the
+/// package there. Returns the state and whether Factory fails too. A failure
+/// Factory builds is the update's (it blocks); one Factory fails too does not;
+/// one Factory has no result of is `NoBaseline`, which blocks.
+pub fn judge_port(state: ArchState, baseline: Option<&ArchState>) -> (ArchState, bool) {
+    match state {
+        ArchState::Failed { detail } => match baseline {
+            None => (ArchState::NoBaseline { detail }, false),
+            Some(b) if b.is_failure() => (ArchState::Failed { detail }, true),
+            Some(ArchState::Succeeded) => (ArchState::Failed { detail }, false),
+            Some(_) => (ArchState::NotFinal("baseline building".to_string()), false),
+        },
+        other => (other, false),
+    }
 }

@@ -53,3 +53,82 @@ fn an_existing_build_block_keeps_its_flags_and_gets_the_disable() {
     assert!(edited.contains("    <disable repository=\"openSUSE_Factory_zSystems\"/>\n  </build>"));
     assert_eq!(edited.matches("<build>").count(), 1);
 }
+
+mod states {
+    use super::*;
+    use crate::osc::BuildStatus;
+
+    #[test]
+    fn a_port_result_is_classified_as_a_port_result() {
+        assert_eq!(
+            classify_port(&BuildStatus::Succeeded, None),
+            ArchState::Succeeded
+        );
+        assert_eq!(
+            classify_port(&BuildStatus::Excluded, None),
+            ArchState::Ignored
+        );
+        assert_eq!(
+            classify_port(&BuildStatus::Unresolvable, Some("nothing provides libwlroots-0_20 needed by x")),
+            ArchState::NotTestable {
+                detail: Some("nothing provides libwlroots-0_20".to_string())
+            }
+        );
+        assert_eq!(
+            classify_port(&BuildStatus::Unresolvable, None),
+            ArchState::NotTestable { detail: None }
+        );
+        assert_eq!(
+            classify_port(&BuildStatus::Broken, None),
+            ArchState::NotTestable {
+                detail: Some("broken".to_string())
+            }
+        );
+        assert_eq!(
+            classify_port(&BuildStatus::Building, None),
+            ArchState::NotFinal("building".to_string())
+        );
+        assert!(matches!(
+            classify_port(&BuildStatus::Failed, None),
+            ArchState::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_port_failure_is_judged_against_factory() {
+        let failed = || ArchState::Failed { detail: None };
+        assert_eq!(
+            judge_port(failed(), Some(&failed())),
+            (ArchState::Failed { detail: None }, true),
+            "Factory fails too: not the update's"
+        );
+        assert_eq!(
+            judge_port(failed(), Some(&ArchState::Succeeded)),
+            (ArchState::Failed { detail: None }, false),
+            "Factory builds it: the update's"
+        );
+        assert_eq!(
+            judge_port(failed(), None),
+            (ArchState::NoBaseline { detail: None }, false),
+            "no Factory result: it blocks, and says so"
+        );
+        assert_eq!(
+            judge_port(failed(), Some(&ArchState::Pending("building".into()))),
+            (ArchState::NotFinal("baseline building".into()), false)
+        );
+        let not_testable = ArchState::NotTestable { detail: None };
+        assert_eq!(judge_port(not_testable.clone(), None), (not_testable, false));
+    }
+
+    #[test]
+    fn only_a_failing_port_result_blocks_and_it_names_the_baseline() {
+        assert!(ArchState::NoBaseline { detail: None }.is_failure());
+        assert!(!ArchState::NotTestable { detail: None }.is_failure());
+        assert!(!ArchState::NotFinal("building".into()).is_failure());
+        assert_eq!(
+            ArchState::NoBaseline { detail: None }.label(),
+            "failed (no Factory baseline)"
+        );
+        assert_eq!(ArchState::NotFinal("building".into()).label(), "not final (building)");
+    }
+}

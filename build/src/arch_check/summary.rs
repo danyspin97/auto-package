@@ -1,7 +1,7 @@
 //! The other-architecture results of a run: the rows of the summary's "Other
 //! architectures" section.
 
-use super::ArchState;
+use super::{ArchState, is_port_repo};
 
 /// One checked `(repository, arch)` result of a package.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,9 +10,8 @@ pub struct ArchRow {
     pub repo: String,
     pub arch: String,
     pub state: ArchState,
-    /// The same repository and arch fail in the baseline project too (the
-    /// origin, or for a port repository the port project), so the update did
-    /// not cause it.
+    /// The same repository and arch fail in the baseline too (the origin, or
+    /// for a port repository Factory), so the update did not cause it.
     pub baseline_fails: bool,
     /// The saved build log of a failure, if it was fetched.
     pub log: Option<String>,
@@ -38,7 +37,8 @@ impl ArchRow {
 
 /// The lines of the "Other architectures" section: one per result that is not
 /// succeeded or ignored, one line each for a `(pkg, repo, arch)`, first seen
-/// wins. Empty when every checked result succeeded.
+/// wins. A port result that is not testable gets a line saying so. Empty when
+/// every checked result succeeded.
 pub fn section_lines(rows: &[ArchRow]) -> Vec<String> {
     let mut seen: Vec<(&str, &str, &str)> = Vec::new();
     let mut out = Vec::new();
@@ -50,21 +50,32 @@ pub fn section_lines(rows: &[ArchRow]) -> Vec<String> {
             continue;
         }
         seen.push(row.key());
-        let mut line = format!(
-            "{} {}/{}: {}",
-            row.pkg,
-            row.repo,
-            row.arch,
-            row.state.label()
-        );
-        match &row.state {
-            ArchState::Failed { detail: Some(d) } | ArchState::Unresolvable { detail: Some(d) } => {
-                line.push_str(&format!(": {d}"));
-            }
-            _ => {}
+        let port = is_port_repo(&row.repo);
+        let mut line = if let ArchState::NotTestable { .. } = row.state {
+            format!("{} not testable on {}", row.pkg, row.arch)
+        } else {
+            format!(
+                "{} {}/{}: {}",
+                row.pkg,
+                row.repo,
+                row.arch,
+                row.state.label()
+            )
+        };
+        if let Some(detail) = row.state.detail() {
+            line.push_str(&format!(": {detail}"));
         }
         if row.baseline_fails {
-            line.push_str(" (also fails in the origin)");
+            let who = if port { "Factory" } else { "the origin" };
+            line.push_str(&format!(" (also fails in {who})"));
+        }
+        if let ArchState::NotFinal(_) = row.state
+            && port
+        {
+            line.push_str(&format!(
+                " (results on {} can take hours: re-run `auto-package update` later to refresh)",
+                row.arch
+            ));
         }
         if let Some(log) = &row.log {
             line.push_str(&format!(" [log: {log}]"));
