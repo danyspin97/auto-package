@@ -104,10 +104,55 @@ fn split_dependency_tokens(list: &str) -> Vec<&str> {
     tokens
 }
 
-/// Every `BuildRequires:` entry of a spec, in file order, without duplicates.
-/// Conditionals are not evaluated: an entry under `%if` is listed.
-pub fn build_requires(spec: &str) -> Vec<BuildRequire> {
-    let mut out: Vec<BuildRequire> = Vec::new();
+/// A version bound a `BuildRequires:` entry states: `>= 5.5`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    /// One of `>=`, `<=`, `=`, `==`, `<`, `>`.
+    pub op: String,
+    pub version: String,
+}
+
+/// One `BuildRequires:` entry and the bound it states, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Requirement {
+    pub dep: BuildRequire,
+    pub bound: Option<Bound>,
+}
+
+const BOUND_OPS: [&str; 6] = [">=", "<=", "=", "==", "<", ">"];
+
+/// Split `pkgconfig(x)>=1` into the name and its bound. An operator inside
+/// `(...)` or `%{...}` is part of the name.
+fn split_inline_bound(token: &str) -> (&str, Option<Bound>) {
+    let mut depth = 0usize;
+    for (i, c) in token.char_indices() {
+        match c {
+            '{' | '(' => depth += 1,
+            '}' | ')' => depth = depth.saturating_sub(1),
+            '<' | '>' | '=' if depth == 0 => {
+                let rest = &token[i..];
+                let op_len = rest
+                    .chars()
+                    .take_while(|c| matches!(c, '<' | '>' | '='))
+                    .count();
+                let version = &rest[op_len..];
+                let bound = (!version.is_empty()).then(|| Bound {
+                    op: rest[..op_len].to_string(),
+                    version: version.to_string(),
+                });
+                return (&token[..i], bound);
+            }
+            _ => {}
+        }
+    }
+    (token, None)
+}
+
+/// Every `BuildRequires:` entry of a spec, in file order, with the bound it
+/// states, without duplicates. Conditionals are not evaluated: an entry under
+/// `%if` is listed.
+pub fn build_requirements(spec: &str) -> Vec<Requirement> {
+    let mut out: Vec<Requirement> = Vec::new();
     for line in spec.lines() {
         let Some(rest) = line.trim_start().strip_prefix("BuildRequires") else {
             continue;
@@ -121,30 +166,53 @@ pub fn build_requires(spec: &str) -> Vec<BuildRequire> {
         let Some(list) = rest.and_then(|r| r.strip_prefix(':')) else {
             continue;
         };
-        let mut tokens = split_dependency_tokens(list).into_iter();
+        let mut tokens = split_dependency_tokens(list).into_iter().peekable();
         while let Some(token) = tokens.next() {
-            if matches!(token, ">=" | "<=" | "=" | "<" | ">" | "==") {
-                // The bound belongs to the previous name.
+            if BOUND_OPS.contains(&token) {
+                // A stray operator: its version is skipped with it.
                 tokens.next();
                 continue;
             }
             if token.starts_with(['<', '>', '=']) {
-                // `foo >=1.0`: operator and version in one token.
                 continue;
             }
-            let name = token.split(['<', '>', '=']).next().unwrap_or(token);
-            let entry = if !name.is_empty()
+            let (name, inline) = split_inline_bound(token);
+            // A spaced bound (`foo >= 1.0`) follows the name as two tokens.
+            let bound = match tokens.peek() {
+                Some(op) if BOUND_OPS.contains(op) => {
+                    let op = tokens.next().unwrap_or_default().to_string();
+                    tokens.next().map(|version| Bound {
+                        op,
+                        version: version.to_string(),
+                    })
+                }
+                _ => inline,
+            };
+            let dep = if !name.is_empty()
                 && name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
             {
                 BuildRequire::Package(name.to_string())
             } else {
-                BuildRequire::Capability(token.to_string())
+                BuildRequire::Capability(name.to_string())
             };
+            let entry = Requirement { dep, bound };
             if !out.contains(&entry) {
                 out.push(entry);
             }
+        }
+    }
+    out
+}
+
+/// Every `BuildRequires:` entry of a spec, in file order, without duplicates.
+/// Conditionals are not evaluated: an entry under `%if` is listed.
+pub fn build_requires(spec: &str) -> Vec<BuildRequire> {
+    let mut out: Vec<BuildRequire> = Vec::new();
+    for r in build_requirements(spec) {
+        if !out.contains(&r.dep) {
+            out.push(r.dep);
         }
     }
     out

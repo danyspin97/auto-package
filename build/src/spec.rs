@@ -91,6 +91,8 @@ mod expand_order_tests;
 
 mod checks;
 #[cfg(test)]
+mod requirement_tests;
+#[cfg(test)]
 mod review_fix_tests;
 pub use checks::*;
 
