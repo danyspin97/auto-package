@@ -2,7 +2,7 @@
 //! restored, the tracked strays, and the commit.
 
 use super::*;
-use crate::osc::query::*;
+use crate::osc::ci_retry::*;
 
 /// What a checkout publishes to OBS, split by [`publish_plan`].
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -539,29 +539,12 @@ pub fn commit(
 
     let mut ci = vec!["ci".to_string(), "-m".to_string(), message.to_string()];
     ci.extend(files.iter().cloned());
-    let out = proc::capture_with_timeout("osc", &ci, checkout_dir, emit, OSC_TRANSFER_TIMEOUT)
-        .map_err(during(format!("ci in {}", checkout_dir.display())))?;
-
-    if !out.success() {
-        // "nothing to do" means files are already committed — not an error.
-        if out.stdout.contains("nothing to do") || out.stderr.contains("nothing to do") {
-            return Ok(());
-        }
-        let mut detail = ci_failure_detail(&out.stdout, &out.stderr);
-        if let Some(log) = log {
-            let full = format!("--- stdout\n{}\n--- stderr\n{}\n", out.stdout, out.stderr);
-            match ap_core::fsx::write_atomic(log, full) {
-                Ok(()) => detail.push_str(&format!("\nthe full output is in {}", log.display())),
-                Err(e) => detail.push_str(&format!("\nthe full output cannot be saved: {e}")),
-            }
-        }
-        return Err(Error::OscFailed {
-            cmd: format!("ci -m {message:?} in {}", checkout_dir.display()),
-            code: out.code,
-            stderr: detail,
-        });
-    }
-    Ok(())
+    // A transient server error (a 5xx, a timeout) is tried again; the commit
+    // did not happen, so the same `ci` is the right retry.
+    with_ci_retries(
+        || ci_once(checkout_dir, message, &ci, log, emit),
+        std::thread::sleep,
+    )
 }
 
 /// What a failed `osc` call says: stderr, then stdout, as their last ten distinct

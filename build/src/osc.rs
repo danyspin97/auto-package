@@ -101,6 +101,9 @@ pub use service::*;
 pub(crate) use service_root::{has_services_root, warn_if_no_root};
 mod sandbox;
 pub use sandbox::*;
+mod ci_retry;
+#[cfg(test)]
+mod ci_retry_tests;
 mod publish;
 pub use publish::*;
 mod baseline;
