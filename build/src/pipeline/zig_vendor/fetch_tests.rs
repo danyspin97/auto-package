@@ -238,6 +238,32 @@ fn a_query_and_an_upper_case_extension_are_read_and_a_fragment_is_not_sent() {
     assert_eq!(fake.calls(), [plain]);
 }
 
+/// `pkg-1.0.tar` as zig 0.15.2 made it, and the legacy `1220` hash zig printed
+/// for it.
+const ZIG_TAR: &[u8] = include_bytes!("testdata/zig-pkg-1.0.tar");
+const ZIG_TAR_LEGACY: &str = "122011a6ed00c7abd2e8cbc0a9b267c4b6441dda9a3386a7c341284fe9e036628064";
+
+#[test]
+fn a_legacy_1220_dependency_is_fetched_and_its_hash_checked() {
+    let url = "https://codeberg.org/x/pkg/archive/v1.0.tar";
+    let fake = Fake::new(vec![(url, Route::Body(ZIG_TAR.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ZIG_TAR_LEGACY)));
+    assert_eq!(result.unwrap()[0].declared, ZIG_TAR_LEGACY);
+}
+
+#[test]
+fn a_legacy_1220_hash_that_does_not_match_is_refused() {
+    let url = "https://codeberg.org/x/pkg/archive/v1.0.tar";
+    let wrong = format!("1220{}", "00".repeat(32));
+    let fake = Fake::new(vec![(url, Route::Body(ZIG_TAR.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, &wrong)));
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("archive hash 1220") && err.contains(&wrong),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_git_url_is_fetched_as_its_forge_archive_of_that_commit() {
     let git = format!("git+https://codeberg.org/ifreund/zig-pixman#{HEX40}");

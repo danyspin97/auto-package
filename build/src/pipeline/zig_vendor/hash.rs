@@ -14,6 +14,12 @@
 //! including a symlink). Pixman and wayland archives, whose declared hashes
 //! are in river's `build.zig.zon`, are tests here. Waylock's archives were not
 //! available, so the 0.16 layout and waylock's hashes are not verified.
+//!
+//! Zig 0.13 and earlier declared `1220` and the hex of a SHA-256 instead
+//! (a multihash). Zig 0.15.2 still verifies that form, and it is the SHA-256
+//! over the same sorted per-file digests, without the id and size: the three
+//! trees zig printed for it (files only, nested files with an executable,
+//! and a symlink) all match.
 
 use std::io::Read;
 
@@ -75,18 +81,29 @@ impl PackageHash {
                 self.size
             )
         })?;
+        let total = self.sorted_digest();
+        let mut raw = [0u8; 33];
+        raw[..4].copy_from_slice(&id.to_le_bytes());
+        raw[4..8].copy_from_slice(&size.to_le_bytes());
+        raw[8..].copy_from_slice(&total[..25]);
+        Ok(encode(&raw))
+    }
+
+    /// The legacy declared hash, `1220` and the hex of the whole SHA-256 over
+    /// the sorted per-file digests. It has no id and no size.
+    pub(super) fn finish_legacy(mut self) -> String {
+        format!("1220{}", hex::encode(self.sorted_digest()))
+    }
+
+    /// The SHA-256 over the per-file digests, in path order.
+    fn sorted_digest(&mut self) -> [u8; 32] {
         self.digests
             .sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut all = Sha256::new();
         for (_, digest) in &self.digests {
             all.update(digest);
         }
-        let total: [u8; 32] = all.finalize().into();
-        let mut raw = [0u8; 33];
-        raw[..4].copy_from_slice(&id.to_le_bytes());
-        raw[4..8].copy_from_slice(&size.to_le_bytes());
-        raw[8..].copy_from_slice(&total[..25]);
-        Ok(encode(&raw))
+        all.finalize().into()
     }
 }
 
@@ -125,20 +142,43 @@ pub(super) fn encode(bytes: &[u8]) -> String {
     out
 }
 
+/// A declared hash, in the form zig wrote it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Declared<'a> {
+    /// `name-version-<44 chars>`, as zig 0.14 and later write it.
+    Current {
+        name_version: &'a str,
+        digest: &'a str,
+    },
+    /// `1220` and 64 lowercase hex digits, as zig 0.13 and earlier wrote it.
+    Legacy,
+}
+
+/// Which form a declared hash is in, and its parts.
+pub(super) fn parse_declared(hash: &str) -> Result<Declared<'_>, String> {
+    if is_legacy(hash) {
+        return Ok(Declared::Legacy);
+    }
+    let (name_version, digest) = split_declared(hash)?;
+    Ok(Declared::Current {
+        name_version,
+        digest,
+    })
+}
+
+/// A legacy declared hash: `1220` and 64 lowercase hex digits, which is the
+/// multihash of a SHA-256 (`0x12` is SHA-256, `0x20` the 32-byte length).
+fn is_legacy(hash: &str) -> bool {
+    hash.len() == 68
+        && hash.starts_with("1220")
+        && hash[4..]
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
 /// Split a declared hash into its `name-version` prefix and its 44-character
 /// digest. The digest may contain `-`, so the split is from the end.
-///
-/// A `1220…` multihash (zig 0.13 and older) has no name and no digest here;
-/// it is refused with its own message, since this module does not verify it.
 pub(super) fn split_declared(hash: &str) -> Result<(&str, &str), String> {
-    if hash.len() == 68
-        && hash.starts_with("1220")
-        && hash[4..].bytes().all(|c| c.is_ascii_hexdigit())
-    {
-        return Err(format!(
-            "`{hash}` is a zig 0.13-era multihash, which is not verified here"
-        ));
-    }
     let len = hash.len();
     if len < DIGEST_LEN + 2 || !hash.is_char_boundary(len - DIGEST_LEN) {
         return Err(format!("`{hash}` is not a zig package hash"));

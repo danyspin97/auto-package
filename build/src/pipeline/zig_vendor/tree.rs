@@ -138,9 +138,8 @@ fn rel_of(root: &Path, abs: &Path) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
-/// The zig package hash of `items` with the fingerprint id `id`, in the form
-/// `build.zig.zon` declares after the name and version.
-pub(super) fn package_hash(items: &[Item], id: u32) -> Result<String, String> {
+/// The per-file digests of `items`, as zig hashes a package.
+fn collect(items: &[Item]) -> Result<PackageHash, String> {
     let mut hash = PackageHash::new();
     for item in items {
         match item {
@@ -153,5 +152,16 @@ pub(super) fn package_hash(items: &[Item], id: u32) -> Result<String, String> {
             Item::Link { rel, target } => hash.link(rel, target),
         }
     }
-    hash.finish(id)
+    Ok(hash)
+}
+
+/// The zig package hash of `items` with the fingerprint id `id`, the base64
+/// after the name and version in `build.zig.zon`.
+pub(super) fn package_hash(items: &[Item], id: u32) -> Result<String, String> {
+    collect(items)?.finish(id)
+}
+
+/// The legacy `1220…` hash of `items`, as zig 0.13 and earlier declared it.
+pub(super) fn legacy_hash(items: &[Item]) -> Result<String, String> {
+    Ok(collect(items)?.finish_legacy())
 }

@@ -11,8 +11,8 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use super::hash::split_declared;
-use super::tree::{Item, included_items, package_hash};
+use super::hash::{Declared, parse_declared};
+use super::tree::{Item, included_items, legacy_hash, package_hash};
 use super::unpack::{Format, Limits, unpack};
 use super::zon::{self, Dependency, Manifest};
 use crate::allowed_hosts::Asker;
@@ -138,8 +138,7 @@ fn fetch_one(
     declared: &str,
     index: usize,
 ) -> Result<Dep, String> {
-    let (name_version, digest) =
-        split_declared(declared).map_err(|e| format!("zig dep {name}: {e}"))?;
+    let form = parse_declared(declared).map_err(|e| format!("zig dep {name}: {e}"))?;
     let (archive, by_url) = archive_url(url).map_err(|e| format!("zig dep {name}: {e}"))?;
     let root = req.work.join(format!("dep-{index}"));
     let mut current = archive.clone();
@@ -176,15 +175,21 @@ fn fetch_one(
     let manifest = zon::parse(&text).map_err(|e| format!("zig dep {name}: {e}"))?;
     let items = included_items(&root, manifest.paths.as_deref())
         .map_err(|e| format!("zig dep {name}: {e}"))?;
-    let fingerprint = manifest
-        .fingerprint
-        .ok_or_else(|| format!("zig dep {name}: the manifest has no .fingerprint"))?;
-    // Zig's id is the low 32 bits of the fingerprint.
-    let id = (fingerprint & 0xffff_ffff) as u32;
-    let computed = package_hash(&items, id).map_err(|e| format!("zig dep {name}: {e}"))?;
-    if computed != digest {
+    let computed = match form {
+        Declared::Current { name_version, .. } => {
+            let fingerprint = manifest
+                .fingerprint
+                .ok_or_else(|| format!("zig dep {name}: the manifest has no .fingerprint"))?;
+            // Zig's id is the low 32 bits of the fingerprint.
+            let id = (fingerprint & 0xffff_ffff) as u32;
+            let digest = package_hash(&items, id).map_err(|e| format!("zig dep {name}: {e}"))?;
+            format!("{name_version}-{digest}")
+        }
+        Declared::Legacy => legacy_hash(&items).map_err(|e| format!("zig dep {name}: {e}"))?,
+    };
+    if computed != declared {
         return Err(format!(
-            "zig dep {name}: archive hash {name_version}-{computed} ≠ build.zig.zon {declared}"
+            "zig dep {name}: archive hash {computed} ≠ build.zig.zon {declared}"
         ));
     }
     Ok(Dep {

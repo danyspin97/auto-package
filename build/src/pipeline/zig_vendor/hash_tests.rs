@@ -171,11 +171,72 @@ fn a_declared_hash_splits_at_its_last_44_characters() {
     assert_eq!(digest, "jmOlcrJuBABMWPGDKK86BO7zrfmxm17nimqFb0gffZTn");
 }
 
+/// A plain tar in testdata, as its files and links, with the top directory
+/// stripped, for the hashes zig printed for it.
+fn tree_of_tar(name: &str) -> PackageHash {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/pipeline/zig_vendor/testdata")
+        .join(name);
+    let mut ar = tar::Archive::new(std::fs::File::open(path).unwrap());
+    let mut hash = PackageHash::new();
+    for entry in ar.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let rel: PathBuf = entry.path().unwrap().components().skip(1).collect();
+        if rel.as_os_str().is_empty() || entry.header().entry_type().is_dir() {
+            continue;
+        }
+        let rel = rel.to_string_lossy().into_owned();
+        if entry.header().entry_type().is_symlink() {
+            let target = entry.link_name().unwrap().unwrap().into_owned();
+            hash.link(&rel, target.as_os_str().as_encoded_bytes());
+        } else {
+            hash.file(&rel, &mut entry).unwrap();
+        }
+    }
+    hash
+}
+
+#[test]
+fn zig_0_15_2_verifies_the_legacy_1220_hashes() {
+    // Each is the hash zig 0.15.2 printed as "the fetched package has" for the
+    // same tree, when a dependency declared another hash.
+    assert_eq!(
+        tree_of_tar("zig-pkg-1.0.tar").finish_legacy(),
+        "122011a6ed00c7abd2e8cbc0a9b267c4b6441dda9a3386a7c341284fe9e036628064"
+    );
+    // Nested directories and an executable file.
+    assert_eq!(
+        tree_of_tar("zig-pkg-2.0.tar").finish_legacy(),
+        "1220b74845688f8019f40acfcc1f232dc3ccc7f1772cc28c30e2e3ae8459729170e8"
+    );
+    // A symlink, hashed as its path and target.
+    assert_eq!(
+        tree_of_tar("zig-pkg-3.0.tar").finish_legacy(),
+        "122045b9cbb315c89cd20446f8c89c4f28b113cf74d1870c22eb28e7acc9030f13a0"
+    );
+}
+
+#[test]
+fn zig_0_15_2_hashes_the_nested_tree_in_the_current_form() {
+    // `zig fetch` on the same tree printed this hash for the current form.
+    assert_eq!(
+        tree_of_tar("zig-pkg-2.0.tar").finish(0x3030_ff30).unwrap(),
+        "MP8wMCwCAAC3SEVoj4AZ9ArPzB8jLcPMx_F3LMKMMOLj"
+    );
+}
+
+#[test]
+fn a_legacy_hash_is_told_apart_from_the_current_form() {
+    let old = format!("1220{}", "ab".repeat(32));
+    assert_eq!(parse_declared(&old), Ok(Declared::Legacy));
+    // Not the legacy form: a wrong length, or upper-case hex.
+    assert!(parse_declared(&format!("1220{}", "ab".repeat(31))).is_err());
+    assert!(split_declared(&old).is_err());
+    assert!(parse_declared(&format!("1220{}", "AB".repeat(32))).is_err());
+}
+
 #[test]
 fn malformed_and_old_hashes_are_refused() {
-    // Zig 0.13 form: a multihash with no name.
-    let old = format!("1220{}", "ab".repeat(32));
-    assert!(split_declared(&old).unwrap_err().contains("zig 0.13-era"));
     assert!(split_declared("short-1.0-abc").is_err());
     assert!(split_declared("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").is_err());
     let no_dash = format!("pkg1.0{}", "A".repeat(44));
