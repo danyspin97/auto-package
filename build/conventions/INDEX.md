@@ -94,3 +94,10 @@
 94. Merged into convention 14 — read convention 14 when the prompt lists patches that failed to apply or you are about to remove a Patch line
 95. Package named for a series (fmt-9, wlroots-0_15): stays on that series — read when the package name ends in a version number
 96. Python spec macro forms — read when writing a Python preamble, %python_expand, %if on python_flavor, %ifpython, a shebang fix, a -doc subpackage or Leap 15 flavors
+97. Meson projects (native meson.build) — read when the build system is meson, the spec needs %meson/%meson_build, or a subproject or .wrap file exists
+98. Perl CPAN modules (perl-<Dist>) — read when the package is a perl- module, has Makefile.PL, needs perl(...) BuildRequires or %perl_make_install
+99. PHP applications and PEAR packages — read when the source is a PHP app (composer.json, /usr/share/php) or a PEAR package.xml or php-pear-* name
+100. Ruby gems (rubygem-<name>) — read when the source is a .gem or .gemspec, the name is rubygem-*, or gem2rpm output needs fixing
+101. Lua modules (lua<ver>-<module>) — read when the package is a Lua module, has a rockspec, or needs the luajit headers via LUA_INCLUDE
+102. Common Lisp libraries (cl-<lib>) — read when the source has an .asd system file or the package is a cl- library
+103. NPM / nodejs: vendored node_modules, legacy nodejs macros — read when npm or node runs in the build, package-lock.json is in the sdist, or you consider %nodejs_install
