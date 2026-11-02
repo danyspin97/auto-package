@@ -17,20 +17,36 @@ use crate::osc::query::*;
 /// holding a plain `<base-name>.spec` (`pytorch.spec`) that has no relation
 /// to the OBS package name, so the guess is not enough on its own.
 pub fn list_package_files(project: &str, pkg: &str, emit: Emit<'_>) -> Option<Vec<String>> {
+    list_package_files_checked(project, pkg, emit).ok()
+}
+
+/// [`list_package_files`] with the reason it failed: osc's own error text, or
+/// that osc could not be run at all.
+pub fn list_package_files_checked(
+    project: &str,
+    pkg: &str,
+    emit: Emit<'_>,
+) -> Result<Vec<String>, String> {
     if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) {
-        return None;
+        return Err(format!("{project}/{pkg} is not a valid OBS name"));
     }
-    let out = osc_query(&["ls", project, pkg], emit, &format!("ls {project}/{pkg}"))?;
+    let Some(out) = osc_query(&["ls", project, pkg], emit, &format!("ls {project}/{pkg}")) else {
+        return Err("osc ls could not be run".into());
+    };
     if !out.success() {
-        return None;
+        let said = out.stderr.trim();
+        return Err(if said.is_empty() {
+            format!("osc ls exited with code {}", out.code)
+        } else {
+            said.to_string()
+        });
     }
-    Some(
-        out.stdout
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-    )
+    Ok(out
+        .stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 /// The spec file of OBS package `pkg` given its file listing: the one `*.spec`

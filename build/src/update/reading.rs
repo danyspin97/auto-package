@@ -22,6 +22,24 @@ mod reading {
         incident: Option<Result<String, ReadError>>,
         go_on: bool,
     ) -> (Result<String, ReadError>, Run) {
+        let list: Vec<Result<Vec<String>, String>> = list
+            .iter()
+            .map(|f| {
+                f.clone()
+                    .ok_or_else(|| "osc ls could not be run".to_string())
+            })
+            .collect();
+        run_with(&list, cat, incident, go_on)
+    }
+
+    /// [`run`] with osc's listing answers as they are: the file list, or the
+    /// text of osc's error.
+    fn run_with(
+        list: &[Result<Vec<String>, String>],
+        cat: &[Option<&str>],
+        incident: Option<Result<String, ReadError>>,
+        go_on: bool,
+    ) -> (Result<String, ReadError>, Run) {
         let r = Run {
             lists: Cell::new(0),
             cats: Cell::new(0),
@@ -107,6 +125,73 @@ mod reading {
         assert_eq!(out, Err(ReadError::Failed("interrupted".into())));
         assert_eq!(r.lists.get(), 1);
         assert_eq!(r.waits.borrow().len(), 1);
+    }
+
+    const BROKEN_LINK: &str = "Link \"X11:Wayland/stacktile\" cannot be expanded:\n \
+         openSUSE:Factory/stacktile: package 'stacktile' does not exist\n\n\
+         Use \"osc repairlink\" to fix merge conflicts.\n";
+
+    #[test]
+    fn a_broken_link_is_not_retried_and_names_its_target() {
+        let (out, r) = run_with(
+            &[Err(BROKEN_LINK.to_string()), Ok(files(&["stacktile.spec"]))],
+            &[Some("Name: stacktile")],
+            None,
+            true,
+        );
+        let Err(ReadError::Failed(why)) = out else {
+            panic!("expected a failed read, got {out:?}");
+        };
+        assert!(why.contains("openSUSE:Factory/stacktile"), "{why}");
+        assert!(why.contains("relink or unlink"), "{why}");
+        assert_eq!(r.lists.get(), 1);
+        assert!(r.waits.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_missing_package_is_not_retried() {
+        let (out, r) = run_with(
+            &[Err(
+                "HTTP Error 404: Not Found\nunknown_package: no such package".to_string(),
+            )],
+            &[None],
+            None,
+            true,
+        );
+        let Err(ReadError::Failed(why)) = out else {
+            panic!("expected a failed read, got {out:?}");
+        };
+        assert!(why.contains("does not exist on OBS"), "{why}");
+        assert_eq!(r.lists.get(), 1);
+    }
+
+    #[test]
+    fn a_bare_400_or_404_or_does_not_exist_is_retried() {
+        for said in [
+            "HTTP Error 404: Not Found",
+            "HTTP Error 400: Bad Request",
+            "osc: package 'pkg' does not exist",
+        ] {
+            let (out, r) = run_with(&[Err(said.to_string())], &[None], None, true);
+            assert!(matches!(out, Err(ReadError::Failed(_))), "{said}: {out:?}");
+            assert_eq!(r.lists.get(), 3, "{said}");
+        }
+    }
+
+    #[test]
+    fn a_timed_out_listing_is_still_retried() {
+        let (out, r) = run_with(
+            &[
+                Err("Connection timed out".to_string()),
+                Err("HTTP Error 503: Service Unavailable".to_string()),
+                Ok(files(&["pkg.spec"])),
+            ],
+            &[Some("Name: pkg")],
+            None,
+            true,
+        );
+        assert_eq!(out.as_deref(), Ok("Name: pkg"));
+        assert_eq!(r.lists.get(), 3);
     }
 
     #[test]

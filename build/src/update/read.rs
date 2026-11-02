@@ -42,7 +42,7 @@ impl From<ReadError> for SkipReason {
 pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<String, ReadError> {
     read_spec(
         pkg,
-        &|| osc::list_package_files(project, pkg, emit),
+        &|| osc::list_package_files_checked(project, pkg, emit),
         &|file| osc::cat_file(project, pkg, file, emit),
         // An update project keeps a released package's sources in its newest
         // incident copy (`pkg.NNNNN`), the plain one empty.
@@ -64,13 +64,58 @@ pub(super) fn read_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(5 * u64::from(attempt - 1))
 }
 
+/// Why a failed `osc ls` of `pkg` will fail again, as the reason to report, or
+/// `None` when the failure may pass. `osc_says` is osc's error text.
+///
+/// Permanent: a `_link` that cannot be expanded (its target is missing or the
+/// link conflicts; only the maintainer can fix it), and a 404 that OBS gives
+/// for a package or project that is not there (`unknown_package`,
+/// `unknown_project`). A bare 400 or 404 is not: a backend that is failing
+/// answers the same way, so it is retried like any other failure.
+pub(super) fn permanent_listing_failure(pkg: &str, osc_says: &str) -> Option<String> {
+    if osc::text_is_transient(osc_says) {
+        return None;
+    }
+    let first = osc_says
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if let Some(at) = osc_says.find("cannot be expanded") {
+        let detail = osc_says[at + "cannot be expanded".len()..]
+            .trim_start_matches(':')
+            .lines()
+            .map(str::trim)
+            .take_while(|l| !l.contains("repairlink"))
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let detail = if detail.is_empty() {
+            first.to_string()
+        } else {
+            detail
+        };
+        return Some(format!(
+            "the _link of {pkg} cannot be expanded ({detail}); the maintainer must relink or unlink it"
+        ));
+    }
+    let lower = osc_says.to_lowercase();
+    let missing = lower.contains("unknown_package") || lower.contains("unknown_project");
+    if osc_says.contains("HTTP Error 404") && missing {
+        return Some(format!(
+            "{pkg} does not exist on OBS ({first}); not retried"
+        ));
+    }
+    None
+}
+
 /// [`spec_for_package`] with OBS behind closures: `list` is the file listing
-/// (`None` when it failed), `cat` a file's text, `incident` the read of the
-/// newest incident copy when there is one, and `pause` waits and says whether
-/// to go on.
+/// (osc's error text when it failed), `cat` a file's text, `incident` the read
+/// of the newest incident copy when there is one, and `pause` waits and says
+/// whether to go on.
 pub(super) fn read_spec(
     pkg: &str,
-    list: &dyn Fn() -> Option<Vec<String>>,
+    list: &dyn Fn() -> Result<Vec<String>, String>,
     cat: &dyn Fn(&str) -> Option<String>,
     incident: &dyn Fn() -> Option<Result<String, ReadError>>,
     pause: &dyn Fn(std::time::Duration) -> bool,
@@ -80,9 +125,19 @@ pub(super) fn read_spec(
         if attempt > 1 && !pause(read_backoff(attempt)) {
             return Err(ReadError::Failed("interrupted".into()));
         }
-        let Some(files) = list() else {
-            why = "listing the package's files (osc ls) failed".into();
-            continue;
+        let files = match list() {
+            Ok(files) => files,
+            Err(osc_says) => {
+                if let Some(reason) = permanent_listing_failure(pkg, &osc_says) {
+                    return Err(ReadError::Failed(reason));
+                }
+                let first = osc_says.lines().map(str::trim).find(|l| !l.is_empty());
+                why = format!(
+                    "listing the package's files (osc ls) failed: {}",
+                    first.unwrap_or("no output")
+                );
+                continue;
+            }
         };
         let Some(picked) = pick_spec_filename(pkg, &files) else {
             if files.is_empty()
