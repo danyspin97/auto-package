@@ -155,6 +155,11 @@ fn a_real_archive_is_fetched_and_its_hash_checked() {
 const ZIG_XZ: &[u8] = include_bytes!("testdata/zig-pkg-1.0.tar.xz");
 const ZIG_XZ_HASH: &str = "pkg-1.0.0-adtcAfUAAAARpu0Ax6vS6MvAqbJnxLZEHdqaM4anw0Eo";
 const ZIG_XZ_URL: &str = "https://codeberg.org/x/pkg/archive/v1.0.tar.xz";
+/// `pkg-1.0.zip`, and `pkg-1.0` with a symlink in its `.paths`, both as zig
+/// 0.15.2 printed their hashes.
+const ZIG_ZIP: &[u8] = include_bytes!("testdata/zig-pkg-1.0.zip");
+const ZIG_LINKY_ZIP: &[u8] = include_bytes!("testdata/zig-linky.zip");
+const ZIG_LINKY_HASH: &str = "pkg-1.0.0-adtcAQoBAADqzx2aY9slcvj2hMtkPNekQNx1xATI8ZnD";
 
 #[test]
 fn a_tar_xz_dependency_is_fetched_and_its_zig_hash_checked() {
@@ -317,12 +322,20 @@ fn a_path_dependency_is_skipped() {
 }
 
 #[test]
-fn a_zip_dependency_is_refused_before_any_request() {
-    let url = "https://codeberg.org/o/r/archive/v1.zip";
-    let fake = Fake::new(vec![]);
-    let (_dir, result) = fetch(&fake, &root(&dep("r", url, PIXMAN_HASH)));
-    assert!(result.unwrap_err().contains("zip"));
-    assert!(fake.calls().is_empty());
+fn a_zip_dependency_is_fetched_and_its_zig_hash_checked() {
+    let url = "https://codeberg.org/x/pkg/archive/v1.0.zip";
+    let fake = Fake::new(vec![(url, Route::Body(ZIG_ZIP.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ZIG_XZ_HASH)));
+    assert_eq!(result.unwrap()[0].declared, ZIG_XZ_HASH);
+    assert_eq!(fake.calls(), [url]);
+}
+
+#[test]
+fn a_zip_with_a_symlink_has_the_hash_zig_gives_it() {
+    let url = "https://codeberg.org/x/pkg/archive/v1.0.zip";
+    let fake = Fake::new(vec![(url, Route::Body(ZIG_LINKY_ZIP.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ZIG_LINKY_HASH)));
+    assert_eq!(result.unwrap()[0].declared, ZIG_LINKY_HASH);
 }
 
 #[test]

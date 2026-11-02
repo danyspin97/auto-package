@@ -18,13 +18,16 @@ use std::path::{Component, Path, PathBuf};
 
 mod guard;
 
-/// The compressions a dependency archive may use. `.zip`, `.tar.bz2` and the
-/// rest are refused, so their decoders are not parsed here.
+pub(super) mod zip_archive;
+
+/// The compressions a dependency archive may use. `.tar.bz2` and the rest are
+/// refused, as zig refuses them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Format {
     TarGz,
     TarXz,
     TarZst,
+    Zip,
 }
 
 impl Format {
@@ -38,12 +41,10 @@ impl Format {
         } else if path.ends_with(".tar.zst") || path.ends_with(".tzst") {
             Ok(Format::TarZst)
         } else if path.ends_with(".zip") {
-            Err(format!(
-                "`{url}` is a zip archive, which zig_vendor refuses"
-            ))
+            Ok(Format::Zip)
         } else {
             Err(format!(
-                "`{url}` is not a .tar.gz, .tar.xz or .tar.zst archive (the only formats zig_vendor reads)"
+                "`{url}` is not a .tar.gz, .tar.xz, .tar.zst or .zip archive (the only formats zig_vendor reads)"
             ))
         }
     }
@@ -87,7 +88,12 @@ pub(super) fn unpack(
         return Err(format!("{} already exists", dest.display()));
     }
     std::fs::create_dir_all(&stage).map_err(|e| format!("creating {}: {e}", stage.display()))?;
-    let (links, roots) = write_entries(src, format, &stage, limits)?;
+    let (links, roots) = if format == Format::Zip {
+        zip_archive::write_entries(src, &stage, limits)?;
+        (Vec::new(), stage_roots(&stage)?)
+    } else {
+        write_entries(src, format, &stage, limits)?
+    };
     let top = single_top_dir(&stage, &roots)?;
     check_links(&links, top.is_some())?;
     match top {
@@ -101,11 +107,30 @@ pub(super) fn unpack(
     }
 }
 
+/// The most bytes an archive's stream may hold, decompressed: the content
+/// limit plus a header allowance per entry. The reader stops there.
+fn stream_cap(limits: Limits) -> u64 {
+    limits
+        .max_bytes
+        .saturating_add((limits.max_entries as u64).saturating_mul(PER_ENTRY_OVERHEAD))
+}
+
 /// The staging directory for `dest`: a sibling with a `.stage` suffix.
 fn stage_of(dest: &Path) -> PathBuf {
     let mut name = dest.as_os_str().to_owned();
     name.push(".stage");
     PathBuf::from(name)
+}
+
+/// The names on disk at the top of `stage`: the roots of a zip archive, whose
+/// entries are unpacked by `zip_archive` and so have no names of their own here.
+fn stage_roots(stage: &Path) -> Result<BTreeSet<OsString>, String> {
+    let read = |e: std::io::Error| format!("reading {}: {e}", stage.display());
+    let mut roots = BTreeSet::new();
+    for entry in std::fs::read_dir(stage).map_err(read)? {
+        roots.insert(entry.map_err(read)?.file_name());
+    }
+    Ok(roots)
 }
 
 /// The root zig chooses: when every entry is under one name, `roots` holds
@@ -158,12 +183,9 @@ fn write_entries(
             zstd::stream::read::Decoder::new(src)
                 .map_err(|e| format!("reading the zstd stream: {e}"))?,
         ),
+        Format::Zip => unreachable!("unpack reads zip archives with zip_archive"),
     };
-    // The tar stream cannot be larger than the content plus headers.
-    let stream_cap = limits
-        .max_bytes
-        .saturating_add((limits.max_entries as u64).saturating_mul(PER_ENTRY_OVERHEAD));
-    let mut ar = tar::Archive::new(guard::MetaGuard::new(stream).take(stream_cap));
+    let mut ar = tar::Archive::new(guard::MetaGuard::new(stream).take(stream_cap(limits)));
     let mut links = Vec::new();
     let mut roots = BTreeSet::new();
     let mut bytes: u64 = 0;

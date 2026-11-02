@@ -340,11 +340,153 @@ fn only_the_formats_zig_reads_are_read() {
     assert_eq!(Format::of_url("https://x/a.txz"), Ok(Format::TarXz));
     assert_eq!(Format::of_url("https://x/a.tar.zst"), Ok(Format::TarZst));
     assert_eq!(Format::of_url("https://x/a.tzst"), Ok(Format::TarZst));
-    assert!(
-        Format::of_url("https://x/a-1.0.zip")
-            .unwrap_err()
-            .contains("zip")
-    );
+    assert_eq!(Format::of_url("https://x/a-1.0.zip"), Ok(Format::Zip));
     assert!(Format::of_url("https://x/a.tar.bz2").is_err());
     assert!(Format::of_url("https://x/archive").is_err());
+}
+
+/// A zip archive of `entries`, written by the zip crate.
+fn raw_zip(entries: &[(&str, K)]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, kind) in entries {
+        let opts = zip::write::SimpleFileOptions::default();
+        match kind {
+            K::File(d) => {
+                zw.start_file(*name, opts.unix_permissions(0o644)).unwrap();
+                zw.write_all(d).unwrap();
+            }
+            K::Exec(d) => {
+                zw.start_file(*name, opts.unix_permissions(0o755)).unwrap();
+                zw.write_all(d).unwrap();
+            }
+            K::Dir => zw.add_directory(*name, opts).unwrap(),
+            K::Link(t) => zw.add_symlink(*name, *t, opts).unwrap(),
+            K::Hard(_) | K::Device => panic!("a zip archive has no hard links or devices"),
+        }
+    }
+    zw.finish().unwrap().into_inner()
+}
+
+fn expect_zip_refused(entries: &[(&str, K)], needle: &str) {
+    let (_dir, result) = run(&raw_zip(entries), Format::Zip, LIMITS);
+    let err = result.expect_err("the archive must be refused");
+    assert!(err.contains(needle), "wanted `{needle}` in: {err}");
+}
+
+#[test]
+fn a_zig_made_zip_archive_unpacks_like_a_tar_one() {
+    // `pkg-1.0.zip` as zig 0.15.2 reads it: top directory `pkg-1.0/`.
+    let bytes = include_bytes!("testdata/zig-pkg-1.0.zip");
+    let (dir, result) = run(&bytes[..], Format::Zip, LIMITS);
+    result.unwrap();
+    let out = dir.path().join("out");
+    assert_eq!(std::fs::read(out.join("hello.txt")).unwrap(), b"hello\n");
+    assert!(out.join("build.zig.zon").is_file());
+    assert!(!out.join("pkg-1.0").exists());
+}
+
+#[test]
+fn a_zip_archive_keeps_modes_and_the_root_and_writes_links_as_files() {
+    let bytes = raw_zip(&[
+        ("p/", K::Dir),
+        ("p/src/", K::Dir),
+        ("p/src/main.zig", K::File(b"x")),
+        ("p/run.sh", K::Exec(b"#!/bin/sh\n")),
+        ("p/link", K::Link("src/main.zig")),
+        ("p/d2/", K::Dir),
+        ("p/d2/link", K::Link("../src/main.zig")),
+    ]);
+    let (dir, result) = run(&bytes, Format::Zip, LIMITS);
+    result.unwrap();
+    let out = dir.path().join("out");
+    assert_eq!(std::fs::read(out.join("src/main.zig")).unwrap(), b"x");
+    // Zig writes a zip's symlink entry as a file holding the target.
+    assert!(
+        std::fs::symlink_metadata(out.join("link"))
+            .unwrap()
+            .is_file()
+    );
+    assert_eq!(std::fs::read(out.join("link")).unwrap(), b"src/main.zig");
+    assert_eq!(
+        std::fs::read(out.join("d2/link")).unwrap(),
+        b"../src/main.zig"
+    );
+    let mode = |f: &str| std::fs::metadata(out.join(f)).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode("run.sh"), 0o755);
+    assert_eq!(mode("src/main.zig"), 0o644);
+    assert!(!out.join("p").exists());
+}
+
+#[test]
+fn zip_names_that_are_absolute_or_climb_are_refused() {
+    expect_zip_refused(&[("/etc/x", K::File(b"x"))], "not a relative path");
+    expect_zip_refused(
+        &[("p/", K::Dir), ("p/../x", K::File(b"x"))],
+        "unsafe component",
+    );
+}
+
+#[test]
+fn a_zip_symlink_that_leaves_the_tree_is_only_a_file_holding_its_target() {
+    // Nothing is linked, so nothing can leave the tree.
+    let bytes = raw_zip(&[
+        ("p/", K::Dir),
+        ("p/a/", K::Dir),
+        ("p/a/l", K::Link("../../../etc/passwd")),
+    ]);
+    let (dir, result) = run(&bytes, Format::Zip, LIMITS);
+    result.unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("out/a/l")).unwrap(),
+        b"../../../etc/passwd"
+    );
+}
+
+#[test]
+fn a_zip_with_too_many_entries_or_bytes_stops() {
+    let bytes = raw_zip(&[
+        ("p/", K::Dir),
+        ("p/a", K::File(b"a")),
+        ("p/b", K::File(b"b")),
+    ]);
+    let (_dir, result) = run(
+        &bytes,
+        Format::Zip,
+        Limits {
+            max_entries: 2,
+            ..LIMITS
+        },
+    );
+    assert!(result.unwrap_err().contains("more than 2 entries"));
+    let bytes = raw_zip(&[("p/", K::Dir), ("p/a", K::File(b"12345"))]);
+    let (_dir, result) = run(
+        &bytes,
+        Format::Zip,
+        Limits {
+            max_bytes: 4,
+            ..LIMITS
+        },
+    );
+    assert!(result.unwrap_err().contains("bytes of files"));
+}
+
+#[test]
+fn a_truncated_or_corrupt_zip_is_refused() {
+    let bytes = include_bytes!("testdata/zig-pkg-1.0.zip");
+    let (_dir, result) = run(&bytes[..bytes.len() - 30], Format::Zip, LIMITS);
+    assert!(result.is_err());
+    let mut corrupt = bytes.to_vec();
+    let mid = corrupt.len() / 3;
+    corrupt[mid] ^= 0xff;
+    let (_dir, result) = run(&corrupt, Format::Zip, LIMITS);
+    assert!(result.is_err());
+}
+
+#[test]
+fn an_entry_expanding_more_than_deflate_can_is_refused() {
+    // Deflate expands at most about 1032 to 1, so 1 MiB from 10 bytes is not
+    // a real deflate stream of a file.
+    assert!(!zip_archive::ratio_ok(1 << 20, 10));
+    assert!(zip_archive::ratio_ok(10 << 20, (10 << 20) / 1032));
 }
