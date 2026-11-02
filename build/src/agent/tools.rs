@@ -224,6 +224,9 @@ pub(super) fn turn_denied_tools(
             denied.push(format!("{tool}({p}/*.changes)"));
         }
     }
+    if let Some(checkout) = checkout {
+        denied.extend(metadata_denied_tools(checkout));
+    }
     denied.extend(rpm_denied_tools());
     denied.extend(quilt_denied_tools(workspace));
     denied.extend(patch_denied_tools(workspace));
@@ -236,6 +239,26 @@ pub(super) fn turn_denied_tools(
         edit_bytes_command().as_deref(),
     ));
     denied.join(",")
+}
+
+/// The version-control metadata of the checkout: osc's `.osc` (`_apiurl` names
+/// the API server, with the user's credentials, and `_files` the tracked names)
+/// and git's `.git` (a `gitdir:` file, or a config with `core.fsmonitor` or
+/// `diff.external`, runs code when git runs in the checkout). The turn reads
+/// them (the grants of [`turn_allowed_tools`] cover the checkout) but must not
+/// write them: a rewritten file would redirect the pipeline's next `osc` or
+/// `git` call. Denied for Edit, Write and NotebookEdit, the directory and
+/// everything under it, anchored to the checkout path the grants use.
+fn metadata_denied_tools(checkout: &std::path::Path) -> Vec<String> {
+    let p = permission_path(checkout);
+    let mut out = Vec::new();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        for dir in [".osc", ".git"] {
+            out.push(format!("{tool}({p}/{dir})"));
+            out.push(format!("{tool}({p}/{dir}/**)"));
+        }
+    }
+    out
 }
 
 /// The directories the host file's deny rules cover: the config directory, and

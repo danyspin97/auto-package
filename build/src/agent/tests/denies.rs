@@ -318,3 +318,56 @@ fn a_linked_host_file_also_denies_the_directory_it_points_to() {
     let p = permission_path(&std::fs::canonicalize(&dotfiles).unwrap());
     assert!(rules.contains(&format!("Write({p}/**)")), "{rules:?}");
 }
+
+#[test]
+fn checkout_osc_and_git_metadata_is_denied_for_every_write_tool() {
+    // The four entries per write tool: `.osc` and `.git`, each as the
+    // directory itself and as everything under it. The rules are built from
+    // the checkout path the grants use (the canonical one, `permission_path`).
+    let ws = std::path::Path::new("/srv/ws");
+    let co = std::path::Path::new("/srv/ws/checkout");
+    let denied = turn_denied_tools(ws, Some(co));
+    let list: Vec<&str> = denied.split(',').collect();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        for dir in [".osc", ".git"] {
+            for rule in [
+                format!("{tool}(//srv/ws/checkout/{dir})"),
+                format!("{tool}(//srv/ws/checkout/{dir}/**)"),
+            ] {
+                assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+            }
+        }
+    }
+    // The grants still reach the checkout: the deny is what keeps the
+    // metadata out, not a missing grant.
+    let tools = turn_allowed_tools(Task::FixAfterBuild, ws, Some(co));
+    assert!(tools.contains("Edit(//srv/ws/checkout/**)"), "{tools}");
+}
+
+#[cfg(unix)]
+#[test]
+fn checkout_metadata_denies_follow_the_canonical_checkout_path() {
+    // The checkout reached through a symlink: the grants and the denies name
+    // the real directory, so the rules cannot be sidestepped by the link.
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real/pkg");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let ws = root.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let denied = turn_denied_tools(&ws, Some(&link));
+    let canonical = permission_path(&std::fs::canonicalize(&real).unwrap());
+    assert!(
+        denied.contains(&format!("Edit({canonical}/.osc/**)")),
+        "{denied}"
+    );
+    assert!(
+        denied.contains(&format!("Write({canonical}/.git)")),
+        "{denied}"
+    );
+    assert!(
+        !denied.contains(&format!("Edit({}/.osc", link.display())),
+        "{denied}"
+    );
+}
