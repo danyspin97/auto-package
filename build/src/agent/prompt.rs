@@ -43,6 +43,20 @@ const PRIORITIES: &str = r#"
    instead of reporting a hollow success.
 "#;
 
+/// The Bash grants of a checkout turn (`turn_allowed_tools`), and the refusals
+/// the sandbox gives everything else. Without it a turn learns them by trial.
+pub(super) const BASH_RULES: &str = r#"
+## Bash in this turn
+
+Bash is granted only for `ls <relative path>`, `osc status`, `osc cat <project>
+<package> <path>`, `readelf`, `zypper search|what-provides|info`, and, with
+`source/` as the directory, `quilt <subcommand>` and `patch --dry-run` (`cd source
+&& ` may prefix only those two). Anything else is refused, including `;`, `&&`,
+`|`, `>`, `$`, backticks, globs (`*`, `?`, `[`), `..`, `~`, an absolute path given
+to `ls`, and `cat`, `cp`, `grep`, `find`. Read a file with Read, search with Grep,
+and edit with Edit or quilt.
+"#;
+
 /// Workflow/header/cleanup boilerplate that, like [`CONVENTIONS`], is
 /// identical on every turn regardless of package, task, or attempt — kept as
 /// a separate constant (rather than folded into `CONVENTIONS` itself) only
@@ -269,7 +283,7 @@ pub(super) fn static_system_prompt() -> &'static str {
     // `--nvidia redist` is set once at startup, before the first turn.
     PROMPT.get_or_init(|| {
         let mut prompt = format!(
-            "{PRIORITIES}\n{}\n\n{STATIC_WORKFLOW}",
+            "{PRIORITIES}\n{}\n\n{BASH_RULES}\n{STATIC_WORKFLOW}",
             conventions_prompt()
         );
         if let Some(addendum) = redist_cuda_prompt() {

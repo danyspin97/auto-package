@@ -291,6 +291,25 @@ fn system_prompt_file_holds_the_static_prompt() {
     );
 }
 
+/// The Bash rules reach every turn, and name what the sandbox refuses.
+#[test]
+fn static_system_prompt_states_the_bash_grants() {
+    assert!(static_system_prompt().contains(BASH_RULES.trim()));
+    assert!(
+        BASH_RULES.len() < 600,
+        "Bash rules are {} bytes",
+        BASH_RULES.len()
+    );
+    for want in [
+        "`ls <relative path>`",
+        "`quilt <subcommand>`",
+        "`;`",
+        "globs",
+    ] {
+        assert!(BASH_RULES.contains(want), "Bash rules lack {want}");
+    }
+}
+
 #[test]
 fn static_system_prompt_carries_both_conventions_and_workflow() {
     let combined = static_system_prompt();
