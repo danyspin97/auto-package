@@ -159,3 +159,35 @@ fn a_warning_on_stderr_does_not_hide_the_error_on_stdout() {
     // A line both streams print is shown once.
     assert_eq!(ci_failure_detail("same\nother\n", "same\n"), "same\nother");
 }
+
+/// elfutils has two specs in one package. The main one is at the new version
+/// and its archive is named by its own `Name:`/`Version:`, not the sibling's
+/// (still at the old version). The new archive is published.
+#[test]
+fn a_source_of_the_second_spec_is_named_by_that_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = "Name: elfutils\nVersion: 0.197\nSource: https://sourceware.org/elfutils/ftp/%{version}/%{name}-%{version}.tar.bz2\n";
+    let sibling = "Name: elfutils-debuginfod\nVersion: 0.196\nSource: https://sourceware.org/elfutils/ftp/%{version}/elfutils-%{version}.tar.bz2\n";
+    for (name, body) in [
+        ("elfutils.spec", main),
+        ("elfutils-debuginfod.spec", sibling),
+        ("elfutils-0.197.tar.bz2", ""),
+    ] {
+        fs::write(dir.path().join(name), body).unwrap();
+    }
+    let plan = publish_plan(dir.path());
+    assert!(
+        plan.files.contains(&"elfutils-0.197.tar.bz2".to_string()),
+        "{plan:?}"
+    );
+    assert!(!plan.skipped.contains(&"elfutils-0.197.tar.bz2".to_string()));
+}
+
+#[test]
+fn each_spec_names_its_own_sources() {
+    let main = "Name: elfutils\nVersion: 0.197\nSource: %{name}-%{version}.tar.bz2\n";
+    let sibling =
+        "Name: elfutils-debuginfod\nVersion: 0.196\nSource: elfutils-%{version}.tar.bz2\n";
+    let names = all_spec_source_names(&[main.to_string(), sibling.to_string()]);
+    assert_eq!(names, ["elfutils-0.197.tar.bz2", "elfutils-0.196.tar.bz2"]);
+}

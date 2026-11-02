@@ -33,12 +33,13 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
         .collect();
     names.sort();
 
-    let spec_text: String = names
+    let spec_texts: Vec<String> = names
         .iter()
         .filter(|n| n.ends_with(".spec"))
         .filter_map(|n| fs::read_to_string(checkout_dir.join(n)).ok())
         .collect();
-    let sources = spec_source_names(&spec_text);
+    let spec_text: String = spec_texts.concat();
+    let sources = all_spec_source_names(&spec_texts);
     let series: Vec<String> = fs::read_to_string(checkout_dir.join("series"))
         .unwrap_or_default()
         .lines()
@@ -105,6 +106,17 @@ pub(super) fn spec_source_names(spec_text: &str) -> Vec<String> {
             let name = source.file();
             (!name.is_empty()).then(|| name.to_string())
         })
+        .collect()
+}
+
+/// [`spec_source_names`] of each spec of a package on its own. A spec expands
+/// its own `Name:` and `Version:`: a sibling spec at another version
+/// (elfutils-debuginfod next to elfutils) names its own archive, and reading the
+/// first spec's values for it would name none.
+pub(super) fn all_spec_source_names(spec_texts: &[String]) -> Vec<String> {
+    spec_texts
+        .iter()
+        .flat_map(|t| spec_source_names(t))
         .collect()
 }
 
@@ -381,7 +393,7 @@ pub(super) fn tracked_files(checkout_dir: &Path) -> Vec<String> {
 /// it `%prep` fails, and the commit would carry the deletion. Returns the names
 /// restored with `osc revert`.
 pub fn restore_named_sources(checkout_dir: &Path, emit: Emit<'_>) -> Vec<String> {
-    let spec_text: String = fs::read_dir(checkout_dir)
+    let spec_texts: Vec<String> = fs::read_dir(checkout_dir)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
@@ -390,7 +402,7 @@ pub fn restore_named_sources(checkout_dir: &Path, emit: Emit<'_>) -> Vec<String>
         .collect();
     // Only a name that is exact: a wildcard would also bring back the previous
     // release's archive, which a version update removes on purpose.
-    let sources: Vec<String> = spec_source_names(&spec_text)
+    let sources: Vec<String> = all_spec_source_names(&spec_texts)
         .into_iter()
         .filter(|n| !n.contains('%'))
         .collect();
