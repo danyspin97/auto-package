@@ -191,12 +191,16 @@ pub fn parse(url: &str) -> Option<ForgeUrl> {
             "wiki", "raw", "tags", "branches", "compare", "graphs", "settings", "actions",
             "security",
         ];
+        // SourceHut's download path (`~owner/repo/refs/download/...`) is the
+        // one place `refs` follows the repo; elsewhere it is a segment.
+        let sourcehut = host == "git.sr.ht";
         // Match whole path segments only, and never the first two (owner
         // and repo): `owner/actions-toolkit` or `owner/wiki` are repos.
         let mut cut = path.len();
         let mut offset: usize = 0;
         for (i, seg) in path.split('/').enumerate() {
-            if i >= 2 && GH_SUBPATHS.contains(&seg) {
+            let sourcehut_refs = sourcehut && seg == "refs";
+            if i >= 2 && (sourcehut_refs || GH_SUBPATHS.contains(&seg)) {
                 cut = offset.saturating_sub(1);
                 break;
             }
@@ -334,6 +338,23 @@ mod tests {
         // we compute the project path.
         let f = parse("https://gitlab.com/group/subgroup/project/-/tree/main").unwrap();
         assert_eq!(f.project_path, "group/subgroup/project");
+    }
+
+    #[test]
+    fn sourcehut_download_paths_are_trimmed_to_the_repo() {
+        let f =
+            parse("https://git.sr.ht/~emersion/kanshi/refs/download/v1.6.0/kanshi-1.6.0.tar.gz")
+                .unwrap();
+        assert_eq!(f.project_path, "~emersion/kanshi");
+        assert_eq!(f.repo_name, "kanshi");
+        assert_eq!(f.canonical_https(), "https://git.sr.ht/~emersion/kanshi");
+    }
+
+    #[test]
+    fn a_refs_segment_is_a_path_segment_outside_sourcehut() {
+        let f = parse("https://gitlab.com/group/refs/project").unwrap();
+        assert_eq!(f.project_path, "group/refs/project");
+        assert_eq!(f.repo_name, "project");
     }
 
     #[test]
