@@ -246,7 +246,9 @@ mod generate_stage;
 
 mod update_mode;
 
+mod patch_apply;
 mod patch_stage;
+use patch_apply::*;
 mod sdist_stage;
 #[cfg(test)]
 mod update_mode_tests;
