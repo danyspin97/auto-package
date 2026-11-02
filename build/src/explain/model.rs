@@ -51,6 +51,9 @@ pub struct RunInfo {
     /// The other-architecture results of the package that were not succeeded,
     /// as the `arch_check` event of the run says them.
     pub arch_checks: Vec<String>,
+    /// The zig vendor archives the run refreshed: one line per archive, then
+    /// one line per dependency it holds.
+    pub zig_vendor: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]

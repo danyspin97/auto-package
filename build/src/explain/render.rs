@@ -182,6 +182,9 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
             &ex.run_info.arch_checks.join("; "),
         );
     }
+    for line in &ex.run_info.zig_vendor {
+        o.kv("zig vendor", Kind::Dim, line);
+    }
     if ex.run.is_some() {
         let (txt, kind) = match (&ex.run_info.finished, ex.run_info.elapsed_ms) {
             (Some(f), Some(ms)) => (format!("{f} after {}", fmt_ms(ms)), kind_of_outcome(f)),

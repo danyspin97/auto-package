@@ -368,3 +368,24 @@ fn a_port_result_that_fails_in_factory_too_says_so() {
         ]
     );
 }
+
+#[test]
+fn the_zig_vendor_archive_a_run_refreshed_lists_its_dependencies() {
+    let t = fixture(&[
+        r#"{"event":"zig_vendor","step":2,"pkg":"foo","file":"vendor.tar.zst","changed":true,"deps":[{"name":"pixman","url":"https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz","hash":"pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX"}]}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(ex.run_info.zig_vendor.len(), 2);
+    assert_eq!(
+        ex.run_info.zig_vendor[0],
+        "vendor.tar.zst: rewritten, 1 dependency"
+    );
+    assert!(ex.run_info.zig_vendor[1].contains("pixman-0.3.0-LClMn"));
+    let text = plain(&render(&ex, 120));
+    assert!(text.contains("zig vendor"), "{text}");
+    assert!(text.contains("vendor.tar.zst: rewritten"), "{text}");
+    // A run without the event lists none.
+    let old = fixture(&[]);
+    let ex = explain(&query(old.path())).unwrap();
+    assert!(ex.run_info.zig_vendor.is_empty());
+}

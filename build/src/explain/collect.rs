@@ -114,6 +114,7 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         unreadable_lines: p.bad_lines,
         hosts_allowed: p.hosts_allowed.iter().map(host_allowed_line).collect(),
         arch_checks: p.arch_checks.iter().flat_map(arch_check_lines).collect(),
+        zig_vendor: p.zig_vendor.iter().flat_map(zig_vendor_lines).collect(),
     };
     // Attach the artifact directories of the attempts.
     for a in &mut p.attempts {
@@ -181,6 +182,8 @@ pub(super) struct Parsed {
     pub(super) hosts_allowed: Vec<Value>,
     /// `arch_check` events of the package, in order.
     pub(super) arch_checks: Vec<Value>,
+    /// `zig_vendor` events of the run, in order.
+    pub(super) zig_vendor: Vec<Value>,
     pub(super) selected: Vec<Value>,
     pub(super) attempts: Vec<Attempt>,
     pub(super) skipped: Vec<String>,
@@ -265,6 +268,33 @@ fn arch_check_lines(v: &Value) -> Vec<String> {
             line
         })
         .collect()
+}
+
+/// The lines of one `zig_vendor` event: the archive and whether it was
+/// rewritten, then each dependency with its URL and declared hash.
+fn zig_vendor_lines(v: &Value) -> Vec<String> {
+    let file = v["file"].as_str().unwrap_or("?");
+    let deps = v["deps"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let changed = if v["changed"].as_bool().unwrap_or(false) {
+        "rewritten"
+    } else {
+        "unchanged"
+    };
+    let noun = if deps.len() == 1 {
+        "dependency"
+    } else {
+        "dependencies"
+    };
+    let mut lines = vec![format!("{file}: {changed}, {} {noun}", deps.len())];
+    for d in deps {
+        lines.push(format!(
+            "  {} {} {}",
+            d["name"].as_str().unwrap_or("?"),
+            d["url"].as_str().unwrap_or("?"),
+            d["hash"].as_str().unwrap_or("?"),
+        ));
+    }
+    lines
 }
 
 /// A `host_allowed` event as the report shows it: `host (scope, from source)`.

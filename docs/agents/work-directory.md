@@ -94,6 +94,11 @@ user's `allowed-hosts` file (its `# reason` comments) is their record.
 `auto-package explain` lists the `host_allowed` hosts of the run it reads.
 Recipe: `jq -c 'select(.event=="host_allowed")' "$R"`.
 Recipe: `jq -c 'select(.event=="arch_check")' "$R"`.
+`zig_vendor` (`pkg`, `file`, `changed`, `deps`: `name`, `url`, `hash`) is the
+refresh of a zig vendor archive from the new source's `build.zig.zon`, written
+on an update; absent when the package has no such archive.
+`auto-package explain` lists the dependencies it names.
+Recipe: `jq -c 'select(.event=="zig_vendor")' "$R"`.
 A run with no `run_finished` was interrupted or is still going.
 
 Recipes (`R=$P/runs/<run>/run.jsonl`, `K=<pkg>`):

@@ -39,6 +39,7 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
             "run_finished" => p.run_finished = Some(v),
             "host_allowed" => p.hosts_allowed.push(v),
             "arch_check" => p.arch_checks.push(v),
+            "zig_vendor" => p.zig_vendor.push(v),
             "target_selected" => p.selected.push(v),
             "step_started" => p.attempts.push(Attempt {
                 step: step.unwrap_or(0),
