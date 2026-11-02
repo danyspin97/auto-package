@@ -369,7 +369,11 @@ impl DepResolver {
     }
 
     /// The binary names of a repository, listed once per run.
-    fn repository_names(&self, project: &str, repository: &str) -> Result<Vec<String>, String> {
+    pub(super) fn repository_names(
+        &self,
+        project: &str,
+        repository: &str,
+    ) -> Result<Vec<String>, String> {
         let key = listing_key(project, repository, &self.arch);
         let cached = self
             .listings

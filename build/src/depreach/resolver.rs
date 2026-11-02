@@ -31,6 +31,8 @@ pub struct DepResolver {
     pub(super) capability_fetch: Mutex<()>,
     /// The packages of the branch project, read once per run.
     pub(super) branch_packages: Mutex<Option<Result<HashSet<String>, String>>>,
+    /// Names a warning has been made about this run, so each is reported once.
+    pub(super) reported: Mutex<HashSet<String>>,
     /// Time the capability fetches of the run have taken so far, see
     /// [`DepResolver::charged`].
     capability_spent: Mutex<Duration>,
@@ -77,6 +79,7 @@ impl DepResolver {
             capability_fetch: Mutex::new(()),
             branch_packages: Mutex::new(None),
             capability_spent: Mutex::new(Duration::ZERO),
+            reported: Mutex::default(),
             clock: Box::new(move || origin.elapsed()),
             budget: CAPABILITY_BUDGET,
         }

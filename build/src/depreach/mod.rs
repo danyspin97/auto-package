@@ -27,6 +27,9 @@ use crate::osc::{self, PathAddition, ProjectInfo, PublishedBinary};
 use crate::proc::Emit;
 use crate::spec::BuildRequire;
 
+mod build_path;
+#[cfg(test)]
+mod build_path_tests;
 mod capability;
 #[cfg(test)]
 mod capability_tests;

@@ -198,15 +198,19 @@ pub(super) fn reach_dependencies(
     let mut not_published: Vec<&str> = Vec::new();
     for v in &verdicts {
         match &v.state {
-            DepState::OnlyUnusable { hits } => {
-                let projects: Vec<&str> = hits.iter().map(|h| h.project.as_str()).collect();
-                ctx.warn(format!(
-                    "{}: BuildRequires {} is only published in {}, which cannot be added as a \
-                     build path (a personal project, or no repository matching the branch's)",
-                    item.pkg,
-                    v.name,
-                    projects.join(", ")
-                ));
+            DepState::OnlyUnusable { .. } => {
+                // Published only where no path can point, which is not evidence
+                // that it is missing: warn when the build path's repositories do
+                // not list it either, once per name (D-20261102-34).
+                if matches!(resolver.in_build_path(&v.name), Ok(false))
+                    && resolver.first_report(&v.name)
+                {
+                    ctx.warn(format!(
+                        "{}: BuildRequires {} is not listed by any repository of the branch's \
+                         build path; the build will say if it is missing",
+                        item.pkg, v.name
+                    ));
+                }
             }
             DepState::NotPublished => not_published.push(&v.name),
             DepState::Unchecked => unchecked.push(v.name.clone()),
