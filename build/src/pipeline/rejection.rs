@@ -4,6 +4,7 @@
 use super::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::patch_check::*;
+use crate::pipeline::patch_rules::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::source_guard::*;
@@ -300,6 +301,20 @@ pub(super) fn accept_or_restore_reasoned(
                  The edit was rolled back.\n"
             ),
         );
+        return Err(problem);
+    }
+
+    // A patch the edit adds must have its header, its `PatchN:` comment and source-only
+    // changes (D-20261102-10); the rules are checked before the source loop guard.
+    if let Some(problem) = reject_patch_rules(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+    ) {
         return Err(problem);
     }
 

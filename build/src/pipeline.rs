@@ -314,9 +314,18 @@ mod apply_turn;
 mod network_fetch;
 #[cfg(test)]
 mod network_fetch_tests;
+mod patch_rules;
+mod patch_rules_content;
+#[cfg(test)]
+mod patch_rules_content_tests;
+mod patch_rules_spec;
+#[cfg(test)]
+mod patch_rules_tests;
 mod source_guard;
 #[cfg(test)]
 mod source_guard_tests;
+#[cfg(test)]
+mod turn_naming_tests;
 use apply_turn::*;
 mod keep_version;
 mod licence;

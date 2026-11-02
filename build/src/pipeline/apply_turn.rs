@@ -5,6 +5,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::npm_vendor::*;
+use crate::pipeline::patch_rules::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::render::*;
@@ -190,6 +191,8 @@ fn apply_turn_outcome_with(
             // already in the new sources; never because it does not apply.
             let unproven =
                 unproven_patch_removals(config, checkout_dir, spec_path, before, snapshot);
+            // A new patch must be named by the bullet.
+            let bullet_source = turn_bullet_source(outcome);
             let changed = if !unproven.is_empty() {
                 let why = reject_unproven_removal(
                     spec_path,
@@ -202,6 +205,21 @@ fn apply_turn_outcome_with(
                     &format!("Attempt {attempt} — {label}"),
                     &unproven,
                 );
+                if let Some(slot) = rejected_out.as_mut() {
+                    **slot = Some(why);
+                }
+                false
+            } else if let Some(why) = reject_unnamed_patches(
+                spec_path,
+                before,
+                snapshot,
+                step,
+                reporter,
+                notes_path.clone(),
+                &keep,
+                &bullet_source,
+                &format!("Attempt {attempt} — {label}"),
+            ) {
                 if let Some(slot) = rejected_out.as_mut() {
                     **slot = Some(why);
                 }
@@ -257,35 +275,7 @@ fn apply_turn_outcome_with(
                         message: format!("{rpm_name}: dropped the empty '{name}'"),
                     });
                 }
-                // One bullet per changelog line; the reasoning is prose, so only
-                // its first sentence becomes the bullet.
-                let source = if outcome.changelog.trim().is_empty() {
-                    outcome
-                        .reasoning
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                } else {
-                    outcome.changelog.clone()
-                };
-                warn_if_err(
-                    reporter,
-                    "adding the .changes entry for the agent's edit",
-                    osc::add_release_changes_entry(
-                        checkout_dir,
-                        &config.version,
-                        &without_own_version(
-                            &without_macros(
-                                &changes_message(&source),
-                                &config.pkg_name,
-                                &config.version,
-                            ),
-                            &config.pkg_name,
-                            &config.version,
-                        ),
-                        Emit::new(reporter, step.id),
-                    ),
-                );
+                add_edit_changes_entry(config, checkout_dir, reporter, step, &bullet_source);
             }
             Ok(if changed {
                 TurnEffect::Edited
@@ -531,6 +521,49 @@ pub(super) fn apply_turn_and_reset_with(
         *from_repo_archive = false;
     }
     Ok(effect)
+}
+
+/// The text a turn's `.changes` bullet is made of: the changelog it gave, or,
+/// when it gave none, its reasoning as one line.
+pub(super) fn turn_bullet_source(outcome: &crate::agent::TurnOutcome) -> String {
+    if outcome.changelog.trim().is_empty() {
+        outcome
+            .reasoning
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        outcome.changelog.clone()
+    }
+}
+
+/// Adds the `.changes` entry of an agent edit: the turn's bullet, with the macros
+/// and the version it wrote left out. The turn cannot run `osc vc` itself.
+pub(super) fn add_edit_changes_entry(
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    reporter: &dyn Reporter,
+    step: &StepDir,
+    bullet_source: &str,
+) {
+    warn_if_err(
+        reporter,
+        "adding the .changes entry for the agent's edit",
+        osc::add_release_changes_entry(
+            checkout_dir,
+            &config.version,
+            &without_own_version(
+                &without_macros(
+                    &changes_message(bullet_source),
+                    &config.pkg_name,
+                    &config.version,
+                ),
+                &config.pkg_name,
+                &config.version,
+            ),
+            Emit::new(reporter, step.id),
+        ),
+    );
 }
 
 /// What happened to the spec as a result of [`apply_turn_outcome`]. See its
