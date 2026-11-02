@@ -152,6 +152,25 @@ pub fn package_devel_project(project: &str, pkg: &str, emit: Emit<'_>) -> Option
         .and_then(|xml| parse_devel_project(&xml))
 }
 
+/// The `<scmsync>` URL in a package meta: the git repository OBS builds a
+/// git-hosted package from.
+pub fn parse_scmsync(meta_xml: &str) -> Option<String> {
+    let (_, rest) = meta_xml.split_once("<scmsync>")?;
+    let (url, _) = rest.split_once("</scmsync>")?;
+    let url = url.trim();
+    (!url.is_empty()).then(|| url.to_string())
+}
+
+/// The `<scmsync>` URL of `project/pkg`, when the package is git-hosted. A
+/// failed meta read is no answer.
+pub fn package_scmsync(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+    check_obs_name("project", project).ok()?;
+    check_obs_name("package", pkg).ok()?;
+    api_get(&format!("/source/{project}/{}/_meta", enc(pkg)), emit)
+        .ok()
+        .and_then(|xml| parse_scmsync(&xml))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum BranchFailure {
     AlreadyThere,
@@ -190,12 +209,15 @@ pub(super) fn classify_branch_failure(stderr: &str) -> BranchFailure {
 /// The result of a branch request that did not succeed, as the caller reports
 /// it: an already existing branch is reused, the other failures are errors.
 /// `path` is the request, named in the error for a failure osc does not explain.
+/// `git_hosted` is the `<scmsync>` URL of the package when it has one, which
+/// a 422 is named with, as it may be the reason.
 pub(super) fn branch_refusal(
     source: &str,
     pkg: &str,
     target_project: &str,
     path: &str,
     out: &Captured,
+    git_hosted: Option<&str>,
 ) -> Result<BranchResult, Error> {
     let why = first_line(&out.stderr);
     match classify_branch_failure(&out.stderr) {
@@ -211,11 +233,16 @@ pub(super) fn branch_refusal(
         ))),
         // osc prints only the status line for 422, not OBS's reason; the body
         // is printed when osc runs with its debug option.
-        BranchFailure::Refused => Err(Error::NotActionable(format!(
-            "cannot branch {source}/{pkg} into {target_project}: OBS refused the request \
-             ({why}); osc does not print OBS's reason for this status. To see it, run the \
-             same `osc branch` with `-d`, which prints the response body"
-        ))),
+        BranchFailure::Refused => {
+            let git = git_hosted.map_or(String::new(), |url| {
+                format!("; the package is git-hosted (<scmsync> {url}), which may be why")
+            });
+            Err(Error::NotActionable(format!(
+                "cannot branch {source}/{pkg} into {target_project}: OBS refused the request \
+                 ({why}){git}. osc does not print OBS's reason for this status. To see it, \
+                 run the same `osc branch` with `-d`, which prints the response body"
+            )))
+        }
         BranchFailure::Other => Err(Error::OscFailed {
             cmd: format!("api -X POST {path}"),
             code: out.code,
@@ -295,5 +322,16 @@ pub fn branch_package_at(
             target_project,
         )));
     }
-    branch_refusal(source, pkg, target_project, &path, &out)
+    // The meta is read only for the refusal, to name a git-hosted package.
+    let git_hosted = (classify_branch_failure(&out.stderr) == BranchFailure::Refused)
+        .then(|| package_scmsync(source, pkg, emit))
+        .flatten();
+    branch_refusal(
+        source,
+        pkg,
+        target_project,
+        &path,
+        &out,
+        git_hosted.as_deref(),
+    )
 }
