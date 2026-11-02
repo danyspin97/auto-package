@@ -22,6 +22,8 @@ mod tree_tests;
 #[cfg(test)]
 mod unpack_meta_tests;
 #[cfg(test)]
+mod unpack_root_tests;
+#[cfg(test)]
 mod unpack_tests;
 #[cfg(test)]
 mod vendor_tar_tests;

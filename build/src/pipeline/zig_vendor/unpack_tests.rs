@@ -122,15 +122,71 @@ fn absolute_and_climbing_names_are_refused() {
 }
 
 #[test]
-fn a_top_level_file_is_refused() {
-    expect_refused(&[("readme", K::File(b"x"))], "is not a directory");
+fn a_top_level_file_makes_the_top_level_the_root() {
+    let bytes = tar_gz(&[
+        ("readme", K::File(b"r")),
+        ("p/", K::Dir),
+        ("p/a", K::File(b"a")),
+    ]);
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    result.unwrap();
+    let out = dir.path().join("out");
+    assert_eq!(std::fs::read(out.join("readme")).unwrap(), b"r");
+    assert_eq!(std::fs::read(out.join("p/a")).unwrap(), b"a");
 }
 
 #[test]
-fn a_second_top_level_directory_is_refused() {
+fn a_second_top_level_directory_makes_the_top_level_the_root() {
+    let bytes = tar_gz(&[("a/", K::Dir), ("a/x", K::File(b"x")), ("b/", K::Dir)]);
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    result.unwrap();
+    let out = dir.path().join("out");
+    assert_eq!(std::fs::read(out.join("a/x")).unwrap(), b"x");
+    assert!(out.join("b").is_dir());
+}
+
+#[test]
+fn a_single_top_level_link_is_not_taken_as_the_root() {
+    let bytes = tar_gz(&[
+        ("real/", K::Dir),
+        ("real/a", K::File(b"a")),
+        ("top", K::Link("real")),
+    ]);
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    result.unwrap();
+    let out = dir.path().join("out");
+    assert_eq!(std::fs::read(out.join("real/a")).unwrap(), b"a");
+    assert_eq!(
+        std::fs::read_link(out.join("top")).unwrap(),
+        Path::new("real")
+    );
+}
+
+#[test]
+fn a_link_out_of_a_single_top_directory_is_refused() {
     expect_refused(
-        &[("a/", K::Dir), ("b/", K::Dir)],
-        "more than one top-level directory",
+        &[
+            ("p/", K::Dir),
+            ("p/a/", K::Dir),
+            ("p/a/l", K::Link("../../x")),
+        ],
+        "outside the tree",
+    );
+}
+
+#[test]
+fn a_link_out_of_the_top_is_kept_when_the_top_is_not_the_root() {
+    let bytes = tar_gz(&[
+        ("p/", K::Dir),
+        ("p/a/", K::Dir),
+        ("p/a/l", K::Link("../../x")),
+        ("README", K::File(b"r")),
+    ]);
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    result.unwrap();
+    assert_eq!(
+        std::fs::read_link(dir.path().join("out/p/a/l")).unwrap(),
+        Path::new("../../x")
     );
 }
 
@@ -237,10 +293,16 @@ fn an_existing_destination_is_refused() {
 }
 
 #[test]
-fn an_empty_archive_is_refused() {
+fn an_empty_archive_unpacks_to_an_empty_root_as_zig_does() {
     let bytes = tar_gz(&[]);
-    let (_dir, result) = run(&bytes, Format::TarGz, LIMITS);
-    assert!(result.unwrap_err().contains("empty"));
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    result.unwrap();
+    assert!(
+        std::fs::read_dir(dir.path().join("out"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]

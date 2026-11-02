@@ -1,11 +1,16 @@
 //! Unpacks a dependency archive into a directory, and refuses what the
 //! vendoring step must not write: absolute or climbing paths, links that leave
-//! the tree or pass through another link, hard links, devices and fifos, a
-//! second top-level directory, and anything over the limits.
+//! the tree or pass through another link, hard links, devices and fifos, and
+//! anything over the limits.
 //!
-//! The archive's single top-level directory is stripped, so the files land
-//! directly in `dest`, as zig stores a package.
+//! The root is chosen as zig chooses it: when every entry is under one name
+//! and that name is a directory, the root is that directory, and its name is
+//! dropped. Otherwise the archive's top level is the root, so a file at the top
+//! level or a second top-level directory is kept as it is. An archive whose
+//! entries are all under `./` is refused, as zig 0.15.2 cannot unpack it.
 
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -67,16 +72,83 @@ pub(super) const LIMITS: Limits = Limits {
 const PER_ENTRY_OVERHEAD: u64 = 1536;
 
 /// Unpack `src` into `dest`, which must not exist yet.
+///
+/// The entries are written into a staging directory first, since whether the
+/// archive has a single root directory is known only at its end. Links are
+/// checked again then, against the root that was chosen.
 pub(super) fn unpack(
     src: impl Read,
     format: Format,
     dest: &Path,
     limits: Limits,
 ) -> Result<(), String> {
-    if dest.exists() {
+    let stage = stage_of(dest);
+    if dest.exists() || stage.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
-    std::fs::create_dir_all(dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
+    std::fs::create_dir_all(&stage).map_err(|e| format!("creating {}: {e}", stage.display()))?;
+    let (links, roots) = write_entries(src, format, &stage, limits)?;
+    let top = single_top_dir(&stage, &roots)?;
+    check_links(&links, top.is_some())?;
+    match top {
+        Some(name) => {
+            std::fs::rename(stage.join(&name), dest)
+                .map_err(|e| format!("moving the root into {}: {e}", dest.display()))?;
+            std::fs::remove_dir(&stage).map_err(|e| format!("removing {}: {e}", stage.display()))
+        }
+        None => std::fs::rename(&stage, dest)
+            .map_err(|e| format!("moving {} into place: {e}", dest.display())),
+    }
+}
+
+/// The staging directory for `dest`: a sibling with a `.stage` suffix.
+fn stage_of(dest: &Path) -> PathBuf {
+    let mut name = dest.as_os_str().to_owned();
+    name.push(".stage");
+    PathBuf::from(name)
+}
+
+/// The root zig chooses: when every entry is under one name, `roots` holds
+/// that name alone, and it is stripped when it is a directory. `roots` is
+/// what the entries name as written, so `./x` is under `.`, and zig does
+/// not strip `.` (it cannot unpack such an archive at all).
+fn single_top_dir(stage: &Path, roots: &BTreeSet<OsString>) -> Result<Option<OsString>, String> {
+    let mut names = roots.iter();
+    let (Some(name), None) = (names.next(), names.next()) else {
+        return Ok(None);
+    };
+    if name == "." {
+        return Err(
+            "every entry is under ./, which zig 0.15.2 cannot unpack: name the entries without ./"
+                .to_string(),
+        );
+    }
+    match std::fs::symlink_metadata(stage.join(name)) {
+        Ok(meta) => Ok(meta.is_dir().then(|| name.clone())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("reading {}: {e}", stage.display())),
+    }
+}
+
+/// The first component of an entry's name as written: `.` for a name that
+/// starts with `./`, which is how zig names an entry under the archive's root.
+fn raw_root(path: &Path) -> Option<OsString> {
+    match path.components().next()? {
+        Component::Normal(name) => Some(name.to_owned()),
+        Component::CurDir => Some(OsString::from(".")),
+        _ => None,
+    }
+}
+
+/// Write every entry of the archive under `dest`, with the archive's own
+/// top-level names. Returns each link written, as `(link, target)`, and the
+/// root name of every entry, as [`single_top_dir`] reads them.
+fn write_entries(
+    src: impl Read,
+    format: Format,
+    dest: &Path,
+    limits: Limits,
+) -> Result<(Vec<(PathBuf, PathBuf)>, BTreeSet<OsString>), String> {
     let stream: Box<dyn Read> = match format {
         Format::TarGz => Box::new(flate2::read::GzDecoder::new(src)),
         // Zig reads one xz stream and stops at its end, so a second stream
@@ -92,7 +164,8 @@ pub(super) fn unpack(
         .max_bytes
         .saturating_add((limits.max_entries as u64).saturating_mul(PER_ENTRY_OVERHEAD));
     let mut ar = tar::Archive::new(guard::MetaGuard::new(stream).take(stream_cap));
-    let mut top: Option<std::ffi::OsString> = None;
+    let mut links = Vec::new();
+    let mut roots = BTreeSet::new();
     let mut bytes: u64 = 0;
     let entries = ar
         .entries()
@@ -112,16 +185,18 @@ pub(super) fn unpack(
         if kind.is_pax_global_extensions() {
             continue;
         }
-        let Some(rel) = strip_top(&path, &mut top)? else {
+        let rel = entry_path(&path)?;
+        if let Some(root) = raw_root(&path) {
+            roots.insert(root);
+        }
+        if rel.as_os_str().is_empty() {
             if kind.is_dir() {
                 continue;
             }
-            return Err(format!(
-                "the top-level entry {} is not a directory",
-                path.display()
-            ));
-        };
-        if rel.components().count() > limits.max_depth {
+            return Err(format!("the entry {} has no name", path.display()));
+        }
+        // The top-level name counts as one level, as in `max_depth`'s doc.
+        if rel.components().count() > limits.max_depth + 1 {
             return Err(format!(
                 "{} is deeper than {} levels",
                 rel.display(),
@@ -148,6 +223,7 @@ pub(super) fn unpack(
             ensure_dirs(dest, parent_of(&rel))?;
             symlink(&target, dest.join(&rel))
                 .map_err(|e| format!("creating the link {}: {e}", rel.display()))?;
+            links.push((rel, target));
         } else if kind.is_hard_link() {
             return Err(format!(
                 "{} is a hard link, which zig_vendor refuses",
@@ -160,40 +236,63 @@ pub(super) fn unpack(
             ));
         }
     }
-    if top.is_none() {
-        return Err("the archive is empty".to_string());
+    Ok((links, roots))
+}
+
+/// An entry's path as normal components. A leading `.` is skipped, as zig
+/// skips it; the root, a second `.` after a name, and `..` are refused.
+fn entry_path(path: &Path) -> Result<PathBuf, String> {
+    let shown = path.display();
+    let mut rel = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Normal(p) => rel.push(p),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("the entry {shown} is not a relative path"));
+            }
+            Component::CurDir => {}
+            _ => return Err(format!("the entry {shown} has an unsafe component")),
+        }
+    }
+    Ok(rel)
+}
+
+/// Refuse a link that leaves the root. With a single top-level directory the
+/// root is that directory, so `..` may not climb above it.
+fn check_links(links: &[(PathBuf, PathBuf)], under_top: bool) -> Result<(), String> {
+    let floor = usize::from(under_top);
+    for (rel, target) in links {
+        if leaves(rel, target, floor) {
+            return Err(format!(
+                "the link {} points outside the tree",
+                rel.display()
+            ));
+        }
     }
     Ok(())
 }
 
-/// The path below the archive's top-level directory, or `None` for the
-/// top-level directory itself. Every entry must share one top-level name.
-fn strip_top(path: &Path, top: &mut Option<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
-    let shown = path.display();
-    let mut parts = path.components();
-    let first = match parts.next() {
-        Some(Component::Normal(p)) => p,
-        _ => return Err(format!("the entry {shown} is not a relative path")),
-    };
-    match top {
-        None => *top = Some(first.to_owned()),
-        Some(t) if t.as_os_str() != first => {
-            return Err("the archive has more than one top-level directory".to_string());
-        }
-        Some(_) => {}
+/// Whether the link `target` at `rel` climbs above its first `floor`
+/// components. The check is lexical, from the link's own directory.
+fn leaves(rel: &Path, target: &Path, floor: usize) -> bool {
+    if target.as_os_str().is_empty() || target.has_root() {
+        return true;
     }
-    let mut rel = PathBuf::new();
-    for c in parts {
+    let mut depth = parent_of(rel).components().count();
+    for c in target.components() {
         match c {
-            Component::Normal(p) => rel.push(p),
-            _ => return Err(format!("the entry {shown} has an unsafe component")),
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth <= floor {
+                    return true;
+                }
+                depth -= 1;
+            }
+            _ => return true,
         }
     }
-    Ok(if rel.as_os_str().is_empty() {
-        None
-    } else {
-        Some(rel)
-    })
+    false
 }
 
 fn parent_of(rel: &Path) -> &Path {

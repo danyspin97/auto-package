@@ -13,3 +13,16 @@ fn a_git_archive_with_a_pax_global_header_has_the_hash_zig_gives_it() {
     let (_dir, result) = fetch(&fake, &root(&dep("x", url, GIT_ARCHIVE_HASH)));
     assert_eq!(result.unwrap()[0].declared, GIT_ARCHIVE_HASH);
 }
+
+/// An archive whose entries are named `./x` and `src2/x`: two roots, so zig
+/// strips neither. Its manifest's `.paths` keeps the same files as the git
+/// archive, so zig gave it the same hash.
+const DOT_MIXED: &[u8] = include_bytes!("testdata/dot-mixed-0.1.0.tar.gz");
+
+#[test]
+fn an_archive_with_dot_slash_names_has_the_hash_zig_gives_it() {
+    let url = "https://codeberg.org/x/x/archive/v0.1.0.tar.gz";
+    let fake = Fake::new(vec![(url, Route::Body(DOT_MIXED.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("x", url, GIT_ARCHIVE_HASH)));
+    assert_eq!(result.unwrap()[0].declared, GIT_ARCHIVE_HASH);
+}
