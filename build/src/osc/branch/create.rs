@@ -158,6 +158,8 @@ pub(super) enum BranchFailure {
     Locked,
     NotFound,
     NoPermission,
+    /// OBS answered 422: it understood the request and refused it.
+    Refused,
     Other,
 }
 
@@ -178,8 +180,47 @@ pub(super) fn classify_branch_failure(stderr: &str) -> BranchFailure {
         BranchFailure::NotFound
     } else if lower.contains("permission") || lower.contains("http error 403") {
         BranchFailure::NoPermission
+    } else if http_status(stderr) == Some(422) {
+        BranchFailure::Refused
     } else {
         BranchFailure::Other
+    }
+}
+
+/// The result of a branch request that did not succeed, as the caller reports
+/// it: an already existing branch is reused, the other failures are errors.
+/// `path` is the request, named in the error for a failure osc does not explain.
+pub(super) fn branch_refusal(
+    source: &str,
+    pkg: &str,
+    target_project: &str,
+    path: &str,
+    out: &Captured,
+) -> Result<BranchResult, Error> {
+    let why = first_line(&out.stderr);
+    match classify_branch_failure(&out.stderr) {
+        BranchFailure::AlreadyThere => Ok(BranchResult::AlreadyThere),
+        BranchFailure::Locked => Err(Error::NotActionable(format!(
+            "cannot branch {source}/{pkg}: {source} or {target_project} is locked ({why})"
+        ))),
+        BranchFailure::NotFound => Err(Error::NotActionable(format!(
+            "cannot branch {source}/{pkg}: it does not exist ({why})"
+        ))),
+        BranchFailure::NoPermission => Err(Error::NotActionable(format!(
+            "cannot branch {source}/{pkg} into {target_project}: permission denied ({why})"
+        ))),
+        // osc prints only the status line for 422, not OBS's reason; the body
+        // is printed when osc runs with its debug option.
+        BranchFailure::Refused => Err(Error::NotActionable(format!(
+            "cannot branch {source}/{pkg} into {target_project}: OBS refused the request \
+             ({why}); osc does not print OBS's reason for this status. To see it, run the \
+             same `osc branch` with `-d`, which prints the response body"
+        ))),
+        BranchFailure::Other => Err(Error::OscFailed {
+            cmd: format!("api -X POST {path}"),
+            code: out.code,
+            stderr: out.stderr.clone(),
+        }),
     }
 }
 
@@ -254,22 +295,5 @@ pub fn branch_package_at(
             target_project,
         )));
     }
-    let why = first_line(&out.stderr).to_string();
-    match classify_branch_failure(&out.stderr) {
-        BranchFailure::AlreadyThere => Ok(BranchResult::AlreadyThere),
-        BranchFailure::Locked => Err(Error::NotActionable(format!(
-            "cannot branch {source}/{pkg}: {source} or {target_project} is locked ({why})"
-        ))),
-        BranchFailure::NotFound => Err(Error::NotActionable(format!(
-            "cannot branch {source}/{pkg}: it does not exist ({why})"
-        ))),
-        BranchFailure::NoPermission => Err(Error::NotActionable(format!(
-            "cannot branch {source}/{pkg} into {target_project}: permission denied ({why})"
-        ))),
-        BranchFailure::Other => Err(Error::OscFailed {
-            cmd: format!("api -X POST {path}"),
-            code: out.code,
-            stderr: out.stderr,
-        }),
-    }
+    branch_refusal(source, pkg, target_project, &path, &out)
 }

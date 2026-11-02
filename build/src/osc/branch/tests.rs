@@ -201,6 +201,10 @@ fn branch_failures_are_told_apart() {
     assert_eq!(c("unknown_package"), NotFound);
     assert_eq!(c("create_project_no_permission"), NoPermission);
     assert_eq!(c("HTTP Error 500"), Other);
+    assert_eq!(
+        c("Server returned an error: HTTP Error 422: Unprocessable Entity"),
+        Refused
+    );
 }
 
 #[test]

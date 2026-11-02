@@ -33,4 +33,6 @@ mod package_enable_tests;
 #[cfg(test)]
 mod package_flags_tests;
 #[cfg(test)]
+mod refusal_tests;
+#[cfg(test)]
 mod tests;
