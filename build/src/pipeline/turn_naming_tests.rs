@@ -1,5 +1,6 @@
-//! The `.changes` name of a patch an agent edit adds, on the Edited arm (fix, review
-//! and dependency turns) that keeps the edit.
+//! The `.changes` name of a patch an agent edit adds, on the paths that keep an
+//! agent edit: the Edited arm (fix, review and dependency turns) and the gate of
+//! the arms that answer `NoChange` with the edit kept.
 
 use super::*;
 
@@ -142,6 +143,49 @@ fn a_fix_turn_that_names_the_new_patch_keeps_the_edit_and_writes_its_bullet() {
     );
     assert_eq!(effect, TurnEffect::Edited, "{rejected:?}");
     assert!(rejected.is_none());
+    assert!(
+        std::fs::read_to_string(&c.spec_path)
+            .unwrap()
+            .contains("Patch0: foo-fix.patch")
+    );
+    assert!(
+        changes(&c).contains("Add foo-fix.patch: gcc 15 build"),
+        "{}",
+        changes(&c)
+    );
+}
+
+#[test]
+fn a_gated_edit_that_adds_a_patch_is_named_before_it_is_kept() {
+    // The arms that answer NoChange keep their spec edit through this gate.
+    let gate = |c: &Case, bullet: &str| {
+        gate_turn_edit_without_accept(
+            &c.spec_path,
+            BEFORE,
+            Some(&c.snapshot),
+            &c.step,
+            &ap_core::sink::NULL_REPORTER,
+            "\n## test — edits kept\n",
+            c.checkout.join("notes.md"),
+            &[],
+            &c.config,
+            &c.checkout,
+            "PatchDependency - test",
+            bullet,
+        )
+    };
+    let c = case();
+    agent_adds_patch(&c, &format!("{HEADER}{DIFF}"));
+    assert!(
+        !gate(&c, "Fix the gcc 15 build"),
+        "an unnamed patch is refused"
+    );
+    assert_eq!(std::fs::read_to_string(&c.spec_path).unwrap(), BEFORE);
+    assert!(!c.checkout.join("foo-fix.patch").exists());
+
+    let c = case();
+    agent_adds_patch(&c, &format!("{HEADER}{DIFF}"));
+    assert!(gate(&c, "Add foo-fix.patch: gcc 15 build"));
     assert!(
         std::fs::read_to_string(&c.spec_path)
             .unwrap()

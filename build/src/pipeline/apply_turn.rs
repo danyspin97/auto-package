@@ -314,6 +314,10 @@ fn apply_turn_outcome_with(
                     "\n## npm vendoring deferral — edits kept\n",
                     notes_path.clone(),
                     &keep,
+                    config,
+                    checkout_dir,
+                    label,
+                    &turn_bullet_source(outcome),
                 );
                 if !accepted && let Some(msg) = repeated_spec_rejection(spec_path) {
                     return Err(format!("{label}: {msg}"));
@@ -424,6 +428,10 @@ fn apply_turn_outcome_with(
                         "\n## use_upstream_wheel refused — edits kept\n",
                         notes_path.clone(),
                         &keep,
+                        config,
+                        checkout_dir,
+                        label,
+                        &turn_bullet_source(outcome),
                     );
                     append_notes(
                         notes_path,

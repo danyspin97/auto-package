@@ -128,10 +128,12 @@ pub(super) fn reject_patch_escape(
 }
 
 /// The gate for a turn whose arm answers `NoChange` (the npm-vendor deferral and
-/// the refused wheel switch): a spec the turn edited goes through the full
-/// acceptance gate, an unchanged spec only through the patch-escape check. A
-/// rejection restores the snapshot keeping `keep`. Returns true when the turn's
-/// spec edit was accepted.
+/// the refused wheel switch): a spec the turn edited goes through the same checks
+/// as an edit the turn is kept for (the unproven patch removals, the `.changes`
+/// name of a new patch, then the acceptance gate), an unchanged spec only through
+/// the patch-escape check. A rejection restores the snapshot keeping `keep`.
+/// Returns true when the turn's spec edit was accepted.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gate_turn_edit_without_accept(
     spec_path: &Path,
     before: &str,
@@ -141,25 +143,62 @@ pub(super) fn gate_turn_edit_without_accept(
     notes_entry: &str,
     notes_path: PathBuf,
     keep: &[String],
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    label: &str,
+    bullet_source: &str,
 ) -> bool {
     let spec_edited = std::fs::read_to_string(spec_path).ok().as_deref() != Some(before);
-    if spec_edited {
-        accept_or_restore_with_snapshot(
-            spec_path,
-            before,
-            snapshot,
-            step,
-            reporter,
-            notes_entry,
-            notes_path,
-            keep,
-        )
-    } else {
-        reject_patch_escape(
+    if !spec_edited {
+        return reject_patch_escape(
             spec_path, before, snapshot, step, reporter, notes_path, keep,
         )
-        .is_none()
+        .is_none();
     }
+    let unproven = unproven_patch_removals(config, checkout_dir, spec_path, before, snapshot);
+    if !unproven.is_empty() {
+        reject_unproven_removal(
+            spec_path, before, snapshot, step, reporter, notes_path, keep, label, &unproven,
+        );
+        return false;
+    }
+    if reject_unnamed_patches(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+        bullet_source,
+        label,
+    )
+    .is_some()
+    {
+        return false;
+    }
+    if !accept_or_restore_with_snapshot(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_entry,
+        notes_path,
+        keep,
+    ) {
+        return false;
+    }
+    // A patch the edit adds is named in `.changes` as an edit the turn is kept for
+    // is: the bullet the turn gave, not one the agent wrote by hand.
+    let after = std::fs::read_to_string(spec_path).unwrap_or_default();
+    if !added_patches(spec_path, before, &after, snapshot).is_empty() {
+        if let Some(snap) = snapshot {
+            snap.restore_changes_files(reporter, Some(step));
+        }
+        add_edit_changes_entry(config, checkout_dir, reporter, step, bullet_source);
+    }
+    true
 }
 
 /// The acceptance gate for an agent edit. A full-checkout snapshot taken
