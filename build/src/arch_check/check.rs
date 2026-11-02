@@ -25,8 +25,11 @@ pub struct CheckRequest<'a> {
     /// Add the origin's architectures the branch lacks, before the check. OBS
     /// then schedules every package of the branch on them, so this is opt-in.
     pub add_arches: bool,
+    /// The ports to add to the branch (see `ports`), and enable for the
+    /// package once they are there. Empty for none.
+    pub ports: Vec<Port>,
     /// The branch is only read here (the source of an in-place update): no
-    /// architecture is added to it, whatever `add_arches` says.
+    /// architecture or port is added to it, whatever the other fields say.
     pub read_only: bool,
     /// The total wait for the other architectures.
     pub bound: Duration,
@@ -41,7 +44,7 @@ pub struct CheckRequest<'a> {
 #[derive(Debug, Default)]
 pub struct CheckOutcome {
     pub rows: Vec<ArchRow>,
-    pub added: Vec<ArchAddition>,
+    pub added: Vec<MetaEdit>,
     pub notes: Vec<String>,
     /// Every architecture of the branch, but the primary, was checked and
     /// waited for. Only then is the package's build status the whole story.
@@ -57,7 +60,8 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
     obs: &O,
     req: &CheckRequest<'_>,
 ) -> Result<CheckOutcome, String> {
-    if req.add_arches && !req.read_only {
+    let writes = req.add_arches || !req.ports.is_empty();
+    if writes && !req.read_only {
         // Refused before any OBS read: only a home: project is ever written.
         ensure_branch_project(req.branch)?;
     }
@@ -66,44 +70,76 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
         .ok_or_else(|| format!("the origin project {} does not exist", req.origin))?;
     let origin = parse_project_info(&origin_xml);
     let mut notes: Vec<String> = Vec::new();
-    let mut added = Vec::new();
-    if req.add_arches && req.read_only {
-        notes.push("the branch is only read here: no architecture is added to it".to_string());
-    } else if req.add_arches {
+    let mut added: Vec<MetaEdit> = Vec::new();
+    if writes && req.read_only {
+        notes.push(
+            "the branch is only read here: no architecture or port is added to it".to_string(),
+        );
+    } else if writes {
         added = edit_branch_meta(
             obs,
             req.branch,
-            |branch| plan_additions(branch, &origin, req.wanted),
-            |adds| {
-                for a in adds {
-                    (req.say)(format!(
-                        "adding arch {} to repository {} of {}: OBS will schedule every package of the branch on it",
-                        a.arch, a.repository, req.branch
-                    ));
+            |branch| {
+                let mut edits: Vec<MetaEdit> = if req.add_arches {
+                    plan_additions(branch, &origin, req.wanted)
+                        .into_iter()
+                        .map(MetaEdit::Arch)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                edits.extend(req.ports.iter().map(|p| MetaEdit::Port(*p)));
+                edits
+            },
+            |edits| {
+                for e in edits {
+                    (req.say)(e.describe(req.branch));
                 }
             },
         )?;
-        notes.extend(
-            added
-                .iter()
-                .map(|a| format!("added {} to {}/{}", a.arch, req.branch, a.repository)),
-        );
+        notes.extend(added.iter().map(|e| match e {
+            MetaEdit::Arch(a) => format!("added {} to {}/{}", a.arch, req.branch, a.repository),
+            MetaEdit::Port(p) => format!("added {} to {}", p.repo, req.branch),
+        }));
     }
+    let arch_added: Vec<ArchAddition> = added
+        .iter()
+        .filter_map(|e| match e {
+            MetaEdit::Arch(a) => Some(a.clone()),
+            MetaEdit::Port(_) => None,
+        })
+        .collect();
     let branch_xml = obs
         .project_meta(req.branch)?
         .ok_or_else(|| format!("the branch project {} does not exist", req.branch))?;
     let branch = parse_project_info(&branch_xml);
+    if !req.ports.is_empty() && !req.read_only {
+        // After the ports are in the branch, and before the results are read.
+        let repos: Vec<&str> = req.ports.iter().map(|p| p.repo).collect();
+        if let Err(e) = obs.enable_repositories(req.branch, req.pkg, &repos) {
+            notes.push(format!(
+                "could not enable {} for {}: its port results are not checked: {e}",
+                repos.join(", "),
+                req.pkg
+            ));
+        }
+    }
 
-    let keys: Vec<Key> = check_set(&branch, &origin, &added, req.wanted)
+    let keys: Vec<Key> = check_set(&branch, &origin, &arch_added, req.wanted)
         .into_iter()
         .filter(|(r, a)| (r.as_str(), a.as_str()) != req.primary)
         .collect();
-    let covered = branch.repositories.iter().all(|repo| {
-        repo.arches.iter().all(|arch| {
-            (repo.name.as_str(), arch.as_str()) == req.primary
-                || keys.iter().any(|(r, a)| *r == repo.name && a == arch)
-        })
-    });
+    // A port's result does not gate the submit, so the ports are not counted.
+    let covered = branch
+        .repositories
+        .iter()
+        .filter(|repo| !is_port_repo(&repo.name))
+        .all(|repo| {
+            repo.arches.iter().all(|arch| {
+                (repo.name.as_str(), arch.as_str()) == req.primary
+                    || keys.iter().any(|(r, a)| *r == repo.name && a == arch)
+            })
+        });
     if keys.is_empty() {
         return Ok(CheckOutcome {
             rows: Vec::new(),

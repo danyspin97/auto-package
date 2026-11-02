@@ -1,7 +1,7 @@
 //! The one write the arch check makes: adding architectures to repositories
 //! of the user's own branch project, under the project-meta lock.
 
-use super::{ArchAddition, ArchObs};
+use super::{ArchAddition, ArchObs, Port, add_port_to_meta};
 use crate::osc::{ProjectInfo, lock_project_meta, parse_project_info, repository_elements};
 
 /// Refuse any project but a `home:` one. Only the branch project, which the
@@ -83,17 +83,63 @@ fn line_indent(xml: &str, pos: usize) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
 
+/// One change to the branch project's meta: an architecture added to a
+/// repository, or a port's repository added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaEdit {
+    Arch(ArchAddition),
+    Port(Port),
+}
+
+impl MetaEdit {
+    /// What the change does, for the user, before it is written.
+    pub fn describe(&self, branch: &str) -> String {
+        match self {
+            MetaEdit::Arch(a) => format!(
+                "adding arch {} to repository {} of {branch}: OBS will schedule every package of the branch on it",
+                a.arch, a.repository
+            ),
+            MetaEdit::Port(p) => format!(
+                "adding repository {} ({} from {}) to {branch}: a package builds there only once it enables it",
+                p.repo, p.arch, p.project
+            ),
+        }
+    }
+}
+
+/// Apply `edits` to a project meta in order. Returns the new XML and the edits
+/// that changed it; an edit already in place changes nothing.
+pub fn apply_edits(xml: &str, edits: &[MetaEdit]) -> Result<(String, Vec<MetaEdit>), String> {
+    let mut xml = xml.to_string();
+    let mut made = Vec::new();
+    for edit in edits {
+        let (next, changed) = match edit {
+            MetaEdit::Arch(a) => {
+                let (next, made_arches) = add_arches_to_meta(&xml, std::slice::from_ref(a))?;
+                let changed = !made_arches.is_empty();
+                (next, changed)
+            }
+            MetaEdit::Port(p) => add_port_to_meta(&xml, p)?,
+        };
+        if changed {
+            xml = next;
+            made.push(edit.clone());
+        }
+    }
+    Ok((xml, made))
+}
+
 /// Edit the branch project `project` on OBS. Under the project-meta lock the
-/// meta is read and parsed, `plan` picks the additions from that fresh copy,
-/// `announce` is told what is about to be added, and the meta is written back
+/// meta is read and parsed, `plan` picks the changes from that fresh copy,
+/// `announce` is told what is about to be changed, and the meta is written back
 /// only when something changed. A project that is not a `home:` one is refused
-/// before any OBS call. Returns the additions made.
+/// before any OBS call. Returns the changes made.
 pub fn edit_branch_meta<O: ArchObs + ?Sized>(
     obs: &O,
     project: &str,
-    plan: impl FnOnce(&ProjectInfo) -> Vec<ArchAddition>,
-    announce: impl FnOnce(&[ArchAddition]),
-) -> Result<Vec<ArchAddition>, String> {
+    plan: impl FnOnce(&ProjectInfo) -> Vec<MetaEdit>,
+    announce: impl FnOnce(&[MetaEdit]),
+) -> Result<Vec<MetaEdit>, String> {
     ensure_branch_project(project)?;
     let _lock = lock_project_meta();
     let xml = obs
@@ -103,7 +149,7 @@ pub fn edit_branch_meta<O: ArchObs + ?Sized>(
     if planned.is_empty() {
         return Ok(Vec::new());
     }
-    let (edited, made) = add_arches_to_meta(&xml, &planned)?;
+    let (edited, made) = apply_edits(&xml, &planned)?;
     if made.is_empty() {
         return Ok(made);
     }

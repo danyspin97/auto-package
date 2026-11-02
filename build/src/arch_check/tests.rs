@@ -33,6 +33,12 @@ fn an_unknown_or_empty_arch_list_is_refused() {
     let err = parse_arch_list("x86_64,mips").unwrap_err();
     assert!(err.contains("mips") && err.contains("s390x"), "{err}");
     assert!(parse_arch_list(" , ").is_err());
+    assert!(
+        parse_arch_list("armv7l")
+            .unwrap_err()
+            .contains("no Tumbleweed armv7l in OBS")
+    );
+    assert_eq!(parse_arch_list("s390x,ppc64le,riscv64").unwrap().len(), 3);
 }
 
 #[test]
@@ -205,6 +211,10 @@ impl ArchObs for FakeMeta {
     ) -> Result<(), String> {
         Err("the meta fake has no logs".to_string())
     }
+
+    fn enable_repositories(&self, _: &str, _: &str, _: &[&str]) -> Result<bool, String> {
+        Err("the meta fake enables nothing".to_string())
+    }
 }
 
 #[test]
@@ -218,7 +228,7 @@ fn only_a_home_project_may_be_written_to() {
     let err = edit_branch_meta(
         &fake,
         "openSUSE:Factory",
-        |_| vec![add("ports", "s390x")],
+        |_| vec![MetaEdit::Arch(add("ports", "s390x"))],
         |_| {},
     )
     .unwrap_err();
@@ -242,18 +252,23 @@ fn the_edit_reads_announces_then_writes_under_the_lock() {
         "home:u:p",
         |info| {
             assert_eq!(repo_arches(info, "ports"), vec!["x86_64"]);
-            vec![add("ports", "s390x")]
+            vec![MetaEdit::Arch(add("ports", "s390x"))]
         },
         |adds| {
             announced
                 .borrow_mut()
-                .extend(adds.iter().map(|a| format!("{}/{}", a.repository, a.arch)));
+                .extend(adds.iter().map(|a| a.describe("home:u:p")));
             fake.events.borrow_mut().push("announce".to_string());
         },
     )
     .unwrap();
-    assert_eq!(made, vec![add("ports", "s390x")]);
-    assert_eq!(*announced.borrow(), ["ports/s390x"]);
+    assert_eq!(made, vec![MetaEdit::Arch(add("ports", "s390x"))]);
+    assert_eq!(
+        *announced.borrow(),
+        [
+            "adding arch s390x to repository ports of home:u:p: OBS will schedule every package of the branch on it"
+        ]
+    );
     assert_eq!(*fake.events.borrow(), ["read", "announce", "write"]);
     assert_eq!(
         repo_arches(&parse_project_info(&fake.xml.borrow()), "ports"),
@@ -264,8 +279,13 @@ fn the_edit_reads_announces_then_writes_under_the_lock() {
 #[test]
 fn a_second_edit_reads_then_changes_nothing() {
     let fake = FakeMeta::with(&repo_xml("ports", &["x86_64", "s390x"]));
-    let made =
-        edit_branch_meta(&fake, "home:u:p", |_| vec![add("ports", "s390x")], |_| {}).unwrap();
+    let made = edit_branch_meta(
+        &fake,
+        "home:u:p",
+        |_| vec![MetaEdit::Arch(add("ports", "s390x"))],
+        |_| {},
+    )
+    .unwrap();
     assert!(made.is_empty());
     assert_eq!(*fake.events.borrow(), ["read"]);
 }

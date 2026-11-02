@@ -5,8 +5,8 @@ use std::path::Path;
 
 use crate::obs_status::ResultEntry;
 use crate::osc::{
-    fetch_buildlog, get_package_results, get_package_results_if_present, get_project_meta,
-    set_project_meta,
+    enable_package_repositories, fetch_buildlog, get_package_results,
+    get_package_results_if_present, get_project_meta, set_project_meta,
 };
 use crate::proc::Emit;
 
@@ -35,6 +35,9 @@ pub trait ArchObs {
         arch: &str,
         path: &Path,
     ) -> Result<(), String>;
+    /// Enable `repos` for the package `project/pkg`; whether its meta changed.
+    fn enable_repositories(&self, project: &str, pkg: &str, repos: &[&str])
+    -> Result<bool, String>;
 }
 
 /// [`ArchObs`] over `osc`.
@@ -72,5 +75,14 @@ impl ArchObs for LiveArchObs<'_> {
         path: &Path,
     ) -> Result<(), String> {
         fetch_buildlog(project, pkg, repo, arch, path, self.emit).map_err(|e| e.to_string())
+    }
+
+    fn enable_repositories(
+        &self,
+        project: &str,
+        pkg: &str,
+        repos: &[&str],
+    ) -> Result<bool, String> {
+        enable_package_repositories(project, pkg, repos, self.emit).map_err(|e| e.to_string())
     }
 }

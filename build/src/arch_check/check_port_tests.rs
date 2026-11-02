@@ -35,6 +35,20 @@ mod ports_check {
     }
 
     #[test]
+    fn a_port_the_check_leaves_out_does_not_uncover_the_branch() {
+        let fake = fixture();
+        with_port(&fake);
+        let dir = tempfile::tempdir().unwrap();
+        let say = |_: String| {};
+        let only = vec!["x86_64".to_string()];
+        let mut req = request(dir.path(), &say, false, false);
+        req.wanted = Some(only.as_slice());
+        let out = check_other_arches(&fake, &req).unwrap();
+        assert!(out.rows.is_empty());
+        assert!(out.covered);
+    }
+
+    #[test]
     fn a_port_failure_factory_has_too_does_not_block() {
         let fake = fixture();
         with_port(&fake);
@@ -182,5 +196,102 @@ mod gate_ports {
         assert!(matches!(gate(&fake), GateVerdict::Pass { .. }));
         branch_with_port(&fake, "scheduled");
         assert!(matches!(gate(&fake), GateVerdict::Pass { .. }));
+    }
+}
+
+mod ports_edit {
+    use super::*;
+    use crate::osc::parse_project_info;
+
+    const PORT: &str = "openSUSE_Factory_zSystems";
+
+    fn zsystems_request<'a>(
+        log_dir: &'a Path,
+        say: &'a dyn Fn(String),
+        read_only: bool,
+    ) -> CheckRequest<'a> {
+        let mut req = request(log_dir, say, false, read_only);
+        req.ports = ports_wanted(Some(&["s390x".to_string()]));
+        req
+    }
+
+    fn index_of(events: &[String], prefix: &str) -> usize {
+        events
+            .iter()
+            .position(|e| e.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no {prefix} in {events:?}"))
+    }
+
+    #[test]
+    fn a_port_is_added_once_enabled_for_the_package_and_then_read() {
+        let fake = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let say = |m: String| fake.log(format!("say:{m}"));
+        set_results(&fake, BRANCH, vec![entry("p", PORT, "s390x", "succeeded")]);
+        let out = check_other_arches(&fake, &zsystems_request(dir.path(), &say, false)).unwrap();
+        assert_eq!(fake.writes(), [format!("write:{BRANCH}")]);
+        let branch = parse_project_info(&fake.metas.borrow()[BRANCH]);
+        assert_eq!(repo_arches(&branch, PORT), ["s390x"]);
+        assert!(fake.metas.borrow()[BRANCH].contains(&format!("<disable repository=\"{PORT}\"/>")));
+        let events = fake.events.borrow().clone();
+        let write = index_of(&events, "write:");
+        let enable = index_of(&events, &format!("enable:{BRANCH}:p:{PORT}"));
+        let read = index_of(&events, &format!("results:{BRANCH}:p"));
+        assert!(write < enable && enable < read, "{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.starts_with("say:adding repository")),
+            "{events:?}"
+        );
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0].state, ArchState::Succeeded);
+    }
+
+    #[test]
+    fn a_second_run_writes_nothing_more() {
+        let fake = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let say = |_: String| {};
+        set_results(&fake, BRANCH, vec![entry("p", PORT, "s390x", "succeeded")]);
+        check_other_arches(&fake, &zsystems_request(dir.path(), &say, false)).unwrap();
+        check_other_arches(&fake, &zsystems_request(dir.path(), &say, false)).unwrap();
+        assert_eq!(fake.writes().len(), 1, "{:?}", fake.events.borrow());
+    }
+
+    #[test]
+    fn a_read_only_check_neither_adds_nor_enables_a_port() {
+        let fake = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let say = |_: String| {};
+        let out = check_other_arches(&fake, &zsystems_request(dir.path(), &say, true)).unwrap();
+        assert!(fake.writes().is_empty());
+        assert!(
+            !fake
+                .events
+                .borrow()
+                .iter()
+                .any(|e| e.starts_with("enable:"))
+        );
+        assert!(
+            out.notes.iter().any(|n| n.contains("only read")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    #[test]
+    fn a_port_is_refused_for_a_project_that_is_not_home_before_any_read() {
+        let fake = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let say = |_: String| {};
+        let mut req = zsystems_request(dir.path(), &say, false);
+        req.branch = "devel:languages:rust";
+        assert!(check_other_arches(&fake, &req).is_err());
+        assert!(
+            fake.events.borrow().is_empty(),
+            "{:?}",
+            fake.events.borrow()
+        );
     }
 }

@@ -81,6 +81,16 @@ impl ArchObs for FakeObs {
         self.results(project, pkg).map(Some)
     }
 
+    fn enable_repositories(
+        &self,
+        project: &str,
+        pkg: &str,
+        repos: &[&str],
+    ) -> Result<bool, String> {
+        self.log(format!("enable:{project}:{pkg}:{}", repos.join(",")));
+        Ok(true)
+    }
+
     fn buildlog(
         &self,
         _project: &str,
@@ -163,6 +173,7 @@ pub(super) fn request<'a>(
         primary: ("standard", "x86_64"),
         wanted: None,
         add_arches,
+        ports: Vec::new(),
         read_only,
         bound: Duration::ZERO,
         log_dir,

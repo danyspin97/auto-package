@@ -2,7 +2,7 @@
 //! the check itself lives in `ap_build::arch_check`; this reports it.
 
 use super::*;
-use ap_build::arch_check::{self, ArchRow, CheckRequest, LiveArchObs};
+use ap_build::arch_check::{self, ArchRow, CheckRequest, LiveArchObs, Port};
 use ap_core::event::ArchCheckResult;
 
 /// The `--arches` list, validated, or `None` when it was not given.
@@ -11,6 +11,17 @@ pub(super) fn wanted_arches(a: &UpdateProjectArgs) -> Result<Option<Vec<String>>
         return Ok(None);
     }
     arch_check::parse_arch_list(&a.arches.join(",")).map(Some)
+}
+
+/// The ports the check uses: every port under `--ports`, and the port of each
+/// arch that `--arches` names (which implies it), narrowed to `wanted`.
+pub(super) fn ports_for(a: &UpdateProjectArgs, wanted: Option<&[String]>) -> Vec<Port> {
+    let named = wanted.is_some_and(|w| w.iter().any(|x| arch_check::port_for_arch(x).is_some()));
+    if a.ports || named {
+        arch_check::ports_wanted(wanted)
+    } else {
+        Vec::new()
+    }
 }
 
 /// Check the package `item` just built in `branch` on the other architectures.
@@ -46,6 +57,13 @@ pub(super) fn check_item(
             return;
         }
     };
+    let ports = ports_for(a, wanted.as_deref());
+    if !ports.is_empty() && item.origin != "openSUSE:Factory" {
+        ctx.say(format!(
+            "the ports build openSUSE:Factory's sources, not {}'s: {} is judged against Factory",
+            item.origin, item.pkg
+        ));
+    }
     let distro = crate::choose_distro(a.distro.as_deref(), branch, &a.arch);
     let log_dir = ctx.run_dir.path.join("arch-logs");
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
@@ -62,6 +80,7 @@ pub(super) fn check_item(
         // Adding an arch makes OBS schedule every package of the branch on it,
         // so it is done only for the arches asked for by name.
         add_arches: wanted.is_some(),
+        ports: ports.clone(),
         // An in-place update's source is only read: it is never written.
         read_only: a.in_place,
         bound: std::time::Duration::from_secs(a.arch_wait_minutes * 60),

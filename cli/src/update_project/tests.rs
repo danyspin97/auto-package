@@ -415,3 +415,20 @@ fn the_arches_flag_is_validated_and_the_rows_become_events() {
     assert_eq!(ev.detail.as_deref(), Some("boom"));
     assert!(ev.origin_fails);
 }
+
+#[test]
+fn the_ports_follow_the_flag_and_the_arches_named() {
+    use super::arch;
+    let mut a = args(&[]);
+    assert!(arch::ports_for(&a, None).is_empty());
+    a.ports = true;
+    assert_eq!(arch::ports_for(&a, None).len(), 3);
+    a.ports = false;
+    let s390x = vec!["s390x".to_string()];
+    assert_eq!(arch::ports_for(&a, Some(&s390x)).len(), 1);
+    let x86 = vec!["x86_64".to_string()];
+    assert!(arch::ports_for(&a, Some(&x86)).is_empty());
+    a.arches = vec!["armv7l".into()];
+    let err = arch::wanted_arches(&a).unwrap_err();
+    assert!(err.contains("no Tumbleweed armv7l in OBS"), "{err}");
+}

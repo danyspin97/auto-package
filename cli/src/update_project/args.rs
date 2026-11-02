@@ -154,10 +154,21 @@ pub struct UpdateProjectArgs {
 
     /// Check the other architectures given here (comma separated), and add the
     /// ones the branch lacks: OBS then schedules every package of the branch on
-    /// them. Names OBS knows only: x86_64, aarch64, armv7l, armv6l, i586,
-    /// ppc64le, s390x, riscv64, ppc64, ppc.
+    /// them. Names OBS knows, except armv7l, which cannot be checked: x86_64,
+    /// aarch64, armv6l, i586, ppc64le, s390x, riscv64, ppc64, ppc. The ports
+    /// (s390x, ppc64le, riscv64) come from the Factory ports, see `--ports`.
     #[arg(long, value_delimiter = ',', value_name = "ARCHES")]
     pub arches: Vec<String>,
+
+    /// Check the updated package on the Factory ports: s390x, ppc64le and
+    /// riscv64, which Factory itself does not build. Their repositories are
+    /// added to the branch once, and the package is enabled for them, so OBS
+    /// builds it there. A port's failure blocks the submit only when Factory
+    /// builds the package there. Results can take hours on s390x and riscv64;
+    /// a result still pending is shown as not final, and re-running `update`
+    /// later refreshes it.
+    #[arg(long, default_value_t = false, conflicts_with = "no_arch_check")]
+    pub ports: bool,
 
     /// The total time to wait for the other architectures' builds, in minutes.
     /// Builds still running after it are reported as still building.

@@ -28,6 +28,9 @@ pub fn parse_arch_list(list: &str) -> Result<Vec<String>, String> {
                 KNOWN_ARCHES.join(", ")
             ));
         }
+        if arch == "armv7l" {
+            return Err("armv7l cannot be checked: no Tumbleweed armv7l in OBS".to_string());
+        }
         if !out.iter().any(|a| a == arch) {
             out.push(arch.to_string());
         }

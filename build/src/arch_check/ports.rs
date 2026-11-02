@@ -58,6 +58,11 @@ pub fn baseline_key(repo: &str, arch: &str) -> (String, String) {
     }
 }
 
+/// The port that builds `arch`, if one does.
+pub fn port_for_arch(arch: &str) -> Option<&'static Port> {
+    PORTS.iter().find(|p| p.arch == arch)
+}
+
 /// The ports whose architecture is in `wanted` (every port when `None`).
 pub fn ports_wanted(wanted: Option<&[String]>) -> Vec<Port> {
     PORTS
