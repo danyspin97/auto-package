@@ -151,12 +151,28 @@ pub enum SkipReason {
     },
 }
 
+/// Whether a version carries a calendar date (`2020-11-13`): upstream
+/// numbers its releases by day, not by a number of the package's kind.
+pub(crate) fn is_dated(version: &str) -> bool {
+    version.as_bytes().windows(10).any(|w| {
+        let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+        digits(&w[..4]) && w[4] == b'-' && digits(&w[5..7]) && w[7] == b'-' && digits(&w[8..])
+    })
+}
+
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SkipReason::NoSpec => write!(f, "the package has no spec file"),
             SkipReason::ReadFailed(why) => write!(f, "the spec could not be read: {why}"),
             SkipReason::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
+            SkipReason::NotAnRpmVersion { latest } if is_dated(latest) => write!(
+                f,
+                "needs a maintainer: upstream's newest release ({latest}) is a date, which is \
+                 not a valid RPM Version: a date cannot be compared with the package's version. \
+                 A maintainer must choose the version to package and run update with \
+                 --to-version (no '-', spaces or slashes)"
+            ),
             SkipReason::NotAnRpmVersion { latest } => write!(
                 f,
                 "upstream's newest release ({latest}) is not a valid RPM Version: an RPM \

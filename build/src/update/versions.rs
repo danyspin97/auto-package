@@ -486,3 +486,25 @@ pub(super) fn a_dash_from_repology_is_refused_not_mapped() {
         c.decision
     );
 }
+
+/// An upstream that numbers its releases by date (`2020-11-13`) while the
+/// package keeps a number of its own is reported as a scheme to decide on.
+#[test]
+pub(super) fn dated_tags_against_a_numbered_package_need_a_maintainer() {
+    let spec = "Name: rootbar\nVersion: 0.221\nURL: https://github.com/o/rootbar\n\
+                Source0: https://github.com/o/rootbar/archive/%{version}.tar.gz\n";
+    let c = classify(
+        "rootbar",
+        &|_: &str| Ok(spec.to_string()),
+        &only_repo("2020-11-13"),
+    );
+    let Decision::Skipped(reason) = c.decision else {
+        panic!("a dated release must be skipped");
+    };
+    assert!(
+        reason
+            .to_string()
+            .starts_with("needs a maintainer: upstream's newest release (2020-11-13) is a date"),
+        "{reason}"
+    );
+}
