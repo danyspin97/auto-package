@@ -121,8 +121,17 @@ pub(super) fn is_series_copy_of(rpm_name: &str, name: &str) -> bool {
             .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Why a `latest` newer than the packaged version is not taken, when it is not:
-/// a package on a series (`fmt-9`, `mariadb-55`), or one pinned to its major
+/// What holds a package back from a `latest` newer than its packaged version.
+pub(super) enum Held {
+    /// The package is held to a series: only that series' newest release is
+    /// taken, and only a forge repository can say what that is.
+    Series(Vec<u64>),
+    /// The package is not taken at all; the reason says why.
+    Stop(SkipReason),
+}
+
+/// Why a `latest` newer than the packaged version is not taken as it is: a
+/// package on a series (`fmt-9`, `mariadb-55`), or one pinned to its major
 /// because its name is an old series of its spec's Name (`mariadb-55`) or a
 /// sibling is on a newer series. A plain package's jump of two majors, or into
 /// a series a sibling is on, is left to the maintainer.
@@ -132,26 +141,13 @@ pub(super) fn held_back<SpecLookup>(
     latest: &str,
     fetch_spec: &SpecLookup,
     project: &HashSet<String>,
-) -> Option<SkipReason>
+) -> Option<Held>
 where
     SpecLookup: Fn(&str) -> Result<String, ReadError>,
 {
     let packaged = header.version.as_str();
-    let other_series = |series: String| SkipReason::OtherSeries {
-        series,
-        packaged: packaged.to_string(),
-        latest: latest.to_string(),
-    };
     if let Some(series) = series_of(rpm_name, packaged) {
-        return (!in_series(latest, &series)).then(|| {
-            other_series(
-                series
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join("."),
-            )
-        });
+        return (!in_series(latest, &series)).then_some(Held::Series(series));
     }
     let own = major_key(packaged);
     if own.is_empty() {
@@ -165,23 +161,21 @@ where
         .iter()
         .find(|(_, v)| series_pair(v) == latest_pair && series_pair(v) != own_pair)
     {
-        return Some(SkipReason::NeedsMaintainer(format!(
+        return Some(Held::Stop(SkipReason::NeedsMaintainer(format!(
             "{latest} is on the series of {sibling} ({version}), which this package does not follow"
-        )));
+        ))));
     }
     let series_copy = is_series_copy_of(rpm_name, &header.name);
     let newer_sibling = related.iter().any(|(_, v)| series_pair(v) > own_pair);
     if series_copy || newer_sibling {
-        return (major_key(latest) != own)
-            .then(|| other_series(own.iter().map(u64::to_string).collect::<Vec<_>>().join(".")));
+        return (major_key(latest) != own).then_some(Held::Series(own));
     }
     // A plain package takes a jump of one major; two or more it leaves to the
     // maintainer.
     let first = |v: &str| version::leading_numbers(v).first().copied();
     match (first(packaged), first(latest)) {
-        (Some(from), Some(to)) if to >= from + 2 => Some(SkipReason::NeedsMaintainer(format!(
-            "{packaged} to {latest} is a jump of {} majors",
-            to - from
+        (Some(from), Some(to)) if to >= from + 2 => Some(Held::Stop(SkipReason::NeedsMaintainer(
+            format!("{packaged} to {latest} is a jump of {} majors", to - from),
         ))),
         _ => None,
     }

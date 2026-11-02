@@ -320,6 +320,11 @@ pub fn plan_one(
                     crate::upstream::latest_on_repology(n)
                 })
             };
+            let in_series = |u: &str, s: &[u64]| {
+                lookup(&format!("repo-series:{u}:{s:?}"), || {
+                    crate::sources::latest_release_in_series(u, s)
+                })
+            };
             let gem = |g: &str| {
                 lookup(&format!("rubygems:{g}"), || {
                     crate::upstream::latest_on_rubygems(g)
@@ -342,6 +347,7 @@ pub fn plan_one(
                 fetch_service: &fetch_service,
                 fetch_has_service: &|pkg: &str| update::project_has_service(project, pkg, emit),
                 fetch_release_date: &|url: &str| update::cached_release_date(url),
+                fetch_repo_in_series: &in_series,
             };
             update::classify(&pkg, &fetch, &lookups)
         }

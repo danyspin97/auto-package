@@ -32,6 +32,7 @@ mod kind;
 mod map;
 mod release_date;
 mod release_list;
+mod release_series;
 mod releases;
 mod sourcehut;
 
@@ -41,5 +42,6 @@ pub use kind::*;
 pub use map::*;
 pub use release_date::*;
 pub use release_list::*;
+pub use release_series::*;
 pub use releases::*;
 pub(crate) use sourcehut::{is_sourcehut_host, ls_remote_tags, newest_version};

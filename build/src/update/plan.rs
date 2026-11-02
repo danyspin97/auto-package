@@ -169,13 +169,16 @@ where
     let decision = match compare_versions(&latest, tag_version, scheme) {
         pypi::VersionCompare::Newer => {
             match held_back(rpm_name, &header, &latest, fetch_spec, project) {
-                Some(reason) => Decision::Skipped(reason),
                 None => Decision::Update {
                     ecosystem,
                     old_version: header.version,
                     new_version: latest,
                     upstream_tag,
                 },
+                Some(Held::Stop(reason)) => Decision::Skipped(reason),
+                Some(Held::Series(series)) => {
+                    held_to_series(ecosystem, header.version, latest, &series, lookups)
+                }
             }
         }
         pypi::VersionCompare::NotNewer => Decision::UpToDate {
@@ -211,6 +214,50 @@ pub(crate) fn obs_scm_repo(
             fetch_service(rpm_name).as_deref().and_then(service_git_url)
         }
         _ => None,
+    }
+}
+
+/// A package held to `series` takes the newest release of that series when its
+/// forge repository can say what it is; any other source is left where it is,
+/// and so is a package whose series has no newer release than the one packaged.
+fn held_to_series(
+    ecosystem: Ecosystem,
+    packaged: String,
+    latest: String,
+    series: &[u64],
+    lookups: &Lookups<'_>,
+) -> Decision {
+    let stop = || {
+        Decision::Skipped(SkipReason::OtherSeries {
+            series: series
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("."),
+            packaged: packaged.clone(),
+            latest: latest.clone(),
+        })
+    };
+    let Ecosystem::GitRepo { url } = &ecosystem else {
+        return stop();
+    };
+    match (lookups.fetch_repo_in_series)(url, series) {
+        Ok(newest)
+            if compare_versions(&newest, &packaged, Scheme::Generic)
+                == pypi::VersionCompare::Newer =>
+        {
+            Decision::Update {
+                ecosystem,
+                old_version: packaged,
+                new_version: newest,
+                upstream_tag: None,
+            }
+        }
+        Ok(_) => Decision::UpToDate {
+            ecosystem,
+            version: packaged,
+        },
+        Err(_) => stop(),
     }
 }
 
@@ -387,6 +434,11 @@ pub fn plan_each(
         })
     };
     let fetch_service = |rpm_name: &str| osc::cat_file(project, rpm_name, "_service", emit);
+    let fetch_repo_in_series = |url: &str, series: &[u64]| {
+        upstream_cache::lookup(&format!("repo-series:{url}:{series:?}"), || {
+            crate::sources::latest_release_in_series(url, series)
+        })
+    };
     let (hits_before, fetched_before) = upstream_cache::stats();
     let fetch_has_service = |pkg: &str| suse::project_has_service(project, pkg, emit);
     let fetch_release_date = |url: &str| snapshot::cached_release_date(url);
@@ -400,6 +452,7 @@ pub fn plan_each(
         fetch_service: &fetch_service,
         fetch_has_service: &fetch_has_service,
         fetch_release_date: &fetch_release_date,
+        fetch_repo_in_series: &fetch_repo_in_series,
     };
 
     let packages: HashSet<String> = sources.iter().cloned().collect();

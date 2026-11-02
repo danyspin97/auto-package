@@ -5,8 +5,9 @@
 use super::*;
 use std::collections::HashSet;
 
-/// Lookups that answer `latest` for every kind of source.
-fn answers(latest: &'static str) -> Lookups<'static> {
+/// Lookups that answer `latest` for every kind of source, and no release of a
+/// series of a forge repository unless `in_series` names one.
+fn answers_in(latest: &'static str, in_series: Option<&'static str>) -> Lookups<'static> {
     let f: &'static dyn Fn(&str) -> Result<String, String> =
         Box::leak(Box::new(move |_: &str| -> Result<String, String> {
             Ok(latest.to_string())
@@ -15,6 +16,13 @@ fn answers(latest: &'static str) -> Lookups<'static> {
     let no_has_service: &'static dyn Fn(&str) -> bool = Box::leak(Box::new(|_: &str| false));
     let no_date: &'static dyn Fn(&str) -> Result<(String, String), String> =
         Box::leak(Box::new(|_: &str| Err("no release date".to_string())));
+    let s: &'static dyn Fn(&str, &[u64]) -> Result<String, String> = Box::leak(Box::new(
+        move |_: &str, _: &[u64]| -> Result<String, String> {
+            in_series
+                .map(str::to_string)
+                .ok_or_else(|| "no tag list".to_string())
+        },
+    ));
     Lookups {
         fetch_pypi_latest: f,
         fetch_repo_latest: f,
@@ -25,7 +33,12 @@ fn answers(latest: &'static str) -> Lookups<'static> {
         fetch_service: no_service,
         fetch_has_service: no_has_service,
         fetch_release_date: no_date,
+        fetch_repo_in_series: s,
     }
+}
+
+fn answers(latest: &'static str) -> Lookups<'static> {
+    answers_in(latest, None)
 }
 
 /// The spec of each package named in `table`; any other name has no spec.
@@ -222,5 +235,49 @@ fn a_pinned_package_stops_where_a_sibling_is_on_the_series() {
     assert!(matches!(
         classify_one("foo", table, &project, "2.0.0"),
         Decision::Skipped(SkipReason::OtherSeries { .. })
+    ));
+}
+
+/// `fmt-9` packaging 9.1.0, from a GitHub archive: upstream's newest is 11.0.2.
+const FMT_9: &str = "Name:           fmt-9\nVersion:        9.1.0\n\
+    Source:         https://github.com/fmtlib/fmt/archive/%{version}.tar.gz\n";
+
+#[test]
+fn a_pinned_series_takes_the_newest_release_of_its_series() {
+    let table = &[("fmt-9", FMT_9)];
+    let project = ["fmt-9"];
+    let lookups = answers_in("11.0.2", Some("9.1.2"));
+    let c = classify_in_project(
+        "fmt-9",
+        &specs(table),
+        &lookups,
+        &project.map(String::from).into(),
+    );
+    assert!(matches!(
+        c.decision,
+        Decision::Update { ref new_version, .. } if new_version == "9.1.2"
+    ));
+    let lookups = answers_in("11.0.2", Some("9.1.0"));
+    let c = classify_in_project(
+        "fmt-9",
+        &specs(table),
+        &lookups,
+        &project.map(String::from).into(),
+    );
+    assert!(matches!(c.decision, Decision::UpToDate { .. }));
+}
+
+#[test]
+fn a_pinned_series_on_a_source_without_a_tag_list_is_left() {
+    let table = &[(
+        "fmt-9",
+        "Name:           fmt-9\nVersion:        9.1.0\n\
+         Source:         https://downloads.example.org/fmt-%{version}.tar.gz\n",
+    )];
+    let lookups = answers_in("11.0.2", Some("9.1.2"));
+    let c = classify_in_project("fmt-9", &specs(table), &lookups, &HashSet::new());
+    assert!(matches!(
+        c.decision,
+        Decision::Skipped(SkipReason::OtherSeries { ref series, .. }) if series == "9"
     ));
 }

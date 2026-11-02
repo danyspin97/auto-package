@@ -323,6 +323,8 @@ pub struct Lookups<'a> {
     pub fetch_has_service: &'a dyn Fn(&str) -> bool,
     /// Newest release of a forge repository, with the day it came out.
     pub fetch_release_date: &'a dyn Fn(&str) -> Result<(String, String), String>,
+    /// Newest release of a git forge repository within a series (`[2, 7]`).
+    pub fetch_repo_in_series: &'a dyn Fn(&str, &[u64]) -> Result<String, String>,
 }
 
 /// The places a package's newest version may be looked up, most specific
