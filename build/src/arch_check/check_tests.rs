@@ -1,11 +1,7 @@
 //! The check run against a fake OBS: the reads, the one edit and the results.
 
-use std::path::Path;
-use std::time::Duration;
-
 use super::check_fake::*;
 use super::*;
-use crate::obs_status::ResultEntry;
 
 #[test]
 fn by_default_the_check_reads_and_never_writes_the_branch() {

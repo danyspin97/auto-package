@@ -511,7 +511,6 @@ mod rows {
 
 mod status_lookup {
     use super::super::check::status_of;
-    use super::super::*;
     use crate::obs_status::ResultEntry;
     use crate::osc::BuildStatus;
 

@@ -1,11 +1,9 @@
 //! The port checks and the gate's reads of baselines, against the fake OBS.
 
 use std::path::Path;
-use std::time::Duration;
 
 use super::check_fake::*;
 use super::*;
-use crate::obs_status::ResultEntry;
 
 mod ports_check {
     use super::*;
