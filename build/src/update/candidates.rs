@@ -139,7 +139,9 @@ impl std::fmt::Display for SkipReason {
             SkipReason::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
             SkipReason::NotAnRpmVersion { latest } => write!(
                 f,
-                "upstream's newest release ({latest}) is not a valid RPM Version"
+                "upstream's newest release ({latest}) is not a valid RPM Version: an RPM \
+                 Version cannot hold a '-'. A maintainer must choose the version to package \
+                 and run update with --to-version (no '-', spaces or slashes)"
             ),
             SkipReason::Prerelease { packaged, latest } => write!(
                 f,
@@ -355,4 +357,21 @@ pub(super) fn extract_url_like(source: &str) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_dashed_release_says_what_to_do_next() {
+        let text = SkipReason::NotAnRpmVersion {
+            latest: "2025-10-15T17-29-55Z".into(),
+        }
+        .to_string();
+        assert!(text.contains("2025-10-15T17-29-55Z"), "{text}");
+        assert!(text.contains("not a valid RPM Version"), "{text}");
+        assert!(text.contains("A maintainer must choose"), "{text}");
+        assert!(text.contains("--to-version"), "{text}");
+    }
 }
