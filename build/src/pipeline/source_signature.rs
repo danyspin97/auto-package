@@ -9,11 +9,12 @@
 //! verified over the decompressed stream. No key is trusted here: a key the
 //! keyring lacks is a maintainer's decision.
 
+use super::keyring_accept::accept_command;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// The detached-signature suffixes, stripped in the order the validator strips them.
-const SIGNATURE_SUFFIXES: &[&str] = &[".asc", ".sig", ".sign"];
+pub(super) const SIGNATURE_SUFFIXES: &[&str] = &[".asc", ".sig", ".sign"];
 
 /// The compressed forms an archive may have, with the tool that decompresses each.
 const COMPRESSED: &[(&str, &str)] = &[
@@ -170,7 +171,7 @@ fn verify_file(
             format!("gpg cannot run ({e}), so the signature of {archive} is not checked here")
         })?;
     let status = String::from_utf8_lossy(&out.stdout);
-    Ok(refusal(archive, sig, keyring, &status, &out))
+    Ok(refusal(checkout, archive, sig, keyring, &status, &out))
 }
 
 /// `gpg --verify` of `sig` over the decompressed stream of `compressed`, piped
@@ -221,7 +222,9 @@ fn verify_compressed(
         )));
     }
     let status = String::from_utf8_lossy(&gpg_out.stdout);
-    Ok(refusal(compressed, sig, keyring, &status, &gpg_out))
+    Ok(refusal(
+        checkout, compressed, sig, keyring, &status, &gpg_out,
+    ))
 }
 
 /// `gpg` run in `home` only: `--homedir` and `GNUPGHOME` both name it, no agent
@@ -247,6 +250,7 @@ pub(super) fn gpg_command(gpg: &Path, home: &Path) -> Command {
 /// accepts it; a revoked key does not (`REVKEYSIG`, which gpg also reports with
 /// exit 0).
 fn refusal(
+    checkout: &Path,
     archive: &str,
     sig: &str,
     keyring: &str,
@@ -283,7 +287,7 @@ fn refusal(
             .unwrap_or("unknown");
         return Some(match rc {
             // 9: the key is not on the keyring.
-            "9" => not_in_keyring(archive, sig, fpr, keyring),
+            "9" => not_in_keyring(checkout, archive, sig, fpr, keyring),
             // 4: an algorithm this gpg does not implement.
             "4" => format!(
                 "gpg does not support the signature algorithm of key {fpr}, so the new {archive} \
@@ -298,7 +302,7 @@ fn refusal(
     if let Some(key) = line("NO_PUBKEY") {
         // NO_PUBKEY has only the key id.
         let id = key.split_whitespace().nth(2).unwrap_or("unknown");
-        return Some(not_in_keyring(archive, sig, id, keyring));
+        return Some(not_in_keyring(checkout, archive, sig, id, keyring));
     }
     if line("BADSIG").is_some() {
         return Some(format!(
@@ -315,30 +319,36 @@ fn refusal(
 }
 
 /// The refusal for a signature by a key the keyring lacks. `key` is the full
-/// fingerprint when gpg has it, else only the key ID: then the text says the
-/// 40-digit fingerprint has to be looked up before the key can be checked.
-fn not_in_keyring(archive: &str, sig: &str, key: &str, keyring: &str) -> String {
+/// fingerprint when gpg has it (the signature's issuer fingerprint), else only
+/// the key ID. The text says where the key comes from and the command that
+/// accepts it once a maintainer has checked it on a second channel.
+fn not_in_keyring(checkout: &Path, archive: &str, sig: &str, key: &str, keyring: &str) -> String {
     let full = key.len() == 40 && key.chars().all(|c| c.is_ascii_hexdigit());
-    if full {
-        format!(
-            "the new {archive} is signed with key {key} (the issuer fingerprint of {sig}), which \
-             is not in {keyring}; a maintainer must verify the full fingerprint on a second \
-             channel and add the key (the tool never trusts a key by itself). Nothing was sent \
-             to OBS"
+    let (named, shown) = if full {
+        (
+            format!("key {key}, from the issuer fingerprint of {sig}"),
+            key,
         )
     } else {
-        format!(
-            "the new {archive} is signed with key ID {key} (named by {sig}), which is not in \
-             {keyring}; the signature gives no full fingerprint, so a maintainer must look the \
-             40-digit fingerprint up on the upstream's site, verify it and add the key (the tool \
-             never trusts a key by itself). Nothing was sent to OBS"
+        (
+            format!(
+                "key ID {key}, named by {sig}; the signature gives no full fingerprint, so look \
+                 the 40-digit fingerprint up on the upstream's site"
+            ),
+            "<FULL-FINGERPRINT>",
         )
-    }
+    };
+    format!(
+        "the new {archive} is signed with {named}, which is not in {keyring}; a maintainer must \
+         verify the key and accept it with `{}`. The tool never trusts a key by itself. Nothing \
+         was sent to OBS",
+        accept_command(checkout, shown)
+    )
 }
 
 /// The archive a signature file names: its name without the signature suffix
 /// (the validator strips them in turn, `.asc` first).
-fn archive_of(sig: &str) -> String {
+pub(super) fn archive_of(sig: &str) -> String {
     let mut name = sig;
     for suffix in SIGNATURE_SUFFIXES {
         name = name.strip_suffix(suffix).unwrap_or(name);
@@ -348,7 +358,7 @@ fn archive_of(sig: &str) -> String {
 
 /// The names of the regular files directly in `checkout`, sorted. A name that
 /// starts with a dot is not matched, as the validator's shell globs do not.
-fn file_names(checkout: &Path) -> Vec<String> {
+pub(super) fn file_names(checkout: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(checkout)
         .into_iter()
         .flatten()
@@ -361,7 +371,7 @@ fn file_names(checkout: &Path) -> Vec<String> {
     names
 }
 
-fn first_line(bytes: &[u8]) -> String {
+pub(super) fn first_line(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .lines()
         .find(|l| !l.trim().is_empty())

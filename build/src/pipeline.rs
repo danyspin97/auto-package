@@ -334,6 +334,9 @@ mod carry;
 mod commit_gate_tests;
 #[cfg(test)]
 mod commit_message_tests;
+pub mod keyring_accept;
+#[cfg(test)]
+mod keyring_accept_tests;
 mod service_source;
 #[cfg(test)]
 mod service_source_tests;
