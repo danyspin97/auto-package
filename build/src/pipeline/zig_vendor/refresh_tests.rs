@@ -10,19 +10,19 @@ use std::io::Read;
 use std::path::Path;
 
 const PIXMAN: &[u8] = include_bytes!("testdata/pixman-0.3.0.tar.gz");
-const PIXMAN_HASH: &str = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX";
+pub(super) const PIXMAN_HASH: &str = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX";
 const WAYLAND_HASH: &str = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX";
-const PIXMAN_URL: &str = "https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz";
+pub(super) const PIXMAN_URL: &str = "https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz";
 /// The old vendor archive, which a refresh replaces.
-const OLD: &[u8] = b"not a tarball at all";
+pub(super) const OLD: &[u8] = b"not a tarball at all";
 
 /// Serves the pixman archive at its URL and records each request.
-struct Fake {
+pub(super) struct Fake {
     calls: RefCell<Vec<String>>,
 }
 
 impl Fake {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Fake {
             calls: RefCell::new(Vec::new()),
         }
@@ -61,7 +61,7 @@ fn tar_gz(top: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
 
 /// The new Source0: a package whose manifest depends on pixman, declared with
 /// `hash`.
-fn source0(hash: &str, url: &str) -> Vec<u8> {
+pub(super) fn source0(hash: &str, url: &str) -> Vec<u8> {
     let zon = format!(
         ".{{ .name = .pkg, .version = \"1.0.0\", .fingerprint = 0x3610a686c4bba334, \
          .dependencies = .{{ .pixman = .{{ .url = \"{url}\", .hash = \"{hash}\" }}, }}, }}"
@@ -74,7 +74,7 @@ fn source0(hash: &str, url: &str) -> Vec<u8> {
 
 /// A checkout of a package whose spec is `spec`: the new Source0 and the old
 /// vendor archive.
-fn checkout(spec: &str, src0: &[u8], vendor_name: &str) -> tempfile::TempDir {
+pub(super) fn checkout(spec: &str, src0: &[u8], vendor_name: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("pkg.spec"), spec).unwrap();
     std::fs::write(dir.path().join("pkg-1.0.0.tar.gz"), src0).unwrap();
@@ -83,7 +83,7 @@ fn checkout(spec: &str, src0: &[u8], vendor_name: &str) -> tempfile::TempDir {
 }
 
 /// A spec that refreshes `vendor_name`, reading the cache through `build_opts`.
-fn spec(requires: &str, vendor_name: &str, build_opts: &str) -> String {
+pub(super) fn spec(requires: &str, vendor_name: &str, build_opts: &str) -> String {
     format!(
         "Name:           pkg\n\
          Version:        1.0.0\n\
@@ -112,7 +112,7 @@ fn spec(requires: &str, vendor_name: &str, build_opts: &str) -> String {
 }
 
 /// The entries of a `vendor.tar.zst`, `.tar.gz` or `.tar.xz` file, by path.
-fn entries(path: &Path) -> Vec<(String, bool)> {
+pub(super) fn entries(path: &Path) -> Vec<(String, bool)> {
     let bytes = std::fs::read(path).unwrap();
     let reader: Box<dyn Read> = match path.extension().and_then(|e| e.to_str()) {
         Some("zst") => Box::new(zstd::stream::read::Decoder::new(bytes.as_slice()).unwrap()),

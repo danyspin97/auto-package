@@ -56,7 +56,7 @@ pub(super) fn plan(spec: &str) -> Result<Option<Plan>, String> {
     let Some((file, compression)) = vendor_source(spec) else {
         return Ok(None);
     };
-    let roots = cache_roots(&build_section(spec))?;
+    let roots = cache_roots(spec, &build_section(spec))?;
     let Some(root) = roots.first().cloned() else {
         return Ok(None);
     };
@@ -229,10 +229,17 @@ fn build_section(spec: &str) -> String {
 
 /// The cache directories the build reads, one per distinct flag: the
 /// `--global-cache-dir` argument, or the `--system` one with its `/p` removed.
-/// Each is relative, and a `--system` path must sit in the build directory's
-/// `%{name}-%{version}/` (what `%autosetup` unpacks into), so the archive's
-/// top directory is its first component.
-fn cache_roots(build: &str) -> Result<Vec<String>, String> {
+/// Each is relative to the build subdirectory, so the archive's top directory
+/// is its first component.
+pub(super) fn cache_roots(spec: &str, build: &str) -> Result<Vec<String>, String> {
+    let macros = spec_macros(spec);
+    let subdir = expand_with(
+        &macros,
+        &macros
+            .get("buildsubdir")
+            .cloned()
+            .unwrap_or_else(|| build_subdir(spec)),
+    );
     let words: Vec<&str> = build.split_whitespace().collect();
     let mut roots: Vec<String> = Vec::new();
     for (i, word) in words.iter().enumerate() {
@@ -240,26 +247,8 @@ fn cache_roots(build: &str) -> Result<Vec<String>, String> {
             continue;
         };
         let root = match *word {
-            "--global-cache-dir" => {
-                let dir = arg.trim_end_matches('/');
-                if dir.is_empty() {
-                    return Err("--global-cache-dir has no directory".to_string());
-                }
-                dir.to_string()
-            }
-            "--system" => {
-                let rest = arg
-                    .strip_prefix("%{_builddir}/%{name}-%{version}/")
-                    .unwrap_or("");
-                match rest.strip_suffix("/p") {
-                    Some(root) if !root.is_empty() => root.to_string(),
-                    _ => {
-                        return Err(format!(
-                            "--system {arg} is not a cache under %{{name}}-%{{version}}/ ending in /p"
-                        ));
-                    }
-                }
-            }
+            "--global-cache-dir" => global_root(arg, &macros)?,
+            "--system" => system_root(arg, &macros, &subdir)?,
             _ => continue,
         };
         if root.starts_with('/')
@@ -277,4 +266,101 @@ fn cache_roots(build: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(roots)
+}
+
+/// The cache a `--global-cache-dir <dir>` names: the directory with the spec's
+/// macros expanded, then its trailing and leading `./` dropped. Quotes, `$` and
+/// backticks are refused, as the shell would expand them and the vendor step
+/// does not; so is a macro the spec does not define.
+fn global_root(
+    arg: &str,
+    macros: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let dir = expand_with(macros, arg);
+    if dir.contains(['"', '\'', '`', '$']) {
+        return Err(format!(
+            "--global-cache-dir {arg} is not a plain path: the shell would expand it"
+        ));
+    }
+    if dir.contains('%') {
+        return Err(format!(
+            "--global-cache-dir {arg} is left with a macro after expansion; the spec does not define it"
+        ));
+    }
+    let dir = dir.trim_end_matches('/');
+    let dir = dir.strip_prefix("./").unwrap_or(dir);
+    if dir.is_empty() {
+        return Err("--global-cache-dir has no directory".to_string());
+    }
+    Ok(dir.to_string())
+}
+
+/// `v` with the spec's macros expanded, twice so that a macro naming another
+/// is followed. A macro the spec does not define is left as it is.
+fn expand_with(macros: &std::collections::HashMap<String, String>, v: &str) -> String {
+    let once = expand_simple_defines(v, macros);
+    expand_simple_defines(&once, macros)
+}
+
+/// The directory the build runs in, as the spec names it: the `-n` of its
+/// `%autosetup` or `%setup`, else `%{name}-%{version}`, which is where both
+/// unpack without `-n`. Its macros are left for the caller to expand.
+fn build_subdir(spec: &str) -> String {
+    for line in spec.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if !matches!(words.first(), Some(&("%autosetup" | "%setup"))) {
+            continue;
+        }
+        if let Some(dir) = words
+            .iter()
+            .position(|w| *w == "-n")
+            .and_then(|i| words.get(i + 1))
+        {
+            return dir.to_string();
+        }
+    }
+    "%{name}-%{version}".to_string()
+}
+
+/// The cache a `--system <path>` names, relative to the build subdirectory
+/// `subdir` (already expanded), with its `/p` removed. The path is expanded
+/// with the spec's macros, and must then be `%{_builddir}/` followed by
+/// `subdir`, or a relative path, which zig reads from the build subdirectory.
+/// A macro left over, or a path outside the build directory, is refused with
+/// the reason.
+fn system_root(
+    arg: &str,
+    macros: &std::collections::HashMap<String, String>,
+    subdir: &str,
+) -> Result<String, String> {
+    // `%{buildsubdir}` names the build subdirectory, which the spec's macros
+    // do not define.
+    let path = expand_with(macros, &arg.replace("%{buildsubdir}", subdir));
+    let (in_build, rest) = match path.strip_prefix("%{_builddir}/") {
+        Some(rest) => (true, rest),
+        None => (false, path.as_str()),
+    };
+    if let Some(at) = rest.find(['%', '$']) {
+        let left: String = rest[at..]
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '/')
+            .collect();
+        return Err(format!(
+            "--system {arg} is left with {left} after expansion; the spec does not define it"
+        ));
+    }
+    let rest = if in_build {
+        rest.strip_prefix(&format!("{subdir}/")).ok_or_else(|| {
+            format!("--system {arg} is outside the build directory (%{{_builddir}}/{subdir}/)")
+        })?
+    } else if rest.starts_with('/') {
+        return Err(format!(
+            "--system {arg} is an absolute path outside the build directory"
+        ));
+    } else {
+        rest
+    };
+    rest.strip_suffix("/p")
+        .map(|r| r.strip_prefix("./").unwrap_or(r).to_string())
+        .ok_or_else(|| format!("--system {arg} does not end in /p"))
 }

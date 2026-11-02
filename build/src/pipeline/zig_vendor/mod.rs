@@ -28,6 +28,10 @@ mod fetch_tests;
 #[cfg(test)]
 mod hash_tests;
 #[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
+mod refresh_system_tests;
+#[cfg(test)]
 mod refresh_tests;
 #[cfg(test)]
 mod scratch_tests;
