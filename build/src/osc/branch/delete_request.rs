@@ -106,6 +106,13 @@ pub fn parse_accepted_deletes(xml: &str) -> Vec<DeleteRequest> {
                 open.pop();
                 continue;
             }
+            // A CDATA section is character data as written: nothing to decode.
+            Ok(Event::CData(t)) => {
+                if in_description {
+                    text.push_str(&t);
+                }
+                continue;
+            }
             Ok(Event::Eof) | Err(_) => break,
             Ok(_) => continue,
         };

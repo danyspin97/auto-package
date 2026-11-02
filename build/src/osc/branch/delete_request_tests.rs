@@ -180,3 +180,56 @@ fn a_target_name_that_is_not_an_obs_name_is_not_searched() {
     assert!(delete_requests_path("openSUSE:Factory", "x' or 'a'='a").is_none());
     assert!(delete_requests_path("openSUSE:Factory", "stacktile").is_some());
 }
+
+/// The request's own description, decoded: entities and numeric references
+/// in the text, and CDATA sections, come out as the characters they stand for.
+fn description_of(text: &str) -> String {
+    let xml = format!(
+        "<collection matches=\"1\"><request id=\"7\">\
+         <action type=\"delete\"><target project=\"P\" package=\"x\"/></action>\
+         <state name=\"accepted\" when=\"2026-01-02T03:04:05\"/>\
+         <description>{text}</description></request></collection>"
+    );
+    let found = parse_accepted_deletes(&xml);
+    assert_eq!(found.len(), 1);
+    found[0].description.clone()
+}
+
+#[test]
+fn a_description_is_read_with_its_entities_decoded() {
+    assert_eq!(
+        description_of("[botdel] build problems for &gt;= 6 weeks &amp; more"),
+        "[botdel] build problems for >= 6 weeks & more"
+    );
+    assert_eq!(
+        description_of("&lt;b&gt; &quot;q&quot; &apos;a&apos; &#62;n &#x26;x"),
+        "<b> \"q\" 'a' >n &x"
+    );
+}
+
+#[test]
+fn a_description_is_read_with_its_cdata_sections_as_written() {
+    assert_eq!(
+        description_of("see <![CDATA[<b> & x &gt; y]]> now"),
+        "see <b> & x &gt; y now"
+    );
+}
+
+#[test]
+fn the_report_prints_a_request_description_decoded() {
+    let report = broken_link_report_with("X11:Wayland", "stacktile", "fallback", &|path| {
+        Ok(if path.contains("expand=0") {
+            STACKTILE_LISTING.to_string()
+        } else {
+            STACKTILE_DELETE.replace(
+                "[botdel] Package has had build problems for &gt;= 6 weeks",
+                "[botdel] build problems for &gt;= 6 weeks &amp; more",
+            )
+        })
+    });
+    assert!(
+        report.contains(": \"[botdel] build problems for >= 6 weeks & more\""),
+        "{report}"
+    );
+    assert!(!report.contains("&gt;"), "{report}");
+}
