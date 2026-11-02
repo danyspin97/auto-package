@@ -5,6 +5,8 @@
 //! because a review of the specs of a full run found the same slips on dozens
 //! of packages: a model asked to fix them one by one spends a turn on each.
 
+pub mod hygiene;
+
 /// Headers that start a new section of a spec.
 const SECTION_HEADERS: &[&str] = &[
     "%prep",
