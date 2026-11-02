@@ -27,12 +27,16 @@ use crate::osc::{self, PathAddition, ProjectInfo, PublishedBinary};
 use crate::proc::Emit;
 use crate::spec::BuildRequire;
 
+mod capability;
+#[cfg(test)]
+mod capability_tests;
 mod judge;
 mod obs;
 mod resolver;
 #[cfg(test)]
 mod tests;
 
+pub use capability::*;
 pub use judge::*;
 pub use obs::*;
 pub use resolver::*;

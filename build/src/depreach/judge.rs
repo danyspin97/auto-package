@@ -38,6 +38,17 @@ pub enum DepState {
     NotPublished,
     /// Not a package name; see the module docs.
     Unchecked,
+    /// A capability, looked up in the RPMs' `Provides:` (see `capability`).
+    Capability(CapState),
+}
+
+/// The per-repository options of a state that can be fixed by adding a path:
+/// a missing package. A capability is only reported, never fixed by a path.
+pub(super) fn options_of(state: &DepState) -> Option<&[(String, Vec<Hit>)]> {
+    match state {
+        DepState::Missing { options } => Some(options),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +195,7 @@ pub(super) fn judge(
 pub fn choose_paths(verdicts: &[DepVerdict]) -> Vec<PathAddition> {
     let mut uncovered: HashSet<(usize, String)> = HashSet::new();
     for (i, v) in verdicts.iter().enumerate() {
-        if let DepState::Missing { options } = &v.state {
+        if let Some(options) = options_of(&v.state) {
             for (repo, hits) in options {
                 if !hits.is_empty() {
                     uncovered.insert((i, repo.clone()));
@@ -192,17 +203,18 @@ pub fn choose_paths(verdicts: &[DepVerdict]) -> Vec<PathAddition> {
             }
         }
     }
-    let covers = |project: &str, (i, repo): &(usize, String)| match &verdicts[*i].state {
-        DepState::Missing { options } => options
-            .iter()
-            .any(|(r, hits)| r == repo && hits.iter().any(|h| h.project == project)),
-        _ => false,
+    let covers = |project: &str, (i, repo): &(usize, String)| {
+        options_of(&verdicts[*i].state).is_some_and(|options| {
+            options
+                .iter()
+                .any(|(r, hits)| r == repo && hits.iter().any(|h| h.project == project))
+        })
     };
     let mut chosen = Vec::new();
     while !uncovered.is_empty() {
         let mut score: HashMap<&str, usize> = HashMap::new();
         for v in verdicts {
-            if let DepState::Missing { options } = &v.state {
+            if let Some(options) = options_of(&v.state) {
                 for h in options.iter().flat_map(|(_, hits)| hits) {
                     score.entry(h.project.as_str()).or_insert(0);
                 }
@@ -261,7 +273,8 @@ pub fn dependency_origins(
     };
     for v in verdicts {
         match &v.state {
-            DepState::Reachable { provider } => push(provider),
+            DepState::Reachable { provider }
+            | DepState::Capability(CapState::Provided { provider }) => push(provider),
             DepState::Missing { options } => {
                 let hit = options
                     .iter()
