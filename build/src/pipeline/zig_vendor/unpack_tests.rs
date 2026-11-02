@@ -1,0 +1,260 @@
+use super::unpack::*;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
+/// One raw tar entry. Names are written byte for byte, so a hostile name such
+/// as `/etc/x` or `pkg/../x` reaches the unpacker unchanged.
+enum K {
+    File(&'static [u8]),
+    Exec(&'static [u8]),
+    Dir,
+    Link(&'static str),
+    Hard(&'static str),
+    Device,
+}
+
+fn raw_tar(entries: &[(&str, K)]) -> Vec<u8> {
+    let mut ar = tar::Builder::new(Vec::new());
+    for (name, kind) in entries {
+        let (typ, data, link, mode): (u8, &[u8], Option<&str>, u32) = match kind {
+            K::File(d) => (b'0', d, None, 0o644),
+            K::Exec(d) => (b'0', d, None, 0o755),
+            K::Dir => (b'5', &[], None, 0o755),
+            K::Link(t) => (b'2', &[], Some(t), 0o777),
+            K::Hard(t) => (b'1', &[], Some(t), 0o644),
+            K::Device => (b'3', &[], None, 0o644),
+        };
+        let mut h = tar::Header::new_old();
+        h.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+        if let Some(t) = link {
+            h.as_old_mut().linkname[..t.len()].copy_from_slice(t.as_bytes());
+        }
+        h.set_entry_type(tar::EntryType::new(typ));
+        h.set_size(data.len() as u64);
+        h.set_mode(mode);
+        h.set_cksum();
+        ar.append(&h, data).unwrap();
+    }
+    ar.into_inner().unwrap()
+}
+
+fn tar_gz(entries: &[(&str, K)]) -> Vec<u8> {
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut gz, &raw_tar(entries)).unwrap();
+    gz.finish().unwrap()
+}
+
+/// Unpack `bytes` into a fresh `out` under a temp dir, with `limits`.
+fn run(bytes: &[u8], format: Format, limits: Limits) -> (tempfile::TempDir, Result<(), String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out");
+    let result = unpack(bytes, format, &dest, limits);
+    (dir, result)
+}
+
+fn expect_refused(entries: &[(&str, K)], needle: &str) {
+    let (_dir, result) = run(&tar_gz(entries), Format::TarGz, LIMITS);
+    let err = result.expect_err("the archive must be refused");
+    assert!(err.contains(needle), "wanted `{needle}` in: {err}");
+}
+
+#[test]
+fn files_dirs_and_links_are_written_under_the_top_directory() {
+    let bytes = tar_gz(&[
+        ("pkg-1.0/", K::Dir),
+        ("pkg-1.0/src/", K::Dir),
+        ("pkg-1.0/src/main.zig", K::File(b"x")),
+        ("pkg-1.0/link", K::Link("src/main.zig")),
+        ("pkg-1.0/d2/", K::Dir),
+        ("pkg-1.0/d2/link", K::Link("../src/main.zig")),
+    ]);
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    result.unwrap();
+    let out = dir.path().join("out");
+    assert_eq!(std::fs::read(out.join("src/main.zig")).unwrap(), b"x");
+    assert_eq!(
+        std::fs::read_link(out.join("link")).unwrap(),
+        Path::new("src/main.zig")
+    );
+    assert_eq!(
+        std::fs::read_link(out.join("d2/link")).unwrap(),
+        Path::new("../src/main.zig")
+    );
+    assert!(!out.join("pkg-1.0").exists());
+}
+
+#[test]
+fn an_executable_mode_is_kept_and_others_are_not_executable() {
+    let bytes = tar_gz(&[
+        ("p/", K::Dir),
+        ("p/run.sh", K::Exec(b"#!/bin/sh\n")),
+        ("p/data", K::File(b"d")),
+    ]);
+    let (dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    result.unwrap();
+    let mode = |f: &str| {
+        std::fs::metadata(dir.path().join("out").join(f))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode("run.sh"), 0o755);
+    assert_eq!(mode("data"), 0o644);
+}
+
+#[test]
+fn a_zstd_archive_unpacks_like_a_gzip_one() {
+    let zst = zstd::stream::encode_all(&raw_tar(&[("p/", K::Dir), ("p/a", K::File(b"a"))])[..], 0)
+        .unwrap();
+    let (dir, result) = run(&zst, Format::TarZst, LIMITS);
+    result.unwrap();
+    assert_eq!(std::fs::read(dir.path().join("out/a")).unwrap(), b"a");
+}
+
+#[test]
+fn absolute_and_climbing_names_are_refused() {
+    expect_refused(&[("/etc/x", K::File(b"x"))], "not a relative path");
+    expect_refused(
+        &[("p/", K::Dir), ("p/../x", K::File(b"x"))],
+        "unsafe component",
+    );
+}
+
+#[test]
+fn a_top_level_file_is_refused() {
+    expect_refused(&[("readme", K::File(b"x"))], "is not a directory");
+}
+
+#[test]
+fn a_second_top_level_directory_is_refused() {
+    expect_refused(
+        &[("a/", K::Dir), ("b/", K::Dir)],
+        "more than one top-level directory",
+    );
+}
+
+#[test]
+fn links_that_leave_the_tree_are_refused() {
+    expect_refused(
+        &[("p/", K::Dir), ("p/l", K::Link("../../etc/passwd"))],
+        "outside the tree",
+    );
+    expect_refused(
+        &[("p/", K::Dir), ("p/l", K::Link("/etc/passwd"))],
+        "outside the tree",
+    );
+    expect_refused(
+        &[("p/", K::Dir), ("p/l", K::Link("../x"))],
+        "outside the tree",
+    );
+    expect_refused(&[("p/", K::Dir), ("p/l", K::Link(""))], "no link target");
+}
+
+#[test]
+fn a_link_through_an_earlier_link_is_refused() {
+    expect_refused(
+        &[
+            ("p/", K::Dir),
+            ("p/a", K::Link("b")),
+            ("p/c", K::Link("a/../x")),
+        ],
+        "outside the tree",
+    );
+}
+
+#[test]
+fn a_file_written_through_an_earlier_link_is_refused() {
+    expect_refused(
+        &[
+            ("p/", K::Dir),
+            ("p/d", K::Link("e")),
+            ("p/d/f", K::File(b"x")),
+        ],
+        "passes through a link",
+    );
+}
+
+#[test]
+fn hard_links_and_devices_are_refused() {
+    expect_refused(&[("p/", K::Dir), ("p/h", K::Hard("p/x"))], "hard link");
+    expect_refused(&[("p/", K::Dir), ("p/dev", K::Device)], "device");
+}
+
+#[test]
+fn too_many_entries_stop_the_unpack() {
+    let bytes = tar_gz(&[
+        ("p/", K::Dir),
+        ("p/a", K::File(b"a")),
+        ("p/b", K::File(b"b")),
+    ]);
+    let (_dir, result) = run(
+        &bytes,
+        Format::TarGz,
+        Limits {
+            max_entries: 2,
+            ..LIMITS
+        },
+    );
+    assert!(result.unwrap_err().contains("more than 2 entries"));
+}
+
+#[test]
+fn too_many_file_bytes_stop_the_unpack() {
+    let bytes = tar_gz(&[("p/", K::Dir), ("p/a", K::File(b"12345"))]);
+    let (_dir, result) = run(
+        &bytes,
+        Format::TarGz,
+        Limits {
+            max_bytes: 4,
+            ..LIMITS
+        },
+    );
+    assert!(result.unwrap_err().contains("bytes of files"));
+}
+
+#[test]
+fn too_deep_a_path_is_refused() {
+    let bytes = tar_gz(&[("p/", K::Dir), ("p/a/b/c", K::File(b"x"))]);
+    let (_dir, result) = run(
+        &bytes,
+        Format::TarGz,
+        Limits {
+            max_depth: 2,
+            ..LIMITS
+        },
+    );
+    assert!(result.unwrap_err().contains("deeper than 2"));
+}
+
+#[test]
+fn an_existing_destination_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out");
+    std::fs::create_dir(&dest).unwrap();
+    let err = unpack(&tar_gz(&[("p/", K::Dir)])[..], Format::TarGz, &dest, LIMITS).unwrap_err();
+    assert!(err.contains("already exists"));
+}
+
+#[test]
+fn an_empty_archive_is_refused() {
+    let bytes = tar_gz(&[]);
+    let (_dir, result) = run(&bytes, Format::TarGz, LIMITS);
+    assert!(result.unwrap_err().contains("empty"));
+}
+
+#[test]
+fn only_tar_gz_and_tar_zst_are_read() {
+    assert_eq!(Format::of_url("https://x/a-1.0.tar.gz"), Ok(Format::TarGz));
+    assert_eq!(Format::of_url("https://x/a.tgz"), Ok(Format::TarGz));
+    assert_eq!(Format::of_url("https://x/a.tar.zst"), Ok(Format::TarZst));
+    assert_eq!(Format::of_url("https://x/a.tzst"), Ok(Format::TarZst));
+    assert!(
+        Format::of_url("https://x/a-1.0.zip")
+            .unwrap_err()
+            .contains("zip")
+    );
+    assert!(Format::of_url("https://x/a.tar.xz").is_err());
+    assert!(Format::of_url("https://x/a.tar.bz2").is_err());
+    assert!(Format::of_url("https://x/archive").is_err());
+}

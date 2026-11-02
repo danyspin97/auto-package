@@ -110,6 +110,7 @@ dependencies = [
  "urlencoding",
  "walkdir",
  "zip",
+ "zstd",
 ]
 
 [[package]]
