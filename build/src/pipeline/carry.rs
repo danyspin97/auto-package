@@ -215,7 +215,10 @@ fn carry_forward_service_spec(
     let service_path = checkout_dir.join("_service");
     let service =
         std::fs::read_to_string(&service_path).map_err(|e| format!("reading _service: {e}"))?;
-    let plan = plan_service_carry(&service, &config.version, || {
+    let old_spec =
+        std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
+    let old_version = crate::spec::parse_header(&old_spec).map(|h| h.version);
+    let plan = plan_service_carry(&service, &config.version, old_version.as_deref(), || {
         crate::sources::tag_for_version(repo, &config.version)
             .ok_or_else(|| format!("{repo} lists no tag for {}", config.version))
     })?;
@@ -235,9 +238,6 @@ fn carry_forward_service_spec(
         });
     }
     let moved = plan.moved;
-    let old_spec =
-        std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
-    let old_version = crate::spec::parse_header(&old_spec).map(|h| h.version);
     let before: std::collections::HashSet<String> = tarballs_in(checkout_dir);
     // Both files go back as they were when anything below fails: a half-moved
     // checkout would be taken for a finished one by the next run.
@@ -327,6 +327,7 @@ pub(super) struct ServicePlan {
 pub(super) fn plan_service_carry(
     service: &str,
     version: &str,
+    old_version: Option<&str>,
     tag_of: impl FnOnce() -> Result<String, String>,
 ) -> Result<ServicePlan, String> {
     let masked = mask_xml_comments(service);
@@ -334,17 +335,31 @@ pub(super) fn plan_service_carry(
         "the _service is not a tar_scm, obs_scm or url cargo_vendor one, so the source cannot be moved",
     )?;
     revision_span(&masked, scm).ok_or("the _service has no revision to move to the new tag")?;
+    let mut unchecked = None;
+    let mut base = service.to_string();
     if kind == SourceService::BuildTime {
         refuse_manual_vendoring(&masked)?;
+        // A literal versionformat gives every tag the same version; OBS takes it
+        // from the tag once it is @PARENT_TAG@. That is refused, before any
+        // lookup, where the tag could not be checked afterwards.
+        let why = build_time_unverifiable(&source_params(service, &masked, scm));
+        base = with_parent_tag_version_format(service, &masked, scm, old_version, why.as_deref())?;
+        unchecked = why;
     }
     let tag = tag_of()?;
-    let unchecked = if kind == SourceService::BuildTime {
-        check_build_time_version(&source_params(service, &masked, scm), &tag, version)?
-    } else {
-        None
-    };
-    let moved = with_service_revision(service, &tag)
+    let moved = with_service_revision(&base, &tag)
         .ok_or("the _service has no revision to move to the new tag")?;
+    if kind == SourceService::BuildTime && unchecked.is_none() {
+        // The check runs on the moved service, as OBS will read it.
+        let moved_masked = mask_xml_comments(&moved);
+        let (moved_scm, _) = source_service(&moved_masked)
+            .ok_or("the _service is not a tar_scm, obs_scm or url cargo_vendor one")?;
+        unchecked = check_build_time_version(
+            &source_params(&moved, &moved_masked, moved_scm),
+            &tag,
+            version,
+        )?;
+    }
     Ok(ServicePlan {
         moved,
         kind,

@@ -441,3 +441,63 @@ pub(super) fn with_service_revision(service: &str, tag: &str) -> Option<String> 
         &service[end..]
     ))
 }
+
+/// Why the `Version` a build-time tag gives cannot be checked here, when it
+/// cannot: `parent-tag` or `match-tag` (OBS picks the tag from another one), or
+/// a source that is not git. A placeholder revision is not among them: OBS builds
+/// the newest tag then, and the tag looked up is checked as for any carry.
+pub(super) fn build_time_unverifiable(params: &[(String, String)]) -> Option<String> {
+    if let Some(scm) = param_value(params, "scm").filter(|scm| *scm != "git") {
+        return Some(format!("the source is `{scm}`, not git"));
+    }
+    if param_value(params, "parent-tag").is_some() || param_value(params, "match-tag").is_some() {
+        return Some("parent-tag or match-tag picks the tag OBS builds, not the revision".into());
+    }
+    None
+}
+
+/// `service` with the `versionformat` of the `obs_scm` service at `scm` set to
+/// `@PARENT_TAG@` when it is a literal version. A literal names every tag the
+/// same way, so moving the revision alone would keep the old version. The
+/// rewrite is made only when the literal is the spec's current `Version`
+/// (`old_version`) exactly, since that is the version the tag gave before. A
+/// literal that is not (`1.0.3+git`), or any literal when `unverifiable` says
+/// the new version cannot be checked, is `Err` and nothing is changed. Any
+/// other value (empty, or with a macro or a git format code) is kept.
+pub(super) fn with_parent_tag_version_format(
+    service: &str,
+    masked: &str,
+    scm: usize,
+    old_version: Option<&str>,
+    unverifiable: Option<&str>,
+) -> Result<String, String> {
+    let open = "<param name=\"versionformat\">";
+    let block = service_block(masked, scm);
+    let Some(start) = block.find(open).map(|i| scm + i + open.len()) else {
+        return Ok(service.to_string());
+    };
+    let Some(len) = masked[start..].find("</param>") else {
+        return Ok(service.to_string());
+    };
+    let end = start + len;
+    let value = crate::obs_xml::unescape(service[start..end].trim());
+    if value.is_empty() || value.contains(['@', '%']) {
+        return Ok(service.to_string());
+    }
+    if let Some(why) = unverifiable {
+        return Err(format!(
+            "{why}, and the literal versionformat `{value}` would keep the old version at build time; nothing was changed"
+        ));
+    }
+    if old_version != Some(value.as_str()) {
+        return Err(format!(
+            "the literal versionformat `{value}` is not the spec's Version{}, so it cannot follow the tag; nothing was changed",
+            old_version.map(|v| format!(" `{v}`")).unwrap_or_default()
+        ));
+    }
+    Ok(format!(
+        "{}@PARENT_TAG@{}",
+        &service[..start],
+        &service[end..]
+    ))
+}

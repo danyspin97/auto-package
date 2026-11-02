@@ -78,7 +78,7 @@ fn the_aquamarine_service_gives_its_tag_without_the_v() {
     );
     // The placeholder revision stays: the build takes the newest tag.
     assert_eq!(with_service_revision(svc, "v0.16.0").unwrap(), svc);
-    let plan = plan_service_carry(svc, "0.16.0", || Ok("v0.16.0".into())).unwrap();
+    let plan = plan_service_carry(svc, "0.16.0", None, || Ok("v0.16.0".into())).unwrap();
     assert_eq!(plan.moved, svc);
     assert!(plan.unchecked.is_none());
 }
@@ -88,13 +88,168 @@ fn a_pattern_without_a_replacement_keeps_the_version_through_a_carry() {
     // A `_service` with `v(.*)` and no replacement parameter, moved to v0.9.6:
     // OBS names the package 0.9.6, so the carry must accept the spec's version.
     let svc = "<services><service mode=\"manual\" name=\"obs_scm\"><param name=\"url\">https://github.com/o/r.git</param><param name=\"scm\">git</param><param name=\"versionformat\">@PARENT_TAG@</param><param name=\"versionrewrite-pattern\">v(.*)</param><param name=\"revision\">v0.9.5</param></service><service mode=\"buildtime\" name=\"tar\"/></services>";
-    let plan = plan_service_carry(svc, "0.9.6", || Ok("v0.9.6".into())).unwrap();
+    let plan = plan_service_carry(svc, "0.9.6", None, || Ok("v0.9.6".into())).unwrap();
     assert!(plan.unchecked.is_none());
     assert!(
         plan.moved
             .contains("<param name=\"revision\">v0.9.6</param>")
     );
-    assert!(plan_service_carry(svc, "0.9.5", || Ok("v0.9.6".into())).is_err());
+    assert!(plan_service_carry(svc, "0.9.5", None, || Ok("v0.9.6".into())).is_err());
+}
+
+#[test]
+fn a_literal_version_format_moves_to_the_parent_tag() {
+    // neatvnc as it was: a commit revision and a literal versionformat.
+    let svc = "<services><service mode=\"disabled\" name=\"obs_scm\"><param name=\"url\">https://github.com/o/neatvnc.git</param><param name=\"scm\">git</param><param name=\"revision\">783437ad</param><param name=\"versionformat\">1.0.3</param><param name=\"versionrewrite-pattern\">v(.*)</param></service><service mode=\"buildtime\" name=\"tar\"/></services>";
+    let plan = plan_service_carry(svc, "1.0.4", Some("1.0.3"), || Ok("v1.0.4".into())).unwrap();
+    assert!(
+        plan.moved
+            .contains("<param name=\"versionformat\">@PARENT_TAG@</param>")
+    );
+    assert!(
+        plan.moved
+            .contains("<param name=\"revision\">v1.0.4</param>")
+    );
+    assert!(plan.unchecked.is_none());
+    // Without a pattern the tag keeps its v, so the version is refused.
+    let no_pattern = svc.replace("<param name=\"versionrewrite-pattern\">v(.*)</param>", "");
+    let err = plan_service_carry(&no_pattern, "1.0.4", Some("1.0.3"), || Ok("v1.0.4".into()))
+        .err()
+        .unwrap();
+    assert!(err.contains("`v1.0.4`"), "{err}");
+    assert!(plan_service_carry(&no_pattern, "1.0.4", Some("1.0.3"), || Ok("1.0.4".into())).is_ok());
+    // A macro format is not literal and stays as it is.
+    let masked = mask_xml_comments(OBS_SCM);
+    let scm = masked.find("name=\"obs_scm\"").unwrap();
+    assert_eq!(
+        with_parent_tag_version_format(OBS_SCM, &masked, scm, None, None).unwrap(),
+        OBS_SCM
+    );
+}
+
+/// A neatvnc-like `obs_scm` service with the given versionformat, scm, revision
+/// and extra `<param>`s.
+fn literal_obs_scm(format: &str, scm: &str, revision: &str, extra: &str) -> String {
+    format!(
+        "<services><service mode=\"disabled\" name=\"obs_scm\"><param name=\"url\">https://github.com/o/neatvnc.git</param><param name=\"scm\">{scm}</param><param name=\"revision\">{revision}</param><param name=\"versionformat\">{format}</param><param name=\"versionrewrite-pattern\">v(.*)</param>{extra}</service><service mode=\"buildtime\" name=\"tar\"/></services>"
+    )
+}
+
+#[test]
+fn a_literal_format_is_refused_when_the_tag_cannot_be_checked() {
+    // Each of these makes the Version a tag gives unverifiable, so a literal
+    // format would be rewritten to a value that keeps the old version.
+    let cases = [
+        (
+            "1.0.3",
+            "git",
+            "v1.0.3",
+            "<param name=\"parent-tag\">v1.0.3</param>",
+        ),
+        (
+            "1.0.3",
+            "git",
+            "v1.0.3",
+            "<param name=\"match-tag\">v*</param>",
+        ),
+        ("1.0.3", "hg", "v1.0.3", ""),
+    ];
+    for (format, scm, revision, extra) in cases {
+        let svc = literal_obs_scm(format, scm, revision, extra);
+        let asked = Cell::new(false);
+        let err = plan_service_carry(&svc, "1.0.4", Some("1.0.3"), || {
+            asked.set(true);
+            Ok("v1.0.4".into())
+        })
+        .err()
+        .unwrap_or_else(|| panic!("accepted: {svc}"));
+        assert!(err.contains("nothing was changed"), "{err}");
+        assert!(!asked.get(), "the tag was looked up for {svc}");
+    }
+}
+
+#[test]
+fn a_literal_format_that_is_not_the_spec_version_is_refused() {
+    // `1.0.3+git` and `git` are not the Version the spec has: replacing them
+    // with @PARENT_TAG@ would drop the suffix (or the whole value).
+    for format in ["1.0.3+git", "git"] {
+        let svc = literal_obs_scm(format, "git", "main", "");
+        let asked = Cell::new(false);
+        let err = plan_service_carry(&svc, "1.0.4", Some("1.0.3"), || {
+            asked.set(true);
+            Ok("v1.0.4".into())
+        })
+        .err()
+        .unwrap();
+        assert!(err.contains(&format!("`{format}`")), "{err}");
+        assert!(!asked.get());
+    }
+    // A spec with no Version gives no basis for a literal either.
+    let svc = literal_obs_scm("1.0.3", "git", "main", "");
+    assert!(plan_service_carry(&svc, "1.0.4", None, || Ok("v1.0.4".into())).is_err());
+}
+
+#[test]
+fn a_macro_format_is_kept_and_its_version_unchecked_when_the_tag_cannot_be_checked() {
+    let cases = [
+        (
+            "<param name=\"parent-tag\">v1.0.3</param>",
+            "git",
+            "v1.0.3",
+            "parent-tag",
+        ),
+        (
+            "<param name=\"match-tag\">v*</param>",
+            "git",
+            "v1.0.3",
+            "match-tag",
+        ),
+        ("", "hg", "v1.0.3", "not git"),
+    ];
+    for (extra, scm, revision, reason) in cases {
+        let svc = literal_obs_scm("@PARENT_TAG@", scm, revision, extra);
+        let plan = plan_service_carry(&svc, "1.0.4", Some("1.0.3"), || Ok("v1.0.4".into()))
+            .unwrap_or_else(|e| panic!("refused {svc}: {e}"));
+        assert!(
+            plan.moved
+                .contains("<param name=\"versionformat\">@PARENT_TAG@</param>")
+        );
+        let why = plan.unchecked.unwrap_or_else(|| panic!("checked: {svc}"));
+        assert!(why.contains(reason), "{why}");
+        assert!(
+            plan.moved
+                .contains("<param name=\"revision\">v1.0.4</param>")
+        );
+    }
+}
+
+#[test]
+fn a_literal_format_under_a_placeholder_revision_moves_and_is_checked() {
+    // OBS builds the newest tag for `@PARENT_TAG@`. A literal kept there would
+    // build the old version, so the rewrite is made, and the tag looked up is
+    // checked as for any carry (the existing aquamarine case).
+    let svc = literal_obs_scm("1.0.3", "git", "@PARENT_TAG@", "");
+    let plan = plan_service_carry(&svc, "1.0.4", Some("1.0.3"), || Ok("v1.0.4".into())).unwrap();
+    assert!(
+        plan.moved
+            .contains("<param name=\"versionformat\">@PARENT_TAG@</param>")
+    );
+    assert!(
+        plan.moved
+            .contains("<param name=\"revision\">@PARENT_TAG@</param>")
+    );
+    assert!(plan.unchecked.is_none());
+}
+
+#[test]
+fn a_literal_format_equal_to_the_spec_version_still_moves() {
+    let svc = literal_obs_scm("1.0.3", "git", "main", "");
+    let plan = plan_service_carry(&svc, "1.0.4", Some("1.0.3"), || Ok("v1.0.4".into())).unwrap();
+    assert!(
+        plan.moved
+            .contains("<param name=\"versionformat\">@PARENT_TAG@</param>")
+    );
+    assert!(plan.unchecked.is_none());
 }
 
 #[test]
@@ -237,7 +392,7 @@ fn a_parent_tag_or_match_tag_makes_the_version_unchecked() {
 fn a_plan_without_a_revision_is_refused_before_the_tag_lookup() {
     let asked = Cell::new(false);
     let no_revision = "<services><service mode=\"disabled\" name=\"obs_scm\"><param name=\"url\">u</param></service></services>";
-    let res = plan_service_carry(no_revision, "0.2.2", || {
+    let res = plan_service_carry(no_revision, "0.2.2", None, || {
         asked.set(true);
         Ok("v0.2.2".into())
     });
@@ -252,7 +407,7 @@ fn a_manual_vendoring_service_is_refused_before_the_tag_lookup() {
         "<service mode=\"buildtime\" name=\"tar\"/>",
         "<service mode=\"buildtime\" name=\"tar\"/>\n  <service mode=\"manual\" name=\"cargo_vendor\"/>",
     );
-    let err = plan_service_carry(&svc, "0.2.2", || {
+    let err = plan_service_carry(&svc, "0.2.2", None, || {
         asked.set(true);
         Ok("v0.2.2".into())
     })
@@ -264,7 +419,7 @@ fn a_manual_vendoring_service_is_refused_before_the_tag_lookup() {
 
 #[test]
 fn a_no_tag_refusal_is_the_lookups_own() {
-    let err = plan_service_carry(OBS_SCM, "0.2.2", || {
+    let err = plan_service_carry(OBS_SCM, "0.2.2", None, || {
         Err("hyprland-guiutils lists no tag for 0.2.2".to_string())
     })
     .err()
@@ -274,21 +429,21 @@ fn a_no_tag_refusal_is_the_lookups_own() {
 
 #[test]
 fn the_plan_moves_the_revision_of_an_obs_scm_service() {
-    let plan = plan_service_carry(OBS_SCM, "0.2.2", || Ok("v0.2.2".into())).unwrap();
+    let plan = plan_service_carry(OBS_SCM, "0.2.2", None, || Ok("v0.2.2".into())).unwrap();
     assert_eq!(plan.kind, SourceService::BuildTime);
     assert_eq!(
         plan.moved,
         OBS_SCM.replace(">main</param>", ">v0.2.2</param>")
     );
     // A version the tag does not give at build time is refused, nothing moved.
-    let wrong = plan_service_carry(OBS_SCM, "0.2.3", || Ok("v0.2.2".into()));
+    let wrong = plan_service_carry(OBS_SCM, "0.2.3", None, || Ok("v0.2.2".into()));
     assert!(wrong.is_err());
 }
 
 #[test]
 fn a_tar_scm_service_is_fetched_and_not_checked_for_a_version() {
     let tar = "<services><service name=\"tar_scm\"><param name=\"revision\">v1.0</param></service></services>";
-    let plan = plan_service_carry(tar, "1.1", || Ok("v1.1".into())).unwrap();
+    let plan = plan_service_carry(tar, "1.1", None, || Ok("v1.1".into())).unwrap();
     assert_eq!(plan.kind, SourceService::Fetched);
     assert!(plan.moved.contains("<param name=\"revision\">v1.1</param>"));
 }
@@ -378,7 +533,7 @@ fn a_url_cargo_vendor_fetches_and_a_buildtime_one_does_not_block_obs_scm() {
         "<service mode=\"buildtime\" name=\"tar\"/>\n  <service mode=\"buildtime\" name=\"cargo_vendor\"/>",
     );
     assert!(refuse_manual_vendoring(&mask_xml_comments(&buildtime)).is_ok());
-    assert!(plan_service_carry(&buildtime, "0.2.2", || Ok("v0.2.2".into())).is_ok());
+    assert!(plan_service_carry(&buildtime, "0.2.2", None, || Ok("v0.2.2".into())).is_ok());
 }
 
 #[test]
