@@ -182,9 +182,18 @@ pub(super) fn commit_message(checkout_dir: &Path) -> String {
         })
         .unwrap_or_default();
     match changes_summary(&working, &pristine) {
-        Some(summary) => format!("{BASE}: {summary}"),
+        Some(summary) => one_line(&format!("{BASE}: {summary}")),
         None => BASE.to_string(),
     }
+}
+
+/// `text` as one line for `osc ci -m`: every run of white space or control
+/// character is a single space.
+pub(super) fn one_line(text: &str) -> String {
+    text.split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The bullets of the newest entry of `working` joined on one line and cut at
@@ -212,7 +221,7 @@ pub(super) fn changes_summary(working: &str, pristine: &str) -> Option<String> {
             last.push_str(l.trim());
         }
     }
-    let joined = bullets.join("; ");
+    let joined = one_line(&bullets.join("; "));
     if joined.is_empty() {
         return None;
     }

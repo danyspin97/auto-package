@@ -326,6 +326,8 @@ use gen_spec::*;
 mod carry;
 #[cfg(test)]
 mod commit_gate_tests;
+#[cfg(test)]
+mod commit_message_tests;
 mod service_source;
 #[cfg(test)]
 mod service_source_tests;
