@@ -124,7 +124,8 @@ pub(super) fn is_series_copy_of(rpm_name: &str, name: &str) -> bool {
 /// Why a `latest` newer than the packaged version is not taken, when it is not:
 /// a package on a series (`fmt-9`, `mariadb-55`), or one pinned to its major
 /// because its name is an old series of its spec's Name (`mariadb-55`) or a
-/// sibling is on a newer series.
+/// sibling is on a newer series. A plain package's jump of two majors, or into
+/// a series a sibling is on, is left to the maintainer.
 pub(super) fn held_back<SpecLookup>(
     rpm_name: &str,
     header: &spec::Header,
@@ -157,14 +158,33 @@ where
         return None;
     }
     let own_pair = series_pair(packaged);
+    let latest_pair = series_pair(latest);
     let related = sibling_versions(rpm_name, project, fetch_spec);
+    // A sibling already on the series this would move to keeps it.
+    if let Some((sibling, version)) = related
+        .iter()
+        .find(|(_, v)| series_pair(v) == latest_pair && series_pair(v) != own_pair)
+    {
+        return Some(SkipReason::NeedsMaintainer(format!(
+            "{latest} is on the series of {sibling} ({version}), which this package does not follow"
+        )));
+    }
     let series_copy = is_series_copy_of(rpm_name, &header.name);
     let newer_sibling = related.iter().any(|(_, v)| series_pair(v) > own_pair);
     if series_copy || newer_sibling {
         return (major_key(latest) != own)
             .then(|| other_series(own.iter().map(u64::to_string).collect::<Vec<_>>().join(".")));
     }
-    None
+    // A plain package takes a jump of one major; two or more it leaves to the
+    // maintainer.
+    let first = |v: &str| version::leading_numbers(v).first().copied();
+    match (first(packaged), first(latest)) {
+        (Some(from), Some(to)) if to >= from + 2 => Some(SkipReason::NeedsMaintainer(format!(
+            "{packaged} to {latest} is a jump of {} majors",
+            to - from
+        ))),
+        _ => None,
+    }
 }
 
 /// Whether `version` belongs to `series`: it starts with the same numbers.

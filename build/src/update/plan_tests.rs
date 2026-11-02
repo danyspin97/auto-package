@@ -181,3 +181,46 @@ fn a_plain_package_still_takes_one_major_jump() {
         Decision::Update { ref new_version, .. } if new_version == "2.0.0"
     ));
 }
+
+#[test]
+fn a_plain_package_stops_on_a_jump_of_two_majors() {
+    let table = &[(
+        "couchdb",
+        "Name:           couchdb\nVersion:        1.6.1\n",
+    )];
+    match classify_one("couchdb", table, &["couchdb"], "3.5.3") {
+        Decision::Skipped(SkipReason::NeedsMaintainer(why)) => {
+            assert!(why.contains("a jump of 2 majors"), "{why}");
+        }
+        other => panic!("expected a stop for the major jump, got {other:?}"),
+    }
+    assert!(matches!(
+        classify_one("couchdb", table, &["couchdb"], "1.6.2"),
+        Decision::Update { .. }
+    ));
+}
+
+#[test]
+fn a_pinned_package_stops_where_a_sibling_is_on_the_series() {
+    // `foo2` is on 1.9 here, a newer series than `foo`'s 1.4: `foo` is pinned to
+    // 1.x, and it does not take 1.9 either, which `foo2` already carries.
+    let table = &[
+        ("foo", "Name:           foo\nVersion:        1.4.0\n"),
+        ("foo2", "Name:           foo2\nVersion:        1.9.0\n"),
+    ];
+    let project = ["foo", "foo2"];
+    match classify_one("foo", table, &project, "1.9.3") {
+        Decision::Skipped(SkipReason::NeedsMaintainer(why)) => {
+            assert!(why.contains("foo2"), "{why}");
+        }
+        other => panic!("expected a stop at the sibling's series, got {other:?}"),
+    }
+    assert!(matches!(
+        classify_one("foo", table, &project, "1.4.1"),
+        Decision::Update { .. }
+    ));
+    assert!(matches!(
+        classify_one("foo", table, &project, "2.0.0"),
+        Decision::Skipped(SkipReason::OtherSeries { .. })
+    ));
+}

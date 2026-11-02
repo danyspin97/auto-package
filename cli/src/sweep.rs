@@ -25,7 +25,7 @@ impl PlanReport {
     ) {
         use ap_build::update::{Decision, SkipReason};
         if let Decision::Skipped(SkipReason::NeedsMaintainer(why)) = &c.decision {
-            self.maintainer.push(why.clone());
+            self.maintainer.push(format!("{}: {why}", c.rpm_name));
         }
         let eco_tag = |e: &ap_build::update::Ecosystem| e.tag();
         let line = match &c.decision {
