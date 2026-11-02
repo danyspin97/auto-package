@@ -37,6 +37,14 @@ impl ArchState {
         matches!(self, ArchState::Pending(_))
     }
 
+    /// The detail a failure or an unresolvable result carries, if any.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            ArchState::Failed { detail } | ArchState::Unresolvable { detail } => detail.as_deref(),
+            _ => None,
+        }
+    }
+
     /// The word the summary and the run log use for the state.
     pub fn label(&self) -> String {
         match self {

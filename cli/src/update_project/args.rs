@@ -147,6 +147,28 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false, conflicts_with = "submit")]
     pub local: bool,
 
+    /// Do not check the built package on the other architectures its branch
+    /// builds it for (after the primary build). `--local` skips the check anyway.
+    #[arg(long, default_value_t = false, conflicts_with = "arches")]
+    pub no_arch_check: bool,
+
+    /// Check the other architectures given here (comma separated), and add the
+    /// ones the branch lacks: OBS then schedules every package of the branch on
+    /// them. Names OBS knows only: x86_64, aarch64, armv7l, armv6l, i586,
+    /// ppc64le, s390x, riscv64, ppc64, ppc.
+    #[arg(long, value_delimiter = ',', value_name = "ARCHES")]
+    pub arches: Vec<String>,
+
+    /// The total time to wait for the other architectures' builds, in minutes.
+    /// Builds still running after it are reported as still building.
+    #[arg(long, default_value_t = 30, value_name = "MINUTES")]
+    pub arch_wait_minutes: u64,
+
+    /// `--submit`: submit a package even when it fails on another architecture
+    /// that its origin builds. Without it such a package is not submitted.
+    #[arg(long, default_value_t = false)]
+    pub allow_arch_failures: bool,
+
     #[command(flatten)]
     pub local_opts: crate::local_opts::LocalOpts,
 

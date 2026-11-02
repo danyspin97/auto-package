@@ -33,6 +33,7 @@ use super::{
 /// that keeps growing.
 const MAX_DEPENDENCY_ITEMS: usize = 25;
 
+mod arch;
 mod args;
 mod audit;
 mod cmd;

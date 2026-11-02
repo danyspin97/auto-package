@@ -1,4 +1,5 @@
 use super::*;
+use crate::arch_check::{self, ArchRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemOutcome {
@@ -226,6 +227,22 @@ pub fn sr_confirmation_lines(branch_project: &str, items: &[&Item]) -> Vec<Strin
             )
         })
         .collect()
+}
+
+/// The "Other architectures" section of the end-of-run summary: empty when the
+/// check found nothing to report.
+pub fn arch_section(rows: &[ArchRow]) -> String {
+    use std::fmt::Write as _;
+    let lines = arch_check::section_lines(rows);
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let _ = writeln!(out, "Other architectures ({}):", lines.len());
+    for l in lines {
+        let _ = writeln!(out, "  {l}");
+    }
+    out
 }
 
 /// The end-of-run summary.

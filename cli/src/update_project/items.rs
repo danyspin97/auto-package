@@ -382,6 +382,9 @@ pub(super) fn build_ready(
             Ok(()) => ItemOutcome::Updated,
             Err(why) => ItemOutcome::Failed(why),
         };
+        if outcome == ItemOutcome::Updated {
+            super::arch::check_item(a, branch, &item, ctx, report);
+        }
         report.results.push(ItemResult {
             item,
             outcome,

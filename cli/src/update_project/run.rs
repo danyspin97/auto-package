@@ -34,6 +34,9 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     if a.improve && a.update_deps {
         return Err(eyre!("--update-deps is only for update"));
     }
+    if let Err(e) = arch::wanted_arches(&a) {
+        return Err(eyre!("--arches: {e}"));
+    }
     ap_build::branch_revision::validate_args(
         &a.only,
         a.revision.as_deref(),
@@ -217,7 +220,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     });
     if !a.dry_run {
         *summary = Some(format!(
-            "{}{}",
+            "{}{}{}",
             print_run_summary(
                 &memory,
                 &branch_project,
@@ -231,7 +234,8 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 &report.paths,
                 &report.requirements,
                 a.submit
-            )
+            ),
+            up::arch_section(&report.arch),
         ));
     }
 

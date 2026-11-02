@@ -8,6 +8,8 @@ pub(super) struct Report {
     pub(super) paths: Vec<PathAddition>,
     /// Capabilities with no provider in a repository the branch builds in.
     pub(super) requirements: Vec<MissingRequirement>,
+    /// The other-architecture results of the updated packages.
+    pub(super) arch: Vec<ap_build::arch_check::ArchRow>,
 }
 
 /// What the build needs from `run`'s setup.
