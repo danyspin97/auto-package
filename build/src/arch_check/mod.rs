@@ -7,14 +7,18 @@
 //! a branch repository. The OBS reads and the orchestration live in the CLI.
 
 mod arches;
+mod classify;
 mod meta;
 mod obs;
 #[cfg(test)]
 mod tests;
+mod wait;
 
 pub use arches::*;
+pub use classify::*;
 pub use meta::*;
 pub use obs::*;
+pub use wait::*;
 
 use std::time::Duration;
 

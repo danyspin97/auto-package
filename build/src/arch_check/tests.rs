@@ -258,3 +258,125 @@ fn a_comment_that_looks_like_an_arch_or_a_repository_is_not_one() {
         vec!["x86_64", "s390x"]
     );
 }
+
+mod results {
+    use super::super::*;
+    use crate::osc::BuildStatus;
+
+    #[test]
+    fn each_status_classifies_to_its_state() {
+        assert_eq!(
+            classify(&BuildStatus::Succeeded, None),
+            ArchState::Succeeded
+        );
+        assert_eq!(
+            classify(&BuildStatus::Failed, None),
+            ArchState::Failed { detail: None }
+        );
+        assert_eq!(classify(&BuildStatus::Broken, None), ArchState::Broken);
+        assert_eq!(classify(&BuildStatus::Excluded, None), ArchState::Ignored);
+        assert_eq!(classify(&BuildStatus::Disabled, None), ArchState::Ignored);
+        assert!(classify(&BuildStatus::Building, None).is_pending());
+        assert!(classify(&BuildStatus::Scheduled, None).is_pending());
+        assert!(classify(&BuildStatus::Blocked, None).is_pending());
+        assert!(classify(&BuildStatus::Unknown("no results".into()), None).is_pending());
+    }
+
+    #[test]
+    fn an_unresolvable_result_names_its_missing_dependencies() {
+        let details =
+            "nothing provides libfoo.so()(64bit) needed by bar; nothing provides baz-devel >= 2";
+        assert_eq!(
+            classify(&BuildStatus::Unresolvable, Some(details)),
+            ArchState::Unresolvable {
+                detail: Some("missing libfoo.so()(64bit), baz-devel".to_string())
+            }
+        );
+        assert_eq!(
+            classify(&BuildStatus::Unresolvable, Some("cycle detected")),
+            ArchState::Unresolvable { detail: None }
+        );
+    }
+
+    #[test]
+    fn only_failures_count_as_failures() {
+        assert!(classify(&BuildStatus::Failed, None).is_failure());
+        assert!(classify(&BuildStatus::Unresolvable, None).is_failure());
+        assert!(classify(&BuildStatus::Broken, None).is_failure());
+        assert!(!ArchState::Ignored.is_failure());
+        assert!(!ArchState::Succeeded.is_failure());
+        assert!(!ArchState::Pending("building".into()).is_failure());
+    }
+
+    #[test]
+    fn the_first_error_line_is_the_error_or_the_last_line() {
+        let log = "[  1s] + make\n[  2s] foo.c: error: no such header\n[  3s] make: *** Error 1\n";
+        assert_eq!(
+            first_error_line(log).as_deref(),
+            Some("[  2s] foo.c: error: no such header")
+        );
+        assert_eq!(
+            first_error_line("only\nthe tail").as_deref(),
+            Some("the tail")
+        );
+        assert_eq!(first_error_line("\n  \n"), None);
+    }
+
+    #[test]
+    fn the_wait_stops_at_the_bound_with_the_last_results() {
+        use crate::osc::BuildStatus;
+        use std::cell::Cell;
+        use std::time::Duration;
+        let clock = Cell::new(Duration::ZERO);
+        let polls = Cell::new(0u32);
+        let out = wait_settled(
+            Duration::from_secs(120),
+            || {
+                polls.set(polls.get() + 1);
+                Ok(vec![("s390x", BuildStatus::Building)])
+            },
+            |d| clock.set(clock.get() + d),
+            || clock.get(),
+            |_| Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(out, vec![("s390x", BuildStatus::Building)]);
+        assert!(
+            clock.get() <= Duration::from_secs(120),
+            "slept {:?}",
+            clock.get()
+        );
+        assert_eq!(polls.get(), 3, "polls at 0, 60 and 120 seconds");
+    }
+
+    #[test]
+    fn the_wait_returns_early_once_nothing_is_pending() {
+        use crate::osc::BuildStatus;
+        use std::cell::Cell;
+        use std::time::Duration;
+        let calls = Cell::new(0u32);
+        let out = wait_settled(
+            Duration::from_secs(1800),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(vec![
+                    ("x86_64", BuildStatus::Succeeded),
+                    (
+                        "s390x",
+                        if calls.get() < 2 {
+                            BuildStatus::Building
+                        } else {
+                            BuildStatus::Failed
+                        },
+                    ),
+                ])
+            },
+            |_| {},
+            || Duration::ZERO,
+            |_| Duration::from_secs(15),
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 2);
+        assert_eq!(out[1].1, BuildStatus::Failed);
+    }
+}
