@@ -26,7 +26,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -37,6 +37,8 @@ use crate::proc::{self, Captured, Emit};
 
 mod allowlist;
 mod proxy;
+#[cfg(test)]
+mod proxy_slots_tests;
 mod run;
 mod sandbox;
 #[cfg(test)]

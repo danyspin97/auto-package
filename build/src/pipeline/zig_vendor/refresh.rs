@@ -8,7 +8,10 @@ use std::path::Path;
 use ap_core::sink::Reporter;
 
 use super::fetch::{Fetch, HttpFetch, RETRY_PAUSE, Refusal, Request, fetch_vendor};
-use super::fetch_git::{GitRun, NoGit};
+use super::fetch_git::GitRun;
+#[cfg(test)]
+use super::fetch_git::NoGit;
+use super::fetch_git_sandbox::SandboxGit;
 use super::plan::{plan, source0_file};
 use super::unpack::{Format, LIMITS, unpack};
 use super::vendor_tar::write_vendor_tar;
@@ -34,8 +37,8 @@ pub(in crate::pipeline) struct RefreshedDep {
     pub(in crate::pipeline) hash: String,
 }
 
-/// [`refresh_checkout`] over the network, through the host allowlist. For the
-/// update pipeline.
+/// [`refresh_with`] over the network, through the host allowlist, with git run
+/// in the sandbox. For the update pipeline.
 pub(in crate::pipeline) fn refresh_from_network(
     checkout: &Path,
     spec: &str,
@@ -43,7 +46,10 @@ pub(in crate::pipeline) fn refresh_from_network(
     reporter: &dyn Reporter,
     work: &Path,
 ) -> Result<Option<Refreshed>, Refusal> {
-    refresh_with(checkout, spec, package, &HttpFetch, &NoGit, reporter, work)
+    let git = SandboxGit {
+        max_file: LIMITS.max_bytes,
+    };
+    refresh_with(checkout, spec, package, &HttpFetch, &git, reporter, work)
 }
 
 /// Whether [`refresh_from_network`] applies to `spec`. `Err` when the spec is

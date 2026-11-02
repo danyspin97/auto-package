@@ -208,7 +208,7 @@ pub(crate) fn unsafe_mode() -> bool {
 }
 
 /// The `bwrap` to run, or why services cannot be sandboxed here.
-pub(super) fn sandbox_ready() -> Result<&'static Path, Error> {
+pub(crate) fn sandbox_ready() -> Result<&'static Path, Error> {
     let why = match ap_core::sandbox::bwrap_path() {
         None => "bwrap is not installed".to_string(),
         Some(_) if !ap_core::sandbox::bwrap_works() => {

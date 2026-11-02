@@ -58,10 +58,12 @@ pub(super) trait GitRun {
     ) -> Result<String, String>;
 }
 
-/// A [`GitRun`] that runs nothing: every command fails. For a fetch that may not
-/// run git, and for tests of what is not git's.
+/// A [`GitRun`] that runs nothing: every command fails. For tests of what is not
+/// git's: a dependency that needs git is refused by them.
+#[cfg(test)]
 pub(super) struct NoGit;
 
+#[cfg(test)]
 impl GitRun for NoGit {
     fn run(
         &self,
@@ -307,13 +309,17 @@ fn argv(parts: &[&str]) -> Vec<String> {
 }
 
 /// A command on the bare repository. Hooks are off by path, whatever the config.
+/// A fetch checks the objects it receives, and keeps them in one pack file
+/// (`fetch.unpackLimit=1`), so the sandbox's file size limit bounds them.
 fn git_dir(parts: &[&str]) -> Vec<String> {
-    let mut args = vec![
-        GIT.to_string(),
-        format!("--git-dir={GITDIR}"),
-        "-c".to_string(),
-        "core.hooksPath=/dev/null".to_string(),
-    ];
+    let mut args = vec![GIT.to_string(), format!("--git-dir={GITDIR}")];
+    for config in [
+        "core.hooksPath=/dev/null",
+        "fetch.fsckObjects=true",
+        "fetch.unpackLimit=1",
+    ] {
+        args.extend(["-c".to_string(), config.to_string()]);
+    }
     args.extend(parts.iter().map(|p| p.to_string()));
     args
 }

@@ -143,12 +143,38 @@ pub(super) fn status_text(status: u16) -> &'static str {
     }
 }
 
+/// The most connections the proxy serves at once. A connection past that is
+/// answered with 503 and closed, so a client cannot start unbounded threads.
+pub(super) const MAX_CONNECTIONS: usize = 16;
+
+/// A connection slot, given back when it is dropped.
+pub(super) struct Slot(Arc<AtomicUsize>);
+
+/// Take a slot of `taken` if fewer than `max` are taken.
+pub(super) fn take_slot(taken: &Arc<AtomicUsize>, max: usize) -> Option<Slot> {
+    if taken.fetch_add(1, Ordering::SeqCst) < max {
+        Some(Slot(Arc::clone(taken)))
+    } else {
+        taken.fetch_sub(1, Ordering::SeqCst);
+        None
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// What the proxy threads share.
 pub(super) struct Shared {
     /// Read for every request, so a host allowed during the run applies.
     hosts: Arc<AllowedHosts>,
     /// Who the requests are for: recorded with each refused host.
     asker: Asker,
+    /// The one host a request may name, when the proxy was started for one
+    /// (see [`Proxy::start_only`]); `None` checks the allowlist alone.
+    only: Option<String>,
     refused: Mutex<Vec<String>>,
     /// Upstream connections, shut down when the proxy stops so no tunnel
     /// thread outlives the run.
@@ -168,30 +194,61 @@ impl Proxy {
     /// Start serving; `hosts` is the allowlist every request is checked against,
     /// and `asker` names what the requests are for.
     pub(crate) fn start(hosts: Arc<AllowedHosts>, asker: Asker) -> io::Result<Self> {
+        Self::start_with(hosts, asker, None)
+    }
+
+    /// [`Self::start`] where a request may name only `host`, even when the
+    /// allowlist allows more.
+    pub(crate) fn start_only(
+        hosts: Arc<AllowedHosts>,
+        asker: Asker,
+        host: &str,
+    ) -> io::Result<Self> {
+        Self::start_with(hosts, asker, Some(host.to_ascii_lowercase()))
+    }
+
+    fn start_with(
+        hosts: Arc<AllowedHosts>,
+        asker: Asker,
+        only: Option<String>,
+    ) -> io::Result<Self> {
         let dir = tempfile::Builder::new()
             .prefix("ap-service-proxy-")
             .tempdir()?;
         let listener = UnixListener::bind(dir.path().join(SOCKET_NAME))?;
         let stop = Arc::new(AtomicBool::new(false));
+        let taken = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Shared {
             hosts,
             asker,
+            only,
             refused: Mutex::new(Vec::new()),
             active: Mutex::new(Vec::new()),
         });
         let accept = {
             let stop = Arc::clone(&stop);
             let shared = Arc::clone(&shared);
+            let taken = Arc::clone(&taken);
             std::thread::spawn(move || {
                 for conn in listener.incoming() {
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
                     match conn {
-                        Ok(client) => {
-                            let shared = Arc::clone(&shared);
-                            std::thread::spawn(move || handle(client, &shared));
-                        }
+                        Ok(mut client) => match take_slot(&taken, MAX_CONNECTIONS) {
+                            Some(slot) => {
+                                let shared = Arc::clone(&shared);
+                                std::thread::spawn(move || {
+                                    let _slot = slot;
+                                    handle(client, &shared)
+                                });
+                            }
+                            None => {
+                                let _ = client.write_all(
+                                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                );
+                            }
+                        },
                         Err(_) => std::thread::sleep(Duration::from_millis(50)),
                     }
                 }
@@ -251,6 +308,12 @@ pub(super) fn handle(mut client: UnixStream, shared: &Shared) {
         let (host, port) = parse_connect(&head)?;
         let host = check_target(&host, port, &shared.hosts, &shared.asker)
             .map_err(|e| refuse(403, format!("{host}:{port}: {e}")))?;
+        if shared.only.as_deref().is_some_and(|only| only != host) {
+            return Err(refuse(
+                403,
+                format!("{host}:{port}: this proxy reaches only its own host"),
+            ));
+        }
         Ok((host, port, rest))
     });
     let upstream = request.and_then(|(host, port, rest)| {

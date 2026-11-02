@@ -6,6 +6,7 @@
 
 mod fetch;
 mod fetch_git;
+mod fetch_git_sandbox;
 mod fetch_source;
 mod hash;
 mod plan;
@@ -25,6 +26,8 @@ mod fetch_archive_tests;
 mod fetch_forge_tests;
 #[cfg(test)]
 mod fetch_git_check_tests;
+#[cfg(test)]
+mod fetch_git_sandbox_tests;
 #[cfg(test)]
 mod fetch_git_tests;
 #[cfg(test)]
