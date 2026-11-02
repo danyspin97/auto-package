@@ -91,6 +91,8 @@ mod expand_order_tests;
 
 mod arch_tags;
 mod checks;
+mod placeholders;
+pub use placeholders::*;
 mod upstream_tag;
 pub use arch_tags::*;
 pub use upstream_tag::*;

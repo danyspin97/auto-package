@@ -3,23 +3,6 @@
 
 use super::*;
 
-/// Lines of `spec` that still carry a `TODO` or `FIXME` placeholder, as `(line number,
-/// text)`. The skeleton generators leave these for the agent to fill in, and a
-/// spec that keeps one builds an empty or half-described package. The
-/// `%changelog` is history, not a placeholder, and is not searched.
-pub fn todo_placeholders(spec: &str) -> Vec<(usize, String)> {
-    let mut found = Vec::new();
-    for (i, line) in spec.lines().enumerate() {
-        if line.trim_end() == "%changelog" {
-            break;
-        }
-        if line.contains("TODO") || line.contains("FIXME") {
-            found.push((i + 1, line.trim().to_string()));
-        }
-    }
-    found
-}
-
 /// Lines of the spec that set a variable whose only purpose is to tell an
 /// upstream build "I accept the licence terms" or "this is not a licence
 /// violation" (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1`,
