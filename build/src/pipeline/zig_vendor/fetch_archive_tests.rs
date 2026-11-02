@@ -26,3 +26,18 @@ fn an_archive_with_dot_slash_names_has_the_hash_zig_gives_it() {
     let (_dir, result) = fetch(&fake, &root(&dep("x", url, GIT_ARCHIVE_HASH)));
     assert_eq!(result.unwrap()[0].declared, GIT_ARCHIVE_HASH);
 }
+
+#[test]
+fn the_gzip_content_types_zig_reads_name_a_gzipped_tar() {
+    // zig 0.15.2 reads these three as gzip, as it reads application/gzip.
+    let url = "https://codeberg.org/x/x/archive/v0.1.0";
+    for ct in [
+        "application/tar+gzip",
+        "application/x-tar-gz",
+        "application/x-gtar-compressed; q=1",
+    ] {
+        let fake = Fake::new(vec![(url, Route::Typed(ct, GIT_ARCHIVE.to_vec()))]);
+        let (_dir, result) = fetch(&fake, &root(&dep("x", url, GIT_ARCHIVE_HASH)));
+        assert_eq!(result.unwrap()[0].declared, GIT_ARCHIVE_HASH, "{ct}");
+    }
+}

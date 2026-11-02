@@ -333,16 +333,81 @@ fn a_corrupt_xz_archive_is_refused() {
 }
 
 #[test]
-fn only_the_formats_zig_reads_are_read() {
-    assert_eq!(Format::of_url("https://x/a-1.0.tar.gz"), Ok(Format::TarGz));
-    assert_eq!(Format::of_url("https://x/a.tgz"), Ok(Format::TarGz));
-    assert_eq!(Format::of_url("https://x/a.tar.xz"), Ok(Format::TarXz));
-    assert_eq!(Format::of_url("https://x/a.txz"), Ok(Format::TarXz));
-    assert_eq!(Format::of_url("https://x/a.tar.zst"), Ok(Format::TarZst));
-    assert_eq!(Format::of_url("https://x/a.tzst"), Ok(Format::TarZst));
-    assert_eq!(Format::of_url("https://x/a-1.0.zip"), Ok(Format::Zip));
-    assert!(Format::of_url("https://x/a.tar.bz2").is_err());
-    assert!(Format::of_url("https://x/archive").is_err());
+fn only_the_formats_zig_reads_are_named() {
+    assert_eq!(
+        Format::of_extension("https://x/a-1.0.tar.gz"),
+        Some(Format::TarGz)
+    );
+    assert_eq!(Format::of_extension("https://x/a.tgz"), Some(Format::TarGz));
+    assert_eq!(
+        Format::of_extension("https://x/a.tar.xz"),
+        Some(Format::TarXz)
+    );
+    assert_eq!(Format::of_extension("https://x/a.txz"), Some(Format::TarXz));
+    assert_eq!(
+        Format::of_extension("https://x/a.tar.zst"),
+        Some(Format::TarZst)
+    );
+    assert_eq!(
+        Format::of_extension("https://x/a.tzst"),
+        Some(Format::TarZst)
+    );
+    assert_eq!(Format::of_extension("https://x/a.tar"), Some(Format::Tar));
+    assert_eq!(
+        Format::of_extension("https://x/a-1.0.zip"),
+        Some(Format::Zip)
+    );
+    assert_eq!(
+        Format::of_extension("https://x/A-1.0.TAR.XZ?x=1#f"),
+        Some(Format::TarXz)
+    );
+    assert_eq!(Format::of_extension("https://x/a.tar.bz2"), None);
+    assert_eq!(Format::of_extension("https://x/a.gz"), None);
+    assert_eq!(Format::of_extension("https://x/archive"), None);
+}
+
+#[test]
+fn the_content_type_names_the_format_as_zig_reads_it() {
+    let r = Format::resolve;
+    assert_eq!(
+        r(Some("application/x-tar"), Some(Format::TarGz)),
+        Ok(Format::Tar)
+    );
+    assert_eq!(
+        r(Some("Application/X-Gzip; charset=binary"), None),
+        Ok(Format::TarGz)
+    );
+    assert_eq!(r(Some("application/gzip"), None), Ok(Format::TarGz));
+    assert_eq!(r(Some("application/x-xz"), None), Ok(Format::TarXz));
+    assert_eq!(r(Some("application/zstd"), None), Ok(Format::TarZst));
+    assert_eq!(r(Some("application/zip"), None), Ok(Format::Zip));
+    assert_eq!(
+        r(Some("application/x-zip-compressed"), None),
+        Ok(Format::Zip)
+    );
+    // A type that names nothing leaves the decision to the URL.
+    assert_eq!(
+        r(Some("application/octet-stream"), Some(Format::TarXz)),
+        Ok(Format::TarXz)
+    );
+    assert_eq!(r(None, Some(Format::Zip)), Ok(Format::Zip));
+    assert!(r(Some("application/octet-stream"), None).is_err());
+    assert!(r(None, None).is_err());
+    assert!(
+        r(Some("text/plain"), Some(Format::TarGz))
+            .unwrap_err()
+            .contains("unrecognized Content-Type")
+    );
+    assert!(r(Some("application/x-zstd"), None).is_err());
+    assert!(r(Some("application/x-bzip2"), None).is_err());
+}
+
+#[test]
+fn a_plain_tar_unpacks_like_a_compressed_one() {
+    let bytes = raw_tar(&[("p/", K::Dir), ("p/a", K::File(b"a"))]);
+    let (dir, result) = run(&bytes, Format::Tar, LIMITS);
+    result.unwrap();
+    assert_eq!(std::fs::read(dir.path().join("out/a")).unwrap(), b"a");
 }
 
 /// A zip archive of `entries`, written by the zip crate.

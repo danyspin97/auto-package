@@ -20,10 +20,11 @@ mod guard;
 
 pub(super) mod zip_archive;
 
-/// The compressions a dependency archive may use. `.tar.bz2` and the rest are
-/// refused, as zig refuses them.
+/// The formats a dependency archive may have: the ones zig 0.15.2 reads. A
+/// `.tar.bz2` or a `.gz` alone is refused, as zig refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Format {
+    Tar,
     TarGz,
     TarXz,
     TarZst,
@@ -31,22 +32,69 @@ pub(super) enum Format {
 }
 
 impl Format {
-    /// The format named by a URL's extension (the URL has no query or fragment).
-    pub(super) fn of_url(url: &str) -> Result<Format, String> {
-        let path = url.rsplit('/').next().unwrap_or(url);
-        if path.ends_with(".tar.gz") || path.ends_with(".tgz") {
-            Ok(Format::TarGz)
-        } else if path.ends_with(".tar.xz") || path.ends_with(".txz") {
-            Ok(Format::TarXz)
-        } else if path.ends_with(".tar.zst") || path.ends_with(".tzst") {
-            Ok(Format::TarZst)
-        } else if path.ends_with(".zip") {
-            Ok(Format::Zip)
+    /// The format a URL's extension names, ignoring case, a query and a
+    /// fragment. The extensions are the ones zig reads.
+    pub(super) fn of_extension(url: &str) -> Option<Format> {
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+        if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+            Some(Format::TarGz)
+        } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
+            Some(Format::TarXz)
+        } else if name.ends_with(".tar.zst") || name.ends_with(".tzst") {
+            Some(Format::TarZst)
+        } else if name.ends_with(".tar") {
+            Some(Format::Tar)
+        } else if name.ends_with(".zip") {
+            Some(Format::Zip)
         } else {
-            Err(format!(
-                "`{url}` is not a .tar.gz, .tar.xz, .tar.zst or .zip archive (the only formats zig_vendor reads)"
-            ))
+            None
         }
+    }
+
+    /// The format a response's `Content-Type` names, as zig reads it. A type
+    /// with parameters is read without them, and its case is ignored.
+    /// `application/octet-stream` names none, so the URL decides. Any other
+    /// type is an error, as it is for zig.
+    pub(super) fn of_content_type(content_type: &str) -> Result<Option<Format>, String> {
+        let essence = content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        Ok(match essence.as_str() {
+            "application/octet-stream" => None,
+            "application/x-tar" => Some(Format::Tar),
+            "application/gzip"
+            | "application/x-gzip"
+            | "application/tar+gzip"
+            | "application/x-tar-gz"
+            | "application/x-gtar-compressed" => Some(Format::TarGz),
+            "application/x-xz" => Some(Format::TarXz),
+            "application/zstd" => Some(Format::TarZst),
+            "application/zip" | "application/x-zip-compressed" => Some(Format::Zip),
+            _ => {
+                return Err(format!(
+                    "unrecognized Content-Type `{content_type}` (zig_vendor reads tar, gzip, xz, zstd and zip archives)"
+                ));
+            }
+        })
+    }
+
+    /// The format of a fetched archive: the Content-Type decides when it names
+    /// one, else the URL's extension (`by_url`). Neither naming one is an error.
+    pub(super) fn resolve(
+        content_type: Option<&str>,
+        by_url: Option<Format>,
+    ) -> Result<Format, String> {
+        let named = match content_type {
+            Some(ct) => Format::of_content_type(ct)?,
+            None => None,
+        };
+        named.or(by_url).ok_or_else(|| {
+            "the archive is not a format zig_vendor reads: its URL has no .tar.gz, .tar.xz, .tar.zst, .tar or .zip extension, and its Content-Type names none".to_string()
+        })
     }
 }
 
@@ -175,6 +223,7 @@ fn write_entries(
     limits: Limits,
 ) -> Result<(Vec<(PathBuf, PathBuf)>, BTreeSet<OsString>), String> {
     let stream: Box<dyn Read> = match format {
+        Format::Tar => Box::new(src),
         Format::TarGz => Box::new(flate2::read::GzDecoder::new(src)),
         // Zig reads one xz stream and stops at its end, so a second stream
         // makes the archive truncated, as it does for zig.

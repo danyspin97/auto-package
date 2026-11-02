@@ -23,10 +23,14 @@ pub(super) const MAX_REDIRECTS: usize = 5;
 /// Dependencies fetched for one package, transitive ones included.
 pub(super) const MAX_DEPS: usize = 256;
 
-/// The answer to one request: a redirect to follow, or the archive's body.
+/// The answer to one request: a redirect to follow, or the archive's body
+/// with the `Content-Type` it was served as.
 pub(super) enum Response {
     Redirect(String),
-    Body(Box<dyn Read>),
+    Body {
+        content_type: Option<String>,
+        body: Box<dyn Read>,
+    },
 }
 
 /// Where archives come from. The real one is [`HttpFetch`]; tests use a fake.
@@ -52,12 +56,19 @@ impl Fetch for HttpFetch {
                 .ok_or_else(|| format!("{url} redirects without a Location"))?;
             return Ok(Response::Redirect(location.to_string()));
         }
+        let content_type = resp
+            .headers()
+            .get(ureq::http::header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap_or("").to_string());
         let body = resp
             .into_body()
             .into_with_config()
             .limit(crate::http::MAX_DOWNLOAD)
             .reader();
-        Ok(Response::Body(Box::new(body)))
+        Ok(Response::Body {
+            content_type,
+            body: Box::new(body),
+        })
     }
 }
 
@@ -129,8 +140,7 @@ fn fetch_one(
 ) -> Result<Dep, String> {
     let (name_version, digest) =
         split_declared(declared).map_err(|e| format!("zig dep {name}: {e}"))?;
-    let archive = archive_url(url).map_err(|e| format!("zig dep {name}: {e}"))?;
-    let format = Format::of_url(&archive).map_err(|e| format!("zig dep {name}: {e}"))?;
+    let (archive, by_url) = archive_url(url).map_err(|e| format!("zig dep {name}: {e}"))?;
     let root = req.work.join(format!("dep-{index}"));
     let mut current = archive.clone();
     let mut hops = 0;
@@ -141,7 +151,9 @@ fn fetch_one(
             .get(&current)
             .map_err(|e| format!("zig dep {name}: {e}"))?
         {
-            Response::Body(body) => {
+            Response::Body { content_type, body } => {
+                let format = Format::resolve(content_type.as_deref(), by_url)
+                    .map_err(|e| format!("zig dep {name}: {current}: {e}"))?;
                 unpack(body, format, &root, req.limits)
                     .map_err(|e| format!("zig dep {name}: {e}"))?;
                 break;
@@ -153,8 +165,9 @@ fn fetch_one(
                         "zig dep {name}: more than {MAX_REDIRECTS} redirects"
                     ));
                 }
-                current = redirect_target(&current, &location)
+                let target = redirect_target(&current, &location)
                     .map_err(|e| format!("zig dep {name}: {e}"))?;
+                current = without_fragment(&target).to_string();
             }
         }
     }
@@ -190,21 +203,24 @@ fn check_url(req: &Request<'_>, name: &str, url: &str) -> Result<(), String> {
         .map_err(|e| format!("zig dep {name}: {e}"))
 }
 
-/// The archive URL a dependency's `url` field names. `https://` archives are
-/// used as written. `git+https://` becomes the forge's archive of the commit
-/// after `#`, for codeberg.org, github.com, gitlab.com and git.sr.ht only.
-pub(super) fn archive_url(url: &str) -> Result<String, String> {
+/// The archive URL a dependency's `url` field names, and the format its URL
+/// names, if any. `https://` archives are used as written, without a fragment,
+/// as zig requests them. `git+https://` becomes the forge's archive of the
+/// commit after `#`, for codeberg.org, github.com, gitlab.com and git.sr.ht
+/// only, and those archives are gzipped tarballs.
+pub(super) fn archive_url(url: &str) -> Result<(String, Option<Format>), String> {
     if let Some(rest) = url.strip_prefix("git+https://") {
-        return forge_archive(rest, url);
+        return forge_archive(rest, url).map(|a| (a, Some(Format::TarGz)));
     }
     if !url.starts_with("https://") {
         return Err(format!("`{url}` is not an https:// or git+https:// URL"));
     }
-    if url.contains(['?', '#']) {
-        return Err(format!("`{url}` has a query or a fragment"));
-    }
-    Format::of_url(url)?;
-    Ok(url.to_string())
+    Ok((without_fragment(url).to_string(), Format::of_extension(url)))
+}
+
+/// The URL without its fragment, which is never sent.
+fn without_fragment(url: &str) -> &str {
+    url.split('#').next().unwrap_or(url)
 }
 
 /// `rest` is `host/owner/repo[?ref=…]#commit`, the part after `git+https://`.

@@ -15,6 +15,8 @@ const HEX40: &str = "c183af18ae35dd5fb3dde709697c8f84bb1dc7f3";
 pub(super) enum Route {
     Redirect(String),
     Body(Vec<u8>),
+    /// A body served with this Content-Type.
+    Typed(&'static str, Vec<u8>),
 }
 
 /// Serves `routes` by exact URL and records every URL asked for.
@@ -44,9 +46,14 @@ impl Fetch for Fake {
         self.calls.borrow_mut().push(url.to_string());
         match self.routes.iter().find(|(u, _)| u == url) {
             Some((_, Route::Redirect(to))) => Ok(Response::Redirect(to.clone())),
-            Some((_, Route::Body(b))) => {
-                Ok(Response::Body(Box::new(std::io::Cursor::new(b.clone()))))
-            }
+            Some((_, Route::Body(b))) => Ok(Response::Body {
+                content_type: None,
+                body: Box::new(std::io::Cursor::new(b.clone())),
+            }),
+            Some((_, Route::Typed(ct, b))) => Ok(Response::Body {
+                content_type: Some(ct.to_string()),
+                body: Box::new(std::io::Cursor::new(b.clone())),
+            }),
             None => Err(format!("no route for {url}")),
         }
     }
@@ -169,6 +176,66 @@ fn a_tar_xz_dependency_is_fetched_and_its_zig_hash_checked() {
     let deps = result.unwrap();
     assert_eq!(deps[0].declared, ZIG_XZ_HASH);
     assert_eq!(fake.calls(), [ZIG_XZ_URL]);
+}
+
+#[test]
+fn a_content_type_names_the_format_over_the_url_extension() {
+    let url = "https://codeberg.org/x/pkg/archive/v1.0.zip";
+    let fake = Fake::new(vec![(
+        url,
+        Route::Typed("application/x-xz", ZIG_XZ.to_vec()),
+    )]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ZIG_XZ_HASH)));
+    assert_eq!(result.unwrap()[0].declared, ZIG_XZ_HASH);
+}
+
+#[test]
+fn a_url_without_an_extension_takes_its_content_type() {
+    let url = "https://codeberg.org/x/pkg/archive/v1.0";
+    let fake = Fake::new(vec![(
+        url,
+        Route::Typed("application/zip", ZIG_ZIP.to_vec()),
+    )]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ZIG_XZ_HASH)));
+    assert_eq!(result.unwrap()[0].declared, ZIG_XZ_HASH);
+}
+
+#[test]
+fn an_unrecognized_content_type_is_refused_after_the_request() {
+    let fake = Fake::new(vec![(
+        ZIG_XZ_URL,
+        Route::Typed("text/html", ZIG_XZ.to_vec()),
+    )]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", ZIG_XZ_URL, ZIG_XZ_HASH)));
+    assert!(result.unwrap_err().contains("unrecognized Content-Type"));
+    assert_eq!(fake.calls(), [ZIG_XZ_URL]);
+}
+
+#[test]
+fn a_bz2_archive_is_refused_because_zig_refuses_it() {
+    let url = "https://codeberg.org/x/pkg/archive/v1.0.tar.bz2";
+    let fake = Fake::new(vec![(url, Route::Body(ZIG_XZ.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ZIG_XZ_HASH)));
+    assert!(
+        result
+            .unwrap_err()
+            .contains("not a format zig_vendor reads")
+    );
+}
+
+#[test]
+fn a_query_and_an_upper_case_extension_are_read_and_a_fragment_is_not_sent() {
+    let url = "https://codeberg.org/x/pkg/archive/V1.0.TAR.XZ?download=1";
+    let fake = Fake::new(vec![(url, Route::Body(ZIG_XZ.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ZIG_XZ_HASH)));
+    assert_eq!(result.unwrap()[0].declared, ZIG_XZ_HASH);
+    assert_eq!(fake.calls(), [url]);
+    let frag = "https://codeberg.org/x/pkg/archive/v1.0.tar.xz#frag";
+    let plain = "https://codeberg.org/x/pkg/archive/v1.0.tar.xz";
+    let fake = Fake::new(vec![(plain, Route::Body(ZIG_XZ.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pkg", frag, ZIG_XZ_HASH)));
+    assert_eq!(result.unwrap()[0].declared, ZIG_XZ_HASH);
+    assert_eq!(fake.calls(), [plain]);
 }
 
 #[test]
@@ -373,7 +440,7 @@ fn forge_git_urls_map_to_their_commit_archive() {
         ),
     ];
     for (git, want) in cases {
-        assert_eq!(archive_url(&git).unwrap(), want, "{git}");
+        assert_eq!(archive_url(&git).unwrap().0, want, "{git}");
     }
 }
 
@@ -393,10 +460,7 @@ fn git_urls_that_are_not_pinned_or_not_forges_are_refused() {
         format!("git+http://codeberg.org/o/r#{c}"),
         format!("git+ssh://codeberg.org/o/r#{c}"),
         format!("git+https://git.sr.ht/o/r#{c}"),
-        format!("https://example.org/a.tar.gz?x=1"),
         "http://codeberg.org/o/r/archive/v1.tar.gz".to_string(),
-        "https://codeberg.org/o/r/archive/v1.tar.bz2".to_string(),
-        "https://codeberg.org/o/r/archive/v1".to_string(),
     ];
     for url in refused {
         assert!(archive_url(&url).is_err(), "{url} should be refused");
