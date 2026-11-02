@@ -4,6 +4,7 @@ mod build_cmd;
 mod cleanup;
 mod diffview;
 mod edit_bytes;
+mod keyring;
 mod local_opts;
 mod run_limits;
 mod tui;
@@ -256,6 +257,12 @@ enum Commands {
     /// sources, byte for byte: the refresh turn's helper for a file its Edit
     /// tool refuses as not UTF-8. Run from the workspace.
     EditBytes(edit_bytes::EditBytesArgs),
+
+    /// Manage the signing keys of a package's keyring (see `keyring accept`).
+    Keyring {
+        #[command(subcommand)]
+        command: keyring::KeyringCommand,
+    },
 
     /// Explain what happened to a package in a work directory: how its version
     /// was chosen, each attempt with the agent's own summary, the outcome, the

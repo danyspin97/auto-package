@@ -549,6 +549,9 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             }
         }
         Commands::Hosts { command } => allow_host::hosts_command(&command)?,
+        Commands::Keyring { command } => match command {
+            keyring::KeyringCommand::Accept(args) => keyring::accept_command(&args)?,
+        },
         Commands::Lint(mut args) => {
             args.allow_host.apply()?;
             args.improve = true;
