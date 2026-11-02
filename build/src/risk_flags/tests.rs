@@ -422,3 +422,45 @@ fn a_reader_outside_the_run_sees_the_risks_of_the_last_run() {
     clear_submitted(root.path(), "python-foo").unwrap();
     assert!(of_package(root.path(), "python-foo").is_empty());
 }
+
+#[test]
+fn a_patch_changing_more_than_the_review_size_is_flagged_for_review() {
+    let body = |n: usize| {
+        let mut text = "--- foo-1.0/setup.py\n+++ foo-1.0/setup.py\n@@ -1 +1 @@\n".to_string();
+        for i in 0..n {
+            text.push_str(&format!("+line {i}\n"));
+        }
+        text
+    };
+    let mut at_size = files(SPEC);
+    at_size
+        .patches
+        .insert("fix-build.patch".into(), body(REVIEW_PATCH_LINES));
+    let found = from_change(&files(SPEC), &at_size, &["setup.py".into()]);
+    assert!(
+        !found
+            .iter()
+            .any(|r| matches!(r, RiskFlag::LargePatch { .. })),
+        "{found:?}"
+    );
+
+    let mut over = files(SPEC);
+    over.patches
+        .insert("fix-build.patch".into(), body(REVIEW_PATCH_LINES + 1));
+    let found = from_change(&files(SPEC), &over, &["setup.py".into()]);
+    assert_eq!(
+        found,
+        vec![RiskFlag::LargePatch {
+            patch: "fix-build.patch".into(),
+            lines: REVIEW_PATCH_LINES + 1,
+        }]
+    );
+    assert!(
+        RiskFlag::LargePatch {
+            patch: "fix-build.patch".into(),
+            lines: 201,
+        }
+        .line()
+        .starts_with("RISK: fix-build.patch changes 201 lines")
+    );
+}

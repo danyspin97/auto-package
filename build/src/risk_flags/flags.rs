@@ -23,6 +23,9 @@ pub enum RiskFlag {
     ChangedScriptlet { header: String },
     /// A part of the change that could not be analysed, and why.
     Unanalysed { what: String },
+    /// A patch that was added or changed and changes more lines than
+    /// [`REVIEW_PATCH_LINES`]: it needs a person's review before it is submitted.
+    LargePatch { patch: String, lines: usize },
 }
 
 impl RiskFlag {
@@ -45,6 +48,9 @@ impl RiskFlag {
                 format!("RISK: changed scriptlet body: {header}")
             }
             RiskFlag::Unanalysed { what } => format!("RISK: not analysed: {what}"),
+            RiskFlag::LargePatch { patch, lines } => format!(
+                "RISK: {patch} changes {lines} lines (over {REVIEW_PATCH_LINES}), needs a review"
+            ),
         };
         one_line(&text)
     }

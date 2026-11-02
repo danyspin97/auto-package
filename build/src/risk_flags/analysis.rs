@@ -217,6 +217,13 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
         if base.patches.get(patch) == Some(text) {
             continue;
         }
+        let lines = changed_line_count(text);
+        if lines > REVIEW_PATCH_LINES {
+            push(RiskFlag::LargePatch {
+                patch: patch.clone(),
+                lines,
+            });
+        }
         for path in patch_paths(text) {
             if !is_known(&path) {
                 push(RiskFlag::PatchOutsideSet {
@@ -227,6 +234,19 @@ pub fn from_change(base: &Files, fin: &Files, archive: &[String]) -> Vec<RiskFla
         }
     }
     out
+}
+
+/// The changed lines of a patch above which it needs a person's review.
+pub const REVIEW_PATCH_LINES: usize = 200;
+
+/// The lines a patch adds or removes, its file headers aside.
+pub(super) fn changed_line_count(text: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            (l.starts_with('+') && !l.starts_with("+++ "))
+                || (l.starts_with('-') && !l.starts_with("--- "))
+        })
+        .count()
 }
 
 /// Whether `tag` (the text before a colon) is `name` with an optional number
