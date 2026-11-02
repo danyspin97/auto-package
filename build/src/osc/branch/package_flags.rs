@@ -404,3 +404,105 @@ pub fn sync_build_flags(
         }
     }
 }
+
+/// Enable each of `repos` for the package whose meta is `xml`: an
+/// `<enable repository="R"/>` in its `<build>` flags, which are made when the
+/// meta has none. A repository the flags already enable is left alone, so
+/// `None` means nothing changes. Enabling a repository is what lets a package
+/// build in one the project disables for all its packages.
+pub fn with_repositories_enabled(xml: &str, repos: &[&str]) -> Result<Option<String>, String> {
+    let lay = layout(xml)?;
+    if lay.root != "package" {
+        return Err("not a package meta".into());
+    }
+    let build = lay.children.iter().find(|c| c.name == "build");
+    let enabled: Vec<String> = match build {
+        Some(b) => open_tags(&xml[b.start..b.end], "enable")?
+            .iter()
+            .filter_map(|t| crate::obs_xml::attr(t, "repository"))
+            .collect(),
+        None => Vec::new(),
+    };
+    let elements: Vec<String> = repos
+        .iter()
+        .filter(|r| !enabled.iter().any(|e| e == *r))
+        .map(|r| format!("<enable repository=\"{}\"/>", crate::obs_xml::escape(r)))
+        .collect();
+    if elements.is_empty() {
+        return Ok(None);
+    }
+    let mut xml = xml.to_string();
+    match build {
+        Some(b) if xml[b.start..b.end].ends_with("/>") => {
+            let ind = line_indent_of(&xml, b.start);
+            let body: String = elements.iter().map(|e| format!("\n{ind}  {e}")).collect();
+            let rewritten = format!("<build>{body}\n{ind}</build>");
+            xml.replace_range(b.start..b.end, &rewritten);
+        }
+        Some(b) => {
+            let close = b.start
+                + xml[b.start..b.end]
+                    .rfind("</build>")
+                    .ok_or("the package's build flags are not closed")?;
+            let ind = format!("{}  ", line_indent_of(&xml, b.start));
+            insert_on_own_line(&mut xml, close, &ind, &elements);
+        }
+        None => {
+            let close = lay
+                .close_at
+                .ok_or("the package meta is an empty element, with nowhere to put build flags")?;
+            let ind = child_indent(&xml, &lay);
+            let body: String = elements.iter().map(|e| format!("\n{ind}  {e}")).collect();
+            let block = format!("<build>{body}\n{ind}</build>");
+            insert_on_own_line(&mut xml, close, &ind, &[block]);
+        }
+    }
+    layout(&xml).map_err(|e| format!("the enabled meta does not parse: {e}"))?;
+    Ok(Some(xml))
+}
+
+/// Insert each of `items` before the tag at `at`: on lines of their own, indented
+/// by `ind`, when that tag starts its line, else right before it.
+fn insert_on_own_line(xml: &mut String, at: usize, ind: &str, items: &[String]) {
+    let line_start = xml[..at].rfind('\n').map_or(0, |i| i + 1);
+    if xml[line_start..at].trim().is_empty() {
+        let lines: String = items.iter().map(|i| format!("{ind}{i}\n")).collect();
+        xml.insert_str(line_start, &lines);
+    } else {
+        xml.insert_str(at, &items.concat());
+    }
+}
+
+/// The whitespace leading the line `pos` is on.
+fn line_indent_of(xml: &str, pos: usize) -> &str {
+    let line_start = xml[..pos].rfind('\n').map_or(0, |i| i + 1);
+    let line = &xml[line_start..pos];
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// Enable `repos` for the package `project/pkg` (see
+/// [`with_repositories_enabled`]): its meta is read and written back only when
+/// it changes. Returns whether it was written.
+pub fn enable_package_repositories(
+    project: &str,
+    pkg: &str,
+    repos: &[&str],
+    emit: Emit<'_>,
+) -> Result<bool, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", pkg)?;
+    let xml = api_get(&format!("/source/{project}/{}/_meta", enc(pkg)), emit)?;
+    let edited = with_repositories_enabled(&xml, repos).map_err(|why| {
+        Error::NotActionable(format!(
+            "cannot enable {} for {project}/{pkg}: {why}",
+            repos.join(", ")
+        ))
+    })?;
+    match edited {
+        None => Ok(false),
+        Some(new) => {
+            write_meta(&["meta", "pkg", project, pkg], &new, emit)?;
+            Ok(true)
+        }
+    }
+}
