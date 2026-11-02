@@ -1,6 +1,7 @@
 //! The commit step: the commit and its message and summary, the publish checks,
 //! the recorded outcome, and the retries of service runs.
 
+use super::source_signature::{SignatureCheck, check_signed_sources};
 use super::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::prompt_notes::*;
@@ -66,6 +67,19 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     if let Err(reason) = ensure_sources_present(ctx, &expanded) {
         commit_step.finish(StepOutcome::Failed);
         return Err(ctx.failed(reason));
+    }
+    // A signed new archive must verify against the package's keyring before
+    // OBS's own validator, which runs inside `osc ci`, sees it.
+    match check_signed_sources(&ctx.checkout_dir) {
+        SignatureCheck::Ok => {}
+        SignatureCheck::Skipped(note) => ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: note,
+        }),
+        SignatureCheck::Refused(reason) => {
+            commit_step.finish(StepOutcome::Failed);
+            return Err(ctx.failed_as(FailureKind::NeedsMaintainer, reason));
+        }
     }
     for name in osc::restore_dropped_recipe_files(
         &ctx.checkout_dir,

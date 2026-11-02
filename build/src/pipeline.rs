@@ -175,6 +175,10 @@ pub enum FailureKind {
     /// may not be as the pipeline left it. A change that could not be put back
     /// is named in the reason.
     Tampered,
+    /// The new release needs a decision a maintainer makes, such as a signing
+    /// key the package's keyring lacks. Nothing was sent to OBS, and nothing is
+    /// retried: the same refusal would come back.
+    NeedsMaintainer,
 }
 
 #[derive(Debug)]
@@ -325,6 +329,9 @@ mod commit_gate_tests;
 mod service_source;
 #[cfg(test)]
 mod service_source_tests;
+mod source_signature;
+#[cfg(test)]
+mod source_signature_tests;
 use carry::*;
 use service_source::*;
 mod prompt_notes;
