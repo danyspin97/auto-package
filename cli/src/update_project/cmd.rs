@@ -171,6 +171,25 @@ pub(super) fn cmd_update_project(
             continue;
         }
         if !a.dry_run {
+            // An origin that is unresolvable in every repository gives a branch
+            // that cannot build either: it is reported, not branched.
+            match osc::origin_unresolvable(&item.origin, &item.pkg) {
+                Ok(Some(why)) => {
+                    let why = format!("broken outside the tool: origin unresolvable ({why})");
+                    ctx.warn(format!("{}: {why}", item.pkg));
+                    report.results.push(ItemResult {
+                        item,
+                        outcome: ItemOutcome::Skipped(why),
+                        sr: SrOutcome::NotRequested,
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => ctx.warn(format!(
+                    "{}: could not read the origin's results, branching anyway: {e}",
+                    item.pkg
+                )),
+            }
             match branch_item(
                 branch,
                 &mut item,

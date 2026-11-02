@@ -29,8 +29,12 @@ mod submit;
 pub use submit::*;
 mod delete_request;
 pub use delete_request::*;
+mod origin_health;
+pub use origin_health::*;
 #[cfg(test)]
 mod delete_request_tests;
+#[cfg(test)]
+mod origin_health_tests;
 
 #[cfg(test)]
 mod package_enable_tests;
