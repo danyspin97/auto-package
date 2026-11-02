@@ -3,8 +3,8 @@
 3. Arch-specific vs noarch, C libs and -devel names — read when deciding BuildArch, or an extension links a C/C++ library
 4. Merged into convention 6 — read convention 6 when build-backend is maturin or the source has Cargo.toml plus pyproject.toml
 5. License must be an SPDX expression — read when License is FIXME, not SPDX, or no LICENSE file exists in the sdist
-6. %pyproject_wheel / %pyproject_install for PEP 517 — read when writing %build or %install of a Python package
-7. %check with %pytest / %pytest_arch and its BuildRequires — read when adding or editing %check of a Python package
+6. %pyproject_wheel / %pyproject_install for PEP 517 — read when writing %build or %install of a Python package, or the source has only setup.py
+7. %check with %pytest / %pytest_arch / %pyunittest and its BuildRequires — read when adding or editing %check of a Python package, or a test needs mypy, flake8 or coverage
 8. Python flavors, %python_expand, %python_files, _multibuild — read when touching flavor macros, multibuild or python_subpackages
 9. Merged into convention 50 — read convention 50 when the spec or your edit has -j1, -j N, --jobs or -n N on make, cmake, ninja or pytest
 10. %check failure: missing dependency or compiler vs cannot run here — read when %check fails (ImportError, fixture not found, collect error, command 'g++'/'gcc' failed, No such file 'g++')
@@ -29,7 +29,7 @@
 29. Merged into convention 77 — read convention 77 when no source tarball or repository URL can be found for the package
 30. Merged into convention 22 — read convention 22 when the prompt lists several "Other projects in this archive"
 31. Merged into convention 39 — read convention 39 when rpmlint warns on Summary, description or binaries
-32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl or the generator says "no sdist" for the release
+32. Prebuilt binary wheel packages (no %build) — read when Source0 is a .whl, the generator says "no sdist" for the release, or PyPI has only a wheel but a source repo exists
 33. Merged into convention 32 — read convention 32 when the package has no Python and no Cargo
 34. Optional extras are Recommends, not BuildRequires — read when pyproject lists optional-dependencies you consider adding
 35. Merged into convention 53 — read convention 53 when the package ships a daemon, a .service unit or needs /run dirs
@@ -93,3 +93,4 @@
 93. Merged into convention 77 — read convention 77 when the release page has a .asc, .sig or .sign next to the tarball
 94. Merged into convention 14 — read convention 14 when the prompt lists patches that failed to apply or you are about to remove a Patch line
 95. Package named for a series (fmt-9, wlroots-0_15): stays on that series — read when the package name ends in a version number
+96. Python spec macro forms — read when writing a Python preamble, %python_expand, %if on python_flavor, %ifpython, a shebang fix, a -doc subpackage or Leap 15 flavors
