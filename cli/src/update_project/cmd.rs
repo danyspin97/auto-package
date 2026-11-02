@@ -122,6 +122,8 @@ pub(super) fn cmd_update_project(
     // release is queued behind the package that needs it.
     let mut queue: VecDeque<Item> = VecDeque::new();
     let mut visited: HashSet<String> = HashSet::new();
+    // The packages handled so far, which a capability may be provided by.
+    let mut run_packages: Vec<String> = Vec::new();
     let mut ready: Vec<Item> = Vec::new();
     let mut admitted = 0;
     let mut dependency_count = 0;
@@ -241,20 +243,30 @@ pub(super) fn cmd_update_project(
         };
         match spec {
             Some(spec) => {
-                let (adds, verdicts) =
-                    match reach_dependencies(a, &item, &spec, &resolver, ctx, report) {
-                        Ok(found) => found,
-                        Err(e) => {
-                            let why = e.to_string();
-                            ctx.warn(format!("{}: {why}", item.pkg));
-                            report.results.push(ItemResult {
-                                item,
-                                outcome: ItemOutcome::Failed(why),
-                                sr: SrOutcome::NotRequested,
-                            });
-                            continue;
-                        }
-                    };
+                if !run_packages.contains(&item.pkg) {
+                    run_packages.push(item.pkg.clone());
+                }
+                let (adds, verdicts) = match reach_dependencies(
+                    a,
+                    &item,
+                    &spec,
+                    &resolver,
+                    &run_packages,
+                    ctx,
+                    report,
+                ) {
+                    Ok(found) => found,
+                    Err(e) => {
+                        let why = e.to_string();
+                        ctx.warn(format!("{}: {why}", item.pkg));
+                        report.results.push(ItemResult {
+                            item,
+                            outcome: ItemOutcome::Failed(why),
+                            sr: SrOutcome::NotRequested,
+                        });
+                        continue;
+                    }
+                };
                 if a.update_deps {
                     for dep in dependency_items(a, branch, &item, &verdicts, &adds, ctx, emit) {
                         if dependency_count >= MAX_DEPENDENCY_ITEMS {

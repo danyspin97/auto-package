@@ -6,6 +6,8 @@ use super::*;
 pub(super) struct Report {
     pub(super) results: Vec<ItemResult>,
     pub(super) paths: Vec<PathAddition>,
+    /// Capabilities with no provider in a repository the branch builds in.
+    pub(super) requirements: Vec<MissingRequirement>,
 }
 
 /// What the build needs from `run`'s setup.

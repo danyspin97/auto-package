@@ -225,7 +225,13 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 &a.arch,
                 &ctx.state_root
             ),
-            up::summary_text(&branch_project, &report.results, &report.paths, a.submit)
+            up::summary_text(
+                &branch_project,
+                &report.results,
+                &report.paths,
+                &report.requirements,
+                a.submit
+            )
         ));
     }
 

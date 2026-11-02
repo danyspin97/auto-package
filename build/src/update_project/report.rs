@@ -233,6 +233,7 @@ pub fn summary_text(
     branch_project: &str,
     results: &[ItemResult],
     paths: &[PathAddition],
+    missing: &[MissingRequirement],
     submit: bool,
 ) -> String {
     use std::fmt::Write as _;
@@ -280,6 +281,11 @@ pub fn summary_text(
                 _ => None,
             })
             .collect(),
+    );
+    section(
+        &mut out,
+        "requirements no provider satisfies",
+        requirement_lines(missing),
     );
     if submit {
         section(

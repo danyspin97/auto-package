@@ -168,15 +168,22 @@ pub(super) fn reach_dependencies(
     item: &Item,
     spec: &str,
     resolver: &DepResolver,
+    run_packages: &[String],
     ctx: &Ctx<'_>,
     report: &mut Report,
 ) -> color_eyre::Result<(Vec<PathAddition>, Vec<depreach::DepVerdict>)> {
-    let deps = ap_build::spec::build_requires(spec);
-    let verdicts = resolver
+    let reqs = ap_build::spec::build_requirements(spec);
+    let deps: Vec<ap_build::spec::BuildRequire> = reqs.iter().map(|r| r.dep.clone()).collect();
+    let mut verdicts = resolver
         .check(&deps)
         .map_err(|e| eyre!("checking the BuildRequires of {}: {e}", item.pkg))?;
+    verdicts.extend(
+        resolver
+            .check_requirements(&reqs, &item.pkg, &item.origin, run_packages)
+            .map_err(|e| eyre!("checking the capabilities of {}: {e}", item.pkg))?,
+    );
 
-    let mut unchecked = 0;
+    let mut unchecked: Vec<String> = Vec::new();
     let mut not_published: Vec<&str> = Vec::new();
     for v in &verdicts {
         match &v.state {
@@ -191,15 +198,29 @@ pub(super) fn reach_dependencies(
                 ));
             }
             DepState::NotPublished => not_published.push(&v.name),
-            DepState::Unchecked => unchecked += 1,
+            DepState::Unchecked => unchecked.push(v.name.clone()),
+            DepState::Capability(state) => match state {
+                depreach::CapState::NoProvider { unknown, .. } => {
+                    report_no_provider(item, &v.name, state, a, ctx, report);
+                    unchecked.extend(unknown.iter().map(|why| format!("{} ({why})", v.name)));
+                }
+                depreach::CapState::Unchecked(why) => unchecked.push(format!("{} ({why})", v.name)),
+                depreach::CapState::Provided { .. } => {}
+            },
             _ => {}
         }
     }
-    if unchecked > 0 {
+    if !unchecked.is_empty() {
+        // The first few say what was not checked and why; the rest are a count.
+        const SHOWN: usize = 3;
+        let mut listed = unchecked[..unchecked.len().min(SHOWN)].join("; ");
+        if unchecked.len() > SHOWN {
+            listed.push_str(&format!("; and {} more", unchecked.len() - SHOWN));
+        }
         ctx.say(format!(
-            "{}: {unchecked} capability-style BuildRequires (pkgconfig(), %{{...}}) not checked; \
-             the build will say if one is missing",
-            item.pkg
+            "{}: {} BuildRequires not checked: {listed}; the build will say if one is missing",
+            item.pkg,
+            unchecked.len(),
         ));
     }
     if !not_published.is_empty() {
@@ -239,6 +260,34 @@ pub(super) fn reach_dependencies(
         report.paths.extend(made);
     }
     Ok((adds, verdicts))
+}
+
+/// One warning per repository a provider in the paths does not satisfy the
+/// requirement in, naming that provider and its version. Nothing is added to
+/// the build paths for a capability.
+fn report_no_provider(
+    item: &Item,
+    requirement: &str,
+    state: &depreach::CapState,
+    a: &UpdateProjectArgs,
+    ctx: &Ctx<'_>,
+    report: &mut Report,
+) {
+    let depreach::CapState::NoProvider { found, .. } = state else {
+        return;
+    };
+    for f in found {
+        ctx.warn(format!(
+            "{}: {requirement} has no provider that satisfies it in {} ({}) (found: {} {})",
+            item.pkg, f.repo, a.arch, f.rpm, f.version
+        ));
+        report.requirements.push(MissingRequirement {
+            pkg: item.pkg.clone(),
+            requirement: requirement.to_string(),
+            repository: f.repo.clone(),
+            arch: a.arch.clone(),
+        });
+    }
 }
 
 /// The dependencies of `parent` that live in another project and have a newer

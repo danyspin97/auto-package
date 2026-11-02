@@ -16,7 +16,9 @@ use ap_build::osc::{self, BranchResult, PathAddition};
 use ap_build::proc::Emit;
 use ap_build::quality;
 use ap_build::update::{self, Ecosystem};
-use ap_build::update_project::{self as up, Item, ItemOutcome, ItemResult, SrOutcome};
+use ap_build::update_project::{
+    self as up, Item, ItemOutcome, ItemResult, MissingRequirement, SrOutcome,
+};
 use ap_core::event::{Event, RunOutcome};
 use ap_core::run::RunDir;
 use ap_core::sink::{FanoutReporter, HumanSink, JsonlSink, LogLevel, MemorySink, Reporter};

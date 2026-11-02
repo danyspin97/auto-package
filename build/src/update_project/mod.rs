@@ -11,8 +11,10 @@ use crate::update::{Candidate, Decision, Ecosystem};
 
 mod plan;
 mod report;
+mod requirements;
 #[cfg(test)]
 mod tests;
 
 pub use plan::*;
 pub use report::*;
+pub use requirements::*;
