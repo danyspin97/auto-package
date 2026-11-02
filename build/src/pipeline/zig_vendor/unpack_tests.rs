@@ -412,7 +412,8 @@ fn the_content_type_names_the_format_as_zig_reads_it() {
         r(Some("application/octet-stream"), Some(Format::TarXz)),
         Ok(Format::TarXz)
     );
-    assert_eq!(r(None, Some(Format::Zip)), Ok(Format::Zip));
+    // No Content-Type at all is refused, as zig refuses it, whatever the URL.
+    assert!(r(None, Some(Format::Zip)).is_err());
     assert!(r(Some("application/octet-stream"), None).is_err());
     assert!(r(None, None).is_err());
     assert!(

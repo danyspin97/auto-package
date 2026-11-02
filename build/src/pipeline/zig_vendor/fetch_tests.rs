@@ -1,6 +1,5 @@
 use super::fetch::*;
 use super::hash::PackageHash;
-use super::tree::Item;
 use super::zon;
 use std::cell::RefCell;
 
@@ -11,13 +10,17 @@ const PIXMAN_HASH: &str = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6Hwt
 const WAYLAND: &[u8] = include_bytes!("testdata/wayland-0.6.0.tar.gz");
 const WAYLAND_HASH: &str = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX";
 const PIXMAN_URL: &str = "https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz";
-const HEX40: &str = "c183af18ae35dd5fb3dde709697c8f84bb1dc7f3";
+pub(super) const HEX40: &str = "c183af18ae35dd5fb3dde709697c8f84bb1dc7f3";
 
 pub(super) enum Route {
     Redirect(String),
+    /// A body served as `application/octet-stream`, as codeberg and gitlab
+    /// serve their archives.
     Body(Vec<u8>),
     /// A body served with this Content-Type.
     Typed(&'static str, Vec<u8>),
+    /// A body served with no Content-Type at all.
+    Untyped(Vec<u8>),
 }
 
 /// Serves `routes` by exact URL and records every URL asked for.
@@ -48,6 +51,10 @@ impl Fetch for Fake {
         match self.routes.iter().find(|(u, _)| u == url) {
             Some((_, Route::Redirect(to))) => Ok(Response::Redirect(to.clone())),
             Some((_, Route::Body(b))) => Ok(Response::Body {
+                content_type: Some("application/octet-stream".to_string()),
+                body: Box::new(std::io::Cursor::new(b.clone())),
+            }),
+            Some((_, Route::Untyped(b))) => Ok(Response::Body {
                 content_type: None,
                 body: Box::new(std::io::Cursor::new(b.clone())),
             }),
@@ -129,7 +136,7 @@ pub(super) fn dep(name: &str, url: &str, hash: &str) -> String {
     format!(".{name} = .{{ .url = \"{url}\", .hash = \"{hash}\" }},")
 }
 
-struct Quiet;
+pub(super) struct Quiet;
 impl ap_core::sink::Reporter for Quiet {
     fn report(&self, _: &ap_core::event::Event) {}
 }
@@ -507,63 +514,4 @@ fn a_malformed_declared_hash_is_refused_before_any_request() {
     let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, "1220abcdef")));
     assert!(result.unwrap_err().contains("zig dep pixman"));
     assert!(fake.calls().is_empty());
-}
-
-/// The `build.zig.zon` of the escaping-links fixture, byte for byte as zig
-/// 0.15.2 was given it.
-const ESCAPE_ZON: &[u8] = b".{ .name = .pkg, .version = \"1.0.0\", .fingerprint = 0xfe6ff7d5e56618e7, .minimum_zig_version = \"0.15.0\", .dependencies = .{}, .paths = .{ \"\" } }\n";
-const ESCAPE_URL: &str = "https://codeberg.org/x/pkg/archive/v1.0.0.tar.gz";
-/// The hash `zig fetch` (0.15.2) printed for `escaping_links_archive`.
-const ESCAPE_HASH: &str = "pkg-1.0.0-5xhm5acAAAAShCPB01y6rmDUnKP0_AiaChK3-jKQDNic";
-
-/// The archive given to `zig fetch`: `pkg/` with a manifest and a file, a
-/// link that climbs out of it, and an absolute link.
-fn escaping_links_archive() -> Vec<u8> {
-    let mut ar = tar::Builder::new(flate2::write::GzEncoder::new(
-        Vec::new(),
-        flate2::Compression::fast(),
-    ));
-    let mut dir = tar::Header::new_gnu();
-    dir.set_entry_type(tar::EntryType::Directory);
-    dir.set_mode(0o755);
-    dir.set_size(0);
-    dir.set_cksum();
-    ar.append_data(&mut dir, "pkg/", &[][..]).unwrap();
-    for (path, content) in [
-        ("pkg/build.zig.zon", ESCAPE_ZON),
-        ("pkg/a.zig", b"pub fn main() void {}\n" as &[u8]),
-    ] {
-        let mut h = tar::Header::new_gnu();
-        h.set_size(content.len() as u64);
-        h.set_mode(0o644);
-        h.set_cksum();
-        ar.append_data(&mut h, path, content).unwrap();
-    }
-    for (path, target) in [
-        ("pkg/sub/evil", "../../../../../../etc/passwd"),
-        ("pkg/abs", "/etc/passwd"),
-    ] {
-        let mut h = tar::Header::new_gnu();
-        h.set_entry_type(tar::EntryType::Symlink);
-        h.set_mode(0o777);
-        h.set_size(0);
-        ar.append_link(&mut h, path, target).unwrap();
-    }
-    ar.into_inner().unwrap().finish().unwrap()
-}
-
-#[test]
-fn links_that_leave_the_tree_hash_as_zig_hashes_them_and_are_not_written() {
-    let fake = Fake::new(vec![(ESCAPE_URL, Route::Body(escaping_links_archive()))]);
-    let m = root(&dep("pkg", ESCAPE_URL, ESCAPE_HASH));
-    let (_dir, result) = fetch(&fake, &m);
-    let deps = result.unwrap();
-    assert_eq!(deps[0].declared, ESCAPE_HASH);
-    assert!(deps[0].root.join("a.zig").is_file());
-    assert!(std::fs::symlink_metadata(deps[0].root.join("sub/evil")).is_err());
-    assert!(std::fs::symlink_metadata(deps[0].root.join("abs")).is_err());
-    assert!(deps[0].items.iter().any(|i| matches!(
-        i,
-        Item::Link { rel, target } if rel == "sub/evil" && target == b"../../../../../../etc/passwd"
-    )));
 }

@@ -89,17 +89,20 @@ impl Format {
         })
     }
 
-    /// The format of a fetched archive: the Content-Type decides when it names
-    /// one, else the URL's extension (`by_url`). Neither naming one is an error.
+    /// The format of a fetched archive, as zig 0.15.2 reads it. A response with
+    /// no Content-Type is refused, as zig refuses it, whatever its URL says. Else
+    /// the Content-Type decides when it names a format, and the URL's extension
+    /// (`by_url`) decides when it is `application/octet-stream`.
     pub(super) fn resolve(
         content_type: Option<&str>,
         by_url: Option<Format>,
     ) -> Result<Format, String> {
-        let named = match content_type {
-            Some(ct) => Format::of_content_type(ct)?,
-            None => None,
+        let Some(ct) = content_type else {
+            return Err(
+                "the response has no Content-Type, which zig 0.15.2 refuses too".to_string(),
+            );
         };
-        named.or(by_url).ok_or_else(|| {
+        Format::of_content_type(ct)?.or(by_url).ok_or_else(|| {
             "the archive is not a format zig_vendor reads: its URL has no .tar.gz, .tar.xz, .tar.zst, .tar or .zip extension, and its Content-Type names none".to_string()
         })
     }

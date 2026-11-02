@@ -15,6 +15,8 @@ mod zon;
 #[cfg(test)]
 mod fetch_archive_tests;
 #[cfg(test)]
+mod fetch_forge_tests;
+#[cfg(test)]
 mod fetch_tests;
 #[cfg(test)]
 mod hash_tests;
