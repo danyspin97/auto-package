@@ -155,6 +155,13 @@ pub enum SkipReason {
     SuseNoUpstream {
         why: String,
     },
+    /// A snapshot package whose forge repository has a release published after
+    /// the snapshot was taken. Only a maintainer can move the package to it.
+    SnapshotBehind {
+        release: String,
+        released: String,
+        snapshot: String,
+    },
 }
 
 /// Whether a version carries a calendar date (`2020-11-13`): upstream
@@ -242,6 +249,14 @@ impl std::fmt::Display for SkipReason {
             SkipReason::SuseNoUpstream { why } => {
                 write!(f, "SUSE-maintained, no upstream release: {why}")
             }
+            SkipReason::SnapshotBehind {
+                release,
+                released,
+                snapshot,
+            } => write!(
+                f,
+                "needs a maintainer: release {release} ({released}) is newer than the snapshot ({snapshot})"
+            ),
             SkipReason::VersionCompareFailed { packaged, latest } => {
                 write!(
                     f,
@@ -290,6 +305,8 @@ pub struct Lookups<'a> {
     /// Whether the package holds a `_service` (asked only for a package that
     /// has no source URL, to tell whether something fetches its source).
     pub fetch_has_service: &'a dyn Fn(&str) -> bool,
+    /// Newest release of a forge repository, with the day it came out.
+    pub fetch_release_date: &'a dyn Fn(&str) -> Result<(String, String), String>,
 }
 
 /// The places a package's newest version may be looked up, most specific

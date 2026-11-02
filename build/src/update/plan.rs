@@ -103,6 +103,12 @@ where
         (latest, None)
     };
     if version::is_snapshot(&header.version) {
+        if let Some(decision) = snapshot::against_release(&ecosystem, &header.version, lookups) {
+            return Candidate {
+                rpm_name: rpm_name.to_string(),
+                decision,
+            };
+        }
         return skipped(
             rpm_name,
             SkipReason::Snapshot {
@@ -407,6 +413,7 @@ pub fn plan_each(
     let fetch_service = |rpm_name: &str| osc::cat_file(project, rpm_name, "_service", emit);
     let (hits_before, fetched_before) = upstream_cache::stats();
     let fetch_has_service = |pkg: &str| suse::project_has_service(project, pkg, emit);
+    let fetch_release_date = |url: &str| snapshot::cached_release_date(url);
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
         fetch_repo_latest: &fetch_repo_latest,
@@ -416,6 +423,7 @@ pub fn plan_each(
         fetch_cpan_latest: &fetch_cpan_latest,
         fetch_service: &fetch_service,
         fetch_has_service: &fetch_has_service,
+        fetch_release_date: &fetch_release_date,
     };
 
     let total = names.len();

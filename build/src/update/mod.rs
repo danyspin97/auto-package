@@ -41,9 +41,13 @@ mod plan;
 mod read;
 #[cfg(test)]
 mod reading;
+mod snapshot;
 #[cfg(test)]
 mod specs;
 mod suse;
+pub use snapshot::cached_release_date;
+#[cfg(test)]
+mod snapshot_tests;
 pub use suse::project_has_service;
 #[cfg(test)]
 mod suse_tests;

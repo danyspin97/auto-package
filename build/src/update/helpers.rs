@@ -35,6 +35,9 @@ pub(super) fn unused_lookups() -> Lookups<'static> {
     fn has_service(_: &str) -> bool {
         true
     }
+    fn release_date(_: &str) -> Result<(String, String), String> {
+        Err("not looked up in this test".to_string())
+    }
     Lookups {
         fetch_pypi_latest: &none,
         fetch_repo_latest: &none,
@@ -44,6 +47,7 @@ pub(super) fn unused_lookups() -> Lookups<'static> {
         fetch_cpan_latest: &none,
         fetch_service: &no_service,
         fetch_has_service: &has_service,
+        fetch_release_date: &release_date,
     }
 }
 

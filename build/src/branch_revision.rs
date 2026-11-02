@@ -341,6 +341,7 @@ pub fn plan_one(
                 fetch_cpan_latest: &cpan,
                 fetch_service: &fetch_service,
                 fetch_has_service: &|pkg: &str| update::project_has_service(project, pkg, emit),
+                fetch_release_date: &|url: &str| update::cached_release_date(url),
             };
             update::classify(&pkg, &fetch, &lookups)
         }
