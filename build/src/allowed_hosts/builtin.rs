@@ -38,6 +38,7 @@ pub(super) const TRUSTED_SOURCE_HOSTS: &[&str] = &[
     "rubygems.org",
     "registry.npmjs.org",
     "metacpan.org",
+    "fastapi.metacpan.org",
     "hackage.haskell.org",
     "ftp.gnu.org",
     "download.gnu.org",

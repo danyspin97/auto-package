@@ -27,6 +27,10 @@ pub enum Ecosystem {
     /// Resolved from rubygems.org's latest-version record of the gem a
     /// `rubygem-` package names. Asked after Repology, when that has no newest.
     Rubygems { gem: String },
+    /// Resolved from MetaCPAN's latest release of a CPAN distribution, for a
+    /// `perl-` package or one whose Source or Url is on a CPAN host. Asked
+    /// after Repology, when that has no newest.
+    Cpan { dist: String },
 }
 
 impl Ecosystem {
@@ -48,6 +52,7 @@ impl Ecosystem {
             Ecosystem::Index { .. } => "index",
             Ecosystem::Repology { .. } => "repology",
             Ecosystem::Rubygems { .. } => "rubygems",
+            Ecosystem::Cpan { .. } => "cpan",
         }
     }
 }
@@ -246,6 +251,8 @@ pub struct Lookups<'a> {
     pub fetch_repology_latest: &'a dyn Fn(&str) -> Result<String, String>,
     /// Latest version rubygems.org lists for a gem.
     pub fetch_gem_latest: &'a dyn Fn(&str) -> Result<String, String>,
+    /// Latest release MetaCPAN lists for a CPAN distribution.
+    pub fetch_cpan_latest: &'a dyn Fn(&str) -> Result<String, String>,
 }
 
 /// The places a package's newest version may be looked up, most specific
@@ -300,6 +307,9 @@ pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
             gem: gem.to_string(),
         });
     }
+    if let Some(dist) = crate::upstream_cpan::dist_of(header) {
+        add(Ecosystem::Cpan { dist });
+    }
     out
 }
 
@@ -340,6 +350,7 @@ pub(super) fn lookup(ecosystem: &Ecosystem, lookups: &Lookups<'_>) -> Result<Str
         Ecosystem::Index { url } => ("release listing", url),
         Ecosystem::Repology { project } => ("Repology", project),
         Ecosystem::Rubygems { gem } => ("rubygems.org", gem),
+        Ecosystem::Cpan { dist } => ("MetaCPAN", dist),
     };
     if spec::has_unexpanded_macro(name) {
         return Err(SkipReason::UnexpandedMacro {
@@ -353,6 +364,7 @@ pub(super) fn lookup(ecosystem: &Ecosystem, lookups: &Lookups<'_>) -> Result<Str
         Ecosystem::Index { url } => (lookups.fetch_index_latest)(url),
         Ecosystem::Repology { project } => (lookups.fetch_repology_latest)(project),
         Ecosystem::Rubygems { gem } => (lookups.fetch_gem_latest)(gem),
+        Ecosystem::Cpan { dist } => (lookups.fetch_cpan_latest)(dist),
     };
     latest.map_err(|error| SkipReason::LookupFailed {
         ecosystem_tag: tag.into(),

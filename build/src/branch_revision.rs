@@ -213,6 +213,7 @@ pub fn verify_upstream(ecosystem: &Ecosystem, old: &str, version: &str) -> Resul
         }
         Ecosystem::Repology { .. } => Err("Repology names no source to fetch".to_string()),
         Ecosystem::Rubygems { .. } => Err("rubygems.org names no source to fetch".to_string()),
+        Ecosystem::Cpan { .. } => Err("MetaCPAN names no source to fetch".to_string()),
     }
 }
 
@@ -301,12 +302,18 @@ pub fn plan_one(
                     crate::upstream::latest_on_rubygems(g)
                 })
             };
+            let cpan = |d: &str| {
+                lookup(&format!("cpan:{d}"), || {
+                    crate::upstream_cpan::latest_on_metacpan(d)
+                })
+            };
             let lookups = update::Lookups {
                 fetch_pypi_latest: &pypi,
                 fetch_repo_latest: &repo,
                 fetch_index_latest: &index,
                 fetch_repology_latest: &repology,
                 fetch_gem_latest: &gem,
+                fetch_cpan_latest: &cpan,
             };
             update::classify(&pkg, &fetch, &lookups)
         }

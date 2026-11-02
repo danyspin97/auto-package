@@ -403,3 +403,75 @@ pub(super) fn repology_newest_is_asked_before_rubygems() {
         }
     ));
 }
+
+#[test]
+pub(super) fn a_perl_package_is_asked_of_metacpan_when_repology_has_no_newest() {
+    let spec_text =
+        "Name: perl-DBIx-MyServer\nVersion: 0.5\nSource: DBIx-MyServer-%{version}.tar.gz\n";
+    let spec = |_: &str| Ok(spec_text.to_string());
+    let no_index: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Err("not an archive".to_string());
+    let no_repology: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Err("marks no newest".to_string());
+    let cpan: &'static dyn Fn(&str) -> Result<String, String> = &|dist: &str| {
+        assert_eq!(dist, "DBIx-MyServer");
+        Ok("0.6".to_string())
+    };
+    let lookups = Lookups {
+        fetch_index_latest: no_index,
+        fetch_repology_latest: no_repology,
+        fetch_cpan_latest: cpan,
+        ..unused_lookups()
+    };
+    let c = classify("perl-DBIx-MyServer", &spec, &lookups);
+    assert_eq!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::Cpan {
+                dist: "DBIx-MyServer".into()
+            },
+            old_version: "0.5".into(),
+            new_version: "0.6".into(),
+        }
+    );
+    assert_eq!(
+        Ecosystem::Cpan {
+            dist: "DBIx-MyServer".into()
+        }
+        .tag(),
+        "cpan"
+    );
+    assert!(
+        !Ecosystem::Cpan {
+            dist: "DBIx-MyServer".into()
+        }
+        .can_build()
+    );
+}
+
+#[test]
+pub(super) fn repology_newest_is_asked_before_metacpan() {
+    let spec_text =
+        "Name: perl-DBIx-MyServer\nVersion: 0.5\nSource: DBIx-MyServer-%{version}.tar.gz\n";
+    let spec = |_: &str| Ok(spec_text.to_string());
+    let no_index: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Err("not an archive".to_string());
+    let repology: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Ok("0.7".to_string());
+    let cpan: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| unreachable!("MetaCPAN is asked only when Repology has no newest");
+    let lookups = Lookups {
+        fetch_index_latest: no_index,
+        fetch_repology_latest: repology,
+        fetch_cpan_latest: cpan,
+        ..unused_lookups()
+    };
+    let c = classify("perl-DBIx-MyServer", &spec, &lookups);
+    assert!(matches!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::Repology { .. },
+            ..
+        }
+    ));
+}

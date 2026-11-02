@@ -117,6 +117,7 @@ fn builtin_lists_differ_for_services_and_sources() {
     // Source indexes are also reachable by services, as before.
     assert!(h.allows("rubygems.org", Use::Source));
     assert!(h.allows("rubygems.org", Use::Service));
+    assert!(h.allows("fastapi.metacpan.org", Use::Source));
     // The forges are on both.
     assert!(h.allows("github.com", Use::Source));
     assert!(h.allows("sub.gitlab.com", Use::Service));

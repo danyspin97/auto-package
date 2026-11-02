@@ -189,7 +189,7 @@ fn rss_titles(rss: &str) -> Vec<String> {
     out
 }
 
-fn get_text(url: &str) -> Result<String, String> {
+pub(crate) fn get_text(url: &str) -> Result<String, String> {
     let resp = ap_ecosystem::net::call_with_retries(|| {
         crate::http::get(url).header("User-Agent", USER_AGENT)
     })

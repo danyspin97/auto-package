@@ -44,5 +44,6 @@ pub mod update;
 pub mod update_project;
 pub mod upstream;
 pub mod upstream_cache;
+pub mod upstream_cpan;
 pub mod version;
 pub mod workspace;

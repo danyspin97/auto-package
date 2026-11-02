@@ -35,6 +35,7 @@ pub(super) fn unused_lookups() -> Lookups<'static> {
         fetch_index_latest: &none,
         fetch_repology_latest: &none,
         fetch_gem_latest: &none,
+        fetch_cpan_latest: &none,
     }
 }
 

@@ -351,6 +351,11 @@ pub fn plan_each(
             crate::upstream::latest_on_rubygems(gem)
         })
     };
+    let fetch_cpan_latest = |dist: &str| {
+        upstream_cache::lookup(&format!("cpan:{dist}"), || {
+            crate::upstream_cpan::latest_on_metacpan(dist)
+        })
+    };
     let (hits_before, fetched_before) = upstream_cache::stats();
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
@@ -358,6 +363,7 @@ pub fn plan_each(
         fetch_index_latest: &fetch_index_latest,
         fetch_repology_latest: &fetch_repology_latest,
         fetch_gem_latest: &fetch_gem_latest,
+        fetch_cpan_latest: &fetch_cpan_latest,
     };
 
     let total = names.len();
