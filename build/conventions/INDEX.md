@@ -95,19 +95,19 @@
 95. Package named for a series (fmt-9, wlroots-0_15): stays on that series — read when the package name ends in a version number
 96. Python spec macro forms — read when writing a Python preamble, %python_expand, %if on python_flavor, %ifpython, a shebang fix, a -doc subpackage or Leap 15 flavors
 97. Meson projects (native meson.build) — read when the build system is meson, the spec needs %meson/%meson_build, or a subproject or .wrap file exists
-98. Perl CPAN modules (perl-<Dist>) — read when the package is a perl- module, has Makefile.PL, needs perl(...) BuildRequires or %perl_make_install
-99. PHP applications and PEAR packages — read when the source is a PHP app (composer.json, /usr/share/php) or a PEAR package.xml or php-pear-* name
-100. Ruby gems (rubygem-<name>) — read when the source is a .gem or .gemspec, the name is rubygem-*, or gem2rpm output needs fixing
-101. Lua modules (lua<ver>-<module>) — read when the package is a Lua module, has a rockspec, or needs the luajit headers via LUA_INCLUDE
-102. Common Lisp libraries (cl-<lib>) — read when the source has an .asd system file or the package is a cl- library
+98. Other language ecosystems: Perl, PHP, Ruby, Lua, Lisp — read when the package is one of them (.gem, Makefile.PL, composer.json, rockspec, .asd)
+99. Merged into convention 98 — read convention 98 when the source is a PHP app (composer.json) or a PEAR package.xml or php-pear-* name
+100. Merged into convention 98 — read convention 98 when the source is a .gem or .gemspec, or the name is rubygem-*
+101. Merged into convention 98 — read convention 98 when the package is a Lua module, has a rockspec, or needs the luajit headers
+102. Merged into convention 98 — read convention 98 when the source has an .asd system file or the package is a cl- library
 103. NPM / nodejs: vendored node_modules, legacy nodejs macros — read when npm or node runs in the build, package-lock.json is in the sdist, or you consider %nodejs_install
-104. RPM scriptlets ($1 table, -p, ldconfig, texinfo, gconf) — read when writing or fixing %pre/%post/%preun/%postun, a -p interpreter, or an upgrade fails in a scriptlet
-105. Users and groups via sysusers.d (system-user-<name>) — read when a package creates a system user or group, or Provides user(...) or group(...)
-106. XML catalog entries (catalog.d, update-xml-catalog) — read when a package ships XML schemas, DTDs or a catalog, or uses xmlcatalog
+104. RPM scriptlets, system users, XML catalogs, SysV init — read when writing a %pre/%post/%preun/%postun or -p scriptlet, a system user, an XML catalog or an init script
+105. Merged into convention 104 — read convention 104 when a package creates a system user or group, or Provides user(...) or group(...)
+106. Merged into convention 104 — read convention 104 when a package ships XML schemas, DTDs or a catalog, or uses xmlcatalog
 107. Several versions of one command: update-alternatives (not Python) — read when a package installs a command that other versions also provide, or uses /etc/alternatives
-108. SysV init scripts (deprecated, never add) — read when a package has an init script, /etc/init.d, insserv or a request to add a daemon init script
-109. General rules: no prebuilt binaries or bundled libs, .desktop, logrotate, udev, donations — read when the tarball holds a binary or bundled lib, or the spec adds a .desktop or udev rule
-110. License coverage of subpackages and Legal-Review-Notice — read when a subpackage has its own License, a subpackage lacks %license, or a tarball file is left out of the package
-111. Upstream patch header, type-1 comment, .changes line — read when adding or changing a PatchN: or a patch file, its Upstream: header, or a .changes patch entry (Add/Backport/Rebase/Drop)
-112. X11:XOrg and X11:Wayland patch format (Patch-Mainline, tagged file names) — read when the package uses X11 patch names such as N_, u_, T_, or Patch-Mainline headers
+108. Merged into convention 104 — read convention 104 when a package has an init script, /etc/init.d, insserv or a request to add a daemon init script
+109. General rules, license coverage — read when the tarball holds a binary or bundled lib, the spec adds a .desktop or udev rule, or a License or %license is in question
+110. Merged into convention 109 — read convention 109 when a subpackage has its own License, lacks %license, or a tarball file is left out of the package
+111. Upstream patch header, type-1 comment, .changes line, X11 patch format — read when adding or changing a PatchN:, its Upstream: header, a .changes patch entry, or an X11 patch
+112. Merged into convention 111 — read convention 111 when the package uses X11 patch names such as N_, u_, T_ or Patch-Mainline headers
 113. Standalone Cargo crates: workspaces, _service parameters, vendored crate patches — read when a Cargo.toml package needs a workspace, update=false, update-crate, or a vendored crate patched
