@@ -83,7 +83,7 @@ pub fn check_pipeline_name(item: &Item) -> Result<(), String> {
         }
         Ecosystem::GitRepo { .. } => Ok(()),
         // Only reported, never built, so there is no name to mismatch.
-        Ecosystem::Index { .. } | Ecosystem::Repology { .. } => Ok(()),
+        Ecosystem::Index { .. } | Ecosystem::Repology { .. } | Ecosystem::Rubygems { .. } => Ok(()),
     }
 }
 

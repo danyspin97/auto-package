@@ -262,6 +262,38 @@ fn newest_on_repology(body: &str) -> Result<String, String> {
         .ok_or_else(|| "Repology has no newest version for it".to_string())
 }
 
+/// The newest version rubygems.org lists for `gem`, from its latest-version
+/// document. The host must pass the shared allowlist for source fetches.
+pub fn latest_on_rubygems(gem: &str) -> Result<String, String> {
+    let valid = !gem.is_empty()
+        && gem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid {
+        return Err(format!("{gem:?} is not a gem name"));
+    }
+    let host = "rubygems.org";
+    crate::allowed_hosts::shared()
+        .check_host(
+            host,
+            crate::allowed_hosts::Use::Source,
+            &crate::allowed_hosts::Asker::source(gem),
+        )
+        .map_err(|e| format!("{host}: {e}"))?;
+    let url = format!("https://{host}/api/v1/versions/{gem}/latest.json");
+    newest_on_rubygems(&get_text(&url)?)
+}
+
+/// The `version` a rubygems.org latest-version document names.
+fn newest_on_rubygems(body: &str) -> Result<String, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("rubygems.org sent no JSON: {e}"))?;
+    doc["version"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "rubygems.org names no version for it".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -413,6 +445,19 @@ mod tests {
         assert_eq!(newest_on_repology(body).as_deref(), Ok("2.10.0"));
         assert!(newest_on_repology("[]").is_err());
         assert!(newest_on_repology("not json").is_err());
+    }
+
+    #[test]
+    fn rubygems_names_the_version_of_its_latest_document() {
+        assert_eq!(
+            newest_on_rubygems(r#"{"version":"6.1.0","authors":"x"}"#).as_deref(),
+            Ok("6.1.0")
+        );
+        assert!(newest_on_rubygems(r#"{"name":"x"}"#).is_err());
+        assert!(newest_on_rubygems("<html>").is_err());
+        // A malformed gem name is refused before anything is fetched.
+        assert!(latest_on_rubygems("../etc").is_err());
+        assert!(latest_on_rubygems("").is_err());
     }
 
     #[test]

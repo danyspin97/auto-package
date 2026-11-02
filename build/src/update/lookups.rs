@@ -331,3 +331,75 @@ pub(super) fn a_version_finished_by_a_script_is_compared_on_what_is_known() {
         "upstream says less than is known"
     );
 }
+
+#[test]
+pub(super) fn a_rubygem_package_is_asked_of_rubygems_when_repology_has_no_newest() {
+    // `rubygem-unicorn` names gem `unicorn`; its Source is on rubygems.org,
+    // which is not an archive the release listing can read.
+    let spec_text = include_str!("../testdata/spec/rubygem-unicorn.spec");
+    let spec = |_: &str| Ok(spec_text.to_string());
+    let no_index: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Err("not an archive".to_string());
+    let no_repology: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Err("marks no newest".to_string());
+    let gem: &'static dyn Fn(&str) -> Result<String, String> = &|name: &str| {
+        assert_eq!(name, "unicorn");
+        Ok("6.1.1".to_string())
+    };
+    let lookups = Lookups {
+        fetch_index_latest: no_index,
+        fetch_repology_latest: no_repology,
+        fetch_gem_latest: gem,
+        ..unused_lookups()
+    };
+    let c = classify("rubygem-unicorn", &spec, &lookups);
+    assert_eq!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::Rubygems {
+                gem: "unicorn".into()
+            },
+            old_version: "6.1.0".into(),
+            new_version: "6.1.1".into(),
+        }
+    );
+    assert_eq!(
+        Ecosystem::Rubygems {
+            gem: "unicorn".into()
+        }
+        .tag(),
+        "rubygems"
+    );
+    assert!(
+        !Ecosystem::Rubygems {
+            gem: "unicorn".into()
+        }
+        .can_build()
+    );
+}
+
+#[test]
+pub(super) fn repology_newest_is_asked_before_rubygems() {
+    let spec_text = include_str!("../testdata/spec/rubygem-unicorn.spec");
+    let spec = |_: &str| Ok(spec_text.to_string());
+    let no_index: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Err("not an archive".to_string());
+    let repology: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Ok("6.1.2".to_string());
+    let gem: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| unreachable!("rubygems is asked only when Repology has no newest");
+    let lookups = Lookups {
+        fetch_index_latest: no_index,
+        fetch_repology_latest: repology,
+        fetch_gem_latest: gem,
+        ..unused_lookups()
+    };
+    let c = classify("rubygem-unicorn", &spec, &lookups);
+    assert!(matches!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::Repology { .. },
+            ..
+        }
+    ));
+}

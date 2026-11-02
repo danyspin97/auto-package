@@ -412,7 +412,7 @@ fn build_item(
             item.pkg.clone(),
             Some(url.replace(&item.old_version, &item.new_version)),
         ),
-        Ecosystem::Repology { .. } => {
+        Ecosystem::Repology { .. } | Ecosystem::Rubygems { .. } => {
             return Err(format!(
                 "{}'s source is known only through the {} lookup, which names nothing the pipeline \
                  can fetch and unpack yet",

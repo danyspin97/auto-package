@@ -346,12 +346,18 @@ pub fn plan_each(
             crate::upstream::latest_on_repology(name)
         })
     };
+    let fetch_gem_latest = |gem: &str| {
+        upstream_cache::lookup(&format!("rubygems:{gem}"), || {
+            crate::upstream::latest_on_rubygems(gem)
+        })
+    };
     let (hits_before, fetched_before) = upstream_cache::stats();
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
         fetch_repo_latest: &fetch_repo_latest,
         fetch_index_latest: &fetch_index_latest,
         fetch_repology_latest: &fetch_repology_latest,
+        fetch_gem_latest: &fetch_gem_latest,
     };
 
     let total = names.len();

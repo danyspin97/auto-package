@@ -24,6 +24,9 @@ pub enum Ecosystem {
     /// Resolved from Repology's record of the project, for a package whose spec
     /// does not say where its source is kept.
     Repology { project: String },
+    /// Resolved from rubygems.org's latest-version record of the gem a
+    /// `rubygem-` package names. Asked after Repology, when that has no newest.
+    Rubygems { gem: String },
 }
 
 impl Ecosystem {
@@ -44,6 +47,7 @@ impl Ecosystem {
             Ecosystem::GitRepo { .. } => "git",
             Ecosystem::Index { .. } => "index",
             Ecosystem::Repology { .. } => "repology",
+            Ecosystem::Rubygems { .. } => "rubygems",
         }
     }
 }
@@ -240,6 +244,8 @@ pub struct Lookups<'a> {
     pub fetch_index_latest: &'a dyn Fn(&str) -> Result<String, String>,
     /// Newest version Repology knows for a project.
     pub fetch_repology_latest: &'a dyn Fn(&str) -> Result<String, String>,
+    /// Latest version rubygems.org lists for a gem.
+    pub fetch_gem_latest: &'a dyn Fn(&str) -> Result<String, String>,
 }
 
 /// The places a package's newest version may be looked up, most specific
@@ -285,6 +291,15 @@ pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
     add(Ecosystem::Repology {
         project: header.name.clone(),
     });
+    if let Some(gem) = header
+        .name
+        .strip_prefix("rubygem-")
+        .filter(|g| !g.is_empty())
+    {
+        add(Ecosystem::Rubygems {
+            gem: gem.to_string(),
+        });
+    }
     out
 }
 
@@ -324,6 +339,7 @@ pub(super) fn lookup(ecosystem: &Ecosystem, lookups: &Lookups<'_>) -> Result<Str
         Ecosystem::GitRepo { url } => ("git", url),
         Ecosystem::Index { url } => ("release listing", url),
         Ecosystem::Repology { project } => ("Repology", project),
+        Ecosystem::Rubygems { gem } => ("rubygems.org", gem),
     };
     if spec::has_unexpanded_macro(name) {
         return Err(SkipReason::UnexpandedMacro {
@@ -336,6 +352,7 @@ pub(super) fn lookup(ecosystem: &Ecosystem, lookups: &Lookups<'_>) -> Result<Str
         Ecosystem::GitRepo { url } => (lookups.fetch_repo_latest)(url),
         Ecosystem::Index { url } => (lookups.fetch_index_latest)(url),
         Ecosystem::Repology { project } => (lookups.fetch_repology_latest)(project),
+        Ecosystem::Rubygems { gem } => (lookups.fetch_gem_latest)(gem),
     };
     latest.map_err(|error| SkipReason::LookupFailed {
         ecosystem_tag: tag.into(),
