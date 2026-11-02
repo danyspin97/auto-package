@@ -6,6 +6,7 @@ use crate::pipeline::licence::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::sibling::*;
+use crate::pipeline::spec_edits::*;
 use crate::pipeline::turn_spend::*;
 
 /// The kind a failed agent turn is recorded as. A rejected change to the
@@ -22,6 +23,20 @@ pub(super) fn turn_failure_kind(e: &crate::agent::Error) -> FailureKind {
         // be read): not the edit the gate refuses.
         FailureKind::AgentFailed
     }
+}
+
+/// Whether a failed turn ends the package whatever its caller does: the turn
+/// changed the checkout's metadata (`Tampered`) or the package's `Version:`
+/// (`VersionChanged`). No caller downgrades, skips or retries these.
+pub(super) fn ends_package(kind: FailureKind) -> bool {
+    matches!(kind, FailureKind::Tampered | FailureKind::VersionChanged)
+}
+
+/// The version check around a turn (see [`version_stop`]): `Some` when the
+/// spec at `path` does not carry the package's version `expected`.
+fn version_check(path: Option<&Path>, expected: &str, when: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path?).ok()?;
+    version_stop(&text, expected, when)
 }
 
 /// The shared run environment an agent turn works in.
@@ -178,6 +193,19 @@ pub(super) fn agent_turn(
         reporter,
         obs_name,
     } = env;
+    // The spec's Version is the package's before every turn, and a turn may not
+    // change it (see `version_stop`): a change made between turns stops here.
+    let version_spec = ctx.checkout_dir.map(|d| d.join(format!("{obs_name}.spec")));
+    let before_spec = version_spec
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    if let Some(why) = version_check(
+        version_spec.as_deref(),
+        &config.version,
+        &format!("{}, before the turn", ctx.label),
+    ) {
+        return Err((why, FailureKind::VersionChanged));
+    }
     let step = StepGuard::begin(
         pkg_run,
         reporter,
@@ -417,14 +445,33 @@ pub(super) fn agent_turn(
         }
     };
 
+    // The turn's cost is charged first: a turn stopped by the check below cost it.
+    *spent_usd += outcome.usage.cost_usd();
+    record_daily_spend(&config.work_dir, outcome.usage.cost_usd());
+    // A turn that changed the Version is undone and stops the package, whatever
+    // its action, a wheel switch included.
+    if let Some(why) = version_check(
+        version_spec.as_deref(),
+        &config.version,
+        &format!("{}, after the turn", ctx.label),
+    ) {
+        if let (Some(path), Some(text)) = (version_spec.as_deref(), before_spec.as_deref()) {
+            restore_spec(path, text, None, reporter);
+        }
+        let step = step.finish(StepOutcome::Failed);
+        reporter.report(&Event::Warning {
+            step: Some(step.id),
+            message: why.clone(),
+        });
+        return Err((why, FailureKind::VersionChanged));
+    }
+
     *session_id = outcome.session_id.as_ref().map(|id| {
         format!(
             "{}|{id}",
             crate::agent::model_for_attempt(ctx.attempt, model_rotation.get())
         )
     });
-    *spent_usd += outcome.usage.cost_usd();
-    record_daily_spend(&config.work_dir, outcome.usage.cost_usd());
 
     // If the claude CLI's final `result` event carried a structured
     // end-early signal but `pick_turn_response` still rescued a usable

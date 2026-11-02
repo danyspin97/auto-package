@@ -99,6 +99,20 @@ pub(super) fn source_is_available(file: &str, head: &[String], checkout_dir: &Pa
             .is_ok_and(|text| service_fetches(&text))
 }
 
+/// Why a spec does not carry the package's version `expected`, `None` when it
+/// does or it has no `Version:` to read. Checked before every agent turn and
+/// after each, so a `Version:` changed between turns, or by a turn, stops the
+/// package. `when` names the moment for the reason.
+pub(super) fn version_stop(spec: &str, expected: &str, when: &str) -> Option<String> {
+    let found = spec_version(spec)?;
+    (found != expected).then(|| {
+        format!(
+            "{when}: the spec's Version is {found}, the package's version is {expected}; a \
+             Version change is the pipeline's, not the agent's, so the package is stopped"
+        )
+    })
+}
+
 /// Name checks and the local-state fast path; opens the workspace.
 pub(super) fn preflight<'a>(
     config: &'a PipelineConfig,

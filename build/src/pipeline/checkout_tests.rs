@@ -1,6 +1,7 @@
-//! The branch check of the checkout before the first turn.
+//! The version guards of the checkout: the branch check before the first turn,
+//! and the `Version:` a turn or the time between turns may not change.
 
-use crate::pipeline::checkout::{settle_branch_version, source_is_available};
+use crate::pipeline::checkout::{settle_branch_version, source_is_available, version_stop};
 use std::cell::Cell;
 
 fn spec(version: &str) -> String {
@@ -102,6 +103,36 @@ fn a_missing_spec_or_a_failed_reread_is_a_mismatch() {
     );
     let why = r.unwrap_err();
     assert!(why.contains("osc up failed"), "{why}");
+}
+
+#[test]
+fn a_spec_at_the_package_version_passes_the_turn_check() {
+    let text = spec("2.0");
+    assert!(version_stop(&text, "2.0", "before the turn").is_none());
+}
+
+#[test]
+fn a_version_reset_between_turns_stops_the_package() {
+    // The spec was 2.0 after the last turn; something outside the agent set 1.0.
+    let why = version_stop(&spec("1.0"), "2.0", "before the turn").expect("a stop");
+    assert!(
+        why.contains("Version is 1.0") && why.contains("package is stopped"),
+        "{why}"
+    );
+}
+
+#[test]
+fn an_edited_turn_that_changes_the_version_stops_the_package() {
+    // A turn's edit leaves the spec at the old version: the check after the
+    // turn stops it, whatever the action, and the caller restores the spec.
+    let why = version_stop(&spec("1.0"), "2.0", "after the turn").expect("a stop");
+    assert!(why.starts_with("after the turn"), "{why}");
+}
+
+#[test]
+fn a_turn_that_keeps_the_version_is_not_a_stop() {
+    assert!(version_stop(&spec("2.0"), "2.0", "after the turn").is_none());
+    assert!(version_stop("no version here", "2.0", "after the turn").is_none());
 }
 
 #[test]

@@ -190,6 +190,10 @@ pub enum FailureKind {
     /// 410, so the release moved or was removed outside the tool (class 4 of
     /// D-06). Nothing is retried: the same answer would come back.
     BrokenOutside,
+    /// The spec's `Version:` is not the package's before or after a turn: it
+    /// was changed between turns, or by a turn that may not change it. The
+    /// spec is put back and the package stops; no caller downgrades this.
+    VersionChanged,
 }
 
 #[derive(Debug)]

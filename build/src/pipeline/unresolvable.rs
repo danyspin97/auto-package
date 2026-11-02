@@ -421,6 +421,11 @@ pub(super) fn unresolvable_deps_round(
             &mut st.session_id,
             &mut st.step_attempts,
         );
+        if let Err((e, kind)) = &turn
+            && ends_package(*kind)
+        {
+            return Err(ctx.failed_as(*kind, e.clone()));
+        }
         let turn_succeeded = turn.is_ok();
         if let Ok((_, outcome)) = turn {
             translated = outcome.unresolvable_packages;

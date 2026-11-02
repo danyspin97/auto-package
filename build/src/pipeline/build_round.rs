@@ -364,7 +364,7 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
     );
     let (agent_step, outcome) = match turn {
         Ok(v) => v,
-        Err((e, _)) => {
+        Err((e, kind)) => {
             discard_failed_turn(
                 ws.notes(),
                 reporter,
@@ -373,6 +373,9 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
                 &good,
                 "PostBuildReview",
             );
+            if ends_package(kind) {
+                return Some(RoundEnd::Finished(ctx.failed_as(kind, e)));
+            }
             reporter.report(&Event::Warning {
                 step: None,
                 message: format!("{rpm_name}: post-build review skipped: {e}"),

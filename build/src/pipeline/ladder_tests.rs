@@ -297,6 +297,28 @@ fn run_case(
     wheel_lookups: &std::cell::Cell<usize>,
     check: Option<(&str, &str)>,
 ) -> Case {
+    run_case_with(
+        rpm_name,
+        force,
+        siblings,
+        first,
+        turns.into_iter().map(Ok).collect(),
+        wheel_lookups,
+        check,
+    )
+}
+
+/// [`run_case`] with each scripted turn either an answer or the failure kind
+/// the turn ends with.
+fn run_case_with(
+    rpm_name: &str,
+    force: bool,
+    siblings: &[&str],
+    first: crate::agent::TurnOutcome,
+    turns: Vec<Result<crate::agent::TurnOutcome, FailureKind>>,
+    wheel_lookups: &std::cell::Cell<usize>,
+    check: Option<(&str, &str)>,
+) -> Case {
     let root = tempfile::tempdir().unwrap();
     let work = root.path().join("work");
     let state_root = work.join("state");
@@ -403,12 +425,13 @@ fn run_case(
         &lookup,
         &mut |_, _, site, _, _, context| {
             contexts.borrow_mut().push(context.to_string());
-            let out = queue
+            let next = queue
                 .borrow_mut()
                 .pop_front()
                 .expect("the ladder asked for more turns than the script has");
             // A speculative file the turn left in the checkout.
             std::fs::write(site.snapshot.checkout_dir.join("junk.patch"), b"x").unwrap();
+            let out = next.map_err(|kind| ("the turn failed".to_string(), kind))?;
             Ok((
                 StepDir {
                     path: site.step.path.clone(),
@@ -515,4 +538,25 @@ fn a_reason_naming_a_sibling_does_not_request_its_patch() {
         "{:?}",
         case.result
     );
+}
+
+/// A turn that ends with a `VersionChanged` failure is the package's failure
+/// through the ladder: no rung runs after it, and the kind is kept.
+#[test]
+fn a_version_change_in_a_ladder_turn_ends_the_package_with_its_kind() {
+    let lookups = std::cell::Cell::new(0);
+    let case = run_case_with(
+        "open-webui-thing",
+        false,
+        &[],
+        blocked("first turn blocked"),
+        vec![Err(FailureKind::VersionChanged)],
+        &lookups,
+        Some(("%check failed", "Fix the tests")),
+    );
+    let Err(PipelineResult::Failed { kind, .. }) = &case.result else {
+        panic!("the package must fail: {:?}", case.result);
+    };
+    assert_eq!(*kind, FailureKind::VersionChanged);
+    assert!(super::agent::ends_package(*kind));
 }
