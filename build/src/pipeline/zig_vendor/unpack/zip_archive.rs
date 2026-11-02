@@ -4,7 +4,7 @@
 //! which this reader follows: a symlink entry is written as a regular file
 //! holding its target, since zig hashes it so (its hash counts the target's
 //! bytes as a file). The archive is seekable, so it is first copied to a
-//! temporary file in the work directory.
+//! temporary file in the work directory, which is removed when it is dropped.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

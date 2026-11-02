@@ -6,6 +6,7 @@
 
 mod fetch;
 mod hash;
+mod scratch;
 mod tree;
 mod unpack;
 mod vendor_tar;
@@ -17,6 +18,8 @@ mod fetch_archive_tests;
 mod fetch_tests;
 #[cfg(test)]
 mod hash_tests;
+#[cfg(test)]
+mod scratch_tests;
 #[cfg(test)]
 mod tree_tests;
 #[cfg(test)]

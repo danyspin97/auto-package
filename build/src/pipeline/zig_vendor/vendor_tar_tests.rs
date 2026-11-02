@@ -323,3 +323,15 @@ fn an_empty_list_writes_only_the_two_directories() {
     let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(paths, ["vendor", "vendor/p"]);
 }
+
+#[test]
+fn a_failed_vendor_archive_leaves_no_scratch_file_behind() {
+    let (dir, dep) = synthetic("x-1.0-X", &[("d/x", b"q", 0o644)], &[]);
+    // The file is gone before the packed archive is built from it.
+    std::fs::remove_file(dir.path().join("pkg/d/x")).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let mut out = Vec::new();
+    let result = write_vendor_tar_zst(&[dep], Layout::Packed, scratch.path(), &mut out);
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}

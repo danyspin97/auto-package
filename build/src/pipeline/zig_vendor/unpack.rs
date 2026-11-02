@@ -23,6 +23,8 @@ use std::path::{Component, Path, PathBuf};
 
 mod guard;
 
+use super::scratch::Scratch;
+
 pub(super) mod zip_archive;
 
 /// The formats a dependency archive may have: the ones zig 0.15.2 reads. A
@@ -141,18 +143,20 @@ pub(super) fn unpack(
     dest: &Path,
     limits: Limits,
 ) -> Result<Vec<Link>, String> {
-    let stage = stage_of(dest);
-    if dest.exists() || stage.exists() {
+    let stage_path = stage_of(dest);
+    if dest.exists() || stage_path.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
-    std::fs::create_dir_all(&stage).map_err(|e| format!("creating {}: {e}", stage.display()))?;
+    // Removed when this returns, on failure too; after a success it is empty.
+    let stage = Scratch::create(stage_path)?;
+    let stage_dir = stage.path();
     let (links, roots) = if format == Format::Zip {
-        zip_archive::write_entries(src, &stage, limits)?;
-        (Vec::new(), stage_roots(&stage)?)
+        zip_archive::write_entries(src, stage_dir, limits)?;
+        (Vec::new(), stage_roots(stage_dir)?)
     } else {
-        write_entries(src, format, &stage, limits)?
+        write_entries(src, format, stage_dir, limits)?
     };
-    let top = single_top_dir(&stage, &roots)?;
+    let top = single_top_dir(stage_dir, &roots)?;
     let links = match &top {
         Some(name) => links
             .into_iter()
@@ -164,12 +168,9 @@ pub(super) fn unpack(
         None => links,
     };
     match top {
-        Some(name) => {
-            std::fs::rename(stage.join(&name), dest)
-                .map_err(|e| format!("moving the root into {}: {e}", dest.display()))?;
-            std::fs::remove_dir(&stage).map_err(|e| format!("removing {}: {e}", stage.display()))?
-        }
-        None => std::fs::rename(&stage, dest)
+        Some(name) => std::fs::rename(stage_dir.join(&name), dest)
+            .map_err(|e| format!("moving the root into {}: {e}", dest.display()))?,
+        None => std::fs::rename(stage_dir, dest)
             .map_err(|e| format!("moving {} into place: {e}", dest.display()))?,
     }
     Ok(links)
