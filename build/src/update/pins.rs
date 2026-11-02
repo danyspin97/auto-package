@@ -70,36 +70,58 @@ pub(super) fn series_pair(version: &str) -> Vec<u64> {
         .collect()
 }
 
-/// The name a package keeps across its series: `influxdb2` and `influxdb` share
-/// `influxdb`, `mariadb-55` shares `mariadb`. A name without a number at its
-/// end is its own base (`zookeeper-kit` is not `zookeeper`).
-pub(super) fn upstream_base(rpm_name: &str) -> &str {
-    let base = rpm_name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '_');
-    base.strip_suffix('-').unwrap_or(base)
+/// The series a package's name spells out, when its trailing digits are its
+/// major (`influxdb2` on 2.7.10, `gtk3` on 3.24, `nodejs22` on 22.11) or its
+/// major and minor written together (`python311` on 3.11.4 is `[3, 11]`,
+/// `libpng16` on 1.6.40 is `[1, 6]`). Trailing digits that match neither
+/// (`bzip2` on 1.0.8, `lz4` on 1.10) name no series.
+pub(super) fn name_series(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
+    let digits = &rpm_name[rpm_name
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .len()..];
+    if digits.is_empty() {
+        return None;
+    }
+    let numbers = version::leading_numbers(version);
+    let major = *numbers.first()?;
+    if digits == major.to_string() {
+        return Some(major_key(version));
+    }
+    match numbers.get(1) {
+        Some(minor) if digits == format!("{major}{minor}") => Some(vec![major, *minor]),
+        _ => None,
+    }
 }
 
-/// The project's other packages with the same base as `rpm_name`, read from
-/// their specs: `(name, packaged version)`. A sibling whose spec cannot be read
-/// says nothing and is left out. Flavors (`boost:base`) are not packages of
-/// their own.
+/// The git forge repository a package's source is, from its `Source:` and
+/// `Url:` after the macros are expanded (`https://github.com/influxdata/influxdb`).
+fn upstream_of(header: &spec::Header) -> Option<String> {
+    [header.expanded_source.as_deref(), header.url.as_deref()]
+        .into_iter()
+        .flatten()
+        .find_map(super::candidates::git_repo_url)
+}
+
+/// The project's other packages whose source is the same forge repository as
+/// `upstream`, read from their specs: `(name, packaged version)`. This finds a
+/// sibling whatever its name (`influxdb2` for `influxdb`, `zookeeper-kit` for
+/// `zookeeper`). A sibling whose spec cannot be read says nothing and is left
+/// out. Flavors (`boost:base`) are not packages of their own.
 fn sibling_versions<SpecLookup>(
     rpm_name: &str,
+    upstream: &str,
     project: &HashSet<String>,
     fetch_spec: &SpecLookup,
 ) -> Vec<(String, String)>
 where
     SpecLookup: Fn(&str) -> Result<String, ReadError>,
 {
-    let base = upstream_base(rpm_name);
-    if base.is_empty() {
-        return Vec::new();
-    }
     project
         .iter()
-        .filter(|s| s.as_str() != rpm_name && !s.contains(':') && upstream_base(s) == base)
+        .filter(|s| s.as_str() != rpm_name && !s.contains(':'))
         .filter_map(|s| {
             let header = spec::parse_header(&fetch_spec(s).ok()?)?;
-            Some((s.clone(), header.version))
+            (upstream_of(&header).as_deref() == Some(upstream)).then(|| (s.clone(), header.version))
         })
         .collect()
 }
@@ -146,7 +168,8 @@ where
     SpecLookup: Fn(&str) -> Result<String, ReadError>,
 {
     let packaged = header.version.as_str();
-    if let Some(series) = series_of(rpm_name, packaged) {
+    if let Some(series) = series_of(rpm_name, packaged).or_else(|| name_series(rpm_name, packaged))
+    {
         return (!in_series(latest, &series)).then_some(Held::Series(series));
     }
     let own = major_key(packaged);
@@ -155,7 +178,10 @@ where
     }
     let own_pair = series_pair(packaged);
     let latest_pair = series_pair(latest);
-    let related = sibling_versions(rpm_name, project, fetch_spec);
+    let related = match upstream_of(header) {
+        Some(upstream) => sibling_versions(rpm_name, &upstream, project, fetch_spec),
+        None => Vec::new(),
+    };
     // A sibling already on the series this would move to keeps it.
     if let Some((sibling, version)) = related
         .iter()

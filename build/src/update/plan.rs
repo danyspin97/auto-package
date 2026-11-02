@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 /// Fetch and classify one package. Pure given the injected lookups —
@@ -398,9 +399,20 @@ pub fn plan_each(
     // OBS package name. The old guess silently missed every one of these
     // (Oct 6 review finding #3): `demo+1.0` looked for `demo+1.0.spec`,
     // not the actual `demo.spec`.
+    // A sibling check reads the specs of the other packages too, so a spec is
+    // read once for the whole run.
+    let read_specs: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     let fetch_spec = |rpm_name: &str| {
+        if let Some(text) = read_specs.borrow().get(rpm_name) {
+            return Ok(text.clone());
+        }
         let spec = spec_for_package(project, rpm_name, emit);
         stash_spec(project, rpm_name, spec.as_ref().ok());
+        if let Ok(text) = &spec {
+            read_specs
+                .borrow_mut()
+                .insert(rpm_name.to_string(), text.clone());
+        }
         spec
     };
     let fetch_pypi_latest = |pypi_name: &str| {

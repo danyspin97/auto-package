@@ -124,11 +124,11 @@ fn a_package_is_pinned_by_a_sibling_on_a_newer_series() {
     let table = &[
         (
             "influxdb",
-            "Name:           influxdb\nVersion:        1.11.8\n",
+            "Name:           influxdb\nVersion:        1.11.8\nUrl:            https://github.com/influxdata/influxdb\n",
         ),
         (
             "influxdb2",
-            "Name:           influxdb2\nVersion:        2.7.10\n",
+            "Name:           influxdb2\nVersion:        2.7.10\nUrl:            https://github.com/influxdata/influxdb\n",
         ),
     ];
     let project = ["influxdb", "influxdb2"];
@@ -218,8 +218,14 @@ fn a_pinned_package_stops_where_a_sibling_is_on_the_series() {
     // `foo2` is on 1.9 here, a newer series than `foo`'s 1.4: `foo` is pinned to
     // 1.x, and it does not take 1.9 either, which `foo2` already carries.
     let table = &[
-        ("foo", "Name:           foo\nVersion:        1.4.0\n"),
-        ("foo2", "Name:           foo2\nVersion:        1.9.0\n"),
+        (
+            "foo",
+            "Name:           foo\nVersion:        1.4.0\nUrl:            https://github.com/example/foo\n",
+        ),
+        (
+            "foo2",
+            "Name:           foo2\nVersion:        1.9.0\nUrl:            https://github.com/example/foo\n",
+        ),
     ];
     let project = ["foo", "foo2"];
     match classify_one("foo", table, &project, "1.9.3") {
@@ -279,5 +285,134 @@ fn a_pinned_series_on_a_source_without_a_tag_list_is_left() {
     assert!(matches!(
         c.decision,
         Decision::Skipped(SkipReason::OtherSeries { ref series, .. }) if series == "9"
+    ));
+}
+
+/// A spec of `name` at `version`, whose source is the GitHub repository `repo`.
+fn forged(name: &str, version: &str, repo: &str) -> String {
+    format!(
+        "Name:           {name}\nVersion:        {version}\n\
+         Source:         https://github.com/{repo}/archive/v{version}.tar.gz\n"
+    )
+}
+
+/// The decision for `rpm_name`, whose spec is `spec`, in a project of `project`.
+fn decide(rpm_name: &str, spec: String, project: &[&str], lookups: &Lookups<'_>) -> Decision {
+    let project: HashSet<String> = project.iter().map(|p| p.to_string()).collect();
+    let fetch = move |name: &str| {
+        if name == rpm_name {
+            Ok(spec.clone())
+        } else {
+            Err(ReadError::NoSpec)
+        }
+    };
+    classify_in_project(rpm_name, &fetch, lookups, &project).decision
+}
+
+#[test]
+fn influxdb2_stays_on_2_x_and_takes_the_newest_2_x_release() {
+    let spec = forged("influxdb2", "2.7.10", "influxdata/influxdb");
+    let lookups = answers_in("3.12.1", Some("2.7.12"));
+    assert!(matches!(
+        decide("influxdb2", spec.clone(), &["influxdb2"], &lookups),
+        Decision::Update { ref new_version, .. } if new_version == "2.7.12"
+    ));
+    let lookups = answers_in("3.12.1", None);
+    assert!(matches!(
+        decide("influxdb2", spec, &["influxdb2"], &lookups),
+        Decision::Skipped(SkipReason::OtherSeries { ref series, .. }) if series == "2"
+    ));
+}
+
+#[test]
+fn a_name_with_a_major_and_minor_stays_on_that_minor_series() {
+    let spec = forged("python311", "3.11.4", "python/cpython");
+    let lookups = answers_in("3.12.0", Some("3.11.7"));
+    assert!(matches!(
+        decide("python311", spec.clone(), &["python311"], &lookups),
+        Decision::Update { ref new_version, .. } if new_version == "3.11.7"
+    ));
+    let lookups = answers_in("3.12.0", Some("3.11.4"));
+    assert!(matches!(
+        decide("python311", spec, &["python311"], &lookups),
+        Decision::UpToDate { .. }
+    ));
+    let spec = forged("libpng16", "1.6.40", "glennrp/libpng");
+    let lookups = answers_in("1.7.0", Some("1.6.43"));
+    assert!(matches!(
+        decide("libpng16", spec, &["libpng16"], &lookups),
+        Decision::Update { ref new_version, .. } if new_version == "1.6.43"
+    ));
+}
+
+#[test]
+fn a_name_whose_trailing_digits_match_no_series_is_not_pinned() {
+    let spec = forged("bzip2", "1.0.8", "libarchive/bzip2");
+    let lookups = answers("1.1.0");
+    assert!(matches!(
+        decide("bzip2", spec, &["bzip2"], &lookups),
+        Decision::Update { ref new_version, .. } if new_version == "1.1.0"
+    ));
+    let spec = forged("lz4", "1.10.0", "lz4/lz4");
+    assert!(matches!(
+        decide("lz4", spec, &["lz4"], &answers("1.11.0")),
+        Decision::Update { ref new_version, .. } if new_version == "1.11.0"
+    ));
+    let spec = forged("mpg123", "1.32.9", "mpg123/mpg123");
+    assert!(matches!(
+        decide("mpg123", spec, &["mpg123"], &answers("1.33.0")),
+        Decision::Update { ref new_version, .. } if new_version == "1.33.0"
+    ));
+}
+
+#[test]
+fn gtk3_and_nodejs22_stay_on_their_major() {
+    let spec = forged("gtk3", "3.24.41", "GNOME/gtk");
+    assert!(matches!(
+        decide("gtk3", spec, &["gtk3"], &answers_in("4.16.0", None)),
+        Decision::Skipped(SkipReason::OtherSeries { ref series, .. }) if series == "3"
+    ));
+    let spec = forged("nodejs22", "22.11.0", "nodejs/node");
+    assert!(matches!(
+        decide("nodejs22", spec, &["nodejs22"], &answers_in("24.0.0", None)),
+        Decision::Skipped(SkipReason::OtherSeries { ref series, .. }) if series == "22"
+    ));
+}
+
+#[test]
+fn a_sibling_is_found_by_its_upstream_whatever_its_name() {
+    // zookeeper-kit is on the same release as zookeeper, from the same forge
+    // repository, so zookeeper is not held back: 3.4.13 -> 3.9.7 is proposed.
+    let table = &[
+        (
+            "zookeeper",
+            "Name:           zookeeper\nVersion:        3.4.13\nUrl:            https://github.com/apache/zookeeper\n",
+        ),
+        (
+            "zookeeper-kit",
+            "Name:           zookeeper-kit\nVersion:        3.4.13\nUrl:            https://github.com/apache/zookeeper\n",
+        ),
+    ];
+    assert!(matches!(
+        classify_one("zookeeper", table, &["zookeeper", "zookeeper-kit"], "3.9.7"),
+        Decision::Update { ref new_version, .. } if new_version == "3.9.7"
+    ));
+}
+
+#[test]
+fn a_sibling_with_another_upstream_does_not_pin_by_its_name() {
+    let table = &[
+        (
+            "foo",
+            "Name:           foo\nVersion:        1.4.0\nUrl:            https://github.com/example/foo\n",
+        ),
+        (
+            "foo2",
+            "Name:           foo2\nVersion:        1.9.0\nUrl:            https://github.com/example/other\n",
+        ),
+    ];
+    assert!(matches!(
+        classify_one("foo", table, &["foo", "foo2"], "2.0.0"),
+        Decision::Update { ref new_version, .. } if new_version == "2.0.0"
     ));
 }
