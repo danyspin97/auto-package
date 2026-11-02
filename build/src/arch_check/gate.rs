@@ -94,16 +94,22 @@ pub fn gate_verdict(
             "its build status is a failure, but no result of {pkg} fails"
         ));
     }
-    let mut notes: Vec<String> = shared
-        .iter()
-        .map(|r| {
-            let project = r.baseline.as_ref().map_or("", |b| b.project.as_str());
-            format!(
-                "{pkg} also fails in {project} on {}: not counted against the submit",
-                name(r)
-            )
-        })
-        .collect();
+    // Nothing was built on another architecture: the pass below says nothing
+    // about them, so the notes say so.
+    let mut notes: Vec<String> = Vec::new();
+    if !others.is_empty() && others.iter().all(|r| r.state.is_skipped()) {
+        notes.push(format!(
+            "{pkg} is not checked on the other architectures: every result there is disabled \
+             or excluded in the branch"
+        ));
+    }
+    notes.extend(shared.iter().map(|r| {
+        let project = r.baseline.as_ref().map_or("", |b| b.project.as_str());
+        format!(
+            "{pkg} also fails in {project} on {}: not counted against the submit",
+            name(r)
+        )
+    }));
     if blocking.is_empty() {
         return GateVerdict::Pass { notes };
     }

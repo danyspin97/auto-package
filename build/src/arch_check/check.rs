@@ -301,7 +301,7 @@ fn baseline_project(origin: &str, repo: &str) -> String {
 pub(super) fn baseline_state(entries: &[ResultEntry], pkg: &str, key: &Key) -> Option<ArchState> {
     deciding_entry(entries, pkg, key)
         .map(|e| classify(&resolve_lenient(e), e.details.as_deref()))
-        .filter(|s| *s != ArchState::Ignored)
+        .filter(|s| !s.is_skipped())
 }
 
 /// Read each failure's baseline, once per project: the origin for an ordinary

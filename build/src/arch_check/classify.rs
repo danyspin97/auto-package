@@ -17,8 +17,11 @@ pub enum ArchState {
         detail: Option<String>,
     },
     Broken,
-    /// Excluded or disabled by the spec or the project: never a failure.
+    /// Excluded by the spec (ExclusiveArch, ExcludeArch) or the project: never a failure.
     Ignored,
+    /// Disabled in the project: the repository is not built for the package, so
+    /// nothing was checked there. Not a failure, and not a pass either.
+    Disabled,
     /// Still scheduled, blocked or building (or not reported yet).
     Pending(String),
     /// A port result that cannot be built: its dependencies are missing on
@@ -54,6 +57,12 @@ impl ArchState {
         matches!(self, ArchState::Pending(_))
     }
 
+    /// Whether the result is not built for the package at all (excluded or
+    /// disabled): it is neither checked nor a failure.
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, ArchState::Ignored | ArchState::Disabled)
+    }
+
     /// The detail a failure, an unresolvable or a port result carries, if any.
     pub fn detail(&self) -> Option<&str> {
         match self {
@@ -73,6 +82,7 @@ impl ArchState {
             ArchState::Unresolvable { .. } => "unresolvable".to_string(),
             ArchState::Broken => "broken".to_string(),
             ArchState::Ignored => "excluded".to_string(),
+            ArchState::Disabled => "disabled".to_string(),
             ArchState::Pending(what) => format!("still {what}"),
             ArchState::NotTestable { .. } => "not testable".to_string(),
             ArchState::NoBaseline { .. } => "failed (no Factory baseline)".to_string(),
@@ -93,7 +103,8 @@ pub fn classify(status: &BuildStatus, details: Option<&str>) -> ArchState {
             }
         }
         BuildStatus::Broken => ArchState::Broken,
-        BuildStatus::Excluded | BuildStatus::Disabled => ArchState::Ignored,
+        BuildStatus::Excluded => ArchState::Ignored,
+        BuildStatus::Disabled => ArchState::Disabled,
         BuildStatus::Scheduled => ArchState::Pending("scheduled".to_string()),
         BuildStatus::Blocked => ArchState::Pending("blocked".to_string()),
         BuildStatus::Building => ArchState::Pending("building".to_string()),

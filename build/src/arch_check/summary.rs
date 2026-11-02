@@ -35,15 +35,16 @@ impl ArchRow {
     }
 }
 
-/// The lines of the "Other architectures" section: one per result that is not
-/// succeeded or ignored, one line each for a `(pkg, repo, arch)`, first seen
-/// wins. A port result that is not testable gets a line saying so. Empty when
-/// every checked result succeeded.
+/// The lines of the "Other architectures" section: first one for each package
+/// none of whose other results was built (see [`not_checked_lines`]), then one
+/// per result that is not succeeded or skipped, one line each for a
+/// `(pkg, repo, arch)`, first seen wins. A port result that is not testable
+/// gets a line saying so. Empty when every checked result succeeded.
 pub fn section_lines(rows: &[ArchRow]) -> Vec<String> {
     let mut seen: Vec<(&str, &str, &str)> = Vec::new();
-    let mut out = Vec::new();
+    let mut out = not_checked_lines(rows);
     for row in rows {
-        if matches!(row.state, ArchState::Succeeded | ArchState::Ignored) {
+        if matches!(row.state, ArchState::Succeeded) || row.state.is_skipped() {
             continue;
         }
         if seen.contains(&row.key()) {
@@ -83,4 +84,34 @@ pub fn section_lines(rows: &[ArchRow]) -> Vec<String> {
         out.push(line);
     }
     out
+}
+
+/// One line for each package whose other-architecture results were all
+/// skipped (disabled or excluded in the branch): nothing was built there, so
+/// the check checked nothing and must not read as a pass.
+pub fn not_checked_lines(rows: &[ArchRow]) -> Vec<String> {
+    let mut pkgs: Vec<&str> = Vec::new();
+    for row in rows {
+        if !pkgs.contains(&row.pkg.as_str()) {
+            pkgs.push(&row.pkg);
+        }
+    }
+    pkgs.into_iter()
+        .filter_map(|pkg| {
+            let own: Vec<&ArchRow> = rows.iter().filter(|r| r.pkg == pkg).collect();
+            if own.is_empty() || !own.iter().all(|r| r.state.is_skipped()) {
+                return None;
+            }
+            let disabled = own.iter().all(|r| r.state == ArchState::Disabled);
+            let why = if disabled {
+                "the repositories are disabled in the branch"
+            } else {
+                "every result is disabled or excluded in the branch"
+            };
+            Some(format!(
+                "{pkg}: not checked on the other architectures: {why} ({} results)",
+                own.len()
+            ))
+        })
+        .collect()
 }

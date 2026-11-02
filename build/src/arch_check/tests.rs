@@ -322,7 +322,7 @@ mod results {
         );
         assert_eq!(classify(&BuildStatus::Broken, None), ArchState::Broken);
         assert_eq!(classify(&BuildStatus::Excluded, None), ArchState::Ignored);
-        assert_eq!(classify(&BuildStatus::Disabled, None), ArchState::Ignored);
+        assert_eq!(classify(&BuildStatus::Disabled, None), ArchState::Disabled);
         assert!(classify(&BuildStatus::Building, None).is_pending());
         assert!(classify(&BuildStatus::Scheduled, None).is_pending());
         assert!(classify(&BuildStatus::Blocked, None).is_pending());

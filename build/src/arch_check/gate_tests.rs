@@ -92,3 +92,34 @@ fn a_failure_status_that_no_result_explains_refuses() {
         GateVerdict::Refuse(_)
     ));
 }
+
+#[test]
+fn a_package_disabled_everywhere_else_passes_with_a_note_not_silently() {
+    let rows = vec![
+        primary(),
+        row("ports", "s390x", ArchState::Disabled, None),
+        row("ports", "ppc64le", ArchState::Disabled, None),
+    ];
+    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, false) else {
+        panic!("a pass is expected: nothing fails");
+    };
+    assert_eq!(
+        notes,
+        [
+            "p is not checked on the other architectures: every result there is disabled or excluded in the branch"
+        ]
+    );
+}
+
+#[test]
+fn a_checked_arch_gives_no_not_checked_note() {
+    let rows = vec![
+        primary(),
+        row("ports", "s390x", ArchState::Disabled, None),
+        row("ports", "ppc64le", ArchState::Succeeded, None),
+    ];
+    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, false) else {
+        panic!("a pass is expected");
+    };
+    assert!(notes.is_empty(), "{notes:?}");
+}

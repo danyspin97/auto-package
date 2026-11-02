@@ -19,6 +19,8 @@ mod gate;
 #[cfg(test)]
 mod gate_tests;
 mod meta;
+#[cfg(test)]
+mod not_checked_tests;
 mod obs;
 mod ports;
 mod summary;
