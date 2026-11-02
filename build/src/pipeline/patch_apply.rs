@@ -1,6 +1,8 @@
-//! Applying a RefreshPatches turn's outcome: the edit is kept or rolled back.
+//! Applying a RefreshPatches turn's outcome: the edit is kept or rolled back, and
+//! a patch the turn adds meets the patch rules and is named in `.changes`.
 
 use super::*;
+use crate::pipeline::patch_rules::*;
 use crate::pipeline::patch_stage::*;
 use crate::pipeline::rejection::*;
 use crate::pipeline::render::*;
@@ -13,8 +15,9 @@ pub(super) enum PatchTurnApplied {
     Kept,
     /// Nothing was kept: no edit, or a spec rpmspec refuses.
     RolledBack,
-    /// The edit removed patches without proof and was rolled back; what to tell
-    /// the next round.
+    /// The edit was rolled back: it removed patches without proof, or a patch it
+    /// adds breaks a patch rule or is not named in `.changes`. What to tell the
+    /// next round.
     Refused(String),
 }
 
@@ -113,6 +116,44 @@ pub(super) fn apply_patch_turn(
             &label,
             &unproven,
         ));
+    }
+    // A patch the turn adds meets the rules of a fix turn's (a header, a PATCH comment,
+    // source-only changes) and is named in `.changes` by the bullet the turn gave.
+    let bullet_source = turn_bullet_source(outcome);
+    if let Some(why) = reject_patch_rules(
+        spec_path,
+        before,
+        Some(snapshot),
+        step,
+        reporter,
+        notes.clone(),
+        &[],
+    ) {
+        return PatchTurnApplied::Refused(why);
+    }
+    if let Some(why) = reject_unnamed_patches(
+        spec_path,
+        before,
+        Some(snapshot),
+        step,
+        reporter,
+        notes.clone(),
+        &[],
+        &bullet_source,
+        &label,
+    ) {
+        return PatchTurnApplied::Refused(why);
+    }
+    let after = std::fs::read_to_string(spec_path).unwrap_or_default();
+    if !added_patches(spec_path, before, &after, Some(snapshot)).is_empty() {
+        snapshot.restore_changes_files(reporter, Some(step));
+        add_edit_changes_entry(
+            ctx.config,
+            &ctx.checkout_dir,
+            reporter,
+            step,
+            &bullet_source,
+        );
     }
     append_notes(
         notes,

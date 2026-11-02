@@ -1,6 +1,7 @@
 use super::*;
 use crate::patch_check::{CheckReport, PatchResult, PatchStatus, Refresh};
 
+mod new_patches;
 mod part2;
 
 /// A scripted turn: what it does to the checkout, then its answer.
