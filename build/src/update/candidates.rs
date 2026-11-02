@@ -279,7 +279,11 @@ pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
     if let Some((pypi_name, _version)) = pypi::pypi_name_and_version_from_wheel_filename(source) {
         add(Ecosystem::Pypi { pypi_name });
     }
-    if let Some(pypi_name) = pypi::pypi_name_from_versioned_tarball(source, &header.version) {
+    // A bare tarball name is a guess at a PyPI project, which only a Python
+    // package's name can be: a C library's `galera-4` must not reach PyPI.
+    if header.python
+        && let Some(pypi_name) = pypi::pypi_name_from_versioned_tarball(source, &header.version)
+    {
         add(Ecosystem::Pypi { pypi_name });
     }
     let expanded = header.expanded_source.as_deref().unwrap_or_default();

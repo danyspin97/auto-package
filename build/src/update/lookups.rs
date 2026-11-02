@@ -475,3 +475,47 @@ pub(super) fn repology_newest_is_asked_before_metacpan() {
         }
     ));
 }
+
+#[test]
+pub(super) fn a_c_library_is_not_guessed_on_pypi_by_its_tarball_name() {
+    // `galera-4-%{version}` is a C project; a PyPI project of that name is no
+    // evidence of anything, so PyPI is never asked and Repology answers.
+    let spec_text = "Name: galera-4\nVersion: 26.4.22\nSource: galera-%{version}.tar.gz\n";
+    let spec = |_: &str| Ok(spec_text.to_string());
+    let no_pypi: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| unreachable!("PyPI is not asked for a C library");
+    let repology: &'static dyn Fn(&str) -> Result<String, String> =
+        &|_: &str| Ok("26.4.23".to_string());
+    let lookups = Lookups {
+        fetch_pypi_latest: no_pypi,
+        fetch_repology_latest: repology,
+        ..unused_lookups()
+    };
+    let c = classify("galera-4", &spec, &lookups);
+    assert_eq!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::Repology {
+                project: "galera-4".into()
+            },
+            old_version: "26.4.22".into(),
+            new_version: "26.4.23".into(),
+        }
+    );
+}
+
+#[test]
+pub(super) fn a_python_package_is_guessed_on_pypi_by_its_tarball_name() {
+    let spec = |_: &str| Ok(TORCHAUDIO_SPEC.to_string());
+    let c = classify("python-torchaudio", &spec, &only_pypi("2.5.0"));
+    assert_eq!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::Pypi {
+                pypi_name: "torchaudio".into()
+            },
+            old_version: "2.4.0".into(),
+            new_version: "2.5.0".into(),
+        }
+    );
+}

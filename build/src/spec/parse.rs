@@ -24,6 +24,23 @@ pub struct Header {
     /// defines expanded, and the `#/<file>` rename OBS reads off the end cut
     /// away: the address a download would use.
     pub expanded_source: Option<String>,
+    /// Whether the spec is a Python package's: see [`is_python_spec`].
+    pub python: bool,
+}
+
+/// Whether a spec is a Python package's: its name has a `python-` or
+/// `python3-` flavour, its Source or Url is a PyPI file, or its build uses the
+/// Python macros. A bare tarball name is only a PyPI name for such a package.
+fn is_python_spec(spec: &str, name: &str, urls: &[Option<&str>]) -> bool {
+    name.starts_with("python-")
+        || name.starts_with("python3-")
+        || urls
+            .iter()
+            .flatten()
+            .any(|u| u.contains("files.pythonhosted.org") || u.contains("pypi.io"))
+        || spec.contains("%pyproject_")
+        || spec.contains("%python_")
+        || spec.contains("%{python_")
 }
 
 /// Parse `Name:`, `Version:`, and the first `Source:` / `Source0:` line out of
@@ -60,12 +77,22 @@ pub fn parse_header(spec: &str) -> Option<Header> {
         let twice = expand_lookup_text(&once, &macros);
         twice.split('#').next().unwrap_or(&twice).trim().to_string()
     });
+    let python = is_python_spec(
+        spec,
+        &name,
+        &[
+            source.as_deref(),
+            url.as_deref(),
+            expanded_source.as_deref(),
+        ],
+    );
     Some(Header {
         name,
         version,
         source,
         url,
         expanded_source,
+        python,
     })
 }
 
