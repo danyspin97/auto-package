@@ -269,3 +269,45 @@ fn the_child_gets_a_scrubbed_environment() {
     assert!(env.lines().any(|l| l.starts_with("PATH=")), "{env}");
     assert!(env.lines().any(|l| l == "QUILTRC=/dev/null"), "{env}");
 }
+
+#[test]
+fn a_turn_that_rewrites_the_checkouts_apiurl_is_rejected_and_the_file_put_back() {
+    // The whole turn, with a stub that writes the checkout's `_apiurl` and then
+    // answers: the turn is rejected and the file is back as it was.
+    let co = tempfile::tempdir().unwrap();
+    let apiurl = co.path().join(".osc/_apiurl");
+    std::fs::create_dir(co.path().join(".osc")).unwrap();
+    std::fs::write(&apiurl, "https://api.example\n").unwrap();
+    let event = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": answer("edited").to_string(),
+        "total_cost_usd": 0.01,
+        "num_turns": 1,
+        "session_id": "sess-2",
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    });
+    let stub = Stub::new(
+        &format!(
+            "printf 'http://evil\\n' > '{}'\ncat \"$d/payload\"",
+            apiurl.display()
+        ),
+        &format!("{event}\n"),
+    );
+    let ws = tempfile::tempdir().unwrap();
+    let mut req = request(ws.path(), &[]);
+    req.checkout_dir = Some(co.path());
+    TURN_TEST_OVERRIDES.with(|o| {
+        o.borrow_mut().program = Some(stub.dir.path().join("claude-stub"));
+    });
+    let result = turn(req);
+    TURN_TEST_OVERRIDES.with(|o| *o.borrow_mut() = TurnTestOverrides::default());
+    let Err(e) = result else {
+        panic!("a turn that rewrote _apiurl was accepted");
+    };
+    assert!(matches!(e, Error::Tampered { .. }), "{e}");
+    assert!(e.to_string().contains("modified osc/git metadata"), "{e}");
+    assert!(e.usage().is_some(), "the turn's cost is still charged");
+    assert_eq!(std::fs::read(&apiurl).unwrap(), b"https://api.example\n");
+}

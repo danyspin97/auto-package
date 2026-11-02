@@ -180,11 +180,12 @@ impl Sweep {
 /// patch turns, then the upstream wheel) bound it, so it neither waits for a
 /// dependent to ask in a later run nor depends on the round count. Other
 /// failures are retried within `max_attempts` rounds, except a spent allowance
-/// or a rate limit, which a repeat would only reproduce.
+/// or a rate limit, which a repeat would only reproduce, and a turn rejected
+/// for touching the checkout's metadata, which the pipeline does not retry.
 pub(super) fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts: usize) -> bool {
     match kind {
         FailureKind::ConditionUnmet => true,
-        FailureKind::Exhausted | FailureKind::RateLimited => false,
+        FailureKind::Exhausted | FailureKind::RateLimited | FailureKind::Tampered => false,
         _ => rounds < max_attempts,
     }
 }

@@ -169,6 +169,12 @@ pub enum FailureKind {
     /// gate's refusals are `Other`), and a style-only failure downgrades it like
     /// the other agent-side kinds.
     AgentFailed,
+    /// The agent's turn changed the checkout's osc or git metadata, or left a
+    /// link that leaves the tree (see `agent::integrity`). Its own kind: no
+    /// caller downgrades it to a warning or retries it, because the checkout
+    /// may not be as the pipeline left it. A change that could not be put back
+    /// is named in the reason.
+    Tampered,
 }
 
 #[derive(Debug)]
@@ -345,6 +351,9 @@ mod version_conflict_tests;
 
 #[cfg(test)]
 mod obs_baseline_tests;
+
+#[cfg(test)]
+mod agent_tests;
 
 #[cfg(test)]
 mod tests;

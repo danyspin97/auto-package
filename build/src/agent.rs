@@ -24,6 +24,7 @@ pub(crate) use tools::REFRESH_SERIES;
 use tools::*;
 mod edit_bytes;
 use edit_bytes::*;
+mod integrity;
 mod run;
 mod user_prompt;
 pub(crate) use user_prompt::*;

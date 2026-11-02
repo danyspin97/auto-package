@@ -140,7 +140,21 @@ pub(crate) fn model_for_attempt(attempt: usize, rotation: usize) -> &'static str
 /// printed to stderr in real time as they arrive. The structured JSON response
 /// is parsed from the final `result` event in the stream.
 pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
+    // The checkout's osc and git metadata is copied before the turn and checked
+    // after it, whatever the turn returned: a turn that changed it is rejected
+    // and the metadata is put back (see `integrity`).
+    let guard = super::integrity::MetadataGuard::begin(req.checkout_dir);
     let result = turn_inner(req);
+    let result = match guard.settle() {
+        None => result,
+        Some(detail) => Err(Error::Tampered {
+            usage: match &result {
+                Ok(outcome) => outcome.usage.clone(),
+                Err(e) => e.usage().cloned().unwrap_or_default(),
+            },
+            detail,
+        }),
+    };
     // Every caller (build, notes, discovery, translate-deps) goes through
     // here: a logged-out CLI cannot do any work, so stop the whole run rather
     // than let each package retry and escalate into the same wall.

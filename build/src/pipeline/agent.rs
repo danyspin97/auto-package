@@ -8,6 +8,22 @@ use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::sibling::*;
 
+/// The kind a failed agent turn is recorded as. A rejected change to the
+/// checkout's metadata is `Tampered`, which no caller downgrades or retries.
+pub(super) fn turn_failure_kind(e: &crate::agent::Error) -> FailureKind {
+    if e.is_not_logged_in() {
+        FailureKind::AgentUnavailable
+    } else if e.is_rate_limited() {
+        FailureKind::RateLimited
+    } else if matches!(e, crate::agent::Error::Tampered { .. }) {
+        FailureKind::Tampered
+    } else {
+        // The turn itself failed (a crash, a timeout, an answer that could not
+        // be read): not the edit the gate refuses.
+        FailureKind::AgentFailed
+    }
+}
+
 /// The shared run environment an agent turn works in.
 pub(super) struct TurnEnv<'a> {
     pub(super) config: &'a PipelineConfig,
@@ -447,15 +463,7 @@ pub(super) fn agent_turn(
                 &config.pkg_name,
                 crate::agent::max_agent_turns(ctx.task),
             );
-            let kind = if e.is_not_logged_in() {
-                FailureKind::AgentUnavailable
-            } else if e.is_rate_limited() {
-                FailureKind::RateLimited
-            } else {
-                // The turn itself failed (a crash, a timeout, an answer that
-                // could not be read): not the edit the gate refuses.
-                FailureKind::AgentFailed
-            };
+            let kind = turn_failure_kind(&e);
             reporter.report(&Event::Warning {
                 step: Some(step.id),
                 message: message.clone(),

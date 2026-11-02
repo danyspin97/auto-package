@@ -2,6 +2,7 @@ use super::*;
 mod denies;
 mod edit_bytes;
 mod errors;
+mod integrity;
 mod prompt;
 mod scrub;
 mod stub;

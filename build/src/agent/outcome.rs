@@ -88,6 +88,12 @@ pub enum Error {
         usage: Usage,
     },
 
+    /// The turn changed the checkout's osc or git metadata, or left a link that
+    /// leaves the tree. The change was undone and the turn is rejected; `detail`
+    /// names what changed. `usage` is what the turn cost, which is still charged.
+    #[error("the agent {detail}: turn rejected")]
+    Tampered { detail: String, usage: Usage },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -138,7 +144,7 @@ impl Error {
                         .filter(|l| !l.trim_start().starts_with('{'))
                         .any(looks_like_not_logged_in)
             }
-            Error::Launch(_) | Error::Parse { .. } | Error::Io(_) => false,
+            Error::Launch(_) | Error::Parse { .. } | Error::Tampered { .. } | Error::Io(_) => false,
         }
     }
 
@@ -163,7 +169,9 @@ impl Error {
     pub fn usage(&self) -> Option<&Usage> {
         match self {
             Error::EndedEarly(e) => Some(&e.usage),
-            Error::Failed { usage, .. } | Error::Parse { usage, .. } => Some(usage),
+            Error::Failed { usage, .. }
+            | Error::Parse { usage, .. }
+            | Error::Tampered { usage, .. } => Some(usage),
             Error::Launch(_) | Error::Io(_) => None,
         }
     }
@@ -176,7 +184,7 @@ impl Error {
         match self {
             Error::Failed { prompt, .. } | Error::Parse { prompt, .. } => Some(prompt),
             Error::EndedEarly(e) => Some(&e.prompt),
-            Error::Launch(_) | Error::Io(_) => None,
+            Error::Launch(_) | Error::Io(_) | Error::Tampered { .. } => None,
         }
     }
 
@@ -188,7 +196,7 @@ impl Error {
         match self {
             Error::Failed { stdout, .. } | Error::Parse { stdout, .. } => Some(stdout),
             Error::EndedEarly(e) => Some(&e.stdout),
-            Error::Launch(_) | Error::Io(_) => None,
+            Error::Launch(_) | Error::Io(_) | Error::Tampered { .. } => None,
         }
     }
 
@@ -196,7 +204,11 @@ impl Error {
     pub fn stderr(&self) -> Option<&str> {
         match self {
             Error::Failed { stderr, .. } => Some(stderr),
-            Error::Parse { .. } | Error::EndedEarly(_) | Error::Launch(_) | Error::Io(_) => None,
+            Error::Parse { .. }
+            | Error::EndedEarly(_)
+            | Error::Launch(_)
+            | Error::Io(_)
+            | Error::Tampered { .. } => None,
         }
     }
 }

@@ -157,6 +157,7 @@ fn a_condition_failure_is_queued_again_in_the_same_run() {
     assert!(!r(K::Other, 2, 2));
     assert!(!r(K::Exhausted, 0, 3));
     assert!(!r(K::RateLimited, 0, 3));
+    assert!(!r(K::Tampered, 0, 3));
 }
 
 use super::*;

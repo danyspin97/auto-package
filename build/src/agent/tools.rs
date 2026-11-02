@@ -261,7 +261,7 @@ pub(super) fn turn_denied_tools(
 /// the tracked names) and git's `.git` (a `gitdir:` file, or a config with
 /// `core.fsmonitor` or `diff.external`, runs code when git runs in the
 /// checkout).
-const CHECKOUT_METADATA_DIRS: [&str; 2] = [".osc", ".git"];
+pub(super) const CHECKOUT_METADATA_DIRS: [&str; 2] = [".osc", ".git"];
 
 /// The version-control metadata of the checkout. The turn reads it (the grants
 /// of [`turn_allowed_tools`] cover the checkout) but must not write it: a
