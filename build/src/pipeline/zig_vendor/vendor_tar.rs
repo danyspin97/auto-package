@@ -3,9 +3,13 @@
 //! `vendor/` as its only top-level directory. The output depends only on the
 //! dependencies' files and links, their executable bits and their hashes: not
 //! on file times, owners, the order they were given in, or the host.
+//!
+//! The archive is written as it is built: each file is copied from its place
+//! in the tree, and each packed `.tar.gz` is first built in a scratch file,
+//! since its size goes in the tar header before its bytes.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -48,15 +52,22 @@ enum Body {
         exec: bool,
     },
     Link(Vec<u8>),
-    /// Bytes built in memory: the packed `.tar.gz` of a dependency.
-    Bytes(Vec<u8>),
+    /// The packed `.tar.gz` of the dependency at this index of the sorted
+    /// list. It is built when its turn comes.
+    Packed(usize),
 }
 
 type Entries = BTreeMap<String, Body>;
 
-/// The `vendor.tar.zst` for `deps` in `layout`. Dependencies are written in
-/// the order of their declared hashes. Two with one hash are an error.
-pub(super) fn vendor_tar_zst(deps: &[Dep], layout: Layout) -> Result<Vec<u8>, String> {
+/// Write the `vendor.tar.zst` for `deps` in `layout` to `out`. Dependencies
+/// are written in the order of their declared hashes. Two with one hash are an
+/// error. Each packed `.tar.gz` is built in a scratch file in `scratch`.
+pub(super) fn write_vendor_tar_zst(
+    deps: &[Dep],
+    layout: Layout,
+    scratch: &Path,
+    out: impl Write,
+) -> Result<(), String> {
     let mut sorted: Vec<&Dep> = deps.iter().collect();
     sorted.sort_by(|a, b| a.declared.cmp(&b.declared));
     if let Some(pair) = sorted.windows(2).find(|w| w[0].declared == w[1].declared) {
@@ -65,13 +76,10 @@ pub(super) fn vendor_tar_zst(deps: &[Dep], layout: Layout) -> Result<Vec<u8>, St
     let mut entries = Entries::new();
     put(&mut entries, "vendor".to_string(), Body::Dir)?;
     put(&mut entries, "vendor/p".to_string(), Body::Dir)?;
-    for dep in sorted {
+    for (i, dep) in sorted.iter().enumerate() {
         let top = format!("vendor/p/{}", dep.declared);
         match layout {
-            Layout::Packed => {
-                let gz = packed_gz(&dep.declared, &dep.items)?;
-                put(&mut entries, format!("{top}.tar.gz"), Body::Bytes(gz))?;
-            }
+            Layout::Packed => put(&mut entries, format!("{top}.tar.gz"), Body::Packed(i))?,
             Layout::Unpacked => {
                 for (path, body) in tree_entries(&top, &dep.items)? {
                     put(&mut entries, path, body)?;
@@ -80,18 +88,22 @@ pub(super) fn vendor_tar_zst(deps: &[Dep], layout: Layout) -> Result<Vec<u8>, St
         }
     }
     let mut tar = tar::Builder::new(
-        zstd::stream::write::Encoder::new(Vec::new(), 9)
+        zstd::stream::write::Encoder::new(out, 9)
             .map_err(|e| format!("starting the zstd stream: {e}"))?,
     );
     for (path, body) in &entries {
-        append(&mut tar, path, body)?;
+        match body {
+            Body::Packed(i) => append_packed(&mut tar, path, sorted[*i], scratch)?,
+            _ => append(&mut tar, path, body)?,
+        }
     }
     let encoder = tar
         .into_inner()
         .map_err(|e| format!("finishing the tar: {e}"))?;
     encoder
         .finish()
-        .map_err(|e| format!("finishing the zstd stream: {e}"))
+        .map_err(|e| format!("finishing the zstd stream: {e}"))?;
+    Ok(())
 }
 
 /// Insert an entry. A directory may be listed twice; anything else may not.
@@ -134,37 +146,64 @@ fn tree_entries(top: &str, items: &[Item]) -> Result<Entries, String> {
     Ok(out)
 }
 
-/// The `p/<hash>.tar.gz` of one package: `<hash>/` and its tree, gzipped.
-fn packed_gz(declared: &str, items: &[Item]) -> Result<Vec<u8>, String> {
-    let entries = tree_entries(declared, items)?;
-    let mut ar = tar::Builder::new(flate2::write::GzEncoder::new(
-        Vec::new(),
+/// Append the `p/<hash>.tar.gz` of one package: `<hash>/` and its tree, gzipped.
+/// The gzipped tar goes to a scratch file first, so its size is known for the
+/// header and no archive is held in memory.
+fn append_packed<W: Write>(
+    ar: &mut tar::Builder<W>,
+    path: &str,
+    dep: &Dep,
+    scratch: &Path,
+) -> Result<(), String> {
+    let mut file = tempfile::tempfile_in(scratch)
+        .map_err(|e| format!("creating a scratch file in {}: {e}", scratch.display()))?;
+    let entries = tree_entries(&dep.declared, &dep.items)?;
+    let mut inner = tar::Builder::new(flate2::write::GzEncoder::new(
+        &mut file,
         flate2::Compression::best(),
     ));
-    for (path, body) in &entries {
-        append(&mut ar, path, body)?;
+    for (p, body) in &entries {
+        append(&mut inner, p, body)?;
     }
-    ar.into_inner()
-        .map_err(|e| format!("finishing {declared}.tar.gz: {e}"))?
+    inner
+        .into_inner()
+        .map_err(|e| format!("finishing {}.tar.gz: {e}", dep.declared))?
         .finish()
-        .map_err(|e| format!("finishing {declared}.tar.gz: {e}"))
+        .map_err(|e| format!("finishing {}.tar.gz: {e}", dep.declared))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("reading {}.tar.gz back: {e}", dep.declared))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("reading {}.tar.gz back: {e}", dep.declared))?
+        .len();
+    let mut h = fixed_header(tar::EntryType::Regular, 0o644, len)
+        .map_err(|e| format!("writing {path}: {e}"))?;
+    h.set_cksum();
+    ar.append_data(&mut h, path, &mut file)
+        .map_err(|e| format!("writing {path}: {e}"))
 }
 
-/// Append one entry with fixed metadata: mtime 0, owner and group 0 with no
-/// names, mode 0755 for directories and executables, 0644 for other files.
-fn append<W: Write>(ar: &mut tar::Builder<W>, path: &str, body: &Body) -> Result<(), String> {
-    let err = |e: std::io::Error| format!("writing {path}: {e}");
+/// A header with fixed metadata: mtime 0, owner and group 0 with no names.
+fn fixed_header(kind: tar::EntryType, mode: u32, size: u64) -> std::io::Result<tar::Header> {
     let mut h = tar::Header::new_gnu();
     h.set_mtime(0);
     h.set_uid(0);
     h.set_gid(0);
-    h.set_username("").map_err(err)?;
-    h.set_groupname("").map_err(err)?;
+    h.set_username("")?;
+    h.set_groupname("")?;
+    h.set_entry_type(kind);
+    h.set_mode(mode);
+    h.set_size(size);
+    Ok(h)
+}
+
+/// Append one entry with fixed metadata: mode 0755 for directories and
+/// executables, 0644 for other files, and a link's own 0777.
+fn append<W: Write>(ar: &mut tar::Builder<W>, path: &str, body: &Body) -> Result<(), String> {
+    let err = |e: std::io::Error| format!("writing {path}: {e}");
     match body {
         Body::Dir => {
-            h.set_entry_type(tar::EntryType::Directory);
-            h.set_mode(0o755);
-            h.set_size(0);
+            let mut h = fixed_header(tar::EntryType::Directory, 0o755, 0).map_err(err)?;
             h.set_cksum();
             ar.append_data(&mut h, path, &[][..]).map_err(err)
         }
@@ -172,25 +211,16 @@ fn append<W: Write>(ar: &mut tar::Builder<W>, path: &str, body: &Body) -> Result
             let mut file =
                 std::fs::File::open(abs).map_err(|e| format!("reading {}: {e}", abs.display()))?;
             let len = file.metadata().map_err(err)?.len();
-            h.set_entry_type(tar::EntryType::Regular);
-            h.set_mode(if *exec { 0o755 } else { 0o644 });
-            h.set_size(len);
+            let mode = if *exec { 0o755 } else { 0o644 };
+            let mut h = fixed_header(tar::EntryType::Regular, mode, len).map_err(err)?;
             h.set_cksum();
             ar.append_data(&mut h, path, &mut file).map_err(err)
         }
         Body::Link(target) => {
-            h.set_entry_type(tar::EntryType::Symlink);
-            h.set_mode(0o777);
-            h.set_size(0);
+            let mut h = fixed_header(tar::EntryType::Symlink, 0o777, 0).map_err(err)?;
             ar.append_link(&mut h, path, Path::new(std::ffi::OsStr::from_bytes(target)))
                 .map_err(err)
         }
-        Body::Bytes(data) => {
-            h.set_entry_type(tar::EntryType::Regular);
-            h.set_mode(0o644);
-            h.set_size(data.len() as u64);
-            h.set_cksum();
-            ar.append_data(&mut h, path, data.as_slice()).map_err(err)
-        }
+        Body::Packed(_) => unreachable!("a packed .tar.gz is appended by append_packed"),
     }
 }
