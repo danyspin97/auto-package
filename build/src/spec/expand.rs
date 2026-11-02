@@ -7,7 +7,7 @@
 /// understood — parametric macros, conditionals, nested `%()` evaluation,
 /// and the lua `%{lua:...}` form are intentionally left untouched; this is
 /// a header reader, not an rpm interpreter.
-pub(super) fn collect_simple_defines(spec: &str) -> std::collections::HashMap<String, String> {
+pub(crate) fn collect_simple_defines(spec: &str) -> std::collections::HashMap<String, String> {
     let mut macros = std::collections::HashMap::new();
     // One frame per open `%if`. A define is only recorded when every frame's
     // current branch is known to be taken: recording from an unevaluable

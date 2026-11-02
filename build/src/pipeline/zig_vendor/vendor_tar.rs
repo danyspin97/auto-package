@@ -1,8 +1,9 @@
 //! Writes a package's vendor archive: zig's global package cache with each
-//! dependency in the layout its zig version reads, as a `vendor.tar.zst` with
-//! `vendor/` as its only top-level directory. The output depends only on the
-//! dependencies' files and links, their executable bits and their hashes: not
-//! on file times, owners, the order they were given in, or the host.
+//! dependency in the layout its zig version reads, as a `vendor.tar.zst` (or
+//! `.tar.gz`) with the cache directory as its only top-level directory. The
+//! output depends only on the dependencies' files and links, their executable
+//! bits and their hashes: not on file times, owners, the order they were given
+//! in, or the host.
 //!
 //! The archive is written as it is built: each file is copied from its place
 //! in the tree, and each packed `.tar.gz` is first built in a scratch file,
@@ -59,12 +60,23 @@ enum Body {
 
 type Entries = BTreeMap<String, Body>;
 
-/// Write the `vendor.tar.zst` for `deps` in `layout` to `out`. Dependencies
-/// are written in the order of their declared hashes. Two with one hash are an
-/// error. Each packed `.tar.gz` is built in a scratch file in `scratch`.
-pub(super) fn write_vendor_tar_zst(
+/// The compression of the vendor archive. It is the one the old archive had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Compression {
+    Zst,
+    Gz,
+}
+
+/// Write the vendor archive for `deps` in `layout` to `out`, with `root` (a
+/// relative path such as `vendor`) as the directory zig's cache lives in.
+/// Dependencies are written in the order of their declared hashes. Two with
+/// one hash are an error. Each packed `.tar.gz` is built in a scratch file in
+/// `scratch`.
+pub(super) fn write_vendor_tar(
     deps: &[Dep],
     layout: Layout,
+    root: &str,
+    compression: Compression,
     scratch: &Path,
     out: impl Write,
 ) -> Result<(), String> {
@@ -73,11 +85,21 @@ pub(super) fn write_vendor_tar_zst(
     if let Some(pair) = sorted.windows(2).find(|w| w[0].declared == w[1].declared) {
         return Err(format!("two dependencies declare {}", pair[0].declared));
     }
+    let parts: Vec<&str> = root.split('/').collect();
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
+        return Err(format!("`{root}` is not a plain relative directory"));
+    }
     let mut entries = Entries::new();
-    put(&mut entries, "vendor".to_string(), Body::Dir)?;
-    put(&mut entries, "vendor/p".to_string(), Body::Dir)?;
+    for depth in 1..=parts.len() {
+        put(&mut entries, parts[..depth].join("/"), Body::Dir)?;
+    }
+    let p = format!("{root}/p");
+    put(&mut entries, p.clone(), Body::Dir)?;
     for (i, dep) in sorted.iter().enumerate() {
-        let top = format!("vendor/p/{}", dep.declared);
+        let top = format!("{p}/{}", dep.declared);
         match layout {
             Layout::Packed => put(&mut entries, format!("{top}.tar.gz"), Body::Packed(i))?,
             Layout::Unpacked => {
@@ -87,23 +109,40 @@ pub(super) fn write_vendor_tar_zst(
             }
         }
     }
-    let mut tar = tar::Builder::new(
-        zstd::stream::write::Encoder::new(out, 9)
-            .map_err(|e| format!("starting the zstd stream: {e}"))?,
-    );
-    for (path, body) in &entries {
+    match compression {
+        Compression::Zst => {
+            let enc = zstd::stream::write::Encoder::new(out, 9)
+                .map_err(|e| format!("starting the zstd stream: {e}"))?;
+            let enc = write_tar(&entries, &sorted, scratch, enc)?;
+            enc.finish()
+                .map_err(|e| format!("finishing the zstd stream: {e}"))?;
+        }
+        Compression::Gz => {
+            let enc = flate2::write::GzEncoder::new(out, flate2::Compression::best());
+            let enc = write_tar(&entries, &sorted, scratch, enc)?;
+            enc.finish()
+                .map_err(|e| format!("finishing the gzip stream: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// `entries` as a tar stream into `w`, which is handed back unfinished.
+fn write_tar<W: Write>(
+    entries: &Entries,
+    sorted: &[&Dep],
+    scratch: &Path,
+    w: W,
+) -> Result<W, String> {
+    let mut tar = tar::Builder::new(w);
+    for (path, body) in entries {
         match body {
             Body::Packed(i) => append_packed(&mut tar, path, sorted[*i], scratch)?,
             _ => append(&mut tar, path, body)?,
         }
     }
-    let encoder = tar
-        .into_inner()
-        .map_err(|e| format!("finishing the tar: {e}"))?;
-    encoder
-        .finish()
-        .map_err(|e| format!("finishing the zstd stream: {e}"))?;
-    Ok(())
+    tar.into_inner()
+        .map_err(|e| format!("finishing the tar: {e}"))
 }
 
 /// Insert an entry. A directory may be listed twice; anything else may not.

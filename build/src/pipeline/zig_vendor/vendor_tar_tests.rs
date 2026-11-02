@@ -2,15 +2,25 @@ use super::fetch::Dep;
 use super::hash::split_declared;
 use super::tree::{included_items, package_hash};
 use super::unpack::{Format, LIMITS, unpack};
-use super::vendor_tar::{Layout, write_vendor_tar_zst};
+use super::vendor_tar::{Compression, Layout, write_vendor_tar};
 
-/// The archive for `deps` in `layout`, in memory, with scratch files in a
-/// temporary directory.
-fn vendor_tar_zst(deps: &[Dep], layout: Layout) -> Result<Vec<u8>, String> {
+/// The archive for `deps` in `layout` and `compression` under `root`, in
+/// memory, with scratch files in a temporary directory.
+fn vendor_tar(
+    deps: &[Dep],
+    layout: Layout,
+    root: &str,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
     let scratch = tempfile::tempdir().unwrap();
     let mut out = Vec::new();
-    write_vendor_tar_zst(deps, layout, scratch.path(), &mut out)?;
+    write_vendor_tar(deps, layout, root, compression, scratch.path(), &mut out)?;
     Ok(out)
+}
+
+/// The default archive: a `vendor.tar.zst` under `vendor/`.
+fn vendor_tar_zst(deps: &[Dep], layout: Layout) -> Result<Vec<u8>, String> {
+    vendor_tar(deps, layout, "vendor", Compression::Zst)
 }
 
 #[test]
@@ -19,7 +29,15 @@ fn a_file_gets_the_same_bytes_as_memory() {
     let in_memory = vendor_tar_zst(std::slice::from_ref(&dep), Layout::Packed).unwrap();
     let path = dir.path().join("vendor.tar.zst");
     let file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
-    write_vendor_tar_zst(std::slice::from_ref(&dep), Layout::Packed, dir.path(), file).unwrap();
+    write_vendor_tar(
+        std::slice::from_ref(&dep),
+        Layout::Packed,
+        "vendor",
+        Compression::Zst,
+        dir.path(),
+        file,
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), in_memory);
 }
 use super::zon::Manifest;
@@ -331,7 +349,14 @@ fn a_failed_vendor_archive_leaves_no_scratch_file_behind() {
     std::fs::remove_file(dir.path().join("pkg/d/x")).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let mut out = Vec::new();
-    let result = write_vendor_tar_zst(&[dep], Layout::Packed, scratch.path(), &mut out);
+    let result = write_vendor_tar(
+        &[dep],
+        Layout::Packed,
+        "vendor",
+        Compression::Zst,
+        scratch.path(),
+        &mut out,
+    );
     assert!(result.is_err());
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }
