@@ -406,3 +406,70 @@ fn real_quilt_leaves_an_offset_only_patch_byte_identical() {
         offset
     );
 }
+
+#[test]
+fn refresh_keeps_the_patch_shape_it_was_written_in() {
+    let a = b"--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n";
+    assert_eq!(
+        refresh_args(a, 1),
+        ["-p", "ab", "--no-timestamps", "--no-index"]
+    );
+    let orig = b"Index: f.txt\n====\n--- foo-1.0.orig/f.txt\t2020-01-01\n+++ foo-1.0/f.txt\n";
+    assert_eq!(refresh_args(orig, 1), ["--no-timestamps"]);
+    let zero = b"--- f.txt\n+++ f.txt\n";
+    assert_eq!(
+        refresh_args(zero, 0),
+        ["-p", "0", "--no-timestamps", "--no-index"]
+    );
+    // The description above the diff may hold a `---` separator of its own.
+    let sep = b"Subject: x\n---\n--- a/f.txt\n+++ b/f.txt\n";
+    assert_eq!(
+        refresh_args(sep, 1),
+        ["-p", "ab", "--no-timestamps", "--no-index"]
+    );
+}
+
+#[test]
+fn real_quilt_refresh_keeps_the_header_index_and_path_style() {
+    if !quilt_available() {
+        eprintln!("quilt is not installed; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tar = tarball(dir.path(), &[("f.txt", "a\nb\nc\nd\ne\nf\ng\nh\n")]);
+    // A fuzzy hunk (its first and last context lines do not match), in the
+    // `<dir>.orig/` style with an Index line and a timestamp.
+    let patch = "Keep this header\n\nIndex: f.txt\n\
+        ===================================================================\n\
+        --- foo-1.0.orig/f.txt\t2020-01-01 00:00:00.000000000 +0000\n\
+        +++ foo-1.0/f.txt\t2020-01-01 00:00:00.000000000 +0000\n\
+        @@ -6,5 +6,5 @@\n X\n f\n-g\n+G\n h\n Y\n";
+    std::fs::write(dir.path().join("fuzzy.patch"), patch).unwrap();
+    let spec = "Name: foo\nVersion: 1.0\nPatch0: fuzzy.patch\n%prep\n%autosetup -p1\n";
+    let report = check(spec, dir.path(), Some(&tar), Refresh::Offset);
+    assert_eq!(report.not_run, None, "{report:?}");
+    let refreshed = String::from_utf8(report.patches[0].refreshed.clone().unwrap()).unwrap();
+    assert!(refreshed.starts_with("Keep this header\n"), "{refreshed}");
+    assert!(
+        refreshed.lines().any(|l| l.starts_with("Index: ")),
+        "the Index line is kept: {refreshed}"
+    );
+    assert!(
+        refreshed.lines().any(|l| l.starts_with("=====")),
+        "{refreshed}"
+    );
+    assert!(
+        refreshed.lines().any(|l| l == "--- foo-1.0.orig/f.txt"),
+        "the .orig style is kept, with no timestamp: {refreshed}"
+    );
+    assert!(
+        refreshed
+            .lines()
+            .any(|l| l.starts_with("+++ foo-1.0/f.txt")),
+        "{refreshed}"
+    );
+    assert!(
+        !refreshed.contains("a/f.txt") && !refreshed.contains("2020-01-01"),
+        "{refreshed}"
+    );
+}

@@ -39,6 +39,31 @@ pub(super) fn not_run(plan: &[Planned], why: String) -> CheckReport {
     }
 }
 
+/// The options of the `quilt refresh` that makes a fuzzy patch exact, chosen to
+/// keep the shape the patch has. quilt keeps the text above the diff; `-p ab`
+/// writes `a/` and `b/` paths, which a `<dir>.orig/` patch does not have, so
+/// that style gets quilt's own paths. No timestamps are added, and no `Index:`
+/// and `====` lines unless the patch has them.
+pub(super) fn refresh_args(original: &[u8], level: u32) -> Vec<&'static str> {
+    let text = String::from_utf8_lossy(original);
+    let orig_style = text
+        .lines()
+        .find_map(|l| l.strip_prefix("--- "))
+        .and_then(|path| path.split('\t').next()?.split('/').next())
+        .is_some_and(|first| first.ends_with(".orig"));
+    let mut args = Vec::new();
+    if level == 0 {
+        args.extend(["-p", "0"]);
+    } else if !orig_style {
+        args.extend(["-p", "ab"]);
+    }
+    args.push("--no-timestamps");
+    if !text.lines().any(|l| l.starts_with("Index:")) {
+        args.push("--no-index");
+    }
+    args
+}
+
 /// One quilt invocation in the scratch tree.
 pub(super) struct Quilt {
     pub(super) root: PathBuf,

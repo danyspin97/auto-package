@@ -131,8 +131,10 @@ pub(super) fn run_check(
             status,
             refreshed: None,
         };
-        let copied =
-            read(&e.name).is_some_and(|b| std::fs::write(quilt.patches.join(&e.name), b).is_ok());
+        let original = read(&e.name);
+        let copied = original
+            .as_deref()
+            .is_some_and(|b| std::fs::write(quilt.patches.join(&e.name), b).is_ok());
         if !copied {
             report.patches.push(result(PatchStatus::NotChecked {
                 reason: "the file is not in the checkout".into(),
@@ -163,8 +165,11 @@ pub(super) fn run_check(
                     output: truncate(&output, OUTPUT_LIMIT),
                 });
                 if refresh == Refresh::Offset && fuzz {
-                    let level = if e.level == 0 { "0" } else { "ab" };
-                    let args = ["refresh", "-p", level, "--no-timestamps", "--no-index"];
+                    let mut args = vec!["refresh"];
+                    args.extend(refresh_args(
+                        original.as_deref().unwrap_or_default(),
+                        e.level,
+                    ));
                     if quilt.run(&args).is_ok_and(|(ok, _)| ok) {
                         r.refreshed = std::fs::read(quilt.patches.join(&e.name)).ok();
                     }
