@@ -111,3 +111,4 @@
 111. Upstream patch header, type-1 comment, .changes line, X11 patch format — read when adding or changing a PatchN:, its Upstream: header, a .changes patch entry, or an X11 patch
 112. Merged into convention 111 — read convention 111 when the package uses X11 patch names such as N_, u_, T_ or Patch-Mainline headers
 113. Standalone Cargo crates: workspaces, _service parameters, vendored crate patches — read when a Cargo.toml package needs a workspace, update=false, update-crate, or a vendored crate patched
+114. C/C++ system-library shims: check every consumer in the same turn — read when a C/C++ build fails in a header, namespace or include path that a system-library shim or patch provides
