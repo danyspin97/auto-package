@@ -40,7 +40,7 @@ pub fn parse_header(spec: &str) -> Option<Header> {
     let name_raw = tag_value(spec, "Name:")?;
     let version_raw = tag_value(spec, "Version:")?;
     let defines = collect_simple_defines(spec);
-    let name = expand_simple_defines(name_raw, &defines);
+    let name = expand_lookup_text(name_raw, &defines);
     let version = expand_simple_defines(version_raw, &defines);
     let source = tag_value(spec, "Source:")
         .or_else(|| tag_value(spec, "Source0:"))
@@ -50,14 +50,14 @@ pub fn parse_header(spec: &str) -> Option<Header> {
     macros.insert("version".to_string(), version.clone());
     let url = tag_value(spec, "Url:")
         .or_else(|| tag_value(spec, "URL:"))
-        .map(|u| expand_simple_defines(u, &macros));
+        .map(|u| expand_lookup_text(u, &macros));
     if let Some(u) = &url {
         macros.insert("url".to_string(), u.clone());
     }
     // Twice: a define may be spelled with another.
     let expanded_source = source.as_deref().map(|s| {
-        let once = expand_simple_defines(s, &macros);
-        let twice = expand_simple_defines(&once, &macros);
+        let once = expand_lookup_text(s, &macros);
+        let twice = expand_lookup_text(&once, &macros);
         twice.split('#').next().unwrap_or(&twice).trim().to_string()
     });
     Some(Header {

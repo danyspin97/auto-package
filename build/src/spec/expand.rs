@@ -147,6 +147,101 @@ pub(crate) fn expand_simple_defines(
     expand_once(s, macros)
 }
 
+/// Expand a string a lookup is built from (a Repology name, a forge URL, a
+/// release-listing URL): the plain forms of [`expand_simple_defines`], plus
+/// `%{?x}`, `%{?x:y}` and `%{!?x:y}` against the spec's own defines. An
+/// undefined `%{?x}` is empty, as an undefined `%{?x:y}` is.
+pub(crate) fn expand_lookup_text(
+    s: &str,
+    macros: &std::collections::HashMap<String, String>,
+) -> String {
+    expand_once(&expand_conditionals(s, macros), macros)
+}
+
+/// Whether `s` still holds a macro after expansion: a `%` that opens a
+/// `%{...}`, a `%(...)`, a `%%`, a `%?`/`%!`, or a name, as rpm reads them. A
+/// percent-encoded byte (`%20`, `%2B`) is not a macro and is not flagged.
+pub(crate) fn has_unexpanded_macro(s: &str) -> bool {
+    s.as_bytes().windows(2).any(|w| {
+        w[0] == b'%'
+            && (matches!(w[1], b'{' | b'(' | b'%' | b'?' | b'!' | b'_')
+                || w[1].is_ascii_alphabetic())
+    })
+}
+
+/// Replace each `%{?x}`, `%{?x:y}` and `%{!?x:y}` that [`conditional_value`]
+/// can evaluate. Everything else is copied, for [`expand_once`] to see.
+fn expand_conditionals(s: &str, macros: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('%') {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos..];
+        if after.starts_with("%%") {
+            out.push_str("%%");
+            rest = &after[2..];
+            continue;
+        }
+        if let Some(body) = after.strip_prefix("%{")
+            && let Some(end) = closing_brace(body)
+            && let Some(value) = conditional_value(&body[..end], macros)
+        {
+            out.push_str(&value);
+            rest = &body[end + 1..];
+            continue;
+        }
+        out.push('%');
+        rest = &after[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The index in `body` of the `}` that closes a `%{` whose text starts at
+/// `body`, counting nested braces.
+fn closing_brace(body: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in body.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 0 => return Some(i),
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The text a conditional macro gives, where `inner` is what sits between
+/// the braces: `?x`, `?x:y` or `!?x:y`. `None` for any other shape (`!?x`
+/// alone, `expand:`, a name rpm would not take), which is then left for the
+/// caller to refuse.
+fn conditional_value(
+    inner: &str,
+    macros: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let (negated, rest) = match inner.strip_prefix('!') {
+        Some(r) => (true, r),
+        None => (false, inner),
+    };
+    let rest = rest.strip_prefix('?')?;
+    let (name, text) = match rest.split_once(':') {
+        Some((n, t)) => (n, Some(t)),
+        None => (rest, None),
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let defined = macros.get(name);
+    Some(match (negated, text) {
+        (false, None) => defined.cloned().unwrap_or_default(),
+        (false, Some(t)) if defined.is_some() => t.to_string(),
+        (true, Some(t)) if defined.is_none() => t.to_string(),
+        (false, Some(_)) | (true, Some(_)) => String::new(),
+        (true, None) => return None,
+    })
+}
+
 /// One left-to-right scan that replaces only whole macro identifiers
 /// (`%{ident}` and `%ident`, ident = `[A-Za-z0-9_]+`). `%%`, `%{?x}`,
 /// `%{!?x}`, `%(...)` and unknown names are copied through untouched.

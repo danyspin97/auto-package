@@ -129,6 +129,12 @@ pub enum SkipReason {
         version: String,
         why: String,
     },
+    /// The name or URL a lookup would use still holds a macro after the
+    /// spec's own defines are expanded, so the lookup is not made.
+    UnexpandedMacro {
+        lookup: String,
+        text: String,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
@@ -151,6 +157,11 @@ impl std::fmt::Display for SkipReason {
             SkipReason::VersionNotFound { version, why } => {
                 write!(f, "version {version} was not found upstream: {why}")
             }
+            SkipReason::UnexpandedMacro { lookup, text } => write!(
+                f,
+                "{lookup} lookup refused: {text:?} still holds a macro after the spec's \
+                 defines are expanded"
+            ),
             SkipReason::SpecHeaderMissing => write!(f, "spec has no Name:/Version:"),
             SkipReason::NoSourceLine => write!(f, "spec has no Source: line"),
             SkipReason::NotRecognized { source } => {
@@ -259,7 +270,7 @@ pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
         add(Ecosystem::Pypi { pypi_name });
     }
     let expanded = header.expanded_source.as_deref().unwrap_or_default();
-    for line in [source, expanded, header.url.as_deref().unwrap_or_default()] {
+    for line in [expanded, header.url.as_deref().unwrap_or_default()] {
         if let Some(url) = git_repo_url(line) {
             add(Ecosystem::GitRepo { url });
         }
@@ -297,12 +308,40 @@ pub fn declared_upstream(header: &spec::Header) -> DeclaredUpstream {
         return DeclaredUpstream::Pypi;
     }
     let expanded = header.expanded_source.as_deref().unwrap_or_default();
-    for line in [expanded, header.url.as_deref().unwrap_or_default(), source] {
+    for line in [expanded, header.url.as_deref().unwrap_or_default()] {
         if let Some(url) = git_repo_url(line) {
             return DeclaredUpstream::Git(url);
         }
     }
     DeclaredUpstream::Unknown
+}
+
+/// Ask one ecosystem for its newest version. A lookup whose name or URL still
+/// holds a macro is refused, and that text is named in the reason.
+pub(super) fn lookup(ecosystem: &Ecosystem, lookups: &Lookups<'_>) -> Result<String, SkipReason> {
+    let (tag, name) = match ecosystem {
+        Ecosystem::Pypi { pypi_name } => ("PyPI", pypi_name),
+        Ecosystem::GitRepo { url } => ("git", url),
+        Ecosystem::Index { url } => ("release listing", url),
+        Ecosystem::Repology { project } => ("Repology", project),
+    };
+    if spec::has_unexpanded_macro(name) {
+        return Err(SkipReason::UnexpandedMacro {
+            lookup: tag.into(),
+            text: name.clone(),
+        });
+    }
+    let latest = match ecosystem {
+        Ecosystem::Pypi { pypi_name } => (lookups.fetch_pypi_latest)(pypi_name),
+        Ecosystem::GitRepo { url } => (lookups.fetch_repo_latest)(url),
+        Ecosystem::Index { url } => (lookups.fetch_index_latest)(url),
+        Ecosystem::Repology { project } => (lookups.fetch_repology_latest)(project),
+    };
+    latest.map_err(|error| SkipReason::LookupFailed {
+        ecosystem_tag: tag.into(),
+        name: name.clone(),
+        error,
+    })
 }
 
 /// Whether `latest` is strictly newer than `packaged`.

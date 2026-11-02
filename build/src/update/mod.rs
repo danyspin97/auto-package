@@ -34,6 +34,8 @@ mod candidates;
 #[cfg(test)]
 mod helpers;
 #[cfg(test)]
+mod lookup_macro_tests;
+#[cfg(test)]
 mod lookups;
 mod plan;
 mod read;

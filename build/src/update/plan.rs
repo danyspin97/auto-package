@@ -30,29 +30,12 @@ where
     };
     let mut found = None;
     for ecosystem in ecosystems(&header) {
-        let (tag, name, latest) = match &ecosystem {
-            Ecosystem::Pypi { pypi_name } => {
-                ("PyPI", pypi_name, (lookups.fetch_pypi_latest)(pypi_name))
-            }
-            Ecosystem::GitRepo { url } => ("git", url, (lookups.fetch_repo_latest)(url)),
-            Ecosystem::Index { url } => ("release listing", url, (lookups.fetch_index_latest)(url)),
-            Ecosystem::Repology { project } => (
-                "Repology",
-                project,
-                (lookups.fetch_repology_latest)(project),
-            ),
-        };
-        match latest {
+        match lookup(&ecosystem, lookups) {
             Ok(v) => {
                 found = Some((ecosystem, v));
                 break;
             }
-            Err(error) => {
-                let failure = SkipReason::LookupFailed {
-                    ecosystem_tag: tag.into(),
-                    name: name.clone(),
-                    error,
-                };
+            Err(failure) => {
                 // A PyPI name guessed from a tarball that PyPI has never
                 // heard of says nothing about the package; keep it only if no
                 // other place has a more telling failure.
