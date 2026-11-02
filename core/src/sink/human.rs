@@ -148,6 +148,11 @@ impl HumanSink {
                         format!("✗ failed: {reason}")
                             .if_supports_color(Stderr, |t| t.style(Style::new().red().bold())),
                     ),
+                    PackageOutcome::NeedsMaintainer { reason } => format!(
+                        "{}",
+                        format!("! needs a maintainer: {reason}")
+                            .if_supports_color(Stderr, |t| t.style(Style::new().yellow().bold())),
+                    ),
                 };
                 Some(format!(
                     "{outcome_colored}  {} {}",

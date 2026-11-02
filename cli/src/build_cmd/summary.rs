@@ -74,6 +74,42 @@ pub(crate) fn waiting_list(deps: &[String], failed: &[&String]) -> String {
         .join(", ")
 }
 
+/// The packages whose latest outcome is a failure this run, a needs-maintainer
+/// stop included: a package waiting on one reads `failed X`.
+pub(crate) fn failed_packages(
+    latest: &std::collections::BTreeMap<String, (String, PackageOutcome)>,
+) -> Vec<&String> {
+    latest
+        .iter()
+        .filter_map(|(pkg, (_, outcome))| match outcome {
+            PackageOutcome::Failed { .. } | PackageOutcome::NeedsMaintainer { .. } => Some(pkg),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The packages the fix loop changed: built, given up on or stopped for a
+/// maintainer, so their flags and risks are listed.
+pub(crate) fn touched_packages(
+    latest: &std::collections::BTreeMap<String, (String, PackageOutcome)>,
+) -> Vec<&String> {
+    latest
+        .iter()
+        .filter(|(_, (_, o))| {
+            matches!(
+                o,
+                PackageOutcome::Built
+                    | PackageOutcome::BuiltLocally
+                    | PackageOutcome::AlreadyBuilt
+                    | PackageOutcome::MissingDeps { .. }
+                    | PackageOutcome::Failed { .. }
+                    | PackageOutcome::NeedsMaintainer { .. }
+            )
+        })
+        .map(|(pkg, _)| pkg)
+        .collect()
+}
+
 /// The packages among `pkgs` whose recorded fix-loop flags are not empty, with
 /// each flag's line, in the order given.
 pub(crate) fn fix_flagged<'a>(
@@ -159,13 +195,7 @@ pub(crate) fn print_run_summary(
         })
         .collect();
     queued.retain(|(pkg, _)| !built.contains(pkg));
-    let failed: Vec<&String> = latest
-        .iter()
-        .filter_map(|(pkg, (_, outcome))| match outcome {
-            PackageOutcome::Failed { .. } => Some(pkg),
-            _ => None,
-        })
-        .collect();
+    let failed = failed_packages(&latest);
     let _ = writeln!(out, "\nQueued, waiting on dependencies ({}):", queued.len());
     for (pkg, deps) in queued {
         if deps.is_empty() {
@@ -175,22 +205,25 @@ pub(crate) fn print_run_summary(
         }
     }
 
+    // Stopped for a maintainer's decision (a refused signature): not a build
+    // failure, and nothing was sent to OBS for it.
+    let needs_maintainer: Vec<(&String, &String)> = latest
+        .iter()
+        .filter_map(|(pkg, (_, outcome))| match outcome {
+            PackageOutcome::NeedsMaintainer { reason } => Some((pkg, reason)),
+            _ => None,
+        })
+        .collect();
+    if !needs_maintainer.is_empty() {
+        let _ = writeln!(out, "\nNeeds a maintainer ({}):", needs_maintainer.len());
+        for (pkg, reason) in needs_maintainer {
+            let _ = writeln!(out, "  {pkg}: {reason}");
+        }
+    }
+
     // What the fix loop changed in the packages it built or gave up on: the same
     // lines the changelog and the submit request carry.
-    let touched: Vec<&String> = latest
-        .iter()
-        .filter(|(_, (_, o))| {
-            matches!(
-                o,
-                PackageOutcome::Built
-                    | PackageOutcome::BuiltLocally
-                    | PackageOutcome::AlreadyBuilt
-                    | PackageOutcome::MissingDeps { .. }
-                    | PackageOutcome::Failed { .. }
-            )
-        })
-        .map(|(pkg, _)| pkg)
-        .collect();
+    let touched = touched_packages(&latest);
     let flagged = fix_flagged(state_root, touched.iter().copied());
     let _ = writeln!(out, "\nFlagged by the fix loop ({}):", flagged.len());
     for (pkg, lines) in &flagged {
@@ -259,4 +292,47 @@ pub(crate) fn print_run_summary(
         &ap_build::allowed_hosts::shared(),
     ));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn latest(
+        outcomes: &[(&str, PackageOutcome)],
+    ) -> std::collections::BTreeMap<String, (String, PackageOutcome)> {
+        outcomes
+            .iter()
+            .map(|(pkg, o)| (pkg.to_string(), ("1.0".to_string(), o.clone())))
+            .collect()
+    }
+
+    #[test]
+    fn a_package_waiting_on_a_needs_maintainer_stop_reads_failed() {
+        let latest = latest(&[
+            (
+                "gamma",
+                PackageOutcome::NeedsMaintainer {
+                    reason: "key".into(),
+                },
+            ),
+            ("beta", PackageOutcome::Built),
+        ]);
+        let failed = failed_packages(&latest);
+        assert_eq!(
+            waiting_list(&["gamma".to_string(), "beta".to_string()], &failed),
+            "failed gamma, beta"
+        );
+    }
+
+    #[test]
+    fn the_fix_loop_flags_of_a_needs_maintainer_stop_are_listed() {
+        let latest = latest(&[(
+            "gamma",
+            PackageOutcome::NeedsMaintainer {
+                reason: "key".into(),
+            },
+        )]);
+        assert_eq!(touched_packages(&latest), vec![&"gamma".to_string()]);
+    }
 }

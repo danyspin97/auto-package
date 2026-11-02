@@ -267,6 +267,13 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
         PipelineResult::MissingDeps { deps, .. } => {
             PackageOutcome::MissingDeps { deps: deps.clone() }
         }
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::NeedsMaintainer,
+            ..
+        } => PackageOutcome::NeedsMaintainer {
+            reason: reason.clone(),
+        },
         PipelineResult::Failed { reason, kind, .. } => PackageOutcome::Failed {
             reason: reason.clone(),
             disk_full: *kind == FailureKind::DiskFull,

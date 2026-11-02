@@ -175,6 +175,11 @@ pub enum PackageOutcome {
         #[serde(default)]
         disk_full: bool,
     },
+    /// Stopped for a maintainer's decision (see `FailureKind::NeedsMaintainer`):
+    /// nothing was sent to OBS, and it is not a build failure.
+    NeedsMaintainer {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

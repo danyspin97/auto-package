@@ -241,9 +241,11 @@ impl TuiState {
                             PkgStatus::Failed
                         }
                     }
+                    PackageOutcome::NeedsMaintainer { .. } => PkgStatus::Failed,
                 };
                 match outcome {
-                    PackageOutcome::Failed { reason, .. } => {
+                    PackageOutcome::Failed { reason, .. }
+                    | PackageOutcome::NeedsMaintainer { reason } => {
                         // Keep the failed step so the Step column can name it.
                         // A worker that died mid-step never sent `StepFinished`,
                         // so close the step here.
@@ -269,11 +271,15 @@ impl TuiState {
                         format!("needs: {}", deps.join(", "))
                     }
                     PackageOutcome::Failed { reason, .. } => format!("failed: {reason}"),
+                    PackageOutcome::NeedsMaintainer { reason } => {
+                        format!("needs a maintainer: {reason}")
+                    }
                 };
                 state.add_log(
                     match outcome {
                         PackageOutcome::Failed { .. } => LogLevel::Error,
-                        PackageOutcome::MissingDeps { .. } => LogLevel::Warn,
+                        PackageOutcome::MissingDeps { .. }
+                        | PackageOutcome::NeedsMaintainer { .. } => LogLevel::Warn,
                         _ => LogLevel::Success,
                     },
                     msg,

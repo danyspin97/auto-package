@@ -124,6 +124,20 @@ impl Frontier<'_> {
                     });
                     return false;
                 }
+                if kind == FailureKind::NeedsMaintainer {
+                    // A decision for a maintainer: another round would only
+                    // repeat the same refusal.
+                    self.permanently_failed.insert(rpm_name.clone());
+                    self.give_ups.insert(
+                        rpm_name.clone(),
+                        format!("it needs a maintainer ({reason})"),
+                    );
+                    (self.pkg_reporter)(&rpm_name).report(&Event::Warning {
+                        step: None,
+                        message: format!("{rpm_name} needs a maintainer: {reason}"),
+                    });
+                    return true;
+                }
                 let rate_limited = kind == FailureKind::RateLimited;
                 // A package that already spent its *entire* budget or attempt
                 // allowance on this round gives up at once, instead of
