@@ -149,6 +149,12 @@ pub enum SkipReason {
         lookup: String,
         text: String,
     },
+    /// The package is SUSE-maintained and has no upstream release to follow:
+    /// its SUSE forge repository has no release or tag, or its `Source:` has no
+    /// URL and nothing fetches it. Report only.
+    SuseNoUpstream {
+        why: String,
+    },
 }
 
 /// Whether a version carries a calendar date (`2020-11-13`): upstream
@@ -233,6 +239,9 @@ impl std::fmt::Display for SkipReason {
                 "the package follows the {series} series ({packaged}), and upstream's \
                  newest ({latest}) is of another one"
             ),
+            SkipReason::SuseNoUpstream { why } => {
+                write!(f, "SUSE-maintained, no upstream release: {why}")
+            }
             SkipReason::VersionCompareFailed { packaged, latest } => {
                 write!(
                     f,
@@ -278,6 +287,9 @@ pub struct Lookups<'a> {
     /// The package's `_service` text, when it can be read (see
     /// [`service_git_url`]).
     pub fetch_service: &'a dyn Fn(&str) -> Option<String>,
+    /// Whether the package holds a `_service` (asked only for a package that
+    /// has no source URL, to tell whether something fetches its source).
+    pub fetch_has_service: &'a dyn Fn(&str) -> bool,
 }
 
 /// The places a package's newest version may be looked up, most specific

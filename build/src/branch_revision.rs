@@ -340,6 +340,7 @@ pub fn plan_one(
                 fetch_gem_latest: &gem,
                 fetch_cpan_latest: &cpan,
                 fetch_service: &fetch_service,
+                fetch_has_service: &|pkg: &str| update::project_has_service(project, pkg, emit),
             };
             update::classify(&pkg, &fetch, &lookups)
         }

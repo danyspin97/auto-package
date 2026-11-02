@@ -43,6 +43,10 @@ mod read;
 mod reading;
 #[cfg(test)]
 mod specs;
+mod suse;
+pub use suse::project_has_service;
+#[cfg(test)]
+mod suse_tests;
 #[cfg(test)]
 mod versions;
 

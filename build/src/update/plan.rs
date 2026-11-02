@@ -22,6 +22,8 @@ where
     // failure is the one reported: it belongs to the most specific guess.
     let mut first_failure: Option<SkipReason> = None;
     let mut pypi_miss: Option<SkipReason> = None;
+    // The forge's own failure, whatever guess came before it in the order.
+    let mut git_failure: Option<SkipReason> = None;
     // The PyPI name came from the tarball's file name, not from a PyPI URL.
     let pypi_guessed = {
         let source = header.source.as_deref().unwrap_or_default();
@@ -37,6 +39,9 @@ where
                 break;
             }
             Err(failure) => {
+                if matches!(&ecosystem, Ecosystem::GitRepo { .. }) {
+                    git_failure.get_or_insert(failure.clone());
+                }
                 // A PyPI name guessed from a tarball that PyPI has never
                 // heard of says nothing about the package; keep it only if no
                 // other place has a more telling failure.
@@ -52,6 +57,11 @@ where
         }
     }
     let Some((ecosystem, latest)) = found else {
+        if let Some(why) = suse::no_upstream_release(&header, git_failure.as_ref(), || {
+            (lookups.fetch_has_service)(rpm_name)
+        }) {
+            return skipped(rpm_name, SkipReason::SuseNoUpstream { why });
+        }
         return skipped(
             rpm_name,
             first_failure
@@ -396,6 +406,7 @@ pub fn plan_each(
     };
     let fetch_service = |rpm_name: &str| osc::cat_file(project, rpm_name, "_service", emit);
     let (hits_before, fetched_before) = upstream_cache::stats();
+    let fetch_has_service = |pkg: &str| suse::project_has_service(project, pkg, emit);
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
         fetch_repo_latest: &fetch_repo_latest,
@@ -404,6 +415,7 @@ pub fn plan_each(
         fetch_gem_latest: &fetch_gem_latest,
         fetch_cpan_latest: &fetch_cpan_latest,
         fetch_service: &fetch_service,
+        fetch_has_service: &fetch_has_service,
     };
 
     let total = names.len();
