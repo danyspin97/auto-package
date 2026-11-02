@@ -84,6 +84,20 @@ fn the_aquamarine_service_gives_its_tag_without_the_v() {
 }
 
 #[test]
+fn a_pattern_without_a_replacement_keeps_the_version_through_a_carry() {
+    // A `_service` with `v(.*)` and no replacement parameter, moved to v0.9.6:
+    // OBS names the package 0.9.6, so the carry must accept the spec's version.
+    let svc = "<services><service mode=\"manual\" name=\"obs_scm\"><param name=\"url\">https://github.com/o/r.git</param><param name=\"scm\">git</param><param name=\"versionformat\">@PARENT_TAG@</param><param name=\"versionrewrite-pattern\">v(.*)</param><param name=\"revision\">v0.9.5</param></service><service mode=\"buildtime\" name=\"tar\"/></services>";
+    let plan = plan_service_carry(svc, "0.9.6", || Ok("v0.9.6".into())).unwrap();
+    assert!(plan.unchecked.is_none());
+    assert!(
+        plan.moved
+            .contains("<param name=\"revision\">v0.9.6</param>")
+    );
+    assert!(plan_service_carry(svc, "0.9.5", || Ok("v0.9.6".into())).is_err());
+}
+
+#[test]
 fn a_rewrite_that_does_not_give_the_version_is_refused() {
     let no_match = params(&[
         ("versionformat", "@PARENT_TAG@+@TAG_OFFSET@"),
