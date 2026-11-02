@@ -328,6 +328,7 @@ impl DepResolver {
         if additions.is_empty() {
             return Ok(Vec::new());
         }
+        let _meta = osc::lock_project_meta();
         let _guard = self.edit.lock().unwrap_or_else(|e| e.into_inner());
         let (meta, _) = self.branch_info()?;
         let (edited, made) = osc::add_paths_to_meta(&meta, additions)?;

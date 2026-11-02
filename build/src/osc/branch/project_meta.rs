@@ -127,6 +127,17 @@ pub fn set_project_meta(project: &str, xml: &str, emit: Emit<'_>) -> Result<(), 
     write_meta(&["meta", "prj", project], xml, emit)
 }
 
+/// The lock every read-modify-write of a project meta takes, in this process:
+/// an edit reads the meta, changes it and writes it back while the guard is
+/// held, so two such edits never interleave and lose one another's change.
+/// Read the meta again inside the guard, not before it.
+pub(super) static PROJECT_META_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold the project-meta lock until the guard is dropped.
+pub fn lock_project_meta() -> std::sync::MutexGuard<'static, ()> {
+    PROJECT_META_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Replace a meta document through `osc`: `args` names the meta (`meta prj P`
 /// or `meta pkg P PKG`), and `xml` is written to a private file that `-F`
 /// reads.

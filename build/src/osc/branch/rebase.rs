@@ -232,6 +232,7 @@ pub fn with_local_blocking(xml: &str) -> Option<String> {
 /// Make the repositories of `project` block on its own packages only (see
 /// [`with_local_blocking`]).
 pub(super) fn block_locally(project: &str, emit: Emit<'_>) -> Result<(), Error> {
+    let _meta = lock_project_meta();
     let Some(xml) = get_project_meta(project, emit)? else {
         return Ok(());
     };
