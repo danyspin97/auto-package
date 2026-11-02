@@ -110,3 +110,4 @@
 110. License coverage of subpackages and Legal-Review-Notice — read when a subpackage has its own License, a subpackage lacks %license, or a tarball file is left out of the package
 111. Upstream patch header, type-1 comment, .changes line — read when adding or changing a PatchN: or a patch file, its Upstream: header, or a .changes patch entry (Add/Backport/Rebase/Drop)
 112. X11:XOrg and X11:Wayland patch format (Patch-Mainline, tagged file names) — read when the package uses X11 patch names such as N_, u_, T_, or Patch-Mainline headers
+113. Standalone Cargo crates: workspaces, _service parameters, vendored crate patches — read when a Cargo.toml package needs a workspace, update=false, update-crate, or a vendored crate patched
