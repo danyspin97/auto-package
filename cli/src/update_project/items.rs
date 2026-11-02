@@ -5,6 +5,17 @@ pub(super) fn visit_key(item: &Item) -> String {
     format!("{}/{}", item.origin, osc::fuzzy_key(&item.pkg))
 }
 
+/// Why `item` cannot be built for `arch` by its own arch tags: the origin's
+/// spec has an `ExclusiveArch:` without `arch`, or an `ExcludeArch:` with it.
+/// `None` when it can be, or the origin's spec cannot be read (then the build
+/// decides). Checked before the package is branched, so nothing is created for
+/// a package that could only end `excluded`.
+pub(super) fn arch_exclusion(item: &Item, arch: &str, ctx: &Ctx<'_>) -> Option<String> {
+    let emit = Emit::run(ctx.reporter.as_ref());
+    let spec = osc::cat_file(&item.origin, &item.pkg, &format!("{}.spec", item.pkg), emit)?;
+    ap_build::spec::arch_excluded_reason(&spec, arch)
+}
+
 /// Whether `package` is absent from the branch project's listing taken before
 /// the branch call, so that call is what created it. A listing that could not
 /// be read proves nothing, so the package is not treated as created.

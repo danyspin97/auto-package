@@ -3,52 +3,6 @@
 
 use super::*;
 
-/// The architectures `spec`'s top-level `ExclusiveArch:` allows when none of
-/// them is `arch`, so a build for `arch` can only end `excluded`. `None` when the
-/// spec has no such line, names a macro or `do_not_build` (a switch the tool
-/// owns), has it inside a conditional, or allows `arch`.
-pub fn exclusive_arch_excluding(spec: &str, arch: &str) -> Option<Vec<String>> {
-    let mut depth = 0usize;
-    let mut allowed: Vec<String> = Vec::new();
-    for line in spec.lines() {
-        let t = line.trim_start();
-        if t.starts_with("%description") || t.starts_with("%package") {
-            break;
-        }
-        if t.starts_with("%if") {
-            depth += 1;
-        } else if t.starts_with("%endif") {
-            depth = depth.saturating_sub(1);
-        } else if depth == 0
-            && t.len() > "exclusivearch:".len()
-            && t[.."exclusivearch:".len()].eq_ignore_ascii_case("exclusivearch:")
-        {
-            allowed.extend(
-                t["exclusivearch:".len()..]
-                    .split_whitespace()
-                    .map(str::to_string),
-            );
-        } else if depth > 0
-            && t.get(..14)
-                .is_some_and(|h| h.eq_ignore_ascii_case("exclusivearch:"))
-        {
-            return None;
-        }
-    }
-    if allowed.is_empty()
-        || allowed
-            .iter()
-            .any(|a| a.contains('%') || a == "do_not_build")
-    {
-        return None;
-    }
-    let is_x86_32 = |a: &str| matches!(a, "i386" | "i486" | "i586" | "i686");
-    let hit = allowed
-        .iter()
-        .any(|a| a == arch || (is_x86_32(arch) && is_x86_32(a)));
-    (!hit).then_some(allowed)
-}
-
 /// Lines of `spec` that still carry a `TODO` or `FIXME` placeholder, as `(line number,
 /// text)`. The skeleton generators leave these for the agent to fill in, and a
 /// spec that keeps one builds an empty or half-described package. The

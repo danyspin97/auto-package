@@ -89,8 +89,10 @@ mod skeleton_header_guard_tests;
 #[cfg(test)]
 mod expand_order_tests;
 
+mod arch_tags;
 mod checks;
 mod upstream_tag;
+pub use arch_tags::*;
 pub use upstream_tag::*;
 #[cfg(test)]
 mod requirement_tests;

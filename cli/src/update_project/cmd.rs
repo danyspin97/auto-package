@@ -164,6 +164,17 @@ pub(super) fn cmd_update_project(
                 item
             }
         };
+        // A package that its own ExclusiveArch or ExcludeArch keeps off this
+        // architecture would only end `excluded`: it is skipped before any branch.
+        if let Some(why) = arch_exclusion(&item, &a.arch, ctx) {
+            ctx.warn(format!("skipping {}: {why}", item.pkg));
+            report.results.push(ItemResult {
+                item,
+                outcome: ItemOutcome::Skipped(why),
+                sr: SrOutcome::NotRequested,
+            });
+            continue;
+        }
         if a.in_place {
             // The package is already where it will be changed, and its
             // BuildRequires resolve: it builds there today.
