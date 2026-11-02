@@ -151,8 +151,8 @@ fn carry_forward_repo_spec(
     reporter: &dyn Reporter,
 ) -> Result<GenSpecResult, String> {
     let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
-    let mut bumped = crate::spec::set_version(&old, &config.version)
-        .ok_or("its Version: is not a plain value")?;
+    let mut bumped =
+        crate::spec::set_version_and_tag(&old, &config.version, config.upstream_tag.as_deref())?;
     if crate::spec::expanded_sources(&bumped).is_empty() {
         // The source has no web address: a `_service` fetches it, or the
         // tarball was committed by hand.
