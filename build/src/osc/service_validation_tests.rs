@@ -1,3 +1,4 @@
+use super::service::service_xml_problem;
 use super::validate_service_xml;
 
 #[test]
@@ -346,4 +347,29 @@ fn a_refused_param_in_an_otherwise_valid_service_refuses_the_file() {
         r#"<param name="outdir">/etc</param></service>"#,
     );
     assert!(super::parse_service_xml(xml.as_bytes(), "test-pkg").is_err());
+}
+
+#[test]
+fn a_malformed_service_file_is_named_before_osc_reads_it() {
+    // The awww `_service` as the fix-after-build edit left it: `</param>` lost.
+    let broken = "<services>\n  <service mode=\"manual\" name=\"cargo_vendor\">\n    <param name=\"update\">false\n  </service>\n</services>\n";
+    let why = service_xml_problem(broken).unwrap();
+    assert!(
+        why.contains("not well-formed XML") && why.contains("line"),
+        "{why}"
+    );
+    assert!(service_xml_problem("<services/>\n").is_none());
+    assert!(
+        service_xml_problem("<!-- c -->\n<services><service name=\"x\"/></services>").is_none()
+    );
+}
+
+#[test]
+fn a_utf8_bom_before_the_root_is_accepted_as_osc_accepts_it() {
+    // osc reads the file as bytes with ElementTree, which skips a UTF-8 byte
+    // order mark; the checks read the same file and must not refuse it.
+    let xml =
+        "\u{feff}<services>\n  <service mode=\"manual\" name=\"set_version\"/>\n</services>\n";
+    assert!(service_xml_problem(xml).is_none());
+    validate_service_xml(xml.as_bytes()).unwrap();
 }

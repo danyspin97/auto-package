@@ -499,11 +499,13 @@ pub fn discard_untracked_archives(checkout_dir: &Path, skipped: &[String]) -> Ve
 ///
 /// Only `files` are staged and committed. `osc addremove` and `osc ci` both
 /// take file arguments, so a file outside the list is neither tracked nor
-/// pushed, even when it is modified.
+/// pushed, even when it is modified. When `ci` fails, the whole of its output
+/// is written to `log` (when given) and the error names that file.
 pub fn commit(
     checkout_dir: &Path,
     message: &str,
     files: &[String],
+    log: Option<&Path>,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
     if files.is_empty() {
@@ -545,11 +547,44 @@ pub fn commit(
         if out.stdout.contains("nothing to do") || out.stderr.contains("nothing to do") {
             return Ok(());
         }
+        let mut detail = ci_failure_detail(&out.stdout, &out.stderr);
+        if let Some(log) = log {
+            let full = format!("--- stdout\n{}\n--- stderr\n{}\n", out.stdout, out.stderr);
+            match ap_core::fsx::write_atomic(log, full) {
+                Ok(()) => detail.push_str(&format!("\nthe full output is in {}", log.display())),
+                Err(e) => detail.push_str(&format!("\nthe full output cannot be saved: {e}")),
+            }
+        }
         return Err(Error::OscFailed {
             cmd: format!("ci -m {message:?} in {}", checkout_dir.display()),
             code: out.code,
-            stderr: out.stderr,
+            stderr: detail,
         });
     }
     Ok(())
+}
+
+/// What a failed `osc` call says: stderr, then stdout, as their last ten distinct
+/// lines, without control characters. osc prints some failures on stdout only
+/// (a malformed `_service` is printed there before `exit 1`) and some warnings
+/// on stderr, so both are read; the caller keeps the full output in a log.
+pub(crate) fn ci_failure_detail(stdout: &str, stderr: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+    for text in [stderr, stdout] {
+        let text = ap_core::sink::printable(text);
+        for line in text
+            .lines()
+            .map(str::trim_end)
+            .filter(|l| !l.trim().is_empty())
+        {
+            if seen.insert(line.to_string()) {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    if lines.is_empty() {
+        return "osc printed nothing on stdout or stderr".to_string();
+    }
+    lines[lines.len().saturating_sub(10)..].join("\n")
 }

@@ -58,6 +58,7 @@ pub(super) fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), 
             &dir,
             "Tidy the spec (auto-package lint)",
             &commit_files,
+            None,
             emit,
         )
         .map_err(|e| e.to_string())

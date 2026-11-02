@@ -255,6 +255,36 @@ pub(crate) fn validate_service_xml(xml: &[u8]) -> Result<(), String> {
     parse_service_xml(xml, "test-pkg").map(|_| ())
 }
 
+/// Why osc would stop on the checkout's `_service` before it commits: the file
+/// is not well-formed XML. osc prints the position on stdout and exits 1, so
+/// the commit is refused here with the line. `None` without a `_service`, or
+/// when it reads.
+pub fn service_problem(checkout_dir: &std::path::Path) -> Option<String> {
+    let xml = std::fs::read_to_string(checkout_dir.join("_service")).ok()?;
+    service_xml_problem(&xml)
+}
+
+/// [`service_problem`] for the text of a `_service`.
+pub(crate) fn service_xml_problem(xml: &str) -> Option<String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) => return None,
+            Ok(_) => {}
+            Err(e) => {
+                let at = (reader.buffer_position() as usize).min(xml.len());
+                let line = xml.get(..at).map_or(1, |s| s.matches('\n').count() + 1);
+                return Some(format!(
+                    "the _service is not well-formed XML (around line {line}): {e}"
+                ));
+            }
+        }
+    }
+}
+
 /// [`validate_service_xml`], returning the services in order with their
 /// decoded (trimmed) params: what is run is what was checked.
 pub(crate) fn parse_service_xml(

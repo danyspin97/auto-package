@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use ap_core::event::{Event, SkipReason, StepKind, StepOutcome};
@@ -80,6 +81,11 @@ impl<'a> StepGuard<'a> {
             started: Instant::now(),
             finished: false,
         })
+    }
+
+    /// A file in the step's directory.
+    pub fn file(&self, name: &str) -> PathBuf {
+        self.dir.file(name)
     }
 
     /// Report the step's end and hand back its directory.

@@ -135,6 +135,12 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     let mut files = plan.files.clone();
     files.extend(removed);
+    // osc reads the checkout's `_service` before it commits; a malformed one
+    // stops it with the reason on stdout, so it is refused here, with the line.
+    if let Some(why) = osc::service_problem(&ctx.checkout_dir) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(format!("not committed: {why}; nothing was sent to OBS")));
+    }
     // Noted before the write: a commit that fails half way may still have sent them.
     if let Err(e) = osc::note_attempt(&baseline, &files) {
         commit_step.finish(StepOutcome::Failed);
@@ -144,6 +150,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         &ctx.checkout_dir,
         &commit_message(&ctx.checkout_dir),
         &files,
+        Some(&commit_step.file("osc-ci.log")),
         Emit::new(ctx.reporter, commit_step.id),
     ) {
         return Err(ctx.failed_osc(&e));

@@ -237,7 +237,7 @@ pub fn restore_baseline(dir: &Path, expected: &Path, emit: Emit<'_>) -> Result<(
         dir,
         expected,
         obs_still_at_checkout,
-        |checkout, message, files| commit(checkout, message, files, emit),
+        |checkout, message, files| commit(checkout, message, files, None, emit),
     ) {
         Ok(()) => {
             let _ = fs::remove_dir_all(dir);

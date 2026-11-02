@@ -126,6 +126,36 @@ fn a_patch_named_by_the_series_file_is_published() {
 #[test]
 fn nothing_is_committed_without_a_file_to_commit() {
     let dir = tempfile::tempdir().unwrap();
-    let err = commit(dir.path(), "msg", &[], Emit::quiet()).unwrap_err();
+    let err = commit(dir.path(), "msg", &[], None, Emit::quiet()).unwrap_err();
     assert!(matches!(err, Error::NothingToPublish(_)), "{err}");
+}
+
+#[test]
+fn a_failed_ci_says_what_osc_printed() {
+    // osc prints a malformed `_service` on stdout and exits 1, with stderr empty.
+    let detail = ci_failure_detail("XML error in _service file on line 9, column 4\n", "");
+    assert_eq!(detail, "XML error in _service file on line 9, column 4");
+    assert_eq!(
+        ci_failure_detail("", "  "),
+        "osc printed nothing on stdout or stderr"
+    );
+    // Control characters never reach the error; stderr comes first.
+    assert_eq!(ci_failure_detail("out", "err\x1b[0m"), "err\nout");
+    let long: String = (0..30).map(|i| format!("line {i}\n")).collect();
+    assert_eq!(ci_failure_detail(&long, "").lines().count(), 10);
+}
+
+#[test]
+fn a_warning_on_stderr_does_not_hide_the_error_on_stdout() {
+    // osc warns on stderr and reports the failure on stdout: both are shown.
+    let detail = ci_failure_detail(
+        "XML error in _service file on line 9, column 4\n",
+        "warning: the spec is old\n",
+    );
+    assert_eq!(
+        detail,
+        "warning: the spec is old\nXML error in _service file on line 9, column 4"
+    );
+    // A line both streams print is shown once.
+    assert_eq!(ci_failure_detail("same\nother\n", "same\n"), "same\nother");
 }

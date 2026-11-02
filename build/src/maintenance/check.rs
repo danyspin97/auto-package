@@ -137,6 +137,7 @@ pub(super) fn commit_refs(
             refs.join(", ")
         ),
         &[name.to_string()],
+        None,
         emit,
     );
     match committed {
