@@ -28,8 +28,21 @@ where
         pypi::pypi_name_from_source_url(source).is_none()
             && pypi::pypi_name_and_version_from_wheel_filename(source).is_none()
     };
+    // Only a spec that names neither a repository nor a URL to download from is
+    // read for its `_service`: that is what an obs_scm source looks like, and
+    // the other packages save an OBS read.
+    let downloads_from_url = header
+        .expanded_source
+        .as_deref()
+        .is_some_and(|s| s.starts_with("http://") || s.starts_with("https://"));
+    let service_git = match declared_upstream(&header) {
+        DeclaredUpstream::Unknown if !downloads_from_url => (lookups.fetch_service)(rpm_name)
+            .as_deref()
+            .and_then(service_git_url),
+        _ => None,
+    };
     let mut found = None;
-    for ecosystem in ecosystems(&header) {
+    for ecosystem in ecosystems(&header, service_git) {
         match lookup(&ecosystem, lookups) {
             Ok(v) => {
                 found = Some((ecosystem, v));
@@ -358,6 +371,7 @@ pub fn plan_each(
             crate::upstream_cpan::latest_on_metacpan(dist)
         })
     };
+    let fetch_service = |rpm_name: &str| osc::cat_file(project, rpm_name, "_service", emit);
     let (hits_before, fetched_before) = upstream_cache::stats();
     let lookups = Lookups {
         fetch_pypi_latest: &fetch_pypi_latest,
@@ -366,6 +380,7 @@ pub fn plan_each(
         fetch_repology_latest: &fetch_repology_latest,
         fetch_gem_latest: &fetch_gem_latest,
         fetch_cpan_latest: &fetch_cpan_latest,
+        fetch_service: &fetch_service,
     };
 
     let total = names.len();

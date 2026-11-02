@@ -145,7 +145,7 @@ pub fn classify_forced(
         return skipped(SkipReason::SpecHeaderMissing);
     };
     let mut failures: Vec<String> = Vec::new();
-    for ecosystem in update::ecosystems(&header) {
+    for ecosystem in update::ecosystems(&header, None) {
         if !ecosystem.can_build() {
             continue;
         }
@@ -307,6 +307,8 @@ pub fn plan_one(
                     crate::upstream_cpan::latest_on_metacpan(d)
                 })
             };
+            // The spec at `revision` is read, its `_service` is not: an obs_scm
+            // source is looked up through Repology only.
             let lookups = update::Lookups {
                 fetch_pypi_latest: &pypi,
                 fetch_repo_latest: &repo,
@@ -314,6 +316,7 @@ pub fn plan_one(
                 fetch_repology_latest: &repology,
                 fetch_gem_latest: &gem,
                 fetch_cpan_latest: &cpan,
+                fetch_service: &|_| None,
             };
             update::classify(&pkg, &fetch, &lookups)
         }

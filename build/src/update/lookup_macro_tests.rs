@@ -48,11 +48,11 @@ pub(super) fn a_forge_url_with_a_define_is_looked_up_expanded() {
         Some("https://github.com/arangodb/arangodb")
     );
     assert!(
-        ecosystems(&header).contains(&Ecosystem::GitRepo {
+        ecosystems(&header, None).contains(&Ecosystem::GitRepo {
             url: "https://github.com/arangodb/arangodb".into()
         }),
         "{:?}",
-        ecosystems(&header)
+        ecosystems(&header, None)
     );
     let spec = |_: &str| Ok(ARANGODB3_SPEC.to_string());
     let repo: &'static dyn Fn(&str) -> Result<String, String> = &|url: &str| {

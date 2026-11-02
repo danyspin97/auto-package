@@ -118,6 +118,99 @@ pub(crate) fn unescape(s: &str) -> String {
     out
 }
 
+/// The start tag of the element whose attribute is at `at` in `masked`.
+pub(crate) fn open_tag(masked: &str, at: usize) -> &str {
+    let start = masked[..at].rfind('<').unwrap_or(0);
+    let end = masked[start..]
+        .find('>')
+        .map_or(masked.len(), |i| start + i + 1);
+    &masked[start..end]
+}
+
+/// The value of the parameter `name`, when the list has it.
+pub(crate) fn param_value<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// The offsets (in `masked`) of the `<service>` elements named `name`.
+pub(crate) fn service_elements(masked: &str, name: &str) -> Vec<usize> {
+    masked
+        .match_indices(&format!("name=\"{name}\""))
+        .map(|(at, _)| at)
+        .filter(|&at| open_tag(masked, at).starts_with("<service"))
+        .collect()
+}
+
+/// `xml` with every XML comment blanked to spaces (newlines kept). The result
+/// has the same length, so an offset in it is the offset in `xml`, and a
+/// commented-out element is not read as a live one.
+pub(crate) fn mask_xml_comments(xml: &str) -> String {
+    let mut out = xml.as_bytes().to_vec();
+    let mut from = 0;
+    while let Some(open) = xml[from..].find("<!--").map(|i| from + i) {
+        let end = xml[open + 4..]
+            .find("-->")
+            .map_or(xml.len(), |i| open + 4 + i + 3);
+        for b in &mut out[open..end] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+        from = end;
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// The text of the `<service>` element whose name starts at `at`: up to its
+/// closing tag, or only its own tag when it is self-closing, so a parameter of
+/// the next service is never taken for its own.
+pub(crate) fn service_block(service: &str, at: usize) -> &str {
+    let rest = &service[at..];
+    let tag_end = rest.find('>').map_or(rest.len(), |i| i + 1);
+    if rest[..tag_end].ends_with("/>") {
+        return &rest[..tag_end];
+    }
+    let end = rest.find("</service>").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// The `<param>`s of the source service at `scm`, by name, with their values
+/// decoded. Found in `masked`; the values are read from `service`, which has
+/// the same offsets.
+pub(crate) fn source_params(service: &str, masked: &str, scm: usize) -> Vec<(String, String)> {
+    let end = scm + service_block(masked, scm).len();
+    let open = "<param name=\"";
+    let mut out = Vec::new();
+    let mut at = scm;
+    while let Some(p) = masked[at..end].find(open) {
+        let name_at = at + p + open.len();
+        let Some(quote) = masked[name_at..end].find('"') else {
+            break;
+        };
+        let name = masked[name_at..name_at + quote].to_string();
+        let tag_at = name_at + quote;
+        let Some(gt) = masked[tag_at..end].find('>') else {
+            break;
+        };
+        let value_at = tag_at + gt + 1;
+        if masked[tag_at..value_at].ends_with("/>") {
+            out.push((name, String::new()));
+            at = value_at;
+            continue;
+        }
+        let Some(close) = masked[value_at..end].find("</param>") else {
+            break;
+        };
+        let value_end = value_at + close;
+        out.push((name, unescape(service[value_at..value_end].trim())));
+        at = value_end;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

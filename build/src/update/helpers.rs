@@ -29,6 +29,9 @@ pub(super) fn unused_lookups() -> Lookups<'static> {
     fn none(_: &str) -> Result<String, String> {
         Err("not looked up in this test".to_string())
     }
+    fn no_service(_: &str) -> Option<String> {
+        None
+    }
     Lookups {
         fetch_pypi_latest: &none,
         fetch_repo_latest: &none,
@@ -36,6 +39,7 @@ pub(super) fn unused_lookups() -> Lookups<'static> {
         fetch_repology_latest: &none,
         fetch_gem_latest: &none,
         fetch_cpan_latest: &none,
+        fetch_service: &no_service,
     }
 }
 

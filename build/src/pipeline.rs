@@ -364,6 +364,9 @@ mod service_source_tests;
 mod source_signature;
 #[cfg(test)]
 mod source_signature_tests;
+use crate::obs_xml::{
+    mask_xml_comments, open_tag, param_value, service_block, service_elements, source_params,
+};
 use carry::*;
 use service_source::*;
 mod prompt_notes;

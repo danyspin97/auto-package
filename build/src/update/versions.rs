@@ -263,3 +263,127 @@ pub(super) fn a_zero_tag_offset_is_compared_as_the_tag() {
         ahead.decision
     );
 }
+
+/// An obs_scm package whose spec names no repository is looked up in the
+/// repository its `_service` names.
+#[test]
+pub(super) fn an_obs_scm_source_is_looked_up_in_its_service_repository() {
+    fn service(_: &str) -> Option<String> {
+        Some(
+            "<services>\n  <service name=\"obs_scm\" mode=\"manual\">\n    \
+             <param name=\"url\">https://github.com/MastroHD/ashell.git</param>\n    \
+             <param name=\"scm\">git</param>\n    \
+             <param name=\"revision\">v0.5.0</param>\n  </service>\n</services>\n"
+                .to_string(),
+        )
+    }
+    assert_eq!(
+        service_git_url(&service("").unwrap()).as_deref(),
+        Some("https://github.com/MastroHD/ashell")
+    );
+    assert_eq!(
+        service_git_url(
+            "<service name=\"tar_scm\"><param name=\"url\">https://example.org/x.git</param></service>"
+        ),
+        None
+    );
+    let spec = "Name: ashell\nVersion: 0.5.0\nSource: ashell.tar.gz\n";
+    let lookups = Lookups {
+        fetch_service: &service,
+        ..only_repo("0.6.0")
+    };
+    let c = classify("ashell", &|_: &str| Ok(spec.to_string()), &lookups);
+    assert_eq!(
+        c.decision,
+        Decision::Update {
+            ecosystem: Ecosystem::GitRepo {
+                url: "https://github.com/MastroHD/ashell".into(),
+            },
+            old_version: "0.5.0".into(),
+            new_version: "0.6.0".into(),
+        }
+    );
+}
+
+/// A spec that downloads its source from a URL is not read for a `_service`.
+#[test]
+pub(super) fn a_spec_with_a_download_url_does_not_read_its_service() {
+    let spec = "Name: x\nVersion: 0.5.0\nSource: https://example.org/x-%{version}.tar.gz\n";
+    let lookups = Lookups {
+        fetch_service: &|_: &str| -> Option<String> { panic!("the _service is not read") },
+        ..unused_lookups()
+    };
+    let c = classify("x", &|_: &str| Ok(spec.to_string()), &lookups);
+    assert!(
+        !matches!(c.decision, Decision::Update { .. }),
+        "{:?}",
+        c.decision
+    );
+}
+
+/// Only a live `obs_scm` service that fetches from git names a package's
+/// repository. A commented-out, disabled, non-git or self-closing one does not,
+/// and a `tar_scm` service is never read: its snapshot is not proposed for the
+/// newest tag.
+#[test]
+pub(super) fn only_a_live_obs_scm_git_service_names_the_repository() {
+    const URL: &str = "https://github.com/MastroHD/ashell";
+    let cases = [
+        (
+            "<!-- <service name=\"obs_scm\"><param name=\"url\">URL.git</param></service> -->",
+            None,
+        ),
+        (
+            "<service name=\"obs_scm\" mode=\"disabled\"><param name=\"url\">URL.git</param></service>",
+            None,
+        ),
+        (
+            "<service name=\"obs_scm\"><param name=\"url\">URL.git</param><param name=\"scm\">svn</param></service>",
+            None,
+        ),
+        // The self-closing service has no url; the next service's is not its own.
+        (
+            "<service name=\"obs_scm\" mode=\"manual\"/>\n<service name=\"download_url\"><param name=\"url\">URL.git</param></service>",
+            None,
+        ),
+        (
+            "<service name=\"tar_scm\"><param name=\"url\">URL.git</param></service>",
+            None,
+        ),
+        (
+            "<service name=\"obs_scm\"><param name=\"url\">URL.git</param></service>",
+            Some(URL),
+        ),
+        (
+            "<service name=\"obs_scm\"><param name=\"url\">URL.git</param><param name=\"scm\">git</param></service>",
+            Some(URL),
+        ),
+    ];
+    for (service, expected) in cases {
+        let service = service.replace("URL", URL);
+        assert_eq!(service_git_url(&service).as_deref(), expected, "{service}");
+    }
+    // A tar_scm snapshot is not proposed for the newest tag of its repository.
+    let snapshot = "Name: ashell\nVersion: 0.5.0+git20240101\nSource: ashell.tar.gz\n";
+    let tar_scm = |_: &str| {
+        Some(format!(
+            "<service name=\"tar_scm\"><param name=\"url\">{URL}.git</param></service>"
+        ))
+    };
+    let lookups = Lookups {
+        fetch_service: &tar_scm,
+        ..only_repo("0.6.0")
+    };
+    let c = classify("ashell", &|_: &str| Ok(snapshot.to_string()), &lookups);
+    assert!(
+        !matches!(
+            c.decision,
+            Decision::Update {
+                ecosystem: Ecosystem::GitRepo { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        c.decision
+    );
+}

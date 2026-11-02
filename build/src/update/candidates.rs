@@ -1,4 +1,5 @@
 use super::*;
+use crate::obs_xml::{mask_xml_comments, open_tag, param_value, service_elements, source_params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -253,6 +254,9 @@ pub struct Lookups<'a> {
     pub fetch_gem_latest: &'a dyn Fn(&str) -> Result<String, String>,
     /// Latest release MetaCPAN lists for a CPAN distribution.
     pub fetch_cpan_latest: &'a dyn Fn(&str) -> Result<String, String>,
+    /// The package's `_service` text, when it can be read (see
+    /// [`service_git_url`]).
+    pub fetch_service: &'a dyn Fn(&str) -> Option<String>,
 }
 
 /// The places a package's newest version may be looked up, most specific
@@ -265,7 +269,10 @@ pub struct Lookups<'a> {
 /// URL first (the majority of python-* packages), then wheel filenames
 /// (NVIDIA's binary distributions), then bare `-%{version}.tar.gz` templates,
 /// then git forges, then release listings.
-pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
+///
+/// `service_git` is the forge repository the checkout's `_service` names (see
+/// [`service_git_url`]), for an obs_scm source whose spec has no URL to read.
+pub(crate) fn ecosystems(header: &spec::Header, service_git: Option<String>) -> Vec<Ecosystem> {
     let mut out: Vec<Ecosystem> = Vec::new();
     let mut add = |e: Ecosystem| {
         if !out.contains(&e) {
@@ -292,6 +299,9 @@ pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
             add(Ecosystem::GitRepo { url });
         }
     }
+    if let Some(url) = service_git {
+        add(Ecosystem::GitRepo { url });
+    }
     if (expanded.starts_with("http://") || expanded.starts_with("https://"))
         && crate::sources::is_any_archive(crate::sources::last_segment(expanded))
     {
@@ -315,6 +325,28 @@ pub(crate) fn ecosystems(header: &spec::Header) -> Vec<Ecosystem> {
         add(Ecosystem::Cpan { dist });
     }
     out
+}
+
+/// The forge repository the checkout's `obs_scm` service fetches the source
+/// from, as a forge URL. An obs_scm source is made by OBS at build time, so
+/// the spec alone names no repository for it. Only a live service counts: a
+/// commented-out one is masked, a `disabled` one is skipped, and so is one
+/// that does not fetch from git (`scm`). `tar_scm` is not read: a snapshot
+/// packaged from one names its own version, not the newest tag.
+pub(crate) fn service_git_url(service: &str) -> Option<String> {
+    let masked = mask_xml_comments(service);
+    service_elements(&masked, "obs_scm")
+        .into_iter()
+        .find_map(|at| {
+            let params = source_params(service, &masked, at);
+            let param = |name: &str| param_value(&params, name).filter(|v| !v.is_empty());
+            let disabled =
+                crate::obs_xml::attr(open_tag(&masked, at), "mode").as_deref() == Some("disabled");
+            if disabled || param("scm").is_some_and(|scm| scm != "git") {
+                return None;
+            }
+            git_repo_url(param("url")?)
+        })
 }
 
 /// Where a spec's own `Source:` says its upstream is, without the guesses
