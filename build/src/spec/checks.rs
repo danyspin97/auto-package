@@ -362,6 +362,11 @@ pub fn missing_check_path_problems(spec: &str, exists: &dyn Fn(&str) -> bool) ->
     if missing.is_empty() || spec.contains("--wildcards") {
         return Vec::new();
     }
+    missing_paths_problem(&missing)
+}
+
+/// The review problem naming the non-empty `missing` paths.
+pub fn missing_paths_problem(missing: &[String]) -> Vec<String> {
     vec![format!(
         "its %check uses {} which the source archive does not ship: add the project's \
          GitHub tag archive as `Source1` (in a `_service` with `download_files`) and extract \

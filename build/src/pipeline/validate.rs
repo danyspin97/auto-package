@@ -3,6 +3,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::check_paths::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::keep_version::*;
 use crate::pipeline::patch_check::*;
@@ -327,8 +328,16 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     })
                     .unwrap_or_default();
                 if src.is_dir() {
-                    let have =
-                        |p: &str| src.join(p).exists() || tops.iter().any(|t| t.join(p).exists());
+                    // A path a spec patch creates is shipped once the patch is applied.
+                    let created = patch_created_paths(
+                        &spec_text_now(spec_path),
+                        spec_path.parent().unwrap_or_else(|| Path::new("")),
+                    );
+                    let have = |p: &str| {
+                        created.iter().any(|c| c == p)
+                            || src.join(p).exists()
+                            || tops.iter().any(|t| t.join(p).exists())
+                    };
                     // The repository's tag archive as a second source, when the
                     // sdist metadata names the repository and the tag exists; the
                     // missing-source step above fetches it on the next pass.
@@ -350,10 +359,23 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                         validate_step.finish(StepOutcome::Ok);
                         return Ok(Flow::Retry);
                     }
-                    style.extend(crate::spec::missing_check_path_problems(
-                        &spec_text_now(spec_path),
-                        &have,
-                    ));
+                    // On an update, a missing path the origin's %check names too is
+                    // inherited: reported, not a problem of this edit.
+                    let origin = st.update.as_ref().and_then(|u| u.origin_spec.as_deref());
+                    let (introduced, inherited) =
+                        missing_check_path_split(&spec_text_now(spec_path), origin, &have);
+                    if let Some(update) = st.update.as_mut() {
+                        for problem in newly_reported(&mut update.reported, inherited) {
+                            reporter.report(&Event::Warning {
+                                step: Some(validate_step.id),
+                                message: format!(
+                                    "{rpm_name}: {problem}; the origin's spec has the same \
+                                     problem, so this update leaves it as it is"
+                                ),
+                            });
+                        }
+                    }
+                    style.extend(introduced);
                 }
             }
             if crate::spec::check_is_file_probe_only(&spec_text_now(spec_path))

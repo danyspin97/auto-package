@@ -277,6 +277,9 @@ mod fix_turn;
 use fix_turn::*;
 mod rpmlint_fix;
 use rpmlint_fix::*;
+mod check_paths;
+#[cfg(test)]
+mod check_paths_tests;
 mod commit;
 mod validate;
 use commit::*;
