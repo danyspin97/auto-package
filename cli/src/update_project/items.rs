@@ -309,7 +309,9 @@ pub(super) fn build_ready(
         } else if a.improve {
             ctx.say(format!("improving {} in {branch}", item.pkg));
             if mechanical.contains(&item.pkg) {
-                tidy_item(branch, &item, ctx)
+                let target = osc::choose_repository(branch, a.distro.as_deref(), &a.arch).0;
+                let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&target);
+                tidy_item(branch, &item, ctx, ldconfig)
             } else if a.no_agent {
                 report.results.push(ItemResult {
                     item,

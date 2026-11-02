@@ -49,6 +49,8 @@ impl Audit {
             let mut audits: Vec<quality::PackageAudit> = Vec::new();
             let mut sent = 0;
             let mut seen: HashSet<String> = HashSet::new();
+            let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&distro);
+            let mut ldconfig_left = false;
             update::plan_each(
                 &source,
                 &|n| wanted_by(&only, &exclude, n),
@@ -64,7 +66,8 @@ impl Audit {
                         ));
                         return true;
                     };
-                    let mut findings = quality::audit_spec(&spec);
+                    ldconfig_left |= ap_build::spec_tidy::hygiene::ldconfig_left(&spec, ldconfig);
+                    let mut findings = quality::audit_spec(&spec, ldconfig);
                     let status = statuses.get(&c.rpm_name).or_else(|| statuses.get(pkg));
                     if let Some(status) = status {
                         findings.extend(quality::audit_status(status));
@@ -123,6 +126,9 @@ impl Audit {
             )?;
             for line in quality::report_lines(&audits) {
                 say(line);
+            }
+            if ldconfig_left {
+                say("ldconfig scriptlets left: the target distro may not define %ldconfig_scriptlets".to_string());
             }
             Ok(AuditEnd {
                 packages: audits.len(),

@@ -21,6 +21,8 @@ pub enum Kind {
     RpmlintWarning,
     /// A style slip [`tidy`] corrects.
     SpecStyle,
+    /// An obsolete spec construct [`tidy`] removes: one finding per construct.
+    SpecHygiene,
     /// The spec has no `%check`.
     NoCheck,
     /// Tests were dropped from `%check` to get the package to build.
@@ -34,6 +36,7 @@ impl Kind {
             Kind::RpmlintError => "rpmlint-error",
             Kind::RpmlintWarning => "rpmlint-warning",
             Kind::SpecStyle => "style",
+            Kind::SpecHygiene => "hygiene",
             Kind::NoCheck => "no-check",
             Kind::DroppedTests => "dropped-tests",
         }
@@ -41,7 +44,7 @@ impl Kind {
 
     /// Whether [`tidy`] fixes it without a build or a model.
     pub fn is_mechanical(self) -> bool {
-        self == Kind::SpecStyle
+        matches!(self, Kind::SpecStyle | Kind::SpecHygiene)
     }
 }
 
@@ -51,9 +54,13 @@ pub struct Finding {
     pub detail: String,
 }
 
-/// Every deterministic style pass, in the order the pipeline applies them.
-pub fn tidy(spec: &str) -> String {
-    let spec = spec_tidy::unwrap_python_expand_block(spec);
+/// Every deterministic fix of `lint`: the obsolete constructs first, so that a
+/// `%clean` is gone before the `%check` it could be moved with, then the style
+/// passes in the order the pipeline applies them. `ldconfig_macro` says whether the
+/// target defines `%ldconfig_scriptlets` (see `hygiene::ldconfig_macro_defined`).
+pub fn tidy(spec: &str, ldconfig_macro: bool) -> String {
+    let spec = spec_tidy::hygiene::drop_obsolete_constructs(spec, ldconfig_macro);
+    let spec = spec_tidy::unwrap_python_expand_block(&spec);
     let spec = spec_tidy::move_check_before_files(&spec);
     let spec = spec_tidy::add_noarch_to_pure_python(&spec);
     let spec = spec_tidy::use_version_macro(&spec);
@@ -63,8 +70,9 @@ pub fn tidy(spec: &str) -> String {
 type StylePass = fn(&str) -> String;
 
 /// What is wrong with `spec` on its own: the style passes that would change
-/// it, a missing `%check`, and tests the pipeline dropped.
-pub fn audit_spec(spec: &str) -> Vec<Finding> {
+/// it, a missing `%check`, and tests the pipeline dropped. The obsolete constructs
+/// are judged for a target with `ldconfig_macro` or without it.
+pub fn audit_spec(spec: &str, ldconfig_macro: bool) -> Vec<Finding> {
     let mut out = Vec::new();
     let passes: [(&str, StylePass); 5] = [
         (
@@ -95,6 +103,12 @@ pub fn audit_spec(spec: &str) -> Vec<Finding> {
                 detail: what.to_string(),
             });
         }
+    }
+    for c in spec_tidy::hygiene::constructs(spec, ldconfig_macro) {
+        out.push(Finding {
+            kind: Kind::SpecHygiene,
+            detail: format!("line {}: {}; fix: {}", c.line, c.what, c.fix),
+        });
     }
     if !spec.lines().any(|l| l.trim_end() == "%check") {
         out.push(Finding {
@@ -213,13 +227,17 @@ mod tests {
 
     #[test]
     fn a_spec_with_a_check_has_no_missing_check_finding() {
-        assert!(!audit_spec(GOOD).iter().any(|f| f.kind == Kind::NoCheck));
+        assert!(
+            !audit_spec(GOOD, true)
+                .iter()
+                .any(|f| f.kind == Kind::NoCheck)
+        );
     }
 
     #[test]
     fn a_spec_without_check_is_reported() {
         let spec = GOOD.replace("%check\n%pytest\n\n", "");
-        let f = audit_spec(&spec);
+        let f = audit_spec(&spec, true);
         assert!(f.iter().any(|f| f.kind == Kind::NoCheck));
     }
 
@@ -227,11 +245,11 @@ mod tests {
     fn check_after_files_is_a_style_finding_that_tidy_fixes() {
         let spec =
             "Name: x\nVersion: 1\n\n%install\ntrue\n\n%files\n/a\n\n%check\ntrue\n\n%changelog\n";
-        let f = audit_spec(spec);
+        let f = audit_spec(spec, true);
         assert!(f.iter().any(|f| f.kind == Kind::SpecStyle));
-        let tidied = tidy(spec);
+        let tidied = tidy(spec, true);
         assert!(
-            !audit_spec(&tidied)
+            !audit_spec(&tidied, true)
                 .iter()
                 .any(|f| f.detail.starts_with("%check after"))
         );
@@ -241,14 +259,14 @@ mod tests {
     fn tidy_is_idempotent() {
         let spec =
             "Name: x\nVersion: 1\n\n%install\ntrue\n\n%files\n/a\n\n%check\ntrue\n\n%changelog\n";
-        let once = tidy(spec);
-        assert_eq!(tidy(&once), once);
+        let once = tidy(spec, true);
+        assert_eq!(tidy(&once, true), once);
     }
 
     #[test]
     fn dropped_tests_are_counted() {
         let spec = format!("{GOOD}\n# evidence: FAILED t.py::a\n# evidence: FAILED t.py::b\n");
-        let f = audit_spec(&spec);
+        let f = audit_spec(&spec, true);
         let d = f.iter().find(|f| f.kind == Kind::DroppedTests).unwrap();
         assert!(d.detail.starts_with("2 "), "{}", d.detail);
     }
@@ -330,5 +348,100 @@ mod tests {
         assert_eq!(lines[1], "  no-check: the spec has no %check");
         assert!(lines.contains(&"2 package(s) checked, 1 without findings".to_string()));
         assert!(lines.contains(&"  no-check: 1".to_string()));
+    }
+
+    /// The VulkanMemoryAllocator spec of X11:Wayland as it is in the project.
+    const VMA: &str = include_str!("testdata/spec/vulkanmemoryallocator.spec");
+    /// The hyprlang spec of X11:Wayland: `Group:` tags and a hand-written
+    /// `%post`/`%postun` pair for libhyprlang2.
+    const HYPRLANG: &str = include_str!("testdata/spec/hyprlang.spec");
+
+    /// A spec with every obsolete construct `lint` removes, and a version to
+    /// check that `lint` leaves it alone.
+    const LEGACY: &str = "Name:           libfoo\nVersion:        1.2.3\nRelease:        0\n\
+        Summary:        Foo\nLicense:        MIT\nGroup:          Development/Libraries/C\n\
+        BuildRoot:      %{_tmppath}/%{name}\nURL:            https://example.org/foo\n\
+        Source0:        %{name}-%{version}.tar.gz\nBuildRequires:  cmake\n\n%description\nFoo.\n\n\
+        %package -n libfoo1\nSummary:        Library\nGroup:          System/Libraries\n\
+        %description -n libfoo1\nFoo.\n\n%prep\n%autosetup\n\n%build\n%cmake\n%cmake_build\n\n\
+        %install\nrm -rf %{buildroot}\n%cmake_install\n\n%check\n%ctest\n\n\
+        %post   -n libfoo1 -p /sbin/ldconfig\n%postun -n libfoo1 -p /sbin/ldconfig\n\n\
+        %clean\nrm -rf %{buildroot}\n\n%files\n%defattr(-,root,root)\n%license LICENSE\n\n\
+        %files -n libfoo1\n%{_libdir}/libfoo.so.*\n\n%changelog\n";
+
+    fn hygiene_findings(spec: &str) -> Vec<Finding> {
+        audit_spec(spec, true)
+            .into_iter()
+            .filter(|f| f.kind == Kind::SpecHygiene)
+            .collect()
+    }
+
+    #[test]
+    fn each_obsolete_construct_is_one_hygiene_finding_with_its_line_and_fix() {
+        let f = hygiene_findings(LEGACY);
+        assert_eq!(f.len(), 7, "{f:#?}");
+        assert!(f.iter().all(|f| f.detail.starts_with("line ")));
+        assert!(f.iter().any(|f| f.detail.starts_with("line 6: ")
+            && f.detail.contains("fix: delete the line `Group:")));
+        assert!(!needs_pipeline(&audit_spec(LEGACY, true)));
+    }
+
+    #[test]
+    fn lint_tidy_removes_the_obsolete_constructs_and_keeps_the_version() {
+        let tidied = tidy(LEGACY, true);
+        for gone in ["Group:", "BuildRoot:", "%clean", "%defattr", "rm -rf"] {
+            assert!(!tidied.contains(gone), "{gone} is left:\n{tidied}");
+        }
+        assert!(tidied.contains("%ldconfig_scriptlets -n libfoo1\n"));
+        assert!(tidied.contains("Version:        1.2.3\n"));
+        assert!(hygiene_findings(&tidied).is_empty());
+        assert_eq!(tidy(&tidied, true), tidied);
+    }
+
+    #[test]
+    fn the_vulkan_group_line_is_the_only_change_tidy_makes() {
+        let expected = VMA.replace("Group:          Development/Libraries/C and C++\n", "");
+        assert_eq!(tidy(VMA, true), expected);
+        assert_eq!(tidy(&expected, true), expected);
+        assert!(hygiene_findings(VMA).len() == 1);
+    }
+
+    #[test]
+    fn the_hyprlang_pair_and_its_group_tags_become_one_scriptlets_line() {
+        let expected = HYPRLANG
+            .replace("Group:          System/Libraries\n", "")
+            .replace("Group:          Development/Libraries/Other\n", "")
+            .replace(
+                "%post   -n lib%{name}%{sover} -p /sbin/ldconfig\n\
+                 %postun -n lib%{name}%{sover} -p /sbin/ldconfig\n",
+                "%ldconfig_scriptlets -n lib%{name}%{sover}\n",
+            );
+        assert_eq!(tidy(HYPRLANG, true), expected);
+        assert_eq!(tidy(&expected, true), expected);
+    }
+
+    #[test]
+    fn a_group_inside_a_conditional_is_left_and_not_a_finding() {
+        let spec = "Name: x\nVersion: 1.2.3\n%if 0%{?suse_version} < 1315\nGroup: Other\n%endif\n\
+                    %check\ntrue\n%files\n/a\n%changelog\n";
+        assert!(hygiene_findings(spec).is_empty());
+        assert_eq!(tidy(spec, true), spec);
+    }
+
+    #[test]
+    fn a_hand_written_ldconfig_pair_is_fixed_only_for_a_target_with_the_macro() {
+        let spec = "%post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n%files\n/a\n";
+        let hygiene = |ldconfig| {
+            audit_spec(spec, ldconfig)
+                .iter()
+                .filter(|f| f.kind == Kind::SpecHygiene)
+                .count()
+        };
+        assert_eq!(hygiene(true), 1);
+        assert_eq!(hygiene(false), 0);
+        assert_eq!(tidy(spec, false), spec);
+        assert!(tidy(spec, true).contains("%ldconfig_scriptlets"));
+        assert!(spec_tidy::hygiene::ldconfig_left(spec, false));
+        assert!(!spec_tidy::hygiene::ldconfig_left(spec, true));
     }
 }

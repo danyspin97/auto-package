@@ -438,6 +438,36 @@ pub fn use_ldconfig_scriptlets(spec: &str) -> Option<String> {
     apply(spec, Pass::Ldconfig)
 }
 
+/// Every pass above, in order, on `spec`. The text is `spec` itself when
+/// none of them applies. The `%ldconfig_scriptlets` pass runs only when
+/// `ldconfig_macro` is set (see [`ldconfig_macro_defined`]).
+pub fn drop_obsolete_constructs(spec: &str, ldconfig_macro: bool) -> String {
+    let passes: [fn(&str) -> Option<String>; 5] = [
+        drop_group_tags,
+        drop_buildroot_tags,
+        drop_clean_sections,
+        drop_install_buildroot_rm,
+        drop_default_defattr,
+    ];
+    let mut text = passes
+        .iter()
+        .fold(spec.to_string(), |text, pass| pass(&text).unwrap_or(text));
+    if ldconfig_macro && let Some(next) = use_ldconfig_scriptlets(&text) {
+        text = next;
+    }
+    text
+}
+
+/// Whether `spec` has a hand-written `%post`/`%postun` pair that the
+/// `%ldconfig_scriptlets` pass would replace, which stays because the target
+/// does not define the macro.
+pub fn ldconfig_left(spec: &str, ldconfig_macro: bool) -> bool {
+    !ldconfig_macro
+        && constructs(spec, true)
+            .iter()
+            .any(|c| c.pass == Pass::Ldconfig)
+}
+
 /// The default `%defattr(-,root,root)` lines of `%files`, dropped. Other
 /// modes are kept: they say something the default does not.
 pub fn drop_default_defattr(spec: &str) -> Option<String> {
