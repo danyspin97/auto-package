@@ -150,7 +150,7 @@ fn the_vendor_archive_is_rebuilt_from_build_zig_zon() {
     assert_eq!(got.file, "vendor.tar.zst");
     assert!(got.changed);
     assert_eq!(got.deps.len(), 1);
-    assert_eq!(got.deps[0].declared, PIXMAN_HASH);
+    assert_eq!(got.deps[0].hash, PIXMAN_HASH);
     assert_eq!(fake.calls.borrow().as_slice(), [PIXMAN_URL]);
 
     // zig 0.16 layout: one `.tar.gz` per dependency, nothing unpacked, no

@@ -14,6 +14,7 @@ use crate::pipeline::review::*;
 use crate::pipeline::sdist_stage::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::validate::*;
+use crate::pipeline::zig_stage::*;
 
 pub fn run_package(
     config: &PipelineConfig,
@@ -529,6 +530,8 @@ fn run_stages(
     let spec = generate_spec_stage(&ctx, &mut st)?;
     osc_service_stage(&ctx, &mut st, &spec)?;
     fetch_sdist_stage(&ctx, &mut st, spec.need_spec)?;
+    // The zig vendor archive, rebuilt from the new source, before the first build.
+    zig_vendor_stage(&ctx, &mut st)?;
     resume_budget(&ctx, &mut st)?;
     // The carried-forward patches against the new sources, before the review
     // turn and the first commit.

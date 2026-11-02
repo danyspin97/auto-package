@@ -14,6 +14,8 @@ mod unpack;
 mod vendor_tar;
 mod zon;
 
+pub(in crate::pipeline) use refresh::{applies, refresh_from_network};
+
 #[cfg(test)]
 mod fetch_archive_tests;
 #[cfg(test)]

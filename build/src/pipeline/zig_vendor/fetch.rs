@@ -84,8 +84,10 @@ pub(super) struct Dep {
     /// The URL as the manifest wrote it.
     pub(super) url: String,
     /// The archive URL that was requested, after the git mapping.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) archive_url: String,
     /// The unpacked tree, the top-level directory stripped.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) root: PathBuf,
     /// The dependency's own manifest.
     pub(super) manifest: Manifest,

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use ap_core::sink::Reporter;
 
-use super::fetch::{Dep, Fetch, Request, fetch_vendor};
+use super::fetch::{Fetch, HttpFetch, Request, fetch_vendor};
 use super::plan::{plan, source0_file};
 use super::unpack::{Format, LIMITS, unpack};
 use super::vendor_tar::write_vendor_tar;
@@ -15,14 +15,40 @@ use super::zon;
 
 /// What a refresh did.
 #[derive(Debug)]
-pub(super) struct Refreshed {
+pub(in crate::pipeline) struct Refreshed {
     /// The vendor archive's file name in the checkout.
-    pub(super) file: String,
+    pub(in crate::pipeline) file: String,
     /// Whether the file's bytes changed. A refresh that writes what the old
     /// archive already had is not a change to the package.
-    pub(super) changed: bool,
+    pub(in crate::pipeline) changed: bool,
     /// The dependencies the archive holds, sorted by declared hash.
-    pub(super) deps: Vec<Dep>,
+    pub(in crate::pipeline) deps: Vec<RefreshedDep>,
+}
+
+/// A dependency the archive holds, as the manifest of its package gives it.
+#[derive(Debug, Clone)]
+pub(in crate::pipeline) struct RefreshedDep {
+    pub(in crate::pipeline) name: String,
+    pub(in crate::pipeline) url: String,
+    pub(in crate::pipeline) hash: String,
+}
+
+/// [`refresh_checkout`] over the network, through the host allowlist. For the
+/// update pipeline.
+pub(in crate::pipeline) fn refresh_from_network(
+    checkout: &Path,
+    spec: &str,
+    package: &str,
+    reporter: &dyn Reporter,
+    work: &Path,
+) -> Result<Option<Refreshed>, String> {
+    refresh_checkout(checkout, spec, package, &HttpFetch, reporter, work)
+}
+
+/// Whether [`refresh_from_network`] applies to `spec`. `Err` when the spec is
+/// one it applies to but cannot refresh: the reason the package stops with.
+pub(in crate::pipeline) fn applies(spec: &str) -> Result<bool, String> {
+    plan(spec).map(|p| p.is_some())
 }
 
 /// Refresh the vendor archive of the spec in `checkout`. `Ok(None)` when the
@@ -89,6 +115,14 @@ pub(super) fn refresh_checkout(
         ap_core::fsx::write_atomic(&target, &bytes)
             .map_err(|e| format!("writing {}: {e}", plan.file))?;
     }
+    let deps = deps
+        .into_iter()
+        .map(|d| RefreshedDep {
+            name: d.name,
+            url: d.url,
+            hash: d.declared,
+        })
+        .collect();
     Ok(Some(Refreshed {
         file: plan.file,
         changed,

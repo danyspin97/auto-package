@@ -43,8 +43,6 @@ pub(super) struct Plan {
     /// The cache directory, relative to the build directory: `vendor`.
     pub(super) root: String,
     pub(super) layout: Layout,
-    /// The zig version the layout was taken from, for the reports.
-    pub(super) zig: String,
 }
 
 /// The plan for `spec`, `None` when the spec is not one this step refreshes.
@@ -73,7 +71,7 @@ pub(super) fn plan(spec: &str) -> Result<Option<Plan>, String> {
             "{file} is compressed with xz, which the vendor step does not write (zst or gz)"
         ));
     };
-    let Some((zig, layout)) = zig_requirement(&requirements)? else {
+    let Some(layout) = zig_layout(&requirements)? else {
         return Ok(None);
     };
     Ok(Some(Plan {
@@ -81,7 +79,6 @@ pub(super) fn plan(spec: &str) -> Result<Option<Plan>, String> {
         compression,
         root,
         layout,
-        zig,
     }))
 }
 
@@ -114,11 +111,11 @@ fn zig_version_of_name(name: &str) -> Option<&str> {
     (v.contains('.') && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then_some(v)
 }
 
-/// The zig version a spec requires and the layout that version reads. `None`
-/// when the spec requires no zig. `Err` when the version cannot be told, or
-/// two requirements read different layouts.
-fn zig_requirement(requirements: &[Requirement]) -> Result<Option<(String, Layout)>, String> {
-    let mut found: Option<(String, Layout)> = None;
+/// The layout that the zig version a spec requires reads. `None` when the
+/// spec requires no zig. `Err` when the version cannot be told, or two
+/// requirements read different layouts.
+fn zig_layout(requirements: &[Requirement]) -> Result<Option<Layout>, String> {
+    let mut found: Option<Layout> = None;
     for req in requirements {
         if !zig_name(&req.dep) {
             continue;
@@ -146,15 +143,15 @@ fn zig_requirement(requirements: &[Requirement]) -> Result<Option<(String, Layou
                  pin the zig version to pick one"
             ));
         }
-        match &found {
-            Some((prev, prev_layout)) if *prev_layout != layout => {
+        match found {
+            Some(prev) if prev != layout => {
                 return Err(format!(
-                    "the spec requires zig {prev} and zig {version}, which read different \
-                     vendor layouts"
+                    "the spec requires zig {version}, which reads a different vendor layout \
+                     from another zig requirement of the spec"
                 ));
             }
             Some(_) => {}
-            None => found = Some((version, layout)),
+            None => found = Some(layout),
         }
     }
     Ok(found)

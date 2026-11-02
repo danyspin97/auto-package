@@ -8,7 +8,6 @@ const PIXMAN: &[u8] = include_bytes!("testdata/pixman-0.3.0.tar.gz");
 const PIXMAN_HASH: &str = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX";
 /// The real wayland archive, used where a different archive is needed.
 const WAYLAND: &[u8] = include_bytes!("testdata/wayland-0.6.0.tar.gz");
-const WAYLAND_HASH: &str = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX";
 const PIXMAN_URL: &str = "https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz";
 pub(super) const HEX40: &str = "c183af18ae35dd5fb3dde709697c8f84bb1dc7f3";
 
