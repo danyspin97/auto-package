@@ -35,10 +35,11 @@ pub fn run(
         let Some(ws) = Workspace::find_existing(state_root, &[&name]) else {
             continue;
         };
+        let mut own: Vec<String> = Vec::new();
         if let Ok(text) = std::fs::read_to_string(ws.state_json())
             && let Err(e) = serde_json::from_str::<PkgState>(&text)
         {
-            findings.push(format!(
+            own.push(format!(
                 "{name}: state.json cannot be read ({e}); it is treated as empty"
             ));
         }
@@ -46,14 +47,30 @@ pub fn run(
         // The checkout is named by the OBS name the state records, as the
         // pipeline and `reconcile_with_obs` name it; `rpm_name` otherwise.
         let checkout = checkout_root.join(state.obs_name.as_deref().unwrap_or(&name));
-        findings.extend(check_checkout(&name, &state, &ws, &checkout));
+        own.extend(check_checkout(&name, &state, &ws, &checkout));
         if let Some(statuses) = &statuses
             && let Some(f) = check_obs(&name, &state, statuses.get(&name.to_lowercase()))
         {
-            findings.push(f);
+            own.push(f);
+        }
+        // One line per package: the stale state of a package is one note, not one
+        // line per file or per field.
+        if !own.is_empty() {
+            findings.push(package_summary(&name, &own));
         }
     }
     findings
+}
+
+/// The findings of one package on one line: `name: first; second`, each
+/// finding's own `name: ` prefix dropped.
+fn package_summary(name: &str, findings: &[String]) -> String {
+    let prefix = format!("{name}: ");
+    let parts: Vec<&str> = findings
+        .iter()
+        .map(|f| f.strip_prefix(&prefix).unwrap_or(f))
+        .collect();
+    format!("{name}: {}", parts.join("; "))
 }
 
 /// What the checkout and the state directory of one package say about each other.
@@ -246,23 +263,23 @@ mod tests {
         let found = run(&state_root, &checkouts, || Some(statuses));
         let all = found.join("\n");
         assert!(
-            all.contains("python-a: the checkout has file(s)") && all.contains("stray.bin"),
+            all.contains("the checkout has file(s)") && all.contains("stray.bin"),
             "{all}"
         );
         assert!(
-            all.contains("python-a: state.json records a successful build of 1.0"),
+            all.contains("state.json records a successful build of 1.0"),
             "{all}"
         );
         assert!(
-            all.contains("python-a: the spec was switched to an upstream wheel"),
+            all.contains("the spec was switched to an upstream wheel"),
             "{all}"
         );
         assert!(
-            all.contains("python-a: state.json says it built, but OBS shows Failed"),
+            all.contains("state.json says it built, but OBS shows Failed"),
             "{all}"
         );
         assert!(
-            all.contains("python-b: state.json says failed, but OBS shows it built"),
+            all.contains("state.json says failed, but OBS shows it built"),
             "{all}"
         );
     }
@@ -287,7 +304,7 @@ mod tests {
         });
         let all = run(&state_root, &checkouts, || None).join("\n");
         assert!(
-            all.contains("python-apscheduler: state.json records a successful build of 1.0 but the spec says 2.0"),
+            all.contains("state.json records a successful build of 1.0 but the spec says 2.0"),
             "{all}"
         );
         assert!(all.contains("not committed: stray.bin"), "{all}");
@@ -316,18 +333,16 @@ mod tests {
         std::fs::write(state_root.join("python-b/state.json"), "{not json").unwrap();
         let all = run(&state_root, &checkouts, || None).join("\n");
         assert!(
-            all.contains(
-                "python-a: the spec says 2.0 but the checkout's source archive(s) are a-1.0.tar.gz"
-            ),
+            all.contains("the spec says 2.0 but the checkout's source archive(s) are a-1.0.tar.gz"),
             "{all}"
         );
-        assert!(all.contains("python-b: state.json cannot be read"), "{all}");
+        assert!(all.contains("state.json cannot be read"), "{all}");
         // The matching archive is no finding.
         std::fs::write(checkouts.join("python-a/a-2.0.tar.gz"), "x").unwrap();
         assert!(
             !run(&state_root, &checkouts, || None)
                 .join("\n")
-                .contains("python-a: the spec says")
+                .contains("the spec says")
         );
     }
 
