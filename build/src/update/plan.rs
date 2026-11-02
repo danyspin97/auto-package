@@ -65,7 +65,9 @@ where
         .iter()
         .find_map(|s| latest.strip_suffix(s))
         .map_or(latest.clone(), str::to_string);
-    if version::is_prerelease(&latest) && !version::is_prerelease(&header.version) {
+    // `0.2.2~0` is the tag `0.2.2`: its zero offset is not a pre-release marker.
+    let tag_version = version::strip_tag_offset(&header.version);
+    if version::is_prerelease(&latest) && !version::is_prerelease(tag_version) {
         return skipped(
             rpm_name,
             SkipReason::Prerelease {
@@ -121,7 +123,7 @@ where
         Ecosystem::Pypi { .. } => Scheme::Pep440,
         _ => Scheme::Generic,
     };
-    let decision = match compare_versions(&latest, &header.version, scheme) {
+    let decision = match compare_versions(&latest, tag_version, scheme) {
         pypi::VersionCompare::Newer => match series_of(rpm_name, &header.version) {
             Some(series) if !in_series(&latest, &series) => {
                 Decision::Skipped(SkipReason::OtherSeries {

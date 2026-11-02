@@ -67,6 +67,15 @@ pub fn strip_prefix(v: &str) -> &str {
     }
 }
 
+/// The tag a `Version:` names when it carries a zero tag offset: `0.2.2~0` is
+/// the tag `0.2.2`, since an obs_scm service writes `~<commits since the tag>`
+/// and zero commits is the tag itself. Any other version is returned as it is.
+pub fn strip_tag_offset(v: &str) -> &str {
+    v.strip_suffix("~0")
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(v)
+}
+
 /// Starts like a release number and holds only the characters one is written
 /// with.
 fn is_plain(v: &str) -> bool {
@@ -474,6 +483,15 @@ mod tests {
         assert_eq!(cmp_common_prefix("5", "5.3"), Some(Equal));
         assert_eq!(cmp_common_prefix("4", "5.3"), Some(Less));
         assert_eq!(cmp_common_prefix("abc", "5.3"), None);
+    }
+
+    #[test]
+    fn a_zero_tag_offset_is_the_tag() {
+        assert_eq!(strip_tag_offset("0.2.2~0"), "0.2.2");
+        assert_eq!(strip_tag_offset("0.2.2~3"), "0.2.2~3");
+        assert_eq!(strip_tag_offset("0.2.2~10"), "0.2.2~10");
+        assert_eq!(strip_tag_offset("0.2.2"), "0.2.2");
+        assert_eq!(strip_tag_offset("~0"), "~0");
     }
 
     #[test]

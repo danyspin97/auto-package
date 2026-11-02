@@ -230,3 +230,36 @@ pub(super) fn pypi_packages_compare_by_pep440_the_rest_generically() {
         c.decision
     );
 }
+
+/// An obs_scm package whose `Version:` is `<tag>~0` is on the tag itself, so
+/// the tag is what it is compared with; a non-zero offset is still behind the
+/// tag's release and is an update.
+#[test]
+pub(super) fn a_zero_tag_offset_is_compared_as_the_tag() {
+    let spec = |version: &str| {
+        format!(
+            "Name: wlrctl\nVersion: {version}\n\
+             Source: https://github.com/acheronuk/wlrctl/archive/v%{{version}}.tar.gz\n"
+        )
+    };
+    let on_tag = classify(
+        "wlrctl",
+        &|_: &str| Ok(spec("0.2.2~0")),
+        &only_repo("0.2.2"),
+    );
+    assert!(
+        matches!(on_tag.decision, Decision::UpToDate { .. }),
+        "{:?}",
+        on_tag.decision
+    );
+    let ahead = classify(
+        "wlrctl",
+        &|_: &str| Ok(spec("0.2.2~3")),
+        &only_repo("0.2.2"),
+    );
+    assert!(
+        matches!(ahead.decision, Decision::Update { .. }),
+        "{:?}",
+        ahead.decision
+    );
+}
