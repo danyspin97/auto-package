@@ -4,8 +4,11 @@
 //! bullet keeps the text of the first bullet that is not a refresh, unless a
 //! later one starts with Revert, Replace, Instead, Undo or Drop.
 
+use super::changes::newest_changes_file;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
 
 /// One bullet of an entry body.
 struct Bullet {
@@ -129,6 +132,66 @@ fn is_refresh(head: &str) -> bool {
 /// The leading words of a bullet that take over the text of the bullets before
 /// them: the change it makes undoes or replaces what they say.
 const REPLACING: [&str; 5] = ["Revert", "Replace", "Instead", "Undo", "Drop"];
+
+/// [`rewrite_entry_from_diff`] on the checkout's `.changes` file (the one
+/// [`newest_changes_file`] picks), against `baseline`: the directory
+/// `save_baseline` kept, holding what OBS had before this run (`files/` holds
+/// each name's copy, `tracked` the names). Best effort: a file that cannot be
+/// read or written is left as it is.
+pub fn rewrite_unpublished_entry(checkout_dir: &Path, baseline: &Path) {
+    let Some(file) = newest_changes_file(checkout_dir) else {
+        return;
+    };
+    let Some(name) = file.file_name() else {
+        return;
+    };
+    let Ok(working) = fs::read_to_string(&file) else {
+        return;
+    };
+    let pristine = fs::read_to_string(baseline.join("files").join(name)).unwrap_or_default();
+    let (changed, known) = package_diff(checkout_dir, baseline);
+    if let Some(text) = rewrite_entry_from_diff(&working, &pristine, &changed, &known) {
+        let _ = fs::write(&file, text);
+    }
+}
+
+/// The package files the checkout changes against `baseline`, and every package
+/// file: the names the baseline tracks and the checkout holds (hidden files
+/// aside). A file counts as changed when it is missing on one side.
+fn package_diff(checkout_dir: &Path, baseline: &Path) -> (BTreeSet<String>, BTreeSet<String>) {
+    let saved = baseline.join("files");
+    let tracked = fs::read_to_string(baseline.join("tracked")).unwrap_or_default();
+    let mut known: BTreeSet<String> = tracked
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if let Ok(rd) = fs::read_dir(checkout_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_file() && !name.starts_with('.') {
+                known.insert(name);
+            }
+        }
+    }
+    let changed = known
+        .iter()
+        .filter(|n| differs(&checkout_dir.join(n), &saved.join(n)))
+        .cloned()
+        .collect();
+    (changed, known)
+}
+
+/// Whether the file at `now` differs from the one at `before`: missing on one
+/// side only, or of another length, or other bytes.
+fn differs(now: &Path, before: &Path) -> bool {
+    match (fs::metadata(now), fs::metadata(before)) {
+        (Ok(a), Ok(b)) if a.len() != b.len() => true,
+        (Ok(_), Ok(_)) => fs::read(now).ok() != fs::read(before).ok(),
+        (Err(_), Err(_)) => false,
+        _ => true,
+    }
+}
 
 /// `line` onto `body`, unless it is blank and `body` already ends blank.
 fn push_line(body: &mut Vec<String>, line: &str) {

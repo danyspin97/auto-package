@@ -104,6 +104,9 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     settle_fix_flags(ctx, &baseline, commit_step.id);
     settle_risk_flags(ctx, &baseline);
+    // The entry is rewritten once every turn has added its bullets, so it
+    // reads as the net change against what OBS holds (no model call).
+    osc::rewrite_unpublished_entry(&ctx.checkout_dir, &baseline);
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
     let plan = osc::publish_plan(&ctx.checkout_dir);
     for name in &plan.skipped {

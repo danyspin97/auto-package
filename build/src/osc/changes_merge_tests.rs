@@ -1,5 +1,6 @@
-use crate::osc::changes_merge::rewrite_entry_from_diff;
+use crate::osc::changes_merge::{rewrite_entry_from_diff, rewrite_unpublished_entry};
 use std::collections::BTreeSet;
+use std::fs;
 
 /// The duckdb 2.0.0 entry of run 1 as the agent turns left it (server:database
 /// branch, `duckdb.changes`): nine refreshes, then one bullet per agent fix.
@@ -431,4 +432,55 @@ fn a_second_pass_over_the_result_changes_nothing() {
     assert!(
         rewrite_entry_from_diff(&once, DUCKDB_OLD, &duckdb_changed(), &duckdb_files()).is_none()
     );
+}
+
+#[test]
+fn the_checkout_entry_is_rewritten_against_the_saved_baseline() {
+    let root = tempfile::tempdir().unwrap();
+    let checkout = root.path().join("duckdb");
+    let baseline = root.path().join("obs-baseline");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::create_dir_all(baseline.join("files")).unwrap();
+    // What OBS holds: the old changes, and two patches that the run then
+    // changes (zstd) or leaves alone (yyjson).
+    fs::write(baseline.join("files/duckdb.changes"), DUCKDB_OLD).unwrap();
+    fs::write(baseline.join("files/duckdb-use-system-zstd.patch"), "old\n").unwrap();
+    fs::write(
+        baseline.join("files/duckdb-use-system-yyjson.patch"),
+        "same\n",
+    )
+    .unwrap();
+    fs::write(
+        baseline.join("tracked"),
+        "duckdb.changes\nduckdb-use-system-zstd.patch\nduckdb-use-system-yyjson.patch\n",
+    )
+    .unwrap();
+    fs::write(checkout.join("duckdb-use-system-zstd.patch"), "new\n").unwrap();
+    fs::write(checkout.join("duckdb-use-system-yyjson.patch"), "same\n").unwrap();
+    let entry = "\
+-------------------------------------------------------------------
+Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 2.0.0
+- Refresh duckdb-use-system-zstd.patch
+- Fix duckdb-use-system-zstd.patch to drop a shim
+- Refresh duckdb-use-system-yyjson.patch
+
+";
+    fs::write(
+        checkout.join("duckdb.changes"),
+        format!("{entry}{DUCKDB_OLD}"),
+    )
+    .unwrap();
+
+    rewrite_unpublished_entry(&checkout, &baseline);
+
+    let out = fs::read_to_string(checkout.join("duckdb.changes")).unwrap();
+    assert!(
+        out.contains("- Fix duckdb-use-system-zstd.patch to drop a shim\n"),
+        "{out}"
+    );
+    // The yyjson patch is the same as OBS's: its bullet names nothing changed.
+    assert!(!out.contains("yyjson"), "{out}");
+    assert!(out.ends_with(DUCKDB_OLD), "{out}");
 }

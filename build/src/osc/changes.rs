@@ -147,7 +147,7 @@ pub fn set_flag_lines(
 }
 
 /// The first `.changes` file of `checkout_dir`, in name order.
-fn newest_changes_file(checkout_dir: &Path) -> Option<PathBuf> {
+pub(super) fn newest_changes_file(checkout_dir: &Path) -> Option<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(checkout_dir)
         .ok()?
         .flatten()
