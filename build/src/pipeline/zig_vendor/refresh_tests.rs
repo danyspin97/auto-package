@@ -2,7 +2,7 @@
 //! dir: no network. The dependency is the real pixman archive, whose hash
 //! `build.zig.zon` declares.
 
-use super::fetch::{Fetch, Response};
+use super::fetch::{Fetch, Refusal, Response};
 use super::refresh::refresh_checkout;
 use ap_core::sink::NullReporter;
 use std::cell::RefCell;
@@ -30,7 +30,7 @@ impl Fake {
 }
 
 impl Fetch for Fake {
-    fn get(&self, url: &str) -> Result<Response, String> {
+    fn get(&self, url: &str) -> Result<Response, Refusal> {
         self.calls.borrow_mut().push(url.to_string());
         if url == PIXMAN_URL {
             Ok(Response::Body {
@@ -38,7 +38,7 @@ impl Fetch for Fake {
                 body: Box::new(std::io::Cursor::new(PIXMAN.to_vec())),
             })
         } else {
-            Err(format!("no route for {url}"))
+            Err(format!("no route for {url}").into())
         }
     }
 }
@@ -370,8 +370,9 @@ fn a_zig_requirement_without_a_version_is_refused_before_any_request() {
     let dir = checkout(&spec, &src0, "vendor.tar.zst");
     let fake = Fake::new();
     let work = tempfile::tempdir().unwrap();
-    let err =
-        refresh_checkout(dir.path(), &spec, "pkg", &fake, &NullReporter, work.path()).unwrap_err();
+    let err = refresh_checkout(dir.path(), &spec, "pkg", &fake, &NullReporter, work.path())
+        .unwrap_err()
+        .msg;
     assert!(err.contains("version"), "{err}");
     assert!(fake.calls.borrow().is_empty());
     assert_eq!(
@@ -466,7 +467,8 @@ fn a_hash_mismatch_ends_the_refresh_and_writes_nothing() {
         &NullReporter,
         work.path(),
     )
-    .unwrap_err();
+    .unwrap_err()
+    .msg;
     assert!(err.contains("archive hash"), "{err}");
     assert_eq!(
         std::fs::read(dir.path().join("vendor.tar.zst")).unwrap(),
@@ -486,8 +488,9 @@ fn a_dependency_off_the_allowlist_is_refused_before_it_is_requested() {
     let dir = checkout(&spec, &src0, "vendor.tar.zst");
     let fake = Fake::new();
     let work = tempfile::tempdir().unwrap();
-    let err =
-        refresh_checkout(dir.path(), &spec, "pkg", &fake, &NullReporter, work.path()).unwrap_err();
+    let err = refresh_checkout(dir.path(), &spec, "pkg", &fake, &NullReporter, work.path())
+        .unwrap_err()
+        .msg;
     assert!(err.contains("evil.example.net"), "{err}");
     assert!(fake.calls.borrow().is_empty());
     assert_eq!(
@@ -514,7 +517,8 @@ fn a_source0_without_build_zig_zon_is_refused() {
         &NullReporter,
         work.path(),
     )
-    .unwrap_err();
+    .unwrap_err()
+    .msg;
     assert!(err.contains("build.zig.zon"), "{err}");
     assert_eq!(
         std::fs::read(dir.path().join("vendor.tar.zst")).unwrap(),
@@ -540,7 +544,8 @@ fn a_build_that_reads_two_caches_is_refused() {
         &NullReporter,
         work.path(),
     )
-    .unwrap_err();
+    .unwrap_err()
+    .msg;
     assert!(err.contains("two zig caches"), "{err}");
 }
 

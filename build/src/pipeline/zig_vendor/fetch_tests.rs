@@ -1,6 +1,7 @@
 use super::fetch::*;
 use super::hash::PackageHash;
 use super::zon;
+use crate::pipeline::FailureKind;
 use std::cell::RefCell;
 
 /// The real pixman archive; its declared hash is in river's `build.zig.zon`.
@@ -20,6 +21,10 @@ pub(super) enum Route {
     Typed(&'static str, Vec<u8>),
     /// A body served with no Content-Type at all.
     Untyped(Vec<u8>),
+    /// Refused with this failure kind, every time.
+    Fail(FailureKind),
+    /// Refused as transient for the first `usize` requests, then the body.
+    Flaky(usize, Vec<u8>),
 }
 
 /// Serves `routes` by exact URL and records every URL asked for.
@@ -45,7 +50,7 @@ impl Fake {
 }
 
 impl Fetch for Fake {
-    fn get(&self, url: &str) -> Result<Response, String> {
+    fn get(&self, url: &str) -> Result<Response, Refusal> {
         self.calls.borrow_mut().push(url.to_string());
         match self.routes.iter().find(|(u, _)| u == url) {
             Some((_, Route::Redirect(to))) => Ok(Response::Redirect(to.clone())),
@@ -61,7 +66,26 @@ impl Fetch for Fake {
                 content_type: Some(ct.to_string()),
                 body: Box::new(std::io::Cursor::new(b.clone())),
             }),
-            None => Err(format!("no route for {url}")),
+            Some((_, Route::Fail(kind))) => Err(Refusal {
+                kind: *kind,
+                msg: format!("fake refusal for {url}"),
+                wait: None,
+            }),
+            Some((_, Route::Flaky(fails, b))) => {
+                let asked = self.calls.borrow().iter().filter(|u| *u == url).count();
+                if asked <= *fails {
+                    return Err(Refusal {
+                        kind: FailureKind::Transient,
+                        msg: format!("fake timeout for {url}"),
+                        wait: None,
+                    });
+                }
+                Ok(Response::Body {
+                    content_type: Some("application/octet-stream".to_string()),
+                    body: Box::new(std::io::Cursor::new(b.clone())),
+                })
+            }
+            None => Err(format!("no route for {url}").into()),
         }
     }
 }
@@ -144,7 +168,7 @@ impl ap_core::sink::Reporter for Quiet {
 pub(super) fn fetch(
     fake: &Fake,
     package_root: &zon::Manifest,
-) -> (tempfile::TempDir, Result<Vec<Dep>, String>) {
+) -> (tempfile::TempDir, Result<Vec<Dep>, Refusal>) {
     crate::workspace::disable_disk_gate_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let req = Request {
@@ -153,6 +177,7 @@ pub(super) fn fetch(
         work: dir.path(),
         limits: super::unpack::LIMITS,
         reporter: &Quiet,
+        pause: std::time::Duration::ZERO,
     };
     let result = fetch_vendor(&req, package_root);
     (dir, result)
@@ -221,7 +246,12 @@ fn an_unrecognized_content_type_is_refused_after_the_request() {
         Route::Typed("text/html", ZIG_XZ.to_vec()),
     )]);
     let (_dir, result) = fetch(&fake, &root(&dep("pkg", ZIG_XZ_URL, ZIG_XZ_HASH)));
-    assert!(result.unwrap_err().contains("unrecognized Content-Type"));
+    assert!(
+        result
+            .unwrap_err()
+            .msg
+            .contains("unrecognized Content-Type")
+    );
     assert_eq!(fake.calls(), [ZIG_XZ_URL]);
 }
 
@@ -233,6 +263,7 @@ fn a_bz2_archive_is_refused_because_zig_refuses_it() {
     assert!(
         result
             .unwrap_err()
+            .msg
             .contains("not a format zig_vendor reads")
     );
 }
@@ -273,7 +304,7 @@ fn a_legacy_1220_hash_that_does_not_match_is_refused() {
     let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, &wrong)));
     let err = result.unwrap_err();
     assert!(
-        err.contains("archive hash 1220") && err.contains(&wrong),
+        err.msg.contains("archive hash 1220") && err.msg.contains(&wrong),
         "{err}"
     );
 }
@@ -297,8 +328,58 @@ fn a_host_off_the_allowlist_is_refused_and_never_requested() {
     let fake = Fake::new(vec![(url, Route::Body(PIXMAN.to_vec()))]);
     let (_dir, result) = fetch(&fake, &root(&dep("pixman", url, PIXMAN_HASH)));
     let err = result.unwrap_err();
-    assert!(err.contains("evil.example.net"), "{err}");
+    assert!(err.msg.contains("evil.example.net"), "{err}");
     assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn a_transient_failure_is_tried_again_until_the_archive_comes() {
+    let fake = Fake::new(vec![(PIXMAN_URL, Route::Flaky(2, PIXMAN.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, PIXMAN_HASH)));
+    assert_eq!(result.unwrap()[0].declared, PIXMAN_HASH);
+    assert_eq!(fake.calls().len(), 3);
+}
+
+#[test]
+fn three_transient_failures_end_the_fetch_as_infrastructure() {
+    let fake = Fake::new(vec![(PIXMAN_URL, Route::Flaky(3, PIXMAN.to_vec()))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, PIXMAN_HASH)));
+    let err = result.unwrap_err();
+    assert_eq!(err.kind, FailureKind::Transient);
+    assert!(err.msg.contains("(after 3 tries)"), "{err}");
+    assert_eq!(fake.calls().len(), 3);
+}
+
+#[test]
+fn a_gone_archive_is_broken_outside_the_tool_and_asked_for_once() {
+    let fake = Fake::new(vec![(PIXMAN_URL, Route::Fail(FailureKind::BrokenOutside))]);
+    let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, PIXMAN_HASH)));
+    let err = result.unwrap_err();
+    assert_eq!(err.kind, FailureKind::BrokenOutside);
+    assert!(err.msg.starts_with("zig dep pixman:"), "{err}");
+    assert_eq!(fake.calls().len(), 1);
+}
+
+#[test]
+fn http_statuses_and_connection_errors_sort_into_their_classes() {
+    let kind = |e: ureq::Error| http_refusal("https://codeberg.org/x.tar.gz", e).kind;
+    assert_eq!(
+        kind(ureq::Error::StatusCode(404)),
+        FailureKind::BrokenOutside
+    );
+    assert_eq!(
+        kind(ureq::Error::StatusCode(410)),
+        FailureKind::BrokenOutside
+    );
+    assert_eq!(kind(ureq::Error::StatusCode(500)), FailureKind::Transient);
+    assert_eq!(kind(ureq::Error::StatusCode(503)), FailureKind::Transient);
+    assert_eq!(kind(ureq::Error::StatusCode(403)), FailureKind::Other);
+    assert_eq!(kind(ureq::Error::ConnectionFailed), FailureKind::Transient);
+    assert_eq!(kind(ureq::Error::HostNotFound), FailureKind::Transient);
+    let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+    assert_eq!(kind(ureq::Error::Io(reset)), FailureKind::Transient);
+    let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    assert_eq!(kind(ureq::Error::Io(denied)), FailureKind::Other);
 }
 
 #[test]
@@ -341,7 +422,7 @@ fn a_redirect_to_an_unlisted_host_is_refused_before_it_is_requested() {
         Route::Redirect("https://evil.example.net/a.tar.gz".into()),
     )]);
     let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, PIXMAN_HASH)));
-    assert!(result.unwrap_err().contains("evil.example.net"));
+    assert!(result.unwrap_err().msg.contains("evil.example.net"));
     assert_eq!(fake.calls(), [PIXMAN_URL]);
 }
 
@@ -352,14 +433,14 @@ fn a_redirect_to_plain_http_is_refused() {
         Route::Redirect("http://codeberg.org/x.tar.gz".into()),
     )]);
     let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, PIXMAN_HASH)));
-    assert!(result.unwrap_err().contains("not an https://"));
+    assert!(result.unwrap_err().msg.contains("not an https://"));
 }
 
 #[test]
 fn a_redirect_loop_stops_after_the_limit() {
     let fake = Fake::new(vec![(PIXMAN_URL, Route::Redirect(PIXMAN_URL.into()))]);
     let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, PIXMAN_HASH)));
-    assert!(result.unwrap_err().contains("redirects"));
+    assert!(result.unwrap_err().msg.contains("redirects"));
     assert_eq!(fake.calls().len(), MAX_REDIRECTS + 1);
 }
 
@@ -368,9 +449,10 @@ fn an_archive_with_another_hash_is_refused_with_both_hashes() {
     let fake = Fake::new(vec![(PIXMAN_URL, Route::Body(WAYLAND.to_vec()))]);
     let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, PIXMAN_HASH)));
     let err = result.unwrap_err();
-    assert!(err.contains("archive hash"), "{err}");
-    assert!(err.contains("≠ build.zig.zon"), "{err}");
-    assert!(err.contains(PIXMAN_HASH), "{err}");
+    assert!(err.msg.contains("archive hash"), "{err}");
+    assert!(err.msg.contains("≠ build.zig.zon"), "{err}");
+    assert_eq!(err.kind, FailureKind::NeedsMaintainer);
+    assert!(err.msg.contains(PIXMAN_HASH), "{err}");
 }
 
 #[test]
@@ -415,7 +497,7 @@ fn a_dependency_without_a_hash_is_refused() {
     let m = root(&format!(".pixman = .{{ .url = \"{url}\" }},"));
     let fake = Fake::new(vec![]);
     let (_dir, result) = fetch(&fake, &m);
-    assert!(result.unwrap_err().contains("no .hash"));
+    assert!(result.unwrap_err().msg.contains("no .hash"));
     assert!(fake.calls().is_empty());
 }
 
@@ -451,7 +533,7 @@ fn an_archive_without_a_manifest_is_refused() {
     let url = "https://codeberg.org/o/pk/archive/v1.tar.gz";
     let fake = Fake::new(vec![(url, Route::Body(no_zon))]);
     let (_dir, result) = fetch(&fake, &root(&dep("pk", url, PIXMAN_HASH)));
-    assert!(result.unwrap_err().contains("no build.zig.zon"));
+    assert!(result.unwrap_err().msg.contains("no build.zig.zon"));
 }
 
 #[test]
@@ -511,6 +593,6 @@ fn git_urls_that_are_not_pinned_or_not_forges_are_refused() {
 fn a_malformed_declared_hash_is_refused_before_any_request() {
     let fake = Fake::new(vec![(PIXMAN_URL, Route::Body(PIXMAN.to_vec()))]);
     let (_dir, result) = fetch(&fake, &root(&dep("pixman", PIXMAN_URL, "1220abcdef")));
-    assert!(result.unwrap_err().contains("zig dep pixman"));
+    assert!(result.unwrap_err().msg.contains("zig dep pixman"));
     assert!(fake.calls().is_empty());
 }

@@ -14,12 +14,15 @@ mod unpack;
 mod vendor_tar;
 mod zon;
 
+pub(in crate::pipeline) use fetch::Refusal;
 pub(in crate::pipeline) use refresh::{applies, refresh_from_network};
 
 #[cfg(test)]
 mod fetch_archive_tests;
 #[cfg(test)]
 mod fetch_forge_tests;
+#[cfg(test)]
+mod fetch_status_tests;
 #[cfg(test)]
 mod fetch_tests;
 #[cfg(test)]

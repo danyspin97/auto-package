@@ -274,6 +274,15 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
         } => PackageOutcome::NeedsMaintainer {
             reason: reason.clone(),
         },
+        // Still a failure, but the summary says the URL is gone upstream.
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::BrokenOutside,
+            ..
+        } => PackageOutcome::Failed {
+            reason: format!("broken outside the tool: {reason}"),
+            disk_full: false,
+        },
         PipelineResult::Failed { reason, kind, .. } => PackageOutcome::Failed {
             reason: reason.clone(),
             disk_full: *kind == FailureKind::DiskFull,

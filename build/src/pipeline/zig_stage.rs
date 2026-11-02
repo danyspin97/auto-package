@@ -3,7 +3,7 @@
 //! refusal ends the package with its reason, and no agent turn follows.
 
 use super::*;
-use crate::pipeline::zig_vendor::{applies, refresh_from_network};
+use crate::pipeline::zig_vendor::{Refusal, applies, refresh_from_network};
 use ap_core::event::ZigDep;
 
 /// Step: ZigVendor, on an update of a package whose spec reads a zig vendor
@@ -42,7 +42,7 @@ pub(super) fn zig_vendor_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pi
         rpm_name.clone()
     );
     if let Some(why) = refusal {
-        return Err(refused(ctx, step, &why));
+        return Err(refused(ctx, step, why));
     }
     // The dependency archives unpack into the workspace, and go with it.
     let work = match tempfile::tempdir_in(ws.dir()) {
@@ -51,13 +51,13 @@ pub(super) fn zig_vendor_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pi
             return Err(refused(
                 ctx,
                 step,
-                &format!("no directory to unpack into: {e}"),
+                format!("no directory to unpack into: {e}"),
             ));
         }
     };
     let done = match refresh_from_network(checkout_dir, &spec, rpm_name, reporter, work.path()) {
         Ok(done) => done,
-        Err(why) => return Err(refused(ctx, step, &why)),
+        Err(why) => return Err(refused(ctx, step, why)),
     };
     let Some(done) = done else {
         step.finish(StepOutcome::Ok);
@@ -95,8 +95,13 @@ pub(super) fn zig_vendor_stage(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pi
     Ok(())
 }
 
-/// The package ends with `why`: the refresh is refused, and the step failed.
-fn refused(ctx: &RunCtx, step: StepGuard<'_>, why: &str) -> PipelineResult {
+/// The package ends with `why`, as its failure kind: the refresh is refused,
+/// and the step failed. A plain reason is an `Other` failure.
+fn refused(ctx: &RunCtx, step: StepGuard<'_>, why: impl Into<Refusal>) -> PipelineResult {
+    let why = why.into();
     step.finish(StepOutcome::Failed);
-    ctx.failed(format!("the zig vendor archive cannot be refreshed: {why}"))
+    ctx.failed_as(
+        why.kind,
+        format!("the zig vendor archive cannot be refreshed: {}", why.msg),
+    )
 }

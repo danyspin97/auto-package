@@ -67,3 +67,19 @@ fn a_spent_ladder_is_an_ordinary_failure() {
         PackageOutcome::Failed { .. }
     ));
 }
+
+#[test]
+fn a_url_gone_upstream_is_a_failure_that_says_so() {
+    let gone = PipelineResult::Failed {
+        rpm_name: "python-x".into(),
+        reason: "the zig vendor archive cannot be refreshed: fetching x: HTTP 404".into(),
+        kind: FailureKind::BrokenOutside,
+    };
+    match package_outcome(&gone) {
+        PackageOutcome::Failed { reason, disk_full } => {
+            assert!(reason.starts_with("broken outside the tool: "), "{reason}");
+            assert!(!disk_full);
+        }
+        other => panic!("not a failure: {other:?}"),
+    }
+}

@@ -107,5 +107,5 @@ fn a_response_with_no_content_type_is_refused_as_zig_refuses_it() {
     let fake = Fake::new(vec![(url, Route::Untyped(escaping_links_archive()))]);
     let (_dir, result) = fetch(&fake, &root(&dep("pkg", url, ESCAPE_HASH)));
     let err = result.unwrap_err();
-    assert!(err.contains("no Content-Type"), "{err}");
+    assert!(err.msg.contains("no Content-Type"), "{err}");
 }

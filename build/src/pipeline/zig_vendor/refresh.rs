@@ -7,7 +7,7 @@ use std::path::Path;
 
 use ap_core::sink::Reporter;
 
-use super::fetch::{Fetch, HttpFetch, Request, fetch_vendor};
+use super::fetch::{Fetch, HttpFetch, RETRY_PAUSE, Refusal, Request, fetch_vendor};
 use super::plan::{plan, source0_file};
 use super::unpack::{Format, LIMITS, unpack};
 use super::vendor_tar::write_vendor_tar;
@@ -41,7 +41,7 @@ pub(in crate::pipeline) fn refresh_from_network(
     package: &str,
     reporter: &dyn Reporter,
     work: &Path,
-) -> Result<Option<Refreshed>, String> {
+) -> Result<Option<Refreshed>, Refusal> {
     refresh_checkout(checkout, spec, package, &HttpFetch, reporter, work)
 }
 
@@ -61,11 +61,12 @@ pub(super) fn refresh_checkout(
     fetch: &dyn Fetch,
     reporter: &dyn Reporter,
     work: &Path,
-) -> Result<Option<Refreshed>, String> {
+) -> Result<Option<Refreshed>, Refusal> {
     let Some(plan) = plan(spec)? else {
         return Ok(None);
     };
-    let source0 = source0_file(spec).ok_or("the spec's Source0 has no file name")?;
+    let source0 =
+        source0_file(spec).ok_or_else(|| "the spec's Source0 has no file name".to_string())?;
     let archive = checkout.join(&source0);
     let file = std::fs::File::open(&archive)
         .map_err(|e| format!("the new Source0 {source0} is not in the checkout: {e}"))?;
@@ -87,6 +88,7 @@ pub(super) fn refresh_checkout(
         work: &deps_dir,
         limits: LIMITS,
         reporter,
+        pause: RETRY_PAUSE,
     };
     let deps = fetch_vendor(&req, &manifest)?;
     // The archive is streamed into a temp file next to its target, so a
