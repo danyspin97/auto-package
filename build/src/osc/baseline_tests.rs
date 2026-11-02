@@ -45,6 +45,7 @@ fn a_run_that_wrote_nothing_restores_nothing() {
     save_baseline(co.path(), base.path()).unwrap();
     let res = restore_baseline_with(
         base.path(),
+        co.path(),
         |_| Ok(()),
         |_, _, _| unreachable!("nothing was attempted, so nothing is committed"),
     );
@@ -70,6 +71,7 @@ fn a_failed_attempt_is_undone_and_its_new_file_removed() {
     let mut sent = Vec::new();
     let res = restore_baseline_with(
         base.path(),
+        co.path(),
         |_| Ok(()),
         |_, message, files| {
             sent.push((message.to_string(), files.to_vec()));
@@ -99,6 +101,7 @@ fn an_attempted_file_that_never_reached_obs_is_left_alone() {
     note_attempt(base.path(), &["foo-2.0.tar.gz".to_string()]).unwrap();
     let res = restore_baseline_with(
         base.path(),
+        co.path(),
         |_| Ok(()),
         |_, _, _| unreachable!("nothing reached OBS, so nothing is committed"),
     );
@@ -155,7 +158,7 @@ fn begin_baseline_keeps_an_unrestored_one_and_refuses() {
     // An attempt whose restore cannot run (a file name that is not plain):
     // no OBS call is made, the restore fails and marks the baseline.
     note_attempt(&kept, &["../escape".to_string()]).unwrap();
-    assert!(restore_baseline(&kept, Emit::quiet()).is_err());
+    assert!(restore_baseline(&kept, co.path(), Emit::quiet()).is_err());
     let err =
         begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap_err();
     assert!(err.contains(&kept.display().to_string()), "{err}");
@@ -185,9 +188,30 @@ fn a_tracked_file_without_a_saved_copy_is_not_guessed_back() {
     note_attempt(base.path(), &["foo.spec".to_string()]).unwrap();
     let err = restore_baseline_with(
         base.path(),
+        co.path(),
         |_| Ok(()),
         |_, _, _| unreachable!("the baseline cannot be restored, so nothing is committed"),
     )
     .unwrap_err();
     assert!(err.contains("no saved copy"), "{err}");
+}
+
+#[test]
+fn a_baseline_saved_from_another_checkout_is_refused_and_nothing_is_written() {
+    // The restore writes into the path the baseline names, so a baseline that
+    // names another checkout than the caller's is refused before any write.
+    let co = checkout(&[("foo.spec", "a")]);
+    let other = checkout(&[("foo.spec", "b")]);
+    let base = tempfile::tempdir().unwrap();
+    save_baseline(other.path(), base.path()).unwrap();
+    note_attempt(base.path(), &["foo.spec".to_string()]).unwrap();
+    let err = restore_baseline_with(
+        base.path(),
+        co.path(),
+        |_| Ok(()),
+        |_, _, _| unreachable!("a refused restore commits nothing"),
+    )
+    .unwrap_err();
+    assert!(err.contains("not from"), "{err}");
+    assert_eq!(fs::read_to_string(co.path().join("foo.spec")).unwrap(), "a");
 }

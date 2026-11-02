@@ -94,7 +94,7 @@ pub fn begin_baseline(
 ) -> Result<PathBuf, String> {
     let dir = root.join(ap_core::run::sanitize_name(branch)).join(pkg);
     if is_pending(&dir) {
-        restore_baseline(&dir, emit).map_err(|why| {
+        restore_baseline(&dir, checkout_dir, emit).map_err(|why| {
             format!(
                 "the OBS baseline kept at {} was NOT restored ({why}); \
                  it is kept there, and nothing was written. If OBS is right as it \
@@ -133,6 +133,9 @@ pub fn discard_pending(dir: &Path) -> std::io::Result<bool> {
 /// Put the baseline saved in `dir` back into its checkout, and commit what the
 /// attempts sent to OBS with `commit`, the OBS write (the real one is
 /// [`commit`]; tests record the call). A tracked file gets its saved copy back.
+/// `expected` is the checkout the caller writes for this package: a baseline
+/// that names another one is refused, since the restore writes into the path it
+/// names.
 /// A file the attempts added is removed from the checkout, and committed as a
 /// deletion, only when OBS lists it now (`.osc/_files`, which osc updates on a
 /// commit that lands): a file that never reached OBS has nothing to undo.
@@ -142,6 +145,7 @@ pub fn discard_pending(dir: &Path) -> std::io::Result<bool> {
 /// [`obs_still_at_checkout`]).
 pub fn restore_baseline_with(
     dir: &Path,
+    expected: &Path,
     obs_check: impl FnOnce(&Path) -> Result<(), String>,
     commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
 ) -> Result<(), String> {
@@ -152,6 +156,13 @@ pub fn restore_baseline_with(
     let checkout = fs::read_to_string(dir.join("checkout"))
         .map(PathBuf::from)
         .map_err(|e| format!("the checkout the baseline was saved from is unknown: {e}"))?;
+    if checkout != expected {
+        return Err(format!(
+            "the baseline was saved from {}, not from {}: nothing was written",
+            checkout.display(),
+            expected.display()
+        ));
+    }
     let tracked = fs::read_to_string(dir.join("tracked")).unwrap_or_default();
     let on_obs = tracked_files(&checkout);
     if let Some(bad) = attempted.iter().find(|n| !is_safe_file_arg(n)) {
@@ -218,12 +229,16 @@ pub fn obs_still_at_checkout(checkout: &Path) -> Result<(), String> {
 /// once it is restored. A failure leaves `dir` in place, marked as unrestored
 /// (see [`begin_baseline`]). The commit may run after a shutdown: see
 /// [`proc::restoring_after_shutdown`]. Refuses when OBS has moved on (see
-/// [`obs_still_at_checkout`]).
-pub fn restore_baseline(dir: &Path, emit: Emit<'_>) -> Result<(), String> {
+/// [`obs_still_at_checkout`]), or when the baseline was saved from a checkout
+/// other than `expected`.
+pub fn restore_baseline(dir: &Path, expected: &Path, emit: Emit<'_>) -> Result<(), String> {
     let _restoring = proc::restoring_after_shutdown();
-    match restore_baseline_with(dir, obs_still_at_checkout, |checkout, message, files| {
-        commit(checkout, message, files, emit)
-    }) {
+    match restore_baseline_with(
+        dir,
+        expected,
+        obs_still_at_checkout,
+        |checkout, message, files| commit(checkout, message, files, emit),
+    ) {
         Ok(()) => {
             let _ = fs::remove_dir_all(dir);
             Ok(())

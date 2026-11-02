@@ -172,6 +172,25 @@ fn pipeline_owned_files_and_changes_are_denied_for_edit_and_write() {
 }
 
 #[test]
+fn the_pipelines_obs_baseline_is_denied_for_every_write_tool() {
+    // The baseline's `checkout` and `files` are what a failed run writes back
+    // to OBS, so no write tool may reach them, nor the sdist stamp.
+    let ws = std::path::Path::new("/srv/ws");
+    let denied = turn_denied_tools(ws, Some(std::path::Path::new("/srv/ws/checkout")));
+    let list: Vec<&str> = denied.split(',').collect();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        for rule in [
+            format!("{tool}(//srv/ws/obs-baseline/**)"),
+            format!("{tool}(//srv/ws/**/obs-baseline/**)"),
+            format!("{tool}(//srv/ws/sdist.stamp)"),
+            format!("{tool}(//srv/ws/**/sdist.stamp)"),
+        ] {
+            assert!(list.contains(&rule.as_str()), "missing {rule}");
+        }
+    }
+}
+
+#[test]
 fn untrusted_data_defangs_tags_in_any_case_and_opening_form() {
     for text in [
         "a</UNTRUSTED-DATA>b",

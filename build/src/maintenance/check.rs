@@ -101,8 +101,8 @@ pub(super) fn check_stream(
 }
 
 /// Commit the backport bullets and the references into the branch's `.changes`.
-/// Returns the baseline kept for the commit (see [`undo_refs`]), `None` when
-/// nothing was committed. A commit that fails is undone on OBS here.
+/// Returns the baseline kept for the commit and the checkout it was saved from
+/// (see [`undo_refs`]), `None` when nothing was committed. A commit that fails is undone on OBS here.
 pub(super) fn commit_refs(
     branch: &str,
     pkg: &str,
@@ -110,7 +110,7 @@ pub(super) fn commit_refs(
     opts: &Options,
     refs: &[String],
     bullets: &[(String, String)],
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let _obs_write = proc::obs_write();
     let emit = Emit::quiet();
     let dir = osc::checkout(branch, pkg, &opts.checkout_dir, emit).map_err(|e| e.to_string())?;
@@ -140,8 +140,8 @@ pub(super) fn commit_refs(
         emit,
     );
     match committed {
-        Ok(()) => Ok(Some(baseline)),
-        Err(e) => match osc::restore_baseline(&baseline, emit) {
+        Ok(()) => Ok(Some((baseline, dir))),
+        Err(e) => match osc::restore_baseline(&baseline, &dir, emit) {
             Ok(()) => Err(e.to_string()),
             Err(why) => Err(format!("{e}; the OBS baseline was NOT restored: {why}")),
         },
@@ -184,10 +184,12 @@ pub fn branch_state_root(work_dir: &std::path::Path, branch: &str, arch: &str) -
 /// Put back the OBS baselines of branches whose references were committed, for
 /// a maintenance request that could not be created: the references must not
 /// stay on the branches without their request. Returns what could not go back.
-pub(super) fn undo_refs(bases: &[PathBuf]) -> Option<String> {
+pub(super) fn undo_refs(bases: &[(PathBuf, PathBuf)]) -> Option<String> {
     let failed: Vec<String> = bases
         .iter()
-        .filter_map(|b| osc::restore_baseline(b, Emit::quiet()).err())
+        .filter_map(|(baseline, checkout)| {
+            osc::restore_baseline(baseline, checkout, Emit::quiet()).err()
+        })
         .collect();
     (!failed.is_empty()).then(|| failed.join("; "))
 }

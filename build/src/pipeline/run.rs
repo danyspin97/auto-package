@@ -117,7 +117,8 @@ fn restore_stale_baseline(
         }
     };
     if baseline.exists()
-        && let Err(why) = osc::restore_baseline(&baseline, Emit::run(reporter))
+        && let Err(why) =
+            osc::restore_baseline(&baseline, &expected_checkout(config), Emit::run(reporter))
     {
         return Err(PipelineResult::Failed {
             rpm_name: config.rpm_name.clone(),
@@ -183,8 +184,9 @@ fn finish_package(
         },
         (result, _) => result,
     };
+    let expected = expected_checkout(config);
     let result = restore_obs_baseline(baseline, reporter, result, |dir| {
-        osc::restore_baseline(dir, Emit::run(reporter))
+        osc::restore_baseline(dir, &expected, Emit::run(reporter))
     });
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the

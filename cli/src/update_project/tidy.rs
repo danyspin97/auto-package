@@ -67,7 +67,7 @@ pub(super) fn tidy_item(branch: &str, item: &Item, ctx: &Ctx<'_>) -> Result<(), 
             let _ = std::fs::remove_dir_all(&baseline);
             Ok(())
         }
-        Err(why) => match osc::restore_baseline(&baseline, emit) {
+        Err(why) => match osc::restore_baseline(&baseline, &dir, emit) {
             Ok(()) => Err(why),
             Err(e) => Err(format!("{why}; the OBS baseline was NOT restored: {e}")),
         },

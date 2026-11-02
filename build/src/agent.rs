@@ -26,6 +26,7 @@ mod edit_bytes;
 use edit_bytes::*;
 mod integrity;
 mod links;
+mod owned_files;
 mod run;
 mod user_prompt;
 pub(crate) use user_prompt::*;

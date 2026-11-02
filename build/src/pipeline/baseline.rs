@@ -11,6 +11,17 @@ pub(super) fn obs_baseline_dir(config: &PipelineConfig) -> std::io::Result<PathB
     Workspace::open(&config.state_root, &config.rpm_name).map(|ws| ws.dir().join(OBS_BASELINE_DIR))
 }
 
+/// The checkout the run of `config`'s package writes: the OBS name its state
+/// records (the RPM name before one is recorded). A baseline saved from any
+/// other path is not restored into it (see `osc::restore_baseline`).
+pub(super) fn expected_checkout(config: &PipelineConfig) -> PathBuf {
+    let obs_name = Workspace::open(&config.state_root, &config.rpm_name)
+        .ok()
+        .and_then(|ws| PkgState::load(&ws).obs_name)
+        .unwrap_or_else(|| config.rpm_name.clone());
+    checkout_paths(&config.work_dir, &config.project, &obs_name).0
+}
+
 /// Puts back the OBS revision a failed run found, when the run committed
 /// anything: the attempts stay in OBS history, but the project must not keep a
 /// revision that does not build (`--in-place` writes the project itself). A

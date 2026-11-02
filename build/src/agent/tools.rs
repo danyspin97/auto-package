@@ -171,20 +171,6 @@ pub(super) fn rpm_inspection_tools(rpms_dir: Option<&std::path::Path>) -> String
     format!(",Bash(rpm -qlp {}/*)", dir.display())
 }
 
-/// Files in the workspace that only the pipeline writes. The turn must not
-/// edit them: `state.json` and the probe result steer later decisions, the
-/// locks guard concurrent runs, and `notes.md` is appended by the pipeline.
-const PIPELINE_OWNED_FILES: [&str; 8] = [
-    "state.json",
-    "state.json.*",
-    "*.lock",
-    "build.lock",
-    "flaky-probe.json",
-    "flaky-probe.json.*",
-    "notes.md",
-    "notes.md.*",
-];
-
 /// Project settings are read from the turn's directories, so a file the turn
 /// wrote there (hooks, MCP servers, wider permissions) would take effect on the
 /// next turn. Deny writing them.
@@ -208,13 +194,9 @@ pub(super) fn turn_denied_tools(
     let p = permission_path(workspace);
     for tool in ["Edit", "Write"] {
         denied.push(format!("{tool}({p}/{CONVENTIONS_DIR}/**)"));
-        // The pipeline's own files live in the workspace the turn may write:
-        // its state, locks, probe results and the notes it appends itself.
-        for name in PIPELINE_OWNED_FILES {
-            denied.push(format!("{tool}({p}/{name})"));
-            denied.push(format!("{tool}({p}/**/{name})"));
-        }
     }
+    // The pipeline's own files live in the workspace the turn may write.
+    denied.extend(super::owned_files::denied_tools(workspace));
     // A `.changes` entry comes from the typed `changelog` field, written by the
     // pipeline; its text reaches the commit message and the request description.
     for root in std::iter::once(workspace).chain(checkout) {
