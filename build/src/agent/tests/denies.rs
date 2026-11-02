@@ -476,3 +476,53 @@ fn metadata_names_in_the_quilt_roots_are_write_denied() {
         assert!(!rule_hits, "{path} is write-denied");
     }
 }
+
+#[test]
+fn write_roots_refuse_dot_dot_spellings_of_the_metadata() {
+    // The rules compare path text, so `source/../../<pkg>/.osc/_apiurl` under
+    // the workspace grant has to match a rule of its own. The glob here reads
+    // `**` as any text, which is enough for the path shapes.
+    let ws = std::path::Path::new("/srv/ws");
+    let co = std::path::Path::new("/srv/ws/checkout");
+    let denied = turn_denied_tools(ws, Some(co));
+    let list: Vec<&str> = denied.split(',').collect();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        for root in ["//srv/ws", "//srv/ws/checkout"] {
+            for rule in [
+                format!("{tool}({root}/**/..)"),
+                format!("{tool}({root}/**/../**)"),
+                format!("{tool}({root}/../**)"),
+            ] {
+                assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+            }
+        }
+    }
+    let spelled = [
+        ("Edit", "//srv/ws/source/../../checkout/.osc/_apiurl"),
+        ("Write", "//srv/ws/checkout/../other/.osc/_apiurl"),
+        ("Write", "//srv/ws/checkout/.osc/../_apiurl"),
+    ];
+    for (tool, path) in spelled {
+        assert!(
+            list.iter().any(|rule| {
+                rule.strip_prefix(tool)
+                    .and_then(|r| r.strip_prefix('('))
+                    .and_then(|r| r.strip_suffix(')'))
+                    .is_some_and(|pat| glob_matches(pat, path))
+            }),
+            "no {tool} deny matches {path}"
+        );
+    }
+    // Names that contain two dots, or a dot-dot that is not a segment, stay open.
+    for path in ["//srv/ws/checkout/fix..patch", "//srv/ws/checkout/a..b/x"] {
+        assert!(
+            !list.iter().any(|rule| {
+                rule.strip_prefix("Edit")
+                    .and_then(|r| r.strip_prefix('('))
+                    .and_then(|r| r.strip_suffix(')'))
+                    .is_some_and(|pat| pat.contains("..") && glob_matches(pat, path))
+            }),
+            "{path} is denied"
+        );
+    }
+}

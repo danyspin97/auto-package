@@ -224,6 +224,19 @@ pub(super) fn turn_denied_tools(
             denied.push(format!("{tool}({p}/*.changes)"));
         }
     }
+    // A path that climbs out of a write root with `..` names a file under
+    // another spelling (`source/../../<package>/.osc/_apiurl` reaches the
+    // checkout of a sibling package, or the metadata of this one), and the rules
+    // above compare the text of the path. The write roots refuse `..` as a
+    // segment, for the three write tools.
+    for root in std::iter::once(workspace).chain(checkout) {
+        let p = permission_path(root);
+        for tool in ["Edit", "Write", "NotebookEdit"] {
+            denied.push(format!("{tool}({p}/**/..)"));
+            denied.push(format!("{tool}({p}/**/../**)"));
+            denied.push(format!("{tool}({p}/../**)"));
+        }
+    }
     denied.extend(source_metadata_denied_tools(workspace));
     if let Some(checkout) = checkout {
         denied.extend(metadata_denied_tools(checkout));
