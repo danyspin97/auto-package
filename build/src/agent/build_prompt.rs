@@ -278,19 +278,29 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         String::new()
     };
 
-    let source_note = if req.from_repo_archive {
-        "\nNOTE: PyPI publishes this package as wheels only, so the tarball is an \
-         archive of the upstream repository, not an sdist. Read convention 26 before \
+    // Convention 26 is merged into 22: its repository-source section is there.
+    let source_note = if !req.from_repo_archive {
+        ""
+    } else if req.is_python {
+        "\nNOTE: the tarball is an archive of the upstream repository, not a PyPI sdist. \
+         Read the section \"Source taken from a repository\" of convention 22 before \
          anything else — the project is quite likely in a subdirectory.\n\
          \n\
          Run `ls sdist/` FIRST and compare it against the spec's `%autosetup -n` \
          argument. Repository archives routinely extract to a directory named after \
          the whole repo (e.g. `cuda-python-13.4.2`), not after this specific package \
-         (e.g. `cuda-bindings-13.4.2`), and the generator's guess is wrong almost every \
-         time for this source type. A wrong `-n` fails %prep immediately with 'No such \
-         file or directory' — fix it before anything else.\n"
+         (e.g. `cuda-bindings-13.4.2`). A wrong `-n` fails %prep immediately with 'No \
+         such file or directory' — fix it before anything else.\n"
     } else {
-        ""
+        "\nNOTE: the source is an archive of the upstream repository (a forge tag), not \
+         a release tarball. `sdist/` is the extraction root and `source/` is the one \
+         directory inside it. Read the section \"Source taken from a repository\" of \
+         convention 22 before anything else.\n\
+         \n\
+         Compare `ls sdist/` with the spec's `%autosetup -n` argument before the first \
+         build. A repository archive can extract to a directory named after the whole \
+         repo rather than this package, and a wrong `-n` fails %prep with 'No such file \
+         or directory'.\n"
     };
 
     let subproject_section = if req.subprojects.is_empty() {

@@ -165,6 +165,29 @@ fn a_monorepos_sibling_projects_reach_the_prompt() {
     assert!(prompt.contains("archive of the upstream repository"));
 }
 
+/// The source note describes the archive the turn has: a Python project from
+/// a repository, a C/C++ project from a forge archive, or nothing for a sdist.
+#[test]
+fn the_source_note_describes_the_archive_it_is_given() {
+    let ws = std::path::Path::new("/nonexistent-workspace");
+    let mut req = request(ws, &[]);
+
+    let python = build_turn_prompt(&req);
+    assert!(python.contains("not a PyPI sdist"), "{python}");
+    assert!(python.contains("Run `ls sdist/` FIRST"));
+
+    req.is_python = false;
+    let forge = build_turn_prompt(&req);
+    assert!(forge.contains("(a forge tag), not a release tarball"));
+    assert!(forge.contains("`source/` is the one directory inside it"));
+    assert!(!forge.contains("PyPI"), "{forge}");
+
+    req.from_repo_archive = false;
+    let sdist = build_turn_prompt(&req);
+    assert!(!sdist.contains("archive of the upstream repository"));
+    assert!(!sdist.contains("Source taken from a repository"));
+}
+
 /// The mechanically-recognised cause leads the hint section, before the
 /// excerpt, so the agent acts on it instead of re-reading the log.
 #[test]
