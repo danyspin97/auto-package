@@ -300,3 +300,104 @@ fn a_trigger_script_with_a_defattr_text_is_not_in_the_files_list() {
     let spec = "%files\n/a\n%triggerin -- x\n%defattr(-,root,root)\necho\n%changelog\n";
     assert_eq!(drop_default_defattr(spec), None);
 }
+
+/// The hyprlang spec of X11:Wayland: the hand-written pair for libhyprlang2.
+const HYPRLANG: &str = "%prep\n%autosetup -p1\n\n%build\n%cmake\n\n%check\n%ctest\n\n\
+    %post   -n lib%{name}%{sover} -p /sbin/ldconfig\n\
+    %postun -n lib%{name}%{sover} -p /sbin/ldconfig\n\n\
+    %files devel\n%doc README.md\n\n%files -n lib%{name}%{sover}\n%{_libdir}/lib%{name}.so.*\n\n\
+    %changelog\n";
+
+#[test]
+fn the_hyprlang_pair_becomes_one_ldconfig_scriptlets_line() {
+    assert_eq!(
+        use_ldconfig_scriptlets(HYPRLANG).unwrap(),
+        "%prep\n%autosetup -p1\n\n%build\n%cmake\n\n%check\n%ctest\n\n\
+         %ldconfig_scriptlets -n lib%{name}%{sover}\n\n\
+         %files devel\n%doc README.md\n\n%files -n lib%{name}%{sover}\n%{_libdir}/lib%{name}.so.*\n\n\
+         %changelog\n"
+    );
+    let once = use_ldconfig_scriptlets(HYPRLANG).unwrap();
+    assert_eq!(use_ldconfig_scriptlets(&once), None);
+}
+
+#[test]
+fn the_main_package_pair_becomes_a_bare_ldconfig_scriptlets() {
+    let spec = "%install\nmake\n%post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n\
+                %files\n/usr/lib/a.so\n";
+    assert_eq!(
+        use_ldconfig_scriptlets(spec).unwrap(),
+        "%install\nmake\n%ldconfig_scriptlets\n%files\n/usr/lib/a.so\n"
+    );
+}
+
+#[test]
+fn a_pair_that_differs_in_name_or_is_not_ldconfig_stays() {
+    for spec in [
+        "%post -n libA -p /sbin/ldconfig\n%postun -n libB -p /sbin/ldconfig\n",
+        "%post -n libA -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n",
+        "%post -n libA -p /sbin/ldconfig\n%postun -n libA\n",
+        "%post -n libA\n%postun -n libA -p /sbin/ldconfig\n",
+        "%post -n libA -p /sbin/ldconfig\n%postun -n libA -p /bin/true\n",
+        "%post -n libA -p /sbin/ldconfig -q\n%postun -n libA -p /sbin/ldconfig\n",
+    ] {
+        assert_eq!(use_ldconfig_scriptlets(spec), None, "{spec}");
+    }
+}
+
+#[test]
+fn a_scriptlet_with_a_body_or_a_second_scriptlet_stays() {
+    let body = "%post -n libA -p /sbin/ldconfig\necho hi\n%postun -n libA -p /sbin/ldconfig\n";
+    assert_eq!(use_ldconfig_scriptlets(body), None);
+    let second = "%post -n libA -p /sbin/ldconfig\n%post -n libA\necho x\n\
+                  %postun -n libA -p /sbin/ldconfig\n";
+    assert_eq!(use_ldconfig_scriptlets(second), None);
+    let only_post = "%post -n libA -p /sbin/ldconfig\n%files\n/a\n";
+    assert_eq!(use_ldconfig_scriptlets(only_post), None);
+}
+
+#[test]
+fn a_pair_inside_a_conditional_or_after_changelog_stays() {
+    let cond =
+        "%if 0%{?a}\n%post -n libA -p /sbin/ldconfig\n%postun -n libA -p /sbin/ldconfig\n%endif\n";
+    assert_eq!(use_ldconfig_scriptlets(cond), None);
+    let log = "%files\n/a\n%changelog\n%post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n";
+    assert_eq!(use_ldconfig_scriptlets(log), None);
+}
+
+#[test]
+fn a_pair_split_by_other_sections_joins_into_one_line_without_a_double_blank() {
+    let spec =
+        "%post -n libA -p /sbin/ldconfig\n\n%postun -n libA -p /sbin/ldconfig\n\n%files\n/a\n";
+    assert_eq!(
+        use_ldconfig_scriptlets(spec).unwrap(),
+        "%ldconfig_scriptlets -n libA\n\n%files\n/a\n"
+    );
+}
+
+#[test]
+fn the_repositories_that_define_the_ldconfig_macro_are_the_known_new_ones() {
+    for (repo, defined) in [
+        ("openSUSE_Tumbleweed", true),
+        ("openSUSE_Factory", true),
+        ("openSUSE_Slowroll", true),
+        ("openSUSE_Leap_16.0", true),
+        ("SUSE_SLE-16.0", true),
+        ("openSUSE_Leap_15.6", false),
+        ("SUSE_SLE-15-SP7", false),
+        ("openSUSE_Leap_42.3", false),
+        ("SUSE_SLE-12-SP5", false),
+        ("", false),
+    ] {
+        assert_eq!(ldconfig_macro_defined(repo), defined, "{repo}");
+    }
+}
+
+#[test]
+fn the_ldconfig_pair_is_a_construct_only_for_a_target_that_defines_the_macro() {
+    let spec = "%post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n%files\n/a\n";
+    let found = constructs(spec, true);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].pass, Pass::Ldconfig);
+    assert!(constructs(spec, false).is_empty());
+}

@@ -15,6 +15,7 @@ pub enum Pass {
     Clean,
     InstallRm,
     Defattr,
+    Ldconfig,
 }
 
 /// The `%defattr` of a `%files` list that only says the default: root owns
@@ -78,6 +79,90 @@ fn clean_construct(lines: &[&str], i: usize) -> Option<Construct> {
     })
 }
 
+/// A `%post` or `%postun` header, with the arguments that name its subpackage
+/// and whether it is `-p /sbin/ldconfig`.
+struct Scriptlet {
+    index: usize,
+    depth: i32,
+    post: bool,
+    name: Option<String>,
+    ldconfig: bool,
+}
+
+fn scriptlet_of(lines: &[&str], index: usize, depth: i32) -> Scriptlet {
+    let args: Vec<&str> = lines[index].split_whitespace().skip(1).collect();
+    let (name, rest) = match args.as_slice() {
+        ["-n", name, rest @ ..] => (Some(name.to_string()), rest),
+        rest => (None, rest),
+    };
+    Scriptlet {
+        index,
+        depth,
+        post: first_word(lines[index]) == "%post",
+        name,
+        ldconfig: rest == ["-p", "/sbin/ldconfig"],
+    }
+}
+
+/// Whether the body of the header at `i` is blank.
+fn body_is_blank(lines: &[&str], i: usize) -> bool {
+    lines[i + 1..body_end(lines, i)]
+        .iter()
+        .all(|l| l.trim().is_empty())
+}
+
+/// A `%post` and a `%postun` that only run `/sbin/ldconfig` for the same
+/// subpackage: the one `%ldconfig_scriptlets` line does both.
+fn ldconfig_constructs(lines: &[&str], scriptlets: &[Scriptlet]) -> Vec<Construct> {
+    let mut out = Vec::new();
+    for post in scriptlets
+        .iter()
+        .filter(|s| s.post && s.ldconfig && s.depth == 0)
+    {
+        let same = |s: &&Scriptlet| s.name == post.name;
+        let posts = scriptlets.iter().filter(|s| s.post).filter(same).count();
+        let unposts: Vec<&Scriptlet> = scriptlets.iter().filter(|s| !s.post).filter(same).collect();
+        let [postun] = unposts.as_slice() else {
+            continue;
+        };
+        if posts != 1
+            || !postun.ldconfig
+            || postun.depth != 0
+            || !body_is_blank(lines, post.index)
+            || !body_is_blank(lines, postun.index)
+        {
+            continue;
+        }
+        let with = match &post.name {
+            Some(name) => format!("%ldconfig_scriptlets -n {name}"),
+            None => "%ldconfig_scriptlets".to_string(),
+        };
+        out.push(Construct {
+            pass: Pass::Ldconfig,
+            line: post.index + 1,
+            what: format!(
+                "the `%post` (line {}) and `%postun` (line {}) that only run /sbin/ldconfig",
+                post.index + 1,
+                postun.index + 1
+            ),
+            fix: format!("replace both with `{with}`"),
+            edits: vec![
+                LineEdit {
+                    start: post.index,
+                    end: post.index + 1,
+                    with: vec![with],
+                },
+                LineEdit {
+                    start: postun.index,
+                    end: body_end(lines, postun.index),
+                    with: Vec::new(),
+                },
+            ],
+        });
+    }
+    out
+}
+
 /// A `rm -rf %{buildroot}` that is the first line of `%install`.
 fn install_construct(lines: &[&str], i: usize) -> Option<Construct> {
     let rm = lines.get(i + 1).filter(|l| is_buildroot_rm(l))?;
@@ -119,9 +204,26 @@ fn is_header(line: &str) -> bool {
     is_section(line) || first_word(line) == "%clean"
 }
 
+/// Whether `%ldconfig_scriptlets` is defined for the build repository
+/// `repository`: Tumbleweed, Slowroll, Factory, Leap 16 and SLE 16. Any other
+/// name is taken as not defining it (an older Leap or SLE, or one unknown).
+pub fn ldconfig_macro_defined(repository: &str) -> bool {
+    const KNOWN: &[&str] = &[
+        "Tumbleweed",
+        "Slowroll",
+        "Factory",
+        "Leap_16",
+        "SLE-16",
+        "SLE_16",
+    ];
+    KNOWN.iter().any(|known| repository.contains(known))
+}
+
 /// Every obsolete construct of `spec` that a pass can remove. Lines inside
-/// an `%if` block are not reported: the passes leave them.
-pub fn constructs(spec: &str) -> Vec<Construct> {
+/// an `%if` block are not reported: the passes leave them. The
+/// `%ldconfig_scriptlets` pair is reported only when `ldconfig_macro` is set
+/// (see [`ldconfig_macro_defined`]).
+pub fn constructs(spec: &str, ldconfig_macro: bool) -> Vec<Construct> {
     let lines: Vec<&str> = spec.lines().collect();
     let mut out = Vec::new();
     let mut depth = 0i32;
@@ -134,6 +236,7 @@ pub fn constructs(spec: &str) -> Vec<Construct> {
     let mut section = "";
     // Whether the current section has set a file mode (see `sets_mode`).
     let mut mode_set = false;
+    let mut scriptlets = Vec::new();
     for (i, &line) in lines.iter().enumerate() {
         let word = first_word(line);
         let continued = line.trim_end().ends_with('\\');
@@ -169,6 +272,9 @@ pub fn constructs(spec: &str) -> Vec<Construct> {
                     "%install" => out.extend(install_construct(&lines, i)),
                     _ => {}
                 }
+            }
+            if matches!(word, "%post" | "%postun") {
+                scriptlets.push(scriptlet_of(&lines, i, depth));
             }
             continue;
         }
@@ -225,12 +331,17 @@ pub fn constructs(spec: &str) -> Vec<Construct> {
             });
         }
     }
+    if ldconfig_macro {
+        out.extend(ldconfig_constructs(&lines, &scriptlets));
+    }
     out
 }
 
 /// The spec with every construct of `pass` removed, `None` when it has none.
+/// The `%ldconfig_scriptlets` pass runs whenever it is asked: the caller that
+/// knows the build target decides whether to ask.
 fn apply(spec: &str, pass: Pass) -> Option<String> {
-    let mut edits: Vec<LineEdit> = constructs(spec)
+    let mut edits: Vec<LineEdit> = constructs(spec, true)
         .into_iter()
         .filter(|c| c.pass == pass)
         .flat_map(|c| c.edits)
@@ -319,6 +430,12 @@ pub fn drop_clean_sections(spec: &str) -> Option<String> {
 /// The `rm -rf %{buildroot}` that starts `%install`, dropped.
 pub fn drop_install_buildroot_rm(spec: &str) -> Option<String> {
     apply(spec, Pass::InstallRm)
+}
+
+/// The hand-written `%post` and `%postun` pair that only runs `/sbin/ldconfig`
+/// for one subpackage, replaced by `%ldconfig_scriptlets [-n <sub>]`.
+pub fn use_ldconfig_scriptlets(spec: &str) -> Option<String> {
+    apply(spec, Pass::Ldconfig)
 }
 
 /// The default `%defattr(-,root,root)` lines of `%files`, dropped. Other
