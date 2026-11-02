@@ -239,6 +239,7 @@ fn apply_turn_outcome_with(
                     ),
                     notes_path.clone(),
                     &keep,
+                    &config.rpm_name,
                 ) {
                     Ok(()) => true,
                     Err(why) => {
@@ -403,6 +404,7 @@ fn apply_turn_outcome_with(
                         ),
                         notes_path,
                         &keep,
+                        &config.rpm_name,
                     );
                     Ok(if changed {
                         TurnEffect::SwitchedToWheel

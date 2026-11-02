@@ -94,7 +94,11 @@ mod changes_conflict_tests;
 #[cfg(test)]
 mod not_found_tests;
 mod service;
+mod service_root;
+#[cfg(test)]
+mod service_root_tests;
 pub use service::*;
+pub(crate) use service_root::{has_services_root, warn_if_no_root};
 mod sandbox;
 pub use sandbox::*;
 mod publish;

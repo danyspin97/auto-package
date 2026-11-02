@@ -323,6 +323,9 @@ mod patch_rules_content_tests;
 mod patch_rules_spec;
 #[cfg(test)]
 mod patch_rules_tests;
+mod service_edit;
+#[cfg(test)]
+mod service_edit_tests;
 mod source_guard;
 #[cfg(test)]
 mod source_guard_tests;

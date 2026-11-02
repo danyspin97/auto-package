@@ -98,6 +98,14 @@ impl CheckoutSnapshot {
             .and_then(|e| e.content.clone())
     }
 
+    /// What the snapshot holds for `name`: `None` when the file was absent, else
+    /// its bytes when they were kept.
+    pub(super) fn entry_of(&self, name: &str) -> Option<Option<Vec<u8>>> {
+        self.files
+            .get(std::ffi::OsStr::new(name))
+            .map(|e| e.content.clone())
+    }
+
     /// Whether `name` is in the snapshot with exactly these bytes. A file whose
     /// contents were not kept is never reported unchanged.
     pub(super) fn holds_unchanged(&self, name: &str, bytes: &[u8]) -> bool {

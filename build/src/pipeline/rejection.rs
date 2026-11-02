@@ -7,6 +7,7 @@ use crate::pipeline::patch_check::*;
 use crate::pipeline::patch_rules::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
+use crate::pipeline::service_edit::*;
 use crate::pipeline::source_guard::*;
 
 /// How many times the same validation error rejected an edit of one spec, in
@@ -186,6 +187,7 @@ pub(super) fn gate_turn_edit_without_accept(
         notes_entry,
         notes_path,
         keep,
+        &config.rpm_name,
     ) {
         return false;
     }
@@ -211,6 +213,7 @@ pub(super) fn gate_turn_edit_without_accept(
 /// A rejected turn must roll back the whole checkout, not only the spec: a
 /// `.changes`/patch/`_service` edit made in the same turn would otherwise
 /// survive the rejection, and the next turn could commit it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn accept_or_restore_with_snapshot(
     spec_path: &Path,
     before: &str,
@@ -220,6 +223,7 @@ pub(super) fn accept_or_restore_with_snapshot(
     notes_entry: &str,
     notes_path: PathBuf,
     keep: &[String],
+    package: &str,
 ) -> bool {
     accept_or_restore_reasoned(
         spec_path,
@@ -230,6 +234,7 @@ pub(super) fn accept_or_restore_with_snapshot(
         notes_entry,
         notes_path,
         keep,
+        package,
     )
     .is_ok()
 }
@@ -237,6 +242,7 @@ pub(super) fn accept_or_restore_with_snapshot(
 /// [`accept_or_restore_with_snapshot`] with the reason of a rejection: `Err` is
 /// the gate's own words (the rpmspec or patch complaint), already in the notes
 /// and rolled back.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn accept_or_restore_reasoned(
     spec_path: &Path,
     before: &str,
@@ -246,6 +252,7 @@ pub(super) fn accept_or_restore_reasoned(
     notes_entry: &str,
     notes_path: PathBuf,
     keep: &[String],
+    package: &str,
 ) -> Result<(), String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
 
@@ -340,6 +347,20 @@ pub(super) fn accept_or_restore_reasoned(
                  The edit was rolled back.\n"
             ),
         );
+        return Err(problem);
+    }
+
+    // A `_service` the edit leaves unreadable is put back with the rest of the edit.
+    if let Some(problem) = reject_bad_service(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+        package,
+    ) {
         return Err(problem);
     }
 

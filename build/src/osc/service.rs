@@ -433,7 +433,10 @@ pub fn run_service(checkout_dir: &Path, package: &str, emit: Emit<'_>) -> Result
     // Fail closed: only a missing file skips validation.
     let services = match fs::read(checkout_dir.join("_service")) {
         Ok(xml) => {
-            parse_service_xml(&xml, package).map_err(|reason| Error::ServiceRejected { reason })?
+            let services = parse_service_xml(&xml, package)
+                .map_err(|reason| Error::ServiceRejected { reason })?;
+            warn_if_no_root(&xml, package, emit);
+            services
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {

@@ -348,6 +348,7 @@ pub(super) fn resolve_blocked_with(
                             // Files staged by earlier rounds are not in the
                             // snapshot: a rollback here must keep them.
                             &kept_staged,
+                            &config.rpm_name,
                         );
                     if let Err(e) = &written {
                         append_notes(
