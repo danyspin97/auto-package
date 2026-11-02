@@ -74,17 +74,17 @@ fn repository_pairs(info: &ProjectInfo, repository: &str) -> Vec<osc::PathPair> 
         .collect()
 }
 
-/// The projects reachable from `repository` of a project, the project itself
-/// first, then in OBS path order (see [`osc::walk_path_pairs`]). `info_of`
-/// yields the meta of a path project, or `None` for one that cannot be read:
-/// the project is still listed, but its paths are not followed.
-pub(super) fn reachable_projects(
+/// The `(project, repository)` pairs reachable from `repository` of a project,
+/// in OBS path order (see [`osc::walk_path_pairs`]). `info_of` yields the meta
+/// of a path project, or `None` for one that cannot be read: the project is
+/// still listed, but its paths are not followed.
+pub(super) fn reachable_pairs(
     own: &str,
     own_info: &ProjectInfo,
     repository: &str,
     info_of: &mut dyn FnMut(&str) -> Option<ProjectInfo>,
-) -> Vec<String> {
-    let found = osc::walk_path_pairs(
+) -> Vec<(String, String)> {
+    osc::walk_path_pairs(
         own,
         repository_pairs(own_info, repository),
         usize::MAX,
@@ -96,9 +96,22 @@ pub(super) fn reachable_projects(
             Ok::<_, std::convert::Infallible>(Some(((), paths)))
         },
     )
-    .unwrap_or_default();
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(project, repo, ())| (project, repo))
+    .collect()
+}
+
+/// The projects reachable from `repository` of a project, the project itself
+/// first, then in OBS path order (see [`reachable_pairs`]).
+pub(super) fn reachable_projects(
+    own: &str,
+    own_info: &ProjectInfo,
+    repository: &str,
+    info_of: &mut dyn FnMut(&str) -> Option<ProjectInfo>,
+) -> Vec<String> {
     let mut order = vec![own.to_string()];
-    for (project, _, ()) in found {
+    for (project, _) in reachable_pairs(own, own_info, repository, info_of) {
         if !order.contains(&project) {
             order.push(project);
         }

@@ -33,6 +33,11 @@ mod capability_tests;
 mod flags;
 mod judge;
 mod obs;
+mod requirements;
+#[cfg(test)]
+mod requirements_limit_tests;
+#[cfg(test)]
+mod requirements_tests;
 mod resolver;
 #[cfg(test)]
 mod tests;

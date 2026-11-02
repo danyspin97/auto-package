@@ -1,12 +1,14 @@
+use std::time::{Duration, Instant};
+
 use super::*;
 
 /// Reachability checks and path edits for one branch project and
 /// architecture, with the OBS answers cached for the run.
 pub struct DepResolver {
-    obs: Box<dyn Obs>,
+    pub(super) obs: Box<dyn Obs>,
     reporter: Arc<dyn Reporter + Send + Sync>,
-    branch_project: String,
-    arch: String,
+    pub(super) branch_project: String,
+    pub(super) arch: String,
     metas: Mutex<HashMap<String, Option<ProjectInfo>>>,
     pub(super) binaries: Mutex<HashMap<String, Vec<Hit>>>,
     /// Held across a meta read-modify-write, so two edits cannot interleave.
@@ -18,10 +20,37 @@ pub struct DepResolver {
     metas_fetch: Mutex<()>,
     /// Set for a maintenance run: no build path is added, and this says why.
     frozen_paths: Option<String>,
+    /// Capability searches made, by [`requirements::search_key`].
+    pub(super) rpm_searches: Mutex<HashMap<String, Result<osc::RpmSearch, String>>>,
+    /// `Provides:` of each RPM read, by [`requirements::provides_key`].
+    pub(super) provides: Mutex<HashMap<String, Result<Vec<String>, String>>>,
+    /// Binary names each repository lists, by [`requirements::listing_key`].
+    pub(super) listings: Mutex<HashMap<String, Result<Vec<String>, String>>>,
+    /// Held across the capability fetches, so callers with overlapping
+    /// lookups fetch each RPM once: the later one finds it cached.
+    pub(super) capability_fetch: Mutex<()>,
+    /// The packages of the branch project, read once per run.
+    pub(super) branch_packages: Mutex<Option<Result<HashSet<String>, String>>>,
+    /// Time the capability fetches of the run have taken so far, see
+    /// [`DepResolver::charged`].
+    capability_spent: Mutex<Duration>,
+    /// What the fetch time is measured by: the run's clock, unless a test
+    /// sets its own.
+    clock: Box<dyn Fn() -> Duration + Send + Sync>,
+    pub(super) budget: Duration,
 }
 
 /// Requests in flight at once when fetching several chunks or metas.
 pub(super) const FETCH_PARALLELISM: usize = 8;
+
+/// How long the capability fetches of one run may take in all. Only the time
+/// the fetches take is counted, not the OBS calls around them. Once spent,
+/// every capability still to be checked is unchecked.
+pub(super) const CAPABILITY_BUDGET: Duration = Duration::from_secs(120);
+
+/// How many RPMs are read per capability and repository. Past it, a verdict
+/// that rests on the RPMs read alone is unchecked, not a warning.
+pub(super) const CAPABILITY_READS: usize = 8;
 
 impl DepResolver {
     pub fn new(
@@ -30,6 +59,7 @@ impl DepResolver {
         branch_project: &str,
         arch: &str,
     ) -> Self {
+        let origin = Instant::now();
         DepResolver {
             obs,
             reporter,
@@ -41,7 +71,54 @@ impl DepResolver {
             binaries_fetch: Mutex::new(()),
             metas_fetch: Mutex::new(()),
             frozen_paths: None,
+            rpm_searches: Mutex::default(),
+            provides: Mutex::default(),
+            listings: Mutex::default(),
+            capability_fetch: Mutex::new(()),
+            branch_packages: Mutex::new(None),
+            capability_spent: Mutex::new(Duration::ZERO),
+            clock: Box::new(move || origin.elapsed()),
+            budget: CAPABILITY_BUDGET,
         }
+    }
+
+    /// The same resolver with a different capability budget.
+    pub fn with_capability_budget(mut self, budget: Duration) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// The same resolver with `clock` measuring the capability fetches.
+    #[cfg(test)]
+    pub(super) fn with_capability_clock(
+        mut self,
+        clock: Box<dyn Fn() -> Duration + Send + Sync>,
+    ) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Run `f` and count the time it takes against the capability budget. Only
+    /// the capability fetches are run this way, so the OBS calls around them
+    /// (metas, the branch's package list) are not counted.
+    pub(super) fn charged<T>(&self, f: impl FnOnce() -> T) -> T {
+        let before = (self.clock)();
+        let out = f();
+        let took = (self.clock)().saturating_sub(before);
+        *self
+            .capability_spent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += took;
+        out
+    }
+
+    /// Whether the capability fetches of the run have used up the budget.
+    pub(super) fn budget_spent(&self) -> bool {
+        *self
+            .capability_spent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            >= self.budget
     }
 
     /// A resolver that checks reachability but adds no build path: a path
@@ -55,7 +132,7 @@ impl DepResolver {
 
     /// The meta of a project other than the branch project, from the cache
     /// when it was read before. Unreadable counts as absent.
-    fn path_project_info(&self, project: &str) -> Option<ProjectInfo> {
+    pub(super) fn path_project_info(&self, project: &str) -> Option<ProjectInfo> {
         if let Some(cached) = self
             .metas
             .lock()
@@ -80,7 +157,7 @@ impl DepResolver {
         info
     }
 
-    fn warn(&self, message: String) {
+    pub(super) fn warn(&self, message: String) {
         self.reporter.report(&Event::Warning {
             step: None,
             message,
@@ -95,7 +172,7 @@ impl DepResolver {
     }
 
     /// The branch project's meta, always fresh: it is what gets edited.
-    fn branch_info(&self) -> Result<(String, ProjectInfo), String> {
+    pub(super) fn branch_info(&self) -> Result<(String, ProjectInfo), String> {
         let meta = self
             .obs
             .project_meta(&self.branch_project)?
@@ -156,7 +233,7 @@ impl DepResolver {
     /// Read the metas of the projects `repositories` of `info` reach through
     /// their paths, a level at a time with each level fetched in parallel, so
     /// the walk in [`reachable_projects`] finds them all cached.
-    fn warm_path_metas(&self, info: &ProjectInfo, repositories: &[&str]) {
+    pub(super) fn warm_path_metas(&self, info: &ProjectInfo, repositories: &[&str]) {
         let _turn = self.metas_fetch.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen: HashSet<(String, String)> = HashSet::new();
         let mut level: Vec<(String, String)> = info
@@ -236,7 +313,13 @@ impl DepResolver {
         }
         // Judged under the lock rather than on a copy of the whole cache.
         let hits = self.binaries.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(judge(deps, &repos, &hits, &self.branch_project))
+        // Capabilities are judged by `check_requirements`.
+        let packages: Vec<BuildRequire> = deps
+            .iter()
+            .filter(|d| matches!(d, BuildRequire::Package(_)))
+            .cloned()
+            .collect();
+        Ok(judge(&packages, &repos, &hits, &self.branch_project))
     }
 
     /// Add `additions` to the branch project's meta, skipping paths it already

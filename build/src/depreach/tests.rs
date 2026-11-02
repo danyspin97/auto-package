@@ -39,6 +39,21 @@ impl Obs for Fake {
         self.metas.lock().unwrap().insert(p.into(), xml.into());
         Ok(())
     }
+    fn package_meta(&self, _: &str, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn rpms_containing(&self, _: &str, _: &[String], _: &str) -> Result<osc::RpmSearch, String> {
+        Ok(osc::RpmSearch::default())
+    }
+    fn rpm_provides(&self, _: &str, _: &str, _: &str, _: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    fn repository_names(&self, _: &str, _: &str, _: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    fn project_packages(&self, _: &str) -> Result<HashSet<String>, String> {
+        Ok(HashSet::new())
+    }
     fn published_binaries(&self, names: &[&str]) -> Result<Vec<PublishedBinary>, String> {
         *self.searches.lock().unwrap() += 1;
         Ok(self
@@ -88,7 +103,7 @@ fn fixture() -> (Fake, Arc<dyn Reporter + Send + Sync>) {
         meta("openSUSE:Leap:15.6", &[("standard", &[])]),
     );
     let binaries = vec![
-        bin("cmake", "openSUSE:Factory", "snapshot", "cmake"),
+        bin("cmake", "openSUSE:Factory", "standard", "cmake"),
         bin("cmake", "openSUSE:Leap:15.6", "standard", "cmake"),
         bin("cmake", "devel:tools", "openSUSE_Tumbleweed", "cmake"),
         bin(
@@ -147,6 +162,32 @@ fn resolver() -> (DepResolver, Arc<Fake>) {
         fn published_binaries(&self, n: &[&str]) -> Result<Vec<PublishedBinary>, String> {
             self.0.published_binaries(n)
         }
+        fn package_meta(&self, p: &str, pkg: &str) -> Result<Option<String>, String> {
+            self.0.package_meta(p, pkg)
+        }
+        fn rpms_containing(
+            &self,
+            n: &str,
+            projects: &[String],
+            arch: &str,
+        ) -> Result<osc::RpmSearch, String> {
+            self.0.rpms_containing(n, projects, arch)
+        }
+        fn rpm_provides(
+            &self,
+            p: &str,
+            r: &str,
+            arch: &str,
+            name: &str,
+        ) -> Result<Vec<String>, String> {
+            self.0.rpm_provides(p, r, arch, name)
+        }
+        fn repository_names(&self, p: &str, r: &str, arch: &str) -> Result<Vec<String>, String> {
+            self.0.repository_names(p, r, arch)
+        }
+        fn project_packages(&self, p: &str) -> Result<HashSet<String>, String> {
+            self.0.project_packages(p)
+        }
     }
     let (fake, reporter) = fixture();
     let fake = Arc::new(fake);
@@ -201,6 +242,7 @@ fn names_nobody_can_usefully_provide_are_classified_as_such() {
             pkg("onlyhome"),
             pkg("wrongrepo"),
             pkg("nothing-publishes-this"),
+            // Capabilities are judged by `check_requirements`, not here.
             BuildRequire::Capability("pkgconfig(x)".into()),
         ])
         .unwrap();
@@ -213,7 +255,7 @@ fn names_nobody_can_usefully_provide_are_classified_as_such() {
         DepState::OnlyUnusable { .. }
     ));
     assert_eq!(state(&v, "nothing-publishes-this"), &DepState::NotPublished);
-    assert_eq!(state(&v, "pkgconfig(x)"), &DepState::Unchecked);
+    assert!(v.iter().all(|v| v.name != "pkgconfig(x)"));
     assert!(choose_paths(&v).is_empty());
 }
 
