@@ -4,9 +4,7 @@ use super::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::build_switch::*;
 use crate::pipeline::keep_version::*;
-use crate::pipeline::licence::*;
 use crate::pipeline::npm_vendor::*;
-use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::removal_proof::*;
 use crate::pipeline::render::*;
@@ -78,7 +76,7 @@ fn apply_turn_outcome_with(
     outcome: &crate::agent::TurnOutcome,
     reporter: &dyn Reporter,
     lookup: PypiLookup<'_>,
-) -> Result<TurnEffect, String> {
+) -> Result<TurnEffect, TurnError> {
     let ApplyTurnCtx {
         config,
         checkout_dir,
@@ -140,7 +138,7 @@ fn apply_turn_outcome_with(
         )
         .is_some();
         if escaped && let Some(msg) = repeated_spec_rejection(spec_path) {
-            return Err(format!("{label}: {msg}"));
+            return Err(format!("{label}: {msg}").into());
         }
     }
     let effect = match &outcome.action {
@@ -170,7 +168,7 @@ fn apply_turn_outcome_with(
                     brief(why)
                 ),
             );
-            Err(format!("{label}: agent blocked: {why}"))
+            Err(format!("{label}: agent blocked: {why}").into())
         }
         crate::agent::Action::NoChange => {
             // On NoChange, also restore — the agent's "no change needed"
@@ -266,7 +264,7 @@ fn apply_turn_outcome_with(
                 );
             }
             if !changed && let Some(msg) = repeated_spec_rejection(spec_path) {
-                return Err(format!("{label}: {msg}"));
+                return Err(format!("{label}: {msg}").into());
             }
             // The turn cannot run `osc vc` (osc needs the keyring, which its
             // environment does not reach), so the entry is written here, from
@@ -301,7 +299,7 @@ fn apply_turn_outcome_with(
                     snap.restore_keeping(reporter, Some(step), &keep);
                 }
                 restore_spec(spec_path, before, Some(step), reporter);
-                return Err(format!("{label}: {e}"));
+                return Err(format!("{label}: {e}").into());
             }
             // An npm failure in an sdist that ships a package-lock.json is
             // fixable with the `node_modules` OBS service. Send the agent
@@ -326,7 +324,7 @@ fn apply_turn_outcome_with(
                     &turn_bullet_source(outcome),
                 );
                 if !accepted && let Some(msg) = repeated_spec_rejection(spec_path) {
-                    return Err(format!("{label}: {msg}"));
+                    return Err(format!("{label}: {msg}").into());
                 }
                 // The pipeline does the file work of the route itself: the
                 // lock file into the checkout and the `node_modules` service
@@ -373,7 +371,18 @@ fn apply_turn_outcome_with(
                      ({why}); trying to repackage the upstream PyPI wheel instead"
                 ),
             });
-            match try_wheel_fallback_with(config, checkout_dir, spec_path, step, lookup) {
+            // A wheel carries no source patches: once a usable wheel is known to
+            // exist, a switch that would drop a security patch is refused, before
+            // it writes anything.
+            let guard = || {
+                let dropped = wheel_switch_security_drops(checkout_dir, before, snapshot);
+                if dropped.is_empty() {
+                    Ok(())
+                } else {
+                    Err(wheel_drop_problem(&dropped))
+                }
+            };
+            match try_wheel_fallback_with(config, checkout_dir, spec_path, step, lookup, &guard) {
                 Ok(wheel) => {
                     // Durable, reviewable audit record of what got swapped
                     // and why. See `write_wheel_switch_provenance` for the
@@ -422,7 +431,10 @@ fn apply_turn_outcome_with(
                 // 49). Failing the package here threw that away even when
                 // the agent had correctly diagnosed it; hand the agent the
                 // redirect through the notes it reads next turn and carry on.
-                Err(e) if e.contains("no usable upstream wheel either") => {
+                Err(e) if e.ends_package() => Err(reject_wheel_security_drop(
+                    spec_path, before, snapshot, step, reporter, notes_path, &keep, e.reason,
+                )),
+                Err(e) if e.reason.contains("no usable upstream wheel either") => {
                     // The arm returns NoChange without the acceptance gate, so
                     // the turn's edits are gated here. Either way the arm
                     // answers NoChange; a rejected edit is rolled back first.
@@ -461,7 +473,7 @@ fn apply_turn_outcome_with(
                     });
                     Ok(TurnEffect::NoChange)
                 }
-                Err(e) => Err(format!("{label}: unbuildable from source ({why}), and {e}")),
+                Err(e) => Err(format!("{label}: unbuildable from source ({why}), and {e}").into()),
             }
         }
     };
@@ -511,7 +523,7 @@ pub(super) fn apply_turn_and_reset(
     reporter: &dyn Reporter,
     sdist_top_level: &mut String,
     from_repo_archive: &mut bool,
-) -> Result<TurnEffect, String> {
+) -> Result<TurnEffect, TurnError> {
     apply_turn_and_reset_with(
         ctx,
         outcome,
@@ -530,56 +542,13 @@ pub(super) fn apply_turn_and_reset_with(
     sdist_top_level: &mut String,
     from_repo_archive: &mut bool,
     lookup: PypiLookup<'_>,
-) -> Result<TurnEffect, String> {
+) -> Result<TurnEffect, TurnError> {
     let effect = apply_turn_outcome_with(ctx, outcome, reporter, lookup)?;
     if effect == TurnEffect::SwitchedToWheel {
         *sdist_top_level = String::new();
         *from_repo_archive = false;
     }
     Ok(effect)
-}
-
-/// The text a turn's `.changes` bullet is made of: the changelog it gave, or,
-/// when it gave none, its reasoning as one line.
-pub(super) fn turn_bullet_source(outcome: &crate::agent::TurnOutcome) -> String {
-    if outcome.changelog.trim().is_empty() {
-        outcome
-            .reasoning
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    } else {
-        outcome.changelog.clone()
-    }
-}
-
-/// Adds the `.changes` entry of an agent edit: the turn's bullet, with the macros
-/// and the version it wrote left out. The turn cannot run `osc vc` itself.
-pub(super) fn add_edit_changes_entry(
-    config: &PipelineConfig,
-    checkout_dir: &Path,
-    reporter: &dyn Reporter,
-    step: &StepDir,
-    bullet_source: &str,
-) {
-    warn_if_err(
-        reporter,
-        "adding the .changes entry for the agent's edit",
-        osc::add_release_changes_entry(
-            checkout_dir,
-            &config.version,
-            &without_own_version(
-                &without_macros(
-                    &changes_message(bullet_source),
-                    &config.pkg_name,
-                    &config.version,
-                ),
-                &config.pkg_name,
-                &config.version,
-            ),
-            Emit::new(reporter, step.id),
-        ),
-    );
 }
 
 /// What happened to the spec as a result of [`apply_turn_outcome`]. See its

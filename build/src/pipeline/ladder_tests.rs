@@ -6,6 +6,10 @@ use crate::pipeline::wheel_switch::*;
 
 mod part2;
 
+/// PyPI's answer for a release with one pure wheel.
+const WHEEL_JSON: &str = r#"{"info":{"name":"foo","version":"1.0"},"urls":[{"digests":{"sha256":"01"},
+  "filename":"foo-1.0-py3-none-any.whl","packagetype":"bdist_wheel","size":1,"url":"https://x/f.whl"}]}"#;
+
 #[test]
 fn the_ladder_runs_its_rungs_in_order_and_stops_at_the_first_resolution() {
     let mut seen: Vec<(usize, usize)> = Vec::new();
@@ -319,6 +323,30 @@ fn run_case_with(
     wheel_lookups: &std::cell::Cell<usize>,
     check: Option<(&str, &str)>,
 ) -> Case {
+    run_case_patched(
+        rpm_name,
+        force,
+        siblings,
+        first,
+        turns,
+        wheel_lookups,
+        check,
+        None,
+    )
+}
+
+/// [`run_case_with`] on a spec that declares `patch` (its name and content).
+#[allow(clippy::too_many_arguments)]
+fn run_case_patched(
+    rpm_name: &str,
+    force: bool,
+    siblings: &[&str],
+    first: crate::agent::TurnOutcome,
+    turns: Vec<Result<crate::agent::TurnOutcome, FailureKind>>,
+    wheel_lookups: &std::cell::Cell<usize>,
+    check: Option<(&str, &str)>,
+    patch: Option<(&str, &str)>,
+) -> Case {
     let root = tempfile::tempdir().unwrap();
     let work = root.path().join("work");
     let state_root = work.join("state");
@@ -339,9 +367,13 @@ fn run_case_with(
     }
     let spec_path = checkout.join(format!("{rpm_name}.spec"));
     // A spec rpmspec accepts: the acceptance gate now checks the edit.
+    let declared = patch.map_or(String::new(), |(name, _)| format!("Patch0: {name}\n"));
     let before = format!(
-        "Name: {rpm_name}\nVersion: 1.0\nRelease: 0\nSummary: test\nLicense: MIT\n\n%check\n%pytest\n"
+        "Name: {rpm_name}\nVersion: 1.0\nRelease: 0\nSummary: test\nLicense: MIT\n{declared}\n%check\n%pytest\n"
     );
+    if let Some((name, content)) = patch {
+        std::fs::write(checkout.join(name), content).unwrap();
+    }
     std::fs::write(&spec_path, &before).unwrap();
     let run = ap_core::run::RunDir::allocate(&work).unwrap();
     let pkg_run = run.pkg(rpm_name);
@@ -415,6 +447,10 @@ fn run_case_with(
     let contexts = std::cell::RefCell::new(Vec::new());
     let lookup = |_: &PipelineConfig| {
         wheel_lookups.set(wheel_lookups.get() + 1);
+        // A spec with a patch is the refusal tests': PyPI has a pure wheel.
+        if patch.is_some() {
+            return Ok(WHEEL_JSON.to_string());
+        }
         Err("no PyPI in this test".to_string())
     };
     let result = resolve_blocked_with(

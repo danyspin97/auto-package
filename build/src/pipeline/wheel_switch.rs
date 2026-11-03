@@ -117,9 +117,16 @@ pub(super) fn wheel_or_wheel_only(
         &config.arch,
         config.single_locked_flavor_abi().as_deref(),
     ) {
-        Ok(wheel) => {
-            generate_wheel_binary_spec(config, &wheel, json, checkout_dir, spec_path, step, true)
-        }
+        Ok(wheel) => generate_wheel_binary_spec(
+            config,
+            &wheel,
+            json,
+            checkout_dir,
+            spec_path,
+            step,
+            true,
+            &|| Ok(()),
+        ),
         Err(_) => {
             match generate_multi_flavor_wheel_spec(
                 config,
@@ -128,6 +135,7 @@ pub(super) fn wheel_or_wheel_only(
                 spec_path,
                 step,
                 true,
+                &|| Ok(()),
             ) {
                 Some(result) => result.map(|(r, _)| r),
                 None => Err(GenSpecError::WheelOnly {

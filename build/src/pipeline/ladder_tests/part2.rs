@@ -155,3 +155,112 @@ fn the_drop_edit_needs_a_check_failure() {
     assert!(dropped_tests_edit(None, log, "%check\n%pytest\n", &none).is_err());
     assert!(dropped_tests_edit(Some("%check"), log, "%check\n%pytest\n", &none).is_ok());
 }
+
+/// A python package whose spec declares a security patch, with `turns` as the
+/// answers of the resolver rounds. PyPI is asked `lookups` times.
+fn refused_case(turns: Vec<crate::agent::TurnOutcome>, lookups: &std::cell::Cell<usize>) -> Case {
+    run_case_patched(
+        "python-foo",
+        false,
+        &[],
+        blocked("reason zero"),
+        turns.into_iter().map(Ok).collect(),
+        lookups,
+        None,
+        Some(("fix-CVE-2024-1234.patch", "--- a/f\n+++ b/f\n")),
+    )
+}
+
+#[test]
+fn a_refused_wheel_rung_is_skipped_and_the_ladder_ends_as_needs_maintainer() {
+    let lookups = std::cell::Cell::new(0);
+    let case = refused_case(
+        vec![
+            scripted_outcome(crate::agent::Action::NoChange, "nothing to do"),
+            blocked("reason two"),
+            blocked("reason three"),
+        ],
+        &lookups,
+    );
+    // PyPI had a wheel, the switch would drop the CVE patch and was refused
+    // without a turn; the agent rounds went on without the wheel.
+    assert_eq!(lookups.get(), 1);
+    assert_eq!(case.contexts.len(), 3);
+    match &case.result {
+        Err(PipelineResult::Failed { reason, kind, .. }) => {
+            assert_eq!(*kind, FailureKind::NeedsMaintainer);
+            assert!(reason.starts_with(LADDER_FAILED_PREFIX), "{reason}");
+            assert!(reason.contains("fix-CVE-2024-1234.patch"), "{reason}");
+            assert!(reason.contains("reason three"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        case.notes.contains("Wheel switch refused"),
+        "{}",
+        case.notes
+    );
+    // The note tells the agent not to ask for the wheel again.
+    assert!(
+        case.notes
+            .contains("Do NOT return `use_upstream_wheel` again"),
+        "{}",
+        case.notes
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(&case.checkout)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".whl") || n.ends_with("rpmlintrc"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let ws = Workspace::open(&case.state_root, "python-foo").unwrap();
+    assert!(!ws.dir().join("wheel-origin.txt").exists());
+}
+
+#[test]
+fn a_package_without_a_security_patch_still_ends_exhausted() {
+    let lookups = std::cell::Cell::new(0);
+    let case = run_case(
+        "python-foo",
+        false,
+        &[],
+        blocked("zero"),
+        vec![blocked("one"), blocked("two"), blocked("three")],
+        &lookups,
+        None,
+    );
+    assert!(matches!(
+        case.result,
+        Err(PipelineResult::Failed {
+            kind: FailureKind::Exhausted,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn an_agent_round_refused_the_wheel_blocks_a_second_ask_without_a_lookup() {
+    let lookups = std::cell::Cell::new(0);
+    let ask = |why: &str| {
+        scripted_outcome(
+            crate::agent::Action::UseUpstreamWheel { why: why.into() },
+            why,
+        )
+    };
+    let why = "no compiler for the extension in this build environment: gcc not found";
+    let case = refused_case(vec![ask(why), ask(why), blocked("reason three")], &lookups);
+    // Round 1's ask was refused after one lookup; the wheel rung and round 2's
+    // ask did not look again.
+    assert_eq!(lookups.get(), 1);
+    assert_eq!(case.contexts.len(), 3);
+    match &case.result {
+        Err(PipelineResult::Failed { reason, kind, .. }) => {
+            assert_eq!(*kind, FailureKind::NeedsMaintainer);
+            assert!(
+                reason.contains("asked for the upstream wheel again"),
+                "{reason}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}

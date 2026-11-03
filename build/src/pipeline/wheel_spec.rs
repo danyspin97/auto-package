@@ -15,6 +15,7 @@ pub(super) fn generate_multi_flavor_wheel_spec(
     spec_path: &Path,
     step: &StepDir,
     no_sdist: bool,
+    guard: WheelGuard<'_>,
 ) -> Option<Result<(GenSpecResult, ap_ecosystem::pypi::WheelFile), GenSpecError>> {
     let flavors = match config.python_flavors.try_effective() {
         Ok(flavors) => flavors,
@@ -43,6 +44,10 @@ pub(super) fn generate_multi_flavor_wheel_spec(
             return None;
         }
     };
+    // The wheels exist: the switch is judged before it writes anything.
+    if let Err(why) = guard() {
+        return Some(Err(GenSpecError::Refused(why)));
+    }
     ap_core::diag!(
         "info: {} {}'s wheels are each locked to one CPython — repackaging one wheel per flavor ({})",
         config.pkg_name,
@@ -208,7 +213,9 @@ pub(super) fn generate_wheel_binary_spec(
     spec_path: &Path,
     step: &StepDir,
     no_sdist: bool,
+    guard: WheelGuard<'_>,
 ) -> Result<GenSpecResult, GenSpecError> {
+    guard().map_err(GenSpecError::Refused)?;
     ap_core::diag!(
         "info: {} {} {} — repackaging the upstream wheel {}",
         config.pkg_name,

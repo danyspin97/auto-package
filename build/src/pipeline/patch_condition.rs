@@ -301,6 +301,8 @@ pub(super) fn patch_condition_gate(
                 ctx.rpm_name
             ),
         )),
+        // A refused switch (it would drop a security patch) needs a maintainer.
+        Err(e) if e.ends_package() => Err(e.into_failed(ctx)),
         Err(e) => Err(ctx.failed_as(
             FailureKind::Exhausted,
             format!(

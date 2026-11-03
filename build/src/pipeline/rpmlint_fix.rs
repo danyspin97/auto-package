@@ -303,8 +303,10 @@ pub(super) fn rpmlint_fix_round(
         None,
         Some(&context),
         Some(build_log),
-    )
-    .map_err(|e| turn_failure(&e));
+    );
+    // A turn that could not be applied, a wheel switch refused for a security
+    // patch included, only warns: the package already built.
+    let effect = effect.map_err(|e| turn_failure(&e));
     match rpmlint_after_turn(effect, rpm_name, errors) {
         RpmlintTurn::Keep(warning) => {
             snapshot.restore(reporter, Some(build_step));
@@ -327,7 +329,7 @@ pub(super) fn rpmlint_fix_round(
 }
 
 /// Why a fix turn's result could not be used, as the warning names it.
-fn turn_failure(e: &PipelineResult) -> String {
+pub(super) fn turn_failure(e: &PipelineResult) -> String {
     match e {
         PipelineResult::Failed { reason, .. } => reason.clone(),
         PipelineResult::MissingDeps { deps, .. } => {

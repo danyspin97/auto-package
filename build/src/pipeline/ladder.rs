@@ -10,7 +10,6 @@ use crate::pipeline::prompt_notes::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::rejection::*;
 use crate::pipeline::render::*;
-use crate::pipeline::sibling::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
 use crate::pipeline::wheel_switch::*;
@@ -111,59 +110,6 @@ pub(super) fn ladder_context(
     text
 }
 
-/// The key a failed ladder is remembered under: the spec, and the specs of the
-/// packages it depends on, so a sibling's patch counts as changed input.
-pub(super) fn ladder_key(config: &PipelineConfig, spec: &str) -> u64 {
-    // The memo is written from the stripped spec the agent edited, and the
-    // check reads the spec on disk, which may still carry `# ap: fix` lines the
-    // agent kept: both sides hash the same stripped text.
-    let mut all = crate::spec::strip_ap_fix_comments(spec);
-    for dir in sibling_checkouts(config, spec) {
-        if let Some(name) = dir.file_name() {
-            all.push_str(
-                &std::fs::read_to_string(dir.join(format!("{}.spec", name.to_string_lossy())))
-                    .unwrap_or_default(),
-            );
-        }
-    }
-    hash_spec(&all)
-}
-
-/// Whether an exhausted ladder is remembered (its spec and reason written as the
-/// memo `spent_ladder_refusal` reads). A patch-driven ladder is not, and neither
-/// is one the budget stopped, since its rungs never ran.
-pub(super) fn should_remember_ladder(patch_task: bool, budget_stopped: bool) -> bool {
-    !patch_task && !budget_stopped
-}
-
-/// The failure for a spec whose resolution ladder was already spent: the same
-/// ladder would end the same way, at the price of several turns, while the spec
-/// and the specs it depends on are unchanged. `--force` and a package that is
-/// being patched for a dependent try afresh.
-pub(super) fn spent_ladder_refusal(
-    ctx: &RunCtx,
-    patching: bool,
-    spec_text: &str,
-) -> Option<PipelineResult> {
-    if patching || ctx.config.force {
-        return None;
-    }
-    let state = PkgState::load(&ctx.ws);
-    if state.ladder_spec_hash != Some(ladder_key(ctx.config, spec_text)) {
-        return None;
-    }
-    let reason = state.ladder_reason.unwrap_or_default();
-    Some(ctx.failed_as(
-        FailureKind::Exhausted,
-        format!(
-            "{LADDER_FAILED_PREFIX}{}: the resolution ladder was spent on this spec earlier and \
-             neither it nor the packages it depends on changed ({reason}); not trying again \
-             without --force",
-            ctx.rpm_name
-        ),
-    ))
-}
-
 /// Where a turn that was `blocked` was asked, so the resolver rounds repeat it.
 pub(super) struct LadderSite<'a> {
     /// The failed build's log, when the turn was asked about one: the rung that
@@ -192,14 +138,18 @@ pub(super) fn resolve_blocked(
     st: &mut RunState,
     site: LadderSite<'_>,
     outcome: &crate::agent::TurnOutcome,
-    reason: String,
+    error: TurnError,
 ) -> Result<TurnEffect, PipelineResult> {
+    // A refusal that needs a maintainer is no blocked turn to resolve.
+    if error.ends_package() {
+        return Err(error.into_failed(ctx));
+    }
     resolve_blocked_with(
         ctx,
         st,
         site,
         outcome,
-        reason,
+        error.reason,
         &fetch_release_json,
         &mut |ctx, st, site, label, attempt, context| {
             agent_turn(
@@ -292,6 +242,10 @@ pub(super) fn resolve_blocked_with(
     // answered `use_upstream_wheel` and the route was staged). The mechanical
     // wheel rung waits for the turn after it: see `wheel_rung_round`.
     let mut npm_deferred_round: Option<usize> = None;
+    // Set when a wheel switch was refused for a security patch it would drop:
+    // the package never takes the wheel, the rounds go on without it, and a
+    // ladder that then ends unresolved needs a maintainer.
+    let mut wheel_refused: Option<String> = None;
     let result = run_ladder(&first, LADDER_ROUNDS, |round, history| {
         let latest = history.last().map(String::as_str).unwrap_or("");
         // Mechanical: when only a few tests of `%check` fail, skip exactly those
@@ -389,12 +343,12 @@ pub(super) fn resolve_blocked_with(
             }
         }
         // Mechanical: the upstream wheel, when the project publishes one.
-        if round == wheel_rung_round(npm_deferred_round) && is_python {
+        if round == wheel_rung_round(npm_deferred_round) && is_python && wheel_refused.is_none() {
             let wheel = pipeline_wheel_outcome(&format!(
                 "the resolver found no way to build from source after a blocked turn: {}",
                 brief(latest)
             ));
-            if let Ok(TurnEffect::SwitchedToWheel) = apply_turn_and_reset_with(
+            match apply_turn_and_reset_with(
                 ApplyTurnCtx {
                     config,
                     checkout_dir,
@@ -416,7 +370,13 @@ pub(super) fn resolve_blocked_with(
                 &mut st.from_repo_archive,
                 lookup,
             ) {
-                return Rung::Resolved(TurnEffect::SwitchedToWheel);
+                Ok(TurnEffect::SwitchedToWheel) => {
+                    return Rung::Resolved(TurnEffect::SwitchedToWheel);
+                }
+                // Refused: the wheel is not an option for this package. The
+                // rounds that follow go on without it.
+                Err(e) if e.ends_package() => wheel_refused = Some(e.reason),
+                _ => {}
             }
         }
         if let Err(reason) = ctx.may_start_turn(st.spent_usd) {
@@ -455,13 +415,25 @@ pub(super) fn resolve_blocked_with(
             restore_spec(spec_path, &round_spec, Some(&step), *reporter);
             return Rung::Abort(missing);
         }
+        // The wheel was refused for a security patch: asking again costs a PyPI
+        // lookup and a turn for the same answer. The round is blocked, undone.
+        if wheel_refused.is_some()
+            && matches!(out.action, crate::agent::Action::UseUpstreamWheel { .. })
+        {
+            round_snapshot.restore(*reporter, Some(&step));
+            restore_spec(spec_path, &round_spec, Some(&step), *reporter);
+            return Rung::Blocked(format!(
+                "round {round} asked for the upstream wheel again: it was refused, it would \
+                 drop a security patch"
+            ));
+        }
         // Only the files actually copied are kept (the apply step appends them
         // to `kept_staged`); the rounds before this one are kept as they were.
         let kept_before = kept_staged.clone();
         let label = format!("{} — resolve round {round}", site.apply_label);
         let npm_marked_before = notes_record_npm_deferral(&ws.notes());
         let mut rejected: Option<String> = None;
-        match apply_turn_and_reset(
+        match apply_turn_and_reset_with(
             ApplyTurnCtx {
                 config,
                 checkout_dir,
@@ -481,6 +453,7 @@ pub(super) fn resolve_blocked_with(
             *reporter,
             &mut st.sdist_top_level,
             &mut st.from_repo_archive,
+            lookup,
         ) {
             Ok(TurnEffect::NoChange) => {
                 if !npm_marked_before && notes_record_npm_deferral(&ws.notes()) {
@@ -505,8 +478,14 @@ pub(super) fn resolve_blocked_with(
                 crate::agent::Action::Blocked { why } if !why.trim().is_empty() => {
                     Rung::Blocked(why.clone())
                 }
-                crate::agent::Action::Blocked { .. } => Rung::Blocked(r),
-                _ => Rung::Abort(ctx.failed(r)),
+                // An agent round's own refused switch drops the wheel option the
+                // same way: the round is blocked.
+                _ if r.ends_package() => {
+                    wheel_refused = Some(r.reason.clone());
+                    Rung::Blocked(r.reason)
+                }
+                crate::agent::Action::Blocked { .. } => Rung::Blocked(r.reason),
+                _ => Rung::Abort(ctx.failed(r.reason)),
             },
         }
     });
@@ -552,6 +531,15 @@ pub(super) fn resolve_blocked_with(
                         .join("\n")
                 ),
             );
+            // Every rung that ran failed and the wheel was refused for a
+            // security patch: the package needs a maintainer, and so does a rerun
+            // of the same spec (the memo keeps the kind and the refusal).
+            let (kind, text) = match wheel_refused {
+                Some(refusal) if !budget_stopped => {
+                    (FailureKind::NeedsMaintainer, format!("{text}; {refusal}"))
+                }
+                _ => (FailureKind::Exhausted, text),
+            };
             // A patch-driven ladder (the package is a dependency being patched)
             // writes no memo: the spec it failed on is the dependency's, and
             // an ordinary run of that package must not find it spent.
@@ -568,9 +556,11 @@ pub(super) fn resolve_blocked_with(
                 let spec_now = std::fs::read_to_string(spec_path).unwrap_or_default();
                 let key = ladder_key(config, &spec_now);
                 let memo = text.clone();
+                let needs = kind == FailureKind::NeedsMaintainer;
                 update_state(ws, *reporter, |state| {
                     state.ladder_spec_hash = Some(key);
                     state.ladder_reason = Some(memo);
+                    state.ladder_needs_maintainer = needs;
                 });
             }
             let why = if budget_stopped {
@@ -581,10 +571,7 @@ pub(super) fn resolve_blocked_with(
             } else {
                 text
             };
-            Err(ctx.failed_as(
-                FailureKind::Exhausted,
-                format!("{LADDER_FAILED_PREFIX}{rpm_name}: {why}"),
-            ))
+            Err(ctx.failed_as(kind, format!("{LADDER_FAILED_PREFIX}{rpm_name}: {why}")))
         }
     }
 }

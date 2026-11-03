@@ -276,7 +276,8 @@ pub(super) fn review_stage(
                                 PipelineResult::Failed {
                                     kind: FailureKind::Exhausted
                                         | FailureKind::Other
-                                        | FailureKind::AgentFailed,
+                                        | FailureKind::AgentFailed
+                                        | FailureKind::NeedsMaintainer,
                                     ..
                                 }
                             )

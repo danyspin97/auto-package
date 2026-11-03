@@ -327,7 +327,9 @@ use agent::*;
 mod agent_response;
 use agent_response::*;
 mod ladder;
+mod ladder_memo;
 pub use ladder::*;
+use ladder_memo::*;
 mod logs;
 mod sibling;
 mod sibling_specs;
@@ -337,6 +339,10 @@ mod spec_edits;
 use spec_edits::*;
 mod snapshot;
 use snapshot::*;
+mod turn_changes;
+use turn_changes::*;
+mod turn_error;
+use turn_error::*;
 mod rejection;
 use rejection::*;
 #[cfg(test)]
@@ -359,6 +365,8 @@ mod patch_rules_spec;
 mod patch_rules_tests;
 mod spend_guard;
 use spend_guard::*;
+#[cfg(test)]
+mod refusal_callers_tests;
 mod service_edit;
 #[cfg(test)]
 mod service_edit_tests;
@@ -367,6 +375,8 @@ mod source_guard;
 mod source_guard_tests;
 #[cfg(test)]
 mod turn_naming_tests;
+#[cfg(test)]
+mod wheel_refusal_tests;
 use apply_turn::*;
 mod keep_version;
 mod licence;

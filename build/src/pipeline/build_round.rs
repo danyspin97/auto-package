@@ -408,7 +408,7 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         &mut st.sdist_top_level,
         &mut st.from_repo_archive,
     );
-    match effect {
+    match &effect {
         Ok(TurnEffect::Edited) => {
             st.post_review_revert = Some(PostReviewRevert {
                 spec: good,
@@ -418,8 +418,16 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
             Some(RoundEnd::Retry)
         }
         // No change, a refused edit (already rolled back by the gate), or an
-        // effect the review has no business with: the built spec stands.
+        // effect the review has no business with: the built spec stands. A
+        // wheel switch refused for a security patch is one of them: the build is
+        // green, so the package keeps it and the refusal is only a warning.
         Ok(_) | Err(_) => {
+            if let Err(e) = &effect {
+                reporter.report(&Event::Warning {
+                    step: Some(agent_step.id),
+                    message: format!("{rpm_name}: post-build review turn not applied: {e}"),
+                });
+            }
             snapshot.restore(reporter, Some(&agent_step));
             restore_spec(spec_path, &good, Some(&agent_step), reporter);
             None

@@ -208,7 +208,15 @@ pub(super) fn try_wheel_fallback(
     spec_path: &Path,
     step: &StepDir,
 ) -> Result<ap_ecosystem::pypi::WheelFile, String> {
-    try_wheel_fallback_with(config, checkout_dir, spec_path, step, &fetch_release_json)
+    try_wheel_fallback_with(
+        config,
+        checkout_dir,
+        spec_path,
+        step,
+        &fetch_release_json,
+        &|| Ok(()),
+    )
+    .map_err(|e| e.reason)
 }
 
 /// How the wheel switch learns what PyPI has for a release: the JSON of
@@ -239,7 +247,8 @@ pub(super) fn try_wheel_fallback_with(
     spec_path: &Path,
     step: &StepDir,
     lookup: PypiLookup<'_>,
-) -> Result<ap_ecosystem::pypi::WheelFile, String> {
+    guard: WheelGuard<'_>,
+) -> Result<ap_ecosystem::pypi::WheelFile, TurnError> {
     let json = lookup(config)?;
     let wheel = match ap_ecosystem::pypi::pick_wheel_from_json(
         &json,
@@ -256,29 +265,39 @@ pub(super) fn try_wheel_fallback_with(
                 spec_path,
                 step,
                 false,
+                guard,
             ) {
                 Some(Ok((_, first))) => Ok(first),
+                Some(Err(GenSpecError::Refused(m))) => Err(TurnError::needs_maintainer(m)),
                 Some(Err(
                     GenSpecError::Other(m)
                     | GenSpecError::NoReleaseArchive(m)
                     | GenSpecError::DiskFull(m),
-                )) => Err(format!("per-flavor wheel spec generation failed: {m}")),
+                )) => Err(format!("per-flavor wheel spec generation failed: {m}").into()),
                 Some(Err(GenSpecError::WheelOnly { .. })) | None => {
-                    Err(format!("no usable upstream wheel either: {e}"))
+                    Err(format!("no usable upstream wheel either: {e}").into())
                 }
             };
         }
     };
-    generate_wheel_binary_spec(config, &wheel, &json, checkout_dir, spec_path, step, false)
-        .map_err(|e| match e {
-            GenSpecError::Other(msg)
-            | GenSpecError::NoReleaseArchive(msg)
-            | GenSpecError::DiskFull(msg) => {
-                format!("wheel spec generation failed: {msg}")
-            }
-            GenSpecError::WheelOnly { .. } => {
-                "wheel spec generation failed unexpectedly".to_string()
-            }
-        })?;
+    generate_wheel_binary_spec(
+        config,
+        &wheel,
+        &json,
+        checkout_dir,
+        spec_path,
+        step,
+        false,
+        guard,
+    )
+    .map_err(|e| match e {
+        GenSpecError::Refused(msg) => TurnError::needs_maintainer(msg),
+        GenSpecError::Other(msg)
+        | GenSpecError::NoReleaseArchive(msg)
+        | GenSpecError::DiskFull(msg) => format!("wheel spec generation failed: {msg}").into(),
+        GenSpecError::WheelOnly { .. } => "wheel spec generation failed unexpectedly"
+            .to_string()
+            .into(),
+    })?;
     Ok(wheel)
 }

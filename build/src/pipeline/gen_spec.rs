@@ -19,8 +19,15 @@ pub(super) enum GenSpecError {
     /// The disk is full while the spec is written or the sdist is read or
     /// fetched. Typed where the error was, so it does not depend on its wording.
     DiskFull(String),
+    /// A wheel switch refused by its guard before it wrote anything (it would
+    /// drop a security patch). Carries the reason.
+    Refused(String),
     Other(String),
 }
+
+/// What a wheel switch asks before it writes anything: `Err` is why it must not
+/// go on.
+pub(super) type WheelGuard<'a> = &'a dyn Fn() -> Result<(), String>;
 
 /// A generation failure from a step that writes or reads the disk: a full
 /// disk is [`GenSpecError::DiskFull`], anything else [`GenSpecError::Other`].

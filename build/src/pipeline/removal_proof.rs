@@ -328,3 +328,62 @@ pub(super) fn reject_unproven_removal(
     );
     problem
 }
+
+/// The security patches a wheel switch of the spec `before` would drop: a wheel
+/// carries no source patches, so every patch the spec declares goes with it, and
+/// those that [`is_security_patch`] are not the switch's to drop. Read from the
+/// snapshot in preference to the disk, like the removal gate.
+pub(super) fn wheel_switch_security_drops(
+    checkout_dir: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+) -> Vec<String> {
+    patch_files_of(checkout_dir, before, snapshot)
+        .into_iter()
+        .filter(|(n, content)| is_security_patch(n, content.as_deref().unwrap_or_default()))
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// Why a wheel switch that would drop the security patches `dropped` is
+/// refused: the package needs a maintainer.
+pub(super) fn wheel_drop_problem(dropped: &[String]) -> String {
+    let plural = if dropped.len() > 1 { "es" } else { "" };
+    format!(
+        "needs a maintainer: a wheel switch would drop the security patch{plural} {}; a wheel \
+         carries no source patches: a maintainer must decide",
+        dropped.join(", ")
+    )
+}
+
+/// Roll back a refused wheel switch (`problem`, see [`wheel_drop_problem`]): the
+/// turn's own edits go (keeping the staged files) and the refusal is journaled.
+/// The switch wrote nothing. The error is the refusal.
+pub(super) fn reject_wheel_security_drop(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_path: PathBuf,
+    keep: &[String],
+    problem: String,
+) -> TurnError {
+    if let Some(snap) = snapshot {
+        snap.restore_keeping(reporter, Some(step), keep);
+    }
+    restore_spec(spec_path, before, Some(step), reporter);
+    reporter.report(&Event::Warning {
+        step: Some(step.id),
+        message: format!("wheel switch refused: {problem}"),
+    });
+    append_notes(
+        notes_path,
+        &format!(
+            "\n## Wheel switch refused — drops a security patch\n{problem}\n\
+             Do NOT return `use_upstream_wheel` again for this package: the answer stays the \
+             same. Fix the build from source, or request what it needs.\n"
+        ),
+    );
+    TurnError::needs_maintainer(problem)
+}

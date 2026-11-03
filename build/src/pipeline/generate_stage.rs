@@ -304,7 +304,7 @@ pub(super) fn generate_spec_stage(
                     }
                 )));
             }
-            Err(GenSpecError::Other(e)) => {
+            Err(GenSpecError::Other(e) | GenSpecError::Refused(e)) => {
                 let step = step.finish(StepOutcome::Failed);
                 reporter.report(&Event::Warning {
                     step: Some(step.id),

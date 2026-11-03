@@ -1,7 +1,7 @@
 use super::build_round::{record_rpmlint_logs, revert_warning};
 use super::rpmlint_fix::{
     RpmlintAsk, RpmlintGate, RpmlintTurn, errors_not_in_origin, load_rpmlint_shown,
-    persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_key,
+    persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_key, turn_failure,
 };
 use super::*;
 use crate::pipeline::apply_turn::TurnEffect;
@@ -252,4 +252,23 @@ fn an_error_the_origin_build_reports_too_is_not_asked_of_the_update() {
         rpmlint_ask(&open_gate(), &all_known, &BTreeSet::new()),
         RpmlintAsk::Build
     );
+}
+
+#[test]
+fn a_wheel_switch_refused_for_a_security_patch_keeps_the_built_spec() {
+    let errors = lines(&[ZERO]);
+    // The fix turn's refusal comes back as a failed package; the green build
+    // stands and the refusal is the warning.
+    let refused = PipelineResult::Failed {
+        rpm_name: "python-pywayland".into(),
+        reason: "needs a maintainer: a wheel switch would drop the security patch x.patch".into(),
+        kind: FailureKind::NeedsMaintainer,
+    };
+    let RpmlintTurn::Keep(text) =
+        rpmlint_after_turn(Err(turn_failure(&refused)), "python-pywayland", &errors)
+    else {
+        panic!("a refused switch must not end a green package");
+    };
+    assert!(text.contains("security patch x.patch"), "{text}");
+    assert!(text.contains("the spec that built stands"), "{text}");
 }

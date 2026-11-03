@@ -553,6 +553,10 @@ pub(super) fn switch_for_missing_submodules(
                 step.finish(ap_core::event::StepOutcome::Ok);
                 switched = true;
             }
+            Err(e) if e.ends_package() => {
+                step.finish(ap_core::event::StepOutcome::Failed);
+                return Err(e.into_failed(ctx));
+            }
             other => {
                 step.finish(ap_core::event::StepOutcome::Failed);
                 reporter.report(&Event::Warning {
@@ -560,7 +564,7 @@ pub(super) fn switch_for_missing_submodules(
                     message: format!(
                         "{rpm_name}: the source archive lacks its git submodules and the \
                          wheel switch did not happen ({}); the Review turn decides",
-                        other.err().unwrap_or_else(|| "no change".into())
+                        other.err().map_or_else(|| "no change".into(), |e| e.reason)
                     ),
                 });
             }

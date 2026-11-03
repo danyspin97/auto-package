@@ -101,6 +101,11 @@ pub struct PkgState {
     pub ladder_spec_hash: Option<u64>,
     #[serde(default)]
     pub ladder_reason: Option<String>,
+    /// The spent ladder was refused its wheel for a security patch: a rerun on
+    /// the same spec ends as the first run did, needing a maintainer. Read only
+    /// with `ladder_spec_hash`, which every write of the memo sets with it.
+    #[serde(default)]
+    pub ladder_needs_maintainer: bool,
     /// Hash of the build.log the last PreFix agent turn read. The same log is
     /// not handed to a turn twice (it would find nothing new, at a turn's cost).
     #[serde(default)]
