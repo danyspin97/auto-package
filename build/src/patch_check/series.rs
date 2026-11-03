@@ -306,8 +306,20 @@ pub fn refresh_bullet(names: &[&str]) -> String {
     }
 }
 
-/// The `.changes` bullet for a patch removed because quilt proved it already
-/// applied upstream: the bullet states the proof.
-pub fn proven_drop_bullet(name: &str) -> String {
-    format!("Drop {name}: already applied upstream (reverse-applies cleanly)")
+/// How a patch removal is proven: quilt's `can be reverse-applied`, or each
+/// hunk's added lines already in the new source archive (see `present`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropProof {
+    ReverseApplies,
+    InTarball,
+}
+
+/// The `.changes` bullet for a patch removed because its change is already
+/// upstream: the bullet states the proof.
+pub fn proven_drop_bullet(name: &str, proof: DropProof) -> String {
+    let how = match proof {
+        DropProof::ReverseApplies => "reverse-applies cleanly",
+        DropProof::InTarball => "already in the new tarball",
+    };
+    format!("Drop {name}: already applied upstream ({how})")
 }

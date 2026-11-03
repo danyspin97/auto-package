@@ -375,7 +375,7 @@ fn a_removal_quilt_does_not_prove_is_rolled_back_and_fed_back() {
     );
     assert_eq!(case.contexts.len(), 2, "the refusal is fed back once");
     assert!(
-        case.contexts[1].contains("removal of a.patch is not proven"),
+        case.contexts[1].contains("removal of a.patch is refused"),
         "{}",
         case.contexts[1]
     );

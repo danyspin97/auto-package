@@ -97,13 +97,14 @@ pub(super) fn apply_patch_turn(
     {
         return PatchTurnApplied::RolledBack;
     }
-    let unproven = unproven_patch_removals(
-        ctx.config,
+    let judged = judge_removals(
+        &ctx.config.version,
         &ctx.checkout_dir,
         spec_path,
         before,
         Some(snapshot),
     );
+    let unproven = judged.refused;
     if !unproven.is_empty() {
         return PatchTurnApplied::Refused(reject_unproven_removal(
             spec_path,

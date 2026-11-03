@@ -7,6 +7,7 @@ use crate::pipeline::archive::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::patch_loop::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::removal_proof::*;
 
 // ── carried-forward patches, tested with quilt ───────────────────────────────
 
@@ -91,7 +92,7 @@ pub(super) fn patch_files(
 ) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
     crate::patch_check::declared_patches(spec)
         .into_iter()
-        .filter(|(_, n)| !n.is_empty() && Path::new(n).file_name() == Some(n.as_ref()))
+        .filter(|(_, n)| is_checkout_file(n))
         .map(|(_, n)| {
             let content = std::fs::read(checkout.join(&n)).ok();
             (n, content)
@@ -174,7 +175,14 @@ pub(super) fn remove_proven_patches(
                 ctx.rpm_name, ctx.config.version
             ),
         });
-        add_patch_bullet(ctx, step, &crate::patch_check::proven_drop_bullet(name));
+        add_patch_bullet(
+            ctx,
+            step,
+            &crate::patch_check::proven_drop_bullet(
+                name,
+                crate::patch_check::DropProof::ReverseApplies,
+            ),
+        );
         lines.push(format!(
             "- {name}: removed by the pipeline: already applied upstream (quilt: can be \
              reverse-applied)"
@@ -264,10 +272,28 @@ pub(super) fn settle_patch_changes(
         lines.push(format!("- {name}: refreshed by the agent (round {round})"));
     }
     for name in &removed {
-        add_patch_bullet(ctx, step, &crate::patch_check::proven_drop_bullet(name));
+        let Some(proof) = drop_proof(
+            &ctx.checkout_dir,
+            &ctx.config.version,
+            before_spec,
+            before_files,
+            name,
+        ) else {
+            // The gate proved every removal it let through, so this is not
+            // reached; if it is, no proof is stated.
+            lines.push(format!(
+                "- {name}: removed by the agent (round {round}): no proof was made, no \
+                 .changes bullet"
+            ));
+            continue;
+        };
+        add_patch_bullet(
+            ctx,
+            step,
+            &crate::patch_check::proven_drop_bullet(name, proof),
+        );
         lines.push(format!(
-            "- {name}: removed by the agent (round {round}): already applied upstream (quilt: \
-             can be reverse-applied)"
+            "- {name}: removed by the agent (round {round}): proven"
         ));
     }
     !refreshed.is_empty() || !removed.is_empty()

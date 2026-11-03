@@ -4,12 +4,12 @@
 use super::*;
 use crate::pipeline::prompt_notes::*;
 
-/// The source archive in the checkout. A checkout can hold several (an old
-/// version's tarball next to the new one), so prefer the one named for
-/// `version` and break ties by name, never by directory order.
-pub(crate) fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
-    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
+/// The source archives in `dir`, in directory order. Cargo dep bundles are not
+/// source archives.
+pub(super) fn source_archives(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
         .filter_map(|e| {
             let e = e.ok()?;
             let name = e.file_name();
@@ -27,7 +27,14 @@ pub(crate) fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
                 || n.ends_with(".whl"))
             .then(|| e.path())
         })
-        .collect();
+        .collect()
+}
+
+/// The source archive in the checkout. A checkout can hold several (an old
+/// version's tarball next to the new one), so prefer the one named for
+/// `version` and break ties by name, never by directory order.
+pub(crate) fn find_tarball(dir: &Path, version: &str) -> Option<PathBuf> {
+    let mut found = source_archives(dir);
     // Ranked by (the main archive `<name>-<version>.<ext>`, a name that carries
     // the version); `true` sorts first, then the path decides.
     let rank = |p: &PathBuf| {

@@ -190,8 +190,8 @@ fn apply_turn_outcome_with(
         crate::agent::Action::Edited => {
             // A patch is removed only with quilt's proof that its change is
             // already in the new sources; never because it does not apply.
-            let unproven =
-                unproven_patch_removals(config, checkout_dir, spec_path, before, snapshot);
+            let judged = judge_removals(&config.version, checkout_dir, spec_path, before, snapshot);
+            let unproven = judged.refused;
             // A new patch must be named by the bullet; a build system switch
             // needs evidence and gets its own bullet (`build_switch`).
             let switch = switch_of_edit(spec_path, before);

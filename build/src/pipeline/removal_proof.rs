@@ -1,37 +1,137 @@
-//! The proof a patch removal needs: a patch an edit removes is kept unless
-//! quilt proves its change is already in the new sources.
+//! The proof a patch removal needs. A patch an edit removes is kept unless its
+//! change is already in the new sources: quilt reports it `can be
+//! reverse-applied`, or quilt reports it does not apply and each hunk's added
+//! lines are in the new archive. Every other removal is refused, one quilt did
+//! not check included.
+//!
+//! The gate and the backstop of the patch rules each ask quilt on the same
+//! inputs; nothing is cached, so each ask runs the check again.
 
 use super::*;
+use crate::patch_check::{CheckReport, DropProof, PatchStatus};
 use crate::pipeline::archive::*;
 use crate::pipeline::rejection::*;
 use crate::pipeline::snapshot::*;
 use crate::pipeline::spec_edits::*;
+use std::collections::BTreeMap;
 
-/// The patches a turn removed (its `PatchN:` line or its file) whose removal is
-/// not proven: quilt, run on the new sources with the patches as they were
-/// before the turn, does not report them `can be reverse-applied`, so their
-/// change is not upstream. Empty when the turn removed nothing or every
-/// removal is proven. `snapshot` holds the patch files as they were.
-pub(super) fn unproven_patch_removals(
-    config: &PipelineConfig,
+/// A patch an edit removed without a proof (see [`proof_of`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Refusal {
+    pub(super) name: String,
+    /// Why no proof was made.
+    pub(super) reason: String,
+}
+
+/// What the gate decided about the patches an edit removed.
+#[derive(Debug, Default, Clone)]
+pub(super) struct RemovalJudgement {
+    /// Removed with a proof, and the proof the `.changes` bullet states.
+    pub(super) proven: Vec<(String, DropProof)>,
+    /// Removed without one: refused.
+    pub(super) refused: Vec<Refusal>,
+}
+
+/// Whether a declared patch name is a file the gate judges: a relative path
+/// inside the checkout. `sub/x.patch` is one (quilt does not check it, so its
+/// removal is refused); an empty name, an absolute path and `..` are not.
+pub(super) fn is_checkout_file(name: &str) -> bool {
+    let path = Path::new(name);
+    !name.is_empty()
+        && path.is_relative()
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// The `-pN` level the spec applies each declared patch with, by name.
+fn patch_levels(spec: &str) -> BTreeMap<String, u32> {
+    crate::patch_check::declared_patches(spec)
+        .into_iter()
+        .map(|(number, name)| (name, spec_patch_level(spec, &number)))
+        .collect()
+}
+
+/// The archive a proof is made against: the one named for `version`, else the
+/// only archive the checkout holds. With several archives and none named for
+/// the version, `find_tarball` could pick the old version's, so there is none.
+pub(super) fn proof_tarball(checkout_dir: &Path, version: &str) -> Option<PathBuf> {
+    let found = find_tarball(checkout_dir, version)?;
+    let name = found.file_name()?.to_string_lossy().into_owned();
+    (names_version(&name, version) || source_archives(checkout_dir).len() == 1).then_some(found)
+}
+
+/// The patch files of `spec` as the gate reads them: by name, the content as the
+/// snapshot kept it, else on disk.
+fn patch_files_of(
+    checkout_dir: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+) -> BTreeMap<String, Option<Vec<u8>>> {
+    crate::patch_check::declared_patches(before)
+        .into_iter()
+        .filter(|(_, n)| is_checkout_file(n))
+        .map(|(_, n)| {
+            let content = snapshot
+                .and_then(|s| s.content_of(&n))
+                .or_else(|| std::fs::read(checkout_dir.join(&n)).ok());
+            (n, content)
+        })
+        .collect()
+}
+
+/// The proof for removing `name`, given quilt's `report` on the patch files and
+/// the tarball. `Err` is why no proof was made.
+fn proof_of(
+    report: &CheckReport,
+    tarball: Option<&Path>,
+    diff: Option<&[u8]>,
+    level: u32,
+    name: &str,
+) -> Result<DropProof, String> {
+    match report
+        .patches
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| &p.status)
+    {
+        Some(PatchStatus::AlreadyApplied { .. }) => Ok(DropProof::ReverseApplies),
+        // Only a patch quilt says does not apply may be proven by the archive:
+        // one that applies is not upstream.
+        Some(PatchStatus::Fails { .. }) => match (tarball, diff) {
+            (Some(t), Some(d)) if crate::patch_check::already_in_tarball(t, d, level) => {
+                Ok(DropProof::InTarball)
+            }
+            _ => Err(
+                "quilt checked it, it does not `can be reverse-applied` on the new sources, \
+                 and its added lines are not in the new tarball"
+                    .to_string(),
+            ),
+        },
+        Some(PatchStatus::NotChecked { reason }) => Err(format!(
+            "quilt did not check it ({})",
+            report.not_run.clone().unwrap_or_else(|| reason.clone())
+        )),
+        Some(_) => Err(
+            "quilt checked it and it applies to the new sources, so its change is not in them"
+                .to_string(),
+        ),
+        None => Err("it is not in quilt's series".to_string()),
+    }
+}
+
+/// Judges the patches an edit removed (the spec before it is `before`, the patch
+/// files as in `patch_files_of`). Empty when it removed none.
+pub(super) fn judge_removals(
+    version: &str,
     checkout_dir: &Path,
     spec_path: &Path,
     before: &str,
     snapshot: Option<&CheckoutSnapshot>,
-) -> Vec<String> {
-    let before_files: std::collections::BTreeMap<String, Option<Vec<u8>>> =
-        crate::patch_check::declared_patches(before)
-            .into_iter()
-            .filter(|(_, n)| !n.is_empty() && Path::new(n).file_name() == Some(n.as_ref()))
-            .map(|(_, n)| {
-                let content = snapshot
-                    .and_then(|s| s.content_of(&n))
-                    .or_else(|| std::fs::read(checkout_dir.join(&n)).ok());
-                (n, content)
-            })
-            .collect();
+) -> RemovalJudgement {
+    let before_files = patch_files_of(checkout_dir, before, snapshot);
     if before_files.is_empty() {
-        return Vec::new();
+        return RemovalJudgement::default();
     }
     let after = std::fs::read_to_string(spec_path).unwrap_or_default();
     let after_names: Vec<String> = crate::patch_check::declared_patches(&after)
@@ -43,26 +143,70 @@ pub(super) fn unproven_patch_removals(
         .map(|n| (n.clone(), std::fs::read(checkout_dir.join(n)).ok()))
         .collect();
     let (_, removed) = crate::patch_check::diff_patches(&before_files, &after_names, &after_files);
+    let mut judged = RemovalJudgement::default();
     if removed.is_empty() {
-        return Vec::new();
+        return judged;
     }
-    let tarball = find_tarball(checkout_dir, &config.version);
+    let tarball = proof_tarball(checkout_dir, version);
     let report = crate::patch_check::check_files(before, &before_files, tarball.as_deref());
-    removed
-        .into_iter()
-        .filter(|n| !report.proves_applied(n))
-        .collect()
+    let levels = patch_levels(before);
+    for name in removed {
+        let diff = before_files.get(&name).and_then(|c| c.as_deref());
+        let level = levels.get(&name).copied().unwrap_or(1);
+        match proof_of(&report, tarball.as_deref(), diff, level, &name) {
+            Ok(proof) => judged.proven.push((name, proof)),
+            Err(reason) => {
+                judged.refused.push(Refusal { name, reason });
+            }
+        }
+    }
+    judged
 }
 
-/// What a turn is told when its removal of `names` was refused.
-pub(super) fn unproven_removal_problem(names: &[String]) -> String {
+/// The patches whose removal is refused (see [`judge_removals`]).
+pub(super) fn unproven_patch_removals(
+    version: &str,
+    checkout_dir: &Path,
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+) -> Vec<Refusal> {
+    judge_removals(version, checkout_dir, spec_path, before, snapshot).refused
+}
+
+/// The proof the `.changes` bullet of a removal states, `None` when no proof can
+/// be made: the caller then states none.
+pub(super) fn drop_proof(
+    checkout_dir: &Path,
+    version: &str,
+    before: &str,
+    before_files: &BTreeMap<String, Option<Vec<u8>>>,
+    name: &str,
+) -> Option<DropProof> {
+    let tarball = proof_tarball(checkout_dir, version);
+    let report = crate::patch_check::check_files(before, before_files, tarball.as_deref());
+    let level = patch_levels(before).get(name).copied().unwrap_or(1);
+    proof_of(
+        &report,
+        tarball.as_deref(),
+        before_files.get(name).and_then(|c| c.as_deref()),
+        level,
+        name,
+    )
+    .ok()
+}
+
+/// The refusal text for the removals `names` (the removal is not kept).
+pub(super) fn unproven_removal_problem(names: &[Refusal]) -> String {
     names
         .iter()
-        .map(|n| {
+        .map(|r| {
             format!(
-                "removal of {n} is not proven: quilt does not report it `can be \
-                 reverse-applied` on the new sources, so its change is not in them; rebase it \
-                 with quilt (`quilt push -f`, fix the rejected hunks, `quilt refresh`)"
+                "removal of {n} is refused: {reason}. Keep the patch and refresh it with \
+                 quilt (`quilt push -f`, fix the rejected hunks, `quilt refresh`). If \
+                 it cannot be refreshed, stop and say so: a human must decide.",
+                n = r.name,
+                reason = r.reason
             )
         })
         .collect::<Vec<_>>()
@@ -79,7 +223,7 @@ pub(super) fn reject_unproven_removal(
     notes_path: PathBuf,
     keep: &[String],
     label: &str,
-    unproven: &[String],
+    unproven: &[Refusal],
 ) -> String {
     let problem = unproven_removal_problem(unproven);
     restore_spec(spec_path, before, Some(step), reporter);

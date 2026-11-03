@@ -233,8 +233,12 @@ fn bullets_are_one_line_per_patch_without_the_version() {
     );
     assert_eq!(refresh_bullet(&[]), "");
     assert_eq!(
-        proven_drop_bullet("fix-bar.patch"),
+        proven_drop_bullet("fix-bar.patch", DropProof::ReverseApplies),
         "Drop fix-bar.patch: already applied upstream (reverse-applies cleanly)"
+    );
+    assert_eq!(
+        proven_drop_bullet("fix-bar.patch", DropProof::InTarball),
+        "Drop fix-bar.patch: already applied upstream (already in the new tarball)"
     );
 }
 
@@ -477,4 +481,102 @@ fn real_quilt_refresh_keeps_the_header_index_and_path_style() {
         !refreshed.contains("a/f.txt") && !refreshed.contains("2020-01-01"),
         "{refreshed}"
     );
+}
+
+#[test]
+fn hunks_end_at_their_line_counts_so_a_removed_dash_line_is_not_a_header() {
+    let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n--- x\n-y\n+z\n";
+    assert_eq!(
+        hunks(diff, 1),
+        vec![Hunk {
+            file: Some("f".into()),
+            added: vec!["z".into()],
+        }]
+    );
+    // A created file has no name to prove against.
+    let created = "--- /dev/null\n+++ b/new.h\n@@ -0,0 +1 @@\n+int x;\n";
+    assert_eq!(hunks(created, 1)[0].file, Some("new.h".into()));
+}
+
+#[test]
+fn a_patch_whose_added_lines_are_in_the_new_archive_is_already_in_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let tar = tarball(dir.path(), &[("f.txt", "a\nint answer = 42;\nc\nd\n")]);
+    let adds = "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n-int answer = 41;\n+int answer = 42;\n c\n d\n";
+    assert!(already_in_tarball(&tar, adds.as_bytes(), 1));
+    // The added line is not in the archive.
+    let adds_other =
+        "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n-x\n+int answer = 99;\n c\n d\n";
+    assert!(!already_in_tarball(&tar, adds_other.as_bytes(), 1));
+    // A file the archive does not have is not proven either.
+    let other = "--- a/g.txt\n+++ b/g.txt\n@@ -1 +1 @@\n-x\n+int answer = 42;\n";
+    assert!(!already_in_tarball(&tar, other.as_bytes(), 1));
+}
+
+#[test]
+fn trivial_added_lines_prove_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    // Every file has braces and blank lines: they must not prove a hunk.
+    let tar = tarball(dir.path(), &[("f.txt", "a\n}\n\n{\nbreak;\nc\n")]);
+    for added in ["}", "{", "", "break;", "}\n+break;"] {
+        let diff = format!("--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n a\n-x\n+{added}\n");
+        assert!(!already_in_tarball(&tar, diff.as_bytes(), 1), "{added:?}");
+    }
+}
+
+#[test]
+fn added_lines_must_be_one_contiguous_run_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let tar = tarball(
+        dir.path(),
+        &[(
+            "f.txt",
+            "int first_value = 1;\nfiller line\nint second_value = 2;\nint third_value = 3;\n",
+        )],
+    );
+    // Both lines are in the file, but not next to each other.
+    let apart = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n-a\n+int first_value = 1;\n+int second_value = 2;\n";
+    assert!(!already_in_tarball(&tar, apart.as_bytes(), 1));
+    // Next to each other, but in the wrong order.
+    let reversed = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n-a\n+int third_value = 3;\n+int second_value = 2;\n";
+    assert!(!already_in_tarball(&tar, reversed.as_bytes(), 1));
+    // Contiguous and in order.
+    let run = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n-a\n+int second_value = 2;\n+int third_value = 3;\n";
+    assert!(already_in_tarball(&tar, run.as_bytes(), 1));
+}
+
+#[test]
+fn the_strip_level_decides_which_file_a_patch_is_proven_against() {
+    let dir = tempfile::tempdir().unwrap();
+    // `util.c` at the root has the line; `src/util.c` does not.
+    let tar = tarball(
+        dir.path(),
+        &[
+            ("util.c", "int answer = 42;\n"),
+            ("src/util.c", "int other = 1;\n"),
+        ],
+    );
+    let diff =
+        |name: &str, line: &str| format!("--- {name}\n+++ {name}\n@@ -1 +1 @@\n-x\n+{line}\n");
+    // -p0: `src/util.c` is the file, not the root `util.c`.
+    let p0 = diff("src/util.c", "int answer = 42;");
+    assert!(!already_in_tarball(&tar, p0.as_bytes(), 0));
+    assert!(already_in_tarball(
+        &tar,
+        diff("util.c", "int answer = 42;").as_bytes(),
+        0
+    ));
+    // -p1 strips `src/`: the root `util.c`.
+    assert!(already_in_tarball(&tar, p0.as_bytes(), 1));
+    // -p2 strips two components: `src/util.c`; one too few or too many is
+    // another file.
+    let p2 = diff("x/y/src/util.c", "int other = 1;");
+    assert!(already_in_tarball(&tar, p2.as_bytes(), 2));
+    assert!(!already_in_tarball(&tar, p2.as_bytes(), 1));
+    assert!(!already_in_tarball(&tar, p2.as_bytes(), 3));
+    // Fewer components than the level: no file.
+    assert!(!already_in_tarball(&tar, p0.as_bytes(), 2));
+    // A name that leaves the tree proves nothing.
+    let up = diff("a/../../util.c", "int answer = 42;");
+    assert!(!already_in_tarball(&tar, up.as_bytes(), 1));
 }

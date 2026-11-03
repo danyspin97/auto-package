@@ -284,16 +284,33 @@ fn the_generic_gate_names_only_the_unproven_removals() {
         "Name: foo\nVersion: 1.0\n%prep\n%autosetup -p1\n",
     )
     .unwrap();
-    let unproven = unproven_patch_removals(&config, checkout, &spec_path, before, Some(&snapshot));
-    assert_eq!(unproven, ["a.patch"]);
-    assert!(unproven_removal_problem(&unproven).contains("rebase it with quilt"));
+    let unproven = unproven_patch_removals(
+        &config.version,
+        checkout,
+        &spec_path,
+        before,
+        Some(&snapshot),
+    );
+    assert_eq!(names(&unproven), ["a.patch"]);
+    assert!(unproven_removal_problem(&unproven).contains("refresh it with quilt"));
     // Nothing removed: nothing to prove.
     std::fs::write(&spec_path, before).unwrap();
     std::fs::write(checkout.join("up.patch"), UPSTREAM_DIFF).unwrap();
     std::fs::write(checkout.join("a.patch"), FOREIGN_DIFF).unwrap();
     assert!(
-        unproven_patch_removals(&config, checkout, &spec_path, before, Some(&snapshot)).is_empty()
+        unproven_patch_removals(
+            &config.version,
+            checkout,
+            &spec_path,
+            before,
+            Some(&snapshot)
+        )
+        .is_empty()
     );
+}
+
+fn names(refused: &[crate::pipeline::removal_proof::Refusal]) -> Vec<&str> {
+    refused.iter().map(|r| r.name.as_str()).collect()
 }
 
 #[test]

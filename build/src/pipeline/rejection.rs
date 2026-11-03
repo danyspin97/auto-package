@@ -157,7 +157,8 @@ pub(super) fn gate_turn_edit_without_accept(
         )
         .is_none();
     }
-    let unproven = unproven_patch_removals(config, checkout_dir, spec_path, before, snapshot);
+    let unproven =
+        unproven_patch_removals(&config.version, checkout_dir, spec_path, before, snapshot);
     if !unproven.is_empty() {
         reject_unproven_removal(
             spec_path, before, snapshot, step, reporter, notes_path, keep, label, &unproven,
