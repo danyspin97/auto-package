@@ -178,6 +178,24 @@ fn no_convention_tells_the_agent_to_return_blocked() {
     assert!(!all.contains("return `blocked`") && !all.contains("return `\"blocked\"`"));
     assert!(!all.contains("with `blocked`") && !all.contains("is not an accepted answer"));
     assert_eq!(all.matches("last-resort answer").count(), 1);
+    // Where a convention names `blocked` at all, it says which turn may answer it:
+    // a patch rebase turn or a resolver round. Any other turn is asked again.
+    for (n, text) in crate::conventions_table::CONVENTIONS.iter() {
+        for (i, _) in text.match_indices("`blocked`") {
+            let before: String = text[..i]
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            assert!(
+                before.contains("rebase turn") || before.contains("resolver round"),
+                "convention {n} names `blocked` without saying which turn may answer it"
+            );
+        }
+    }
 }
 
 #[test]

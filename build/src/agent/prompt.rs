@@ -151,7 +151,9 @@ one; the pipeline runs `rpmspec --parse` on it once you finish.
 - "action": "edited", "no_change", "use_upstream_wheel", or "blocked".
   `blocked` is ONLY the last-resort answer of a resolver round that has tried
   every resolution the conventions name; anywhere else the pipeline treats it as
-  a defect of the tool and asks again with your reason fed back.
+  a defect of the tool and asks again with your reason fed back. (A patch rebase
+  turn is the other exception: it answers a patch it cannot port `blocked` in its
+  `patches` list, and the package then stops as needing a maintainer.)
 - "why": required when action is "blocked" or "use_upstream_wheel" — for the
 latter, name the exact missing compiler/SDK and quote the build.log line proving it
 (convention 28 Exception 4)
