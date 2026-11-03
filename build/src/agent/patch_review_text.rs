@@ -14,8 +14,9 @@ pub(super) fn patch_review_task() -> &'static str {
      Give your verdict in the `review` field:\n\
      - `accept` when the patch is right.\n\
      - `rewrite` when you can fix it. Do it with quilt in `source/`: `quilt push` up to \
-       the patch, edit, then `quilt refresh -p ab --no-timestamps --no-index` (`-p 0` \
-       instead of `-p ab` for a `-p0` patch). Never write the `.patch` file by hand, and \
+       the patch, edit, then `quilt refresh --no-timestamps`, plus `-p ab` when \
+       the patch's paths start with `a/` and `b/`, `-p 0` for a `-p0` patch, and \
+       `--no-index` when it has no `Index:` lines (keep the shape it has). Never write the `.patch` file by hand, and \
        keep its header and its `# PATCH-...` comment.\n\
      - `reject` when it is wrong and you cannot fix it, with each problem in `problems`: \
        the patch is then rebased again, told your reasons.\n\

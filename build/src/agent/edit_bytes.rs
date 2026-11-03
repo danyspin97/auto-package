@@ -36,8 +36,8 @@ pub(super) fn refresh_helper_text(command: Option<&str>) -> String {
             {EDIT_BYTES_SCRATCH_DIR}/old.txt --new-file {EDIT_BYTES_SCRATCH_DIR}/new.txt`, \
             where `<path>` is the file under `source/`. It replaces that one occurrence and \
             keeps every other byte, line endings and encoding included.\n\
-         3. Then `cd source && quilt refresh -p ab --no-timestamps --no-index` (`-p 0` for a \
-            `-p0` patch), as for any other hunk.\n\
+         3. Then `cd source && quilt refresh --no-timestamps`, with the same `-p` and `--no-index` \
+            options as for any other hunk (keep the shape the patch has).\n\
          Use it for one edit per patch cycle, as with Edit. If it reports zero or several \
          matches, or refuses the path, answer that patch `blocked` with the reason it gives. \
          Give the command as one plain call: no quotes, globs, `&&`, `;`, `|` or \

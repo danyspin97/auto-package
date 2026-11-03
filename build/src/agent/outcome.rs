@@ -264,8 +264,9 @@ pub(super) fn refresh_patches_task() -> &'static str {
        output, `quilt pop` to undo)\n\
      - `cd source && quilt push -f` (force the failing patch; it leaves `*.rej` files)\n\
      - edit the file to port each rejected hunk, then \
-       `cd source && quilt refresh -p ab --no-timestamps --no-index` (`-p 0` instead of \
-       `-p ab` for a `-p0` patch); quilt writes the patch back into the checkout\n\
+       `cd source && quilt refresh --no-timestamps`, plus `-p ab` when the patch's paths start \
+       with `a/` and `b/`, `-p 0` for a `-p0` patch, and `--no-index` when the patch has no \
+       `Index:` lines (keep the shape the patch has); quilt writes the patch back into the checkout\n\
      - `cd source && quilt diff`, `quilt files`, `quilt series`, `quilt top` to look.\n\
      Each quilt command is one Bash call of the form `cd source && quilt <sub> ...`: the \
      working directory is the workspace, not `source/`. Do not chain several commands \
