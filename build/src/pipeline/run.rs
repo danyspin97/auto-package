@@ -532,6 +532,7 @@ fn run_stages(
     }
     let spec = generate_spec_stage(&ctx, &mut st)?;
     osc_service_stage(&ctx, &mut st, &spec)?;
+    check_signatures_early(&ctx)?;
     fetch_sdist_stage(&ctx, &mut st, spec.need_spec)?;
     // The zig vendor archive, rebuilt from the new source, before the first build.
     zig_vendor_stage(&ctx, &mut st)?;

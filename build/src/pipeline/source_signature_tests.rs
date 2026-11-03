@@ -503,6 +503,16 @@ fn a_new_key_refusal_says_what_the_keyring_holds() {
 }
 
 #[test]
+fn the_early_gate_stops_a_refusal_but_not_a_local_build_or_a_skip() {
+    use super::commit::early_signature_gate;
+    let refused = || SignatureCheck::Refused("no key".into());
+    assert_eq!(early_signature_gate(false, refused).unwrap_err(), "no key");
+    assert!(early_signature_gate(true, refused).is_ok());
+    let skipped = || SignatureCheck::Skipped("no gpg".into());
+    assert!(early_signature_gate(false, skipped).is_ok());
+}
+
+#[test]
 fn the_keyring_listing_is_sanitised_and_says_the_expiry_date() {
     use super::keyring_listing::{parse_holds, printable};
     // A C1 control (U+009B) and a right-to-left override (U+202E), raw and as

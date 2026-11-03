@@ -21,6 +21,52 @@ pub(super) fn commit_unless(
     if local { Ok(()) } else { commit() }
 }
 
+/// The signature check of the new sources, run as soon as they are fetched and
+/// before any agent turn: a key the keyring lacks costs nothing then. Only a
+/// refusal stops here; a skip is reported by the commit step, which runs the
+/// check again as the agent may change the sources. Under `--local` nothing
+/// goes to OBS, so nothing is refused.
+pub(super) fn check_signatures_early(ctx: &RunCtx) -> Result<(), PipelineResult> {
+    early_signature_gate(osc::local_build().is_some(), || {
+        check_signed_sources(&ctx.checkout_dir)
+    })
+    .map_err(|reason| ctx.failed_as(FailureKind::NeedsMaintainer, reason))
+}
+
+/// The refusal reason of the early check, `None` when it does not stop the
+/// package. `check` is run only when the build is not local.
+pub(super) fn early_signature_gate(
+    local: bool,
+    check: impl FnOnce() -> SignatureCheck,
+) -> Result<(), String> {
+    if local {
+        return Ok(());
+    }
+    match check() {
+        SignatureCheck::Refused(reason) => Err(reason),
+        SignatureCheck::Ok | SignatureCheck::Skipped(_) => Ok(()),
+    }
+}
+
+/// Runs the signature check of the checkout: a refusal fails the package as
+/// needing a maintainer, a skip is reported (under `step` when there is one).
+fn signature_gate(
+    ctx: &RunCtx,
+    step: Option<ap_core::event::StepId>,
+) -> Result<(), PipelineResult> {
+    match check_signed_sources(&ctx.checkout_dir) {
+        SignatureCheck::Ok => Ok(()),
+        SignatureCheck::Skipped(note) => {
+            ctx.reporter.report(&Event::Warning {
+                step,
+                message: note,
+            });
+            Ok(())
+        }
+        SignatureCheck::Refused(reason) => Err(ctx.failed_as(FailureKind::NeedsMaintainer, reason)),
+    }
+}
+
 /// Step: Commit.
 pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), PipelineResult> {
     let commit_step = begin_or_fail!(
@@ -70,16 +116,9 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     // A signed new archive must verify against the package's keyring before
     // OBS's own validator, which runs inside `osc ci`, sees it.
-    match check_signed_sources(&ctx.checkout_dir) {
-        SignatureCheck::Ok => {}
-        SignatureCheck::Skipped(note) => ctx.reporter.report(&Event::Warning {
-            step: Some(commit_step.id),
-            message: note,
-        }),
-        SignatureCheck::Refused(reason) => {
-            commit_step.finish(StepOutcome::Failed);
-            return Err(ctx.failed_as(FailureKind::NeedsMaintainer, reason));
-        }
+    if let Err(refused) = signature_gate(ctx, Some(commit_step.id)) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(refused);
     }
     for name in osc::restore_dropped_recipe_files(
         &ctx.checkout_dir,
