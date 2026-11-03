@@ -157,21 +157,10 @@ latter, name the exact missing compiler/SDK and quote the build.log line proving
 (convention 28 Exception 4)
 - "reasoning": your notes: what you found and why, free-form. It goes to the run
   log and the package notes, not to the changelog.
-- "changelog": required when action is "edited". The package's `.changes` bullet,
-  which sits right under `- Update to <version>`. One bullet per change, one line
-  each: a short imperative line (under 100 characters) that starts with a verb (Add,
-  Drop, Fix, Use, Raise, ...) and says what you changed in the package and why. A
-  patch you add, remove or refresh is named by its file name (`Add
-  pytest9-fixtures.patch to convert class fixtures to classmethods`). No package
-  name, no version being packaged (a version the change itself is about, such as a
-  cmake minimum, is fine), no macros (`%{name}`, `%{version}`: write the names out),
-  no other file names or paths, no parentheses, and never what the build log showed
-  or what you reviewed.
-  "Drop the CVE-2025-2588 patch, fixed upstream", not "Drop the CVE-2025-2588 patch,
-  which upstream 1.15.0 already contains (src/fa.c, fa.h, tests/fatest.c)".
-  A dependency change (a BuildRequires, a Requires or a version bound) gets no
-  bullet: a comment next to the line in the spec says why, when the reason is not
-  obvious. See convention 40.
+- "changelog": required when action is "edited" and a change needs a bullet;
+  empty when every change is a dependency change (a BuildRequires, a Requires or a
+  version bound), which gets no bullet; any other edit with an empty changelog is
+  rolled back. The rules are convention 40 above.
 - "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.
   REQUIRED format (each entry must name a specific file or pattern):
   ["Read source/pyproject.toml lines 1-50",

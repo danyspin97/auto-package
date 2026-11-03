@@ -29,7 +29,7 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
     "reasoning": {"type": "string"},
     "changelog": {
       "type": "string",
-      "description": "The package's `.changes` bullets: one bullet per change, one line each, every line an imperative sentence under 100 characters saying what you changed in the package and why. Name a patch you add, remove or refresh by its file name. No package name, no version being packaged, no macros, no other file names, no build-log narration. Required when action is edited."
+      "description": "The package's `.changes` bullets: one bullet per change, one line each, every line an imperative sentence under 100 characters saying what you changed in the package and why. Name a patch you add or change by its file name; the pipeline writes the bullet of a patch it removes with a proof or refreshes. No package name, no version being packaged, no macros, no other file names, no build-log narration. Required when action is edited and a change needs a bullet; empty when every change is a dependency change; any other edit with an empty changelog is rolled back."
     },
     "evidence": {
       "type": "array",
