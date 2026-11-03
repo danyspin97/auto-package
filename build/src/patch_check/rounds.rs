@@ -139,9 +139,10 @@ pub fn agent_report(
          back in place.\n\
          A patch is never removed because it does not apply, nor because it only touches \
          tests (a failing hunk in a `.result` or test file is rebased like any other). The \
-         only accepted proof is quilt's own: `quilt push` of the unchanged patch on the \
-         pristine sources prints `Patch <name> {REVERSE_APPLIED}`. A removal without it is \
-         rejected and rolled back.\n",
+         accepted proofs are quilt's own, `quilt push` of the unchanged patch on the \
+         pristine sources prints `Patch <name> {REVERSE_APPLIED}`, or, for a patch quilt says \
+         fails, every hunk's added lines are already in one file of the new archive as one run, \
+         in order, and each hunk has a substantive line. A removal without a proof is rejected and rolled back.\n",
         checkout.display()
     ));
     text

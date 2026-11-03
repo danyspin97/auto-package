@@ -291,9 +291,11 @@ pub(super) fn refresh_patches_task() -> &'static str {
      \n\
      A patch is NEVER removed because it does not apply, nor because it only touches \
      tests: a failing hunk in a test file or a `.result` file is rebased like any \
-     other. The one proof that a patch may be removed is quilt's own message `Patch \
-     <name> can be reverse-applied` when you `quilt push` the unchanged patch: its \
-     change is already in the new sources. Only then remove it: its `PatchN:` line, \
+     other. A patch may be removed only with a proof that its change is already in the new \
+     sources: quilt's own message `Patch <name> can be reverse-applied` when you `quilt \
+     push` the unchanged patch, or, when quilt says the patch fails, every hunk's added \
+     lines form one contiguous run, in order, in one file of the new archive and \
+     each hunk has a substantive line (the pipeline checks this form itself). Only then remove it: its `PatchN:` line, \
      its `%patchN` line if any, and its file (`cd source && quilt delete -r <name>`). \
      The pipeline checks that proof and rolls back a removal without it.\n\
      \n\
