@@ -408,6 +408,17 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         &mut st.sdist_top_level,
         &mut st.from_repo_archive,
     );
+    // A patch the clean-up wrote or edited is reviewed like any other.
+    let effect = match effect {
+        Ok(e) => {
+            match review_turn_patches(ctx, st, &agent_step, &snapshot, &good, "PostBuildReview", e)
+            {
+                Ok(e) => Ok(e),
+                Err(result) => return Some(RoundEnd::Finished(result)),
+            }
+        }
+        other => other,
+    };
     match &effect {
         Ok(TurnEffect::Edited) => {
             st.post_review_revert = Some(PostReviewRevert {

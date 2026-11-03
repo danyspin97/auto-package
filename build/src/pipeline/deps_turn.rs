@@ -183,6 +183,15 @@ pub(super) fn prefix_stage(
                     )?
                 }
             };
+            let effect = review_turn_patches(
+                ctx,
+                st,
+                &prefix_step,
+                &checkout_snapshot,
+                &clean,
+                "PreFix",
+                effect,
+            )?;
             if matches!(effect, TurnEffect::Edited | TurnEffect::SwitchedToWheel) {
                 st.attempts += 1;
                 persist_attempts(ws, &config.run_id, st.attempts);
