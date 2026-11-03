@@ -120,3 +120,49 @@ fn a_repology_patch_difference_keeps_the_update_and_notes_it() {
     assert_eq!(c.notes.len(), 1, "{c:?}");
     assert!(c.notes[0].contains("27.0.1"), "{c:?}");
 }
+
+#[test]
+fn a_calendar_version_on_either_side_agrees() {
+    assert_eq!(check("2024.05", "2024.10"), Verdict::Agree);
+    assert_eq!(check("2024.10.1", "2025.1"), Verdict::Agree);
+    assert_eq!(check("20240101", "20240201"), Verdict::Agree);
+    assert_eq!(check("1.2.0", "2024.05"), Verdict::Agree);
+    assert_eq!(check("1.2.0", "20240101"), Verdict::Agree);
+}
+
+#[test]
+fn a_calendar_version_is_not_looked_up() {
+    let asked = Cell::new(false);
+    let fetch = |_: &str| -> Result<String, String> {
+        asked.set(true);
+        Ok("2025.1".to_string())
+    };
+    assert_eq!(
+        verdict("attrs", "2024.05", Scheme::Generic, &fetch),
+        Verdict::Agree
+    );
+    assert!(!asked.get());
+}
+
+#[test]
+fn only_a_four_or_eight_digit_year_first_is_a_date() {
+    assert!(is_date_like("2024.05"));
+    assert!(is_date_like("2024.10.1"));
+    assert!(is_date_like("20240101"));
+    assert!(is_date_like("1999"));
+    assert!(!is_date_like("1.2.3"));
+    assert!(!is_date_like("20.5"));
+    assert!(!is_date_like("2100.1"));
+    assert!(!is_date_like("202405"));
+    assert!(!is_date_like("v2024.1"));
+}
+
+#[test]
+fn a_normal_minor_disagreement_still_disagrees() {
+    assert_eq!(
+        check("1.2.0", "1.3.0"),
+        Verdict::Disagrees {
+            repology: "1.3.0".into()
+        }
+    );
+}

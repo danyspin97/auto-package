@@ -18,18 +18,33 @@ pub(crate) enum Verdict {
     Disagrees { repology: String },
 }
 
+/// Whether `version` reads as a calendar date: its first component is a year
+/// (19xx or 20xx) written in four digits, or a date written as eight digits
+/// (20240101). Major and minor numbers mean nothing there.
+pub(crate) fn is_date_like(version: &str) -> bool {
+    let first: String = version.chars().take_while(|c| c.is_ascii_digit()).collect();
+    matches!(first.len(), 4 | 8) && (first.starts_with("19") || first.starts_with("20"))
+}
+
 /// The verdict for `target`, the newest version of the primary source, against
 /// the newest version `fetch` returns for `project` on Repology. Pure: the
-/// lookup is passed in, so a test can answer it without the network.
+/// lookup is passed in, so a test can answer it without the network. A date
+/// version on either side is not compared, so it agrees.
 pub(crate) fn verdict(
     project: &str,
     target: &str,
     scheme: Scheme,
     fetch: &dyn Fn(&str) -> Result<String, String>,
 ) -> Verdict {
+    if is_date_like(target) {
+        return Verdict::Agree;
+    }
     let Ok(repology) = fetch(project) else {
         return Verdict::Agree;
     };
+    if is_date_like(&repology) {
+        return Verdict::Agree;
+    }
     if plan::compare_versions(&repology, target, scheme) != pypi::VersionCompare::Newer {
         return Verdict::Agree;
     }

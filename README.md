@@ -191,7 +191,8 @@ update goes ahead. A Repology error, or a project Repology does not know, has
 no effect. A package held to a series or a major (`python-foo3`, a versioned
 name, a series copy) takes that series' own newest and is not compared:
 Repology's newest may be in another series. Each compared package costs one
-Repology request.
+Repology request. A calendar version on either side (a year first, as `2024.05`
+or `20240101`) is not compared, since its major and minor numbers mean nothing.
 
 A package of SOURCE whose openSUSE:Factory package names another devel project
 than SOURCE is deprecated for SOURCE: `update` does not branch it, and lists it
