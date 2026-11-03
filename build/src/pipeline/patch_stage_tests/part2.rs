@@ -465,3 +465,30 @@ fn a_stall_needs_every_failing_patch_blocked_and_no_file_changed() {
     // Nothing still failing is not a stall: the check decides.
     assert!(!stall(&[], &both, true));
 }
+
+#[test]
+fn two_refreshed_patches_share_one_grouped_bullet() {
+    let case = run(
+        &[("b.patch", "old"), ("c.patch", "FUZZ"), ("d.patch", "FUZZ")],
+        false,
+        10,
+        vec![Box::new(|_, _| outcome(crate::agent::Action::NoChange, ""))],
+    );
+    assert_eq!(
+        bullets(&case.changes, "Refresh patches:"),
+        1,
+        "{}",
+        case.changes
+    );
+    assert!(
+        case.changes.contains("  * c.patch\n  * d.patch\n"),
+        "{}",
+        case.changes
+    );
+    assert_eq!(
+        bullets(&case.changes, "Refresh c.patch"),
+        0,
+        "{}",
+        case.changes
+    );
+}

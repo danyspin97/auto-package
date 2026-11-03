@@ -226,7 +226,12 @@ fn the_loop_stops_on_clean_no_progress_or_rounds() {
 
 #[test]
 fn bullets_are_one_line_per_patch_without_the_version() {
-    assert_eq!(refresh_bullet("fix-foo.patch"), "Refresh fix-foo.patch");
+    assert_eq!(refresh_bullet(&["fix-foo.patch"]), "Refresh fix-foo.patch");
+    assert_eq!(
+        refresh_bullet(&["fix-foo.patch", "fix-bar.patch"]),
+        "Refresh patches:\n  * fix-foo.patch\n  * fix-bar.patch"
+    );
+    assert_eq!(refresh_bullet(&[]), "");
     assert_eq!(
         proven_drop_bullet("fix-bar.patch"),
         "Drop fix-bar.patch: already applied upstream (reverse-applies cleanly)"

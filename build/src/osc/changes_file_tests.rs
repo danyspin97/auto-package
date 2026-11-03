@@ -1,5 +1,7 @@
 use crate::osc::changes::*;
+use crate::osc::changes_refresh::*;
 use crate::osc::service::collapse_generated_changes;
+use crate::proc::Emit;
 use std::fs;
 use std::path::Path;
 
@@ -176,4 +178,66 @@ fn an_entry_obs_holds_is_kept_by_a_later_round_for_another_version() {
 
 fn read_obs(checkout: &Path) -> String {
     fs::read_to_string(checkout.join(".osc/sources/pkg.changes")).unwrap()
+}
+
+#[test]
+fn a_refresh_group_is_one_bullet_and_is_not_written_twice() {
+    let old = entry("- Update to 1.0\n");
+    let co = checkout_with(&old, &old);
+    let block = "Refresh patches:\n  * a.patch\n  * b.patch";
+    add_release_changes_block(co.path(), "1.0", block, Emit::quiet()).unwrap();
+    add_release_changes_block(co.path(), "1.0", block, Emit::quiet()).unwrap();
+    let out = read_changes(co.path());
+    assert!(
+        out.contains("- Refresh patches:\n  * a.patch\n  * b.patch\n"),
+        "{out}"
+    );
+    assert_eq!(out.matches("Refresh patches:").count(), 1, "{out}");
+    assert_eq!(listed_refreshes(co.path(), "1.0"), ["a.patch", "b.patch"]);
+    assert!(listed_refreshes(co.path(), "2.0").is_empty());
+}
+
+#[test]
+fn a_single_refresh_is_listed_as_a_refresh_bullet() {
+    let old = entry("- Update to 1.0\n- Refresh c.patch\n");
+    let co = checkout_with(&old, &old);
+    assert_eq!(listed_refreshes(co.path(), "1.0"), ["c.patch"]);
+}
+
+#[test]
+fn the_refresh_bullet_is_rewritten_in_place_across_rounds_and_runs() {
+    let old = entry("- Update to 1.0\n- Fix x\n");
+    let co = checkout_with(&old, &old);
+    let refresh_bullets = |out: &str| out.lines().filter(|l| l.starts_with("- Refresh")).count();
+    set_refresh_bullet(co.path(), "1.0", "Refresh a.patch", Emit::quiet()).unwrap();
+    assert!(read_changes(co.path()).contains("- Fix x\n- Refresh a.patch\n"));
+    set_refresh_bullet(
+        co.path(),
+        "1.0",
+        "Refresh patches:\n  * a.patch\n  * b.patch",
+        Emit::quiet(),
+    )
+    .unwrap();
+    let out = read_changes(co.path());
+    assert_eq!(refresh_bullets(&out), 1, "{out}");
+    assert!(
+        out.contains("- Fix x\n- Refresh patches:\n  * a.patch\n  * b.patch\n"),
+        "{out}"
+    );
+    let three = "Refresh patches:\n  * a.patch\n  * b.patch\n  * c.patch";
+    set_refresh_bullet(co.path(), "1.0", three, Emit::quiet()).unwrap();
+    // A re-run with the same patches writes the same entry.
+    set_refresh_bullet(co.path(), "1.0", three, Emit::quiet()).unwrap();
+    let out = read_changes(co.path());
+    assert_eq!(refresh_bullets(&out), 1, "{out}");
+    assert_eq!(out.matches("  * ").count(), 3, "{out}");
+    assert_eq!(
+        listed_refreshes(co.path(), "1.0"),
+        ["a.patch", "b.patch", "c.patch"]
+    );
+    // An empty block removes the bullet.
+    set_refresh_bullet(co.path(), "1.0", "", Emit::quiet()).unwrap();
+    let out = read_changes(co.path());
+    assert_eq!(refresh_bullets(&out), 0, "{out}");
+    assert!(out.contains("- Fix x\n"), "{out}");
 }

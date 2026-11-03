@@ -81,7 +81,7 @@ pub fn add_release_changes_entry(
 }
 
 /// One bullet of [`add_release_changes_entry`].
-fn add_release_bullet(
+pub(super) fn add_release_bullet(
     checkout_dir: &Path,
     version: &str,
     message: &str,
@@ -255,7 +255,8 @@ pub(super) fn with_bullet_in_release_entry(
     if !entry.iter().map(bullet_text).any(|t| t == update) {
         return None;
     }
-    if entry.iter().map(bullet_text).any(|t| t == message) {
+    // The block is in the entry already: nothing to add.
+    if has_block(entry, message) {
         return Some(changes.to_string());
     }
     let last = lines[first + 1..end]
@@ -503,20 +504,34 @@ pub fn wrap_unpublished_changes(checkout_dir: &Path) {
     }
 }
 
+/// Whether `message` is in `entry` as one block: its lines, bullet marks aside,
+/// follow each other in the entry (a single line is one bullet).
+pub(super) fn has_block(entry: &[&str], message: &str) -> bool {
+    let strip = |l: &str| l.trim().trim_start_matches(['-', '*', ' ']).to_string();
+    let wanted: Vec<String> = message
+        .lines()
+        .map(strip)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let lines: Vec<String> = entry.iter().map(|l| strip(l)).collect();
+    !wanted.is_empty() && lines.windows(wanted.len()).any(|w| w == wanted.as_slice())
+}
+
 /// Whether the newest entry of a `.changes` file (the text between its first
-/// two separator lines) has `message` as one of its lines, bullet or not.
+/// two separator lines) has `message` as a block (see [`has_block`]).
 pub(super) fn newest_changes_entry_says(changes: &str, message: &str) -> bool {
     let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
+    let mut entry: Vec<&str> = Vec::new();
     let mut started = false;
-    for line in changes.lines().map(str::trim) {
-        if is_separator(line) {
+    for line in changes.lines() {
+        if is_separator(line.trim()) {
             if started {
-                return false;
+                break;
             }
             started = true;
-        } else if started && line.trim_start_matches(['-', '*', ' ']) == message {
-            return true;
+        } else if started {
+            entry.push(line);
         }
     }
-    false
+    has_block(&entry, message)
 }

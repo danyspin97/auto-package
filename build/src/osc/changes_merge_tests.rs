@@ -484,3 +484,77 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
     assert!(!out.contains("yyjson"), "{out}");
     assert!(out.ends_with(DUCKDB_OLD), "{out}");
 }
+
+#[test]
+fn a_refresh_group_is_not_merged_into_the_group_of_its_first_file() {
+    let text = "\
+-------------------------------------------------------------------
+Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 2.0.0
+- Refresh patches:
+  * duckdb-use-system-zstd.patch
+  * duckdb-use-system-yyjson.patch
+- Fix duckdb-use-system-zstd.patch: first attempt
+- Revert duckdb-use-system-zstd.patch: second attempt
+
+";
+    let files = set(&[
+        "duckdb-use-system-zstd.patch",
+        "duckdb-use-system-yyjson.patch",
+    ]);
+    let out = rewrite_entry_from_diff(text, "", &files, &files).unwrap();
+    // The group keeps both refreshes; the two zstd bullets merge into the Revert.
+    assert!(
+        out.contains(
+            "- Refresh patches:\n  * duckdb-use-system-zstd.patch\n  * duckdb-use-system-yyjson.patch\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("- Revert duckdb-use-system-zstd.patch: second attempt\n"),
+        "{out}"
+    );
+    assert!(!out.contains("first attempt"), "{out}");
+}
+
+#[test]
+fn a_refresh_group_whose_patches_are_all_unchanged_is_dropped() {
+    let text = "\
+-------------------------------------------------------------------
+Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 2.0.0
+- Refresh patches:
+  * duckdb-use-system-zstd.patch
+  * duckdb-use-system-yyjson.patch
+- Fix the build
+
+";
+    let out = rewrite_entry_from_diff(text, "", &set(&[]), &duckdb_files()).unwrap();
+    assert!(!out.contains("Refresh patches:"), "{out}");
+    assert!(out.contains("- Fix the build\n"), "{out}");
+}
+
+#[test]
+fn a_continuation_line_naming_a_file_joins_its_bullets_group() {
+    let text = "\
+-------------------------------------------------------------------
+Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 2.0.0
+- Extend the headers
+  for duckdb-use-system-zstd.patch to build
+- Revert duckdb-use-system-zstd.patch: undo it
+
+";
+    let files = set(&["duckdb-use-system-zstd.patch"]);
+    let out = rewrite_entry_from_diff(text, "", &files, &files).unwrap();
+    // The first bullet's continuation is part of its text: the Revert replaces it.
+    assert!(
+        out.contains("- Revert duckdb-use-system-zstd.patch: undo it\n"),
+        "{out}"
+    );
+    assert!(!out.contains("Extend the headers"), "{out}");
+    assert!(!out.contains("  for duckdb"), "{out}");
+}

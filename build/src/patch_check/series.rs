@@ -291,10 +291,19 @@ pub fn series_text(entries: &[SeriesEntry]) -> String {
         .collect()
 }
 
-/// The `.changes` bullet for a refreshed patch. The packaged version is not
-/// named: the release's `Update to` entry already does.
-pub fn refresh_bullet(name: &str) -> String {
-    format!("Refresh {name}")
+/// The `.changes` bullet for the refreshed patches, in the order given: one
+/// patch is `Refresh <patch>`; two or more are one `Refresh patches:` bullet
+/// with an `  * <patch>` item each. The packaged version is not named: the
+/// release's `Update to` entry already does.
+pub fn refresh_bullet(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => format!("Refresh {one}"),
+        many => {
+            let items: String = many.iter().map(|n| format!("\n  * {n}")).collect();
+            format!("Refresh patches:{items}")
+        }
+    }
 }
 
 /// The `.changes` bullet for a patch removed because quilt proved it already

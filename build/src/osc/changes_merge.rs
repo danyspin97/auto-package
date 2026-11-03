@@ -257,8 +257,9 @@ fn update_version(head: &str) -> Option<&str> {
 }
 
 /// The fate of each part: bullets that name no file, and the `Update to` bullet,
-/// stay; a bullet whose named files are all unchanged is dropped, and the rest
-/// are grouped by their first.
+/// stay; a bullet whose named files are all unchanged is dropped; a
+/// `Refresh patches:` group stays on its own; the rest are grouped by their
+/// first file.
 fn fates(parts: &[Part], changed: &BTreeSet<String>) -> Vec<Fate> {
     parts
         .iter()
@@ -266,6 +267,15 @@ fn fates(parts: &[Part], changed: &BTreeSet<String>) -> Vec<Fate> {
             Part::Other(_) => Fate::Keep,
             Part::Bullet(b) if b.names.is_empty() || update_version(&b.head).is_some() => {
                 Fate::Keep
+            }
+            // A refresh group is never merged into the group of a file it names:
+            // it stays as written while one of its patches changed.
+            Part::Bullet(b) if b.head == "Refresh patches:" => {
+                if b.names.iter().any(|n| changed.contains(n)) {
+                    Fate::Keep
+                } else {
+                    Fate::Drop
+                }
             }
             Part::Bullet(b) if b.names.iter().all(|n| !changed.contains(n)) => Fate::Drop,
             Part::Bullet(b) => Fate::Group(b.names[0].clone()),

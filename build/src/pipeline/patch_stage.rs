@@ -371,7 +371,10 @@ pub(super) fn settle_patch_changes(
     !refreshed.is_empty() || !removed.is_empty()
 }
 
-/// One `.changes` bullet per refreshed patch that is still in the spec.
+/// The run's `.changes` refresh bullet: every patch still in the spec that this
+/// release's entry already names, or that this run refreshed, in one bullet
+/// (see [`refresh_bullet`](crate::patch_check::refresh_bullet)). It replaces the
+/// bullet an earlier run wrote, so the entry keeps one.
 pub(super) fn write_refresh_bullets(
     ctx: &RunCtx,
     step: ap_core::event::StepId,
@@ -380,11 +383,27 @@ pub(super) fn write_refresh_bullets(
     let declared = crate::patch_check::declared_patches(
         &std::fs::read_to_string(&ctx.spec_path).unwrap_or_default(),
     );
+    let is_declared = |n: &str| declared.iter().any(|(_, d)| d == n);
+    let mut names: Vec<String> = osc::listed_refreshes(&ctx.checkout_dir, &ctx.config.version)
+        .into_iter()
+        .filter(|n| is_declared(n))
+        .collect();
     for name in refreshed {
-        if declared.iter().any(|(_, n)| n == name) {
-            add_patch_bullet(ctx, step, &crate::patch_check::refresh_bullet(name));
+        if is_declared(name) && !names.contains(name) {
+            names.push(name.clone());
         }
     }
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    warn_if_err(
+        ctx.reporter,
+        "adding the .changes entry for the refreshed patches",
+        osc::set_refresh_bullet(
+            &ctx.checkout_dir,
+            &ctx.config.version,
+            &crate::patch_check::refresh_bullet(&names),
+            Emit::new(ctx.reporter, step),
+        ),
+    );
 }
 
 /// The failure of a package whose patches still do not apply, or that the agent

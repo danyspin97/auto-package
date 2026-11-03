@@ -67,6 +67,8 @@ mod spec_file_name_tests;
 pub use changes::*;
 mod changes_merge;
 pub use changes_merge::*;
+mod changes_refresh;
+pub use changes_refresh::*;
 #[cfg(test)]
 mod changes_file_tests;
 #[cfg(test)]
