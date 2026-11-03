@@ -148,6 +148,32 @@ fn models_escalate_with_the_attempt_and_rotate_on_demand() {
 }
 
 #[test]
+fn a_patch_review_never_runs_below_sonnet_whatever_the_attempt_or_rotation() {
+    let sonnet = "claude-sonnet-5-5";
+    let opus = "claude-opus-5-5";
+    assert_eq!(model_for_task(Task::PatchReview, 1, 0), sonnet);
+    assert_eq!(model_for_task(Task::PatchReview, 3, 0), sonnet);
+    assert_eq!(model_for_task(Task::PatchReview, 6, 0), opus);
+    // a 429 moves it to the other tier at or above Sonnet, never to Haiku
+    assert_eq!(model_for_task(Task::PatchReview, 1, 1), opus);
+    assert_eq!(model_for_task(Task::PatchReview, 1, 2), sonnet);
+    assert_eq!(model_for_task(Task::PatchReview, 6, 1), sonnet);
+    for attempt in 0..9 {
+        for rotation in 0..6 {
+            assert_ne!(
+                model_for_task(Task::PatchReview, attempt, rotation),
+                "claude-haiku-5-5"
+            );
+        }
+    }
+    // every other task keeps the escalation
+    for task in [Task::Review, Task::RefreshPatches, Task::FixAfterBuild] {
+        assert_eq!(model_for_task(task, 1, 0), model_for_attempt(1, 0));
+        assert_eq!(model_for_task(task, 6, 1), model_for_attempt(6, 1));
+    }
+}
+
+#[test]
 fn a_monorepos_sibling_projects_reach_the_prompt() {
     let ws = std::path::Path::new("/nonexistent-workspace");
     let subs = vec![

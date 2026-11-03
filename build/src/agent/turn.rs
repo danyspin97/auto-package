@@ -122,14 +122,34 @@ const AGENT_MODELS: [&str; 3] = ["claude-haiku-5-5", "claude-sonnet-5-5", "claud
 /// `rotation` places along the list (wrapping) to dodge a model whose quota is
 /// exhausted.
 pub(crate) fn model_for_attempt(attempt: usize, rotation: usize) -> &'static str {
-    let base = if attempt <= 2 {
+    AGENT_MODELS[(attempt_tier(attempt) + rotation) % AGENT_MODELS.len()]
+}
+
+/// The index in [`AGENT_MODELS`] an attempt starts on.
+fn attempt_tier(attempt: usize) -> usize {
+    if attempt <= 2 {
         0
     } else if attempt <= 5 {
         1
     } else {
         2
-    };
-    AGENT_MODELS[(base + rotation) % AGENT_MODELS.len()]
+    }
+}
+
+/// The first tier a PatchReview turn may run on: Sonnet. A review is a judge of
+/// another turn's work, so it is never run on a cheaper model, whatever the run
+/// uses; a quota rotation moves only among the tiers from here up.
+const REVIEW_FLOOR_TIER: usize = 1;
+
+/// [`model_for_attempt`] for the turn of `task`: a PatchReview turn stays at or
+/// above [`REVIEW_FLOOR_TIER`], also when the rotation wraps.
+pub(crate) fn model_for_task(task: Task, attempt: usize, rotation: usize) -> &'static str {
+    if task != Task::PatchReview {
+        return model_for_attempt(attempt, rotation);
+    }
+    let tiers = &AGENT_MODELS[REVIEW_FLOOR_TIER..];
+    let base = attempt_tier(attempt).saturating_sub(REVIEW_FLOOR_TIER);
+    tiers[(base + rotation) % tiers.len()]
 }
 
 /// Run one agent turn. The agent has tool access to the workspace and edits

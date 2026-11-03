@@ -325,7 +325,7 @@ pub(super) fn agent_turn(
         session_id: if ctx.resume && !fresh_session.get() {
             session_id.as_deref().and_then(|s| {
                 let (model, id) = s.split_once('|')?;
-                (model == crate::agent::model_for_attempt(ctx.attempt, model_rotation.get()))
+                (model == crate::agent::model_for_task(ctx.task, ctx.attempt, model_rotation.get()))
                     .then_some(id)
             })
         } else {
@@ -411,8 +411,8 @@ pub(super) fn agent_turn(
                     step: Some(step.id),
                     message: format!(
                         "model API rate-limited (429) on {}; pausing, then retrying on {} ({rate_limit_retries}/{MAX_IMMEDIATE_RATE_LIMIT_RETRIES})",
-                        crate::agent::model_for_attempt(ctx.attempt, model_rotation.get() - 1),
-                        crate::agent::model_for_attempt(ctx.attempt, model_rotation.get()),
+                        crate::agent::model_for_task(ctx.task, ctx.attempt, model_rotation.get() - 1),
+                        crate::agent::model_for_task(ctx.task, ctx.attempt, model_rotation.get()),
                     ),
                 });
             }
@@ -491,7 +491,7 @@ pub(super) fn agent_turn(
     *session_id = outcome.session_id.as_ref().map(|id| {
         format!(
             "{}|{id}",
-            crate::agent::model_for_attempt(ctx.attempt, model_rotation.get())
+            crate::agent::model_for_task(ctx.task, ctx.attempt, model_rotation.get())
         )
     });
 

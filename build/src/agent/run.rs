@@ -29,7 +29,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // Escalate with the attempt number: the first 2 attempts go to Haiku 5.5
     // (cheapest), the next 3 to Sonnet 5.5, and everything from attempt 6 on —
     // the packages the cheaper tiers already failed on — to Opus 5.5.
-    let model = model_for_attempt(req.attempt, req.model_rotation);
+    let model = model_for_task(req.task, req.attempt, req.model_rotation);
 
     // Cap this turn at whatever is left of the package budget, so one runaway
     // turn cannot overshoot it — the caller only checks between turns.
