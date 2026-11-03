@@ -323,13 +323,14 @@ fn system_prompt_file_holds_the_static_prompt() {
 fn static_system_prompt_states_the_bash_grants() {
     assert!(static_system_prompt().contains(BASH_RULES.trim()));
     assert!(
-        BASH_RULES.len() < 600,
+        BASH_RULES.len() < 700,
         "Bash rules are {} bytes",
         BASH_RULES.len()
     );
     for want in [
         "`ls <relative path>`",
         "`quilt <subcommand>`",
+        "`rpm -qlp <rpms",
         "`;`",
         "globs",
     ] {

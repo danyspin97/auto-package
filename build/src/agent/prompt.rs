@@ -49,7 +49,8 @@ pub(super) const BASH_RULES: &str = r#"
 ## Bash in this turn
 
 Bash is granted only for `ls <relative path>`, `osc status`, `osc cat <project>
-<package> <path>`, `readelf`, `zypper search|what-provides|info`, and, with
+<package> <path>`, `readelf`, `zypper search|what-provides|info`, `rpm -qlp <rpms
+dir>/<file>.rpm` (only when the workspace map shows an `rpms/` line), and, with
 `source/` as the directory, `quilt <subcommand>` and `patch --dry-run` (`cd source
 && ` may prefix only those two). Anything else is refused, including `;`, `&&`,
 `|`, `>`, `$`, backticks, globs (`*`, `?`, `[`), `..`, `~`, an absolute path given
