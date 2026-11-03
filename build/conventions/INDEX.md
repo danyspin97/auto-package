@@ -10,7 +10,7 @@
 10. %check failure: missing dependency or compiler vs cannot run here — read when %check fails (ImportError, fixture not found, collect error, command 'g++'/'gcc' failed, No such file 'g++')
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
 12. Merged into convention 7 — read convention 7 when %check fails oddly on config
-13. Merged into convention 28 — read convention 28 when %prep/%build fails (no such file, name resolution)
+13. Merged into convention 91 — read convention 91 when %prep/%build fails (no such file, name resolution, FetchContent download)
 14. Tools, the evidence rule, and the stdlib-removal table — read when creating a file, using Bash (zypper, osc cat, rpm -qlp), or a test fails on a removed stdlib API
 15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
 16. Merged into convention 17 — read convention 17 when writing %files module dirs or an import check for an unfamiliar package
@@ -88,7 +88,7 @@
 88. Merged into convention 10 — read convention 10 when a whole test family fails with empty output
 89. [inline] SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
 90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr in a new spec; update keeps them unless forced, lint removes them; keep header, URL:, SPDX License: — read when a spec has them or no URL:
-91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
+91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent, or %build fails offline (13)
 92. Merged into convention 77 — read convention 77 when you write or edit a _service file
 93. Merged into convention 77 — read convention 77 when the release page has a .asc, .sig or .sign next to the tarball
 94. Merged into convention 111 — read convention 111 when the prompt lists patches that failed to apply or you are about to remove a Patch line
