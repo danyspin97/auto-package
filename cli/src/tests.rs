@@ -69,6 +69,7 @@ fn the_plan_counts_each_kind_of_package_as_it_is_added() {
             &Candidate {
                 rpm_name: "python-x".into(),
                 decision,
+                notes: Vec::new(),
             },
             &sink,
         );

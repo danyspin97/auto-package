@@ -68,6 +68,12 @@ impl PlanReport {
             step: None,
             message: line,
         });
+        for note in &c.notes {
+            reporter.report(&Event::Progress {
+                step: None,
+                message: format!("[note]    {}  ({note})", c.rpm_name),
+            });
+        }
     }
 
     pub(super) fn total(&self) -> usize {

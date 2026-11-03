@@ -138,6 +138,7 @@ pub fn classify_forced(
     let skipped = |reason| Candidate {
         rpm_name: rpm_name.to_string(),
         decision: Decision::Skipped(reason),
+        notes: Vec::new(),
     };
     let text = match fetch_spec(rpm_name) {
         Ok(text) => text,
@@ -172,6 +173,7 @@ pub fn classify_forced(
                 return Candidate {
                     rpm_name: rpm_name.to_string(),
                     decision,
+                    notes: Vec::new(),
                 };
             }
             Err(e) => failures.push(e),

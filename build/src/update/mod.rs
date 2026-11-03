@@ -42,6 +42,7 @@ mod plan;
 mod read;
 #[cfg(test)]
 mod reading;
+mod repology;
 mod snapshot;
 #[cfg(test)]
 mod specs;

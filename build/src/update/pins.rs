@@ -150,6 +150,9 @@ pub(super) enum Held {
     Series(Vec<u64>),
     /// The package is not taken at all; the reason says why.
     Stop(SkipReason),
+    /// The package is held to a series or a major that `latest` is already in:
+    /// `latest` is taken as it is.
+    Pinned,
 }
 
 /// Why a `latest` newer than the packaged version is not taken as it is: a
@@ -170,7 +173,11 @@ where
     let packaged = header.version.as_str();
     if let Some(series) = series_of(rpm_name, packaged).or_else(|| name_series(rpm_name, packaged))
     {
-        return (!in_series(latest, &series)).then_some(Held::Series(series));
+        return Some(if in_series(latest, &series) {
+            Held::Pinned
+        } else {
+            Held::Series(series)
+        });
     }
     let own = major_key(packaged);
     if own.is_empty() {
@@ -194,7 +201,11 @@ where
     let series_copy = is_series_copy_of(rpm_name, &header.name);
     let newer_sibling = related.iter().any(|(_, v)| series_pair(v) > own_pair);
     if series_copy || newer_sibling {
-        return (major_key(latest) != own).then_some(Held::Series(own));
+        return Some(if major_key(latest) != own {
+            Held::Series(own)
+        } else {
+            Held::Pinned
+        });
     }
     // A plain package takes a jump of one major; two or more it leaves to the
     // maintainer.

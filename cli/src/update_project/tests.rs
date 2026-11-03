@@ -270,6 +270,7 @@ fn a_backport_item_keeps_the_packaged_version() {
             &update::Candidate {
                 rpm_name: "curl".into(),
                 decision,
+                notes: Vec::new(),
             },
         )
     };

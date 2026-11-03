@@ -124,6 +124,7 @@ where
             return Candidate {
                 rpm_name: rpm_name.to_string(),
                 decision,
+                notes: Vec::new(),
             };
         }
         return skipped(
@@ -161,16 +162,33 @@ where
         return Candidate {
             rpm_name: rpm_name.to_string(),
             decision,
+            notes: Vec::new(),
         };
     }
     let scheme = match ecosystem {
         Ecosystem::Pypi { .. } => Scheme::Pep440,
         _ => Scheme::Generic,
     };
+    // Repology is compared only with a plain update: a package held to a series
+    // takes the series' own newest, which Repology's newest may not be.
+    let mut notes = Vec::new();
     let decision = match compare_versions(&latest, tag_version, scheme) {
         pypi::VersionCompare::Newer => {
             match held_back(rpm_name, &header, &latest, fetch_spec, project) {
-                None => Decision::Update {
+                None => {
+                    let update = Decision::Update {
+                        ecosystem,
+                        old_version: header.version,
+                        new_version: latest,
+                        upstream_tag,
+                    };
+                    let (decision, found) = repology::settle(update, &header.name, lookups);
+                    notes = found;
+                    decision
+                }
+                // Held to a series or a major, whose newest is already the latest:
+                // that is the release taken, and Repology is not compared with it.
+                Some(Held::Pinned) => Decision::Update {
                     ecosystem,
                     old_version: header.version,
                     new_version: latest,
@@ -194,6 +212,7 @@ where
     Candidate {
         rpm_name: rpm_name.to_string(),
         decision,
+        notes,
     }
 }
 
@@ -339,6 +358,7 @@ pub(super) fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
     Candidate {
         rpm_name: rpm_name.to_string(),
         decision: Decision::Skipped(reason),
+        notes: Vec::new(),
     }
 }
 

@@ -5,6 +5,9 @@ use crate::obs_xml::{mask_xml_comments, open_tag, param_value, service_elements,
 pub struct Candidate {
     pub rpm_name: String,
     pub decision: Decision,
+    /// What a check found worth a line in the plan, without stopping the
+    /// package (a patch-level disagreement with Repology).
+    pub notes: Vec<String>,
 }
 
 /// Which ecosystem a package came from. Carried on both `Update` and
@@ -176,6 +179,14 @@ pub enum SkipReason {
         branch: String,
         upstream: String,
     },
+    /// The package's own source and Repology disagree in the major or minor
+    /// number, and Repology is the newer: the version is a maintainer's choice,
+    /// so nothing is retargeted to either one.
+    RepologyDisagrees {
+        source: String,
+        target: String,
+        repology: String,
+    },
 }
 
 /// Whether a version carries a calendar date (`2020-11-13`): upstream
@@ -284,6 +295,15 @@ impl std::fmt::Display for SkipReason {
                 f,
                 "needs a maintainer: the branch project holds {branch}, newer than upstream's \
                  {upstream}; the update would replace it with an older version"
+            ),
+            SkipReason::RepologyDisagrees {
+                source,
+                target,
+                repology,
+            } => write!(
+                f,
+                "Repology lists {repology}; {source} says {target}: a maintainer must pick \
+                 the version, pass --to-version"
             ),
             SkipReason::VersionCompareFailed { packaged, latest } => {
                 write!(

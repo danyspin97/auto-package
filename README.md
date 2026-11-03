@@ -177,6 +177,19 @@ read leaves the package alone, skipped with the cause. The comparison is made
 for an upgrade in a plain `update` only, not for `lint`, `--in-place`,
 `--revision` or a maintenance backport.
 
+A package whose source is not Repology is also compared with Repology's newest
+version for it. When Repology is newer and differs in the major or minor
+number, the package is skipped as needing a maintainer: the two sources
+disagree about which release to package, and the tool never picks one
+silently. The reason names both versions and the source, and a maintainer
+chooses the version and runs `update` with `--to-version`, which is not
+compared. A difference only in the patch level is noted in the plan and the
+update goes ahead. A Repology error, or a project Repology does not know, has
+no effect. A package held to a series or a major (`python-foo3`, a versioned
+name, a series copy) takes that series' own newest and is not compared:
+Repology's newest may be in another series. Each compared package costs one
+Repology request.
+
 The run ends with a summary (updated, failed, skipped, requests, build paths
 added, branch project) and exits non-zero when a package failed.
 

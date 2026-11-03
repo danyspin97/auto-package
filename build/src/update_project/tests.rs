@@ -34,6 +34,7 @@ fn update(name: &str, old: &str, new: &str) -> Candidate {
             new_version: new.into(),
             upstream_tag: None,
         },
+        notes: Vec::new(),
     }
 }
 
@@ -65,10 +66,12 @@ fn only_packages_with_an_update_become_items_and_exclude_applies() {
                 },
                 version: "1".into(),
             },
+            notes: Vec::new(),
         },
         Candidate {
             rpm_name: "e".into(),
             decision: Decision::Skipped(SkipReason::NoSourceLine),
+            notes: Vec::new(),
         },
     ];
     let items = items_from_plan("Base:System", &cands, &["python-b-c".to_string()]);

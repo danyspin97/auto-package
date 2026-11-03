@@ -416,3 +416,18 @@ fn a_sibling_with_another_upstream_does_not_pin_by_its_name() {
         Decision::Update { ref new_version, .. } if new_version == "2.0.0"
     ));
 }
+
+#[test]
+fn a_series_pin_takes_its_newest_without_a_repology_check() {
+    // Repology's newest is on another series: the pinned package takes the
+    // release of its own series, and is not stopped for disagreeing.
+    let spec = forged("python311", "3.11.5", "python/cpython");
+    let mut lookups = answers_in("3.11.9", Some("3.11.9"));
+    let repology: &'static dyn Fn(&str) -> Result<String, String> =
+        Box::leak(Box::new(|_: &str| Ok("3.13.0".to_string())));
+    lookups.fetch_repology_latest = repology;
+    assert!(matches!(
+        decide("python311", spec, &["python311"], &lookups),
+        Decision::Update { ref new_version, .. } if new_version == "3.11.9"
+    ));
+}
