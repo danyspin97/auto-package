@@ -238,9 +238,6 @@ fn record_built_state(ctx: &RunCtx) {
     });
 }
 
-/// The least model budget worth a post-build review turn.
-const POST_REVIEW_MIN_BUDGET_USD: f64 = 0.5;
-
 /// Most diff lines and warning lines the post-build review is given.
 const POST_REVIEW_DIFF_LINES: usize = 200;
 
@@ -265,17 +262,21 @@ pub(super) fn build_warnings_extract(log: &str) -> String {
         .join("\n")
 }
 
+/// The least spend room, in dollars, a post-build review turn needs: the review
+/// is not started with less left than this, whatever the last turn cost.
+pub(super) const POST_REVIEW_MIN_BUDGET_USD: f64 = 0.5;
+
 /// Whether the post-build review is ruled out before any turn: it already ran,
 /// the run is an update (its recipe is the origin's, and a clean-up turn would
-/// rewrite what the maintainer chose), there is no agent, or the budget left is
-/// too small.
+/// rewrite what the maintainer chose), there is no agent, or the budget cannot
+/// cover it (`out_of_budget`, see `POST_REVIEW_MIN_BUDGET_USD`).
 pub(super) fn post_review_ruled_out(
     already_done: bool,
     update: bool,
     no_agent: bool,
-    budget_left: f64,
+    out_of_budget: bool,
 ) -> bool {
-    already_done || update || no_agent || budget_left < POST_REVIEW_MIN_BUDGET_USD
+    already_done || update || no_agent || out_of_budget
 }
 
 /// One cheap clean-up turn on a spec that has just built, when the agent
@@ -299,7 +300,7 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         std::mem::replace(&mut st.post_review_done, true),
         st.update.is_some(),
         config.no_agent,
-        config.budget_usd - st.spent_usd,
+        spend_allows_turn(config.budget_usd, st.spent_usd, POST_REVIEW_MIN_BUDGET_USD).is_err(),
     ) {
         return None;
     }

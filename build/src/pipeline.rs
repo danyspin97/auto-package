@@ -339,6 +339,8 @@ mod snapshot;
 use snapshot::*;
 mod rejection;
 use rejection::*;
+#[cfg(test)]
+mod agent_budget_tests;
 mod apply_turn;
 mod build_switch;
 #[cfg(test)]
@@ -355,6 +357,8 @@ mod patch_rules_content_tests;
 mod patch_rules_spec;
 #[cfg(test)]
 mod patch_rules_tests;
+mod spend_guard;
+use spend_guard::*;
 mod service_edit;
 #[cfg(test)]
 mod service_edit_tests;

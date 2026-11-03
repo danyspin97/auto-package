@@ -13,6 +13,7 @@ use crate::pipeline::patch_stage::*;
 use crate::pipeline::review::*;
 use crate::pipeline::sdist_stage::*;
 use crate::pipeline::snapshot::*;
+use crate::pipeline::spend_guard::*;
 use crate::pipeline::validate::*;
 use crate::pipeline::zig_stage::*;
 
@@ -265,12 +266,20 @@ fn package_notes_step(
         }
     };
     let spent_this_run = spent_in_run(&prior, &config.run_id);
-    if spent_this_run + crate::package_notes::NOTES_CAP_USD > config.budget_usd {
+    // The notes turn is not started when, with what this run spent on the
+    // package, its cap would reach the budget (the rule of every turn).
+    if spend_allows_turn(
+        config.budget_usd,
+        spent_this_run,
+        crate::package_notes::NOTES_CAP_USD,
+    )
+    .is_err()
+    {
         reporter.report(&Event::Warning {
             step: None,
             message: format!(
-                "package notes not updated: ${spent_this_run:.2} already spent and the \
-                 notes turn can cost up to ${:.2}, over the ${:.2} budget",
+                "package notes not updated: ${spent_this_run:.2} already spent in this run \
+                 and the notes turn can cost up to ${:.2}, which would reach the ${:.2} budget",
                 crate::package_notes::NOTES_CAP_USD,
                 config.budget_usd
             ),

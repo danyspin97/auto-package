@@ -175,19 +175,19 @@ mod post_build_review {
 
     #[test]
     fn an_update_is_not_reviewed_after_its_build() {
-        assert!(post_review_ruled_out(false, true, false, 10.0));
+        assert!(post_review_ruled_out(false, true, false, false));
     }
 
     #[test]
     fn a_new_package_keeps_its_post_build_review() {
-        assert!(!post_review_ruled_out(false, false, false, 10.0));
+        assert!(!post_review_ruled_out(false, false, false, false));
     }
 
     #[test]
     fn the_review_still_stops_once_run_or_out_of_budget_or_without_agent() {
-        assert!(post_review_ruled_out(true, false, false, 10.0));
-        assert!(post_review_ruled_out(false, false, true, 10.0));
-        assert!(post_review_ruled_out(false, false, false, 0.0));
+        assert!(post_review_ruled_out(true, false, false, false));
+        assert!(post_review_ruled_out(false, false, true, false));
+        assert!(post_review_ruled_out(false, false, false, true));
     }
 }
 
