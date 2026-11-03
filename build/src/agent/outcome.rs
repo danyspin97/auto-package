@@ -278,8 +278,10 @@ pub(super) fn refresh_patches_task() -> &'static str {
      `source/.pc`. Edit and Write refuse a file that is not UTF-8: that file is edited with the \
      byte-edit helper described below, and a patch the helper cannot edit is answered \
      `blocked` with the reason.\n\
-     The pipeline refreshed every patch that applies with an offset or fuzz before you \
-     started: each patch you are given has rejected hunks. Keep each patch's comment \
+     The pipeline refreshed every patch that applies with fuzz before you started (rpm \
+     applies with `--fuzz=0`) and left every patch that applies with an offset alone as it \
+     is, because rpm applies it: never refresh that one. Each patch you are given has \
+     rejected hunks. Keep each patch's comment \
      header (PATCH-FIX-UPSTREAM / PATCH-FIX-OPENSUSE and the \
      reference) as it is, and never write a .patch file by hand. `patch --dry-run` \
      is a read-only fallback when quilt cannot be used, never the main tool and \

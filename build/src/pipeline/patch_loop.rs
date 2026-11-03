@@ -83,9 +83,9 @@ fn patch_stage_inner(
     );
     let mut accepted: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
     let mut report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
-    // A patch that applies only with an offset or fuzz is refreshed here, by
-    // the pipeline, before any turn: the agent is handed only the patches that
-    // have rejects.
+    // A patch that applies with fuzz is refreshed here, by the pipeline, before
+    // any turn (one with an offset alone is left as it is): the agent is handed
+    // only the patches that have rejects.
     let mut refreshed: std::collections::BTreeSet<String> = Default::default();
     if report.to_refresh().next().is_some() {
         let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Offset);
@@ -352,8 +352,7 @@ fn patch_stage_inner(
             }
         }
     };
-    // A patch an agent turn left with an offset or fuzz (fuzz fails rpm's
-    // `--fuzz=0`) is refreshed the same way the pre-pass refreshed the rest.
+    // A patch an agent turn left with fuzz (which fails rpm's `--fuzz=0`) is refreshed the same way the pre-pass refreshed the rest.
     if report.to_refresh().next().is_some() {
         let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Offset);
         refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
@@ -464,7 +463,7 @@ fn write_refreshed_patches(
         if let Some(bytes) = &p.refreshed {
             write_or_warn(ctx.checkout_dir.join(&p.name), bytes);
             lines.push(format!(
-                "- {}: refreshed by the pipeline (it applied with an offset or fuzz)",
+                "- {}: refreshed by the pipeline (it applied with fuzz)",
                 p.name
             ));
             names.push(p.name.clone());
