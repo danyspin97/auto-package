@@ -427,7 +427,7 @@ fn stage_applies(ctx: &RunCtx, check: &mut PatchCheckFn<'_>, name: &str) -> Resu
     match &patch.status {
         PatchStatus::Applies => Ok(()),
         PatchStatus::AppliesWithOffsetOrFuzz { .. } => {
-            let refreshed = check(ctx, Refresh::Offset);
+            let refreshed = check(ctx, Refresh::Fuzz);
             if let Some(bytes) = refreshed
                 .patches
                 .iter()

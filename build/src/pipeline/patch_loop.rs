@@ -88,7 +88,7 @@ fn patch_stage_inner(
     // only the patches that have rejects.
     let mut refreshed: std::collections::BTreeSet<String> = Default::default();
     if report.to_refresh().next().is_some() {
-        let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Offset);
+        let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Fuzz);
         refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
         report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
     }
@@ -354,7 +354,7 @@ fn patch_stage_inner(
     };
     // A patch an agent turn left with fuzz (which fails rpm's `--fuzz=0`) is refreshed the same way the pre-pass refreshed the rest.
     if report.to_refresh().next().is_some() {
-        let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Offset);
+        let offsets = check_and_settle(ctx, step_id, &mut lines, check, Refresh::Fuzz);
         refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
     }
     write_refresh_bullets(ctx, step_id, &refreshed);

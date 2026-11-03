@@ -164,7 +164,7 @@ pub(super) fn run_check(
                     fuzz,
                     output: truncate(&output, OUTPUT_LIMIT),
                 });
-                if refresh == Refresh::Offset && fuzz {
+                if refresh == Refresh::Fuzz && fuzz {
                     let mut args = vec!["refresh"];
                     args.extend(refresh_args(
                         original.as_deref().unwrap_or_default(),

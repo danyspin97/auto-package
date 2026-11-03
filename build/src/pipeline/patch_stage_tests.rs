@@ -31,7 +31,7 @@ pub(super) fn quilt_missing() -> bool {
 
 /// The check a test runs instead of quilt: a patch file holding `clean`
 /// applies, one holding `FUZZ` applies with fuzz (refreshes to `clean` in
-/// `Refresh::Offset`), one holding `OFFSET` applies with an offset (left as it
+/// `Refresh::Fuzz`), one holding `OFFSET` applies with an offset (left as it
 /// is), one holding
 /// `UPSTREAM` is already applied, anything else fails.
 fn fake_check(ctx: &RunCtx, refresh: Refresh) -> CheckReport {
@@ -46,7 +46,7 @@ fn fake_check(ctx: &RunCtx, refresh: Refresh) -> CheckReport {
                         fuzz: true,
                         output: "Hunk #1 succeeded at 3 with fuzz 1.".into(),
                     },
-                    (refresh == Refresh::Offset).then(|| b"clean\n".to_vec()),
+                    (refresh == Refresh::Fuzz).then(|| b"clean\n".to_vec()),
                 )
             } else if body.contains("OFFSET") {
                 (

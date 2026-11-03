@@ -172,7 +172,7 @@ pub enum Refresh {
     /// Refresh each patch that applied with fuzz: quilt makes it exact, and
     /// rpm's `%autosetup` (`--fuzz=0`) applies only exact patches. A patch
     /// that applied with an offset alone is left byte-identical.
-    Offset,
+    Fuzz,
 }
 
 /// The `PatchN:` lines of `spec`, as `(number, value)`; a bare `Patch:` is 0.

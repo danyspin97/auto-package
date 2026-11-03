@@ -341,7 +341,7 @@ fn real_quilt_classifies_good_fuzzy_and_bad_patches() {
     let spec = "Name: foo\nVersion: 1.0\nPatch0: good.patch\nPatch1: bad.patch\nPatch2: fuzz.patch\n\
                     Patch3: up.patch\n%prep\n%autosetup -p1\n";
     let before = std::fs::read(dir.path().join("fuzz.patch")).unwrap();
-    let report = check(spec, dir.path(), Some(&tar), Refresh::Offset);
+    let report = check(spec, dir.path(), Some(&tar), Refresh::Fuzz);
     assert_eq!(report.not_run, None, "{report:?}");
     let status = |n: &str| {
         report
@@ -398,7 +398,7 @@ fn real_quilt_leaves_an_offset_only_patch_byte_identical() {
     let offset = "--- a/f.txt\n+++ b/f.txt\n@@ -4,3 +4,3 @@\n a\n-b\n+B\n c\n";
     std::fs::write(dir.path().join("off.patch"), offset).unwrap();
     let spec = "Name: foo\nVersion: 1.0\nPatch0: off.patch\n%prep\n%autosetup -p1\n";
-    let report = check(spec, dir.path(), Some(&tar), Refresh::Offset);
+    let report = check(spec, dir.path(), Some(&tar), Refresh::Fuzz);
     assert_eq!(report.not_run, None, "{report:?}");
     let p = &report.patches[0];
     assert!(
@@ -455,7 +455,7 @@ fn real_quilt_refresh_keeps_the_header_index_and_path_style() {
         @@ -6,5 +6,5 @@\n X\n f\n-g\n+G\n h\n Y\n";
     std::fs::write(dir.path().join("fuzzy.patch"), patch).unwrap();
     let spec = "Name: foo\nVersion: 1.0\nPatch0: fuzzy.patch\n%prep\n%autosetup -p1\n";
-    let report = check(spec, dir.path(), Some(&tar), Refresh::Offset);
+    let report = check(spec, dir.path(), Some(&tar), Refresh::Fuzz);
     assert_eq!(report.not_run, None, "{report:?}");
     let refreshed = String::from_utf8(report.patches[0].refreshed.clone().unwrap()).unwrap();
     assert!(refreshed.starts_with("Keep this header\n"), "{refreshed}");
