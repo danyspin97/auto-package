@@ -46,13 +46,16 @@ pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> 
             return Ok(());
         }
     }
-    let out = proc::capture("osc", &["vc", "-m", message], checkout_dir, emit)
+    // Named, so `osc vc` does not pick a file by itself: with two `.changes`
+    // files in the directory it refuses, and says so on stdout.
+    let name = changes_file_name(checkout_dir);
+    let out = proc::capture("osc", &["vc", "-m", message, &name], checkout_dir, emit)
         .map_err(during(format!("vc in {}", checkout_dir.display())))?;
     if !out.success() {
         return Err(Error::OscFailed {
-            cmd: format!("vc -m {message:?} in {}", checkout_dir.display()),
+            cmd: format!("vc -m {message:?} {name} in {}", checkout_dir.display()),
             code: out.code,
-            stderr: out.stderr,
+            stderr: command_failure_text(&out.stdout, &out.stderr),
         });
     }
     merge_pending_changes_file(checkout_dir);
@@ -149,6 +152,31 @@ pub fn newest_changes_file(checkout_dir: &Path) -> Option<PathBuf> {
         .collect();
     files.sort();
     files.into_iter().next()
+}
+
+/// The name `osc vc` is given for the package's `.changes` file: the one
+/// [`newest_changes_file`] picks, or `<dir>.changes` for a package with none yet
+/// (`osc vc` creates it).
+pub(super) fn changes_file_name(checkout_dir: &Path) -> String {
+    newest_changes_file(checkout_dir)
+        .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| {
+            let dir = checkout_dir
+                .file_name()
+                .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            format!("{dir}.changes")
+        })
+}
+
+/// The text a failed command gives for its error: its stderr, then its stdout
+/// when that has text too. `osc vc` reports its refusals on stdout (`Choose one
+/// of ...`), so stderr alone can be empty.
+pub(super) fn command_failure_text(stdout: &str, stderr: &str) -> String {
+    [stderr.trim_end(), stdout.trim_end()]
+        .into_iter()
+        .filter(|t| !t.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `changes` with its `Update to <version>` entry's flag lines set to `lines`
