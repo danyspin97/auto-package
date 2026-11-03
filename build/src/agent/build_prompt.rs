@@ -105,7 +105,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              1. Read the package's spec, its patch list and `source/` (the unpacked \
                 sources) to see where the code goes.\n\
              2. Create the patch with quilt only (`quilt new`, `quilt add`, edit the file, \
-                `quilt refresh`, convention 14): never write a `.patch` file by hand. The \
+                `quilt refresh`, convention 111): never write a `.patch` file by hand. The \
                 patch lives in the checkout beside the spec and is listed as a `PatchN:` \
                 line with a comment saying what it restores and the upstream commit it \
                 comes from, and applied by `%autosetup -p1` or `%patch`.\n\

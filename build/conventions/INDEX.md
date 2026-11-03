@@ -11,7 +11,7 @@
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
 12. Merged into convention 7 — read convention 7 when %check fails oddly on config
 13. Merged into convention 28 — read convention 28 when %prep/%build fails (no such file, name resolution)
-14. Tools, quilt and the PATCH-* tag format — read when adding or editing a PatchN:, creating a file, or using Bash (zypper, osc cat, rpm -qlp)
+14. Tools, the evidence rule, and the stdlib-removal table — read when creating a file, using Bash (zypper, osc cat, rpm -qlp), or a test fails on a removed stdlib API
 15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
 16. Merged into convention 17 — read convention 17 when writing %files module dirs or an import check for an unfamiliar package
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
@@ -91,7 +91,7 @@
 91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
 92. Merged into convention 77 — read convention 77 when you write or edit a _service file
 93. Merged into convention 77 — read convention 77 when the release page has a .asc, .sig or .sign next to the tarball
-94. Merged into convention 14 — read convention 14 when the prompt lists patches that failed to apply or you are about to remove a Patch line
+94. Merged into convention 111 — read convention 111 when the prompt lists patches that failed to apply or you are about to remove a Patch line
 95. Package named for a series (fmt-9, wlroots-0_15): stays on that series — read when the package name ends in a version number
 96. Python spec macro forms — read when writing a Python preamble, %python_expand, %if on python_flavor, %ifpython, a shebang fix, a -doc subpackage or Leap 15 flavors
 97. Meson projects (native meson.build) — read when the build system is meson, the spec needs %meson/%meson_build, or a subproject or .wrap file exists
@@ -108,7 +108,7 @@
 108. Merged into convention 104 — read convention 104 when a package has an init script, /etc/init.d, insserv or a request to add a daemon init script
 109. General rules, license coverage — read when the tarball holds a binary or bundled lib, the spec adds a .desktop or udev rule, or a License or %license is in question
 110. Merged into convention 109 — read convention 109 when a subpackage has its own License, lacks %license, or a tarball file is left out of the package
-111. Upstream patch header, type-1 comment, .changes line, X11 patch format — read when adding or changing a PatchN:, its Upstream: header, a .changes patch entry, or an X11 patch
+111. Patches: quilt workflow, PATCH-* tag, header, .changes line, rebase and removal (94), X11 — read when adding, rebasing, removing or changing a PatchN:
 112. Merged into convention 111 — read convention 111 when the package uses X11 patch names such as N_, u_, T_ or Patch-Mainline headers
 113. Standalone Cargo crates: workspaces, _service parameters, vendored crate patches — read when a Cargo.toml package needs a workspace, update=false, update-crate, or a vendored crate patched
 114. C/C++ system-library shims: check every consumer in the same turn — read when a C/C++ build fails in a header, namespace or include path that a system-library shim or patch provides

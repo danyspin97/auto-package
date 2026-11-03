@@ -128,7 +128,7 @@ j. `Could not find \`protoc\`` during the Rust compile — a crate's `build.rs`
 k. `error: queries overflow the depth limit!` from rustc — a crate's generic/
    async code needs a higher `#![recursion_limit = "N"]` (rustc's own error
    suggests the value; 256 is a safe default when it doesn't). Add it via a
-   PATCH-FIX-OPENSUSE source patch (convention 14) to the named crate's
+   PATCH-FIX-OPENSUSE source patch (convention 111) to the named crate's
    `lib.rs`. This almost never stops at one crate: fixing it in crate A just
    lets the build progress far enough to hit the identical error in every
    OTHER workspace crate that transitively depends on A's generic code. Once
