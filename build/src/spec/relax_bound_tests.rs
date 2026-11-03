@@ -2,19 +2,22 @@ use super::{relax_dependencies, relax_dependency_bounds};
 
 #[test]
 fn the_else_branch_keeps_its_requires_when_the_if_branch_has_the_same_text() {
-    let spec = "%if %{with foo}\nRequires: python-foo\n%else\nRequires: python-foo >= 2\n%endif\n";
-    let out = relax_dependency_bounds(spec, "foo", "1.5");
+    let spec = "%if %{with foo}\nRequires: python-foo\n%else\nRequires: python-foo < 2\n%endif\n";
+    let out = relax_dependency_bounds(spec, "foo", "3.0");
     assert_eq!(
         out,
-        "%if %{with foo}\nRequires: python-foo\n%else\nRequires: python-foo\n%endif\n"
+        "%if %{with foo}\nRequires: python-foo\n%else\n# upstream pins foo<2; relaxed because the shipped 3.0 does not satisfy it\nRequires: python-foo\n%endif\n"
     );
 }
 
 #[test]
 fn a_repeat_within_one_branch_is_still_merged() {
-    let spec = "%if 1\nRequires: python-foo >= 2\nRequires: python-foo >= 3\n%endif\n";
-    let out = relax_dependency_bounds(spec, "foo", "1.5");
-    assert_eq!(out, "%if 1\nRequires: python-foo\n%endif\n");
+    let spec = "%if 1\nRequires: python-foo < 2\nRequires: python-foo < 3\n%endif\n";
+    let out = relax_dependency_bounds(spec, "foo", "4.0");
+    assert_eq!(
+        out,
+        "%if 1\n# upstream pins foo<2; relaxed because the shipped 4.0 does not satisfy it\nRequires: python-foo\n%endif\n"
+    );
 }
 
 #[test]
@@ -45,7 +48,7 @@ fn a_missed_clause_of_a_with_dependency_is_dropped_the_met_one_stays() {
     let spec = "BuildRequires:  %{python_module trio >= 0.25.1 with %python-trio < 0.34}\n";
     assert_eq!(
         relax_dependency_bounds(spec, "trio", "0.34.0"),
-        "BuildRequires:  %{python_module trio >= 0.25.1}\n"
+        "# upstream pins trio<0.34; relaxed because the shipped 0.34.0 does not satisfy it\nBuildRequires:  %{python_module trio >= 0.25.1}\n"
     );
     assert_eq!(
         relax_dependency_bounds(
@@ -53,16 +56,11 @@ fn a_missed_clause_of_a_with_dependency_is_dropped_the_met_one_stays() {
             "trio",
             "3.0"
         ),
-        "BuildRequires:  %{python_module trio >= 1}\n"
+        "# upstream pins trio<2; relaxed because the shipped 3.0 does not satisfy it\nBuildRequires:  %{python_module trio >= 1}\n"
     );
-    assert_eq!(
-        relax_dependency_bounds(
-            "BuildRequires:  %{python_module trio >= 5 with %python-trio < 6}\n",
-            "trio",
-            "3.0"
-        ),
-        "BuildRequires:  %{python_module trio < 6}\n"
-    );
+    // A minimum the shipped version does not reach is not relaxed.
+    let too_old = "BuildRequires:  %{python_module trio >= 5 with %python-trio < 6}\n";
+    assert_eq!(relax_dependency_bounds(too_old, "trio", "3.0"), too_old);
     // Both met: untouched.
     assert_eq!(relax_dependency_bounds(spec, "trio", "0.30.0"), spec);
 }
@@ -90,13 +88,18 @@ fn every_recorded_pin_is_relaxed_in_every_dependency_line() {
     assert_eq!(
         out,
         "Name:           python-open-webui\n\
-             BuildRequires:  %{python_module pydantic}\n\
-             BuildRequires:  %{python_module redis}\n\
+             # upstream pins pydantic==2.13.4; relaxed because the shipped 2.13.5 does not satisfy it\n\
+             BuildRequires:  %{python_module pydantic >= 2.13.4}\n\
+             # upstream pins redis==8.0.1; relaxed because the shipped 8.1.0 does not satisfy it\n\
+             BuildRequires:  %{python_module redis >= 8.0.1}\n\
              BuildRequires:  %{python_module mcp == 1.27.2}\n\
-             Requires:       python-pydantic\n\
-             Requires:       python-redis\n\
+             # upstream pins pydantic==2.13.4; relaxed because the shipped 2.13.5 does not satisfy it\n\
+             Requires:       python-pydantic >= 2.13.4\n\
+             # upstream pins redis=8.0.1; relaxed because the shipped 8.1.0 does not satisfy it\n\
+             Requires:       python-redis >= 8.0.1\n\
              Requires:       python-mcp == 1.27.2\n\
-             Recommends:     python-redis\n\
+             # upstream pins redis==8.0.1; relaxed because the shipped 8.1.0 does not satisfy it\n\
+             Recommends:     python-redis >= 8.0.1\n\
              %python_subpackages\n"
     );
     assert_eq!(relax_dependencies(spec, &[]), spec);
@@ -109,8 +112,50 @@ fn an_exact_pin_is_relaxed_and_a_met_bound_stays() {
         "x",
         "2.0",
     );
-    assert!(out.contains("Requires: python-x\n"), "{out}");
+    assert!(
+        out.contains("# upstream pins x=1.0; relaxed because the shipped 2.0 does not satisfy it\nRequires: python-x >= 1.0\n"),
+        "{out}"
+    );
     assert!(out.contains("python-y >= 1"));
     let same = "Requires: python-x >= 1\n";
     assert_eq!(relax_dependency_bounds(same, "x", "2.0"), same);
+}
+
+#[test]
+fn a_dropped_bound_is_noted_once_without_a_macro_and_a_second_pass_changes_nothing() {
+    let spec = "BuildRequires:  %{python_module numpy < 2.4}\n";
+    let out = relax_dependency_bounds(spec, "numpy", "2.5.0");
+    assert_eq!(
+        out,
+        "# upstream pins numpy<2.4; relaxed because the shipped 2.5.0 does not satisfy it\n\
+         BuildRequires:  %{python_module numpy}\n"
+    );
+    assert!(!out.lines().next().unwrap().contains('%'));
+    assert_eq!(relax_dependency_bounds(&out, "numpy", "2.5.0"), out);
+    // A bound the shipped version meets leaves no comment.
+    assert_eq!(relax_dependency_bounds(spec, "numpy", "2.0.0"), spec);
+}
+
+#[test]
+fn a_minimum_or_a_pin_the_shipped_version_does_not_reach_is_not_relaxed() {
+    // Too old: relaxing would not make the package resolvable (convention 73).
+    for spec in [
+        "Requires: python-x >= 3\n",
+        "BuildRequires: %{python_module x > 3}\n",
+        "Requires: python-x == 3.0\n",
+    ] {
+        assert_eq!(relax_dependency_bounds(spec, "x", "2.0"), spec, "{spec}");
+    }
+    // Too new: a pin becomes its minimum, an upper bound goes.
+    assert_eq!(
+        relax_dependency_bounds(
+            "Requires: python-x == 1.0\nRequires: python-x < 2\n",
+            "x",
+            "2.5"
+        ),
+        "# upstream pins x==1.0; relaxed because the shipped 2.5 does not satisfy it\n\
+         Requires: python-x >= 1.0\n\
+         # upstream pins x<2; relaxed because the shipped 2.5 does not satisfy it\n\
+         Requires: python-x\n"
+    );
 }

@@ -75,9 +75,11 @@ fn a_root_that_pins_distro_packages_has_the_pins_relaxed_in_its_spec() {
                     Requires:       python-redis == 8.0.1\n";
     assert_eq!(
         crate::spec::relax_dependencies(spec, &state.relaxed_dependencies),
-        "BuildRequires:  %{python_module pydantic}\n\
+        "# upstream pins pydantic==2.13.4; relaxed because the shipped 2.13.5 does not satisfy it\n\
+             BuildRequires:  %{python_module pydantic >= 2.13.4}\n\
              BuildRequires:  %{python_module redis == 8.0.1}\n\
-             Requires:       python-pydantic\n\
+             # upstream pins pydantic==2.13.4; relaxed because the shipped 2.13.5 does not satisfy it\n\
+             Requires:       python-pydantic >= 2.13.4\n\
              Requires:       python-redis == 8.0.1\n"
     );
 }

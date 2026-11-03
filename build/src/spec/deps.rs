@@ -34,12 +34,43 @@ pub(crate) fn rpm_constraint_miss(
     }))
 }
 
-/// The dependency lines of `spec` for `dependency` with every version
-/// constraint the version `shipped` misses removed, the name kept: a package the
-/// distro ships is used as it is, and the bound that excludes it (an upstream
-/// `<= 0.1.11`, an exact `==` pin) is dropped instead of the dependency
-/// (convention 59). Constraints it meets stay. Duplicate lines this leaves are
-/// merged.
+/// What relaxing does to one constraint the shipped version is checked against.
+enum Relax {
+    /// The shipped version meets it, or it cannot be relaxed: a minimum, or a pin
+    /// above the shipped version, stays as it is.
+    Keep,
+    /// An upper bound the shipped version exceeds: removed.
+    Drop,
+    /// An exact pin below the shipped version: it becomes this minimum.
+    Minimum(String),
+}
+
+/// How `constraint` (`< 0.34`, `== 2.11.1`) is relaxed for the version `shipped`
+/// (conventions 59, 73 and 75): an upper bound the shipped version exceeds goes, an
+/// exact pin below it becomes `>= <pin>`, and everything else stays, a minimum the
+/// shipped version does not reach included (relaxing it would not make the package
+/// resolvable).
+fn relax_constraint(constraint: &str, shipped: &pep440_rs::Version) -> Relax {
+    let c = constraint.trim();
+    let Some((op, rest)) = ["<=", ">=", "==", "<", ">", "="]
+        .iter()
+        .find_map(|op| c.strip_prefix(op).map(|r| (*op, r.trim())))
+    else {
+        return Relax::Keep;
+    };
+    match (op, rpm_constraint_miss(c, shipped)) {
+        ("<" | "<=", Some(Some(true))) => Relax::Drop,
+        ("=" | "==", Some(Some(true))) => Relax::Minimum(format!(">= {rest}")),
+        _ => Relax::Keep,
+    }
+}
+
+/// The dependency lines of `spec` for `dependency` relaxed for the version
+/// `shipped` (see [`relax_constraint`]): an upper bound it exceeds is removed and
+/// an exact pin below it becomes `>= <pin>`, the name kept, so a package the distro
+/// ships is used as it is (conventions 59 and 75). A minimum it does not reach, and
+/// every constraint it meets, stay. Each change gets an `# upstream pins` comment.
+/// Duplicate lines this leaves are merged.
 pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> String {
     use std::str::FromStr;
     let Ok(shipped_v) = pep440_rs::Version::from_str(shipped.trim()) else {
@@ -92,6 +123,16 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
             continue;
         }
         let (head, value) = line.split_once(':').unwrap_or((line, ""));
+        // The bounds this line loses, as `(name, constraint)`: each gets the
+        // `# upstream pins` comment above the line (convention 75).
+        let mut dropped: Vec<(String, String)> = Vec::new();
+        let compact = |c: &str| c.split_whitespace().collect::<String>();
+        let short_name = |name: &str| {
+            name.strip_prefix("python-")
+                .or_else(|| name.strip_prefix("python3-"))
+                .unwrap_or(name)
+                .to_string()
+        };
         let items: Vec<String> = value
             .split(',')
             .map(|item| {
@@ -124,14 +165,26 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
                 // `%{python_module trio >= 0.25.1 with %python-trio < 0.34}`:
                 // each clause is judged on its own, the ones met stay.
                 if !open.is_empty() && constraint.contains(" with ") {
-                    let clauses: Vec<&str> = constraint.split(" with ").collect();
-                    let kept: Vec<&str> = clauses
-                        .iter()
-                        .map(|c| c.trim_start_matches(|ch: char| !matches!(ch, '<' | '>' | '=')))
-                        .map(str::trim)
-                        .filter(|c| !matches!(rpm_constraint_miss(c, &shipped_v), Some(Some(_))))
+                    let clauses: Vec<String> = constraint
+                        .split(" with ")
+                        .map(|c| {
+                            c.trim_start_matches(|ch: char| !matches!(ch, '<' | '>' | '='))
+                                .trim()
+                                .to_string()
+                        })
                         .collect();
-                    return if kept.len() == clauses.len() {
+                    let mut kept: Vec<String> = Vec::new();
+                    for c in &clauses {
+                        match relax_constraint(c, &shipped_v) {
+                            Relax::Keep => kept.push(c.clone()),
+                            Relax::Drop => dropped.push((short_name(name), compact(c))),
+                            Relax::Minimum(min) => {
+                                dropped.push((short_name(name), compact(c)));
+                                kept.push(min);
+                            }
+                        }
+                    }
+                    return if kept == clauses {
                         item.to_string()
                     } else if kept.is_empty() {
                         format!("{open}{name}{close}")
@@ -142,9 +195,16 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
                         )
                     };
                 }
-                match rpm_constraint_miss(constraint, &shipped_v) {
-                    Some(Some(_)) => format!("{open}{name}{close}"),
-                    _ => item.to_string(),
+                match relax_constraint(constraint, &shipped_v) {
+                    Relax::Keep => item.to_string(),
+                    Relax::Drop => {
+                        dropped.push((short_name(name), compact(constraint)));
+                        format!("{open}{name}{close}")
+                    }
+                    Relax::Minimum(min) => {
+                        dropped.push((short_name(name), compact(constraint)));
+                        format!("{open}{name} {min}{close}")
+                    }
                 }
             })
             .collect();
@@ -166,6 +226,17 @@ pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> S
             continue;
         }
         seen.insert(rebuilt.trim().to_string());
+        for (name, constraint) in dropped {
+            // A `%` would be expanded by rpm inside a comment.
+            let note = format!(
+                "# upstream pins {name}{constraint}; relaxed because the shipped {} does not satisfy it",
+                shipped.trim()
+            )
+            .replace('%', "");
+            if out.last() != Some(&note) {
+                out.push(note);
+            }
+        }
         out.push(rebuilt);
     }
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
