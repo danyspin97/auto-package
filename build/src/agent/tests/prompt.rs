@@ -187,7 +187,7 @@ fn a_monorepos_sibling_projects_reach_the_prompt() {
         "{prompt}"
     );
     assert!(prompt.contains("cuda_bindings/  (declares itself `cuda-bindings`)"));
-    assert!(prompt.contains("convention 30"));
+    assert!(prompt.contains("convention 22 (section 30)"));
     // And the repository-archive note, since this did not come from a sdist.
     assert!(prompt.contains("archive of the upstream repository"));
 }

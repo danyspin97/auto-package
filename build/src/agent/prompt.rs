@@ -87,7 +87,7 @@ For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
 - Library linking errors → search for the library and add its -devel package
 - CUDA headers/libraries (`cuda.h`, `libcudart`, `nvcc`) → do NOT add
   `cuda-devel`/`cuda-runtime`: they cannot exist here. A package whose build
-  needs them is repackaged from its upstream wheel (convention 28, Exception 4; convention 84)
+  needs them is repackaged from its upstream wheel (convention 28, Exception 4; convention 32 (section 84))
 - A missing build-time EXECUTABLE (`command not found`, `No such file or
   directory: 'pg_config'`) → `zypper search --provides --match-exact
   /usr/bin/<tool>` and BuildRequire the package it names. Never guess: plain
@@ -306,7 +306,7 @@ pub(super) fn redist_cuda_prompt() -> Option<String> {
 
 This section REPLACES every statement above and below that openSUSE has no CUDA
 toolkit, that `cuda-devel`/`cuda-runtime` "cannot exist here", and the "CUDA at
-build time means: use the upstream wheel" special case (convention 84, the CUDA special
+build time means: use the upstream wheel" special case (convention 32 (section 84), the CUDA special
 case, step "0f", the dependency-failure hints). In this run the pipeline builds
 NVIDIA's redistributable components as RPMs in the same project, one package per
 component and a `-devel` package for its headers:

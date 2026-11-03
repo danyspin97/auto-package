@@ -62,7 +62,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              verify it before acting on it.\n\
              \n\
              If the problem is a LICENCE (a dependent's guard needs the library \
-             licence-clean, convention 78: the recipe configures `--enable-gpl` or \
+             licence-clean, convention 5 (section 78): the recipe configures `--enable-gpl` or \
              `--enable-nonfree`), the recipe is what to change, as in case (b): remove \
              the GPL-only and non-free components and options, using the lists in the \
              source's own `configure` (`EXTERNAL_LIBRARY_GPL_LIST`, \
@@ -316,7 +316,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "## Other projects in this archive\n\n\
              The source holds several projects side by side. `{primary}` is the one \
              this spec was generated for; these are all of them:\n{list}\n\n\
-             Read convention 30 — the usual answer is one subpackage per project in \
+             Read convention 22 (section 30) — the usual answer is one subpackage per project in \
              this single spec, not one project built and the rest ignored.\n\n",
             primary = req.pkg_name,
             list = req
@@ -464,7 +464,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "## Dependencies that failed to build\n\n\
              This run already tried to build these and could not:\n{}\n\n\
              Do NOT put them in `unresolvable_packages` again — that is the retry \
-             cycle convention 15 Step B exists to break. Work around them only where \
+             cycle convention 10 (section 15) Step B exists to break. Work around them only where \
              the package does not need them: skip the tests that need them, or build \
              without the optional feature that needs them, and say in your reasoning \
              which one you did and why. Never drop a `Requires`/`BuildRequires` the \
@@ -499,8 +499,8 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              these to compile from source (CUDA above all), THIS package cannot be \
              compiled in this environment at all: do not add or keep the \
              BuildRequires — check what wheels PyPI publishes for this version and \
-             set action to `\"use_upstream_wheel\"` (or follow convention 49 for \
-             per-CPython wheels) per convention 84.\n\n",
+             set action to `\"use_upstream_wheel\"` (or follow convention 32 (section 49) for \
+             per-CPython wheels) per convention 32 (section 84).\n\n",
             bullets(req.unbuildable_deps),
         )
     };

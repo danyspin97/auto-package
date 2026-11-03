@@ -27,7 +27,7 @@ pub(super) fn review_prompt_python() -> &'static str {
              0b. **Maturin package detection**: Grep `source/pyproject.toml` for \
                  `build-backend.*maturin`. If found, this is a Rust extension package and the \
                  generator's arch guess is WRONG. Load the `maturin-packaging` skill (see \
-                 convention 4) for the full treatment — Source1 registry.tar.zst, \
+                 convention 6 (section 4)) for the full treatment — Source1 registry.tar.zst, \
                  cargo-packaging, ExclusiveArch, CARGO_* env vars, etc. — and apply ALL of it \
                  before checking anything else; these changes affect the entire spec structure.\n\
              \n\
@@ -77,8 +77,8 @@ pub(super) fn review_prompt_python() -> &'static str {
                  `#include <cuda` / `<cub/` / `<nccl.h>` in compiled sources, and check the \
                  spec's BuildRequires for `cuda-devel`/`cuda-runtime`. If the BUILD needs \
                  CUDA, stop reviewing a source build: this package is repackaged from its \
-                 upstream wheel — return `use_upstream_wheel` now (convention 84 CUDA special \
-                 case; convention 49 when the wheels are per-CPython). Run-time-only use \
+                 upstream wheel — return `use_upstream_wheel` now (convention 32 (section 84) CUDA special \
+                 case; convention 32 (section 49) when the wheels are per-CPython). Run-time-only use \
                  (NVRTC/Triton JIT, `dlopen`) is not a build need.\n\
              \n\
              ## Main Review Checklist\n\
@@ -86,14 +86,14 @@ pub(super) fn review_prompt_python() -> &'static str {
              The generator switched to arch macros if it saw C/C++/Cython source — that's \
              a guess, so confirm it against convention 3 first. Then work through these in order:\n\
              \n\
-             1. **The import name** the package installs — convention 16. This is the \
+             1. **The import name** the package installs — convention 17 (section 16). This is the \
                 single most common thing the generator gets wrong. Always verify from \
                 `source/*.egg-info/top_level.txt` (definitive) or the source code. Never \
                 derive it from the PyPI package name.\n\
              \n\
              2. **Console scripts**: Read `[project.scripts]` or `entry_points` in \
                 source/pyproject.toml or source/setup.cfg. If ANY scripts are declared, \
-                verify ALL python_alternative components are present (convention 18):\n\
+                verify ALL python_alternative components are present (convention 107 (section 18)):\n\
                 - %python_clone -a %{buildroot}%{_bindir}/<script> in %install (one per script)\n\
                 - %python_expand %fdupes at end of %install\n\
                 - Requires(post): update-alternatives\n\
@@ -120,7 +120,7 @@ pub(super) fn review_prompt_python() -> &'static str {
                 The generator sometimes copies test/optional dependencies faithfully but drops \
                 the package's own main dependencies entirely. Add any missing ones as \
                 `BuildRequires: %{python_module <name>}` (needed so %check can import them) \
-                AND `Requires: python-<name>` (needed at install time; flavor-neutral, see convention 65). Do NOT copy \
+                AND `Requires: python-<name>` (needed at install time; flavor-neutral, see convention 8 (section 65)). Do NOT copy \
                 the name's casing verbatim from the dependency list — convention 2 explains \
                 why that is frequently wrong (e.g. a lowercase `pillow` entry in \
                 pyproject.toml still needs `%{python_module Pillow}`) and how to verify the \
@@ -136,7 +136,7 @@ pub(super) fn review_prompt_python() -> &'static str {
                 and make sure pytest itself is there.\n\
              \n\
              5. **Pytest configuration** — `addopts`, `testpaths`, `fail_under`: \
-                convention 12. Fix these now rather than after a failed build.\n\
+                convention 7 (section 12). Fix these now rather than after a failed build.\n\
              \n\
              6. **Build-backend extras**: dynamic version and metadata providers \
                 (convention 22), and the C/C++ libraries an extension links against \
@@ -160,12 +160,12 @@ pub(super) fn review_prompt_python() -> &'static str {
              \n\
              10. **Sibling projects**, if the archive holds more than one — decide the \
                 subpackage layout now, before the first build, because it changes \
-                %build, %install and every %files section (convention 30).\n\
+                %build, %install and every %files section (convention 22 (section 30)).\n\
              \n\
              11. **%description** — the generator writes the Summary into it, and the pipeline \
                 sends the spec back for a whole extra turn when it still equals the Summary \
                 (most packages so far). Write a real one now, in one to three plain \
-                sentences taken from the README's first paragraph (convention 66).\n\
+                sentences taken from the README's first paragraph (convention 63 (section 66)).\n\
              \n\
              If a check does not apply, say so in one clause; do not invent work."
 }

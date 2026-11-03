@@ -84,7 +84,7 @@ pub(super) fn review_prompt_non_python() -> &'static str {
      \n\
      5. **Sibling projects**, if the archive holds more than one — decide the \
         subpackage layout now, before the first build, because it changes \
-        `%build`, `%install` and every `%files` section (convention 30).\n\
+        `%build`, `%install` and every `%files` section (convention 22 (section 30)).\n\
      \n\
      6. **%check**: if there is no automated test target (no `enable_testing()` \
         in CMakeLists.txt, no `make check` in configure.ac), note that in the \
