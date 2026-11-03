@@ -86,7 +86,7 @@ fn restore_turn_edits(ctx: &RunCtx, snapshot: &CheckoutSnapshot, before_spec: &s
 }
 
 /// What quilt said about a patch that is not kept, in one line.
-fn status_reason(status: &crate::patch_check::PatchStatus) -> String {
+pub(super) fn status_reason(status: &crate::patch_check::PatchStatus) -> String {
     use crate::patch_check::PatchStatus;
     match status {
         PatchStatus::Applies => "it applies".into(),

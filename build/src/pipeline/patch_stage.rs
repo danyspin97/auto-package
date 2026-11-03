@@ -71,6 +71,33 @@ pub(super) fn patch_stage(
                 &mut st.step_attempts,
             )
         },
+        &mut |ctx, st, name, context| {
+            // A fresh turn on the one patch: it may write that file only.
+            let names = [name.to_string()];
+            agent_turn(
+                TurnCtx {
+                    carried: false,
+                    label: "patch-review",
+                    task: crate::agent::Task::PatchReview,
+                    event_task: ap_core::event::Task::PatchReview,
+                    attempt: st.attempts,
+                    hint: None,
+                    unresolvable_deps: &[],
+                    unresolvable_detail: &[],
+                    checkout_dir: Some(&ctx.checkout_dir),
+                    from_repo_archive: st.from_repo_archive,
+                    resume: false,
+                    context: Some(context),
+                },
+                TurnEnv {
+                    writable_patches: &names,
+                    ..ctx.turn_env()
+                },
+                &mut st.spent_usd,
+                &mut st.session_id,
+                &mut st.step_attempts,
+            )
+        },
     )
 }
 

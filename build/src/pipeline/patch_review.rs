@@ -2,6 +2,7 @@
 //! each holding the reviewer to the one patch file and gating a rewrite.
 
 use super::*;
+use crate::pipeline::patch_refresh::status_reason;
 use crate::pipeline::patch_review_prompt::*;
 use crate::pipeline::patch_rules::*;
 use crate::pipeline::rejection::*;
@@ -354,4 +355,162 @@ pub(super) fn review_patch_rounds(
         }
     }
     Ok(PatchReviewEnd::Unsettled(last_why))
+}
+
+/// Marks the patches a reviewer rewrote itself, in the workspace, for the risk
+/// flags settled at the commit.
+pub(super) fn mark_reviewer_rewrite(ws: &Workspace, name: &str) {
+    use std::io::Write;
+    let dir = ws.dir().join("patch-review");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("rewritten"))
+    {
+        let _ = writeln!(f, "{name}");
+    }
+}
+
+/// Forgets the marks of an earlier run.
+pub(super) fn clear_reviewer_rewrites(ws: &Workspace) {
+    let _ = std::fs::remove_file(ws.dir().join("patch-review/rewritten"));
+}
+
+/// Whether the patch stage may go on after the reviews.
+#[derive(Debug, PartialEq)]
+pub(super) enum ReviewEnd {
+    /// Every rewritten patch was accepted.
+    Settled,
+    /// A patch was rejected and is back at its pre-rewrite bytes, so it fails
+    /// quilt again: the refresh turn is told these reasons.
+    Redo(String),
+}
+
+/// Whether `name` applies to the new sources, by the quilt check of the stage. A
+/// patch that applies with an offset or fuzz is refreshed in place first.
+fn stage_applies(ctx: &RunCtx, check: &mut PatchCheckFn<'_>, name: &str) -> Result<(), String> {
+    use crate::patch_check::{PatchStatus, Refresh};
+    let report = check(ctx, Refresh::No);
+    let Some(patch) = report.patches.iter().find(|p| p.name == name) else {
+        return Err("the patch is not in the quilt check".into());
+    };
+    match &patch.status {
+        PatchStatus::Applies => Ok(()),
+        PatchStatus::AppliesWithOffsetOrFuzz { .. } => {
+            let refreshed = check(ctx, Refresh::Offset);
+            if let Some(bytes) = refreshed
+                .patches
+                .iter()
+                .find(|p| p.name == name)
+                .and_then(|p| p.refreshed.as_ref())
+            {
+                write_or_warn(ctx.checkout_dir.join(name), bytes);
+            }
+            Ok(())
+        }
+        status => Err(status_reason(status)),
+    }
+}
+
+/// Puts a patch back to the bytes it had before the stage rewrote it. A patch
+/// the stage made has no earlier bytes and stays.
+fn restore_original(ctx: &RunCtx, name: &str, original: Option<&[u8]>) {
+    if let Some(bytes) = original {
+        write_or_warn(ctx.checkout_dir.join(name), bytes);
+    }
+}
+
+/// Reviews every patch the agent rewrote in this stage (`stage_start` is the
+/// patches as they came; a refresh that only moved context or offsets is no
+/// rewrite). Every reviewed patch is kept in `accepted`, so a redo does not
+/// review it again. `last`: no refresh round is left to redo a rejected patch.
+/// `Err` stops the package; the patch that stopped it is back at its
+/// pre-rewrite bytes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn review_stage_patches(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    step_id: ap_core::event::StepId,
+    check: &mut PatchCheckFn<'_>,
+    review: &mut ReviewTurn<'_>,
+    stage_start: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    accepted: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    lines: &mut Vec<String>,
+    last: bool,
+) -> Result<ReviewEnd, PipelineResult> {
+    let spec = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    let names = crate::pipeline::patch_rewrite::rewritten_patches(
+        &spec,
+        &ctx.checkout_dir,
+        stage_start,
+        accepted,
+    );
+    let mut redo: Vec<String> = Vec::new();
+    for name in names {
+        let original = stage_start.get(&name).and_then(|o| o.as_deref());
+        let cause = if original.is_some() {
+            format!("rebased onto {} by a refresh turn", ctx.config.version)
+        } else {
+            "added by a refresh turn".to_string()
+        };
+        let end = review_patch_rounds(
+            ctx,
+            st,
+            step_id,
+            &name,
+            original,
+            &cause,
+            &mut |ctx, n| stage_applies(ctx, check, n),
+            review,
+            lines,
+        );
+        let stop = |why: String| {
+            restore_original(ctx, &name, original);
+            ctx.failed_as(FailureKind::NeedsMaintainer, why)
+        };
+        match end {
+            Err(failed) => {
+                restore_original(ctx, &name, original);
+                return Err(failed);
+            }
+            Ok(PatchReviewEnd::Accepted { rewrote }) => {
+                let bytes = std::fs::read(ctx.checkout_dir.join(&name)).unwrap_or_default();
+                accepted.insert(name.clone(), bytes);
+                if rewrote {
+                    mark_reviewer_rewrite(&ctx.ws, &name);
+                }
+            }
+            Ok(PatchReviewEnd::Rejected(why)) if original.is_some() && !last => {
+                restore_original(ctx, &name, original);
+                redo.push(format!("the patch review rejected {name}: {why}"));
+            }
+            Ok(PatchReviewEnd::Rejected(why)) => {
+                return Err(stop(format!(
+                    "the patch review rejected {name}{}: {why}; it needs a maintainer",
+                    if original.is_none() {
+                        " (a patch new in this update)"
+                    } else {
+                        " in the last round"
+                    }
+                )));
+            }
+            Ok(PatchReviewEnd::GaveUp(why)) => {
+                return Err(stop(format!(
+                    "the patch review gave up on {name}: {why}; it needs a maintainer"
+                )));
+            }
+            Ok(PatchReviewEnd::Unsettled(why)) => {
+                return Err(stop(format!(
+                    "the patch review did not settle {name} in {MAX_REVIEW_ROUNDS} rounds \
+                     ({why}); it needs a maintainer"
+                )));
+            }
+        }
+    }
+    Ok(if redo.is_empty() {
+        ReviewEnd::Settled
+    } else {
+        ReviewEnd::Redo(redo.join("\n"))
+    })
 }

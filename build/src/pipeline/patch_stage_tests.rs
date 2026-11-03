@@ -3,6 +3,7 @@ use crate::patch_check::{CheckReport, PatchResult, PatchStatus, Refresh};
 
 mod new_patches;
 mod part2;
+mod review;
 
 /// A scripted turn: what it does to the checkout, then its answer.
 type Script = Box<dyn FnMut(&Path, &Path) -> crate::agent::TurnOutcome>;
@@ -90,6 +91,10 @@ struct Case {
     _root: tempfile::TempDir,
     result: Result<(), PipelineResult>,
     contexts: Vec<String>,
+    /// The context of each review turn.
+    reviews: Vec<String>,
+    /// The `patch_reviewed` events: patch, verdict, reason.
+    verdicts: Vec<(String, String, String)>,
     attempts: usize,
     notes: String,
     changes: String,
@@ -134,12 +139,75 @@ fn run(
     })
 }
 
+/// [`run`] with every review turn answering `accept`.
+fn run_accepting(
+    patches: &[(&str, &str)],
+    no_agent: bool,
+    max_attempts: usize,
+    scripts: Vec<Script>,
+) -> Case {
+    let mut queue = std::collections::VecDeque::from(scripts);
+    run_reviewed(
+        patches,
+        no_agent,
+        max_attempts,
+        &mut |ctx, _| {
+            let mut script = queue.pop_front().expect("more turns than the script has");
+            Ok(script(&ctx.checkout_dir, &ctx.spec_path))
+        },
+        &mut |_, _| {
+            Ok(review::said(
+                crate::agent::PatchReviewVerdict::Accept,
+                "fine",
+            ))
+        },
+    )
+}
+
 /// [`run`] with each turn answered by `turn`, which may also fail.
 fn run_turns(
     patches: &[(&str, &str)],
     no_agent: bool,
     max_attempts: usize,
     turn: &mut dyn FnMut(&RunCtx, &str) -> Result<crate::agent::TurnOutcome, (String, FailureKind)>,
+) -> Case {
+    run_reviewed(patches, no_agent, max_attempts, turn, &mut |_, _| {
+        panic!("unexpected patch review")
+    })
+}
+
+/// A review turn of a test: the context in, the checkout is the test's to change.
+type ReviewScript<'a> =
+    dyn FnMut(&RunCtx, &str) -> Result<crate::agent::TurnOutcome, (String, FailureKind)> + 'a;
+
+/// The `patch_reviewed` events of a case: patch, verdict, reason.
+#[derive(Default)]
+struct ReviewLog(std::sync::Mutex<Vec<(String, String, String)>>);
+
+impl Reporter for ReviewLog {
+    fn report(&self, e: &Event) {
+        if let Event::PatchReviewed {
+            patch,
+            verdict,
+            reason,
+            ..
+        } = e
+        {
+            self.0
+                .lock()
+                .unwrap()
+                .push((patch.clone(), verdict.clone(), reason.clone()));
+        }
+    }
+}
+
+/// [`run_turns`] with the review turns answered by `review`.
+fn run_reviewed(
+    patches: &[(&str, &str)],
+    no_agent: bool,
+    max_attempts: usize,
+    turn: &mut dyn FnMut(&RunCtx, &str) -> Result<crate::agent::TurnOutcome, (String, FailureKind)>,
+    review: &mut ReviewScript<'_>,
 ) -> Case {
     let root = tempfile::tempdir().unwrap();
     let work = root.path().join("work");
@@ -172,10 +240,11 @@ fn run_turns(
     .unwrap();
     let run = ap_core::run::RunDir::allocate(&work).unwrap();
     let pkg_run = run.pkg("foo");
+    let log = ReviewLog::default();
     let ctx = RunCtx {
         config: &config,
         pkg_run: &pkg_run,
-        reporter: &ap_core::sink::NULL_REPORTER,
+        reporter: &log,
         ws,
         rpm_name: "foo".into(),
         obs_name: "foo".into(),
@@ -204,22 +273,41 @@ fn run_turns(
     let step_path = root.path().join("step");
     std::fs::create_dir_all(&step_path).unwrap();
     let mut contexts = Vec::new();
-    let result = patch_stage_with(&ctx, &mut st, &mut fake_check, &mut |ctx, _, _, context| {
-        contexts.push(context.to_string());
-        let out = turn(ctx, context)?;
-        Ok((
-            StepDir {
-                path: step_path.clone(),
-                id: ap_core::event::StepId(2),
-            },
-            out,
-        ))
-    });
+    let mut reviews = Vec::new();
+    let result = patch_stage_with(
+        &ctx,
+        &mut st,
+        &mut fake_check,
+        &mut |ctx, _, _, context| {
+            contexts.push(context.to_string());
+            let out = turn(ctx, context)?;
+            Ok((
+                StepDir {
+                    path: step_path.clone(),
+                    id: ap_core::event::StepId(2),
+                },
+                out,
+            ))
+        },
+        &mut |ctx, _, _, context| {
+            reviews.push(context.to_string());
+            let out = review(ctx, context)?;
+            Ok((
+                StepDir {
+                    path: step_path.clone(),
+                    id: ap_core::event::StepId(3),
+                },
+                out,
+            ))
+        },
+    );
     let notes = std::fs::read_to_string(ctx.ws.notes()).unwrap_or_default();
     Case {
         _root: root,
         result,
         contexts,
+        reviews,
+        verdicts: log.0.lock().unwrap().clone(),
         attempts: st.attempts,
         notes,
         changes: std::fs::read_to_string(checkout.join("foo.changes")).unwrap(),

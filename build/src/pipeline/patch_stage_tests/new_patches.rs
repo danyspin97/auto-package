@@ -35,7 +35,7 @@ fn rebase_and_add(text: &str, changelog: &str) -> Script {
 
 #[test]
 fn a_refresh_turn_that_adds_a_patch_with_its_header_and_a_named_bullet_is_kept() {
-    let case = run(
+    let case = run_accepting(
         &[("b.patch", "old hunks")],
         false,
         10,
@@ -56,7 +56,7 @@ fn a_refresh_turn_that_adds_a_patch_with_its_header_and_a_named_bullet_is_kept()
 #[test]
 fn a_rebase_turn_that_adds_a_patch_without_its_upstream_is_refused_and_told_why() {
     let no_upstream = NEW_PATCH_OK.replace("Upstream: not yet reported\n", "");
-    let case = run(
+    let case = run_accepting(
         &[("b.patch", "old hunks")],
         false,
         10,
@@ -80,7 +80,7 @@ fn a_rebase_turn_that_adds_a_patch_without_its_upstream_is_refused_and_told_why(
 
 #[test]
 fn a_refresh_turn_that_adds_a_patch_its_changelog_does_not_name_is_refused() {
-    let case = run(
+    let case = run_accepting(
         &[("b.patch", "old hunks")],
         false,
         10,

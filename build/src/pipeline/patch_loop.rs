@@ -3,6 +3,7 @@
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::patch_check::*;
+use crate::pipeline::patch_review::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::snapshot::*;
@@ -13,6 +14,7 @@ pub(super) fn patch_stage_with(
     st: &mut RunState,
     check: &mut PatchCheckFn<'_>,
     turn: &mut PatchTurn<'_>,
+    review: &mut ReviewTurn<'_>,
 ) -> Result<(), PipelineResult> {
     use crate::patch_check::{MAX_ROUNDS, NextRound, PatchStatus, Refresh};
     let RunCtx {
@@ -55,6 +57,15 @@ pub(super) fn patch_stage_with(
             );
         }
     };
+    clear_reviewer_rewrites(ws);
+    // The patches as OBS ships them: a patch whose code differs at the end was
+    // rewritten by a turn and is reviewed. `accepted` holds the bytes a review
+    // accepted, so a patch is not reviewed twice.
+    let stage_start = patch_files(
+        &std::fs::read_to_string(spec_path).unwrap_or_default(),
+        checkout_dir,
+    );
+    let mut accepted: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
     let mut report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
     // A patch that applies only with an offset or fuzz is refreshed here, by
     // the pipeline, before any turn: the agent is handed only the patches that
@@ -265,7 +276,36 @@ pub(super) fn patch_stage_with(
             }
             match verdict {
                 NextRound::Again => {}
-                NextRound::Clean => break String::new(),
+                NextRound::Clean => {
+                    // A blocked patch ends the package below, reviewed or not.
+                    if !blocked.is_empty() {
+                        break String::new();
+                    }
+                    match review_stage_patches(
+                        ctx,
+                        st,
+                        step_id,
+                        check,
+                        review,
+                        &stage_start,
+                        &mut accepted,
+                        &mut lines,
+                        rounds >= MAX_ROUNDS,
+                    ) {
+                        Err(result) => {
+                            write_refresh_bullets(ctx, step_id, &refreshed);
+                            write_notes(&lines, "quilt, review stopped");
+                            step.finish(StepOutcome::Failed);
+                            return Err(result);
+                        }
+                        Ok(ReviewEnd::Settled) => break String::new(),
+                        Ok(ReviewEnd::Redo(why)) => {
+                            lines.push(format!("- round {rounds}: {why}"));
+                            feedback = Some(why);
+                            report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
+                        }
+                    }
+                }
                 NextRound::NoProgress => break format!("round {rounds} made no progress"),
                 NextRound::OutOfRounds => break format!("{rounds} round(s) did not fix them"),
             }
@@ -309,6 +349,26 @@ pub(super) fn patch_stage_with(
             &failing,
             &blocked,
         )));
+    }
+    // A loop that ended another way (no progress, out of rounds) can leave a
+    // rewritten patch that applies, with fuzz now refreshed: it is reviewed too,
+    // with no round left to redo it.
+    if !config.no_agent
+        && let Err(result) = review_stage_patches(
+            ctx,
+            st,
+            step_id,
+            check,
+            review,
+            &stage_start,
+            &mut accepted,
+            &mut lines,
+            true,
+        )
+    {
+        write_notes(&lines, "quilt, review stopped");
+        step.finish(StepOutcome::Failed);
+        return Err(result);
     }
     write_notes(&lines, "quilt");
     step.finish(StepOutcome::Ok);
