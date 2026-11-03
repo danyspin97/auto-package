@@ -329,6 +329,7 @@ pub(super) fn package_config(
         patch_request: None,
         patch_condition: None,
         update: config.update && is_root,
+        branch_version: config.branch_version.clone().filter(|_| is_root),
         unknown_build_system: config.unknown_build_system && is_root,
         ..config.clone()
     }
@@ -356,6 +357,7 @@ mod tests {
             force: false,
             regen: false,
             update: true,
+            branch_version: None,
             source_repo: Some("https://github.com/project-repo/cagebreak".into()),
             upstream_tag: None,
             subprojects: Vec::new(),

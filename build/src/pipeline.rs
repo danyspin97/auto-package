@@ -56,6 +56,10 @@ pub struct PipelineConfig {
     /// package the update command builds only, never for a dependency, a
     /// `build`, or a `lint`.
     pub update: bool,
+    /// For an update of the package (`update`): the `Version:` the OBS branch
+    /// was at when the update was planned. The checkout's spec must be at it
+    /// before the first agent turn. `None` for every other run.
+    pub branch_version: Option<String>,
     /// Build from this source repository instead of a PyPI sdist. Whether it
     /// holds a Rust crate or a Python project is decided by looking inside the
     /// release archive, not by which flag was used.
@@ -335,6 +339,8 @@ mod apply_turn;
 mod build_switch;
 #[cfg(test)]
 mod build_switch_tests;
+#[cfg(test)]
+mod checkout_tests;
 mod network_fetch;
 #[cfg(test)]
 mod network_fetch_tests;

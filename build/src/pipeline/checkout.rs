@@ -17,6 +17,88 @@ fn spec_has_placeholders(path: &Path) -> bool {
         .is_ok_and(|text| !crate::spec::todo_placeholders(&text).is_empty())
 }
 
+/// The `Version:` of a spec, when it has one.
+fn spec_version(text: &str) -> Option<String> {
+    crate::spec::parse_header(text).map(|h| h.version)
+}
+
+/// Whether the checkout is the package an update was planned against. Its spec
+/// must be at `branch` (the version the update starts from) or at `target` (the
+/// package's version: an earlier, interrupted part of this run may have bumped
+/// the spec, committed or not), and every `Source` must be a file the package
+/// has: one of `listed` (the OBS head's files and the checkout's own). `read`
+/// answers the spec's text as it stands. A mismatch is re-read once from OBS;
+/// a checkout that still does not match is `Err`, with the reason.
+pub(super) fn settle_branch_version(
+    read: impl Fn() -> Option<String>,
+    branch: &str,
+    target: &str,
+    reread: impl FnOnce() -> Result<(), String>,
+    listed: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let check = || -> Result<(), String> {
+        let text = read().ok_or("its spec is missing or cannot be read")?;
+        let found = spec_version(&text).ok_or("its spec has no Version")?;
+        if found != branch && found != target {
+            return Err(format!(
+                "its spec has Version {found}, the update expects {branch} (or {target} once \
+                 bumped)"
+            ));
+        }
+        match crate::spec::expanded_sources(&text)
+            .into_iter()
+            .find(|s| !listed(&s.file))
+        {
+            Some(missing) => Err(format!(
+                "its Source {} is not a file of the package on OBS or in the checkout",
+                missing.file
+            )),
+            None => Ok(()),
+        }
+    };
+    if check().is_ok() {
+        return Ok(());
+    }
+    reread().map_err(|e| format!("the checkout does not match the branch: {e}"))?;
+    check().map_err(|why| format!("the checkout does not match the branch: {why}; a fresh checkout from OBS did not change that"))
+}
+
+/// The file name a listing or checkout entry stands for: the output of a
+/// server-side service is listed as `_service:<service>:<file>`.
+fn listed_name(entry: &str) -> &str {
+    entry
+        .strip_prefix("_service:")
+        .and_then(|rest| rest.split_once(':'))
+        .map_or(entry, |(_, file)| file)
+}
+
+/// Whether the text of a `_service` runs a service that downloads or builds
+/// the package's sources.
+fn service_fetches(text: &str) -> bool {
+    ["download_files", "download_url", "obs_scm", "tar_scm"]
+        .iter()
+        .any(|svc| {
+            text.contains(&format!("name=\"{svc}\"")) || text.contains(&format!("name='{svc}'"))
+        })
+}
+
+/// Whether a spec's Source `file` is a file of the package: listed on OBS (also
+/// as the output of a server-side service), in the checkout, or not there yet
+/// because the checkout's `_service` downloads or builds it (a build-time
+/// service leaves nothing to list).
+pub(super) fn source_is_available(file: &str, head: &[String], checkout_dir: &Path) -> bool {
+    if head.iter().any(|h| listed_name(h) == file) || checkout_dir.join(file).exists() {
+        return true;
+    }
+    let in_checkout = std::fs::read_dir(checkout_dir).is_ok_and(|rd| {
+        rd.filter_map(|e| e.ok())
+            .any(|e| listed_name(&e.file_name().to_string_lossy()) == file)
+    });
+    in_checkout
+        || std::fs::read_to_string(checkout_dir.join("_service"))
+            .is_ok_and(|text| service_fetches(&text))
+}
+
 /// Name checks and the local-state fast path; opens the workspace.
 pub(super) fn preflight<'a>(
     config: &'a PipelineConfig,
@@ -205,6 +287,32 @@ pub(super) fn checkout_stage(
                 message: e.to_string(),
             });
             return Err(ctx.failed_osc(&e));
+        }
+        // An update is planned against the branch's version: a checkout not at
+        // it is re-read from OBS once, and stopped here if it still is not, so
+        // no agent turn runs on the wrong sources.
+        if let Some(expected) = &config.branch_version {
+            let head = osc::list_package_files(&config.project, obs_name, emit).unwrap_or_default();
+            let settled = settle_branch_version(
+                || std::fs::read_to_string(spec_path).ok(),
+                expected,
+                &config.version,
+                || {
+                    osc::checkout(&config.project, obs_name, &config.work_dir, emit)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                },
+                |file| source_is_available(file, &head, checkout_dir),
+            );
+            if let Err(reason) = settled {
+                let id = step.id;
+                step.finish(StepOutcome::Failed);
+                reporter.report(&Event::Warning {
+                    step: Some(id),
+                    message: reason.clone(),
+                });
+                return Err(ctx.failed(reason));
+            }
         }
         step.finish(StepOutcome::Ok);
         // Keep spec symlink fresh.

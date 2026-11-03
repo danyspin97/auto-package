@@ -179,6 +179,7 @@ pub(super) fn resolve_dependency_config(
                     patch_request: None,
                     patch_condition: None,
                     update: false,
+                    branch_version: None,
                     unknown_build_system: false,
                     ..config.clone()
                 })
@@ -219,6 +220,7 @@ pub(super) fn resolve_dependency_config(
                 patch_request: None,
                 patch_condition: None,
                 update: false,
+                branch_version: None,
                 unknown_build_system: false,
                 ..config.clone()
             });
@@ -339,6 +341,7 @@ pub(super) fn resolve_dependency_config(
                 patch_request: None,
                 patch_condition: None,
                 update: false,
+                branch_version: None,
                 unknown_build_system: false,
                 ..config.clone()
             });

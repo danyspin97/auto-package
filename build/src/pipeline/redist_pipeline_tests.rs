@@ -75,6 +75,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         force: false,
         regen: false,
         update: false,
+        branch_version: None,
         source_repo: None,
         upstream_tag: None,
         subprojects: Vec::new(),

@@ -151,6 +151,9 @@ pub(crate) fn cmd_build(
         // Only the package the update command builds is updated: a dependency
         // of it (see round.rs) is an ordinary build.
         update: branch.is_some_and(|b| b.update),
+        branch_version: branch
+            .filter(|b| b.update)
+            .and_then(|b| b.from_version.clone()),
         failed_deps: Vec::new(),
         unknown_build_system,
         unbuildable_deps: Vec::new(),
