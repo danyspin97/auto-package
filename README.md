@@ -404,8 +404,11 @@ The project is organized as a Rust workspace:
   Rust/Cargo, plain C/C++, monorepos, prebuilt wheels, systemd services,
   i18n, `-doc` subpackages, Django test settings. These only apply to a
   minority of packages, so they're loaded on demand via the `Skill` tool
-  instead of being sent in every turn's prompt; `build/src/agent.rs`'s
-  `CONVENTIONS` constant holds the always-applicable rules and briefly
+  instead of being sent in every turn's prompt. The conventions are
+  `build/conventions/N.md` (the table `build/src/conventions_table.rs`, the
+  `INDEX.md` with one line per topic). Seven are inline in every turn's
+  system prompt, with a summary of 62; the others are written to
+  `conventions/` in the workspace and read on demand. A convention
   points at the relevant skill by name where one exists.
 
 ### Event System

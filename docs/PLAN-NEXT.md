@@ -41,11 +41,12 @@ and the order of the remaining work, so it can be picked up cold.
   `--backport`, `--bug`, `--affected-by`, `StreamCheck` seam), `--revision` / `--to-version`,
   flaky-test retry (`build/src/flaky.rs`), restore of dropped `_constraints`/`_multibuild`,
   noarch-subpackage fix.
-- Conventions: now 94. New 84-94 (CUDA trigger, dynamic deps, carried-forward recipe, flaky tests,
+- (History, as of that work. Today there are 116 convention files, 45 of
+  them topics, and nvidia-wheels is listed in plugin.json.) Conventions: then 94. New 84-94 (CUDA trigger, dynamic deps, carried-forward recipe, flaky tests,
   SLE/maintenance, spec hygiene, bundled code, services, signatures, patch rebasing); merges as
   pointer stubs; contradictions fixed; anecdotes removed; CUDA/NVIDIA moved to
-  `packaging-skills/nvidia-wheels/SKILL.md` (NOT yet listed in
-  `packaging-skills/.claude-plugin/plugin.json`: add `"./nvidia-wheels"` to its `skills`).
+  `packaging-skills/nvidia-wheels/SKILL.md` (it was not yet listed in
+  `packaging-skills/.claude-plugin/plugin.json` then; it is now).
 
 ## 2. Immediate next step: commit the above atomically
 
