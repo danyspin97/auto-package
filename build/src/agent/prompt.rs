@@ -286,7 +286,7 @@ pub(super) fn materialise_conventions(workspace: &std::path::Path) -> std::io::R
 /// This is kept out of the per-turn user prompt (`-p`), which carries the
 /// genuinely dynamic content: package name, workspace paths, notes.md, build
 /// failure hints. Since Anthropic's prompt cache
-/// only hits on a byte-identical prefix, mixing ~140KB of unchanging
+/// only hits on a byte-identical prefix, mixing tens of KB of unchanging
 /// instructions into a string that's different on every single call meant
 /// it could never be served from cache, on any turn, for any package. As a
 /// separate system-prompt append it becomes a stable prefix shared by every
@@ -294,7 +294,7 @@ pub(super) fn materialise_conventions(workspace: &std::path::Path) -> std::io::R
 /// it here, not a stylistic preference.
 pub(super) fn static_system_prompt() -> &'static str {
     // `turn()` calls this once per agent turn — potentially hundreds of times
-    // over a single `run_package` build+fix loop — and the ~140KB result
+    // over a single `run_package` build+fix loop — and the tens-of-KB result
     // never changes within the process, so compute it once and hand out the
     // same allocation instead of re-formatting and recopying it every call.
     static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
