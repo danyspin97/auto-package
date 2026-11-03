@@ -9,7 +9,7 @@ use super::response::permission_path;
 
 /// Names in the workspace the turn may not write. `sdist.stamp` records which
 /// sdist the extracted tree came from.
-const PIPELINE_OWNED_FILES: [&str; 11] = [
+const PIPELINE_OWNED_FILES: [&str; 13] = [
     "state.json",
     "state.json.*",
     "*.lock",
@@ -21,6 +21,8 @@ const PIPELINE_OWNED_FILES: [&str; 11] = [
     "sdist.stamp",
     "obs-baseline",
     "obs-baseline/**",
+    "patch-review",
+    "patch-review/**",
 ];
 
 /// Denies Edit, Write and NotebookEdit on each of [`PIPELINE_OWNED_FILES`] under
@@ -41,7 +43,10 @@ pub(super) fn denied_tools(workspace: &std::path::Path) -> Vec<String> {
 /// is the source recipe of the package, which a rebase of its patches does not
 /// change, and a read-only translation writes nothing.
 pub(super) fn may_edit_service(task: Task) -> bool {
-    !matches!(task, Task::RefreshPatches | Task::TranslateUnresolvableDeps)
+    !matches!(
+        task,
+        Task::RefreshPatches | Task::PatchReview | Task::TranslateUnresolvableDeps
+    )
 }
 
 /// Denies Edit, Write and NotebookEdit on the checkout's `_service` for a turn

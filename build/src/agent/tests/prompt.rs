@@ -383,6 +383,23 @@ fn the_post_build_review_prompt_is_a_cautious_cleanup() {
 }
 
 #[test]
+fn the_patch_review_prompt_names_the_verdicts_and_its_budget() {
+    let ws = std::path::Path::new("/tmp/ws");
+    let mut req = request(ws, &[]);
+    req.task = Task::PatchReview;
+    let prompt = build_turn_prompt(&req);
+    for want in [
+        "ONE patch",
+        "`accept`",
+        "`rewrite`",
+        "`reject`",
+        "Patch review. $2.00",
+    ] {
+        assert!(prompt.contains(want), "missing {want:?}");
+    }
+}
+
+#[test]
 fn static_system_prompt_opens_with_the_priorities() {
     let combined = static_system_prompt();
     assert!(

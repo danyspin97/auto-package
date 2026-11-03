@@ -53,6 +53,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         }
         Task::PostBuildReview => post_build_review_prompt(),
         Task::RefreshPatches => refresh_patches_task(),
+        Task::PatchReview => patch_review_task(),
         Task::PatchDependency => {
             "This package is a distro package that was branched into the project \
              because another package needs a change to it (convention 62). The \
@@ -156,6 +157,11 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         ),
         Task::PostBuildReview => format!(
             "Post-build review. ${remaining:.2} of model budget left for this package; \
+             keep this turn short.",
+            remaining = (req.budget_usd - req.spent_usd).max(0.0),
+        ),
+        Task::PatchReview => format!(
+            "Patch review. ${remaining:.2} of model budget left for this package; \
              keep this turn short.",
             remaining = (req.budget_usd - req.spent_usd).max(0.0),
         ),

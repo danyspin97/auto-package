@@ -373,7 +373,11 @@ fn a_turn_that_may_edit_the_service_keeps_its_change_to_it() {
 
 #[test]
 fn a_turn_that_may_not_edit_the_service_is_denied_it_and_its_change_is_tampered() {
-    for task in [Task::RefreshPatches, Task::TranslateUnresolvableDeps] {
+    for task in [
+        Task::RefreshPatches,
+        Task::PatchReview,
+        Task::TranslateUnresolvableDeps,
+    ] {
         let (result, service, args) = service_turn(task);
         let Err(e) = result else {
             panic!("{task:?}: a change to the _service was accepted");
@@ -389,5 +393,27 @@ fn a_turn_that_may_not_edit_the_service_is_denied_it_and_its_change_is_tampered(
             args.contains("_service)"),
             "{task:?}: denied in the CLI: {args}"
         );
+    }
+}
+
+#[test]
+fn a_patch_review_turn_reads_the_rebase_series_like_a_refresh_turn() {
+    for (task, want) in [
+        (Task::PatchReview, true),
+        (Task::RefreshPatches, true),
+        (Task::Review, false),
+    ] {
+        let stub = Stub::answering(&answer("no_change"), 0);
+        let ws = tempfile::tempdir().unwrap();
+        let mut req = request(ws.path(), &[]);
+        req.task = task;
+        TURN_TEST_OVERRIDES.with(|o| {
+            o.borrow_mut().program = Some(stub.dir.path().join("claude-stub"));
+        });
+        let _ = turn(req);
+        TURN_TEST_OVERRIDES.with(|o| *o.borrow_mut() = TurnTestOverrides::default());
+        let env = stub.recorded("env.txt");
+        let has = env.lines().any(|l| l == "QUILT_SERIES=series-rebase");
+        assert_eq!(has, want, "{task:?}:\n{env}");
     }
 }

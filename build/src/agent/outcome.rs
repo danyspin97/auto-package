@@ -246,6 +246,9 @@ pub enum Task {
     /// Rebase the carried-forward patches that quilt says no longer apply
     /// cleanly to the new release (see `patch_check`), or remove the obsolete ones.
     RefreshPatches,
+    /// Look at one patch another turn rebased, wrote or edited, and accept it,
+    /// rewrite it or reject it. May change that patch file only.
+    PatchReview,
 }
 
 /// What a [`Task::RefreshPatches`] turn is told to do. The quilt report (each

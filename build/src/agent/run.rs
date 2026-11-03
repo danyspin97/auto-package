@@ -114,7 +114,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         cmd.args(["--add-dir", &checkout.to_string_lossy()]);
     }
     cmd.envs(quilt_env(req.checkout_dir));
-    if req.task == Task::RefreshPatches {
+    if matches!(req.task, Task::RefreshPatches | Task::PatchReview) {
         cmd.env("QUILT_SERIES", REFRESH_SERIES);
     }
     if let Some(id) = req.session_id {
