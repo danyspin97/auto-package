@@ -187,6 +187,11 @@ pub(super) fn cmd_update_project(
             ready.push(item);
             continue;
         }
+        // An origin whose spec cannot be read cannot be updated: it is reported,
+        // not branched, in the dry run as well.
+        if origin::settled_as_broken_origin(&item, ctx, report) {
+            continue;
+        }
         if !a.dry_run {
             // An origin that is unresolvable in every repository gives a branch
             // that cannot build either: it is reported, not branched.

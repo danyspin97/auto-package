@@ -206,6 +206,10 @@ read are not skipped, so a package Factory has dropped is not detected. Only
 `update` of a source other than openSUSE:Factory checks this: not a dependency
 from another project, `--in-place`, `lint`, or `--maintenance`.
 
+An origin with a broken `_link` or no spec file is reported with its cause,
+listed under "needs the maintainer", and not branched; an origin whose spec
+read failed is skipped with that cause, since the read may pass on a retry.
+
 The run ends with a summary (updated, failed, skipped, requests, build paths
 added, branch project) and exits non-zero when a package failed.
 
