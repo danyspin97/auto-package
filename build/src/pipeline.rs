@@ -250,6 +250,7 @@ mod blocked;
 pub use blocked::*;
 mod slots;
 use slots::*;
+mod notes_step;
 mod run;
 pub use run::*;
 mod obs_names;
