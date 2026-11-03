@@ -28,7 +28,7 @@ pub(super) fn review_prompt_non_python() -> &'static str {
      - **`plain-c-cpp-packaging`** — CMakeLists.txt / configure.ac / \
        meson.build at the source root. Covers `find_package`/`PKG_CHECK_MODULES` \
        → BuildRequires lookup, shared-library SONAME subpackage split, \
-       `%ldconfig_scriptlets`, `%files devel` layout for `-devel`/`.pc`/`.so` \
+       ldconfig scriptlets, `%files devel` layout for `-devel`/`.pc`/`.so` \
        split, and how to report missing `-devel` deps in `unresolvable_packages` \
        (strip `lib`-prefix and `-devel` suffix: `libtrantor-devel` → `trantor`).\n\
      - **`maturin-packaging`** — `Cargo.toml` at the root AND a `[build-system] \
@@ -76,7 +76,7 @@ pub(super) fn review_prompt_non_python() -> &'static str {
         (`lib<name><soversion>`) carrying only the versioned `.so.*`, with \
         `%{name}-devel` carrying headers + `.pc` + the unversioned `.so`. \
         See the `plain-c-cpp-packaging` skill for the exact layout and the \
-        `%ldconfig_scriptlets` lines the runtime subpackage needs. Every \
+        ldconfig scriptlets a target without file triggers needs. Every \
         package-private install directory (e.g. `%{_libdir}/<name>-X.Y/`) must \
         be owned exactly once — `%dir` it, or list the whole directory; listing \
         only files inside it fails `check-filelist` ('directories not owned by a \

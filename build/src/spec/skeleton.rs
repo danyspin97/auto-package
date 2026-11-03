@@ -224,7 +224,7 @@ pub enum CBuildSystem {
 /// needing a `lib<name><soversion>`/`-devel` split, and which `-devel`/
 /// `pkgconfig()` BuildRequires its `find_package()`/`pkg_check_modules()`
 /// calls need, both require reading `CMakeLists.txt`/`configure.ac` and
-/// `source/` directly. The skeleton stays deliberately bare; see convention 29.
+/// `source/` directly. The skeleton stays deliberately bare; see convention 32 (section 33).
 pub fn c_project_skeleton(
     pkg_name: &str,
     version: &str,
@@ -294,10 +294,10 @@ pub fn c_project_skeleton(
          TODO: fill in description\n\
          \n\
          # No Python or Cargo packaging found anywhere in this archive - a plain\n\
-         # C/C++ project built with {build_kind}. See convention 29: decide whether\n\
+         # C/C++ project built with {build_kind}. See convention 32 (section 33): decide whether\n\
          # this ships a shared library needing a lib%%{{name}}<soversion>/%%{{name}}-devel\n\
-         # split, find the -devel/pkgconfig() BuildRequires the build actually needs,\n\
-         # and add %%ldconfig_scriptlets to any shared-library subpackage.\n\
+         # split, and find the -devel/pkgconfig() BuildRequires the build actually needs.\n\
+         # Add no ldconfig scriptlets: a file trigger runs ldconfig (convention 104).\n\
          \n\
          %prep\n\
          %autosetup -n {top_level_dir}\n\

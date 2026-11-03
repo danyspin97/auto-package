@@ -57,7 +57,7 @@ pub struct Finding {
 /// Every deterministic fix of `lint`: the obsolete constructs first, so that a
 /// `%clean` is gone before the `%check` it could be moved with, then the style
 /// passes in the order the pipeline applies them. `ldconfig_macro` says whether the
-/// target defines `%ldconfig_scriptlets` (see `hygiene::ldconfig_macro_defined`).
+/// target runs ldconfig from a file trigger (see `hygiene::ldconfig_macro_defined`).
 pub fn tidy(spec: &str, ldconfig_macro: bool) -> String {
     style(&spec_tidy::hygiene::drop_obsolete_constructs(
         spec,
@@ -415,7 +415,7 @@ mod tests {
         for gone in ["Group:", "BuildRoot:", "%clean", "%defattr", "rm -rf"] {
             assert!(!tidied.contains(gone), "{gone} is left:\n{tidied}");
         }
-        assert!(tidied.contains("%ldconfig_scriptlets -n libfoo1\n"));
+        assert!(!tidied.contains("ldconfig"), "{tidied}");
         assert!(tidied.contains("Version:        1.2.3\n"));
         assert!(hygiene_findings(&tidied).is_empty());
         assert_eq!(tidy(&tidied, true), tidied);
@@ -430,14 +430,14 @@ mod tests {
     }
 
     #[test]
-    fn the_hyprlang_pair_and_its_group_tags_become_one_scriptlets_line() {
+    fn the_hyprlang_pair_and_its_group_tags_are_dropped() {
         let expected = HYPRLANG
             .replace("Group:          System/Libraries\n", "")
             .replace("Group:          Development/Libraries/Other\n", "")
             .replace(
                 "%post   -n lib%{name}%{sover} -p /sbin/ldconfig\n\
-                 %postun -n lib%{name}%{sover} -p /sbin/ldconfig\n",
-                "%ldconfig_scriptlets -n lib%{name}%{sover}\n",
+                 %postun -n lib%{name}%{sover} -p /sbin/ldconfig\n\n",
+                "",
             );
         assert_eq!(tidy(HYPRLANG, true), expected);
         assert_eq!(tidy(&expected, true), expected);
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(hygiene(true), 1);
         assert_eq!(hygiene(false), 0);
         assert_eq!(tidy(spec, false), spec);
-        assert!(tidy(spec, true).contains("%ldconfig_scriptlets"));
+        assert!(!tidy(spec, true).contains("ldconfig"));
         assert!(spec_tidy::hygiene::ldconfig_left(spec, false));
         assert!(!spec_tidy::hygiene::ldconfig_left(spec, true));
     }

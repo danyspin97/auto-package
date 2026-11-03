@@ -129,7 +129,7 @@ impl Audit {
                 say(line);
             }
             if ldconfig_left {
-                say("ldconfig scriptlets left: the target distro may not define %ldconfig_scriptlets".to_string());
+                say("ldconfig scriptlets left: the target distro may not run ldconfig from a file trigger".to_string());
             }
             Ok(AuditEnd {
                 packages: audits.len(),

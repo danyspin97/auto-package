@@ -112,7 +112,8 @@ fn body_is_blank(lines: &[&str], i: usize) -> bool {
 }
 
 /// A `%post` and a `%postun` that only run `/sbin/ldconfig` for the same
-/// subpackage: the one `%ldconfig_scriptlets` line does both.
+/// subpackage: current targets run ldconfig from a file trigger, so both go and
+/// nothing replaces them.
 fn ldconfig_constructs(lines: &[&str], scriptlets: &[Scriptlet]) -> Vec<Construct> {
     let mut out = Vec::new();
     for post in scriptlets
@@ -133,10 +134,6 @@ fn ldconfig_constructs(lines: &[&str], scriptlets: &[Scriptlet]) -> Vec<Construc
         {
             continue;
         }
-        let with = match &post.name {
-            Some(name) => format!("%ldconfig_scriptlets -n {name}"),
-            None => "%ldconfig_scriptlets".to_string(),
-        };
         out.push(Construct {
             pass: Pass::Ldconfig,
             line: post.index + 1,
@@ -145,22 +142,58 @@ fn ldconfig_constructs(lines: &[&str], scriptlets: &[Scriptlet]) -> Vec<Construc
                 post.index + 1,
                 postun.index + 1
             ),
-            fix: format!("replace both with `{with}`"),
-            edits: vec![
-                LineEdit {
-                    start: post.index,
-                    end: post.index + 1,
-                    with: vec![with],
-                },
-                LineEdit {
-                    start: postun.index,
-                    end: body_end(lines, postun.index),
-                    with: Vec::new(),
-                },
-            ],
+            fix: "delete both: a file trigger runs ldconfig".to_string(),
+            edits: removal_edits(
+                lines,
+                &[
+                    post.index..post.index + 1,
+                    postun.index..body_end(lines, postun.index),
+                ],
+            ),
         });
     }
     out
+}
+
+/// The edits that delete the line ranges `removed`, plus the blank line after a
+/// removed run when the line before it is blank (or the run starts the file): the
+/// deletion never leaves two blank lines in a row.
+fn removal_edits(lines: &[&str], removed: &[std::ops::Range<usize>]) -> Vec<LineEdit> {
+    let mut gone: std::collections::BTreeSet<usize> = removed.iter().cloned().flatten().collect();
+    loop {
+        let mut next = None;
+        let mut prev: Option<usize> = None;
+        for &i in &gone {
+            if prev.is_none_or(|p| p + 1 != i) {
+                // `i` starts a run: find its end.
+                let end = (i..).find(|j| !gone.contains(j)).unwrap_or(i);
+                let blank_before = i == 0 || lines[i - 1].trim().is_empty();
+                if blank_before && end < lines.len() && lines[end].trim().is_empty() {
+                    next = Some(end);
+                    break;
+                }
+            }
+            prev = Some(i);
+        }
+        match next {
+            Some(i) => {
+                gone.insert(i);
+            }
+            None => break,
+        }
+    }
+    let mut edits: Vec<LineEdit> = Vec::new();
+    for i in gone {
+        match edits.last_mut() {
+            Some(e) if e.end == i => e.end = i + 1,
+            _ => edits.push(LineEdit {
+                start: i,
+                end: i + 1,
+                with: Vec::new(),
+            }),
+        }
+    }
+    edits
 }
 
 /// A `rm -rf %{buildroot}` that is the first line of `%install`.
@@ -221,7 +254,7 @@ pub fn ldconfig_macro_defined(repository: &str) -> bool {
 
 /// Every obsolete construct of `spec` that a pass can remove. Lines inside
 /// an `%if` block are not reported: the passes leave them. The
-/// `%ldconfig_scriptlets` pair is reported only when `ldconfig_macro` is set
+/// ldconfig pair is reported only when `ldconfig_macro` is set
 /// (see [`ldconfig_macro_defined`]).
 pub fn constructs(spec: &str, ldconfig_macro: bool) -> Vec<Construct> {
     let lines: Vec<&str> = spec.lines().collect();
@@ -338,7 +371,7 @@ pub fn constructs(spec: &str, ldconfig_macro: bool) -> Vec<Construct> {
 }
 
 /// The spec with every construct of `pass` removed, `None` when it has none.
-/// The `%ldconfig_scriptlets` pass runs whenever it is asked: the caller that
+/// The ldconfig pass runs whenever it is asked: the caller that
 /// knows the build target decides whether to ask.
 fn apply(spec: &str, pass: Pass) -> Option<String> {
     let mut edits: Vec<LineEdit> = constructs(spec, true)
@@ -433,13 +466,13 @@ pub fn drop_install_buildroot_rm(spec: &str) -> Option<String> {
 }
 
 /// The hand-written `%post` and `%postun` pair that only runs `/sbin/ldconfig`
-/// for one subpackage, replaced by `%ldconfig_scriptlets [-n <sub>]`.
-pub fn use_ldconfig_scriptlets(spec: &str) -> Option<String> {
+/// for one subpackage, dropped: no `%ldconfig_scriptlets` replaces it.
+pub fn drop_ldconfig_pair(spec: &str) -> Option<String> {
     apply(spec, Pass::Ldconfig)
 }
 
 /// Every pass above, in order, on `spec`. The text is `spec` itself when
-/// none of them applies. The `%ldconfig_scriptlets` pass runs only when
+/// none of them applies. The ldconfig pass runs only when
 /// `ldconfig_macro` is set (see [`ldconfig_macro_defined`]).
 pub fn drop_obsolete_constructs(spec: &str, ldconfig_macro: bool) -> String {
     let passes: [fn(&str) -> Option<String>; 5] = [
@@ -452,14 +485,14 @@ pub fn drop_obsolete_constructs(spec: &str, ldconfig_macro: bool) -> String {
     let mut text = passes
         .iter()
         .fold(spec.to_string(), |text, pass| pass(&text).unwrap_or(text));
-    if ldconfig_macro && let Some(next) = use_ldconfig_scriptlets(&text) {
+    if ldconfig_macro && let Some(next) = drop_ldconfig_pair(&text) {
         text = next;
     }
     text
 }
 
 /// Whether `spec` has a hand-written `%post`/`%postun` pair that the
-/// `%ldconfig_scriptlets` pass would replace, which stays because the target
+/// ldconfig pass would drop, which stays because the target
 /// does not define the macro.
 pub fn ldconfig_left(spec: &str, ldconfig_macro: bool) -> bool {
     !ldconfig_macro

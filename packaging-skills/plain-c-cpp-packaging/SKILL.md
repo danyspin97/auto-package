@@ -1,6 +1,6 @@
 ---
 name: plain-c-cpp-packaging
-description: Use when packaging a plain C/C++ library or binary with no Python and no Cargo involved at all — just a CMakeLists.txt, configure.ac, or meson.build at the source root (e.g. a C library dependency that itself needs to be built from source, unresolvable_packages-style). Covers shared-library SONAME subpackage splits, %ldconfig_scriptlets, CMake/autotools/meson %build patterns, source signature verification, and %files layout for devel/runtime splits.
+description: Use when packaging a plain C/C++ library or binary with no Python and no Cargo involved at all — just a CMakeLists.txt, configure.ac, or meson.build at the source root (e.g. a C library dependency that itself needs to be built from source, unresolvable_packages-style). Covers shared-library SONAME subpackage splits, ldconfig scriptlets, CMake/autotools/meson %build patterns, source signature verification, and %files layout for devel/runtime splits.
 ---
 
 # Plain C/C++ packages
@@ -90,24 +90,14 @@ made (convention 86).
   confirm every non-system directory is claimed once. The build log's `check-filelist`
   and `File listed twice` lines are the authoritative list; read them
   before editing `%files`.
-- **`%ldconfig_scriptlets`** (applies to new specs; a carried-forward spec
-  keeps its form unless the build fails on it): every shared-library subpackage needs
-  `%ldconfig_scriptlets -n lib<name><soversion>` (expands to the
-  `%post`/`%postun -p /sbin/ldconfig` pair) directly before its `%files`
-  section. Do not hand-write the ldconfig calls — the macro is the current
-  idiom (do not invent macros; this one is real, confirmed on the build
-  host's `/usr/lib/rpm/macros.d/macros.ldconfig`).
-
-  **DO NOT rewrite `%ldconfig_scriptlets` to manual `%post -n <lib> -p
-  /sbin/ldconfig` / `%postun -n <lib> -p /sbin/ldconfig` just because
-  the macro looks undefined when you grep the local macro files, or the pipeline's spec check warns about it.** That
-  warning is a host-macro-vs-target-macro mismatch (the local macros come
-  from the review host, not an openSUSE build worker) — the macro IS defined on every openSUSE
-  build worker, and the manual rewrite is strictly worse because it
-  loses the single-source-of-truth property of the macro (if openSUSE
-  ever changes what ldconfig invocation to use, every manual spec has
-  to be hand-updated, while every `%ldconfig_scriptlets` user picks it
-  up for free). The macro is not deprecated.
+- **ldconfig scriptlets**: on a current target (Tumbleweed, Slowroll, Factory, Leap 16,
+  SLE 16) a file trigger runs ldconfig, so a new spec adds neither `%ldconfig_scriptlets`
+  nor a hand-written `%post`/`%postun -p /sbin/ldconfig` pair. A carried-forward spec
+  keeps the form it has: leave an existing `%ldconfig_scriptlets` line as it is, and do
+  not rewrite it to a manual pair because the macro looks undefined when you grep the
+  local macro files or the pipeline's spec check warns about it (the local macros come
+  from the review host, not from an openSUSE build worker). For an older target
+  (Leap 15.x, SLE 15) the hand-written pair is the form (convention 104).
 - **CMake `%build`/`%install`**: `%cmake` (configure) then `%cmake_build`,
   then `%cmake_install`. Never hand-write `mkdir build && cd build && cmake
   ..` — the macros already do the out-of-tree build and set the standard

@@ -309,25 +309,24 @@ const HYPRLANG: &str = "%prep\n%autosetup -p1\n\n%build\n%cmake\n\n%check\n%ctes
     %changelog\n";
 
 #[test]
-fn the_hyprlang_pair_becomes_one_ldconfig_scriptlets_line() {
+fn the_hyprlang_pair_is_dropped() {
     assert_eq!(
-        use_ldconfig_scriptlets(HYPRLANG).unwrap(),
+        drop_ldconfig_pair(HYPRLANG).unwrap(),
         "%prep\n%autosetup -p1\n\n%build\n%cmake\n\n%check\n%ctest\n\n\
-         %ldconfig_scriptlets -n lib%{name}%{sover}\n\n\
          %files devel\n%doc README.md\n\n%files -n lib%{name}%{sover}\n%{_libdir}/lib%{name}.so.*\n\n\
          %changelog\n"
     );
-    let once = use_ldconfig_scriptlets(HYPRLANG).unwrap();
-    assert_eq!(use_ldconfig_scriptlets(&once), None);
+    let once = drop_ldconfig_pair(HYPRLANG).unwrap();
+    assert_eq!(drop_ldconfig_pair(&once), None);
 }
 
 #[test]
-fn the_main_package_pair_becomes_a_bare_ldconfig_scriptlets() {
+fn the_main_package_pair_is_dropped() {
     let spec = "%install\nmake\n%post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n\
                 %files\n/usr/lib/a.so\n";
     assert_eq!(
-        use_ldconfig_scriptlets(spec).unwrap(),
-        "%install\nmake\n%ldconfig_scriptlets\n%files\n/usr/lib/a.so\n"
+        drop_ldconfig_pair(spec).unwrap(),
+        "%install\nmake\n%files\n/usr/lib/a.so\n"
     );
 }
 
@@ -341,38 +340,35 @@ fn a_pair_that_differs_in_name_or_is_not_ldconfig_stays() {
         "%post -n libA -p /sbin/ldconfig\n%postun -n libA -p /bin/true\n",
         "%post -n libA -p /sbin/ldconfig -q\n%postun -n libA -p /sbin/ldconfig\n",
     ] {
-        assert_eq!(use_ldconfig_scriptlets(spec), None, "{spec}");
+        assert_eq!(drop_ldconfig_pair(spec), None, "{spec}");
     }
 }
 
 #[test]
 fn a_scriptlet_with_a_body_or_a_second_scriptlet_stays() {
     let body = "%post -n libA -p /sbin/ldconfig\necho hi\n%postun -n libA -p /sbin/ldconfig\n";
-    assert_eq!(use_ldconfig_scriptlets(body), None);
+    assert_eq!(drop_ldconfig_pair(body), None);
     let second = "%post -n libA -p /sbin/ldconfig\n%post -n libA\necho x\n\
                   %postun -n libA -p /sbin/ldconfig\n";
-    assert_eq!(use_ldconfig_scriptlets(second), None);
+    assert_eq!(drop_ldconfig_pair(second), None);
     let only_post = "%post -n libA -p /sbin/ldconfig\n%files\n/a\n";
-    assert_eq!(use_ldconfig_scriptlets(only_post), None);
+    assert_eq!(drop_ldconfig_pair(only_post), None);
 }
 
 #[test]
 fn a_pair_inside_a_conditional_or_after_changelog_stays() {
     let cond =
         "%if 0%{?a}\n%post -n libA -p /sbin/ldconfig\n%postun -n libA -p /sbin/ldconfig\n%endif\n";
-    assert_eq!(use_ldconfig_scriptlets(cond), None);
+    assert_eq!(drop_ldconfig_pair(cond), None);
     let log = "%files\n/a\n%changelog\n%post -p /sbin/ldconfig\n%postun -p /sbin/ldconfig\n";
-    assert_eq!(use_ldconfig_scriptlets(log), None);
+    assert_eq!(drop_ldconfig_pair(log), None);
 }
 
 #[test]
-fn a_pair_split_by_other_sections_joins_into_one_line_without_a_double_blank() {
+fn a_pair_split_by_a_blank_line_goes_without_a_double_blank() {
     let spec =
         "%post -n libA -p /sbin/ldconfig\n\n%postun -n libA -p /sbin/ldconfig\n\n%files\n/a\n";
-    assert_eq!(
-        use_ldconfig_scriptlets(spec).unwrap(),
-        "%ldconfig_scriptlets -n libA\n\n%files\n/a\n"
-    );
+    assert_eq!(drop_ldconfig_pair(spec).unwrap(), "%files\n/a\n");
 }
 
 #[test]
