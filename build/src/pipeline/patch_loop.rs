@@ -112,6 +112,7 @@ pub(super) fn patch_stage_with(
             config,
             st.attempts,
             st.spent_usd,
+            &ctx.signals,
         );
         "--no-agent is set, so no agent turn rebased them".to_string()
     } else {
@@ -124,18 +125,23 @@ pub(super) fn patch_stage_with(
                     "stopped while rebasing the patches: the run is shutting down".into(),
                 ));
             }
-            if st.attempts >= config.max_attempts || st.spent_usd >= config.budget_usd {
+            let budget_stop = ctx.may_start_turn(st.spent_usd).err();
+            if st.attempts >= config.max_attempts || budget_stop.is_some() {
                 skip_agent(
                     reporter,
                     &mut st.step_attempts,
                     config,
                     st.attempts,
                     st.spent_usd,
+                    &ctx.signals,
                 );
-                break format!(
-                    "no agent turn left after {rounds} round(s): {} of {} attempts, ${:.2} of ${:.2}",
-                    st.attempts, config.max_attempts, st.spent_usd, config.budget_usd
-                );
+                break match budget_stop {
+                    Some(reason) => format!("no agent turn left after {rounds} round(s): {reason}"),
+                    None => format!(
+                        "no agent turn left after {rounds} round(s): {} of {} attempts, ${:.2} of ${:.2}",
+                        st.attempts, config.max_attempts, st.spent_usd, config.budget_usd
+                    ),
+                };
             }
             rounds += 1;
             st.attempts += 1;

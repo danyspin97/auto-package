@@ -179,6 +179,7 @@ pub(super) fn fix_after_build(
             config,
             st.attempts,
             st.spent_usd,
+            &ctx.signals,
         );
         return Err(ctx.failed(format!("build failed; log: {}", build_log.display())));
     }
@@ -363,21 +364,19 @@ pub(super) fn fix_after_build(
     st.attempts += 1;
     persist_attempts(ws, &config.run_id, st.attempts);
     let attempts = st.attempts;
-    if attempts > config.max_attempts || st.spent_usd >= config.budget_usd {
+    let budget_stop = ctx.may_start_turn(st.spent_usd).err();
+    if attempts > config.max_attempts || budget_stop.is_some() {
         skip_agent(
             reporter,
             &mut st.step_attempts,
             config,
             attempts,
             st.spent_usd,
+            &ctx.signals,
         );
-        let why = if st.spent_usd >= config.budget_usd {
-            format!(
-                "budget exhausted (${:.2} spent of ${:.2})",
-                st.spent_usd, config.budget_usd
-            )
-        } else {
-            format!("attempt limit {} reached", config.max_attempts)
+        let why = match budget_stop {
+            Some(reason) => reason,
+            None => format!("attempt limit {} reached", config.max_attempts),
         };
         return Err(ctx.failed_as(
             FailureKind::Exhausted,

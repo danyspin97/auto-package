@@ -400,7 +400,10 @@ pub(super) fn unresolvable_deps_round(
         Vec::new()
     };
 
-    if !already_reviewed && !config.no_agent && st.spent_usd < config.budget_usd {
+    if !already_reviewed
+        && !config.no_agent
+        && can_start(config.budget_usd, st.spent_usd, &ctx.signals).is_ok()
+    {
         let turn = agent_turn(
             TurnCtx {
                 carried: false,

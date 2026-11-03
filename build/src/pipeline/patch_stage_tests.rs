@@ -181,6 +181,7 @@ fn run_turns(
         obs_name: "foo".into(),
         checkout_dir: checkout.clone(),
         spec_path: spec_path.clone(),
+        signals: Default::default(),
     };
     let mut st = RunState {
         step_attempts: Default::default(),

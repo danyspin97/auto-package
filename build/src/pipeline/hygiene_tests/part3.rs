@@ -172,6 +172,7 @@ fn a_failed_wheel_lookup_leaves_the_spec_to_the_review_turn() {
         obs_name: "python-foo".into(),
         checkout_dir: checkout,
         spec_path: spec_path.clone(),
+        signals: Default::default(),
     };
     let mut st = RunState {
         step_attempts: Default::default(),

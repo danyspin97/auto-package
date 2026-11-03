@@ -419,12 +419,9 @@ pub(super) fn resolve_blocked_with(
                 return Rung::Resolved(TurnEffect::SwitchedToWheel);
             }
         }
-        if st.spent_usd >= config.budget_usd {
+        if let Err(reason) = ctx.may_start_turn(st.spent_usd) {
             budget_stopped = true;
-            return Rung::Blocked(format!(
-                "round {round} not run: budget exhausted (${:.2} spent of ${:.2})",
-                st.spent_usd, config.budget_usd
-            ));
+            return Rung::Blocked(format!("round {round} not run: {reason}"));
         }
         let context = ladder_context(round, LADDER_ROUNDS, history, site.context);
         let label = format!("resolve-{round}");

@@ -354,6 +354,7 @@ fn run_case_with(
         obs_name: rpm_name.into(),
         checkout_dir: checkout.clone(),
         spec_path: spec_path.clone(),
+        signals: Default::default(),
     };
     let mut st = RunState {
         step_attempts: Default::default(),

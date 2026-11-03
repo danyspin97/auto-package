@@ -73,6 +73,7 @@ pub(super) fn generate_spec_stage(
         obs_name,
         checkout_dir,
         spec_path,
+        ..
     } = ctx;
     let reporter = *reporter;
     let step_attempts = &mut st.step_attempts;

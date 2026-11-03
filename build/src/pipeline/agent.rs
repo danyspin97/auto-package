@@ -47,6 +47,8 @@ pub(super) struct TurnEnv<'a> {
     pub(super) reporter: &'a dyn Reporter,
     /// The package's OBS name, for reading its checkout's spec.
     pub(super) obs_name: &'a str,
+    /// The package's turn signals (see [`TurnSignals`]).
+    pub(super) signals: std::sync::Arc<std::sync::Mutex<TurnSignals>>,
 }
 
 /// What one agent turn needs beyond [`PipelineConfig`].
@@ -151,17 +153,19 @@ pub(super) fn friendly_agent_error(
     format!("agent error for {pkg_name}: {e}")
 }
 
-/// Report why no further agent turn will run for this package.
+/// Report why no further agent turn will run for this package: the same check
+/// [`can_start`] makes before a turn.
 pub(super) fn skip_agent(
     reporter: &dyn Reporter,
     step_attempts: &mut Attempts,
     config: &PipelineConfig,
     attempts: usize,
     spent_usd: f64,
+    signals: &std::sync::Mutex<TurnSignals>,
 ) {
     let reason = if config.no_agent {
         SkipReason::NoAgent
-    } else if spent_usd >= config.budget_usd {
+    } else if can_start(config.budget_usd, spent_usd, signals).is_err() {
         SkipReason::BudgetExhausted
     } else {
         SkipReason::Other(format!(
@@ -192,7 +196,12 @@ pub(super) fn agent_turn(
         pkg_run,
         reporter,
         obs_name,
+        signals,
     } = env;
+    // No turn starts at the budget (see `can_start`).
+    if let Err(why) = can_start(config.budget_usd, *spent_usd, &signals) {
+        return Err((why, FailureKind::Exhausted));
+    }
     // The spec's Version is the package's before every turn, and a turn may not
     // change it (see `version_stop`): a change made between turns stops here.
     let version_spec = ctx.checkout_dir.map(|d| d.join(format!("{obs_name}.spec")));
@@ -448,6 +457,10 @@ pub(super) fn agent_turn(
     // The turn's cost is charged first: a turn stopped by the check below cost it.
     *spent_usd += outcome.usage.cost_usd();
     record_daily_spend(&config.work_dir, outcome.usage.cost_usd());
+    record_turn(
+        &mut signals.lock().unwrap_or_else(|e| e.into_inner()),
+        &outcome,
+    );
     // A turn that changed the Version is undone and stops the package, whatever
     // its action, a wheel switch included.
     if let Some(why) = version_check(

@@ -1,7 +1,10 @@
-//! The budget boundary of an agent turn: a turn that would reach the budget
-//! does not start.
+//! The budget boundary of an agent turn: a turn that would reach the budget,
+//! with the last turn's cost, does not start.
 
-use crate::pipeline::spend_guard::spend_allows_turn;
+use crate::pipeline::patch_loop::pipeline_wheel_outcome;
+use crate::pipeline::spend_guard::{
+    TurnSignals, can_start, record_turn, spend_allows_turn, turn_stop,
+};
 
 #[test]
 fn a_turn_starts_just_below_the_budget_and_not_at_or_over_it() {
@@ -36,4 +39,24 @@ fn the_review_and_the_notes_turn_need_their_cap_in_room_below_the_budget() {
     let cap = crate::package_notes::NOTES_CAP_USD;
     assert!(spend_allows_turn(3.0 + cap, 3.0, cap).is_err());
     assert!(spend_allows_turn(3.01 + cap, 3.0, cap).is_ok());
+}
+
+#[test]
+fn the_last_turns_cost_counts_against_the_budget() {
+    let mut signals = TurnSignals::default();
+    signals.last_turn_usd = 1.0;
+    assert!(turn_stop(3.0, 1.5, &signals).is_ok());
+    assert!(turn_stop(3.0, 2.0, &signals).is_err());
+}
+
+#[test]
+fn a_fresh_package_run_starts_with_no_last_turn() {
+    // The state is per package run: what one run's turn cost does not count in the next.
+    let mut expensive = pipeline_wheel_outcome("x");
+    expensive.usage.cli_cost_usd = Some(2.0);
+    let ran = std::sync::Mutex::new(TurnSignals::default());
+    record_turn(&mut ran.lock().unwrap(), &expensive);
+    assert!(can_start(3.0, 1.0, &ran).is_err());
+    let next = std::sync::Mutex::new(TurnSignals::default());
+    assert!(can_start(3.0, 1.0, &next).is_ok());
 }

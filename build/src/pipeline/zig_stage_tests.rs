@@ -83,6 +83,7 @@ fn run_stage(spec: &str, src0: &[u8], update: bool) -> (tempfile::TempDir, Pipel
         obs_name: "pkg".into(),
         checkout_dir: checkout,
         spec_path,
+        signals: Default::default(),
     };
     let mut st = RunState {
         step_attempts: Default::default(),

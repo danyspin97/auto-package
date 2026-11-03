@@ -24,6 +24,7 @@ fn open_gate() -> RpmlintGate {
         max_attempts: 3,
         spent_usd: 0.0,
         budget_usd: 5.0,
+        signals: Default::default(),
     }
 }
 

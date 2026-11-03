@@ -30,6 +30,7 @@ pub(super) struct RpmlintGate {
     pub(super) max_attempts: usize,
     pub(super) spent_usd: f64,
     pub(super) budget_usd: f64,
+    pub(super) signals: std::sync::Arc<std::sync::Mutex<TurnSignals>>,
 }
 
 /// Whether the round asks the fix turn about the build's `E:` lines.
@@ -60,7 +61,9 @@ pub(super) fn rpmlint_ask(
         .collect();
     if fresh.is_empty() {
         RpmlintAsk::Build
-    } else if gate.attempts < gate.max_attempts && gate.spent_usd < gate.budget_usd {
+    } else if gate.attempts < gate.max_attempts
+        && can_start(gate.budget_usd, gate.spent_usd, &gate.signals).is_ok()
+    {
         RpmlintAsk::Ask(fresh)
     } else {
         RpmlintAsk::Spent
@@ -264,6 +267,7 @@ pub(super) fn rpmlint_fix_round(
         max_attempts: config.max_attempts,
         spent_usd: st.spent_usd,
         budget_usd: config.budget_usd,
+        signals: ctx.signals.clone(),
     };
     let fresh = match rpmlint_ask(&gate, errors, &st.rpmlint_shown) {
         RpmlintAsk::Build => return None,

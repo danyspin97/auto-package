@@ -456,7 +456,8 @@ fn no_agent_reports_the_agent_skip_only_once() {
     // The review gate announces the skip up front, and a later failure
     // path reports it again through `skip_agent`.
     step_attempts.skip(&recorder, StepKind::AgentTurn, SkipReason::NoAgent);
-    skip_agent(&recorder, &mut step_attempts, &config, 0, 0.0);
+    let signals = std::sync::Mutex::new(TurnSignals::default());
+    skip_agent(&recorder, &mut step_attempts, &config, 0, 0.0, &signals);
 
     let events = recorder.0.lock().unwrap();
     let skips = events

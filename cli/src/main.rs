@@ -82,6 +82,9 @@ enum Commands {
         /// one package, within one CLI invocation — see
         /// `PkgState::cumulative_spent_usd`).
         ///
+        /// A turn is not started when the spend so far plus the last turn's cost
+        /// would reach the cap, and the package stops with that reason.
+        ///
         /// The cap stops a runaway, not an ordinary hard package: C++ builds
         /// can need 5–10 agent turns to work through missing BuildRequires and
         /// CMake flag discovery, and large closures run many packages through it.

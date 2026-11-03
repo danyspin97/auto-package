@@ -368,6 +368,9 @@ pub(super) struct RunCtx<'a> {
     pub(super) obs_name: String,
     pub(super) checkout_dir: PathBuf,
     pub(super) spec_path: PathBuf,
+    /// What this package's agent turns cost and said (see [`TurnSignals`]).
+    /// Kept by this run only: a package run starts with none.
+    pub(super) signals: std::sync::Arc<std::sync::Mutex<TurnSignals>>,
 }
 
 impl RunCtx<'_> {
@@ -409,7 +412,13 @@ impl RunCtx<'_> {
             pkg_run: self.pkg_run,
             reporter: self.reporter,
             obs_name: &self.obs_name,
+            signals: self.signals.clone(),
         }
+    }
+
+    /// Whether a turn may start with `spent` already spent by the package.
+    pub(super) fn may_start_turn(&self, spent: f64) -> Result<(), String> {
+        can_start(self.config.budget_usd, spent, &self.signals)
     }
 }
 

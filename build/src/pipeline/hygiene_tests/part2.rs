@@ -253,6 +253,7 @@ fn a_missing_submodule_tree_switches_to_the_wheel_end_to_end_without_the_network
         obs_name: "python-foo".into(),
         checkout_dir: checkout.clone(),
         spec_path: spec_path.clone(),
+        signals: Default::default(),
     };
     let mut st = RunState {
         step_attempts: Default::default(),
@@ -482,6 +483,7 @@ pub(super) fn gate_case(
         obs_name: "python-foo".into(),
         checkout_dir: checkout.clone(),
         spec_path: spec_path.clone(),
+        signals: Default::default(),
     };
     let mut st = RunState {
         step_attempts: Default::default(),

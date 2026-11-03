@@ -23,6 +23,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
         obs_name: _,
         checkout_dir,
         spec_path,
+        ..
     } = ctx;
     let reporter = *reporter;
 
@@ -183,7 +184,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
 
                 if config.no_agent
                     || st.attempts >= config.max_attempts
-                    || st.spent_usd >= config.budget_usd
+                    || can_start(config.budget_usd, st.spent_usd, &ctx.signals).is_err()
                 {
                     skip_agent(
                         reporter,
@@ -191,6 +192,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                         config,
                         st.attempts,
                         st.spent_usd,
+                        &ctx.signals,
                     );
                     return Err(ctx.failed(format!(
                         "spec references source file(s) not present in the \
@@ -234,7 +236,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                 });
                 if config.no_agent
                     || st.attempts >= config.max_attempts
-                    || st.spent_usd >= config.budget_usd
+                    || can_start(config.budget_usd, st.spent_usd, &ctx.signals).is_err()
                 {
                     skip_agent(
                         reporter,
@@ -242,6 +244,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                         config,
                         st.attempts,
                         st.spent_usd,
+                        &ctx.signals,
                     );
                     return Err(ctx.failed(format!(
                         "the spec still has TODO placeholders: {}",
@@ -403,7 +406,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                 });
                 if config.no_agent
                     || st.attempts >= config.max_attempts
-                    || st.spent_usd >= config.budget_usd
+                    || can_start(config.budget_usd, st.spent_usd, &ctx.signals).is_err()
                 {
                     // Style alone never fails a package that otherwise builds.
                     ap_core::diag!(
@@ -495,7 +498,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
             });
             if config.no_agent
                 || st.attempts >= config.max_attempts
-                || st.spent_usd >= config.budget_usd
+                || can_start(config.budget_usd, st.spent_usd, &ctx.signals).is_err()
             {
                 skip_agent(
                     reporter,
@@ -503,6 +506,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     config,
                     st.attempts,
                     st.spent_usd,
+                    &ctx.signals,
                 );
                 return Err(ctx.failed(format!("spec invalid: {e}")));
             }

@@ -58,7 +58,7 @@ pub(super) fn prefix_stage(
     if !spec.need_spec
         && !config.no_agent
         && st.attempts < config.max_attempts
-        && st.spent_usd < config.budget_usd
+        && can_start(config.budget_usd, st.spent_usd, &ctx.signals).is_ok()
         && (build_log_nonempty || matches!(obs_status, Some(osc::BuildStatus::Unresolvable)))
     {
         let attempts = st.attempts;

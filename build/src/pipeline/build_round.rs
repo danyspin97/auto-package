@@ -268,8 +268,8 @@ pub(super) const POST_REVIEW_MIN_BUDGET_USD: f64 = 0.5;
 
 /// Whether the post-build review is ruled out before any turn: it already ran,
 /// the run is an update (its recipe is the origin's, and a clean-up turn would
-/// rewrite what the maintainer chose), there is no agent, or the budget cannot
-/// cover it (`out_of_budget`, see `POST_REVIEW_MIN_BUDGET_USD`).
+/// rewrite what the maintainer chose), there is no agent, or the spend guard
+/// does not let another turn start (`out_of_budget`, see `may_start_turn`).
 pub(super) fn post_review_ruled_out(
     already_done: bool,
     update: bool,
@@ -300,7 +300,9 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         std::mem::replace(&mut st.post_review_done, true),
         st.update.is_some(),
         config.no_agent,
-        spend_allows_turn(config.budget_usd, st.spent_usd, POST_REVIEW_MIN_BUDGET_USD).is_err(),
+        ctx.may_start_turn(st.spent_usd).is_err()
+            || spend_allows_turn(config.budget_usd, st.spent_usd, POST_REVIEW_MIN_BUDGET_USD)
+                .is_err(),
     ) {
         return None;
     }

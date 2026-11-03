@@ -120,7 +120,8 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = 10)]
     pub max_attempts: usize,
 
-    /// USD budget cap for agent calls (per package build).
+    /// USD budget cap for agent calls (per package build). A turn is not
+    /// started when the spend so far plus the last turn's cost would reach it.
     #[arg(long, default_value_t = 10.0)]
     pub budget_usd: f64,
 

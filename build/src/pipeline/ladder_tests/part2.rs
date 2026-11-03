@@ -56,6 +56,7 @@ fn ctx_for<'a>(
         obs_name: "python-foo".into(),
         checkout_dir: PathBuf::new(),
         spec_path: PathBuf::new(),
+        signals: Default::default(),
     }
 }
 
