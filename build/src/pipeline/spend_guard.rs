@@ -30,12 +30,17 @@ struct Streak {
 pub(super) const REPEAT_STOP: u32 = 2;
 
 /// Records what a finished turn of `task` cost and whether it answered `no change`.
+/// A PatchReview turn only sets the cost: it answers `no change` for every patch
+/// it accepts, and two accepts in the same words are not a repeat.
 pub(super) fn record_turn(
     signals: &mut TurnSignals,
     task: Task,
     outcome: &crate::agent::TurnOutcome,
 ) {
     signals.last_turn_usd = outcome.usage.cost_usd();
+    if task == Task::PatchReview {
+        return;
+    }
     let at = signals.streaks.iter().position(|s| s.task == task);
     match &outcome.action {
         Action::NoChange => {

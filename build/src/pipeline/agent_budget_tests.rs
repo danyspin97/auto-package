@@ -148,3 +148,25 @@ fn the_repeat_count_is_per_task_kind() {
     let why = turn_stop(3.0, 0.0, &signals).unwrap_err();
     assert!(why.contains("Review"), "{why}");
 }
+
+#[test]
+fn a_patch_review_no_change_is_not_a_repeat_but_a_fix_turns_is() {
+    let said = turn(crate::agent::Action::NoChange, "the rebase is correct");
+    let mut review = TurnSignals::default();
+    let mut cost = said_with_cost(&said, 0.25);
+    record_turn(&mut review, Task::PatchReview, &cost);
+    cost.reasoning = said.reasoning.clone();
+    record_turn(&mut review, Task::PatchReview, &cost);
+    assert_eq!(review.last_turn_usd, 0.25);
+    assert!(turn_stop(3.0, 0.0, &review).is_ok());
+    let mut fix = TurnSignals::default();
+    record_turn(&mut fix, Task::FixAfterBuild, &said);
+    record_turn(&mut fix, Task::FixAfterBuild, &said);
+    assert!(turn_stop(3.0, 0.0, &fix).is_err());
+}
+
+fn said_with_cost(said: &crate::agent::TurnOutcome, usd: f64) -> crate::agent::TurnOutcome {
+    let mut out = turn(said.action.clone(), &said.reasoning);
+    out.usage.cli_cost_usd = Some(usd);
+    out
+}
