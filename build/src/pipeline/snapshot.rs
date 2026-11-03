@@ -53,9 +53,32 @@ fn is_kept_file(name: &std::ffi::OsStr, keep: &[String]) -> bool {
         .is_some_and(|n| !n.ends_with(".spec") && keep.iter().any(|k| k == n))
 }
 
+/// The file names the checkout's specs declare as patches.
+fn declared_patch_files(checkout_dir: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for entry in std::fs::read_dir(checkout_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if entry.file_name().to_string_lossy().ends_with(".spec")
+            && let Ok(text) = std::fs::read_to_string(entry.path())
+        {
+            out.extend(
+                crate::patch_check::declared_patches(&text)
+                    .into_iter()
+                    .map(|(_, n)| n),
+            );
+        }
+    }
+    out
+}
+
 impl CheckoutSnapshot {
     pub(super) fn take(checkout_dir: &Path) -> Self {
         let mut files = std::collections::HashMap::new();
+        // A declared patch is kept whatever its extension (`x.mbox`, `x.txt`).
+        let declared = declared_patch_files(checkout_dir);
         if let Ok(iter) = std::fs::read_dir(checkout_dir) {
             for entry in iter.filter_map(|e| e.ok()) {
                 let ty = match entry.file_type() {
@@ -69,7 +92,9 @@ impl CheckoutSnapshot {
                     continue;
                 };
                 let name = entry.file_name();
-                let editable = name.to_str().is_some_and(is_agent_editable);
+                let editable = name
+                    .to_str()
+                    .is_some_and(|n| is_agent_editable(n) || declared.contains(n));
                 let content = if editable && meta.len() <= SNAPSHOT_CONTENT_CAP {
                     std::fs::read(entry.path()).ok()
                 } else {

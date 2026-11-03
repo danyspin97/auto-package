@@ -93,6 +93,12 @@ struct Case {
     contexts: Vec<String>,
     /// The patches a reviewer rewrote itself.
     rewrote: Vec<String>,
+    /// The patches a stop left rewritten and unreviewed.
+    unreviewed: Vec<String>,
+    /// Whether a rerun would refuse the checkout as it is left.
+    rerun_refused: bool,
+    /// Whether the turn record is still there when the stage is over.
+    record_left: bool,
     /// The context of each review turn.
     reviews: Vec<String>,
     /// The `patch_reviewed` events: patch, verdict, reason.
@@ -309,7 +315,10 @@ fn run_reviewed(
         result,
         contexts,
         reviews,
-        rewrote: crate::pipeline::patch_review::reviewer_rewrites(&ctx.ws),
+        rewrote: reviewer_rewrites(&ctx.ws, &ctx.checkout_dir),
+        unreviewed: unreviewed_patches(&ctx.ws, &ctx.checkout_dir),
+        rerun_refused: refuse_unreviewed(&ctx).is_some(),
+        record_left: ctx.ws.dir().join("patch-review/in-progress").exists(),
         verdicts: log.0.lock().unwrap().clone(),
         attempts: st.attempts,
         notes,

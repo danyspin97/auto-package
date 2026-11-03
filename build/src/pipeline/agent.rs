@@ -32,13 +32,6 @@ pub(super) fn ends_package(kind: FailureKind) -> bool {
     matches!(kind, FailureKind::Tampered | FailureKind::VersionChanged)
 }
 
-/// The version check around a turn (see [`version_stop`]): `Some` when the
-/// spec at `path` does not carry the package's version `expected`.
-fn version_check(path: Option<&Path>, expected: &str, when: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path?).ok()?;
-    version_stop(&text, expected, when)
-}
-
 /// The shared run environment an agent turn works in.
 pub(super) struct TurnEnv<'a> {
     pub(super) config: &'a PipelineConfig,
@@ -212,6 +205,17 @@ pub(super) fn agent_turn(
     // The spec's Version is the package's before every turn, and a turn may not
     // change it (see `version_stop`): a change made between turns stops here.
     let version_spec = ctx.checkout_dir.map(|d| d.join(format!("{obs_name}.spec")));
+    // The patches as they are before the turn are recorded, and settled when the
+    // turn ends (see `TurnRecord`); a turn that cannot be recorded does not run.
+    let _record = match version_spec
+        .as_deref()
+        .filter(|_| ctx.task != crate::agent::Task::PatchReview)
+        .map(|p| TurnRecord::begin(ws, p))
+        .transpose()
+    {
+        Ok(record) => record,
+        Err(why) => return Err((why, FailureKind::NeedsMaintainer)),
+    };
     let before_spec = version_spec
         .as_deref()
         .and_then(|p| std::fs::read_to_string(p).ok());

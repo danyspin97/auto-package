@@ -104,6 +104,13 @@ round of the review of a patch an agent rewrote: `verdict` is `accepted`,
 `rewritten`, `rejected`, `gave_up`, `rolled_back` (a rewrite or an edit the gate
 refused), `slip` or `not_reviewed` (no turn could start; `reason` says why).
 Recipe: `jq -c 'select(.pkg==env.K and .event=="patch_reviewed")' "$R"`.
+The workspace keeps three review files under `patch-review/`: `<name>.orig` (the
+patch before the rewrite, for the reviewer, removed after each round), `rewritten`
+(patches a reviewer rewrote itself, each with a hash of its bytes; the risk flag
+reads it, a patch whose bytes changed since is not flagged, and a run clears it
+at its start) and `pending` (rewritten patches a stop left unreviewed, with a
+hash; a rerun refuses to go on while a patch still has those bytes, so read the
+patch, edit it or remove the file).
 A run with no `run_finished` was interrupted or is still going.
 
 Recipes (`R=$P/runs/<run>/run.jsonl`, `K=<pkg>`):

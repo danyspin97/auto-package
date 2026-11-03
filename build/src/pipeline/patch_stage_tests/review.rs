@@ -244,7 +244,9 @@ fn a_reject_puts_the_patch_back_and_the_next_rebase_is_told_the_reason() {
     assert!(case.result.is_ok(), "{:?}", case.result);
     assert_eq!(case.contexts.len(), 2);
     assert!(
-        case.contexts[1].contains("the patch review rejected a.patch: drops a hunk"),
+        case.contexts[1].contains(
+            "the patch review rejected a.patch:\n<untrusted-data source=\"patch review reasons\">"
+        ),
         "{}",
         case.contexts[1]
     );
@@ -399,4 +401,200 @@ fn a_new_patch_is_reviewed_as_new_and_a_reject_has_no_redo() {
         "{reason}"
     );
     assert_eq!(case.contexts.len(), 1, "no redo of a new patch");
+    // The rejected new patch stays on disk, recorded: a rerun refuses it.
+    assert!(case.checkout.join("new-fix.patch").exists());
+    assert_eq!(case.unreviewed, ["new-fix.patch"]);
+    assert!(case.rerun_refused);
+}
+
+#[test]
+fn a_stop_restores_every_rewritten_patch_the_review_did_not_reach() {
+    let case = reviewed(
+        &[("a.patch", OLD), ("b.patch", OLD)],
+        vec![Box::new(|co, _| {
+            std::fs::write(co.join("a.patch"), REBASED).unwrap();
+            std::fs::write(co.join("b.patch"), REBASED).unwrap();
+            outcome(Action::Edited, "Refresh a.patch")
+        })],
+        vec![Box::new(|_, _| {
+            Ok(outcome(
+                Action::Blocked {
+                    why: "cannot follow it".into(),
+                },
+                "",
+            ))
+        })],
+    );
+    assert_eq!(failed(&case.result).0, FailureKind::NeedsMaintainer);
+    assert_eq!(case.reviews.len(), 1, "b was never reviewed");
+    assert_eq!(read(&case, "a.patch"), OLD);
+    assert_eq!(read(&case, "b.patch"), OLD);
+    assert!(!case.rerun_refused);
+}
+
+#[test]
+fn a_blocked_patch_with_a_clean_check_still_restores_the_unreviewed_rewrite() {
+    let blocked: Script = Box::new(|co, _| {
+        std::fs::write(co.join("a.patch"), REBASED).unwrap();
+        let mut out = outcome(Action::Edited, "Refresh a.patch");
+        for (name, status) in [
+            ("a.patch", crate::agent::PatchAnswerStatus::Rebased),
+            ("b.patch", crate::agent::PatchAnswerStatus::Blocked),
+        ] {
+            out.patch_answers.push(crate::agent::PatchAnswer {
+                name: name.into(),
+                status,
+                reason: "r".into(),
+            });
+        }
+        out
+    });
+    let case = reviewed(
+        &[("a.patch", OLD), ("b.patch", "clean")],
+        vec![blocked],
+        vec![],
+    );
+    assert!(case.result.is_err(), "{:?}", case.result);
+    assert!(
+        case.reviews.is_empty(),
+        "the blocked patch ends the package first"
+    );
+    assert_eq!(
+        read(&case, "a.patch"),
+        OLD,
+        "an unreviewed rewrite does not stay"
+    );
+}
+
+#[test]
+fn a_patch_with_an_unsafe_name_is_never_reviewed_and_needs_a_maintainer() {
+    let case = reviewed(
+        &[("a,b.patch", OLD)],
+        vec![rebase("a,b.patch", REBASED)],
+        vec![],
+    );
+    let (kind, reason) = failed(&case.result);
+    assert_eq!(kind, FailureKind::NeedsMaintainer);
+    assert!(reason.contains("not a plain file name"), "{reason}");
+    assert!(case.reviews.is_empty());
+    assert_eq!(read(&case, "a,b.patch"), OLD);
+}
+
+#[test]
+fn a_reject_with_no_round_left_to_redo_it_needs_a_maintainer() {
+    let mut agent = std::collections::VecDeque::from(vec![rebase("a.patch", REBASED)]);
+    let case = run_reviewed(
+        &[("a.patch", OLD)],
+        false,
+        1,
+        &mut |ctx, _| {
+            let mut s = agent.pop_front().unwrap();
+            Ok(s(&ctx.checkout_dir, &ctx.spec_path))
+        },
+        &mut |_, _| Ok(said(V::Reject, "wrong")),
+    );
+    assert_eq!(failed(&case.result).0, FailureKind::NeedsMaintainer);
+    assert_eq!(read(&case, "a.patch"), OLD);
+}
+
+#[test]
+fn a_failed_turn_does_not_claim_or_bullet_a_rewrite_it_puts_back() {
+    let case = run_reviewed(
+        &[("a.patch", OLD)],
+        false,
+        10,
+        &mut |ctx, _| {
+            // The agent rewrote the patch (quilt would prove it applies), then failed.
+            std::fs::write(ctx.checkout_dir.join("a.patch"), REBASED).unwrap();
+            Err(("boom".into(), FailureKind::AgentFailed))
+        },
+        &mut |_, _| panic!("no review after a failed turn"),
+    );
+    let (kind, reason) = failed(&case.result);
+    assert_eq!(kind, FailureKind::AgentFailed);
+    assert!(
+        !reason.contains("edits quilt proves apply were kept"),
+        "{reason}"
+    );
+    assert_eq!(read(&case, "a.patch"), OLD);
+    assert_eq!(
+        bullets(&case.changes, "Refresh a.patch"),
+        0,
+        "{}",
+        case.changes
+    );
+    assert!(case.notes.contains("a.patch: put back"), "{}", case.notes);
+}
+
+/// Records the patches as `agent_turn` does before a real turn.
+fn begin(checkout: &Path, spec_path: &Path) {
+    let state = checkout.parent().unwrap().parent().unwrap().join("state");
+    begin_turn(&Workspace::open(&state, "foo").unwrap(), spec_path).unwrap();
+}
+
+#[test]
+fn the_turn_record_is_gone_when_the_stage_settled_and_kept_when_it_could_not() {
+    // Accepted, then a stop that put the patch back: nothing is left recorded.
+    let ok = reviewed(
+        &[("a.patch", OLD)],
+        vec![Box::new(|co, spec| {
+            begin(co, spec);
+            std::fs::write(co.join("a.patch"), REBASED).unwrap();
+            outcome(Action::Edited, "Refresh a.patch")
+        })],
+        vec![reply(V::Accept, "fine")],
+    );
+    assert!(ok.result.is_ok() && !ok.record_left);
+    let put_back = reviewed(
+        &[("a.patch", OLD)],
+        vec![Box::new(|co, spec| {
+            begin(co, spec);
+            std::fs::write(co.join("a.patch"), REBASED).unwrap();
+            outcome(Action::Edited, "Refresh a.patch")
+        })],
+        vec![Box::new(|_, _| {
+            Ok(outcome(Action::Blocked { why: "no".into() }, ""))
+        })],
+    );
+    assert!(put_back.result.is_err() && !put_back.record_left);
+    // A new patch that cannot be recorded as unreviewed: the stage stops for a
+    // maintainer and the turn record stays.
+    let new_fix = "Subject: s\nDescription: a long enough description of the build break.\nUpstream: not yet reported\n---\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-x\n+clean\n";
+    let adder: Script = Box::new(move |checkout, spec_path| {
+        begin(checkout, spec_path);
+        std::fs::write(checkout.join("b.patch"), "clean, rebased").unwrap();
+        std::fs::write(checkout.join("new-fix.patch"), new_fix).unwrap();
+        let spec = std::fs::read_to_string(spec_path).unwrap().replacen(
+            "\n%prep",
+            "\n# PATCH-FIX-UPSTREAM new-fix.patch -- gcc 15 build\nPatch1: new-fix.patch\n%prep",
+            1,
+        );
+        std::fs::write(spec_path, spec).unwrap();
+        outcome(Action::Edited, "Add new-fix.patch: gcc 15 build")
+    });
+    let case = reviewed(
+        &[("b.patch", "old hunks")],
+        vec![adder],
+        vec![Box::new(|co, _| {
+            // Both places for the record of the new patch are blocked.
+            let state = co.parent().unwrap().parent().unwrap().join("state");
+            let ws = Workspace::open(&state, "foo").unwrap().dir().to_path_buf();
+            std::fs::create_dir_all(ws.join("patch-review/pending")).unwrap();
+            let name = ws.file_name().unwrap().to_string_lossy().into_owned();
+            std::fs::create_dir_all(
+                ws.parent()
+                    .unwrap()
+                    .join(format!("{name}-patch-review-pending")),
+            )
+            .unwrap();
+            Ok(said(V::Reject, "not needed"))
+        })],
+    );
+    let (kind, reason) = failed(&case.result);
+    assert_eq!(kind, FailureKind::NeedsMaintainer);
+    assert!(reason.contains("left unreviewed"), "{reason}");
+    assert!(
+        case.record_left,
+        "the record must survive an unsettled stop"
+    );
 }

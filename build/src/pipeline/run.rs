@@ -418,6 +418,9 @@ fn run_stages(
     reporter: &dyn Reporter,
 ) -> Result<PipelineResult, PipelineResult> {
     let ctx = preflight(config, pkg_run, reporter)?;
+    // Before the checkout is updated: a turn record that equals the patches is
+    // settled; one that differs stays, and the patch stage refuses it.
+    settle_record(&ctx.ws, &ctx.spec_path);
     if let Err(reason) = crate::workspace::await_disk_space(&config.work_dir, reporter, None) {
         // A full disk is the machine's, and ends when space is freed.
         return Err(ctx.failed_text(true, reason));

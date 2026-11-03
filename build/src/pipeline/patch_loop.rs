@@ -8,8 +8,25 @@ use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::snapshot::*;
 
-/// [`patch_stage`] with the quilt check and the turn runner given.
+/// [`patch_stage`] with the quilt check and the turn runner given. The agent turns
+/// record the patches as they were (see `begin_turn`); the record is dropped here,
+/// once the stage has settled, however it ended.
 pub(super) fn patch_stage_with(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    check: &mut PatchCheckFn<'_>,
+    turn: &mut PatchTurn<'_>,
+    review: &mut ReviewTurn<'_>,
+) -> Result<(), PipelineResult> {
+    let result = patch_stage_inner(ctx, st, check, turn, review);
+    // The record stays when a stop could not put its rewrites back or record them.
+    if !take_unsettled() {
+        end_turn(&ctx.ws);
+    }
+    result
+}
+
+fn patch_stage_inner(
     ctx: &RunCtx,
     st: &mut RunState,
     check: &mut PatchCheckFn<'_>,
@@ -57,7 +74,6 @@ pub(super) fn patch_stage_with(
             );
         }
     };
-    clear_reviewer_rewrites(ws);
     // The patches as OBS ships them: a patch whose code differs at the end was
     // rewritten by a turn and is reviewed. `accepted` holds the bytes a review
     // accepted, so a patch is not reviewed twice.
@@ -111,6 +127,8 @@ pub(super) fn patch_stage_with(
     let mut rounds = 0usize;
     // What the last round must hear: why its edit was refused.
     let mut feedback: Option<String> = None;
+    // A patch the review rejected is waiting for another rebase round.
+    let mut review_rejected = false;
     // The patches the agent blocked, each with its latest answer.
     let mut blocked: Vec<crate::agent::PatchAnswer> = Vec::new();
     let stop: String = if config.no_agent {
@@ -126,11 +144,16 @@ pub(super) fn patch_stage_with(
     } else {
         loop {
             if crate::proc::shutting_down() {
+                let settled = settle_unreviewed(ctx, &stage_start, &accepted);
                 write_notes(&lines, "quilt, stopped");
                 step.finish(StepOutcome::Failed);
-                return Err(ctx.failed_text(
-                    true,
-                    "stopped while rebasing the patches: the run is shutting down".into(),
+                return Err(settle_stop(
+                    ctx,
+                    &settled,
+                    ctx.failed_text(
+                        true,
+                        "stopped while rebasing the patches: the run is shutting down".into(),
+                    ),
                 ));
             }
             let budget_stop = ctx.may_start_turn(st.spent_usd).err();
@@ -189,6 +212,18 @@ pub(super) fn patch_stage_with(
                         &before_spec,
                         &before_files,
                     );
+                    // A kept edit that is a rewrite is put back below, never reviewed:
+                    // the stage does not claim it, nor give it a bullet.
+                    let settled = settle_unreviewed(ctx, &stage_start, &accepted);
+                    let undone = settled.as_ref().cloned().unwrap_or_default();
+                    let kept: Vec<String> =
+                        kept.into_iter().filter(|n| !undone.contains(n)).collect();
+                    for n in &undone {
+                        lines.push(format!(
+                            "- {n}: put back; the agent's rewrite was not reviewed"
+                        ));
+                    }
+                    let kept_any = !kept.is_empty();
                     refreshed.extend(kept);
                     pop_source_patches(ctx);
                     let report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
@@ -204,7 +239,11 @@ pub(super) fn patch_stage_with(
                     write_notes(&lines, "quilt, stopped");
                     step.finish(StepOutcome::Failed);
                     let reason = if failing.is_empty() && blocked.is_empty() {
-                        format!("{stopped}; the edits quilt proves apply were kept")
+                        if kept_any {
+                            format!("{stopped}; the edits quilt proves apply were kept")
+                        } else {
+                            format!("{stopped}; no edit was kept")
+                        }
                     } else {
                         format!(
                             "{stopped}; {}",
@@ -216,7 +255,7 @@ pub(super) fn patch_stage_with(
                             )
                         )
                     };
-                    return Err(ctx.failed_as(kind, reason));
+                    return Err(settle_stop(ctx, &settled, ctx.failed_as(kind, reason)));
                 }
             };
             let applied =
@@ -293,15 +332,17 @@ pub(super) fn patch_stage_with(
                         rounds >= MAX_ROUNDS,
                     ) {
                         Err(result) => {
+                            let settled = settle_unreviewed(ctx, &stage_start, &accepted);
                             write_refresh_bullets(ctx, step_id, &refreshed);
                             write_notes(&lines, "quilt, review stopped");
                             step.finish(StepOutcome::Failed);
-                            return Err(result);
+                            return Err(settle_stop(ctx, &settled, result));
                         }
                         Ok(ReviewEnd::Settled) => break String::new(),
                         Ok(ReviewEnd::Redo(why)) => {
                             lines.push(format!("- round {rounds}: {why}"));
                             feedback = Some(why);
+                            review_rejected = true;
                             report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
                         }
                     }
@@ -341,14 +382,17 @@ pub(super) fn patch_stage_with(
         for p in &failing {
             lines.push(format!("- {}: still does not apply; kept ({stop})", p.name));
         }
+        let settled = settle_unreviewed(ctx, &stage_start, &accepted);
         write_notes(&lines, "quilt");
         step.finish(StepOutcome::Failed);
-        return Err(ctx.failed(kept_patches_reason(
-            &config.version,
-            &stop,
-            &failing,
-            &blocked,
-        )));
+        let reason = kept_patches_reason(&config.version, &stop, &failing, &blocked);
+        // A patch the review rejected and no round is left to redo needs a maintainer.
+        let result = if review_rejected {
+            ctx.failed_as(FailureKind::NeedsMaintainer, reason)
+        } else {
+            ctx.failed(reason)
+        };
+        return Err(settle_stop(ctx, &settled, result));
     }
     // A loop that ended another way (no progress, out of rounds) can leave a
     // rewritten patch that applies, with fuzz now refreshed: it is reviewed too,
@@ -366,9 +410,10 @@ pub(super) fn patch_stage_with(
             true,
         )
     {
+        let settled = settle_unreviewed(ctx, &stage_start, &accepted);
         write_notes(&lines, "quilt, review stopped");
         step.finish(StepOutcome::Failed);
-        return Err(result);
+        return Err(settle_stop(ctx, &settled, result));
     }
     write_notes(&lines, "quilt");
     step.finish(StepOutcome::Ok);

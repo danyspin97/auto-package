@@ -117,6 +117,7 @@ pub fn clear_submitted(state_root: &Path, pkg: &str) -> std::io::Result<()> {
     let Some(ws) = Workspace::find_by_obs_name(state_root, pkg) else {
         return Ok(());
     };
+    crate::pipeline::review_marks::clear_reviewer_rewrites(&ws);
     PkgState::update(&ws, |st| st.risk_flags.clear()).map(|_| ())
 }
 

@@ -265,7 +265,15 @@ mod update_mode;
 
 mod patch_apply;
 mod patch_review;
+#[allow(dead_code)]
+mod patch_review_edit;
+#[cfg(test)]
+mod patch_review_edit_tests;
 mod patch_review_prompt;
+pub(crate) mod review_marks;
+#[cfg(test)]
+mod review_marks_tests;
+use review_marks::*;
 #[cfg(test)]
 mod patch_review_tests;
 mod patch_rewrite;

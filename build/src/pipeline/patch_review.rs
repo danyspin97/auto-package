@@ -67,6 +67,43 @@ pub(super) fn review_move(outcome: &crate::agent::TurnOutcome, changed: bool) ->
     }
 }
 
+/// The production [`ReviewTurn`]: a fresh PatchReview turn on the patch `name`,
+/// which it may write and no other file of the checkout.
+pub(super) fn agent_review_turn(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    name: &str,
+    context: &str,
+) -> Result<(StepDir, crate::agent::TurnOutcome), (String, FailureKind)> {
+    let names = [name.to_string()];
+    // A session of its own, never kept: the fix turns resume `st.session_id`,
+    // and a review must not take the writer's conversation from them.
+    let mut session: Option<String> = None;
+    crate::pipeline::agent::agent_turn(
+        crate::pipeline::agent::TurnCtx {
+            carried: false,
+            label: "patch-review",
+            task: crate::agent::Task::PatchReview,
+            event_task: ap_core::event::Task::PatchReview,
+            attempt: st.attempts,
+            hint: None,
+            unresolvable_deps: &[],
+            unresolvable_detail: &[],
+            checkout_dir: Some(&ctx.checkout_dir),
+            from_repo_archive: st.from_repo_archive,
+            resume: false,
+            context: Some(context),
+        },
+        crate::pipeline::agent::TurnEnv {
+            writable_patches: &names,
+            ..ctx.turn_env()
+        },
+        &mut st.spent_usd,
+        &mut session,
+        &mut st.step_attempts,
+    )
+}
+
 /// How the review of one patch ended.
 #[derive(Debug, PartialEq)]
 pub(super) enum PatchReviewEnd {
@@ -224,6 +261,15 @@ pub(super) fn review_patch_rounds(
         ..
     } = ctx;
     let reporter = *reporter;
+    // A name from the spec can widen a tool grant: it is never reviewed.
+    if !crate::agent::safe_review_patch_name(name) {
+        let why = "its name is not a plain file name a review may be granted";
+        record_round(ctx, step_id, name, 1, "not_reviewed", why, lines);
+        return Err(ctx.failed_as(
+            FailureKind::NeedsMaintainer,
+            format!("{name} was rewritten and {why}; it needs a maintainer"),
+        ));
+    }
     let patch_path = checkout_dir.join(name);
     let orig_text = original.map(|o| String::from_utf8_lossy(o).into_owned());
     let mut rollback: Option<String> = None;
@@ -287,7 +333,10 @@ pub(super) fn review_patch_rounds(
             rollback: rollback.as_deref(),
         });
         let snapshot = CheckoutSnapshot::take(checkout_dir);
-        let (step, outcome) = match review(ctx, st, name, &context) {
+        let reply = review(ctx, st, name, &context);
+        // The reviewer's pushed patches and edits in source/ do not outlive it.
+        pop_source_patches(ctx);
+        let (step, outcome) = match reply {
             Ok(v) => v,
             Err((e, kind)) => {
                 snapshot.restore(reporter, None);
@@ -355,35 +404,6 @@ pub(super) fn review_patch_rounds(
         }
     }
     Ok(PatchReviewEnd::Unsettled(last_why))
-}
-
-/// Marks the patches a reviewer rewrote itself, in the workspace, for the risk
-/// flags settled at the commit.
-pub(super) fn mark_reviewer_rewrite(ws: &Workspace, name: &str) {
-    use std::io::Write;
-    let dir = ws.dir().join("patch-review");
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("rewritten"))
-    {
-        let _ = writeln!(f, "{name}");
-    }
-}
-
-/// The patches a reviewer rewrote in this run (see [`mark_reviewer_rewrite`]).
-pub(super) fn reviewer_rewrites(ws: &Workspace) -> Vec<String> {
-    let text = std::fs::read_to_string(ws.dir().join("patch-review/rewritten")).unwrap_or_default();
-    let mut names: Vec<String> = text.lines().map(str::to_string).collect();
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// Forgets the marks of an earlier run.
-pub(super) fn clear_reviewer_rewrites(ws: &Workspace) {
-    let _ = std::fs::remove_file(ws.dir().join("patch-review/rewritten"));
 }
 
 /// Whether the patch stage may go on after the reviews.
@@ -486,13 +506,23 @@ pub(super) fn review_stage_patches(
             Ok(PatchReviewEnd::Accepted { rewrote }) => {
                 let bytes = std::fs::read(ctx.checkout_dir.join(&name)).unwrap_or_default();
                 accepted.insert(name.clone(), bytes);
-                if rewrote {
-                    mark_reviewer_rewrite(&ctx.ws, &name);
+                // A patch the reviewer rewrote stays marked when the pipeline's own
+                // refresh later changes its bytes and it is reviewed again.
+                if (rewrote || was_reviewer_rewrite(&ctx.ws, &ctx.checkout_dir, &name))
+                    && let Err(why) = mark_reviewer_rewrite(&ctx.ws, &ctx.checkout_dir, &name)
+                {
+                    return Err(ctx.failed_as(FailureKind::NeedsMaintainer, why));
                 }
             }
             Ok(PatchReviewEnd::Rejected(why)) if original.is_some() && !last => {
                 restore_original(ctx, &name, original);
-                redo.push(format!("the patch review rejected {name}: {why}"));
+                redo.push(format!(
+                    "the patch review rejected {name}:\n{}",
+                    crate::agent::untrusted_data(
+                        "patch review reasons",
+                        &crate::patch_check::truncate(&why, 2_000)
+                    )
+                ));
             }
             Ok(PatchReviewEnd::Rejected(why)) => {
                 return Err(stop(format!(

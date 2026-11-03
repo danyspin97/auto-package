@@ -103,6 +103,13 @@ pub(super) fn source_is_available(file: &str, head: &[String], checkout_dir: &Pa
 /// does or it has no `Version:` to read. Checked before every agent turn and
 /// after each, so a `Version:` changed between turns, or by a turn, stops the
 /// package. `when` names the moment for the reason.
+/// The version check around a turn (see [`version_stop`]): `Some` when the
+/// spec at `path` does not carry the package's version `expected`.
+pub(super) fn version_check(path: Option<&Path>, expected: &str, when: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path?).ok()?;
+    version_stop(&text, expected, when)
+}
+
 pub(super) fn version_stop(spec: &str, expected: &str, when: &str) -> Option<String> {
     let found = spec_version(spec)?;
     (found != expected).then(|| {

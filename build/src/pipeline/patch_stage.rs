@@ -6,6 +6,7 @@ use crate::pipeline::agent::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::patch_loop::*;
+use crate::pipeline::patch_review::agent_review_turn;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::removal_proof::*;
 
@@ -35,6 +36,11 @@ pub(super) fn patch_stage(
     st: &mut RunState,
     spec: &SpecInfo,
 ) -> Result<(), PipelineResult> {
+    // The checkout is reused across runs: a patch a stop left rewritten and
+    // unreviewed is never built, whether or not this run carries patches.
+    if let Some(stop) = refuse_unreviewed(ctx) {
+        return Err(stop);
+    }
     if spec.carried_from.is_none() || crate::redist::is_redist_package(&ctx.config.rpm_name) {
         return Ok(());
     }
@@ -71,33 +77,7 @@ pub(super) fn patch_stage(
                 &mut st.step_attempts,
             )
         },
-        &mut |ctx, st, name, context| {
-            // A fresh turn on the one patch: it may write that file only.
-            let names = [name.to_string()];
-            agent_turn(
-                TurnCtx {
-                    carried: false,
-                    label: "patch-review",
-                    task: crate::agent::Task::PatchReview,
-                    event_task: ap_core::event::Task::PatchReview,
-                    attempt: st.attempts,
-                    hint: None,
-                    unresolvable_deps: &[],
-                    unresolvable_detail: &[],
-                    checkout_dir: Some(&ctx.checkout_dir),
-                    from_repo_archive: st.from_repo_archive,
-                    resume: false,
-                    context: Some(context),
-                },
-                TurnEnv {
-                    writable_patches: &names,
-                    ..ctx.turn_env()
-                },
-                &mut st.spent_usd,
-                &mut st.session_id,
-                &mut st.step_attempts,
-            )
-        },
+        &mut agent_review_turn,
     )
 }
 

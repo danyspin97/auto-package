@@ -23,6 +23,7 @@ mod tools;
 pub(crate) use tools::REFRESH_SERIES;
 use tools::*;
 mod review_tools;
+pub(crate) use review_tools::safe_review_patch_name;
 use review_tools::*;
 mod edit_bytes;
 use edit_bytes::*;

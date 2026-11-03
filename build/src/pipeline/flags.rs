@@ -54,7 +54,7 @@ pub(super) fn settle_risk_flags(ctx: &RunCtx, baseline: &Path) {
     let mut found = from_change(&before, &after, &archive);
     // A patch the reviewer rewrote itself gets a flag next to the large-patch one.
     found.extend(crate::risk_flags::reviewer_rewrite_flags(
-        &crate::pipeline::patch_review::reviewer_rewrites(&ctx.ws),
+        &reviewer_rewrites(&ctx.ws, &ctx.checkout_dir),
         &after,
     ));
     update_state(&ctx.ws, ctx.reporter, |st| {
