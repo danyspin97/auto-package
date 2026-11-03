@@ -18,8 +18,9 @@ const RPMLINT_CONTEXT: &str = "The build SUCCEEDED. rpmlint, run on the RPMs it 
      `E:` lines below. rpmlintrc filters are already applied, so a filtered line is not listed. \
      Fix the cause in the spec (convention 39: fix first; a filter only for what cannot be fixed, \
      with a `# reason:` line). A package's own installed headers belong in a -devel subpackage \
-     (convention 53). If you judge a line cannot be fixed, leave it: it is not asked about again \
-     for this package version.";
+     (convention 53). If you judge a line cannot be fixed, and a filter would hide a real problem, \
+     leave it and say why in `reasoning`: it is not asked about again for this package \
+     version.";
 
 /// What the rpmlint round needs to know before its turn.
 pub(super) struct RpmlintGate {
