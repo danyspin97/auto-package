@@ -215,7 +215,7 @@ made (convention 86).
   `gstreamer`'s `gst-ptp-helper`.
 - **Source signature verification**: when the release page publishes a
   `.sig`/`.asc` next to the tarball, add it and the keyring as sources
-  (convention 93; real examples: `acl`, `attr`, `coreutils`, `bash`,
+  (convention 77 (section 93); real examples: `acl`, `attr`, `coreutils`, `bash`,
   `elfutils`). OBS verifies the signature against the keyring automatically.
 
 ## Things you may see in reference specs that rarely matter for a one-off dependency build
@@ -260,7 +260,7 @@ in order of preference:
    project's CMake options), adding the matching `BuildRequires`;
 2. add the submodule's own release tarball as an extra `SourceN:` (declared
    as a full-URL `Source` fetched by a `_service` with the `download_files`
-   service in `mode="manual"`, convention 92) and unpack it into the empty directory in
+   service in `mode="manual"`, convention 77 (section 92)) and unpack it into the empty directory in
    `%prep` with `tar -xf %{SOURCE1} --strip-components=1 -C third_party/<dir>`;
 3. if neither is possible, report the dependency in `unresolvable_packages`
    (convention 27) rather than inventing a source.
@@ -274,7 +274,7 @@ recipe first in the turn; apply it instead of returning `blocked`.
   (scikit-build-core `wheel.py-api = "cp38"`): in `%prep`,
   `sed -i -E 's/(py-api[[:space:]]*=[[:space:]]*")cp3[0-8]"/\1cp39"/' pyproject.toml`.
 - A CMake licence guard (`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION`): a fact
-  to check, convention 78; never the S3 download
+  to check, convention 5 (section 78); never the S3 download
   option, never `blocked`.
 - CUDA/NVIDIA failures (split `nvidia-cutlass-dsl-libs-*` wheels, a CUDA
   wheel that cannot import without a device): skill nvidia-wheels.

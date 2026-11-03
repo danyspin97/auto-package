@@ -15,7 +15,7 @@ whose `License:` contains `SUSE-NonFree` are not Factory or SLE material. Say so
 in `reasoning`. They stay out of the openSUSE/SUSE OSS projects and are never
 submitted there.
 
-## CUDA at build time means: use the upstream wheel (convention 84)
+## CUDA at build time means: use the upstream wheel (convention 32 (section 84))
 
 openSUSE has no CUDA toolkit (`cuda-devel`/`cuda-runtime` have no PyPI package
 and no public source), so a Python package whose BUILD needs CUDA can never be
@@ -37,7 +37,7 @@ not after a failed build:
    command not found`). NVIDIA's `nvcc` compiling `.cu` device code
    (`nvidia-nccl-cu13`, `nvidia-nvshmem-cu13`, CUDA-CCCL and similar) is the
    standing case. If every wheel is locked to one CPython each (`cp313`,
-   `cp314`, ...), follow convention 49 instead and return `"edited"`. If PyPI
+   `cp314`, ...), follow convention 32 (section 49) instead and return `"edited"`. If PyPI
    publishes no usable wheel at all, build from source and report the missing
    toolkit component once in `unresolvable_packages` under its redist name (an
    extra package the pipeline builds), quoting the build.log line that proves
@@ -85,7 +85,7 @@ exceptions): there never was one to report.
   `torch.utils.cpp_extension` / Triton's JIT, never during the RPM build. With no
   `ext_modules=`, CMakeLists.txt or cythonized `.pyx`, this is `BuildArch:
   noarch` despite the `.cu`/`.cpp` files (convention 3).
-- A "pure Python" wheel can still ship compiled code (convention 60): look for
+- A "pure Python" wheel can still ship compiled code (convention 3 (section 60)): look for
   `.so` files and CUDA sources or headers (`.cu`, `.cuh`, `.ptx`, `.cubin`,
   `.fatbin`), then `readelf -d <file.so>` for the NEEDED lines.
 
@@ -136,7 +136,7 @@ in `%install` instead of splitting a `-devel` subpackage
 package that needs CUDA to build is repackaged from its wheel, so no build here
 ever compiles against them.
 
-## Bundled sonames in NVIDIA wheels (convention 68)
+## Bundled sonames in NVIDIA wheels (convention 91 (section 68))
 
 - For the sonames a wheel links against only through OPTIONAL plugins
   (NVSHMEM's MPI, UCX, fabric and PMIx transports: `libmpi`, `liboshmem`,
@@ -152,7 +152,7 @@ ever compiles against them.
 - Delete the stubs of another architecture (`aarch64-unknown-linux-gnu` in an
   x86_64 package) along with headers, `*.a` archives and test libraries.
 
-## Licence (convention 69)
+## Licence (convention 5 (section 69))
 
 A wheel that bundles NVIDIA's `ptxas`, `cuobjdump`, `nvdisasm`, `libcupti*`,
 `libcudart` or `libcublas` adds `AND SUSE-NonFree` to `License:` (openSUSE's tag
@@ -162,7 +162,7 @@ for redistributable proprietary binaries). Every `LicenseRef-...` spelling,
 `3rdparty/cutlass` tree adds its own licence. Such a package is not Factory or
 SLE material (top of this skill).
 
-## Split wheels sharing one tree (conventions 76, 83)
+## Split wheels sharing one tree (convention 76, section 83)
 
 NVIDIA's `nvidia-cutlass-dsl-libs-base/-core/-cu12/-cu13` all fill
 `nvidia_cutlass_dsl/dsl_packages/...` and the `cutlass` package:
@@ -187,7 +187,7 @@ NVIDIA's `nvidia-cutlass-dsl-libs-base/-core/-cu12/-cu13` all fill
   fails to import because of a split wheel is fixed in the split wheel's spec
   (`patch_dependencies`, convention 62 case b), not by copying files.
 
-## %check without a GPU (convention 67)
+## %check without a GPU (convention 11 (section 67))
 
 A test suite that needs CUDA (the whole of `flashinfer`'s `tests/`, a kernel
 library's GPU tests) cannot pass on an OBS worker. Run the import smoke test
@@ -195,9 +195,9 @@ that needs no device plus the CPU-safe tests selected by a marker or directory
 (`--ignore=tests/gpu`, `-m "not gpu"`). `%check` of a CUDA wheel that fails at
 import for want of a device (`cannot import name 'ir' from _mlir`) checks the
 installed files instead, quoting the import failure. Never size a skip list from
-the word `cuda` alone (convention 81).
+the word `cuda` alone (convention 10 (section 81)).
 
 ## Arch-limited dependencies
 
 A `noarch` package that `Requires` a CUDA library (built only for some
-architectures) propagates that library's `ExclusiveArch` (convention 85).
+architectures) propagates that library's `ExclusiveArch` (convention 34 (section 85)).

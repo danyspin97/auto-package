@@ -58,7 +58,7 @@ R4a. `%check` runs the crate's tests:
 R4b. `vendor.tar.zst` comes from the `cargo_vendor` OBS service declared in
    `_service`; you cannot run services, the pipeline does (`osc service ra`).
    If the checkout has no vendor tarball and `_service` does not declare one,
-   add a `cargo_vendor` service with `mode="manual"` (convention 92) rather
+   add a `cargo_vendor` service with `mode="manual"` (convention 77 (section 92)) rather
    than inventing a Source.
 
 R5. Shell-completion subpackages (bash, zsh, fish): each is `BuildArch: noarch`

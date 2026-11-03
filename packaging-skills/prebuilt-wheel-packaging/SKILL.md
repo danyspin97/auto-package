@@ -47,7 +47,7 @@ must account for. Do this before touching %files; never guess the layout.
     file, don't guess. The wheel tag never moves files to sitearch: a purelib
     wheel with `.so` files stays in sitelib with `ExclusiveArch`.
   * SPLIT wheels of one project that fill the same top-level directory
-    (conventions 76 and 83): each lists only its own
+    (convention 76 and convention 76 (section 83)): each lists only its own
     files and co-owns shared directories with `%dir` (the skeleton does this from
     the sibling wheels, in any build order; keep it). The tree must live in ONE
     site directory: if a `Root-Is-Purelib: false` wheel shares a top-level
@@ -76,7 +76,7 @@ must account for. Do this before touching %files; never guess the layout.
 - Prebuilt vendor binaries trip rpmlint rules a source build would not. Do
   all of this in the FIRST pass:
   * Headers the wheel only carries along: delete them in `%install`
-    (convention 24); nothing here compiles against them.
+    (convention 39 (section 24)); nothing here compiles against them.
   * `shared-library-not-executable`: `chmod 0755` the shared libraries in
     `%install`, always. `missing-hash-section` (badness 10000 per file) and
     `library-without-ldconfig-post*` cannot be fixed for a vendor binary: a
@@ -84,11 +84,11 @@ must account for. Do this before touching %files; never guess the layout.
     with a `# reason:` line (convention 39). The skeleton already has
     `Requires: python-base` (rpmlint `no-dependency-on python-base`;
     `%python_subpackages` does not add it): keep it.
-  * `%files` and licences: convention 69's wheel form (`%license` the
+  * `%files` and licences: convention 5 (section 69)'s wheel form (`%license` the
     dist-info copy, list the rest of the dist-info without it). A `%license`
     path is never prefixed with `%{buildroot}`.
   * Remove pip's `INSTALLER`/`REQUESTED` files from the dist-info in
-    `%install` if rpmlint lists them as unpackaged (convention 23).
+    `%install` if rpmlint lists them as unpackaged (convention 17 (section 23)).
 - License: read `source/*.dist-info/METADATA`'s `License-Expression` or
   `Classifier: License ::` lines, or the packaged `LICENSE`/`NOTICE` file
   if `source/` ships one — the PyPI JSON alone is frequently `FIXME` for
@@ -99,7 +99,7 @@ must account for. Do this before touching %files; never guess the layout.
 
 When PyPI publishes `...-cp313-cp313-manylinux_*_x86_64.whl` and
 `...-cp314-cp314-manylinux_*_x86_64.whl` and nothing covers both
-(convention 49), the automatic wheel switch refuses and you write the spec
+(convention 32 (section 49)), the automatic wheel switch refuses and you write the spec
 yourself:
 
     Source0:        <name>-%{version}-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
@@ -147,7 +147,7 @@ If the service fails, the error is shown to you on the next turn.
 - `License:` is `SUSE-NonFree` for redistributable proprietary binaries, joined
   with `AND` to the open licences of what else is in the wheel; no
   `LicenseRef-...` spelling (rpmlint: `invalid-license`). Every licence file in
-  the dist-info is a `%license` line (convention 69). Such a package, and any
+  the dist-info is a `%license` line (convention 5 (section 69)). Such a package, and any
   `use_upstream_wheel` output, is not Factory or SLE material: say so in
   `reasoning`; it is never submitted to OSS projects.
 - Bundled libraries do not leak into dependencies: `%global
@@ -158,7 +158,7 @@ If the service fails, the error is shown to you on the next turn.
   gets `Provides: bundled(<name>) = <version>` (convention 91).
 - Console scripts and hashed libraries: the pipeline's skeleton reads the
   wheel. Each `[console_scripts]` entry of its `entry_points.txt` already has
-  convention 18's `%python_clone`, `update-alternatives`, `%post`/`%postun` and
+  convention 107 (section 18)'s `%python_clone`, `update-alternatives`, `%post`/`%postun` and
   `%python_alternative` lines (otherwise `/usr/bin/<script>` is unpackaged), and
   a wheel with auditwheel libraries (`<name>.libs/`, `libfoo-<8 hex>.so.N`)
   already has `%global __requires_exclude ^lib.*-[0-9a-f]{8}.*\.so.*$`. Check
