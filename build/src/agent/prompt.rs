@@ -145,7 +145,8 @@ full spec as text). You MUST call the Edit tool BEFORE setting action to
 first. If you identified a fix but did not apply it, set action to
 "no_change" and explain why.
 3. **Check sources and cleanup**: see "Source Files and Cleanup" above —
-verify sources exist, handle untracked files, delete stale artifacts.
+verify sources exist, handle untracked files (leave a stale one: the
+pipeline drops what the spec does not name).
 4. **Validate**: re-read the spec after your last edit, not only after the first
 one; the pipeline runs `rpmspec --parse` on it once you finish.
 5. **Finish**: Return a JSON object with:
