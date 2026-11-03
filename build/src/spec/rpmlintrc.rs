@@ -10,7 +10,7 @@
 ///
 /// `wheel_filename` becomes `Source0`; `%install` unpacks it directly with
 /// `%pyproject_install`, which accepts a pre-built wheel path instead of a
-/// dist it just built. See convention 24 Exception 3 for when this is the
+/// dist it just built. See convention 28 Exception 3 for when this is the
 /// right call versus a workaround to avoid.
 /// Whether a repackaged wheel is the shape that reliably trips the same
 /// handful of rpmlint false positives on an unmodified vendor binary: an
