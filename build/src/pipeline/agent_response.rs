@@ -31,7 +31,7 @@ mod tests {
 
     #[test]
     fn the_response_carries_the_changelog_and_the_patch_answers() {
-        let mut outcome = crate::pipeline::patch_loop::pipeline_wheel_outcome("x");
+        let mut outcome = crate::pipeline::submodule_wheel::pipeline_wheel_outcome("x");
         outcome.action = Action::Edited;
         outcome.changelog = "Rebase a.patch".into();
         outcome.patch_answers = vec![PatchAnswer {

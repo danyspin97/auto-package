@@ -2,11 +2,11 @@
 //! and the stop on a repeated `no change` answer.
 
 use crate::agent::Task;
-use crate::pipeline::patch_loop::pipeline_wheel_outcome;
 use crate::pipeline::spend_guard::{
     BUDGET_REACHED, REPEATED_NO_CHANGE, TurnSignals, can_start, record_turn, spend_allows_turn,
     turn_stop,
 };
+use crate::pipeline::submodule_wheel::pipeline_wheel_outcome;
 
 fn turn(action: crate::agent::Action, reasoning: &str) -> crate::agent::TurnOutcome {
     let mut out = pipeline_wheel_outcome("x");

@@ -273,7 +273,10 @@ mod sdist_stage;
 mod update_mode_tests;
 use patch_stage::*;
 mod patch_loop;
+#[cfg(test)]
 use patch_loop::*;
+mod submodule_wheel;
+use submodule_wheel::*;
 mod patch_refresh;
 use patch_refresh::*;
 mod refresh_series;
