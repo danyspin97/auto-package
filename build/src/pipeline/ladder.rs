@@ -420,7 +420,9 @@ pub(super) fn resolve_blocked_with(
             }
         }
         if let Err(reason) = ctx.may_start_turn(st.spent_usd) {
-            budget_stopped = true;
+            // Only a budget stop is one: the memo of an exhausted ladder must not
+            // read a repeated `no change` as a spent budget.
+            budget_stopped |= reason.starts_with(BUDGET_REACHED);
             return Rung::Blocked(format!("round {round} not run: {reason}"));
         }
         let context = ladder_context(round, LADDER_ROUNDS, history, site.context);

@@ -1,10 +1,20 @@
-//! The budget boundary of an agent turn: a turn that would reach the budget,
-//! with the last turn's cost, does not start.
+//! The per-package spend guard: the budget boundaries with the last turn's cost,
+//! and the stop on a repeated `no change` answer.
 
+use crate::agent::Task;
 use crate::pipeline::patch_loop::pipeline_wheel_outcome;
 use crate::pipeline::spend_guard::{
-    TurnSignals, can_start, record_turn, spend_allows_turn, turn_stop,
+    BUDGET_REACHED, REPEATED_NO_CHANGE, TurnSignals, can_start, record_turn, spend_allows_turn,
+    turn_stop,
 };
+
+fn turn(action: crate::agent::Action, reasoning: &str) -> crate::agent::TurnOutcome {
+    let mut out = pipeline_wheel_outcome("x");
+    out.action = action;
+    out.reasoning = reasoning.into();
+    out.evidence = Vec::new();
+    out
+}
 
 #[test]
 fn a_turn_starts_just_below_the_budget_and_not_at_or_over_it() {
@@ -55,8 +65,86 @@ fn a_fresh_package_run_starts_with_no_last_turn() {
     let mut expensive = pipeline_wheel_outcome("x");
     expensive.usage.cli_cost_usd = Some(2.0);
     let ran = std::sync::Mutex::new(TurnSignals::default());
-    record_turn(&mut ran.lock().unwrap(), &expensive);
+    record_turn(&mut ran.lock().unwrap(), Task::Review, &expensive);
     assert!(can_start(3.0, 1.0, &ran).is_err());
     let next = std::sync::Mutex::new(TurnSignals::default());
     assert!(can_start(3.0, 1.0, &next).is_ok());
+}
+
+#[test]
+fn a_first_no_change_never_stops_whatever_its_reasoning() {
+    for reasoning in ["", "the log is a network timeout"] {
+        let mut signals = TurnSignals::default();
+        record_turn(
+            &mut signals,
+            Task::Review,
+            &turn(crate::agent::Action::NoChange, reasoning),
+        );
+        assert!(turn_stop(3.0, 0.0, &signals).is_ok(), "{reasoning:?}");
+    }
+}
+
+#[test]
+fn the_same_no_change_reasoning_twice_in_a_row_stops_and_names_it() {
+    let said = turn(crate::agent::Action::NoChange, "  the log is a timeout ");
+    let mut signals = TurnSignals::default();
+    record_turn(&mut signals, Task::Review, &said);
+    record_turn(&mut signals, Task::Review, &said);
+    let why = turn_stop(3.0, 0.0, &signals).unwrap_err();
+    assert!(why.contains("the log is a timeout"), "{why}");
+    assert!(why.contains("`no change`"), "{why}");
+    assert!(!why.contains("unexplained"), "{why}");
+}
+
+#[test]
+fn different_no_change_reasons_or_an_edit_in_between_do_not_stop() {
+    let mut signals = TurnSignals::default();
+    record_turn(
+        &mut signals,
+        Task::Review,
+        &turn(crate::agent::Action::NoChange, "one"),
+    );
+    record_turn(
+        &mut signals,
+        Task::Review,
+        &turn(crate::agent::Action::NoChange, "two"),
+    );
+    assert!(turn_stop(3.0, 0.0, &signals).is_ok());
+    record_turn(
+        &mut signals,
+        Task::Review,
+        &turn(crate::agent::Action::NoChange, "two"),
+    );
+    assert!(turn_stop(3.0, 0.0, &signals).is_err());
+    // An edit clears the run of repeats.
+    record_turn(
+        &mut signals,
+        Task::Review,
+        &turn(crate::agent::Action::Edited, ""),
+    );
+    assert!(turn_stop(3.0, 0.0, &signals).is_ok());
+}
+
+#[test]
+fn a_repeat_stop_is_named_as_such_and_not_as_the_budget() {
+    let said = turn(crate::agent::Action::NoChange, "same reason");
+    let mut signals = TurnSignals::default();
+    record_turn(&mut signals, Task::Review, &said);
+    record_turn(&mut signals, Task::Review, &said);
+    let why = turn_stop(3.0, 0.0, &signals).unwrap_err();
+    assert!(why.starts_with(REPEATED_NO_CHANGE), "{why}");
+    assert!(!why.starts_with(BUDGET_REACHED), "{why}");
+}
+
+#[test]
+fn the_repeat_count_is_per_task_kind() {
+    // A `no change` of one kind and one of another do not add up to a repeat.
+    let said = turn(crate::agent::Action::NoChange, "same reason");
+    let mut signals = TurnSignals::default();
+    record_turn(&mut signals, Task::Review, &said);
+    record_turn(&mut signals, Task::FixAfterBuild, &said);
+    assert!(turn_stop(3.0, 0.0, &signals).is_ok());
+    record_turn(&mut signals, Task::Review, &said);
+    let why = turn_stop(3.0, 0.0, &signals).unwrap_err();
+    assert!(why.contains("Review"), "{why}");
 }

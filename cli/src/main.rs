@@ -83,7 +83,9 @@ enum Commands {
         /// `PkgState::cumulative_spent_usd`).
         ///
         /// A turn is not started when the spend so far plus the last turn's cost
-        /// would reach the cap, and the package stops with that reason.
+        /// would reach the cap, and the package stops with that reason. Two `no
+        /// change` answers in a row of one task kind with the same reasoning
+        /// stop it too.
         ///
         /// The cap stops a runaway, not an ordinary hard package: C++ builds
         /// can need 5–10 agent turns to work through missing BuildRequires and

@@ -98,7 +98,7 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--tui`: Enable interactive TUI mode
 - `--log`: Log level when not using TUI: error, warn, info, debug, trace (default: `info`)
 - `--max-attempts`: Maximum AI fix attempts per package (default: 10)
-- `--budget-usd`: USD budget cap for AI calls, per package (its spend counts within one run; default: 10.0). A turn is not started when the spend so far plus the last turn's cost would reach it, and the package stops with that reason.
+- `--budget-usd`: USD budget cap for AI calls, per package (its spend counts within one run; default: 10.0). A turn is not started when the spend so far plus the last turn's cost would reach it, and the package stops with that reason. Two `no change` answers in a row of one task kind with the same reasoning stop it too.
 - `--max-total-usd <USD>`: most the AI may spend per UTC day across all runs and processes sharing the work directory, kept in `<work-dir>/ledger.json` (default: 50). A turn that would pass it is refused with a message naming the cap; an unreadable or locked ledger refuses too.
 - `--max-packages <N>`: most packages one run starts, counting the dependency closure (default: 25, 0 = unlimited). Past it nothing more is queued and the run stops and says so.
 - `--notes <DIR>`: where per-package notes are kept (default: `../auto-package-notes`, relative to the current directory; created on first write, outside this repository)

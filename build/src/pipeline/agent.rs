@@ -165,8 +165,12 @@ pub(super) fn skip_agent(
 ) {
     let reason = if config.no_agent {
         SkipReason::NoAgent
-    } else if can_start(config.budget_usd, spent_usd, signals).is_err() {
-        SkipReason::BudgetExhausted
+    } else if let Err(why) = can_start(config.budget_usd, spent_usd, signals) {
+        if why.starts_with(BUDGET_REACHED) {
+            SkipReason::BudgetExhausted
+        } else {
+            SkipReason::Other(why)
+        }
     } else {
         SkipReason::Other(format!(
             "attempt limit reached ({attempts} of {})",
@@ -198,7 +202,7 @@ pub(super) fn agent_turn(
         obs_name,
         signals,
     } = env;
-    // No turn starts at the budget (see `can_start`).
+    // No turn starts past the budget or after a repeated `no change` (see `can_start`).
     if let Err(why) = can_start(config.budget_usd, *spent_usd, &signals) {
         return Err((why, FailureKind::Exhausted));
     }
@@ -459,6 +463,7 @@ pub(super) fn agent_turn(
     record_daily_spend(&config.work_dir, outcome.usage.cost_usd());
     record_turn(
         &mut signals.lock().unwrap_or_else(|e| e.into_inner()),
+        ctx.task,
         &outcome,
     );
     // A turn that changed the Version is undone and stops the package, whatever
