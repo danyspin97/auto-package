@@ -434,6 +434,8 @@ pub struct TurnOutcome {
     /// A RefreshPatches turn's answer for each patch it touched or could not
     /// port. Empty for every other task.
     pub patch_answers: Vec<PatchAnswer>,
+    /// A PatchReview turn's verdict. `None` for every other task.
+    pub patch_review: Option<PatchReviewAnswer>,
     pub confidence: Confidence,
     pub usage: Usage,
     pub tool_calls: Vec<ToolCall>,

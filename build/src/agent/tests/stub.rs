@@ -417,3 +417,39 @@ fn a_patch_review_turn_reads_the_rebase_series_like_a_refresh_turn() {
         assert_eq!(has, want, "{task:?}:\n{env}");
     }
 }
+
+/// A PatchReview turn against a stub that gives `response`.
+fn review_turn(response: &serde_json::Value) -> Result<TurnOutcome, Error> {
+    let stub = Stub::answering(response, 0);
+    let ws = tempfile::tempdir().unwrap();
+    let mut req = request(ws.path(), &[]);
+    req.task = Task::PatchReview;
+    TURN_TEST_OVERRIDES.with(|o| {
+        o.borrow_mut().program = Some(stub.dir.path().join("claude-stub"));
+    });
+    let result = turn(req);
+    TURN_TEST_OVERRIDES.with(|o| *o.borrow_mut() = TurnTestOverrides::default());
+    result
+}
+
+#[test]
+fn a_patch_review_verdict_reaches_the_outcome() {
+    let mut response = answer("no_change");
+    response["review"] = serde_json::json!({"verdict": "accept", "reason": "same intent"});
+    let out = review_turn(&response).expect("turn");
+    let review = out.patch_review.expect("a verdict");
+    assert_eq!(review.verdict, PatchReviewVerdict::Accept);
+    assert_eq!(review.reason, "same intent");
+}
+
+#[test]
+fn a_patch_review_answer_without_a_verdict_is_no_usable_response() {
+    let Err(Error::Parse { message, .. }) = review_turn(&answer("no_change")) else {
+        panic!("an answer without `review` was accepted");
+    };
+    assert!(message.contains("no usable turn response"), "{message}");
+    assert!(message.contains("`review`"), "{message}");
+    // Giving up needs no verdict.
+    let out = review_turn(&answer("blocked")).expect("a blocked review is an answer");
+    assert!(out.patch_review.is_none());
+}

@@ -74,6 +74,17 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
         "additionalProperties": false
       }
     },
+    "review": {
+      "type": "object",
+      "description": "PatchReview only: your verdict on the one patch named in the Context. Leave it out for any other task.",
+      "properties": {
+        "verdict": {"type": "string", "enum": ["accept", "rewrite", "reject"]},
+        "reason": {"type": "string"},
+        "problems": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["verdict", "reason"],
+      "additionalProperties": false
+    },
     "stage_files": {
       "type": "array",
       "items": {
@@ -93,8 +104,8 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
 }"#;
 
 /// The turn schema for one task. A RefreshPatches turn must answer with a
-/// non-empty `patches` list: the schema says so, and [`pick_turn_response_where`]
-/// refuses an answer without one.
+/// non-empty `patches` list and a PatchReview turn with a `review`: the schema
+/// says so, and [`pick_turn_response_where`] refuses an answer without one.
 pub(super) fn turn_response_schema(task: Task) -> String {
     let Ok(mut schema) = serde_json::from_str::<serde_json::Value>(TURN_RESPONSE_SCHEMA) else {
         return TURN_RESPONSE_SCHEMA.to_string();
@@ -106,6 +117,11 @@ pub(super) fn turn_response_schema(task: Task) -> String {
         if let Some(patches) = schema.pointer_mut("/properties/patches") {
             patches["minItems"] = 1.into();
         }
+    }
+    if task == Task::PatchReview
+        && let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut())
+    {
+        required.push("review".into());
     }
     schema.to_string()
 }
@@ -130,6 +146,28 @@ pub enum PatchAnswerStatus {
     Removed,
     /// Not ported; its edits are rolled back and the reason is reported.
     Blocked,
+}
+
+/// A PatchReview turn's verdict on the one patch it was given.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PatchReviewAnswer {
+    pub verdict: PatchReviewVerdict,
+    pub reason: String,
+    /// What is wrong with the patch, one entry each; for a `reject`.
+    #[serde(default)]
+    pub problems: Vec<String>,
+}
+
+/// What a PatchReview turn says about the patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PatchReviewVerdict {
+    /// The patch is right as it is.
+    Accept,
+    /// The turn fixed the patch itself.
+    Rewrite,
+    /// The patch is wrong and the turn could not fix it.
+    Reject,
 }
 
 /// A dependency the distro already ships, but whose shipped version breaks the
@@ -169,6 +207,8 @@ pub(super) struct TurnResponse {
     pub(super) stage_files: Vec<crate::stage::StageFile>,
     #[serde(default)]
     pub(super) patches: Vec<PatchAnswer>,
+    #[serde(default)]
+    pub(super) review: Option<PatchReviewAnswer>,
 }
 
 /// Pick a usable `TurnResponse` out of a finished turn's output.

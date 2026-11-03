@@ -82,6 +82,37 @@ fn a_refresh_turn_schema_requires_a_patches_list() {
 }
 
 #[test]
+fn a_patch_review_schema_requires_a_review_and_other_tasks_do_not() {
+    let review: serde_json::Value =
+        serde_json::from_str(&turn_response_schema(Task::PatchReview)).unwrap();
+    let required = review["required"].as_array().unwrap();
+    assert!(required.iter().any(|r| r == "review"), "{required:?}");
+    assert!(required.iter().all(|r| r != "patches"), "{required:?}");
+    for task in [Task::RefreshPatches, Task::FixAfterBuild, Task::Review] {
+        let other: serde_json::Value = serde_json::from_str(&turn_response_schema(task)).unwrap();
+        let required = other["required"].as_array().unwrap();
+        assert!(required.iter().all(|r| r != "review"), "{task:?}");
+    }
+}
+
+#[test]
+fn a_review_verdict_is_parsed_with_and_without_problems() {
+    let payload = r#"{"action":"no_change","reasoning":"r","evidence":[],"confidence":"high",
+        "review":{"verdict":"reject","reason":"drops a hunk","problems":["hunk 2 is gone"]}}"#;
+    let resp = pick_turn_response(payload, &[]).unwrap();
+    let review = resp.review.unwrap();
+    assert_eq!(review.verdict, PatchReviewVerdict::Reject);
+    assert_eq!(review.problems, ["hunk 2 is gone"]);
+    let bare = r#"{"action":"no_change","reasoning":"r","evidence":[],"confidence":"high",
+        "review":{"verdict":"accept","reason":"same intent"}}"#;
+    let review = pick_turn_response(bare, &[]).unwrap().review.unwrap();
+    assert_eq!(review.verdict, PatchReviewVerdict::Accept);
+    assert!(review.problems.is_empty());
+    // A verdict outside the three is not an answer.
+    assert!(pick_turn_response(&bare.replace("accept", "maybe"), &[]).is_none());
+}
+
+#[test]
 fn a_refresh_answer_without_patches_falls_through_to_the_tool_call() {
     let no_list = r#"{"action":"edited","reasoning":"r","evidence":[],"confidence":"high"}"#;
     let with_list = r#"{"action":"edited","reasoning":"r","evidence":[],"confidence":"high",

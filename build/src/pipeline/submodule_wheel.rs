@@ -114,6 +114,7 @@ pub(super) fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
         patch_dependencies: Vec::new(),
         stage_files: Vec::new(),
         patch_answers: Vec::new(),
+        patch_review: None,
         confidence: crate::agent::Confidence::High,
         usage: crate::agent::Usage::default(),
         tool_calls: Vec::new(),

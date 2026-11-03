@@ -399,9 +399,13 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     // `result_event.result` empty even when the model DID produce a valid
     // `StructuredOutput` call before being cut off, and treating that as a
     // hard package failure throws away a usable fix for no good reason.
-    let needs_patches =
-        |r: &TurnResponse| req.task != Task::RefreshPatches || !r.patches.is_empty();
-    let resp = match pick_turn_response_where(&result_event.result, &tool_calls, needs_patches) {
+    // A PatchReview turn that gives up (`blocked`) has no verdict to give.
+    let needs_answer = |r: &TurnResponse| match req.task {
+        Task::RefreshPatches => !r.patches.is_empty(),
+        Task::PatchReview => r.review.is_some() || r.action == "blocked",
+        _ => true,
+    };
+    let resp = match pick_turn_response_where(&result_event.result, &tool_calls, needs_answer) {
         Some(r) => r,
         None => {
             // Prefer the structured end-early signals the claude CLI
@@ -438,11 +442,16 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                     usage,
                 }
             } else {
-                // A RefreshPatches answer that names no patch is a retryable
-                // "no usable turn response", the same as a missing answer.
+                // A RefreshPatches answer that names no patch, or a PatchReview
+                // answer without a verdict, is a retryable "no usable turn
+                // response", the same as a missing answer.
                 let detail = if pick_turn_response(&result_event.result, &tool_calls).is_some() {
-                    "the answer has no `patches` list, which a RefreshPatches turn must give"
-                        .to_string()
+                    if req.task == Task::PatchReview {
+                        "the answer has no `review`, which a PatchReview turn must give"
+                    } else {
+                        "the answer has no `patches` list, which a RefreshPatches turn must give"
+                    }
+                    .to_string()
                 } else {
                     format!(
                         "result event is {:?} and no StructuredOutput tool call was made",
@@ -516,6 +525,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         patch_dependencies: resp.patch_dependencies,
         stage_files: resp.stage_files,
         patch_answers: resp.patches,
+        patch_review: resp.review,
         confidence: resp.confidence,
         usage,
         tool_calls,
