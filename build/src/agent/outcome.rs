@@ -296,8 +296,10 @@ pub(super) fn refresh_patches_task() -> &'static str {
      \n\
      A rebased patch keeps its header as it is (`Subject:`, `Description:`, and \
      `Upstream:` with a URL or `not yet reported`) and the `# PATCH-...` comment above \
-     its `Patch:` line. Name each rebased patch in `changelog` as `Rebase <name>: <why>` \
-     and each removed one as `Drop <name>: <reason>`. A rebase never deletes a test, adds \
+     its `Patch:` line. Do not name a rebased or a removed patch in `changelog`: the \
+     pipeline writes `- Refresh <patch>` (or one `- Refresh patches:` list) for every patch it \
+     refreshed or you rebased, and the `Drop` bullet for every patch removed. Name only a \
+     patch you add. A rebase never deletes a test, adds \
      `|| true`, or switches off a build step to get past a failing hunk.\n\
      \n\
      A patch this turn adds as new (a `Patch:` line the spec did not have) needs the same \

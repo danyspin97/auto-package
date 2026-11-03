@@ -466,8 +466,8 @@ pub(super) fn reject_unnamed_patches(
         return None;
     }
     let problem = format!(
-        "the .changes bullet does not name the new patch {}: write `Add|Backport|Rebase|Modify|\
-         Disable|Drop <file>` for each patch the edit adds",
+        "the .changes bullet does not name the new patch {}: write `Add|Backport|Modify <file>` \
+         for each patch the edit adds",
         unnamed.join(", ")
     );
     restore_spec(spec_path, before, Some(step), reporter);
