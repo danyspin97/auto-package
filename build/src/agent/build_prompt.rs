@@ -82,7 +82,8 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              XNNPACK ... have no files), return `use_upstream_wheel` (convention 28 Exception 4), since a wheel \
              carries the same files and the request is then met by it.\n\
              \n\
-             First decide which of convention 62's two cases the problem is. If it is \
+             Read `conventions/62.md` before answering. First decide which of convention 62's two \
+             cases the problem is. If it is \
              case (b) — this package is one this project builds itself (a prebuilt \
              wheel repackage, say) and its OWN RECIPE is wrong or unfinished, so its \
              RPM lacks files or installs them where a sibling package does not look \

@@ -59,7 +59,7 @@
 59. Merged into convention 75 — read convention 75 when OBS says "nothing provides ... = X (got version Y)"
 60. Merged into convention 3 — read convention 3 when choosing BuildArch noarch for a wheel or sdist
 61. [inline] A missing dependency may already be built here — full text for rpm -qlp checks and import-name mismatches
-62. [inline] Dependency needs patching: patch_dependencies — full text for the two cases and the problem text to write
+62. Dependency needs patching: patch_dependencies — summary above; read for the two cases and the problem text to write
 63. [inline] No TODO placeholders left in a spec — full text for what each skeleton marker needs
 64. [inline] C/C++ libs are never python-<lib> — full text; CUDA/NVIDIA vendor wheels are in skill nvidia-wheels
 65. Merged into convention 8 — read convention 8 when writing any Requires line for a Python dependency

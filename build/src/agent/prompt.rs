@@ -209,7 +209,23 @@ it, then re-runs this package."#;
 
 /// The conventions whose full text stays in the system prompt: they apply to
 /// nearly every turn (a missing dependency is built, not worked around).
-pub(super) const INLINE_CONVENTIONS: [u32; 8] = [27, 40, 61, 62, 63, 64, 86, 89];
+pub(super) const INLINE_CONVENTIONS: [u32; 7] = [27, 40, 61, 63, 64, 86, 89];
+
+/// A convention too long and too rare for every turn: only this summary stays in
+/// the system prompt, and the full text is read on demand like any other.
+const SUMMARISED_CONVENTIONS: [(u32, &str); 1] = [(
+    62,
+    "62 (summary; Read `conventions/62.md` before acting on it). A dependency is wrong for \
+     this package in a way only a change to the dependency fixes: (a) the distro ships a \
+     release too new for one symbol or API, or (b) a package this project builds lacks files \
+     this package needs. It is rare: use it only after the other options fail, never for a failure of \
+     one of your own tests, and never for a bound that relaxing it fixes (convention 75, \
+     section 59). Report it in `patch_dependencies` as `{\"name\": ..., \"problem\": ...}`, \
+     not in `unresolvable_packages`, and relax this package's own bound as well. The `problem` gives \
+     the exact error line, the symbol or API, the version that had it and the one that dropped \
+     it, the repository URL and the bound this package declares; write `unverified` for what \
+     you cannot confirm.",
+)];
 
 /// The index of every convention, one line each (`build/conventions/INDEX.md`).
 pub(super) const CONVENTIONS_INDEX: &str = include_str!("../../conventions/INDEX.md");
@@ -229,6 +245,10 @@ fn conventions_prompt() -> String {
             out.push_str(text);
             out.push('\n');
         }
+    }
+    for (_, summary) in SUMMARISED_CONVENTIONS {
+        out.push_str(summary);
+        out.push_str("\n\n");
     }
     out.push_str(&format!(
         "## Convention index\n\n\

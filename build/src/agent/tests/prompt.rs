@@ -72,6 +72,9 @@ fn the_system_prompt_holds_the_inline_conventions_and_the_index_only() {
     assert!(p.contains("27. **ANY dependency missing from OBS"));
     assert!(!p.contains("do not guess a repository URL"));
     assert!(!p.contains("Do not guess a repository URL"));
+    // Convention 62 is on demand: only its summary is in the prompt.
+    assert!(p.contains("62 (summary; Read `conventions/62.md`"));
+    assert!(!p.contains("costs hours of OBS build time"));
     assert!(p.contains("Convention index"));
     assert!(p.len() < 45_000, "system prompt is {} bytes", p.len());
 }
