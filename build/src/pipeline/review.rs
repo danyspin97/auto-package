@@ -288,6 +288,29 @@ pub(super) fn review_stage(
                     }
                 },
             };
+            let effect = match review_turn_patches(
+                ctx,
+                st,
+                &review_step,
+                &checkout_snapshot,
+                &spec_before,
+                if patching.is_some() {
+                    "PatchDependency"
+                } else {
+                    "Review"
+                },
+                effect,
+            ) {
+                Ok(effect) => effect,
+                Err(result) => {
+                    // A stop declines the request like the ladder's: without
+                    // it the dependent asks for the same patch again.
+                    if let Some(problem) = patching {
+                        decline_patch_request(ws, reporter, problem);
+                    }
+                    return Err(result);
+                }
+            };
             // A patch an earlier run already made (the turn finds nothing left
             // to do) is not a failure to patch.
             if patch_turn_failed(patching.is_some(), effect, &outcome.action) {

@@ -141,6 +141,15 @@ pub(super) fn fix_turn(
             reason,
         )?,
     };
+    let effect = review_turn_patches(
+        ctx,
+        st,
+        &agent_step,
+        &checkout_snapshot,
+        &clean,
+        "FixAfterBuild",
+        effect,
+    )?;
     // A dependency the fix added is queued now, not after another build OBS
     // rejects as unresolvable.
     if effect == TurnEffect::Edited

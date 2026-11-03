@@ -265,8 +265,8 @@ mod update_mode;
 
 mod patch_apply;
 mod patch_review;
-#[allow(dead_code)]
 mod patch_review_edit;
+use patch_review_edit::review_turn_patches;
 #[cfg(test)]
 mod patch_review_edit_tests;
 mod patch_review_prompt;

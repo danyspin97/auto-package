@@ -112,6 +112,15 @@ pub(super) fn fix_after_validation(
                     reason,
                 )?,
             };
+            let effect = review_turn_patches(
+                ctx,
+                st,
+                &agent_step,
+                &checkout_snapshot,
+                &clean,
+                "FixAfterValidation",
+                effect,
+            )?;
             if effect == TurnEffect::Edited
                 && let Some(missing) = missing_deps_added_by_edit(ctx, agent_step.id, &clean)
             {
