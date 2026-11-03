@@ -263,6 +263,10 @@ mod recap_entry;
 mod update_mode;
 
 mod patch_apply;
+#[cfg_attr(not(test), allow(dead_code))]
+mod patch_rewrite;
+#[cfg(test)]
+mod patch_rewrite_tests;
 mod patch_stage;
 mod removal_proof;
 #[cfg(test)]
