@@ -19,6 +19,7 @@
 use super::*;
 use crate::pipeline::patch_rules_content::*;
 use crate::pipeline::patch_rules_spec::*;
+use crate::pipeline::removal_proof::*;
 use crate::pipeline::render::*;
 
 /// Words of a `.changes` bullet that name what was done to a patch file.
@@ -388,16 +389,36 @@ pub(super) fn reject_patch_rules(
     reporter: &dyn Reporter,
     notes_path: PathBuf,
     keep: &[String],
+    judge_removals: bool,
 ) -> Option<String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
     let problems = patch_rule_problems(spec_path, before, &after, snapshot);
-    if problems.is_empty() {
+    // Backstop for every accept path: a removed patch needs quilt's proof whatever
+    // turn removed it. Empty (and no quilt run) when nothing was removed, and not
+    // asked when `judge_removals` is false (a switch to the upstream wheel).
+    let version = crate::spec::parse_header(&after)
+        .map(|h| h.version)
+        .unwrap_or_default();
+    let checkout = spec_path.parent().unwrap_or(Path::new("."));
+    let unproven = if judge_removals {
+        unproven_patch_removals(&version, checkout, spec_path, before, snapshot)
+    } else {
+        Vec::new()
+    };
+    let mut reasons = Vec::new();
+    if !problems.is_empty() {
+        reasons.push(format!(
+            "a patch the edit adds does not meet the patch rules: {}",
+            problems.join("; ")
+        ));
+    }
+    if !unproven.is_empty() {
+        reasons.push(unproven_removal_problem(&unproven));
+    }
+    if reasons.is_empty() {
         return None;
     }
-    let problem = format!(
-        "a patch the edit adds does not meet the patch rules: {}",
-        problems.join("; ")
-    );
+    let problem = reasons.join("; ");
     note_spec_rejection(spec_path, &problem);
     reporter.report(&Event::SpecRejected {
         step: step.id,
@@ -413,7 +434,7 @@ pub(super) fn reject_patch_rules(
     append_notes(
         notes_path,
         &format!(
-            "\n## Edit rejected — a patch does not meet the patch rules\n{problem}\n\
+            "\n## Edit rejected — a patch rule or a patch removal\n{problem}\n\
              A patch the edit adds needs a header with Subject:, Description: and \
              Upstream: (a URL, a status word, or `not yet reported`); a `Patch:` line with a \
              `# PATCH-FIX-...` comment above it; and changes to source code only (no removed \

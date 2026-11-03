@@ -314,7 +314,7 @@ fn names(refused: &[crate::pipeline::removal_proof::Refusal]) -> Vec<&str> {
 }
 
 /// A security patch removed with no quilt proof: the gate names it as a human's
-/// case.
+/// case, and the general acceptance check refuses the same edit.
 #[test]
 fn a_security_patch_removed_without_proof_needs_a_human() {
     if quilt_missing() {
@@ -337,6 +337,28 @@ fn a_security_patch_removed_without_proof_needs_a_human() {
     let problem = unproven_removal_problem(&unproven);
     assert!(problem.contains("a human must decide"));
     assert!(problem.contains("security patch"));
+    // The general acceptance check (the ladder's path) refuses it too, and rolls back.
+    let step = ap_core::run::StepDir {
+        path: checkout.join("step"),
+        id: ap_core::event::StepId(1),
+    };
+    std::fs::create_dir_all(&step.path).unwrap();
+    let why = crate::pipeline::patch_rules::reject_patch_rules(
+        &spec_path,
+        before,
+        Some(&snapshot),
+        &step,
+        &ap_core::sink::NullReporter,
+        checkout.join("notes.md"),
+        &[],
+        true,
+    );
+    assert!(
+        why.is_some_and(|w| w.contains("removal of CVE-2024-1.patch is refused")
+            && w.contains("a human must decide"))
+    );
+    assert_eq!(std::fs::read_to_string(&spec_path).unwrap(), before);
+    assert!(checkout.join("CVE-2024-1.patch").exists());
 }
 
 #[test]

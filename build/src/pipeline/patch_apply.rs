@@ -129,6 +129,7 @@ pub(super) fn apply_patch_turn(
         reporter,
         notes.clone(),
         &[],
+        true,
     ) {
         return PatchTurnApplied::Refused(why);
     }

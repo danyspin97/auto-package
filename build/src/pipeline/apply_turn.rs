@@ -394,7 +394,7 @@ fn apply_turn_outcome_with(
                     }
                     // The snapshot is taken before the turn, so on rejection the
                     // wheel and rpmlintrc written above (not in it) are removed.
-                    let changed = accept_or_restore_with_snapshot(
+                    let changed = accept_wheel_switch(
                         spec_path,
                         before,
                         snapshot,

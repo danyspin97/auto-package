@@ -221,3 +221,32 @@ fn a_rename_is_refused_with_its_own_text() {
     assert!(text.contains("looks renamed"), "{text}");
     assert!(!text.contains("refresh it with quilt"), "{text}");
 }
+
+#[test]
+fn a_wheel_switch_drops_its_patches_without_a_proof_and_an_edit_does_not() {
+    let (dir, spec_path, before) = removal("%autosetup -p1");
+    let step = ap_core::run::StepDir {
+        path: dir.path().join("step"),
+        id: ap_core::event::StepId(1),
+    };
+    std::fs::create_dir_all(&step.path).unwrap();
+    let after = std::fs::read_to_string(&spec_path).unwrap();
+    let judge = |judge_removals: bool| {
+        crate::pipeline::patch_rules::reject_patch_rules(
+            &spec_path,
+            &before,
+            None,
+            &step,
+            &ap_core::sink::NullReporter,
+            dir.path().join("notes.md"),
+            &[],
+            judge_removals,
+        )
+    };
+    // An edit that removes the patch is refused (no archive to prove it by).
+    assert!(judge(true).is_some_and(|w| w.contains("removal of p.patch is refused")));
+    // The wheel switch's own spec rewrite is not judged, and nothing is rolled back.
+    std::fs::write(&spec_path, &after).unwrap();
+    assert_eq!(judge(false), None);
+    assert_eq!(std::fs::read_to_string(&spec_path).unwrap(), after);
+}

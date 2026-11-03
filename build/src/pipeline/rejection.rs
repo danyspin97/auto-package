@@ -256,6 +256,67 @@ pub(super) fn accept_or_restore_reasoned(
     keep: &[String],
     package: &str,
 ) -> Result<(), String> {
+    accept_checked(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_entry,
+        notes_path,
+        keep,
+        package,
+        true,
+    )
+}
+
+/// [`accept_or_restore_with_snapshot`] for the spec of a switch to the upstream
+/// wheel. The switch replaces the whole recipe with the wheel's, which carries
+/// no source patches, so the patches it no longer declares are not a removal to
+/// prove (the wheel has its own gate and its `wheel-origin.txt` record). Every
+/// other check applies.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn accept_wheel_switch(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_entry: &str,
+    notes_path: PathBuf,
+    keep: &[String],
+    package: &str,
+) -> bool {
+    accept_checked(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_entry,
+        notes_path,
+        keep,
+        package,
+        false,
+    )
+    .is_ok()
+}
+
+/// The checks of [`accept_or_restore_reasoned`]; `judge_removals` is whether a
+/// patch the edit removed needs a proof (see [`reject_patch_rules`]).
+#[allow(clippy::too_many_arguments)]
+fn accept_checked(
+    spec_path: &Path,
+    before: &str,
+    snapshot: Option<&CheckoutSnapshot>,
+    step: &StepDir,
+    reporter: &dyn Reporter,
+    notes_entry: &str,
+    notes_path: PathBuf,
+    keep: &[String],
+    package: &str,
+    judge_removals: bool,
+) -> Result<(), String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
 
     if let Some((line_no, text)) = crate::spec::first_macro_in_comment(&after) {
@@ -376,6 +437,7 @@ pub(super) fn accept_or_restore_reasoned(
         reporter,
         notes_path.clone(),
         keep,
+        judge_removals,
     ) {
         return Err(problem);
     }
