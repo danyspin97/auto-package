@@ -314,6 +314,7 @@ macro_rules! begin_or_fail {
 }
 use begin_or_fail;
 mod agent;
+mod turn_spend;
 use agent::*;
 mod agent_response;
 use agent_response::*;
