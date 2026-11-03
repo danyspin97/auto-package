@@ -49,6 +49,8 @@ pub(super) struct TurnEnv<'a> {
     pub(super) obs_name: &'a str,
     /// The package's turn signals (see [`TurnSignals`]).
     pub(super) signals: std::sync::Arc<std::sync::Mutex<TurnSignals>>,
+    /// The patch files a PatchReview turn may write; empty for every other task.
+    pub(super) writable_patches: &'a [String],
 }
 
 /// What one agent turn needs beyond [`PipelineConfig`].
@@ -201,6 +203,7 @@ pub(super) fn agent_turn(
         reporter,
         obs_name,
         signals,
+        writable_patches,
     } = env;
     // No turn starts past the budget or after a repeated `no change` (see `can_start`).
     if let Err(why) = can_start(config.budget_usd, *spent_usd, &signals) {
@@ -334,6 +337,7 @@ pub(super) fn agent_turn(
         rpms_dir: Some(&config.rpms_dir),
         sibling_dirs: &sibling_dirs,
         model_rotation: model_rotation.get(),
+        writable_patches,
         on_tool_use: Some(&on_tool_use),
     };
 

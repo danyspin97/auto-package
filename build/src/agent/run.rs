@@ -7,13 +7,20 @@ use crate::agent::build_prompt::*;
 pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
-    let mut allowed_tools = turn_allowed_tools(req.task, req.workspace, req.checkout_dir);
+    let mut allowed_tools = if req.task == Task::PatchReview {
+        review_allowed_tools(req.workspace, req.checkout_dir, req.writable_patches)
+    } else {
+        turn_allowed_tools(req.task, req.workspace, req.checkout_dir)
+    };
     if req.task != Task::TranslateUnresolvableDeps {
         allowed_tools.push_str(&rpm_inspection_tools(req.rpms_dir));
         allowed_tools.push_str(&sibling_read_tools(req.sibling_dirs));
     }
     let mut denied_tools = turn_denied_tools(req.workspace, req.checkout_dir);
-    let service = super::owned_files::service_denied_tools(req.task, req.checkout_dir);
+    let mut service = super::owned_files::service_denied_tools(req.task, req.checkout_dir);
+    if req.task == Task::PatchReview {
+        service.extend(review_denied_tools(req.checkout_dir));
+    }
     if !service.is_empty() {
         denied_tools.push(',');
         denied_tools.push_str(&service.join(","));

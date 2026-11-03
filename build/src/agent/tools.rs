@@ -46,7 +46,7 @@ const QUILT_SUBCOMMANDS: [&str; 21] = [
 /// The prefixes a quilt or `patch` command may carry: bare (in `source/`),
 /// `cd source && `, and `cd <workspace>/source && ` with the workspace path as
 /// given and canonical (the turn has written both forms).
-fn source_prefixes(workspace: &std::path::Path) -> Vec<String> {
+pub(super) fn source_prefixes(workspace: &std::path::Path) -> Vec<String> {
     let mut out = vec![String::new(), "cd source && ".to_string()];
     let canonical = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     for ws in [workspace.to_path_buf(), canonical] {

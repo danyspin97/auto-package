@@ -128,6 +128,7 @@ pub(super) fn request<'a>(
         rpms_dir: None,
         sibling_dirs: &[],
         model_rotation: 0,
+        writable_patches: &[],
         on_tool_use: None,
     }
 }

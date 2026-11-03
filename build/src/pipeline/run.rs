@@ -317,6 +317,7 @@ impl RunCtx<'_> {
             reporter: self.reporter,
             obs_name: &self.obs_name,
             signals: self.signals.clone(),
+            writable_patches: &[],
         }
     }
 
