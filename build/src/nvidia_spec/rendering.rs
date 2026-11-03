@@ -449,9 +449,10 @@ pub fn redist_rpmlintrc(input: &RedistSpecInput) -> String {
     let mut out = String::new();
     // Every file is under /usr/local by design, see `redist_component_spec`.
     out.push_str(
-        "# NVIDIA's CUDA tree lives in /usr/local/cuda-<major>.<minor>: nvcc finds\n\
-         # its tools and headers relative to that tree.\n\
+        "# reason: NVIDIA's CUDA tree lives in /usr/local/cuda-<major>.<minor>, where nvcc finds its tools and headers relative to that tree\n\
          addFilter(\"filelist-forbidden-fhs23\")\n\
+         \n\
+         # reason: NVIDIA's CUDA tree lives in /usr/local/cuda-<major>.<minor>, where nvcc finds its tools and headers relative to that tree\n\
          addFilter(\"dir-or-file-outside-snapshot\")\n",
     );
     let Some(layout) = analyse(&input.files) else {
@@ -460,16 +461,14 @@ pub fn redist_rpmlintrc(input: &RedistSpecInput) -> String {
     if has_shared_libs(&layout) {
         out.push_str(
             "\n\
-             # The libraries are NVIDIA's prebuilt binaries, linked without a hash\n\
-             # section; they cannot be relinked here.\n\
+             # reason: the libraries are NVIDIA's prebuilt binaries, linked without a hash section; they cannot be relinked here\n\
              addFilter(\"missing-hash-section\")\n",
         );
     }
     if layout.members.iter().any(|m| m.dest.ends_with(".a")) {
         out.push_str(
             "\n\
-             # The static libraries are NVIDIA's prebuilt archives; they carry no\n\
-             # debug information.\n\
+             # reason: the static libraries are NVIDIA's prebuilt archives and carry no debug information\n\
              addFilter(\"static-library-without-debuginfo\")\n",
         );
     }
@@ -494,8 +493,7 @@ pub fn redist_rpmlintrc(input: &RedistSpecInput) -> String {
     if lacks_binary {
         out.push_str(
             "\n\
-             # Headers and build-system files only: the package is arch-specific\n\
-             # because NVIDIA's archive is per platform.\n\
+             # reason: headers and build-system files only; the package is arch-specific because NVIDIA's archive is per platform\n\
              addFilter(\"no-binary\")\n",
         );
     }

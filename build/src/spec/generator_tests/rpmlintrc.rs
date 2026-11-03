@@ -203,3 +203,28 @@ fn wheel_console_scripts_get_the_alternatives_handling() {
         }
     }
 }
+
+/// Every `addFilter` of a generated rpmlintrc has a `# reason:` line right above it.
+#[test]
+fn every_generated_wheel_filter_has_a_reason_line() {
+    use ap_ecosystem::sdist::WheelLayout;
+    let layout = WheelLayout {
+        first_shared_lib: Some("p/libx.so.1".into()),
+        origin_runpath: true,
+        empty_files: vec!["p/custom.css".into(), "p/loader.js".into()],
+        ..Default::default()
+    };
+    let (_, text) =
+        wheel_rpmlintrc("p", "p-1-py3-none-manylinux_2_27_x86_64.whl", Some(&layout)).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let filters = lines.iter().filter(|l| l.starts_with("addFilter(")).count();
+    assert_eq!(filters, 6, "{text}");
+    for (i, l) in lines.iter().enumerate() {
+        if l.starts_with("addFilter(") {
+            assert!(
+                lines[i - 1].starts_with("# reason: "),
+                "no reason above {l}: {text}"
+            );
+        }
+    }
+}

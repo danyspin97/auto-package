@@ -48,21 +48,19 @@ pub(crate) fn is_prebuilt_binary_wheel(
 ///   72). Any other RPATH value still fails the check.
 pub fn prebuilt_wheel_rpmlintrc(layout: &ap_ecosystem::sdist::WheelLayout) -> String {
     let mut out = String::from(
-        "# The libraries are upstream's prebuilt binaries, linked without a hash\n\
-         # section; they cannot be relinked here.\n\
+        "# reason: the libraries are upstream's prebuilt binaries, linked without a hash section; they cannot be relinked here\n\
          addFilter(\"missing-hash-section\")\n\
          \n\
-         # The bundled libraries live in site-packages and are loaded from their own\n\
-         # directory by the Python modules, not from the ldconfig path: there is no\n\
-         # ldconfig cache for a scriptlet to refresh.\n\
+         # reason: the bundled libraries are loaded from their own directory by the Python modules, not from the ldconfig path, so there is no cache for a scriptlet to refresh\n\
          addFilter(\"library-without-ldconfig-postin\")\n\
+         \n\
+         # reason: the bundled libraries are loaded from their own directory by the Python modules, not from the ldconfig path, so there is no cache for a scriptlet to refresh\n\
          addFilter(\"library-without-ldconfig-postun\")\n",
     );
     if layout.origin_runpath {
         out.push_str(
             "\n\
-             # The bundled libraries find each other through an $ORIGIN RUNPATH, which\n\
-             # is how a self-contained vendor wheel has to be laid out.\n\
+             # reason: the bundled libraries find each other through an $ORIGIN RUNPATH, which is how a self-contained vendor wheel has to be laid out\n\
              addFilter(\".*binary-or-shlib-defines-rpath.*[$]ORIGIN\")\n",
         );
     }
@@ -84,15 +82,13 @@ fn wheel_empty_files_filters(layout: &ap_ecosystem::sdist::WheelLayout) -> Strin
         {
             continue;
         }
-        if out.is_empty() {
-            out.push_str(
-                "# Empty placeholder files that upstream's wheel ships on purpose (a\n\
-                 # user-editable stylesheet or script): they must stay as they are.\n",
-            );
+        if !out.is_empty() {
+            out.push('\n');
         }
         let escaped = name.replace('.', "\\.").replace('+', "\\+");
         out.push_str(&format!(
-            "addFilter(r\".*zero-length .*/site-packages/{escaped}$\")\n"
+            "# reason: {name} is an empty placeholder that upstream's wheel ships on purpose (a user-editable stylesheet or script)\n\
+             addFilter(r\".*zero-length .*/site-packages/{escaped}$\")\n"
         ));
     }
     out

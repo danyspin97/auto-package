@@ -318,6 +318,15 @@ fn generate_downloads_verifies_lists_and_writes_the_spec_inputs() {
     );
     assert_eq!(g.rpmlintrc_file, "cuda-cudart.rpmlintrc");
     assert!(g.rpmlintrc.contains("filelist-forbidden-fhs23"));
+    // Every filter has its reason on the line above.
+    let rc: Vec<&str> = g.rpmlintrc.lines().collect();
+    for (i, l) in rc
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("addFilter("))
+    {
+        assert!(rc[i - 1].starts_with("# reason: "), "no reason above {l}");
+    }
     // No Python in it.
     assert!(!g.spec.contains("%pyproject") && !g.spec.contains("python_expand"));
 }
