@@ -535,7 +535,17 @@ pub(super) fn purge_source_recipe(checkout_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(checkout_dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    let entries: Vec<_> = entries.flatten().collect();
+    // The wheel's own rpmlintrc is named like Factory's (`<pkg>-rpmlintrc`):
+    // the one a spec names as a source stays. An older `<pkg>.rpmlintrc` that no
+    // spec names goes too.
+    let specs: Vec<String> = entries
+        .iter()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "spec"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .collect();
+    let named = |name: &str| specs.iter().any(|s| osc::spec_names_source(s, name));
+    for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !entry.path().is_file() {
             continue;
@@ -550,8 +560,8 @@ pub(super) fn purge_source_recipe(checkout_dir: &Path) {
             || [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".zip", ".crate"]
                 .iter()
                 .any(|s| name.ends_with(s))
-            // Factory's `<pkg>-rpmlintrc`; the wheel's own is `<pkg>.rpmlintrc`.
-            || name.ends_with("-rpmlintrc");
+            // Factory's `<pkg>-rpmlintrc`, unless the wheel's spec names it.
+            || ((name.ends_with("-rpmlintrc") || name.ends_with(".rpmlintrc")) && !named(&name));
         if recipe_only {
             let _ = std::fs::remove_file(entry.path());
         }

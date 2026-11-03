@@ -21,7 +21,7 @@ fn a_binary_wheel_with_a_shared_lib_gets_a_pre_seeded_rpmlintrc() {
         Some(&binary_only),
     );
     assert!(
-        spec.contains("Source99:       python-nvidia-foo.rpmlintrc\n"),
+        spec.contains("Source99:       python-nvidia-foo-rpmlintrc\n"),
         "{spec}"
     );
 
@@ -102,7 +102,7 @@ fn the_rpmlintrc_file_follows_the_wheel_shape() {
         Some(&layout),
     )
     .unwrap();
-    assert_eq!(file, "python-nvidia-foo.rpmlintrc");
+    assert_eq!(file, "python-nvidia-foo-rpmlintrc");
     assert!(text.contains("[$]ORIGIN"), "{text}");
     assert!(wheel_rpmlintrc("p", "p-1.0-py3-none-any.whl", Some(&layout)).is_none());
     assert!(
@@ -227,4 +227,47 @@ fn every_generated_wheel_filter_has_a_reason_line() {
             );
         }
     }
+}
+
+/// The `<name>.rpmlintrc` of an earlier release goes when the spec names
+/// `<name>-rpmlintrc`, after the new file is written; its filters the new file
+/// lacks are carried over, and a file with other lines stays.
+#[test]
+fn the_dot_named_rpmlintrc_of_an_earlier_release_is_migrated() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("python-foo.rpmlintrc");
+    let new = dir.path().join("python-foo-rpmlintrc");
+    std::fs::write(
+        &old,
+        "# plain comment\naddFilter(\"x\")\naddFilter(\"y\")\n",
+    )
+    .unwrap();
+    // Not dash-named, or the new file not written yet: the old file stays.
+    assert_eq!(
+        migrate_dot_rpmlintrc(dir.path(), "python-bar.rpmlintrc"),
+        Ok(false)
+    );
+    assert!(migrate_dot_rpmlintrc(dir.path(), "python-foo-rpmlintrc").is_err());
+    assert!(old.exists());
+    std::fs::write(&new, "# reason: r\naddFilter(\"x\")\n").unwrap();
+    assert_eq!(
+        migrate_dot_rpmlintrc(dir.path(), "python-foo-rpmlintrc"),
+        Ok(true)
+    );
+    assert!(!old.exists());
+    let text = std::fs::read_to_string(&new).unwrap();
+    assert!(
+        text.contains("# reason: carried over from python-foo.rpmlintrc\naddFilter(\"y\")\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches("addFilter(\"x\")").count(), 1);
+    assert_eq!(
+        migrate_dot_rpmlintrc(dir.path(), "python-foo-rpmlintrc"),
+        Ok(false)
+    );
+    // A file with another line stays, and says why.
+    std::fs::write(&old, "from Config import *\naddFilter(\"x\")\n").unwrap();
+    let why = migrate_dot_rpmlintrc(dir.path(), "python-foo-rpmlintrc").unwrap_err();
+    assert!(why.contains("from Config import *"), "{why}");
+    assert!(old.exists());
 }

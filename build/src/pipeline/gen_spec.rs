@@ -110,6 +110,10 @@ pub(super) fn generate_redist_spec(
         checkout_dir.join(&generated.rpmlintrc_file),
         &generated.rpmlintrc,
     );
+    // An earlier release of the tool named it `<name>.rpmlintrc`.
+    if let Err(why) = crate::spec::migrate_dot_rpmlintrc(checkout_dir, &generated.rpmlintrc_file) {
+        ap_core::diag!("  {why}");
+    }
     // The source of an earlier release goes with the commit.
     crate::redist::remove_stale_archives(checkout_dir, &generated.archive);
     Ok(GenSpecResult {

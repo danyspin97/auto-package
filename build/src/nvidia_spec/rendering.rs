@@ -141,7 +141,7 @@ pub fn redist_filesystem_spec(release: &str, version: &str) -> String {
          Summary:        Library path of the NVIDIA CUDA {maj}.{min} components\n\
          License:        MIT\n\
          URL:            https://developer.nvidia.com/cuda-toolkit\n\
-         Source99:       {name}.rpmlintrc\n\
+         Source99:       {name}-rpmlintrc\n\
          BuildArch:      noarch\n\
          \n\
          %description\n\
@@ -335,7 +335,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
          URL:            https://developer.nvidia.com/cuda-toolkit\n\
          # NVIDIA's archive, committed next to the spec as downloaded from here.\n\
          Source0:        {url}\n\
-         Source99:       {name}.rpmlintrc\n\
+         Source99:       {name}-rpmlintrc\n\
          ExclusiveArch:  {arch}\n",
         version = version,
         human = human_name(&input.name),

@@ -101,7 +101,7 @@ pub fn wheel_binary_skeleton_shared(
         "python_sitearch"
     };
     let source99_line = if wheel_needs_rpmlintrc(wheel_filename, layout) {
-        format!("Source99:       python-{name}.rpmlintrc\n")
+        format!("Source99:       python-{name}-rpmlintrc\n")
     } else {
         String::new()
     };

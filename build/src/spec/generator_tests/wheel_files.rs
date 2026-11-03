@@ -49,13 +49,13 @@ fn a_pure_wheel_repack_normalises_modes_and_filters_empty_files() {
     );
     assert!(
         spec.contains(
-            "Source99:       python-open-webui.rpmlintrc
+            "Source99:       python-open-webui-rpmlintrc
 "
         ),
         "{spec}"
     );
     let (file, text) = wheel_rpmlintrc("open-webui", wheel, Some(&layout)).unwrap();
-    assert_eq!(file, "python-open-webui.rpmlintrc");
+    assert_eq!(file, "python-open-webui-rpmlintrc");
     assert!(
         text.contains(
             r#"addFilter(r".*zero-length .*/site-packages/open_webui/static/custom\.css$")"#

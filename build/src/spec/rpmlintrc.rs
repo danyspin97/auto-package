@@ -94,7 +94,58 @@ fn wheel_empty_files_filters(layout: &ap_ecosystem::sdist::WheelLayout) -> Strin
     out
 }
 
-/// Whether a repackaged wheel needs a `python-<name>.rpmlintrc`: it is a
+/// Migrates the `<base>.rpmlintrc` an earlier release of the tool wrote to the
+/// `<base>-rpmlintrc` (`new_name`) the spec now names: OBS must not hold both.
+/// Nothing happens unless the new file exists. The `addFilter` lines the old file
+/// has and the new one lacks are carried into the new file under a `# reason:`
+/// line, then the old file is removed. `Ok(true)` when it was removed, `Ok(false)`
+/// when there was nothing to do, `Err` when the old file stays because it holds a
+/// line other than a comment, a blank or an `addFilter` (the reason is the message).
+pub fn migrate_dot_rpmlintrc(dir: &std::path::Path, new_name: &str) -> Result<bool, String> {
+    let Some(base) = new_name.strip_suffix("-rpmlintrc") else {
+        return Ok(false);
+    };
+    let old_name = format!("{base}.rpmlintrc");
+    let (old_path, new_path) = (dir.join(&old_name), dir.join(new_name));
+    let Ok(old) = std::fs::read_to_string(&old_path) else {
+        return Ok(false);
+    };
+    let Ok(new) = std::fs::read_to_string(&new_path) else {
+        return Err(format!("{old_name} stays: {new_name} was not written"));
+    };
+    let mut foreign = Vec::new();
+    let mut carried = String::new();
+    for line in old.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with("addFilter(") {
+            foreign.push(line.to_string());
+        } else if !new.lines().any(|l| l.trim() == line) {
+            carried.push_str(&format!(
+                "\n# reason: carried over from {old_name}\n{line}\n"
+            ));
+        }
+    }
+    if !foreign.is_empty() {
+        return Err(format!(
+            "{old_name} stays: it has lines the generator does not write ({})",
+            foreign.join("; ")
+        ));
+    }
+    if !carried.is_empty() {
+        let mut text = new;
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&carried);
+        ap_core::fsx::write_atomic(&new_path, text)
+            .map_err(|e| format!("{old_name} stays: cannot update {new_name}: {e}"))?;
+    }
+    Ok(std::fs::remove_file(&old_path).is_ok())
+}
+
+/// Whether a repackaged wheel needs a `python-<name>-rpmlintrc`: it is a
 /// vendor-binary wheel, or it ships empty files rpmlint calls `zero-length`.
 pub(crate) fn wheel_needs_rpmlintrc(
     wheel_filename: &str,
@@ -104,7 +155,7 @@ pub(crate) fn wheel_needs_rpmlintrc(
         || layout.is_some_and(|l| !wheel_empty_files_filters(l).is_empty())
 }
 
-/// Write `python-<name>.rpmlintrc` next to the spec for a wheel that needs one
+/// Write `python-<name>-rpmlintrc` next to the spec for a wheel that needs one
 /// (the spec's `Source99:` names it, see [`wheel_needs_rpmlintrc`]); nothing for
 /// any other wheel.
 pub(crate) fn wheel_rpmlintrc(
@@ -132,7 +183,7 @@ pub(crate) fn wheel_rpmlintrc(
         return None;
     }
     Some((
-        format!("python-{}.rpmlintrc", pkg_name.to_lowercase()),
+        format!("python-{}-rpmlintrc", pkg_name.to_lowercase()),
         text,
     ))
 }

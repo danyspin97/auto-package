@@ -5,13 +5,14 @@ use super::*;
 #[test]
 fn only_the_package_files_are_published() {
     let dir = tempfile::tempdir().unwrap();
-    let spec = "Name: pkg\nVersion: 1.0\nSource0: pkg-%{version}.tar.gz\nPatch0: 0001-fix.patch\n";
+    let spec = "Name: pkg\nVersion: 1.0\nSource0: pkg-%{version}.tar.gz\nPatch0: 0001-fix.patch\nSource99: pkg-rpmlintrc\n";
     for (name, body) in [
         ("pkg.spec", spec),
         ("pkg-1.0.tar.gz", ""),
         ("_service", ""),
         ("pkg.changes", ""),
         ("pkg.rpmlintrc", ""),
+        ("pkg-rpmlintrc", ""),
         ("0001-fix.patch", ""),
         ("extra.patch", ""),
         ("pkg.spec.preexisting", spec),
@@ -31,8 +32,8 @@ fn only_the_package_files_are_published() {
             "0001-fix.patch",
             "_service",
             "pkg-1.0.tar.gz",
+            "pkg-rpmlintrc",
             "pkg.changes",
-            "pkg.rpmlintrc",
             "pkg.spec",
         ]
     );
@@ -42,6 +43,7 @@ fn only_the_package_files_are_published() {
             "build",
             "extra.patch",
             "pkg.changes.preexisting",
+            "pkg.rpmlintrc",
             "pkg.spec.preexisting",
             "stray.txt",
         ]

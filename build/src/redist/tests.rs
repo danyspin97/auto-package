@@ -307,7 +307,7 @@ fn generate_downloads_verifies_lists_and_writes_the_spec_inputs() {
     assert!(g.spec.contains("%global cuda_mm 13.4\n"));
     assert!(g.spec.contains(&format!("%setup -q -n {top}\n")));
     assert!(g.spec.contains("%{cuda_prefix}/lib64/libcudart.so.13.4.92"));
-    assert!(g.spec.contains("Source99:       cuda-cudart.rpmlintrc\n"));
+    assert!(g.spec.contains("Source99:       cuda-cudart-rpmlintrc\n"));
     assert!(
         g.spec
             .contains(&format!("# Source archive sha256: {}\n", g.sha256))
@@ -316,7 +316,7 @@ fn generate_downloads_verifies_lists_and_writes_the_spec_inputs() {
         g.spec
             .contains("# Source archive: https://developer.download.nvidia.com/")
     );
-    assert_eq!(g.rpmlintrc_file, "cuda-cudart.rpmlintrc");
+    assert_eq!(g.rpmlintrc_file, "cuda-cudart-rpmlintrc");
     assert!(g.rpmlintrc.contains("filelist-forbidden-fhs23"));
     // Every filter has its reason on the line above.
     let rc: Vec<&str> = g.rpmlintrc.lines().collect();

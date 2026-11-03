@@ -87,7 +87,7 @@ pub fn generate(
         crate::spec_tidy::with_archive_note(&spec, &url, &archive.sha256.to_ascii_lowercase());
     Ok(Generated {
         spec,
-        rpmlintrc_file: format!("{rpm_name}.rpmlintrc"),
+        rpmlintrc_file: format!("{rpm_name}-rpmlintrc"),
         rpmlintrc,
         archive: dest,
         url,
@@ -115,7 +115,7 @@ pub(super) fn generate_filesystem(
     }
     Ok(Generated {
         spec: crate::nvidia_spec::redist_filesystem_spec(&mm, &have),
-        rpmlintrc_file: format!("{rpm_name}.rpmlintrc"),
+        rpmlintrc_file: format!("{rpm_name}-rpmlintrc"),
         rpmlintrc: crate::nvidia_spec::redist_filesystem_rpmlintrc(),
         archive: checkout_dir.join("no-archive"),
         url: String::new(),

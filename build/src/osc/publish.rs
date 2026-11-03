@@ -109,6 +109,12 @@ pub(super) fn spec_source_names(spec_text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether a source of `spec_text` is exactly the file `name`. `Name` and
+/// `Version` are expanded; a source with any other macro never matches.
+pub fn spec_names_source(spec_text: &str, name: &str) -> bool {
+    spec_source_names(spec_text).iter().any(|n| n == name)
+}
+
 /// [`spec_source_names`] of each spec of a package on its own. A spec expands
 /// its own `Name:` and `Version:`: a sibling spec at another version
 /// (elfutils-debuginfod next to elfutils) names its own archive, and reading the
@@ -288,28 +294,15 @@ fn is_publishable(
         // The audit trail of a Cargo workspace repair (see the pipeline).
         "cargo-workspace-fix.txt",
     ];
+    // An rpmlintrc (`<name>-rpmlintrc`, or an older `<name>.rpmlintrc`) is published
+    // only when a `Source:` names it: an unreferenced one is dropped with the commit.
     const SUFFIXES: &[&str] = &[
-        ".spec",
-        ".changes",
-        ".rpmlintrc",
-        ".obsinfo",
-        ".tar.gz",
-        ".tar.bz2",
-        ".tar.xz",
-        ".tar.zst",
-        ".tar",
-        ".tgz",
-        ".tbz",
-        ".txz",
-        ".zip",
-        ".crate",
+        ".spec", ".changes", ".obsinfo", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar",
+        ".tgz", ".tbz", ".txz", ".zip", ".crate",
         // A prebuilt wheel used as the source, and the pristine copy of an
         // archive the pipeline rewrote (kept so its provenance is auditable).
-        ".whl",
-        // Detached signatures and keyrings that ship beside a source archive.
-        ".sig",
-        ".asc",
-        ".keyring",
+        ".whl", // Detached signatures and keyrings that ship beside a source archive.
+        ".sig", ".asc", ".keyring",
     ];
     // `foo.tar.gz.orig`: the archive as upstream shipped it. A patch backup
     // (`foo.spec.orig`) is not published.
@@ -336,7 +329,7 @@ pub(super) fn is_removed_rpmlintrc_source(line: &str, removed: &[String]) -> boo
         .is_some_and(|source| removed.iter().any(|r| r == source.file()))
 }
 
-/// Delete zero-byte `*.rpmlintrc` files and the `SourceN:` lines of the spec
+/// Delete zero-byte `*-rpmlintrc` and `*.rpmlintrc` files and the `SourceN:` lines of the spec
 /// that name them: an empty filter file is noise in the package. Returns the
 /// names removed.
 pub fn drop_empty_rpmlintrc(checkout_dir: &Path) -> Vec<String> {
@@ -348,7 +341,7 @@ pub fn drop_empty_rpmlintrc(checkout_dir: &Path) -> Vec<String> {
     entries.sort_by_key(|e| e.file_name());
     for e in &entries {
         let name = e.file_name().to_string_lossy().to_string();
-        if name.ends_with(".rpmlintrc")
+        if (name.ends_with(".rpmlintrc") || name.ends_with("-rpmlintrc"))
             && e.metadata().is_ok_and(|m| m.is_file() && m.len() == 0)
             && fs::remove_file(e.path()).is_ok()
         {

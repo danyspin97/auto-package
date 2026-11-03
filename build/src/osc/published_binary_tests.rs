@@ -127,6 +127,20 @@ fn an_empty_rpmlintrc_goes_with_its_source_line() {
 }
 
 #[test]
+fn an_empty_dash_rpmlintrc_goes_with_its_source_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("p.spec"),
+        "Name: p\nSource0: p-1.tar.gz\nSource99: p-rpmlintrc\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("p-rpmlintrc"), "").unwrap();
+    assert_eq!(drop_empty_rpmlintrc(dir.path()), ["p-rpmlintrc"]);
+    let spec = std::fs::read_to_string(dir.path().join("p.spec")).unwrap();
+    assert_eq!(spec, "Name: p\nSource0: p-1.tar.gz\n");
+}
+
+#[test]
 fn only_the_source_lines_of_removed_rpmlintrc_files_go() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

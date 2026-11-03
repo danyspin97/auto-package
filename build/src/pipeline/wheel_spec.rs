@@ -153,13 +153,21 @@ fn write_wheel_rpmlintrc(
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
 ) {
     match crate::spec::wheel_rpmlintrc(pkg_name, wheel_filename, layout) {
-        Some((file, text)) => write_or_warn(checkout_dir.join(file), text),
+        Some((file, text)) => {
+            write_or_warn(checkout_dir.join(&file), text);
+            // An earlier release of the tool named it `python-<name>.rpmlintrc`.
+            if let Err(why) = crate::spec::migrate_dot_rpmlintrc(checkout_dir, &file) {
+                ap_core::diag!("  {why}");
+            }
+        }
         // A zero-byte rpmlintrc left by an earlier run is a Source99 that
         // does nothing: remove it.
         None => {
-            let stale = checkout_dir.join(format!("python-{}.rpmlintrc", pkg_name.to_lowercase()));
-            if std::fs::metadata(&stale).is_ok_and(|m| m.len() == 0) {
-                let _ = std::fs::remove_file(stale);
+            for ext in ["-rpmlintrc", ".rpmlintrc"] {
+                let stale = checkout_dir.join(format!("python-{}{ext}", pkg_name.to_lowercase()));
+                if std::fs::metadata(&stale).is_ok_and(|m| m.len() == 0) {
+                    let _ = std::fs::remove_file(stale);
+                }
             }
         }
     }

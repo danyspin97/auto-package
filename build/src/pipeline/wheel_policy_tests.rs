@@ -50,15 +50,21 @@ fn switching_to_a_wheel_clears_the_source_recipe_and_keeps_the_wheel_files() {
         "_constraints",
         "a.patch",
         "pytorch-v2.14.0.tar.gz",
-        "python-torch-rpmlintrc",
-        "python-torch.spec",
-        "python-torch.changes",
+        "old-rpmlintrc",
         "python-torch.rpmlintrc",
+        "mentioned-rpmlintrc",
+        "python-torch-rpmlintrc",
+        "python-torch.changes",
         "torch-2.14.1-cp313.whl",
         "_link",
     ] {
         std::fs::write(dir.path().join(f), "x").unwrap();
     }
+    std::fs::write(
+        dir.path().join("python-torch.spec"),
+        "Name: python-torch\nSource99:       python-torch-rpmlintrc\n# mentioned-rpmlintrc\n",
+    )
+    .unwrap();
     std::fs::create_dir(dir.path().join("pytorch")).unwrap();
     purge_source_recipe(dir.path());
     let mut left: Vec<String> = std::fs::read_dir(dir.path())
@@ -70,8 +76,8 @@ fn switching_to_a_wheel_clears_the_source_recipe_and_keeps_the_wheel_files() {
         left,
         [
             "_link",
+            "python-torch-rpmlintrc",
             "python-torch.changes",
-            "python-torch.rpmlintrc",
             "python-torch.spec",
             "pytorch",
             "torch-2.14.1-cp313.whl"

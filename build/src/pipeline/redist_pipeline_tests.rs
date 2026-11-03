@@ -101,6 +101,9 @@ fn a_cuda_wheel_node_is_packaged_from_nvidias_archive_up_to_the_written_spec() {
         .path()
         .join("cuda_cudart-linux-x86_64-13.3.0-archive.tar.xz");
     std::fs::write(&stale, b"old").unwrap();
+    // The dot-named rpmlintrc of an earlier release of the tool.
+    let old_rc = dir.path().join("cuda-cudart.rpmlintrc");
+    std::fs::write(&old_rc, "addFilter(\"x\")\n").unwrap();
     // The node `nvidia-cuda-runtime` is the package `cuda-cudart`, at the manifest's version.
     let config = config("nvidia-cuda-runtime", "13.4.92", "x86_64");
     assert_eq!(config.rpm_name, "cuda-cudart");
@@ -122,15 +125,16 @@ fn a_cuda_wheel_node_is_packaged_from_nvidias_archive_up_to_the_written_spec() {
     assert!(spec.contains("License:        SUSE-NonFree\n"));
     assert!(!spec.contains("%pyproject") && !spec.contains("%python_expand"));
     assert!(spec.contains(&format!("# Source archive sha256: {}\n", fake.advertised)));
-    let rc = std::fs::read_to_string(dir.path().join("cuda-cudart.rpmlintrc")).unwrap();
+    let rc = std::fs::read_to_string(dir.path().join("cuda-cudart-rpmlintrc")).unwrap();
     assert!(rc.contains("filelist-forbidden-fhs23"));
+    assert!(!old_rc.exists(), "the old dot-named file is migrated");
     assert!(dir.path().join(format!("{top}.tar.xz")).is_file());
     assert!(!stale.exists());
     // OBS gets the spec, the archive and the rpmlintrc.
     let plan = osc::publish_plan(dir.path());
     for f in [
         "cuda-cudart.spec",
-        "cuda-cudart.rpmlintrc",
+        "cuda-cudart-rpmlintrc",
         &format!("{top}.tar.xz"),
     ] {
         assert!(
