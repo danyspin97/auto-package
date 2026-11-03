@@ -66,6 +66,37 @@ fn merged_conventions_point_to_a_topic_file() {
     assert!(topics <= 50, "{topics} topic files");
 }
 
+/// A topic file names a convention merged into another file as `convention M
+/// (section N)`, never by the stub's number: a stub costs the agent an extra read.
+#[test]
+fn topic_files_do_not_name_a_stub_of_another_file() {
+    let table = crate::conventions_table::CONVENTIONS;
+    let stub_target = |n: u32| {
+        let (_, text) = table.iter().find(|(k, _)| *k == n)?;
+        let (_, target) = text.trim_end().split_once(". Merged into ")?;
+        target.trim_end_matches('.').parse::<u32>().ok()
+    };
+    for (own, text) in table.iter() {
+        if stub_target(*own).is_some() {
+            continue;
+        }
+        for (i, _) in text.match_indices("convention ") {
+            let digits: String = text[i + "convention ".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            let Ok(n) = digits.parse::<u32>() else {
+                continue;
+            };
+            if let Some(target) = stub_target(n)
+                && target != *own
+            {
+                panic!("convention {own} names the stub {n} (merged into {target})");
+            }
+        }
+    }
+}
+
 /// A build log can contain a fence and then text that reads like an
 /// instruction. The block must stay open until the real closing fence.
 #[test]
