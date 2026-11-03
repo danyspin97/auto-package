@@ -3,6 +3,7 @@
 //! compressed form of an archive is verified over its decompressed stream, and
 //! no gpg is a skip.
 
+use super::keyring_accept::accept_command;
 use super::source_signature::*;
 use super::*;
 use std::io::Write;
@@ -471,4 +472,99 @@ fn gpg_is_only_ever_run_in_its_own_home() {
         env.iter()
             .any(|(k, v)| *k == "GNUPGHOME" && *v == Some(home.as_os_str()))
     );
+}
+
+/// The dbus-1 shape: the keyring holds only an old key, now expired, and the
+/// archive is signed by a new key. The refusal names the new fingerprint, what
+/// the keyring holds (with the expiry), where to check the fingerprint and the
+/// accept command.
+#[test]
+fn a_new_key_refusal_says_what_the_keyring_holds() {
+    if !gpg_ready() {
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
+        return;
+    }
+    let old = expired_signer(SIGNER_A);
+    let new = signer(SIGNER_B);
+    let fpr_old = fingerprint(&old, SIGNER_A);
+    let fpr_new = fingerprint(&new, SIGNER_B);
+    let dir = package(&new, SIGNER_B, &[(&old, SIGNER_A)]);
+    let SignatureCheck::Refused(why) = check_with(Path::new("gpg"), dir.path()) else {
+        panic!("a signature by a key the keyring lacks passes");
+    };
+    assert!(why.contains(&fpr_new), "{why}");
+    assert!(
+        why.contains(&format!("it holds: {fpr_old} ({SIGNER_A}, expired")),
+        "{why}"
+    );
+    assert!(why.contains("announcement or website"), "{why}");
+    assert!(why.contains(&accept_command(dir.path(), &fpr_new)), "{why}");
+    assert!(why.contains("so none is known here"), "{why}");
+}
+
+#[test]
+fn the_keyring_listing_is_sanitised_and_says_the_expiry_date() {
+    use super::keyring_listing::{parse_holds, printable};
+    // A C1 control (U+009B) and a right-to-left override (U+202E), raw and as
+    // gpg's \x escapes, and an escaped colon.
+    let raw = "Eve\u{85}\u{202e}moc <a\\x3ab@x>\\xc2\\x9b";
+    assert_eq!(printable(raw), "Evemoc <a:b@x>");
+    // The separators of the listing cannot forge an entry, and the separators,
+    // line and paragraph ends and zero-width marks are dropped or replaced.
+    assert_eq!(printable("x); FPR (y"), "x__ FPR _y");
+    assert_eq!(
+        printable("a\u{2028}b\u{2029}c\u{200e}d\u{200f}e\u{200b}f\u{061c}g"),
+        "abcdefg"
+    );
+    let colons = "pub:e:4096:1:AAAA:1000000000:1700000000::u:::scESC:\n\
+                  fpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\n\
+                  uid:e::::1000000000::H::Evil\\xe2\\x80\\xae <e@x>::::::::::0:\n\
+                  pub:v:4096:1:BBBB:1000000000:1900000000::u:::scESC:\n\
+                  fpr:::::::::FEDCBA9876543210FEDCBA9876543210FEDCBA98:\n\
+                  uid:r::::1000000000::H::Old <old@x>::::::::::0:\n";
+    assert_eq!(
+        parse_holds(colons),
+        "0123456789ABCDEF0123456789ABCDEF01234567 (Evil <e@x>, expired on 2023-11-14); \
+         FEDCBA9876543210FEDCBA9876543210FEDCBA98 (Old <old@x> (revoked), expires 2030-03-17)"
+    );
+}
+
+#[test]
+fn a_user_id_cannot_hide_text_fake_a_code_span_or_fill_the_refusal() {
+    use super::keyring_listing::printable;
+    // Every invisible character the listing drops, each between two letters.
+    let hidden = [
+        '\u{00AD}',
+        '\u{034F}',
+        '\u{115F}',
+        '\u{1160}',
+        '\u{180B}',
+        '\u{180E}',
+        '\u{2065}',
+        '\u{206A}',
+        '\u{206F}',
+        '\u{2800}',
+        '\u{3164}',
+        '\u{FE00}',
+        '\u{FE0F}',
+        '\u{FFA0}',
+        '\u{FFF9}',
+        '\u{FFFC}',
+        '\u{E0001}',
+        '\u{E0041}',
+        '\u{E007F}',
+        '\u{E0100}',
+    ];
+    for c in hidden {
+        assert_eq!(printable(&format!("a{c}b")), "ab", "U+{:04X}", c as u32);
+    }
+    // A backtick or a quote cannot open a code span or close a string.
+    assert_eq!(printable("x `ap accept y` \"z\""), "x _ap accept y_ _z_");
+    // A name of 64 KB is cut, with the cut said.
+    let long = "n".repeat(65_536);
+    let cut = printable(&long);
+    assert_eq!(cut.chars().count(), 83, "{cut}");
+    assert!(cut.ends_with("n..."), "{cut}");
+    // A name at the limit is whole.
+    assert_eq!(printable(&"n".repeat(80)), "n".repeat(80));
 }

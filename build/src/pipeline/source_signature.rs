@@ -10,6 +10,7 @@
 //! keyring lacks is a maintainer's decision.
 
 use super::keyring_accept::accept_command;
+use super::keyring_listing::keyring_holds;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -42,6 +43,12 @@ pub(super) fn check_signed_sources(checkout: &Path) -> SignatureCheck {
     check_with(Path::new("gpg"), checkout)
 }
 
+/// The keyring of the checkout: its file name and what it holds, for a refusal.
+pub(super) struct Keyring<'a> {
+    file: &'a str,
+    holds: String,
+}
+
 pub(super) fn check_with(gpg: &Path, checkout: &Path) -> SignatureCheck {
     let names = file_names(checkout);
     let signatures: Vec<&String> = names
@@ -70,7 +77,7 @@ pub(super) fn check_with(gpg: &Path, checkout: &Path) -> SignatureCheck {
             keyrings.len()
         ));
     }
-    let Some(keyring) = keyrings.first() else {
+    let Some(file) = keyrings.first() else {
         return SignatureCheck::Skipped(format!(
             "{} is signed, but the checkout has no keyring, so its signature is not checked here",
             signatures[0]
@@ -99,13 +106,13 @@ pub(super) fn check_with(gpg: &Path, checkout: &Path) -> SignatureCheck {
     }
     match gpg_command(gpg, home)
         .arg("--import")
-        .arg(checkout.join(keyring))
+        .arg(checkout.join(file))
         .output()
     {
         Ok(o) if o.status.success() => {}
         Ok(o) => {
             return SignatureCheck::Refused(format!(
-                "the keyring {keyring} cannot be read by gpg ({}), so no signature is \
+                "the keyring {file} cannot be read by gpg ({}), so no signature is \
                  checked against it; a maintainer must look at it. Nothing was sent to OBS",
                 first_line(&o.stderr)
             ));
@@ -117,8 +124,12 @@ pub(super) fn check_with(gpg: &Path, checkout: &Path) -> SignatureCheck {
             ));
         }
     }
+    let keyring = Keyring {
+        file: file.as_str(),
+        holds: keyring_holds(gpg, home),
+    };
     for sig in signatures {
-        match check_signature(gpg, home, checkout, sig, keyring) {
+        match check_signature(gpg, home, checkout, sig, &keyring) {
             Ok(None) => {}
             Ok(Some(refusal)) => return SignatureCheck::Refused(refusal),
             Err(note) => return SignatureCheck::Skipped(note),
@@ -135,7 +146,7 @@ fn check_signature(
     home: &Path,
     checkout: &Path,
     sig: &str,
-    keyring: &str,
+    keyring: &Keyring,
 ) -> Result<Option<String>, String> {
     let archive = archive_of(sig);
     if checkout.join(&archive).is_file() {
@@ -160,7 +171,7 @@ fn verify_file(
     checkout: &Path,
     sig: &str,
     archive: &str,
-    keyring: &str,
+    keyring: &Keyring,
 ) -> Result<Option<String>, String> {
     let out = gpg_command(gpg, home)
         .args(["--status-fd", "1", "--verify"])
@@ -183,7 +194,7 @@ fn verify_compressed(
     sig: &str,
     compressed: &str,
     tool: &str,
-    keyring: &str,
+    keyring: &Keyring,
 ) -> Result<Option<String>, String> {
     let not_run = |e: std::io::Error| {
         format!("{tool} cannot run ({e}), so the signature of {compressed} is not checked here")
@@ -253,7 +264,7 @@ fn refusal(
     checkout: &Path,
     archive: &str,
     sig: &str,
-    keyring: &str,
+    keyring: &Keyring,
     status: &str,
     out: &std::process::Output,
 ) -> Option<String> {
@@ -306,9 +317,10 @@ fn refusal(
     }
     if line("BADSIG").is_some() {
         return Some(format!(
-            "the new {archive} does not verify against {sig} with {keyring}: the archive or its \
+            "the new {archive} does not verify against {sig} with {}: the archive or its \
              signature is not what the key signed; a maintainer must check it. Nothing was sent \
-             to OBS"
+             to OBS",
+            keyring.file
         ));
     }
     Some(format!(
@@ -320,13 +332,23 @@ fn refusal(
 
 /// The refusal for a signature by a key the keyring lacks. `key` is the full
 /// fingerprint when gpg has it (the signature's issuer fingerprint), else only
-/// the key ID. The text says where the key comes from and the command that
-/// accepts it once a maintainer has checked it on a second channel.
-fn not_in_keyring(checkout: &Path, archive: &str, sig: &str, key: &str, keyring: &str) -> String {
+/// the key ID. The text says what the keyring holds, where to check the
+/// fingerprint, and the command that accepts the key once a maintainer has
+/// checked it on a second channel.
+fn not_in_keyring(
+    checkout: &Path,
+    archive: &str,
+    sig: &str,
+    key: &str,
+    keyring: &Keyring,
+) -> String {
     let full = key.len() == 40 && key.chars().all(|c| c.is_ascii_hexdigit());
     let (named, shown) = if full {
         (
-            format!("key {key}, from the issuer fingerprint of {sig}"),
+            format!(
+                "key {key}, from the issuer fingerprint of {sig}; the signature carries no user \
+                 ID, so none is known here"
+            ),
             key,
         )
     } else {
@@ -339,10 +361,13 @@ fn not_in_keyring(checkout: &Path, archive: &str, sig: &str, key: &str, keyring:
         )
     };
     format!(
-        "the new {archive} is signed with {named}, which is not in {keyring}; a maintainer must \
-         verify the key and accept it with `{}`. The tool never trusts a key by itself. Nothing \
-         was sent to OBS",
-        accept_command(checkout, shown)
+        "the new {archive} is signed with {named}, which is not in {file} (it holds: {holds}). \
+         Check the fingerprint against upstream's release announcement or website; a maintainer \
+         must decide, then run `{cmd}`. The tool never trusts a key by itself. Nothing was sent \
+         to OBS",
+        file = keyring.file,
+        holds = keyring.holds,
+        cmd = accept_command(checkout, shown)
     )
 }
 

@@ -369,6 +369,7 @@ mod commit_message_tests;
 pub mod keyring_accept;
 #[cfg(test)]
 mod keyring_accept_tests;
+mod keyring_listing;
 mod service_source;
 #[cfg(test)]
 mod service_source_tests;
