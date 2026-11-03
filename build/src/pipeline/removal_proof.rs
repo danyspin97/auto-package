@@ -276,55 +276,6 @@ pub(super) fn finish_proven_disables(
     Ok(true)
 }
 
-/// Whether the newest `.changes` entry already has a `Drop <name>` bullet.
-fn drop_bullet_exists(checkout_dir: &Path, name: &str) -> bool {
-    let Some(text) =
-        osc::newest_changes_file(checkout_dir).and_then(|f| std::fs::read_to_string(f).ok())
-    else {
-        return false;
-    };
-    let head = format!("Drop {name}");
-    text.lines()
-        .skip(1)
-        .take_while(|l| !(l.trim().len() >= 20 && l.trim().bytes().all(|b| b == b'-')))
-        .any(|l| {
-            l.trim()
-                .trim_start_matches(['-', '*', ' '])
-                .starts_with(&head)
-        })
-}
-
-/// The `.changes` bullets of the patches [`finish_proven_disables`] removed:
-/// `Drop <name>: already applied upstream (<proof>)`, once the edit is kept.
-pub(super) fn note_proven_disables(
-    config: &PipelineConfig,
-    checkout_dir: &Path,
-    judged: &RemovalJudgement,
-    reporter: &dyn Reporter,
-    step: &StepDir,
-) {
-    for (name, proof) in judged
-        .proven
-        .iter()
-        .filter(|(n, _)| judged.disabled.contains(n))
-    {
-        // The agent's own bullet may already say it was dropped.
-        if drop_bullet_exists(checkout_dir, name) {
-            continue;
-        }
-        warn_if_err(
-            reporter,
-            "adding the .changes entry for a disabled patch",
-            osc::add_release_changes_entry(
-                checkout_dir,
-                &config.version,
-                &crate::patch_check::proven_drop_bullet(name, *proof),
-                Emit::new(reporter, step.id),
-            ),
-        );
-    }
-}
-
 /// The patches whose removal is refused (see [`judge_removals`]).
 pub(super) fn unproven_patch_removals(
     version: &str,
@@ -334,6 +285,28 @@ pub(super) fn unproven_patch_removals(
     snapshot: Option<&CheckoutSnapshot>,
 ) -> Vec<Refusal> {
     judge_removals(version, checkout_dir, spec_path, before, snapshot).refused
+}
+
+/// `bullet` with the `Drop` bullet of each patch removed with a proof added, one per
+/// line: the pipeline writes those, the agent does not. A patch the agent's own
+/// bullet already drops (a line starting `Drop <name>`) gets no second one.
+pub(super) fn with_drop_bullets(bullet: String, proven: &[(String, DropProof)]) -> String {
+    proven.iter().fold(bullet, |text, (name, proof)| {
+        let head = format!("Drop {name}");
+        if text.lines().any(|l| {
+            l.trim()
+                .trim_start_matches(['-', '*', ' '])
+                .starts_with(&head)
+        }) {
+            return text;
+        }
+        let drop = crate::patch_check::proven_drop_bullet(name, *proof);
+        if text.trim().is_empty() {
+            drop
+        } else {
+            format!("{text}\n{drop}")
+        }
+    })
 }
 
 /// The proof the `.changes` bullet of a removal states, `None` when no proof can

@@ -191,27 +191,26 @@ fn apply_turn_outcome_with(
             let judged = judge_removals(&config.version, checkout_dir, spec_path, before, snapshot);
             let unproven = judged.refused.clone();
             // A patch the edit disabled with a proof is finished as a removal
-            // before the checks, which see it removed.
-            let finished = if unproven.is_empty() {
-                match finish_proven_disables(checkout_dir, spec_path, before, &judged, snapshot) {
-                    Ok(done) => done,
-                    Err(e) => {
-                        restore_spec(spec_path, before, Some(step), reporter);
-                        if let Some(snap) = snapshot {
-                            snap.restore_keeping(reporter, Some(step), &keep);
-                        }
-                        return Err(
-                            format!("{label}: could not finish the disabled patch: {e}").into()
-                        );
-                    }
+            // before the checks, which see it removed. Its `Drop` bullet is
+            // written with the one of a removed patch (`with_drop_bullets`).
+            if unproven.is_empty()
+                && let Err(e) =
+                    finish_proven_disables(checkout_dir, spec_path, before, &judged, snapshot)
+            {
+                restore_spec(spec_path, before, Some(step), reporter);
+                if let Some(snap) = snapshot {
+                    snap.restore_keeping(reporter, Some(step), &keep);
                 }
-            } else {
-                false
-            };
+                return Err(format!("{label}: could not finish the disabled patch: {e}").into());
+            }
+            let proven = judged.proven;
             // A new patch must be named by the bullet; a build system switch
             // needs evidence and gets its own bullet (`build_switch`).
             let switch = switch_of_edit(spec_path, before);
-            let bullet_source = with_switch_bullet(turn_bullet_source(outcome), switch);
+            let bullet_source = with_drop_bullets(
+                with_switch_bullet(turn_bullet_source(outcome), switch),
+                &proven,
+            );
             let changed = if !unproven.is_empty() {
                 let why = reject_unproven_removal(
                     spec_path,
@@ -298,9 +297,6 @@ fn apply_turn_outcome_with(
                     });
                 }
                 add_edit_changes_entry(config, checkout_dir, reporter, step, &bullet_source);
-                if finished {
-                    note_proven_disables(config, checkout_dir, &judged, reporter, step);
-                }
             }
             Ok(if changed {
                 TurnEffect::Edited

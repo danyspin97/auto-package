@@ -386,8 +386,12 @@ mod patch_rules_spec;
 mod patch_rules_tests;
 mod spend_guard;
 use spend_guard::*;
+mod changelog_required;
 #[cfg(test)]
 mod refusal_callers_tests;
+use changelog_required::*;
+#[cfg(test)]
+mod changelog_required_tests;
 mod service_edit;
 #[cfg(test)]
 mod service_edit_tests;

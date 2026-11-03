@@ -197,3 +197,102 @@ fn a_gated_edit_that_adds_a_patch_is_named_before_it_is_kept() {
         changes(&c)
     );
 }
+
+#[test]
+fn an_edit_with_no_changelog_writes_no_bullet_and_not_its_reasoning() {
+    let c = case();
+    let after = format!("{BEFORE}BuildRequires:  cmake\n");
+    std::fs::write(&c.spec_path, &after).unwrap();
+    let mut out = edited("");
+    out.reasoning = "I added the missing cmake dependency".into();
+    let (effect, rejected) = apply(&c, "FixAfterBuild — attempt 1", &out);
+    assert_eq!(effect, TurnEffect::Edited, "{rejected:?}");
+    assert_eq!(std::fs::read_to_string(&c.spec_path).unwrap(), after);
+    let text = changes(&c);
+    assert!(!text.contains("cmake"), "{text}");
+    assert!(!text.contains("Update the packaging"), "{text}");
+}
+
+#[test]
+fn an_edit_that_changes_more_than_dependencies_needs_a_changelog() {
+    let c = case();
+    let after = format!("{BEFORE}%files\n%{{_bindir}}/foo\n");
+    std::fs::write(&c.spec_path, &after).unwrap();
+    let (effect, rejected) = apply(&c, "FixAfterBuild — attempt 1", &edited(""));
+    assert_eq!(effect, TurnEffect::NoChange);
+    let why = rejected.expect("the edit is rejected");
+    assert!(
+        why.contains("changelog") && why.contains("convention 40"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read_to_string(&c.spec_path).unwrap(), BEFORE);
+
+    // With its bullet the same edit is kept and the bullet is written.
+    let c = case();
+    std::fs::write(&c.spec_path, &after).unwrap();
+    let (effect, rejected) = apply(
+        &c,
+        "FixAfterBuild — attempt 1",
+        &edited("Own the foo binary"),
+    );
+    assert_eq!(effect, TurnEffect::Edited, "{rejected:?}");
+    assert!(
+        changes(&c).contains("Own the foo binary"),
+        "{}",
+        changes(&c)
+    );
+}
+
+#[test]
+fn a_conditional_around_a_check_line_needs_a_changelog() {
+    let before = format!("{BEFORE}%check\npytest\n");
+    let c = case();
+    std::fs::write(&c.spec_path, &before).unwrap();
+    let snapshot = CheckoutSnapshot::take(&c.checkout);
+    let after = before.replace("pytest\n", "%if 0\npytest\n%endif\n");
+    std::fs::write(&c.spec_path, &after).unwrap();
+    let why = reject_missing_changelog(
+        &c.spec_path,
+        &before,
+        Some(&snapshot),
+        &c.step,
+        &ap_core::sink::NULL_REPORTER,
+        c.checkout.join("notes.md"),
+        &[],
+        "",
+        false,
+        "FixAfterBuild",
+    )
+    .expect("the edit is rejected");
+    assert!(why.contains("changelog"), "{why}");
+    assert_eq!(std::fs::read_to_string(&c.spec_path).unwrap(), before);
+}
+
+#[test]
+fn an_rpmlintrc_only_edit_needs_a_changelog_on_the_gate_path_too() {
+    let c = case();
+    std::fs::write(
+        c.checkout.join("foo-rpmlintrc"),
+        "# reason: vendor binary\naddFilter(\"missing-hash-section\")\n",
+    )
+    .unwrap();
+    let after = format!("{BEFORE}Source99:       foo-rpmlintrc\n");
+    std::fs::write(&c.spec_path, &after).unwrap();
+    let kept = gate_turn_edit_without_accept(
+        &c.spec_path,
+        BEFORE,
+        Some(&c.snapshot),
+        &c.step,
+        &ap_core::sink::NULL_REPORTER,
+        "\n## test — edits kept\n",
+        c.checkout.join("notes.md"),
+        &[],
+        &c.config,
+        &c.checkout,
+        "PatchDependency - test",
+        "",
+    );
+    assert!(!kept, "an rpmlintrc and a Source line need a bullet");
+    assert_eq!(std::fs::read_to_string(&c.spec_path).unwrap(), BEFORE);
+    assert!(!c.checkout.join("foo-rpmlintrc").exists());
+}

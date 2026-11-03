@@ -157,8 +157,8 @@ pub(super) fn gate_turn_edit_without_accept(
         )
         .is_none();
     }
-    let unproven =
-        unproven_patch_removals(&config.version, checkout_dir, spec_path, before, snapshot);
+    let judged = judge_removals(&config.version, checkout_dir, spec_path, before, snapshot);
+    let unproven = judged.refused;
     if !unproven.is_empty() {
         reject_unproven_removal(
             spec_path, before, snapshot, step, reporter, notes_path, keep, label, &unproven,
@@ -180,6 +180,22 @@ pub(super) fn gate_turn_edit_without_accept(
     {
         return false;
     }
+    if reject_missing_changelog(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+        bullet_source,
+        false,
+        label,
+    )
+    .is_some()
+    {
+        return false;
+    }
     if !accept_or_restore_with_snapshot(
         spec_path,
         before,
@@ -194,13 +210,15 @@ pub(super) fn gate_turn_edit_without_accept(
         return false;
     }
     // A patch the edit adds is named in `.changes` as an edit the turn is kept for
-    // is: the bullet the turn gave, not one the agent wrote by hand.
+    // is: the bullet the turn gave, not one the agent wrote by hand. The pipeline
+    // adds the `Drop` bullet of each patch the edit removed with a proof.
     let after = std::fs::read_to_string(spec_path).unwrap_or_default();
-    if !added_patches(spec_path, before, &after, snapshot).is_empty() {
+    let entry = with_drop_bullets(bullet_source.to_string(), &judged.proven);
+    if !added_patches(spec_path, before, &after, snapshot).is_empty() || !judged.proven.is_empty() {
         if let Some(snap) = snapshot {
             snap.restore_changes_files(reporter, Some(step));
         }
-        add_edit_changes_entry(config, checkout_dir, reporter, step, bullet_source);
+        add_edit_changes_entry(config, checkout_dir, reporter, step, &entry);
     }
     true
 }

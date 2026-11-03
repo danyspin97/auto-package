@@ -4,18 +4,10 @@ use super::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::prompt_notes::*;
 
-/// The text a turn's `.changes` bullet is made of: the changelog it gave, or,
-/// when it gave none, its reasoning as one line.
+/// The text a turn's `.changes` bullet is made of: the changelog it gave. An
+/// empty one stays empty: an edit that only changes dependencies has no bullet.
 pub(super) fn turn_bullet_source(outcome: &crate::agent::TurnOutcome) -> String {
-    if outcome.changelog.trim().is_empty() {
-        outcome
-            .reasoning
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    } else {
-        outcome.changelog.clone()
-    }
+    outcome.changelog.trim().to_string()
 }
 
 /// Adds the `.changes` entry of an agent edit: the turn's bullet, with the macros
@@ -27,6 +19,9 @@ pub(super) fn add_edit_changes_entry(
     step: &StepDir,
     bullet_source: &str,
 ) {
+    if bullet_source.trim().is_empty() {
+        return;
+    }
     warn_if_err(
         reporter,
         "adding the .changes entry for the agent's edit",

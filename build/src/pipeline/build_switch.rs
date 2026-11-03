@@ -185,9 +185,23 @@ pub(super) fn reject_unchecked_edit(
             snapshot,
             step,
             reporter,
-            notes_path,
+            notes_path.clone(),
             keep,
             bullet_source,
+            label,
+        )
+    })
+    .or_else(|| {
+        reject_missing_changelog(
+            spec_path,
+            before,
+            snapshot,
+            step,
+            reporter,
+            notes_path,
+            keep,
+            &turn_bullet_source(outcome),
+            switch.is_some(),
             label,
         )
     })
