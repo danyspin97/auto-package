@@ -132,7 +132,8 @@ Use `ls` to verify files exist. Missing sources will cause the build to fail.
 0. **Read the evidence you are given before anything else.** A build log that is
 empty or older than the spec's last edit means the build has not finished or has
 not run: return `no_change` and say so, do not read the spec for a failure that
-is not there. If the attempt journal lists an edit that is absent from the spec,
+is not there. A `no_change` with the same reasoning as the turns before it stops the
+package, so say what is new. If the attempt journal lists an edit that is absent from the spec,
 that turn was rejected before the build (an rpmspec error, a placeholder, a
 missing Source, a patch that does not apply) and rolled back with ALL of its
 changes: do not re-apply the same text, redo every change of that turn together
