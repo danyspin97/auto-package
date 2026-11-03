@@ -203,6 +203,8 @@ pub enum Task {
     /// One cheap look at a spec that has just built, to drop leftovers of the
     /// failed attempts that no longer serve a purpose.
     PostBuildReview,
+    /// A fresh look at one rewritten patch.
+    PatchReview,
 }
 
 impl std::fmt::Display for Task {
@@ -218,6 +220,7 @@ impl std::fmt::Display for Task {
             Task::TranslateUnresolvableDeps => write!(f, "translate deps"),
             Task::PatchDependency => write!(f, "patch dependency"),
             Task::PostBuildReview => write!(f, "post-build review"),
+            Task::PatchReview => write!(f, "patch review"),
         }
     }
 }
