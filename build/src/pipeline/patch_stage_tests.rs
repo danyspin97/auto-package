@@ -91,6 +91,8 @@ struct Case {
     _root: tempfile::TempDir,
     result: Result<(), PipelineResult>,
     contexts: Vec<String>,
+    /// The patches a reviewer rewrote itself.
+    rewrote: Vec<String>,
     /// The context of each review turn.
     reviews: Vec<String>,
     /// The `patch_reviewed` events: patch, verdict, reason.
@@ -307,6 +309,7 @@ fn run_reviewed(
         result,
         contexts,
         reviews,
+        rewrote: crate::pipeline::patch_review::reviewer_rewrites(&ctx.ws),
         verdicts: log.0.lock().unwrap().clone(),
         attempts: st.attempts,
         notes,

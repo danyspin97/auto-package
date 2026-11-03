@@ -372,6 +372,15 @@ pub(super) fn mark_reviewer_rewrite(ws: &Workspace, name: &str) {
     }
 }
 
+/// The patches a reviewer rewrote in this run (see [`mark_reviewer_rewrite`]).
+pub(super) fn reviewer_rewrites(ws: &Workspace) -> Vec<String> {
+    let text = std::fs::read_to_string(ws.dir().join("patch-review/rewritten")).unwrap_or_default();
+    let mut names: Vec<String> = text.lines().map(str::to_string).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Forgets the marks of an earlier run.
 pub(super) fn clear_reviewer_rewrites(ws: &Workspace) {
     let _ = std::fs::remove_file(ws.dir().join("patch-review/rewritten"));

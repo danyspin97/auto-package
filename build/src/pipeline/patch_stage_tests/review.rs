@@ -174,6 +174,7 @@ fn a_rewrite_that_applies_is_what_the_next_round_reviews() {
     assert_eq!(verdicts(&case), ["rewritten", "accepted"]);
     assert!(case.reviews[1].contains("+extra"), "{}", case.reviews[1]);
     assert_eq!(read(&case, "a.patch"), BETTER);
+    assert_eq!(case.rewrote, ["a.patch"]);
 }
 
 #[test]

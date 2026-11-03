@@ -32,6 +32,9 @@ pub enum RiskFlag {
     /// A version that moves three or more minor series in the same major
     /// (`3.4.13` to `3.9.7`, `3.4` to `3.9`): a person checks what changed.
     LargeJump { from: String, to: String },
+    /// A patch the patch reviewer rewrote itself, not only judged: a person
+    /// looks at it before it is submitted.
+    ReviewerRewrote { patch: String },
 }
 
 impl RiskFlag {
@@ -63,9 +66,24 @@ impl RiskFlag {
             RiskFlag::LargeJump { from, to } => {
                 format!("RISK: large jump {from} -> {to}, needs a review")
             }
+            RiskFlag::ReviewerRewrote { patch } => {
+                format!("RISK: {patch} was rewritten by the patch reviewer, needs a review")
+            }
         };
         one_line(&text)
     }
+}
+
+/// The flags for the patches a reviewer rewrote (`names`) that the final change
+/// still has: a patch dropped since is not flagged.
+pub fn reviewer_rewrite_flags(names: &[String], fin: &Files) -> Vec<RiskFlag> {
+    names
+        .iter()
+        .filter(|n| fin.patches.contains_key(*n))
+        .map(|patch| RiskFlag::ReviewerRewrote {
+            patch: patch.clone(),
+        })
+        .collect()
 }
 
 /// Adds the risks `found` of a commit of `run_id`. Earlier risks stay until

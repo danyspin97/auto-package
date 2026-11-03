@@ -51,7 +51,12 @@ pub(super) fn settle_risk_flags(ctx: &RunCtx, baseline: &Path) {
     };
     let tarball = find_tarball(checkout, &ctx.config.version);
     let archive = archive_files(tarball.as_deref());
-    let found = from_change(&before, &after, &archive);
+    let mut found = from_change(&before, &after, &archive);
+    // A patch the reviewer rewrote itself gets a flag next to the large-patch one.
+    found.extend(crate::risk_flags::reviewer_rewrite_flags(
+        &crate::pipeline::patch_review::reviewer_rewrites(&ctx.ws),
+        &after,
+    ));
     update_state(&ctx.ws, ctx.reporter, |st| {
         crate::risk_flags::settle(st, &ctx.config.run_id, found)
     });

@@ -558,3 +558,25 @@ fn a_jump_of_two_minor_series_or_a_new_major_is_not_flagged() {
     assert!(flags(&versioned("3.4.13"), &versioned("4.0.0")).is_empty());
     assert!(flags(&versioned("3.4.13"), &versioned("3.4.14")).is_empty());
 }
+
+#[test]
+fn a_patch_the_reviewer_rewrote_is_flagged_while_the_change_still_has_it() {
+    let mut fin = files(SPEC);
+    fin.patches.insert("fix-build.patch".into(), PATCH.into());
+    let names = vec!["fix-build.patch".to_string(), "gone.patch".to_string()];
+    let found = reviewer_rewrite_flags(&names, &fin);
+    assert_eq!(
+        found,
+        vec![RiskFlag::ReviewerRewrote {
+            patch: "fix-build.patch".into()
+        }]
+    );
+    assert_eq!(
+        found[0].line(),
+        "RISK: fix-build.patch was rewritten by the patch reviewer, needs a review"
+    );
+    let mut st = PkgState::default();
+    settle(&mut st, "r1", found.clone());
+    settle(&mut st, "r2", found);
+    assert_eq!(st.risk_flags.len(), 1);
+}
