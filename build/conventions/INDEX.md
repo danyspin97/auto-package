@@ -85,7 +85,7 @@
 85. Merged into convention 34 — read convention 34 when code ctypes-loads a .so, uses cffi, Requires an ExclusiveArch package, or lists ninja
 86. [inline] Update of a carried-forward recipe: edit only what the new release forces; SONAME; no stand-ins; bounds; component lists; header-only noarch devel
 87. Merged into convention 7 — read convention 7 when the prompt lists flaky tests or a %check failure differs between two builds
-88. Merged into conventions 86 and 10 — read convention 10 when a whole test family fails with empty output
+88. Merged into convention 10 — read convention 10 when a whole test family fails with empty output
 89. [inline] SLE, Leap and maintenance targets: minimal change, bug refs — read when the target project is SLE/Leap/maintenance or the spec gates on %sle_version
 90. Spec hygiene: no Group:, BuildRoot:, %clean, %defattr in a new spec; update keeps them unless forced, lint removes them; keep header, URL:, SPDX License: — read when a spec has them or no URL:
 91. Bundled code: unbundle via system option, else Provides: bundled() — read when the sources hold third_party/, vendor/, extern/ or FetchContent
