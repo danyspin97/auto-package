@@ -243,7 +243,7 @@ fn keyring_file(dir: &Path, name: &str, keys: &[(&Home, &str)]) {
 #[test]
 fn a_signature_by_the_keyrings_key_passes() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
@@ -254,7 +254,7 @@ fn a_signature_by_the_keyrings_key_passes() {
 #[test]
 fn a_signature_by_another_key_is_refused_with_its_fingerprint() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
@@ -273,7 +273,7 @@ fn a_signature_by_another_key_is_refused_with_its_fingerprint() {
 #[test]
 fn a_changed_archive_is_refused() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
@@ -288,7 +288,7 @@ fn a_changed_archive_is_refused() {
 #[test]
 fn a_signature_over_the_decompressed_archive_is_verified() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
@@ -333,7 +333,7 @@ fn a_decompressed_archive_signed_by_another_key_is_refused() {
 #[test]
 fn two_keyrings_are_refused_as_the_validator_does() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
@@ -349,7 +349,7 @@ fn two_keyrings_are_refused_as_the_validator_does() {
 #[test]
 fn a_signature_the_spec_does_not_name_is_checked_too() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
@@ -376,7 +376,7 @@ fn a_signature_the_spec_does_not_name_is_checked_too() {
 #[test]
 fn a_keyring_with_two_keys_verifies_either_signer() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
@@ -388,7 +388,7 @@ fn a_keyring_with_two_keys_verifies_either_signer() {
 #[test]
 fn an_expired_signing_key_is_accepted_as_the_validator_accepts_it() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let old = expired_signer(SIGNER_A);
@@ -408,7 +408,7 @@ fn an_expired_signing_key_is_accepted_as_the_validator_accepts_it() {
 #[test]
 fn a_signature_by_a_revoked_key_is_refused() {
     if !gpg_ready() {
-        eprintln!("no gpg: skipped");
+        eprintln!("gpg is not installed: skipping (the keyring tests need gpg)");
         return;
     }
     let a = signer(SIGNER_A);
