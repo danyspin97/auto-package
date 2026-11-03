@@ -19,6 +19,11 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Refusal {
     pub(super) name: String,
+    /// The patch is a security fix (see [`is_security_patch`]).
+    pub(super) security: bool,
+    /// The patch the edit declares in its place with the same bytes: a rename,
+    /// which is not judged.
+    pub(super) renamed_to: Option<String>,
     /// Why no proof was made.
     pub(super) reason: String,
 }
@@ -156,7 +161,20 @@ pub(super) fn judge_removals(
         match proof_of(&report, tarball.as_deref(), diff, level, &name) {
             Ok(proof) => judged.proven.push((name, proof)),
             Err(reason) => {
-                judged.refused.push(Refusal { name, reason });
+                let security = is_security_patch(&name, diff.unwrap_or_default());
+                let renamed_to = diff.filter(|d| !d.is_empty()).and_then(|d| {
+                    after_names
+                        .iter()
+                        .filter(|n| **n != name && is_checkout_file(n))
+                        .find(|n| std::fs::read(checkout_dir.join(n)).ok().as_deref() == Some(d))
+                        .cloned()
+                });
+                judged.refused.push(Refusal {
+                    name,
+                    security,
+                    renamed_to,
+                    reason,
+                });
             }
         }
     }
@@ -196,14 +214,80 @@ pub(super) fn drop_proof(
     .ok()
 }
 
+/// Whether a patch is a security fix: its name carries a CVE id (`CVE-2024-1234`,
+/// also glued as `cve2024-1234`), a `bsc` or `boo` reference as a name token
+/// (`bsc#1234`, `boo1234`), or its header (the first 40 lines) cites one.
+/// `boost-*` and `foo-boo-2d` are not.
+pub(super) fn is_security_patch(name: &str, content: &[u8]) -> bool {
+    let name_lower = name.to_ascii_lowercase();
+    let tokens: Vec<&str> = name_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let all_digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
+    let name_hit = tokens.iter().enumerate().any(|(i, t)| {
+        let next_is_digits = tokens.get(i + 1).is_some_and(|n| all_digits(n));
+        if matches!(*t, "cve" | "bsc" | "boo") {
+            // `CVE-2024-1234`, `bsc#1234`, `boo-1234`: the id is the next token.
+            next_is_digits
+        } else if let Some(year) = t.strip_prefix("cve") {
+            // Glued: `cve2024-1234`.
+            all_digits(year) && next_is_digits
+        } else if let Some(n) = t.strip_prefix("bsc").or_else(|| t.strip_prefix("boo")) {
+            // Glued: `bsc1234`, `boo1234`.
+            all_digits(n) && n.len() > 1
+        } else {
+            false
+        }
+    });
+    if name_hit {
+        return true;
+    }
+    String::from_utf8_lossy(content)
+        .lines()
+        .take(40)
+        .any(|line| cites_id(&line.to_ascii_lowercase()))
+}
+
+/// Whether `line` cites `CVE-\d+-\d+`, `bsc#\d+` or `boo#\d+`.
+fn cites_id(line: &str) -> bool {
+    let after = |prefix: &str| {
+        line.match_indices(prefix)
+            .any(|(i, _)| line[i + prefix.len()..].starts_with(|c: char| c.is_ascii_digit()))
+    };
+    after("bsc#") || after("boo#") || {
+        line.match_indices("cve-").any(|(i, _)| {
+            let rest = &line[i + 4..];
+            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            digits > 0
+                && rest[digits..].starts_with('-')
+                && rest[digits + 1..].starts_with(|c: char| c.is_ascii_digit())
+        })
+    }
+}
+
 /// The refusal text for the removals `names` (the removal is not kept).
 pub(super) fn unproven_removal_problem(names: &[Refusal]) -> String {
     names
         .iter()
         .map(|r| {
+            let security = if r.security {
+                " It is a security patch (CVE, bsc or boo): it is never removed without \
+                 the proof."
+            } else {
+                ""
+            };
+            if let Some(new) = &r.renamed_to {
+                return format!(
+                    "removal of {n} is refused: {new} has the same content, so it looks \
+                     renamed, and a rename is not judged. Keep the name {n}.{security} If it \
+                     must be renamed, stop and say so: a human must decide.",
+                    n = r.name
+                );
+            }
             format!(
                 "removal of {n} is refused: {reason}. Keep the patch and refresh it with \
-                 quilt (`quilt push -f`, fix the rejected hunks, `quilt refresh`). If \
+                 quilt (`quilt push -f`, fix the rejected hunks, `quilt refresh`).{security} If \
                  it cannot be refreshed, stop and say so: a human must decide.",
                 n = r.name,
                 reason = r.reason

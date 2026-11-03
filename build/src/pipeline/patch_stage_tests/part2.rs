@@ -313,6 +313,32 @@ fn names(refused: &[crate::pipeline::removal_proof::Refusal]) -> Vec<&str> {
     refused.iter().map(|r| r.name.as_str()).collect()
 }
 
+/// A security patch removed with no quilt proof: the gate names it as a human's
+/// case.
+#[test]
+fn a_security_patch_removed_without_proof_needs_a_human() {
+    if quilt_missing() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path();
+    source_tarball(checkout);
+    std::fs::write(checkout.join("CVE-2024-1.patch"), FOREIGN_DIFF).unwrap();
+    let spec_path = checkout.join("foo.spec");
+    let before = "Name: foo\nVersion: 1.0\nPatch0: CVE-2024-1.patch\n%prep\n%autosetup -p1\n";
+    std::fs::write(&spec_path, before).unwrap();
+    let snapshot = CheckoutSnapshot::take(checkout);
+    // The removal: the file deleted and its line gone.
+    std::fs::remove_file(checkout.join("CVE-2024-1.patch")).unwrap();
+    let removed = "Name: foo\nVersion: 1.0\n%prep\n%autosetup -p1\n";
+    std::fs::write(&spec_path, removed).unwrap();
+    let unproven = unproven_patch_removals("1.0", checkout, &spec_path, before, Some(&snapshot));
+    assert_eq!(names(&unproven), ["CVE-2024-1.patch"]);
+    let problem = unproven_removal_problem(&unproven);
+    assert!(problem.contains("a human must decide"));
+    assert!(problem.contains("security patch"));
+}
+
 #[test]
 fn dropping_a_patch_removes_exactly_its_lines() {
     let spec = "Name: foo\nPatch1: a.patch\nPatch2: b.patch\n%prep\n%setup\n%patch -P 1 -p1\n%patch2 -p1\n";
