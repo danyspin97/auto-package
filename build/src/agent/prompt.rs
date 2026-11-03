@@ -169,6 +169,9 @@ latter, name the exact missing compiler/SDK and quote the build.log line proving
   or what you reviewed.
   "Drop the CVE-2025-2588 patch, fixed upstream", not "Drop the CVE-2025-2588 patch,
   which upstream 1.15.0 already contains (src/fa.c, fa.h, tests/fatest.c)".
+  A dependency change (a BuildRequires, a Requires or a version bound) gets no
+  bullet: a comment next to the line in the spec says why, when the reason is not
+  obvious. See convention 40.
 - "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.
   REQUIRED format (each entry must name a specific file or pattern):
   ["Read source/pyproject.toml lines 1-50",
