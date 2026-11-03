@@ -207,6 +207,14 @@ pub(super) fn cmd_update_project(
                     item.pkg
                 )),
             }
+        }
+        // A package whose openSUSE:Factory copy comes from another devel project
+        // is left to the maintainer, unless `--deprecated` asks for it. It is
+        // read from Factory last, after every check that skips without a request.
+        if deprecated::settled_as_deprecated(&item, a, ctx, report) {
+            continue;
+        }
+        if !a.dry_run {
             match branch_item(
                 branch,
                 &mut item,

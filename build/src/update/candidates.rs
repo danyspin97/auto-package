@@ -187,6 +187,13 @@ pub enum SkipReason {
         target: String,
         repology: String,
     },
+    /// openSUSE:Factory has the package from another devel project than the
+    /// source (`devel`), so the source's copy is not the one Factory takes:
+    /// `update` leaves it out unless it is asked for with `--deprecated`.
+    Deprecated {
+        devel: String,
+        source: String,
+    },
 }
 
 /// Whether a version carries a calendar date (`2020-11-13`): upstream
@@ -304,6 +311,11 @@ impl std::fmt::Display for SkipReason {
                 f,
                 "Repology lists {repology}; {source} says {target}: a maintainer must pick \
                  the version, pass --to-version"
+            ),
+            SkipReason::Deprecated { devel, source } => write!(
+                f,
+                "openSUSE:Factory lists {devel} as the devel project of this package, not \
+                 {source}: pass --deprecated to include it"
             ),
             SkipReason::VersionCompareFailed { packaged, latest } => {
                 write!(

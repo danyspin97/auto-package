@@ -38,6 +38,7 @@ mod args;
 mod audit;
 mod cmd;
 mod context;
+mod deprecated;
 mod existing;
 mod items;
 mod maintenance;

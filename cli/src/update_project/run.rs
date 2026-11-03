@@ -1,6 +1,7 @@
 use super::*;
 
 pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
+    deprecated::check_args(&a).map_err(|e| eyre!("{e}"))?;
     if a.local && (a.maintenance.is_some() || a.maintenance_list) {
         return Err(eyre!(
             "--local builds on this machine: it cannot be combined with --maintenance, which sends the change to OBS"

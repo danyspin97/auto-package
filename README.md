@@ -158,6 +158,9 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 - `--local`, `--local-root`, `--local-min-free-gib`: as for `build`; `--local` cannot be combined with `--submit` or `--maintenance`.
 - `--nvidia <wheel|redist>` / `--nvidia-redist`: as for `build` (default: `wheel`, or what the work directory last used).
 - `--submit`: create submit requests (see below). `--yes` skips the question.
+- `--deprecated`: include the packages of SOURCE whose openSUSE:Factory package
+  names another devel project (see below). Also use it for a SOURCE that is not
+  a devel project, where it turns the check off. Not for `--maintenance`.
 
 Packages are branched with the OBS branch API, without following a devel
 project, so the request goes back to the project named. A package that is
@@ -189,6 +192,19 @@ no effect. A package held to a series or a major (`python-foo3`, a versioned
 name, a series copy) takes that series' own newest and is not compared:
 Repology's newest may be in another series. Each compared package costs one
 Repology request.
+
+A package of SOURCE whose openSUSE:Factory package names another devel project
+than SOURCE is deprecated for SOURCE: `update` does not branch it, and lists it
+under "needs the maintainer" with the reason. Pass `--deprecated` to include it
+as any other package. This is the only case it skips. The check is meant for a
+SOURCE that is a devel project of Factory: for another source (Leap, SLFO, a
+branch project, a sibling devel project) Factory names a different project for
+nearly every package, so most of them are listed under "needs the maintainer"
+until `--deprecated` is passed. A package that Factory
+does not have, a Factory package whose meta names no devel project, and a failed
+read are not skipped, so a package Factory has dropped is not detected. Only
+`update` of a source other than openSUSE:Factory checks this: not a dependency
+from another project, `--in-place`, `lint`, or `--maintenance`.
 
 The run ends with a summary (updated, failed, skipped, requests, build paths
 added, branch project) and exits non-zero when a package failed.

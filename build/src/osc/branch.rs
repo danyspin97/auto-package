@@ -31,6 +31,8 @@ mod delete_request;
 pub use delete_request::*;
 mod origin_health;
 pub use origin_health::*;
+mod factory_devel;
+pub use factory_devel::*;
 #[cfg(test)]
 mod delete_request_tests;
 #[cfg(test)]

@@ -193,6 +193,15 @@ pub struct UpdateProjectArgs {
     #[command(flatten)]
     pub limits: crate::run_limits::RunLimits,
 
+    /// `update`: include a package of SOURCE whose openSUSE:Factory package names
+    /// another devel project than SOURCE. Without this flag such a package is
+    /// listed as needing the maintainer and not branched. The check is meant for a
+    /// SOURCE that is a devel project; for any other source (a release such as
+    /// Leap or SLFO, a branch project) pass this flag, which turns the check off.
+    /// Not for `--maintenance`.
+    #[arg(long, default_value_t = false)]
+    pub deprecated: bool,
+
     /// Wait for this many GiB free on the work directory's disk before a
     /// package starts its heavy stages (0 = never wait).
     #[arg(long, default_value_t = 3)]
