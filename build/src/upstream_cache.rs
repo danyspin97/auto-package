@@ -15,7 +15,7 @@
 //! Without [`set_dir`] nothing is read or written, so library callers opt in
 //! explicitly.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -62,6 +62,9 @@ static REFRESH: AtomicBool = AtomicBool::new(false);
 static HITS: AtomicUsize = AtomicUsize::new(0);
 static FETCHED: AtomicUsize = AtomicUsize::new(0);
 static STORE: Mutex<Option<Store>> = Mutex::new(None);
+/// The failures of this run by key. Kept only in memory: a transient error may
+/// be gone by the next run, so it is not written to the file.
+static FAILED: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Keep the cache file in `dir`.
 pub fn set_dir(dir: PathBuf) {
@@ -193,6 +196,41 @@ pub fn lookup(key: &str, fetch: impl FnOnce() -> Result<String, String>) -> Resu
         store.save(t);
     }
     Ok(version)
+}
+
+/// [`lookup`] for a source that may be asked for many packages of one run
+/// (Repology). A failure is kept for the rest of the process, so the same key
+/// is not asked again; it is not kept across runs.
+pub fn once_per_run(
+    key: &str,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    ask_once(&FAILED, key, fetch)
+}
+
+/// Ask `fetch` for `key` unless `failed` already holds a failure for it. A new
+/// failure is recorded there; an answer is not (the cache file keeps those).
+pub(crate) fn ask_once(
+    failed: &Mutex<BTreeMap<String, String>>,
+    key: &str,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let known = failed
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned();
+    if let Some(error) = known {
+        return Err(error);
+    }
+    let answer = fetch();
+    if let Err(error) = &answer {
+        failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_string(), error.clone());
+    }
+    answer
 }
 
 /// Write the answers not yet on disk. Called when a sweep ends and when the
@@ -331,5 +369,49 @@ mod tests {
         store.save(100);
         assert!(store.unsaved.contains("k"));
         assert_eq!(store.fresh("k", 101).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_failure_is_asked_once_per_run() {
+        let failed = Mutex::new(BTreeMap::new());
+        let asked = std::cell::Cell::new(0);
+        let fetch = || {
+            asked.set(asked.get() + 1);
+            Err("unknown project".to_string())
+        };
+        assert_eq!(
+            ask_once(&failed, "repology:x", fetch),
+            Err("unknown project".into())
+        );
+        let again = || -> Result<String, String> { unreachable!("asked again") };
+        assert_eq!(
+            ask_once(&failed, "repology:x", again),
+            Err("unknown project".into())
+        );
+        assert_eq!(asked.get(), 1);
+    }
+
+    #[test]
+    fn a_failure_of_one_key_does_not_hold_another() {
+        let failed = Mutex::new(BTreeMap::new());
+        let _ = ask_once(&failed, "repology:x", || Err("no".to_string()));
+        assert_eq!(
+            ask_once(&failed, "repology:y", || Ok("1.0".to_string())),
+            Ok("1.0".into())
+        );
+    }
+
+    #[test]
+    fn an_answer_is_not_kept_here() {
+        let failed = Mutex::new(BTreeMap::new());
+        let asked = std::cell::Cell::new(0);
+        for _ in 0..2 {
+            let fetch = || {
+                asked.set(asked.get() + 1);
+                Ok("2.0".to_string())
+            };
+            assert_eq!(ask_once(&failed, "repology:x", fetch), Ok("2.0".into()));
+        }
+        assert_eq!(asked.get(), 2);
     }
 }

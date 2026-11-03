@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::sources::{archive_name_version, fetch_index, index_dir, is_any_archive, last_segment};
+use crate::upstream_cache;
 use crate::version::{is_prerelease, sort_cmp as version_cmp};
 
 mod tags;
@@ -207,20 +208,36 @@ pub(crate) fn get_text(url: &str) -> Result<String, String> {
 /// it marks as the newest. A `python-` name is also tried as Repology's
 /// `python:` project.
 pub fn latest_on_repology(name: &str) -> Result<String, String> {
-    let mut tried = vec![name.to_string()];
+    // Each try is remembered under its own key, so a `python:` project named
+    // literally by a spec is not confused with the python- fallback.
+    let mut tried = vec![(format!("repology:{name}"), name.to_string())];
     if let Some(rest) = name.strip_prefix("python-") {
-        tried.push(format!("python:{rest}"));
+        tried.push((format!("repology-python:{rest}"), format!("python:{rest}")));
     }
+    latest_over_projects(&tried, &|key, project| {
+        // Kept for the run: a project that failed is not asked again.
+        upstream_cache::once_per_run(key, || {
+            if !space_out_repology() {
+                return Err("interrupted".to_string());
+            }
+            let url = format!(
+                "https://repology.org/api/v1/project/{}",
+                urlencoding::encode(project)
+            );
+            get_text(&url).and_then(|body| newest_on_repology(&body))
+        })
+    })
+}
+
+/// The first answer `ask` gives for the `(key, project)` pairs, in order; the
+/// last error when none does.
+fn latest_over_projects(
+    tried: &[(String, String)],
+    ask: &dyn Fn(&str, &str) -> Result<String, String>,
+) -> Result<String, String> {
     let mut last = String::new();
-    for project in tried {
-        let url = format!(
-            "https://repology.org/api/v1/project/{}",
-            urlencoding::encode(&project)
-        );
-        if !space_out_repology() {
-            return Err("interrupted".to_string());
-        }
-        match get_text(&url).and_then(|body| newest_on_repology(&body)) {
+    for (key, project) in tried {
+        match ask(key, project) {
             Ok(v) => return Ok(v),
             Err(e) => last = e,
         }
@@ -457,6 +474,26 @@ mod tests {
         // After a long pause there is nothing to wait for.
         let later = t0 + Duration::from_secs(60);
         assert_eq!(next_turn(Some(t0), later, spacing), later);
+    }
+
+    #[test]
+    fn a_run_asks_a_failed_repology_name_and_its_python_colon_once() {
+        let failed = Mutex::new(std::collections::BTreeMap::new());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |key: &str, project: &str| {
+            upstream_cache::ask_once(&failed, key, || {
+                asked.borrow_mut().push(project.to_string());
+                Err("unknown project".to_string())
+            })
+        };
+        let projects = [
+            ("repology:python-foo".to_string(), "python-foo".to_string()),
+            ("repology-python:foo".to_string(), "python:foo".to_string()),
+        ];
+        assert!(latest_over_projects(&projects, &ask).is_err());
+        assert_eq!(asked.borrow().as_slice(), ["python-foo", "python:foo"]);
+        assert!(latest_over_projects(&projects, &ask).is_err());
+        assert_eq!(asked.borrow().len(), 2);
     }
 
     #[test]
