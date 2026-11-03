@@ -504,6 +504,16 @@ pub enum Event {
         changed: bool,
         deps: Vec<ZigDep>,
     },
+    /// One patch review round's verdict: `accepted`, `rewritten`, `rejected`,
+    /// `gave_up`, `rolled_back`, `slip` or `not_reviewed` (no turn could start).
+    PatchReviewed {
+        step: StepId,
+        pkg: String,
+        patch: String,
+        round: u32,
+        verdict: String,
+        reason: String,
+    },
 }
 
 /// One dependency a zig vendor archive holds.

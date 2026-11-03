@@ -33,7 +33,8 @@ impl HumanSink {
             | Event::FailedTurnUsage { .. }
             | Event::Progress { .. }
             | Event::HostAllowed { .. }
-            | Event::ZigVendor { .. } => LogLevel::Info,
+            | Event::ZigVendor { .. }
+            | Event::PatchReviewed { .. } => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }
             | Event::ExtractResult { .. }
@@ -233,6 +234,15 @@ impl HumanSink {
                     HostSource::Flag => "--allow-host",
                     HostSource::Tui => "the TUI",
                 },
+            )),
+            Event::PatchReviewed {
+                patch,
+                round,
+                verdict,
+                reason,
+                ..
+            } => Some(format!(
+                "  patch review {patch}, round {round}: {verdict}: {reason}"
             )),
             Event::ZigVendor {
                 file,
@@ -464,5 +474,25 @@ mod tests {
             "auto-package · run 20261030-101010-abcd-1-0 · /w · build 3f2a9c1d8e7b"
         );
         assert!(banner("").ends_with("· build unknown"), "{}", banner(""));
+    }
+
+    #[test]
+    fn a_patch_review_verdict_is_one_info_line() {
+        let event = Event::PatchReviewed {
+            step: crate::event::StepId(3),
+            pkg: "foo".into(),
+            patch: "a.patch".into(),
+            round: 2,
+            verdict: "accepted".into(),
+            reason: "same intent".into(),
+        };
+        assert_eq!(HumanSink::event_level(&event), LogLevel::Info);
+        let line = HumanSink::new(LogLevel::Info).format(&event).unwrap();
+        assert_eq!(
+            line,
+            "  patch review a.patch, round 2: accepted: same intent"
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["event"], "patch_reviewed");
     }
 }
