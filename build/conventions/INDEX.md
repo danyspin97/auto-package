@@ -15,13 +15,13 @@
 15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
 16. Merged into convention 17 — read convention 17 when writing %files module dirs or an import check for an unfamiliar package
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
-18. Merged into convention 53 — read convention 53 when the package declares scripts/entry points or %files lists /usr/bin
+18. Merged into convention 107 — read convention 107 when the package declares scripts/entry points or %files lists /usr/bin
 19. Single % in RPM macros, never %% — read when a spec line shows %% or an rpmspec macro-parse error
 20. Merged into convention 19 — read convention 19 when about to use a python macro you have not seen in the spec or a skill
 21. Merged into convention 1 — read convention 1 when copying a requirement with extras, markers, commas, ~= or !=
 22. Dynamic version/metadata providers need BuildRequires — read when version is 0.0.0 or the build backend import fails
 23. Merged into convention 17 — read convention 17 when %files or rpmlint shows tests/docs/setup files at site-packages root
-24. Merged into convention 53 — read convention 53 when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
+24. Merged into convention 39 — read convention 39 when rpmlint reports devel-file-in-non-devel-package or the package installs .h files
 25. Merged into convention 39 — read convention 39 when the build log says "Badness NNNN exceeds threshold"
 26. Merged into convention 22 — read convention 22 when the checkout is a git snapshot or the project sits in a subdirectory
 27. [inline] Missing dependency: build it, report in unresolvable_packages — full text for naming rules
@@ -36,7 +36,7 @@
 36. Merged into convention 53 — read convention 53 when the package installs locale/ .mo files or rpmlint reports them
 37. Merged into convention 53 — read convention 53 when upstream ships docs as an artifact or the task asks for -doc
 38. Merged into convention 14 — read convention 14 when tests or code fail with AttributeError/ImportError on a stdlib name
-39. rpmlint: fix first; rpmlintrc filter only for a reported warning, # reason:, no setBadness — read when rpmlint reports an E:/W: line or you add addFilter (only addFilter lines)
+39. rpmlint: fix first; rpmlintrc filter only with # reason:, addFilter lines only; own headers to -devel (24) — read when rpmlint reports an E:/W: line or you add addFilter
 40. [inline] The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
 41. Merged into convention 90 — read convention 90 when setup.py/setup.cfg lists test-runner or shim requirements
 42. Merged into convention 22 — read convention 22 when the installed version is wrong or the source has a literal 0.0.0
@@ -50,7 +50,7 @@
 50. OOM / disk-full failures are sizing, not spec bugs — read when the build is killed or says "No space left on device"
 51. Merged into convention 6 — read convention 6 when build-backend is mesonpy or scikit_build_core
 52. Merged into convention 2 — read convention 2 when the package is a fork or rename of another PyPI project
-53. Optional heavy component as own subpackage (%exclude) — read when one tree holds a light core and a heavy optional part
+53. Optional heavy component as own subpackage (%exclude), systemd, i18n, -doc, metapackage — read when one tree holds a light core and a heavy optional part, or for those subpackages
 54. Merged into convention 53 — read convention 53 when a feature only needs other packages installed, no files
 55. Merged into convention 7 — read convention 7 when tests fail only under pytest-xdist -n auto
 56. Merged into convention 77 — read convention 77 when upstream signs a checksums file (checksum.txt, SHA256SUMS) instead of the tarball
@@ -104,7 +104,7 @@
 104. RPM scriptlets, system users, XML catalogs, SysV init — read when writing a %pre/%post/%preun/%postun or -p scriptlet, a system user, an XML catalog or an init script
 105. Merged into convention 104 — read convention 104 when a package creates a system user or group, or Provides user(...) or group(...)
 106. Merged into convention 104 — read convention 104 when a package ships XML schemas, DTDs or a catalog, or uses xmlcatalog
-107. Several versions of one command: update-alternatives (not Python) — read when a package installs a command that other versions also provide, or uses /etc/alternatives
+107. Alternatives: Python console scripts (libalternatives, 18) and update-alternatives for other commands — read when a package installs a command, a script entry point, or uses /etc/alternatives
 108. Merged into convention 104 — read convention 104 when a package has an init script, /etc/init.d, insserv or a request to add a daemon init script
 109. General rules, license coverage — read when the tarball holds a binary or bundled lib, the spec adds a .desktop or udev rule, or a License or %license is in question
 110. Merged into convention 109 — read convention 109 when a subpackage has its own License, lacks %license, or a tarball file is left out of the package
