@@ -256,6 +256,7 @@ mod update_mode;
 
 mod patch_apply;
 mod patch_stage;
+mod removal_proof;
 use patch_apply::*;
 mod sdist_stage;
 #[cfg(test)]

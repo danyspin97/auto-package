@@ -2,6 +2,7 @@
 //! turn, the gates, and the quilt series a refresh turn reads.
 
 use super::*;
+use crate::pipeline::removal_proof::*;
 
 #[test]
 fn the_rounds_are_bounded() {

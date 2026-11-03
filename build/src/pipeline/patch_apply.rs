@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::pipeline::patch_rules::*;
-use crate::pipeline::patch_stage::*;
 use crate::pipeline::rejection::*;
+use crate::pipeline::removal_proof::*;
 use crate::pipeline::render::*;
 use crate::pipeline::snapshot::*;
 

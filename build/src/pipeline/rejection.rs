@@ -6,6 +6,7 @@ use crate::pipeline::licence::*;
 use crate::pipeline::patch_check::*;
 use crate::pipeline::patch_rules::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::removal_proof::*;
 use crate::pipeline::render::*;
 use crate::pipeline::service_edit::*;
 use crate::pipeline::source_guard::*;
