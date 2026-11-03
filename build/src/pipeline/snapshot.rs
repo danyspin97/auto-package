@@ -38,6 +38,7 @@ pub(super) struct SnapshotEntry {
 /// taken (see `write_rebase_series`), which a rollback must be able to put back.
 fn is_agent_editable(name: &str) -> bool {
     name == "series"
+        || crate::pipeline::rpmlintrc_guard::is_rpmlintrc(name)
         || name == crate::agent::REFRESH_SERIES
         || name == "_service"
         || [".spec", ".patch", ".diff", ".changes"]

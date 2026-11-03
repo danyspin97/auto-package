@@ -296,3 +296,31 @@ fn an_rpmlintrc_only_edit_needs_a_changelog_on_the_gate_path_too() {
     assert_eq!(std::fs::read_to_string(&c.spec_path).unwrap(), BEFORE);
     assert!(!c.checkout.join("foo-rpmlintrc").exists());
 }
+
+#[test]
+fn an_edit_that_writes_an_rpmlintrc_without_reasons_is_rolled_back() {
+    let c = case();
+    let after = format!("{BEFORE}Source99:       foo-rpmlintrc\n");
+    std::fs::write(&c.spec_path, &after).unwrap();
+    std::fs::write(c.checkout.join("foo-rpmlintrc"), "addFilter(\"x\")\n").unwrap();
+    let (effect, rejected) = apply(&c, "FixAfterBuild — attempt 1", &edited("Add an rpmlintrc"));
+    assert_eq!(effect, TurnEffect::NoChange);
+    let why = rejected.expect("the edit is rejected");
+    assert!(
+        why.contains("foo-rpmlintrc") && why.contains("# reason:"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read_to_string(&c.spec_path).unwrap(), BEFORE);
+    assert!(!c.checkout.join("foo-rpmlintrc").exists());
+
+    let c = case();
+    std::fs::write(&c.spec_path, &after).unwrap();
+    std::fs::write(
+        c.checkout.join("foo-rpmlintrc"),
+        "# reason: vendor binary\naddFilter(\"missing-hash-section\")\n",
+    )
+    .unwrap();
+    let (effect, rejected) = apply(&c, "FixAfterBuild — attempt 1", &edited("Add an rpmlintrc"));
+    assert_eq!(effect, TurnEffect::Edited, "{rejected:?}");
+    assert!(c.checkout.join("foo-rpmlintrc").exists());
+}

@@ -8,6 +8,7 @@ use crate::pipeline::patch_rules::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::removal_proof::*;
 use crate::pipeline::render::*;
+use crate::pipeline::rpmlintrc_guard::*;
 use crate::pipeline::service_edit::*;
 use crate::pipeline::source_guard::*;
 
@@ -456,6 +457,19 @@ fn accept_checked(
         notes_path.clone(),
         keep,
         judge_removals,
+    ) {
+        return Err(problem);
+    }
+
+    // An rpmlintrc the edit wrote holds only reasoned `addFilter` lines (convention 39).
+    if let Some(problem) = reject_bad_rpmlintrc(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
     ) {
         return Err(problem);
     }

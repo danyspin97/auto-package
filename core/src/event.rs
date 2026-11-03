@@ -154,6 +154,11 @@ pub enum SpecRejection {
     RepeatedSource {
         urls: Vec<String>,
     },
+    /// The edit left an rpmlintrc with lines convention 39 does not allow, as
+    /// `file: line N (...) ...`.
+    BadRpmlintrc {
+        problems: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
