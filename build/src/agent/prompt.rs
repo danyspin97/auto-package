@@ -255,7 +255,8 @@ fn conventions_prompt() -> String {
     out.push_str(&format!(
         "## Convention index\n\n\
          Every numbered convention above and below is a rule of this project. Those marked \
-         [inline] are already given in full above. The others are NOT in this prompt: \
+         [inline] are already given in full above; a `(N)` in a line is a convention merged into that \
+         line's file. The others are NOT in this prompt: \
          `Read {CONVENTIONS_DIR}/<N>.md` BEFORE acting on a situation the line names. Do not \
          read conventions that do not apply, and never act against one whose trigger matches \
          without having read it. Where a task text or a checklist item cites `convention N` \
