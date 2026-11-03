@@ -435,6 +435,7 @@ pub(super) fn cmd_update_project(
             branch_exists: branch_meta.is_some(),
             items: &ready,
             paths: &planned,
+            maintainer: &report.maintainer,
             submit: a.submit,
         }) {
             ctx.say(line);

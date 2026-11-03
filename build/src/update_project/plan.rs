@@ -102,6 +102,8 @@ pub struct DryRun<'a> {
     pub items: &'a [Item],
     /// Build paths that would be added to the branch project.
     pub paths: &'a [PathAddition],
+    /// Packages stopped for the maintainer, each with its reason.
+    pub maintainer: &'a [String],
     pub submit: bool,
 }
 
@@ -141,6 +143,12 @@ pub fn dry_run_lines(d: &DryRun<'_>) -> Vec<String> {
                 note => format!(", {note}"),
             }
         ));
+    }
+    if !d.maintainer.is_empty() {
+        out.push(format!("needs the maintainer ({}):", d.maintainer.len()));
+        for m in d.maintainer {
+            out.push(format!("  {m}"));
+        }
     }
     if d.paths.is_empty() {
         out.push("extra build paths: none needed".to_string());

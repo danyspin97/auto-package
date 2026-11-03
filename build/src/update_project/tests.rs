@@ -124,6 +124,7 @@ fn the_dry_run_names_the_branch_the_paths_and_the_requests() {
         branch_exists: false,
         items: &items,
         paths: &paths,
+        maintainer: &[],
         submit: true,
     });
     assert_eq!(
@@ -151,11 +152,80 @@ fn the_dry_run_without_submit_or_paths_says_so() {
         branch_exists: true,
         items: &[item("x")],
         paths: &[],
+        maintainer: &[],
         submit: false,
     });
     assert!(lines.contains(&"branch project: b (exists)".to_string()));
     assert!(lines.contains(&"extra build paths: none needed".to_string()));
     assert!(lines.contains(&"submit requests: none (--submit not given)".to_string()));
+}
+
+/// The two skips that stop a package for the maintainer without a failure: a
+/// branch ahead of upstream, and Repology disagreeing by a minor.
+fn maintainer_lines() -> Vec<String> {
+    vec![
+        SkipReason::BranchAhead {
+            branch: "2.0".into(),
+            upstream: "1.5".into(),
+        }
+        .to_string(),
+        SkipReason::RepologyDisagrees {
+            source: "git".into(),
+            target: "1.5".into(),
+            repology: "1.6".into(),
+        }
+        .to_string(),
+    ]
+}
+
+#[test]
+fn the_dry_run_lists_what_needs_the_maintainer() {
+    let maintainer: Vec<String> = maintainer_lines()
+        .into_iter()
+        .enumerate()
+        .map(|(i, why)| format!("pkg{i}: {why}"))
+        .collect();
+    let lines = dry_run_lines(&DryRun {
+        source: "S",
+        branch_project: "b",
+        branch_exists: true,
+        items: &[],
+        paths: &[],
+        maintainer: &maintainer,
+        submit: false,
+    });
+    let at = lines
+        .iter()
+        .position(|l| l == "needs the maintainer (2):")
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(lines[at + 1], format!("  {}", maintainer[0]));
+    assert_eq!(lines[at + 2], format!("  {}", maintainer[1]));
+    assert!(lines[at + 1].contains("would replace it with an older version"));
+    assert!(lines[at + 2].contains("a maintainer must pick the version"));
+}
+
+#[test]
+fn the_dry_run_has_no_maintainer_heading_when_nothing_needs_one() {
+    let lines = dry_run_lines(&DryRun {
+        source: "S",
+        branch_project: "b",
+        branch_exists: true,
+        items: &[],
+        paths: &[],
+        maintainer: &[],
+        submit: false,
+    });
+    assert!(!lines.iter().any(|l| l.starts_with("needs the maintainer")));
+}
+
+#[test]
+fn the_summary_lists_the_maintainer_skips_under_their_heading() {
+    let maintainer = maintainer_lines();
+    let text = summary_text("b", &[], &[], &[], &maintainer, false);
+    assert!(text.contains("needs the maintainer (2):"), "{text}");
+    for why in &maintainer {
+        assert!(text.contains(&format!("  {why}")), "{text}");
+    }
 }
 
 fn result(pkg: &str, outcome: ItemOutcome, sr: SrOutcome) -> ItemResult {

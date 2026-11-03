@@ -78,6 +78,31 @@ fn the_plan_counts_each_kind_of_package_as_it_is_added() {
 }
 
 #[test]
+fn a_repology_disagreement_is_listed_for_the_maintainer() {
+    use ap_build::update::{Candidate, Decision, SkipReason};
+    let sink = ap_core::sink::MemorySink::new();
+    let mut plan = super::PlanReport::default();
+    plan.add(
+        &Candidate {
+            rpm_name: "python-x".into(),
+            decision: Decision::Skipped(SkipReason::RepologyDisagrees {
+                source: "pypi".into(),
+                target: "1.2".into(),
+                repology: "1.3".into(),
+            }),
+            notes: Vec::new(),
+        },
+        &sink,
+    );
+    assert_eq!(plan.maintainer.len(), 1, "{:?}", plan.maintainer);
+    assert!(
+        plan.maintainer[0].starts_with("python-x: Repology lists 1.3; pypi says 1.2"),
+        "{:?}",
+        plan.maintainer
+    );
+}
+
+#[test]
 fn a_settled_tui_run_exits_zero_only_without_errors() {
     assert!(super::tui_run_exit(true, None, Ok(()), Vec::new()).is_ok());
 }
