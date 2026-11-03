@@ -29,7 +29,7 @@ pub(super) const IMPORT_TO_DIST: &[(&str, &str)] = &[
     ("tomllib", "tomli"),
 ];
 
-/// Modules removed from the standard library (convention 38's table).
+/// Modules removed from the standard library (convention 116's table).
 pub(super) const REMOVED_STDLIB: &[&str] = &[
     "distutils",
     "imp",

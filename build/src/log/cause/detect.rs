@@ -164,7 +164,7 @@ pub fn detect(log: &ExtractedLog, own_module: &str, spec: &str) -> Option<Probab
                     "`{top}` was removed from the standard library in the Python this build \
                      runs; nothing is missing from the repositories."
                 ),
-                action: "Follow convention 38: patch the code (quilt) to the replacement, or \
+                action: "Follow convention 116: patch the code (quilt) to the replacement, or \
                          add the PyPI backport as a BuildRequires if one exists. Do not report \
                          it as an unresolvable package."
                     .to_string(),

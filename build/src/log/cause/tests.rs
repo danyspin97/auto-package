@@ -241,7 +241,7 @@ fn a_removed_stdlib_module_is_not_a_missing_package() {
     ]);
     let c = detect(&log, "foo", "").unwrap();
     assert!(matches!(c.kind, CauseKind::RemovedStdlibModule { .. }));
-    assert!(c.action.contains("convention 38"));
+    assert!(c.action.contains("convention 116"));
 }
 
 #[test]

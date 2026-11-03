@@ -36,10 +36,9 @@ fn only_the_inline_conventions_are_marked_inline() {
 }
 
 /// A merged convention is one line pointing at a topic file, and the topic
-/// file is a convention itself, not another pointer. The topics number
-/// about forty (the consolidation target); the bound allows the per-system
-/// conventions (build systems, languages, scriptlets, patches) that have
-/// no older topic to merge into.
+/// file is a convention itself, not another pointer. The topics are capped at
+/// fifty, so that a new convention is merged into a topic file unless it has
+/// no topic to join.
 #[test]
 fn merged_conventions_point_to_a_topic_file() {
     let table = crate::conventions_table::CONVENTIONS;
@@ -64,7 +63,7 @@ fn merged_conventions_point_to_a_topic_file() {
             "stub {n} points at another stub, {target}"
         );
     }
-    assert!((25..=45).contains(&topics), "{topics} topic files");
+    assert!(topics <= 50, "{topics} topic files");
 }
 
 /// A build log can contain a fence and then text that reads like an

@@ -11,7 +11,7 @@
 11. Test-skip ladder (deselect, ignore, -o addopts, smoke test) — read when a %check test genuinely cannot run here
 12. Merged into convention 7 — read convention 7 when %check fails oddly on config
 13. Merged into convention 91 — read convention 91 when %prep/%build fails (no such file, name resolution, FetchContent download)
-14. Tools, the evidence rule, and the stdlib-removal table — read when creating a file, using Bash (zypper, osc cat, rpm -qlp), or a test fails on a removed stdlib API
+14. Tools and the evidence rule — read when creating a file, using Bash (zypper, osc cat, rpm -qlp) or stating a fact about the package
 15. Merged into convention 10 — read convention 10 when %check says ModuleNotFoundError or a dep cycle
 16. Merged into convention 17 — read convention 17 when writing %files module dirs or an import check for an unfamiliar package
 17. Python %files exactness: no globs on the package name — read when writing or fixing %files of a Python package
@@ -35,7 +35,7 @@
 35. Merged into convention 53 — read convention 53 when the package ships a daemon, a .service unit or needs /run dirs
 36. Merged into convention 53 — read convention 53 when the package installs locale/ .mo files or rpmlint reports them
 37. Merged into convention 53 — read convention 53 when upstream ships docs as an artifact or the task asks for -doc
-38. Merged into convention 14 — read convention 14 when tests or code fail with AttributeError/ImportError on a stdlib name
+38. Merged into convention 116 — read convention 116 when tests or code fail with AttributeError/ImportError on a stdlib name
 39. rpmlint: fix first; rpmlintrc filter only with # reason:, addFilter lines only; own headers to -devel (24) — read when rpmlint reports an E:/W: line or you add addFilter
 40. [inline] The changelog field: one imperative bullet per change vs the published spec — read when your reply has action edited
 41. Merged into convention 90 — read convention 90 when setup.py/setup.cfg lists test-runner or shim requirements
@@ -113,3 +113,4 @@
 113. Standalone Cargo crates: workspaces, _service parameters, vendored crate patches — read when a Cargo.toml package needs a workspace, update=false, update-crate, or a vendored crate patched
 114. C/C++ system-library shims: check every consumer in the same turn — read when a C/C++ build fails in a header, namespace or include path that a system-library shim or patch provides
 115. Build system switch (autotools to meson or CMake): explicit options and BuildRequires — read when %configure or %make_build becomes %meson or %cmake, or the reverse
+116. Removed/renamed Python stdlib APIs (pkg_resources, distutils, imp, ...): the replacement table — read when a test or import fails with AttributeError/ModuleNotFoundError on a stdlib name
