@@ -30,7 +30,7 @@ pub(super) fn prepare_request(
             message: m,
         })
     };
-    let updated = *outcome == ItemOutcome::Updated;
+    let updated = matches!(outcome, ItemOutcome::Updated | ItemOutcome::AlreadyUpdated);
     // Read before the build status and the spec are checked, so the request is
     // pinned to a revision at least as old as what was checked.
     let source_rev = if updated {

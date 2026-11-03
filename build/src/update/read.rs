@@ -95,8 +95,9 @@ pub(super) fn read_backoff(attempt: u32) -> std::time::Duration {
 /// link conflicts; only the maintainer can fix it), a name OBS cannot hold, a
 /// 401 or 403 (the credentials do not change within a run), and a 404 that OBS
 /// gives for a package or project that is not there (`unknown_package`,
-/// `unknown_project`). A bare 400 or 404 is not: a failing backend answers the
-/// same way. A 404 for a listed file is judged by [`read_spec`].
+/// `unknown_project`, and osc's own `Package not found: P/pkg` or `Project not
+/// found: P` under the status line). A bare 400 or 404 is not: a failing
+/// backend answers the same way. A 404 for a listed file is judged by [`read_spec`].
 pub(super) fn permanent_listing_failure(pkg: &str, osc_says: &str) -> Option<String> {
     if osc::text_is_transient(osc_says) {
         return None;
@@ -133,7 +134,17 @@ pub(super) fn permanent_listing_failure(pkg: &str, osc_says: &str) -> Option<Str
         ));
     }
     let lower = osc_says.to_lowercase();
-    let missing = lower.contains("unknown_package") || lower.contains("unknown_project");
+    // osc 1.x prints `HTTP Error 404: Not Found` and, on the next line, `Package
+    // not found: P/pkg` or `Project not found: P`; the raw OBS codes are what an
+    // `osc api` call shows.
+    let missing = [
+        "unknown_package",
+        "unknown_project",
+        "package not found:",
+        "project not found:",
+    ]
+    .iter()
+    .any(|m| lower.contains(m));
     if osc_says.contains("HTTP Error 404") && missing {
         return Some(format!(
             "{pkg} does not exist on OBS ({first}); not retried"

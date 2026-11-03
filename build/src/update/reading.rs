@@ -174,6 +174,22 @@ mod reading {
     }
 
     #[test]
+    fn what_osc_prints_for_a_missing_package_or_project_is_not_retried() {
+        for said in [
+            "Server returned an error: HTTP Error 404: Not Found\nPackage not found: home:u:branches:Base:System/foo",
+            "Server returned an error: HTTP Error 404: Not Found\nProject not found: home:u:branches:Base:System",
+        ] {
+            let (out, r) = run_with(&[Err(said.to_string())], &[Err("unused")], None, true);
+            let Err(ReadError::Failed(why)) = out else {
+                panic!("expected a failed read, got {out:?}");
+            };
+            assert!(why.contains("does not exist on OBS"), "{said}: {why}");
+            assert_eq!(r.lists.get(), 1, "{said}");
+            assert!(r.waits.borrow().is_empty(), "{said}");
+        }
+    }
+
+    #[test]
     fn a_bare_400_or_404_or_does_not_exist_is_retried() {
         for said in [
             "HTTP Error 404: Not Found",

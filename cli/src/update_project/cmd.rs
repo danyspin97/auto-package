@@ -175,6 +175,12 @@ pub(super) fn cmd_update_project(
             });
             continue;
         }
+        // A branch that holds upstream's version and built it is listed, not
+        // rebuilt; one ahead of upstream is skipped. Both are decided before
+        // the branch call, which would rebase the branch onto its origin.
+        if existing::settled_in_branch(&item, branch, a, ctx, report) {
+            continue;
+        }
         if a.in_place {
             // The package is already where it will be changed, and its
             // BuildRequires resolve: it builds there today.

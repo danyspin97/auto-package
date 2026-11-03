@@ -9,12 +9,14 @@ use crate::osc::{self, PathAddition};
 use crate::risk_flags::RiskFlag;
 use crate::update::{Candidate, Decision, Ecosystem};
 
+mod branch_state;
 mod plan;
 mod report;
 mod requirements;
 #[cfg(test)]
 mod tests;
 
+pub use branch_state::*;
 pub use plan::*;
 pub use report::*;
 pub use requirements::*;

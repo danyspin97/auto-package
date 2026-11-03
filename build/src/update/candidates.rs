@@ -169,6 +169,13 @@ pub enum SkipReason {
         released: String,
         snapshot: String,
     },
+    /// The branch project already holds a version newer than upstream's, so
+    /// the update would replace it with an older one. Only a maintainer can say
+    /// which one is right.
+    BranchAhead {
+        branch: String,
+        upstream: String,
+    },
 }
 
 /// Whether a version carries a calendar date (`2020-11-13`): upstream
@@ -272,6 +279,11 @@ impl std::fmt::Display for SkipReason {
             } => write!(
                 f,
                 "needs a maintainer: release {release} ({released}) is newer than the snapshot ({snapshot})"
+            ),
+            SkipReason::BranchAhead { branch, upstream } => write!(
+                f,
+                "needs a maintainer: the branch project holds {branch}, newer than upstream's \
+                 {upstream}; the update would replace it with an older version"
             ),
             SkipReason::VersionCompareFailed { packaged, latest } => {
                 write!(

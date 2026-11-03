@@ -166,6 +166,17 @@ projects are refused with an explanation. A PyPI-sourced package whose OBS name
 is not `python-<name>` is skipped, since the pipeline would build a second
 package next to it.
 
+Before a package is branched, the `Version:` of its copy in the branch project
+is compared with the origin's and with upstream's. A copy at upstream's version
+whose build there succeeded is listed as already updated and not rebuilt (its
+submit request can still be made). A copy at upstream's version whose build did
+not succeed, or an older copy, is continued from and rebuilt. A copy that is
+newer than upstream's is listed under "needs the maintainer" and left as it is,
+unless `--to-version` names the target. A copy or a build result that cannot be
+read leaves the package alone, skipped with the cause. The comparison is made
+for an upgrade in a plain `update` only, not for `lint`, `--in-place`,
+`--revision` or a maintenance backport.
+
 The run ends with a summary (updated, failed, skipped, requests, build paths
 added, branch project) and exits non-zero when a package failed.
 

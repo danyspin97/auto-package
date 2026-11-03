@@ -5,6 +5,8 @@ use crate::arch_check::{self, ArchRow};
 pub enum ItemOutcome {
     /// Built in the branch project at the new version.
     Updated,
+    /// The branch project already held the new version, so nothing was built.
+    AlreadyUpdated,
     Failed(String),
     /// Not attempted, with the reason.
     Skipped(String),
@@ -87,7 +89,7 @@ pub fn sr_eligibility(
     spec_version: Option<&str>,
 ) -> Result<(), String> {
     match outcome {
-        ItemOutcome::Updated => {}
+        ItemOutcome::Updated | ItemOutcome::AlreadyUpdated => {}
         ItemOutcome::Failed(_) => return Err("its update failed".to_string()),
         ItemOutcome::Skipped(_) => return Err("it was skipped".to_string()),
     }
@@ -276,6 +278,15 @@ pub fn summary_text(
                     r.item.pkg, r.item.old_version, r.item.new_version
                 )
             })
+            .collect(),
+    );
+    section(
+        &mut out,
+        "already updated in the branch (not rebuilt)",
+        results
+            .iter()
+            .filter(|r| r.outcome == ItemOutcome::AlreadyUpdated)
+            .map(|r| format!("{} {}", r.item.pkg, r.item.new_version))
             .collect(),
     );
     section(
