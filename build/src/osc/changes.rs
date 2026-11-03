@@ -28,26 +28,19 @@ pub fn create_initial_changes(
 /// Idempotent: when the newest entry already says `message` (an earlier run
 /// added it), nothing is added.
 pub fn add_changes_entry(checkout_dir: &Path, message: &str, emit: Emit<'_>) -> Result<(), Error> {
-    if let Ok(rd) = fs::read_dir(checkout_dir) {
-        let mut files: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "changes"))
-            .collect();
-        files.sort();
+    if let Some(file) = newest_changes_file(checkout_dir) {
         // A version given up on (a wrong upstream, later corrected) left its
         // entry at the top of the file; it was never published, so it goes.
-        if let Some(file) = files.first()
-            && let Some(name) = file.file_name()
+        if let Some(name) = file.file_name()
             && let (Ok(working), Ok(pristine)) = (
-                fs::read_to_string(file),
+                fs::read_to_string(&file),
                 fs::read_to_string(checkout_dir.join(".osc").join("sources").join(name)),
             )
             && let Some(cleaned) = without_unpublished_update_entry(&working, &pristine, message)
         {
-            let _ = fs::write(file, cleaned);
+            let _ = fs::write(&file, cleaned);
         }
-        if let Some(text) = files.first().and_then(|f| fs::read_to_string(f).ok())
+        if let Ok(text) = fs::read_to_string(&file)
             && newest_changes_entry_says(&text, message)
         {
             return Ok(());
@@ -91,21 +84,12 @@ fn add_release_bullet(
     message: &str,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
-    if let Ok(rd) = fs::read_dir(checkout_dir) {
-        let mut files: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "changes"))
-            .collect();
-        files.sort();
-        if let Some(file) = files.first()
-            && let Ok(text) = fs::read_to_string(file)
-            && let Some(folded) = with_bullet_in_release_entry(&text, version, message)
-        {
-            return fs::write(file, folded).map_err(|e| {
-                Error::NotActionable(format!("cannot write {}: {e}", file.display()))
-            });
-        }
+    if let Some(file) = newest_changes_file(checkout_dir)
+        && let Ok(text) = fs::read_to_string(&file)
+        && let Some(folded) = with_bullet_in_release_entry(&text, version, message)
+    {
+        return fs::write(&file, folded)
+            .map_err(|e| Error::NotActionable(format!("cannot write {}: {e}", file.display())));
     }
     add_changes_entry(checkout_dir, message, emit)
 }
@@ -146,8 +130,17 @@ pub fn set_flag_lines(
     Ok(())
 }
 
-/// The first `.changes` file of `checkout_dir`, in name order.
-pub(super) fn newest_changes_file(checkout_dir: &Path) -> Option<PathBuf> {
+/// The `.changes` file of the package in `checkout_dir`: `<dir>.changes`, the
+/// checkout directory being named after the OBS package, when it exists;
+/// otherwise the first `.changes` file in name order. The first is not always
+/// the package's: `dbus-1-devel-doc.changes` sorts before `dbus-1.changes`.
+pub fn newest_changes_file(checkout_dir: &Path) -> Option<PathBuf> {
+    if let Some(dir_name) = checkout_dir.file_name() {
+        let own = checkout_dir.join(format!("{}.changes", dir_name.to_string_lossy()));
+        if own.is_file() {
+            return Some(own);
+        }
+    }
     let mut files: Vec<PathBuf> = fs::read_dir(checkout_dir)
         .ok()?
         .flatten()
@@ -300,18 +293,10 @@ pub(super) fn merge_pending_changes(current: &str, committed: &str) -> Option<St
 /// has (`.osc/sources/`; none for a file not committed yet). Best effort: a
 /// file that cannot be read or written is left as `osc vc` made it.
 pub(super) fn merge_pending_changes_file(checkout_dir: &Path) {
-    let Ok(rd) = fs::read_dir(checkout_dir) else {
+    let Some(file) = newest_changes_file(checkout_dir) else {
         return;
     };
-    let mut files: Vec<PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "changes"))
-        .collect();
-    files.sort();
-    let Some(file) = files.first() else {
-        return;
-    };
+    let file = &file;
     let Ok(current) = fs::read_to_string(file) else {
         return;
     };

@@ -9,20 +9,16 @@ use super::*;
 /// earlier pass wrote is replaced. Nothing is written when the newest entry is
 /// not this release's.
 pub fn set_update_notes(checkout_dir: &Path, version: &str, lines: &[String]) -> Result<(), Error> {
-    let mut files: Vec<PathBuf> = fs::read_dir(checkout_dir)
-        .map_err(|e| Error::NotActionable(format!("cannot read {}: {e}", checkout_dir.display())))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "changes"))
-        .collect();
-    files.sort();
-    let Some(file) = files.first() else {
+    fs::read_dir(checkout_dir).map_err(|e| {
+        Error::NotActionable(format!("cannot read {}: {e}", checkout_dir.display()))
+    })?;
+    let Some(file) = newest_changes_file(checkout_dir) else {
         return Ok(());
     };
-    let text = fs::read_to_string(file)
+    let text = fs::read_to_string(&file)
         .map_err(|e| Error::NotActionable(format!("cannot read {}: {e}", file.display())))?;
     match with_update_notes_in_release_entry(&text, version, lines) {
-        Some(folded) if folded != text => fs::write(file, folded)
+        Some(folded) if folded != text => fs::write(&file, folded)
             .map_err(|e| Error::NotActionable(format!("cannot write {}: {e}", file.display()))),
         _ => Ok(()),
     }

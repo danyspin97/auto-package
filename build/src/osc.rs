@@ -68,6 +68,8 @@ pub use changes::*;
 mod changes_merge;
 pub use changes_merge::*;
 #[cfg(test)]
+mod changes_file_tests;
+#[cfg(test)]
 mod changes_merge_tests;
 mod update_notes;
 pub use update_notes::*;

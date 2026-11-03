@@ -166,15 +166,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
 /// entry is not on OBS yet, a one-line summary of what it says.
 pub(super) fn commit_message(checkout_dir: &Path) -> String {
     const BASE: &str = "auto-package";
-    let Some(file) = std::fs::read_dir(checkout_dir).ok().and_then(|rd| {
-        let mut files: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "changes"))
-            .collect();
-        files.sort();
-        files.into_iter().next()
-    }) else {
+    let Some(file) = osc::newest_changes_file(checkout_dir) else {
         return BASE.to_string();
     };
     let working = std::fs::read_to_string(&file).unwrap_or_default();
