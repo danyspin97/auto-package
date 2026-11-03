@@ -46,24 +46,57 @@ fn conventions_are_numbered_consecutively_from_one() {
     }
 }
 
+/// The index line of convention `n`, which must be a topic.
+pub(super) fn index_line(n: u32) -> &'static str {
+    CONVENTIONS_INDEX
+        .lines()
+        .find(|l| l.starts_with(&format!("{n}. ")))
+        .unwrap_or_else(|| panic!("the index has no line for convention {n}"))
+}
+
+/// The index has one line per topic file, in order, and each merged convention's
+/// trigger is folded into the line of the topic it points to as `(N) trigger`.
 #[test]
-fn the_index_has_one_line_per_convention() {
+fn the_index_has_one_line_per_topic_with_the_stub_triggers_folded_in() {
+    let table = crate::conventions_table::CONVENTIONS;
+    let target = |text: &str| -> Option<u32> {
+        text.trim_end()
+            .split_once(". Merged into ")
+            .and_then(|(_, t)| t.trim_end_matches('.').parse().ok())
+    };
+    let topics: Vec<u32> = table
+        .iter()
+        .filter(|(_, t)| target(t).is_none())
+        .map(|(n, _)| *n)
+        .collect();
     let lines: Vec<&str> = CONVENTIONS_INDEX.lines().collect();
-    assert_eq!(lines.len(), crate::conventions_table::CONVENTIONS.len());
-    for (i, l) in lines.iter().enumerate() {
+    assert_eq!(lines.len(), topics.len(), "one index line per topic file");
+    for (l, n) in lines.iter().zip(&topics) {
         assert!(
-            l.starts_with(&format!("{}. ", i + 1)),
-            "index line {} is {l:?}",
-            i + 1
+            l.starts_with(&format!("{n}. ")),
+            "index line {l:?} is not {n}"
         );
-        assert!(l.len() <= 200, "index line {} is too long", i + 1);
+        assert!(l.len() <= 600, "index line {n} is too long");
+    }
+    for (n, text) in table {
+        if let Some(t) = target(text) {
+            assert!(
+                index_line(t).contains(&format!("({n}) ")),
+                "the line of {t} does not carry the trigger of {n}"
+            );
+        }
     }
     for n in INLINE_CONVENTIONS {
         assert!(
-            lines[n as usize - 1].contains("[inline]"),
+            index_line(n).contains("[inline]"),
             "convention {n} is not marked inline"
         );
     }
+    assert!(
+        CONVENTIONS_INDEX.len() < 12_000,
+        "the index is {} bytes",
+        CONVENTIONS_INDEX.len()
+    );
 }
 
 #[test]
@@ -344,7 +377,10 @@ fn static_system_prompt_states_the_bash_grants() {
 #[test]
 fn static_system_prompt_carries_both_conventions_and_workflow() {
     let combined = static_system_prompt();
-    assert!(combined.contains("29. Merged into convention 77"));
+    assert!(
+        combined.contains("(29) "),
+        "the index folds in the stub triggers"
+    );
     assert!(combined.contains("### Finding Missing C Headers and Libraries"));
     assert!(combined.contains("## Workflow"));
 }
@@ -373,7 +409,7 @@ fn convention_76_names_the_split_tree_symptom_and_the_fix() {
 /// both gcc and gcc-c++.
 #[test]
 fn a_missing_compiler_routes_to_convention_10_and_cffi_needs_gcc_cxx() {
-    let line = CONVENTIONS_INDEX.lines().nth(9).unwrap();
+    let line = index_line(10);
     assert!(line.starts_with("10. "), "index line 10 is {line:?}");
     assert!(
         line.contains("compiler") && line.contains("'g++'") && line.contains("'gcc'"),
@@ -464,7 +500,7 @@ fn updates_never_remove_hygiene_by_the_conventions() {
         "An existing spec keeps them on an update (convention 86), unless a build or rpmlint"
     ));
     assert!(all.contains("write no bullet for a cosmetic edit, and make none"));
-    let index_86 = CONVENTIONS_INDEX.lines().nth(85).unwrap();
+    let index_86 = index_line(86);
     assert!(
         index_86.contains("only what the new release forces"),
         "{index_86}"

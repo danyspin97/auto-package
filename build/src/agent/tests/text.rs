@@ -25,8 +25,8 @@ fn convention_cross_references_resolve() {
 /// demand while it is already in the system prompt.
 #[test]
 fn only_the_inline_conventions_are_marked_inline() {
-    for (i, l) in CONVENTIONS_INDEX.lines().enumerate() {
-        let n = i as u32 + 1;
+    for l in CONVENTIONS_INDEX.lines() {
+        let n: u32 = l.split('.').next().unwrap().parse().unwrap();
         assert_eq!(
             l.contains("[inline]"),
             INLINE_CONVENTIONS.contains(&n),
