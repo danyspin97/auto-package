@@ -187,16 +187,14 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     // The entry is rewritten once every turn has added its bullets, so it
     // reads as the net change against what OBS holds (no model call).
     osc::rewrite_unpublished_entry(&ctx.checkout_dir, &baseline);
-    // A package that is improved, not updated, may hold unpublished entries
-    // of an earlier run: they are normalised against its origin's.
-    if !ctx.config.update
-        && osc::normalise_unpublished_changes(
-            &ctx.checkout_dir,
-            &ctx.config.project,
-            &ctx.obs_name,
-            Emit::new(ctx.reporter, commit_step.id),
-        )
-    {
+    // A package may hold unpublished entries of an earlier run (an update or
+    // a lint): they are normalised against its origin's.
+    if osc::normalise_unpublished_changes(
+        &ctx.checkout_dir,
+        &ctx.config.project,
+        &ctx.obs_name,
+        Emit::new(ctx.reporter, commit_step.id),
+    ) {
         ctx.reporter.report(&Event::Warning {
             step: Some(commit_step.id),
             message: format!(
